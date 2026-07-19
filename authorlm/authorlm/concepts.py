@@ -93,6 +93,23 @@ def concept_pattern(name: str) -> re.Pattern:
     return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b", re.IGNORECASE)
 
 
+def mention_pattern(name: str) -> re.Pattern:
+    """Where a concept appears *as a term of art* — for ordering-sensitive
+    checks (first mentions, prerequisite gaps). Single-word names declared
+    with a capital keep it: the manuscripts capitalize their terms of art
+    ('ye name it Space'), so casual English reuse of the same word ('time
+    and space') must not count as the concept. Multi-word names collide
+    with casual prose far less, and keep the tolerant match — which
+    concept_pattern remains for existence checks (realization), where any
+    casing of 'the herdsman' is genuinely the concept."""
+    if " " not in name.strip() and name[:1].isupper():
+        if name[-1].lower() == "y":
+            stem = re.escape(name[:-1])
+            return re.compile(rf"\b{stem}(?:y|ies)\b")
+        return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b")
+    return concept_pattern(name)
+
+
 _word_pattern = concept_pattern
 
 

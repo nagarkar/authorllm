@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 
-from .concepts import concept_pattern, node_name
+from .concepts import concept_pattern, mention_pattern, node_name
 from .db import Database, ko_fields, loads, new_id
 from .llm import LLMClient
 
@@ -59,7 +59,7 @@ def _first_mentions(files: dict[str, str], names: dict[str, str]) -> dict[str, i
         for node_id, concept in names.items():
             if node_id in positions:
                 continue
-            match = concept_pattern(concept).search(text)
+            match = mention_pattern(concept).search(text)
             if match:
                 positions[node_id] = offset + match.start()
         offset += len(text) + 1

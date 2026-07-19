@@ -266,6 +266,27 @@ def main_test() -> None:
               + report["pushed"] + report["conflicts"]
               + [e["file"] for e in report["errors"]], str(report))
 
+        # --- prerequisite-gap first mentions: terms of art, not casual words ---
+        # Repro from improvement task it-e34cf5227223: 'wandered through time
+        # and space' must not count as the first mention of concept 'Space'.
+        from authorlm.guidance import _first_mentions
+        gap_files = {"01.md": (
+            "The Dead wandered through time and space in search of redemption.\n\n"
+            "The mutable we name the realm of qualities.\n\n"
+            "When ye discern difference in position and direction, ye name it Space.\n"
+        )}
+        gap_names = {"n-space": "Space", "n-realm": "Realm of Qualities"}
+        mentions = _first_mentions(gap_files, gap_names)
+        check("casual word use does not count as a concept mention",
+              mentions["n-realm"] < mentions["n-space"],
+              f"positions: {mentions}")
+        check("multi-word names still match case-insensitively",
+              "n-realm" in mentions)
+        check("a concept only ever used casually has no first mention",
+              "n-space" not in _first_mentions(
+                  {"01.md": "They wandered through time and space.\n"},
+                  {"n-space": "Space"}))
+
         # --- self-improvement tasks ---
         try:
             api.file_improvement(db, title="x", evidence="e", given="g",
