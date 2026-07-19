@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "authorlm": {
+      "command": "authorlm-mcp",
+      "args": []
+    }
+  }
+}

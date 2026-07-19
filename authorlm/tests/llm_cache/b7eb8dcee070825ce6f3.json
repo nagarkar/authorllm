@@ -1,0 +1,20 @@
+{
+  "model": "gemini/gemini-2.5-flash",
+  "temperature": 0.2,
+  "messages": [
+    {
+      "role": "system",
+      "content": "You distill an author's review explanation into a reusable editorial policy. Reply with one short normative statement in the imperative, at most 15 words, no quotes, no preamble. If the explanation is too situation-specific to generalize, reply with exactly: NONE"
+    },
+    {
+      "role": "user",
+      "content": "Always ground an abstract definition in a lived example before formalizing it"
+    }
+  ],
+  "response": "Ground abstract definitions in lived examples first.",
+  "usage": {
+    "input_tokens": 67,
+    "output_tokens": 333
+  },
+  "recorded_at": "2026-07-15T02:16:23.039178+00:00"
+}

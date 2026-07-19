@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authorlm"
+version = "0.1.0"
+description = "An editorial collaborator for philosophy writing that learns your editorial practice from evidence"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["litellm"]
+mcp = ["mcp"]
+
+[project.scripts]
+authorlm = "authorlm.cli:main"
+authorlm-mcp = "authorlm.mcp_server:main"
+
+[tool.setuptools]
+packages = ["authorlm"]

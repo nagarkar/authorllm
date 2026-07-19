@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# AuthorLM runtime state (databases, OAuth token caches)
+.authorlm/
+
+# Secrets — OAuth installed-app client for the Google Docs bridge
+authorlm/client_secret_*.json
+
+# The author's personal manuscripts are not part of the tool
+authorlm/manuscripts/

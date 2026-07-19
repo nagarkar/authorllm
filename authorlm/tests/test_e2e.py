@@ -1,0 +1,1058 @@
+"""End-to-end test of every MVP use case, driven through the real CLI.
+
+Includes a hermetic LLM scenario: a stub OpenAI-compatible HTTP server
+stands in for LiteLLM/Gemini, so extraction, policy distillation, and
+bridge drafting are tested without network or keys.
+
+Follows the RFC Appendix A shape: declare intent → briefing → guidance with
+explanations → author review (accept / reject with explanation) → revisions
+observed → transitions → episode → evidence → policy learning → next
+session's briefing reflects the learning.
+
+Run: python3 tests/test_e2e.py
+"""
+
+from __future__ import annotations
+
+import contextlib
+import http.server
+import io
+import json
+import shutil
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from authorlm.cli import main  # noqa: E402
+
+PASSED = 0
+
+
+def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
+    buffer = io.StringIO()
+    code = 0
+    try:
+        with contextlib.redirect_stdout(buffer):
+            main(["--workspace", str(workspace), *argv])
+    except SystemExit as err:
+        code = 0 if err.code in (0, None) else 1
+        if isinstance(err.code, str):
+            buffer.write(err.code + "\n")
+            code = 1
+    output = buffer.getvalue()
+    if expect_exit:
+        assert code != 0, f"expected failure but succeeded: {argv}\n{output}"
+    else:
+        assert code == 0, f"command failed: {argv}\n{output}"
+    return output
+
+
+def check(label: str, condition: bool, context: str = "") -> None:
+    global PASSED
+    assert condition, f"FAIL: {label}\n{context}"
+    PASSED += 1
+    print(f"  ok: {label}")
+
+
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+CH1 = """# Chapter 1 — Choice
+
+Every act of thought begins with a choice. Choice is the operation by which
+anything comes to be for us.
+
+To choose is to distinguish. Distinction is the visible form choice takes.
+"""
+
+CH2 = """# Chapter 2 — Fields
+
+Each distinction creates a space of further possible distinctions: a field.
+
+A field is generative, not a container. Each position within a field is a
+distinction that opens further fields, linking choice to structure.
+"""
+
+CH3 = """# Chapter 3 — Trajectories
+
+A field opens possibilities; a trajectory is the path actually taken through
+them. Where choice and distinction are instantaneous and the field is
+structural, only the trajectory unfolds in time.
+
+A trajectory is an ordered series of distinctions, each made from within the
+situation the previous choices created. It is the minimal unit of becoming.
+"""
+
+
+def scenario_editorial_loop(root: Path) -> None:
+    print("Scenario A — full editorial loop (Appendix A shape)")
+    ws = root / "a"
+    ms = ws / "manuscript"
+    write(ms / "01-choice.md", CH1)
+    write(ms / "02-fields.md", CH2)
+
+    out = run(ws, "init", "--name", "book", "--path", str(ms))
+    check("init registers manuscript", "Registered manuscript" in out, out)
+
+    out = run(ws, "session", "start")
+    check("first briefing is fresh", "First session — nothing learned yet" in out, out)
+
+    for name in ("Choice", "Distinction", "Field", "Trajectory", "History"):
+        run(ws, "concept", "add", name)
+    run(ws, "concept", "link", "Choice", "distinguishes", "Distinction")
+    run(ws, "concept", "link", "Distinction", "creates", "Field")
+    run(ws, "concept", "link", "Field", "permits", "Trajectory")
+    run(ws, "concept", "link", "Trajectory", "defines", "History")
+
+    out = run(ws, "intent", "declare", "Introduce trajectories")
+    check("intent declared", "Declared intent" in out, out)
+    intent_id = out.split("[")[1].split("]")[0]
+
+    out = run(ws, "collect")
+    check("collect detects new files", "file_added" in out, out)
+    check("declared concepts realize on collect", "Concept realized: 'Choice'" in out, out)
+    check("unwritten concept stays declared", "Concept realized: 'Trajectory'" not in out, out)
+
+    out = run(ws, "guide")
+    check("guidance proposes introducing Trajectory (plural intent matched)",
+          "Introduce 'Trajectory'" in out, out)
+    check("guidance explains itself from the graph",
+          "Field —permits→ Trajectory" in out, out)
+
+    out = run(ws, "review", "1", "--accept", "--explain", "Bridge from fields is right")
+    check("accept recorded", "accepted" in out, out)
+
+    out = run(ws, "review", "1", "--accept", expect_exit=True)
+    check("double review rejected", "already reviewed" in out, out)
+
+    write(ms / "03-trajectories.md", CH3)
+    out = run(ws, "collect")
+    check("Trajectory realized after writing", "Concept realized: 'Trajectory'" in out, out)
+    check("no extract hint without an LLM", "mine them" not in out, out)
+
+    # Inline diff between collected versions.
+    out = run(ws, "diff")
+    check("diff shows the new chapter as additions",
+          "v2/03-trajectories.md" in out
+          and "+# Chapter 3 — Trajectories" in out, out)
+    out = run(ws, "diff", "v2", "choice")
+    check("diff accepts version and file filter",
+          "No differences" in out, out)
+
+    out = run(ws, "intent", "complete", intent_id, "--outcome", "Trajectories introduced")
+    check("intent completed", "Intent completed" in out, out)
+
+    out = run(ws, "session", "end")
+    check("velocity counts evidence", "evidence: 1" in out, out)
+    check("velocity counts realized concepts", "concepts realized: 4" in out, out)
+
+    out = run(ws, "session", "start")
+    check("second briefing reports realized concept",
+          "Trajectory (introduced in 03-trajectories.md)" in out, out)
+    check("second briefing surfaces inferred edges", "co_occurs" in out, out)
+    check("second briefing suggests remaining focus", "Introduce 'History'" in out, out)
+
+    out = run(ws, "guide")
+    check("no active intent and no gaps → abstention", "abstains" in out, out)
+
+    run(ws, "intent", "declare", "Introduce histories")
+    out = run(ws, "guide")
+    check("new intent matches History via plural", "Introduce 'History'" in out, out)
+
+    out = run(
+        ws, "review", "1", "--reject",
+        "--explain", "Contrast a temporal concept with its static counterpart first",
+    )
+    check("rejection seeds candidate policy", "seeded a candidate policy" in out, out)
+
+    out = run(ws, "guide")
+    check("rejected suggestion is not re-proposed", "Introduce 'History'" not in out, out)
+    check("candidate policy surfaces as reminder", "candidate policy" in out, out)
+
+    out = run(ws, "review", "1", "--accept")
+    out = run(ws, "guide")
+    check("policy reminder deduped within a session", "abstains" in out, out)
+
+    # Support must accumulate across independent sessions (§11.2).
+    run(ws, "session", "end")
+    run(ws, "session", "start")
+    out = run(ws, "guide")
+    check("candidate reminder recurs in a new session", "candidate policy" in out, out)
+    out = run(ws, "review", "1", "--accept")
+    out = run(ws, "policy", "list")
+    check("policy validated after repeated cross-session support", "(validated" in out, out)
+
+    run(ws, "session", "end")
+    run(ws, "session", "start")
+    out = run(ws, "guide")
+    check("validated policy now reminds", "apply your policy" in out, out)
+    out = run(ws, "review", "1", "--reject", "--explain", "Not while drafting an example")
+    check("rejecting validated policy recorded", "Recorded: [1] rejected" in out, out)
+
+    out = run(ws, "briefing")
+    check("briefing shows policy deltas", "Policies strengthened/weakened" in out, out)
+    check("briefing shows contradiction", "Contradictions" in out, out)
+    check("briefing shows outstanding question", "Outstanding questions" in out, out)
+
+    policy_prefix = None
+    current = None
+    for line in run(ws, "policy", "list").splitlines():
+        if line.strip().startswith("["):
+            current = line.split("[")[1].split("]")[0]
+        if "Q1:" in line:
+            policy_prefix = current
+    check("found policy with question via numbered Q lines", policy_prefix is not None)
+    out = run(ws, "policy", "answer", policy_prefix, "Policy holds except inside examples")
+    check("question answered as declared evidence", "Answer recorded" in out, out)
+
+    edge_prefix = None
+    for line in run(ws, "concept", "list").splitlines():
+        if "co_occurs" in line:
+            edge_prefix = line.split("[")[1].split("]")[0]
+            break
+    check("found inferred edge", edge_prefix is not None)
+    out = run(ws, "concept", "confirm", edge_prefix, "elaborates")
+    check("inferred edge confirmed to declared relation", "Confirmed:" in out, out)
+
+    out = run(ws, "collect")
+    check("collect with no changes is a no-op", "No changes" in out, out)
+
+    # --- edge triage: bulk review of inferred relationships ---
+    import subprocess as _sp
+    result = _sp.run(
+        [sys.executable, "main.py", "--workspace", str(ws),
+         "concept", "triage", "--edges"],
+        input="depends_on\nr\nx\n", capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("edge triage walks inferred relationships",
+          "inferred relationship(s)." in result.stdout, result.stdout)
+    check("edge triage retypes by relation name",
+          "(→ " in result.stdout and "depends_on" in result.stdout, result.stdout)
+    check("edge triage summary reports decisions",
+          "Edge triage: confirmed 0, retyped 1, rejected 1, skipped 0." in result.stdout,
+          result.stdout)
+    out = run(ws, "concept", "list")
+    check("retyped edge is declared with new relation",
+          "—depends_on→" in out and "(declared" in out, out)
+    check("rejected edge left the graph view", out.count("co_occurs") == 0, out)
+
+    # Edge triage decisions feed the next extraction prompt.
+    from authorlm.db import Database as _EDB
+    from authorlm.extraction import triage_feedback as _tf
+    _edb = _EDB(ws / ".authorlm" / "authorlm.db")
+    _emid = _edb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
+    feedback = _tf(_edb, _emid)
+    check("edge rejections enter the extraction prompt",
+          "Relationships REJECTED" in feedback, feedback)
+    check("relation corrections enter the extraction prompt",
+          "⇒" in feedback and "depends_on" in feedback, feedback)
+
+    out = run(ws, "intent", "declare", "A dead-end objective")
+    dead_id = out.split("[")[1].split("]")[0]
+    out = run(ws, "intent", "retire", dead_id, "--outcome", "changed direction")
+    check("intent abandon works (retire alias)", "Intent abandoned" in out, out)
+    out = run(ws, "intent", "list")
+    check("abandoned intent shown with status",
+          "(abandoned) A dead-end objective" in out, out)
+    out = run(ws, "intent", "abandon", dead_id, expect_exit=True)
+    check("double abandon blocked", "already abandoned" in out, out)
+
+    out = run(ws, "session", "end")
+    out = run(ws, "history")
+    check("history lists both versions", "v1" in out and "v2" in out, out)
+    out = run(ws, "log")
+    check("log shows transitions", "file_added" in out, out)
+
+
+def scenario_prerequisite_gap(root: Path) -> None:
+    print("Scenario B — prerequisite gap detection")
+    ws = root / "b"
+    ms = ws / "manuscript"
+    write(ms / "01-intro.md", "# Intro\n\nGravity bends every trajectory we draw.\n")
+
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "session", "start")
+    run(ws, "concept", "add", "Trajectory")
+    run(ws, "concept", "add", "Gravity")
+    run(ws, "concept", "link", "Trajectory", "permits", "Gravity")
+    out = run(ws, "collect")
+    check("push lint reports gap delta on collect",
+          "Prerequisite gaps: 0 → 1" in out, out)
+    out = run(ws, "guide")
+    check("intent-less guide still flags structural gaps",
+          "prerequisite" in out.lower(), out)
+    # Both realized in one file, but Gravity is mentioned before Trajectory.
+    check("gap explains text order vs graph order",
+          "first appears before its prerequisite" in out, out)
+
+    # Fuzzy intent feedback: typo → did-you-mean; match → deterministic preview.
+    out = run(ws, "intent", "declare", "Introduce trajektories properly")
+    check("typo intent warns with fuzzy suggestion",
+          "names no concept" in out and "Did you mean: 'Trajectory'" in out, out)
+    out = run(ws, "intent", "declare", "Expand on gravity next")
+    check("matched intent shows deterministic preview",
+          "Preview:" in out and "Gravity — realized" in out, out)
+
+    # Citations are not prerequisites: a historical_reference node must not
+    # generate ordering suggestions even when the graph links it.
+    run(ws, "concept", "add", "Maupertuis", "--kind", "historical_reference")
+    run(ws, "concept", "link", "Maupertuis", "permits", "Trajectory")
+    out = run(ws, "guide")
+    check("historical references never drive prerequisite gaps",
+          "Maupertuis" not in out, out)
+    run(ws, "session", "end")
+
+
+def scenario_objection(root: Path) -> None:
+    print("Scenario C — unanswered objection")
+    ws = root / "c"
+    ms = ws / "manuscript"
+    write(ms / "01.md", "# One\n\nBeing is becoming.\n")
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "session", "start")
+    run(ws, "concept", "add", "Parmenides objection", "--kind", "objection",
+        "--notes", "If being is one, becoming is illusion.")
+    run(ws, "collect")
+    out = run(ws, "guide")
+    check("open objection surfaces", "Parmenides objection" in out, out)
+    check("objection notes carried into explanation", "illusion" in out, out)
+    run(ws, "concept", "add", "Reply to Parmenides")
+    run(ws, "concept", "link", "Reply to Parmenides", "answers", "Parmenides objection")
+    out = run(ws, "guide")
+    check("answered objection no longer surfaces",
+          "Address the open objection" not in out, out)
+
+    # Retire ("delete") a concept: it disappears from list and reasoning,
+    # its edges go with it, and re-adding revives it.
+    out = run(ws, "concept", "retire", "Parmenides objection")
+    check("retire reports edges retired", "1 related edge(s)" in out, out)
+    out = run(ws, "concept", "list")
+    check("retired concept hidden from list", "Parmenides objection" not in out, out)
+    out = run(ws, "concept", "list", "--all")
+    check("retired concept visible with --all",
+          "Parmenides objection (objection, retired" in out, out)
+    out = run(ws, "guide")
+    check("retired objection never surfaces in guidance",
+          "Parmenides objection" not in out, out)
+    out = run(ws, "concept", "retire", "Parmenides objection", expect_exit=True)
+    check("double retire blocked", "already retired" in out, out)
+    out = run(ws, "concept", "add", "Parmenides objection")
+    check("re-adding revives as declared", "declared" in out, out)
+    run(ws, "session", "end")
+
+
+class StubLLMHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal OpenAI-compatible /chat/completions endpoint with canned
+    replies keyed on the system prompt."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        system = body["messages"][0]["content"]
+        user = body["messages"][-1]["content"]
+        if ("LOAD-BEARING units of thought" in system
+                or "ONLY relationships among the known concepts" in system):
+            content = json.dumps({
+                "concepts": [
+                    {"name": "Choice", "kind": "concept", "notes": "primitive act"},
+                    {"name": "Distinction", "kind": "concept", "notes": ""},
+                    {"name": "Field", "kind": "concept", "notes": "space of moves"},
+                    {"name": "Becoming", "kind": "weird-kind", "notes": "coerced"},
+                    {"name": "Basilides", "kind": "historical_reference", "notes": ""},
+                ],
+                "links": [
+                    {"from": "Choice", "relation": "distinguishes", "to": "Distinction"},
+                    {"from": "Distinction", "relation": "creates", "to": "Field"},
+                    {"from": "Field", "relation": "not-a-relation", "to": "Choice"},
+                    {"from": "Ghost", "relation": "permits", "to": "Choice"},
+                ],
+            })
+        elif "editorial analyst reconstructing" in system:
+            content = json.dumps({
+                "decisions": [
+                    {"action": "opened the section with a sailing metaphor "
+                               "before the formal treatment",
+                     "pattern": "Open concept introductions with a lived "
+                                "metaphor before formal definition."},
+                    {"action": "linked becoming back to choice",
+                     "pattern": None},
+                ],
+                "outcome": "Becoming developed through the sailing metaphor.",
+            })
+        elif "distill" in system.lower():
+            content = "NONE" if "one-off" in user else "Introduce intuition before formalism."
+        else:
+            content = "A drafted bridge paragraph from the stub."
+        payload = json.dumps({
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 45},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+
+def scenario_llm_and_unregister(root: Path) -> None:
+    print("Scenario E — LLM features (stub server) and unregister")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "e"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-fields.md", CH2)
+        stub_config = (
+            "# AuthorLM test configuration (TOML — native comments)\n"
+            "[llm]\n"
+            "enabled = true\n"
+            'provider = "openai"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            'model = "stub"\n'
+        )
+        write(ws / ".authorlm" / "config.toml", stub_config)
+
+        out = run(ws, "init", "--name", "book", "--path", str(ms))
+        check("init auto-collects before extraction", "Collected revision v1" in out, out)
+        check("init extracts concepts", "Extracted 5 new concept(s)" in out, out)
+        check("valid links kept; unknown relation and unknown concept dropped",
+              "2 inferred relationship(s)" in out and "skipped 2" in out, out)
+        check("step reports live calls and token usage",
+              "LLM: 1 live call(s) (120 in / 45 out tokens)" in out, out)
+
+        out = run(ws, "concept", "list")
+        check("extracted concept realized against text",
+              "Choice (concept, realized" in out, out)
+        check("unmentioned concept stays declared",
+              "Becoming (concept, declared" in out, out)
+        check("historical_reference kind preserved",
+              "Basilides (historical_reference" in out, out)
+        check("extracted nodes marked unconfirmed",
+              "Choice (concept, realized, unconfirmed" in out, out)
+        check("extracted links are inferred hypotheses",
+              "Choice —distinguishes→ Distinction (inferred" in out, out)
+
+        out = run(ws, "briefing")
+        check("briefing lists extracted concepts for triage",
+              "Extracted concepts awaiting your confirmation (5)" in out, out)
+        out = run(ws, "concept", "confirm", "Becoming", "--kind", "question")
+        check("confirm retypes and confirms a node",
+              "Confirmed concept 'Becoming' (question)" in out, out)
+        out = run(ws, "briefing")
+        check("confirmed node leaves the triage list",
+              "awaiting your confirmation (4)" in out, out)
+
+        out = run(ws, "extract")
+        check("incremental re-extraction is a no-op without changes",
+              "Nothing new since the last extraction" in out, out)
+        out = run(ws, "extract", "--full")
+        check("full re-extraction is idempotent",
+              "Extracted 0 new concept(s)" in out and "full manuscript" in out, out)
+
+        # --- triage: one-keystroke decisions over unconfirmed nodes ---
+        import subprocess
+        long_note = ("a definition long enough that any preview shortening would cut it: "
+                     + "clause after clause of qualifying detail, " * 3).strip().rstrip(",")
+        run(ws, "concept", "edit", "Distinction", "--notes", long_note)
+        result = subprocess.run(
+            [sys.executable, "main.py", "--workspace", str(ws), "concept", "triage"],
+            input="n\nthe primal act of cutting\nk\nh\nr\nx\n",
+            capture_output=True, text=True, timeout=60,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        check("triage reword updates notes in place",
+              "(notes updated)" in result.stdout
+              and "the primal act of cutting" in result.stdout,
+              result.stdout)
+        check("triage walks unconfirmed nodes", "[1/4] Choice" in result.stdout,
+              result.stdout)
+        flat_stdout = " ".join(result.stdout.split())
+        check("triage shows full untruncated notes",
+              " ".join(long_note.split()) in flat_stdout, result.stdout)
+        check("triage summary reports decisions",
+              "Triage: kept 1, retyped 1, retired 1, skipped 1." in result.stdout,
+              result.stdout)
+        check("triage echoes each decision",
+              "(kept)" in result.stdout and "(retired)" in result.stdout
+              and "(→ historical_reference)" in result.stdout,
+              result.stdout)
+        out = run(ws, "concept", "list")
+        check("triage retype applied", "Distinction (historical_reference" in out, out)
+        check("triage retire applied", "Field" not in out, out)
+
+        out = run(ws, "concept", "confirm", "--all")
+        check("bulk confirm sweeps the rest", "Confirmed 1 concept(s)." in out, out)
+        out = run(ws, "briefing")
+        check("nothing left to triage after bulk confirm",
+              "Extracted concepts awaiting your confirmation" not in out, out)
+
+        # --- the learning loop: triage feedback reaches the next extraction ---
+        from authorlm.db import Database as _DB
+        from authorlm.extraction import triage_feedback
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+        _mid = _db.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
+        feedback = triage_feedback(_db, _mid)
+        check("rejections enter the extraction prompt",
+              "REJECTED" in feedback and "Field" in feedback, feedback)
+        check("retype precedents enter the extraction prompt",
+              "Distinction: concept → historical_reference" in feedback, feedback)
+        check("confirmed exemplars enter the extraction prompt",
+              "Choice (concept)" in feedback, feedback)
+        out = run(ws, "extract", "--full")
+        check("full audit re-creates nothing directly",
+              "Extracted 0 new concept(s)" in out, out)
+        check("full audit surfaces conflicts as proposals instead",
+              "2 proposal(s) against settled knowledge" in out, out)
+        out = run(ws, "concept", "list", "--all")
+        check("retired concept stays retired after re-extraction",
+              "Field (concept, retired" in out, out)
+
+        write(ms / "03-new-material.md",
+              "# New\n\n" + "\n\n".join(f"Paragraph {i} of fresh prose." for i in range(6)))
+        out = run(ws, "collect")
+        check("substantial new material hints at extract",
+              "mine them for new concepts with 'extract'" in out, out)
+        out = run(ws, "extract")
+        check("incremental extraction targets only the changed file",
+              "1 changed file(s)" in out, out)
+        out = run(ws, "extract", "03-new-material.md")
+        check("per-file extraction works",
+              "1 selected file(s)" in out, out)
+
+        # A configurable size cap: shrink it and expect a truncation warning.
+        config_path = ws / ".authorlm" / "config.toml"
+        config_path.write_text(
+            stub_config + "# tiny cap to force truncation\nextraction_max_chars = 50\n"
+        )
+        out = run(ws, "extract", "--full")
+        check("configured cap triggers truncation warning",
+              "truncated" in out and "extract <file>" in out, out)
+
+        config_path.write_text(stub_config)
+
+        # --- proposals against settled knowledge (diff-gated) ---
+        edge_id = None
+        for line in run(ws, "concept", "list").splitlines():
+            if "—distinguishes→" in line:
+                edge_id = line.split("[")[1].split("]")[0]
+        run(ws, "concept", "reject-edge", edge_id)
+
+        # Edit text that names Choice, Field, and Distinction — only these
+        # may generate proposals.
+        with open(ms / "01-choice.md", "a") as fh:
+            fh.write("\n\nChoice is the field where every act of distinction begins.\n")
+        run(ws, "collect")
+        out = run(ws, "extract")
+        # The note_update and revival proposals from the --full audit are
+        # still open with identical content, so only the edge is new.
+        check("open proposals are not duplicated; new conflict adds one",
+              "1 proposal(s) against settled knowledge" in out, out)
+
+        out = run(ws, "briefing")
+        check("briefing lists open proposals",
+              "Proposals against settled knowledge (3)" in out, out)
+
+        proposal_ids = {}
+        for line in run(ws, "proposal", "list").splitlines():
+            if "] (" in line:
+                pid = line.split("[")[1].split("]")[0]
+                kind = line.split("(")[1].split(")")[0]
+                proposal_ids[kind] = pid
+        check("all three proposal kinds present",
+              set(proposal_ids) == {"note_update", "revival", "edge_reproposal"},
+              str(proposal_ids))
+
+        out = run(ws, "proposal", "accept", proposal_ids["note_update"])
+        check("adopting a note update applies it", "Updated 'Choice'" in out, out)
+        out = run(ws, "concept", "show", "Choice")
+        check("adopted definition replaced the old note", "primitive act" in out, out)
+
+        out = run(ws, "proposal", "dismiss", proposal_ids["revival"],
+                  "--why", "Field stays retired; the term is incidental here")
+        check("dismissing a revival keeps it retired", "Dismissed" in out, out)
+        out = run(ws, "concept", "list", "--all")
+        check("dismissed revival left concept retired",
+              "Field (concept, retired" in out, out)
+
+        out = run(ws, "proposal", "accept", proposal_ids["edge_reproposal"])
+        check("adopting an edge re-proposal declares it",
+              "Relationship restored" in out, out)
+        out = run(ws, "concept", "list")
+        check("edge back as declared",
+              "Choice —distinguishes→ Distinction (declared" in out, out)
+
+        # Churn guard: an edit that names no settled concept generates
+        # nothing, and dismissed proposals never return verbatim.
+        with open(ms / "01-choice.md", "a") as fh:
+            fh.write("\nMore prose entirely without graph vocabulary.\n")
+        run(ws, "collect")
+        out = run(ws, "extract")
+        check("no proposals without attention hits (churn guard)",
+              "against settled knowledge" not in out, out)
+
+        # --- edges-only extraction and unconfirming an edge ---
+        out = run(ws, "extract", "--full", "--edges-only")
+        check("edges-only extracts no concepts",
+              "Extracted 0 new concept(s)" in out and "edges only" in out, out)
+        # Undo a confirmed edge: back to hypothesis for re-triage.
+        edge_id = None
+        for line in run(ws, "concept", "list").splitlines():
+            if "—distinguishes→" in line and "(declared" in line:
+                edge_id = line.split("[")[1].split("]")[0]
+        out = run(ws, "concept", "unconfirm", edge_id)
+        check("unconfirm returns edge to hypothesis", "Back to hypothesis" in out, out)
+        out = run(ws, "concept", "list")
+        check("unconfirmed edge is inferred again",
+              "—distinguishes→ Distinction (inferred" in out, out)
+
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Develop the notion of Becoming")
+        becoming_id = out.split("[")[1].split("]")[0]
+        out = run(ws, "guide")
+        check("bridge suggested for extracted concept", "Introduce 'Becoming'" in out, out)
+        check("LLM drafts bridge text", "A drafted bridge paragraph from the stub" in out, out)
+
+        out = run(ws, "review", "1", "--reject",
+                  "--explain", "Ground every abstraction in a concrete case first")
+        check("explanation distilled into normative policy",
+              'seeded a candidate policy: "Introduce intuition before formalism."' in out, out)
+
+        out = run(ws, "guide")
+        out = run(ws, "review", "1", "--reject",
+                  "--explain", "This was a one-off exception for this chapter")
+        check("LLM declines to generalize a one-off (NONE path)",
+              "seeded a candidate policy" not in out
+              and "Explanation recorded as high-weight evidence" in out, out)
+
+        # --- episode analysis: learn from the author's actual edits ---
+        with open(ms / "01-choice.md", "a") as fh:
+            fh.write("\n\nLike a sailor tacking, becoming threads through what "
+                     "choice has opened.\n")
+        run(ws, "collect")  # transitions attach to the Becoming episode
+        out = run(ws, "intent", "complete", becoming_id, "--outcome", "done")
+        check("intent completion triggers episode analysis",
+              "Analyzed episode 'Develop the notion of Becoming'" in out, out)
+        check("analysis reports inferred decisions",
+              "opened the section with a sailing metaphor" in out, out)
+        check("analysis seeds a candidate policy from the pattern",
+              "candidate seeded" in out, out)
+        out = run(ws, "policy", "list")
+        check("behavior-derived policy in the policy list",
+              "Open concept introductions with a lived metaphor" in out, out)
+        out = run(ws, "analyze")
+        check("analysis is idempotent", "No episodes awaiting analysis" in out, out)
+
+        # --- episodic retrieval: analyzed episodes become precedents ---
+        run(ws, "concept", "add", "Persistence")
+        run(ws, "concept", "link", "Becoming", "permits", "Persistence")
+        run(ws, "intent", "declare", "Introduce persistence")
+        out = run(ws, "guide")
+        check("guidance retrieves a graph-guided precedent",
+              "Precedent — when you worked on 'Becoming'" in out, out)
+        check("precedent carries the analyzed decision sequence",
+              "opened the section with a sailing metaphor" in out, out)
+
+        run(ws, "session", "end")
+
+        out = run(ws, "unregister", "book")
+        check("unregister reports purged rows", "Unregistered 'book'" in out, out)
+        check("unregister leaves files alone", "not touched" in out, out)
+        out = run(ws, "status", expect_exit=True)
+        check("no manuscript remains after unregister", "no manuscript" in out, out)
+
+        out = run(ws, "init", "--name", "book", "--path", str(ms), "--no-extract")
+        check("re-init after unregister works, --no-extract skips LLM",
+              "Registered manuscript" in out and "Extract" not in out, out)
+        out = run(ws, "concept", "list")
+        check("clean slate after unregister", "Concept Graph is empty" in out, out)
+
+        # ============ Scenario G — TOC authority, precedence, plan ============
+        wg = root / "g"
+        mg = wg / "manuscript"
+        write(mg / "z-first.md", "# One\n\nAlpha opens everything here.\n")
+        write(mg / "a-second.md", "# Two\n\nBeta rests on alpha throughout.\n")
+        write(mg / "toc.md", "# TOC\n\n1. z-first.md\n2. a-second.md\n")
+        write(wg / ".authorlm" / "config.toml", stub_config)
+        run(wg, "init", "--name", "book", "--path", str(mg), "--no-extract")
+        run(wg, "concept", "add", "Alpha")
+        run(wg, "concept", "add", "Beta")
+        run(wg, "concept", "add", "Contents")  # appears only in toc.md
+        run(wg, "concept", "link", "Beta", "depends_on", "Alpha")
+        out = run(wg, "collect")
+        check("TOC order suppresses the false alphabetical gap",
+              "Prerequisite gaps" not in out, out)
+        check("toc.md is structure, not content (no realization from it)",
+              "Concept realized: 'Contents'" not in out, out)
+        out = run(wg, "concept", "list")
+        check("definition precedence follows reading order",
+              "Alpha (concept, realized, introduced in z-first.md" in out, out)
+
+        write(mg / "b-extra.md", "# Extra\n\nUnlisted prose.\n")
+        run(wg, "collect")
+        out = run(wg, "briefing")
+        check("briefing flags files missing from toc.md",
+              "missing from toc.md" in out and "b-extra.md" in out, out)
+
+        # Primary location re-points when introducing text is deleted.
+        write(mg / "z-first.md", "# One\n\nAn opening without the old term.\n")
+        out = run(wg, "collect")
+        check("primary location re-pointed after deletion",
+              "Primary location of 'Alpha' moved: z-first.md → a-second.md" in out,
+              out)
+
+        # Vanished concept → author decides (dismiss = placeholder).
+        write(mg / "a-second.md", "# Two\n\nBeta rests on nothing now.\n")
+        out = run(wg, "collect")
+        check("vanished concept surfaced for decision",
+              "'Alpha' no longer appear" in out and "proposal review" in out, out)
+        pid = None
+        for line in run(wg, "proposal", "list").splitlines():
+            if "(vanished)" in line:
+                pid = line.split("[")[1].split("]")[0]
+        out = run(wg, "proposal", "dismiss", pid)
+        check("dismissed vanished concept becomes a placeholder",
+              "declared placeholder" in out, out)
+        out = run(wg, "concept", "list")
+        check("placeholder is declared again",
+              "Alpha (concept, declared" in out, out)
+
+        # Adopt path: a vanished concept the author lets go is retired.
+        write(mg / "b-extra.md", "# Extra\n\nGamma stands briefly here.\n")
+        run(wg, "concept", "add", "Gamma")
+        run(wg, "collect")
+        write(mg / "b-extra.md", "# Extra\n\nNothing remains.\n")
+        run(wg, "collect")
+        gid = None
+        for line in run(wg, "proposal", "list").splitlines():
+            if "(vanished)" in line and "Gamma" in line:
+                gid = line.split("[")[1].split("]")[0]
+        out = run(wg, "proposal", "accept", gid)
+        check("adopted vanished concept is retired", "Retired 'Gamma'" in out, out)
+
+        # --- plan: placement from graph + TOC ---
+        # State here: Beta realized in a-second.md; Alpha is a declared
+        # placeholder linked Beta depends_on Alpha.
+        run(wg, "intent", "declare", "Reintroduce alpha properly")
+        out = run(wg, "plan")
+        check("plan places concept near realized neighbor",
+              "Introduce 'Alpha'" in out
+              and "in or just after a-second.md (near 'Beta')" in out, out)
+        check("plan cites the matching intent",
+              'serves your active intent: "Reintroduce alpha properly"' in out, out)
+        run(wg, "concept", "add", "Delta")
+        out = run(wg, "plan")
+        check("unconnected concept gets standalone placement",
+              "Introduce 'Delta'" in out and "new standalone document" in out, out)
+        out = run(wg, "plan", "--draft")
+        check("plan --draft writes stubs into _drafts/",
+              "Draft stub written" in out
+              and (mg / "_drafts" / "alpha.md").exists(), out)
+        out = run(wg, "collect")
+        check("_drafts is invisible to observation", "No changes" in out, out)
+
+        # --- hierarchical extraction under a small cap ---
+        write(wg / ".authorlm" / "config.toml",
+              stub_config + "extraction_max_chars = 60\n")
+        out = run(wg, "extract", "--full")
+        check("oversized full extraction goes hierarchical",
+              "hierarchical:" in out and "in reading order" in out, out)
+        write(wg / ".authorlm" / "config.toml", stub_config)
+
+        out = run(ws, "unregister", "-m", "book")
+        check("unregister accepts -m instead of positional",
+              "Unregistered 'book'" in out, out)
+        out = run(ws, "unregister", expect_exit=True)
+        check("unregister without any name errors cleanly",
+              "usage: unregister" in out, out)
+    finally:
+        server.shutdown()
+
+
+def scenario_errors(root: Path) -> None:
+    print("Scenario D — guard rails")
+    ws = root / "d"
+    ms = ws / "manuscript"
+    write(ms / "01.md", "# One\n\nText.\n")
+    out = run(ws, "status", expect_exit=True)
+    check("status without init errors cleanly", "no manuscript" in out, out)
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    out = run(ws, "guide", expect_exit=True)
+    check("guide without session errors cleanly", "no active session" in out, out)
+    run(ws, "session", "start")
+    out = run(ws, "session", "start", expect_exit=True)
+    check("double session start blocked", "already active" in out, out)
+    out = run(ws, "review", "1", "--accept", expect_exit=True)
+    check("review before guide blocked", "no guidance" in out, out)
+    out = run(ws, "guide")
+    check("empty graph → abstention", "abstains" in out, out)
+    out = run(ws, "review", "1", "--accept", expect_exit=True)
+    check("cannot review an abstention", "abstention" in out, out)
+    out = run(ws, "collect")
+    out = run(ws, "session", "end")
+
+
+def scenario_shell_watch_obsidian(root: Path) -> None:
+    print("Scenario F — Obsidian export, observation-ignore, shell, watcher")
+    import subprocess
+    import time as time_mod
+
+    from authorlm.shell import Watcher, translate_line
+
+    ws = root / "f"
+    ms = ws / "manuscript"
+    write(ms / "01-choice.md", CH1)
+    write(ms / "02-fields.md", CH2)
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "concept", "add", "Trajectory")
+    run(ws, "concept", "add", "Field", "--notes", "structured openness")
+    run(ws, "concept", "link", "Field", "permits", "Trajectory")
+    run(ws, "collect")
+
+    # --- Obsidian export ---
+    out = run(ws, "export-obsidian")
+    check("export reports notes and links",
+          "Exported 2 concept note(s) with 1 link(s)" in out, out)
+    field_note = (ms / "_concepts" / "Field.md").read_text()
+    check("stub note has marker and wikilink",
+          "authorlm: exported" in field_note and "permits [[Trajectory]]" in field_note,
+          field_note)
+    check("stub note carries notes and status",
+          "structured openness" in field_note and "status: realized" in field_note,
+          field_note)
+    out = run(ws, "collect")
+    check("_concepts is invisible to observation", "No changes" in out, out)
+    run(ws, "concept", "retire", "Trajectory")
+    out = run(ws, "export-obsidian")
+    check("re-export drops retired concepts",
+          not (ms / "_concepts" / "Trajectory.md").exists(), out)
+
+    # --- concept edit updates notes/kind ---
+    out = run(ws, "concept", "edit", "Field", "--notes", "the horizon of possible moves")
+    check("edit updates notes", "horizon of possible moves" in out, out)
+    out = run(ws, "concept", "list")
+    check("list shows updated notes", "horizon of possible moves" in out, out)
+    out = run(ws, "concept", "edit", "Field", expect_exit=True)
+    check("edit without changes errors cleanly", "usage: concept edit" in out, out)
+    long_note = "a deliberately verbose definition " * 6  # > display shortening
+    run(ws, "concept", "edit", "Field", "--notes", long_note.strip())
+    out = run(ws, "concept", "show", "Field")
+    check("show prints full untruncated notes", long_note.strip() in out, out)
+    check("show prints kind/status and edges",
+          "kind: concept" in out, out)
+
+    # --- doc management: mechanical chapter operations ---
+    out = run(ws, "doc", "add", "03 gravity", "--title", "Gravity")
+    check("doc add scaffolds a chapter",
+          (ms / "03-gravity.md").exists()
+          and "# Gravity" in (ms / "03-gravity.md").read_text(), out)
+    check("doc add records the observation", "file_added" in out, out)
+    out = run(ws, "doc", "list")
+    check("doc list shows chapters and their concepts",
+          "01-choice.md" in out and "introduces:" in out, out)
+    out = run(ws, "doc", "retire", "gravity")
+    check("doc retire archives file and records removal",
+          "file_removed" in out and (ms / "_retired" / "03-gravity.md").exists(), out)
+    out = run(ws, "doc", "list")
+    check("doc list shows retired documents",
+          "Retired:" in out and "03-gravity.md" in out, out)
+    out = run(ws, "doc", "revive", "gravity")
+    check("doc revive restores the file",
+          "file_added" in out and (ms / "03-gravity.md").exists(), out)
+    out = run(ws, "doc", "add", "03 gravity", expect_exit=True)
+    check("doc add refuses an existing name", "already exists" in out, out)
+
+    # --- shell line translation ---
+    check("review sugar translated",
+          translate_line(["review", "2", "accept"]) == ["review", "2", "--accept"])
+    check("non-review lines untouched",
+          translate_line(["intent", "declare", "x"]) == ["intent", "declare", "x"])
+
+    # --- watcher debounce logic ---
+    watcher = Watcher(ms, debounce=0.0)
+    check("quiet manuscript does not trigger", watcher.poll() is False)
+    write(ms / "01-choice.md", CH1 + "\nA new closing thought.\n")
+    check("edit marks dirty, no immediate trigger", watcher.poll() is False)
+    time_mod.sleep(0.01)
+    check("settled edit triggers exactly once", watcher.poll() is True)
+    check("no re-trigger after collection", watcher.poll() is False)
+
+    # --- scripted shell session (no watcher thread) ---
+    result = subprocess.run(
+        [sys.executable, "main.py", "--workspace", str(ws), "shell", "--no-watch"],
+        input="help\nhelp guide\nhelp shell\nstatus\nreview 9 accept\nexit\n",
+        capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("shell help lists commands with one-liners",
+          "help <command>" in result.stdout
+          and "generate editorial guidance" in result.stdout
+          and "review N accept" in result.stdout,
+          result.stdout)
+    check("shell help <command> shows options",
+          "usage: authorlm guide" in result.stdout, result.stdout)
+    check("shell help hides shell-only commands",
+          "unknown command 'shell'" in result.stdout, result.stdout)
+    check("shell help hides internal commands",
+          "_manuscripts" not in result.stdout, result.stdout)
+
+    # --- shell tab completion candidates (readline-side) ---
+    from authorlm.db import Database as _ShellDB
+    from authorlm.shell import shell_candidates
+    _sdb = _ShellDB(ws / ".authorlm" / "authorlm.db")
+    _sms = dict(_sdb.one("SELECT * FROM manuscripts WHERE name = 'book'"))
+    check("shell completion offers commands",
+          "guide" in shell_candidates(_sdb, _sms, "") and
+          "shell" not in shell_candidates(_sdb, _sms, ""))
+    check("shell completion offers actions",
+          "triage" in shell_candidates(_sdb, _sms, "concept "))
+    check("shell completion offers option values",
+          "historical_reference" in shell_candidates(_sdb, _sms, "concept confirm X --kind "))
+    check("shell completion offers live concept names",
+          "Field" in shell_candidates(_sdb, _sms, "concept retire "))
+    check("shell completion offers live doc names",
+          any(c.endswith(".md") for c in shell_candidates(_sdb, _sms, "doc retire ")))
+
+    # --- bash completion generated from the parser ---
+    import os
+    script = run(ws, "completion")
+    check("completion script registers the completer",
+          "complete -o filenames -F _authorlm_complete authorlm" in script, script)
+    comp = subprocess.run(
+        ["bash", "-c",
+         'eval "$SCRIPT"; COMP_WORDS=(authorlm concept tri); COMP_CWORD=2; '
+         '_authorlm_complete; echo "${COMPREPLY[*]}"'],
+        env={**os.environ, "SCRIPT": script},
+        capture_output=True, text=True, timeout=30,
+    )
+    check("completion resolves subcommand actions",
+          comp.stdout.strip() == "triage", comp.stdout + comp.stderr)
+    comp = subprocess.run(
+        ["bash", "-c",
+         'eval "$SCRIPT"; COMP_WORDS=(authorlm concept confirm --kind hist); '
+         'COMP_CWORD=4; _authorlm_complete; echo "${COMPREPLY[*]}"'],
+        env={**os.environ, "SCRIPT": script},
+        capture_output=True, text=True, timeout=30,
+    )
+    check("completion resolves option values",
+          comp.stdout.strip() == "historical_reference", comp.stdout + comp.stderr)
+    comp = subprocess.run(
+        ["bash", "-c",
+         'eval "$SCRIPT"; COMP_WORDS=(authorlm help st); COMP_CWORD=2; '
+         '_authorlm_complete; echo "${COMPREPLY[*]}"'],
+        env={**os.environ, "SCRIPT": script},
+        capture_output=True, text=True, timeout=30,
+    )
+    check("completion resolves help topics",
+          comp.stdout.strip() == "status", comp.stdout + comp.stderr)
+    comp = subprocess.run(
+        ["bash", "-c",
+         'eval "$SCRIPT"; COMP_WORDS=(authorlm init --path manuscr); COMP_CWORD=3; '
+         '_authorlm_complete; echo "${COMPREPLY[*]}"'],
+        env={**os.environ, "SCRIPT": script},
+        capture_output=True, text=True, timeout=30, cwd=str(ws),
+    )
+    check("completion resolves directories for --path",
+          comp.stdout.strip() == "manuscript", comp.stdout + comp.stderr)
+
+    # --- global home database: without -w, data lives in $HOME/.authorlm ---
+    fake_home = root / "fake-home"
+    fake_home.mkdir()
+    home_result = subprocess.run(
+        [sys.executable, "main.py", "status"],
+        env={**os.environ, "HOME": str(fake_home)},
+        capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("default workspace is the home directory",
+          "no manuscript registered" in home_result.stderr + home_result.stdout
+          and (fake_home / ".authorlm" / "authorlm.db").exists(),
+          home_result.stdout + home_result.stderr)
+
+    # --- multiple manuscripts: tailored error; the shell asks instead ---
+    ms2 = ws / "second"
+    write(ms2 / "01.md", "# Two\n\nText.\n")
+    run(ws, "init", "--name", "zeta", "--path", str(ms2))
+    out = run(ws, "status", expect_exit=True)
+    check("ambiguity error names the real command",
+          "authorlm status -m" in out, out)
+    picker_result = subprocess.run(
+        [sys.executable, "main.py", "--workspace", str(ws), "shell", "--no-watch"],
+        input="1\nstatus\nexit\n",
+        capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("shell offers a manuscript picker",
+          "Which manuscript?" in picker_result.stdout
+          and "[1] book" in picker_result.stdout and "[2] zeta" in picker_result.stdout,
+          picker_result.stdout)
+    check("picker selection drives the session",
+          "Manuscript: book" in picker_result.stdout, picker_result.stdout)
+
+    # --- WAL mode active on the shared database ---
+    from authorlm.db import Database as _WDB
+    _wdb = _WDB(ws / ".authorlm" / "authorlm.db")
+    check("SQLite runs in WAL mode",
+          _wdb.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal")
+
+    # --- deletion guard: auto-collect stages, manual collect proceeds ---
+    write(ms / "04-pad.md", "# Pad\n\n" + ("substantial prose here. " * 40))
+    run(ws, "-m", "book", "collect")
+    write(ms / "04-pad.md", "# Pad\n\ntiny\n")
+    out = run(ws, "-m", "book", "collect", "--auto")
+    check("watcher-path collect stages massive deletions",
+          "Large deletion detected in 04-pad.md" in out
+          and "Snapshot NOT collected" in out, out)
+    out = run(ws, "-m", "book", "history")
+    versions_before = out.count("\n")
+    out = run(ws, "-m", "book", "collect")
+    check("manual collect confirms the deletion",
+          "Collected revision" in out, out)
+
+    # --- lazy idle expiry (threshold 0 → any active session expires) ---
+    write(ws / ".authorlm" / "config.toml", "[session]\nidle_hours = 0\n")
+    out = run(ws, "-m", "book", "session", "start")
+    check("idle session closed retroactively before new one starts",
+          "idle for" in out and "closed it retroactively" in out
+          and "started" in out, out)
+    (ws / ".authorlm" / "config.toml").unlink()
+    run(ws, "-m", "book", "session", "end")
+    check("shell starts a session with briefing",
+          "Session" in result.stdout and "Learning Briefing" in result.stdout,
+          result.stdout)
+    check("shell catches up on collection at start",
+          "Collected revision" in result.stdout or "No changes" in result.stdout,
+          result.stdout)
+    check("shell runs commands without prefix",
+          "Manuscript: book" in result.stdout, result.stdout)
+    check("shell survives a command error",
+          "error:" in result.stdout, result.stdout)
+    check("shell notes the still-active session on exit",
+          "still active" in result.stdout, result.stdout)
+    check("shell exits cleanly", result.returncode == 0, result.stderr)
+
+
+def main_test() -> None:
+    root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
+    try:
+        scenario_editorial_loop(root)
+        scenario_prerequisite_gap(root)
+        scenario_objection(root)
+        scenario_errors(root)
+        scenario_llm_and_unregister(root)
+        scenario_shell_watch_obsidian(root)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print(f"\nAll {PASSED} checks passed.")
+
+
+if __name__ == "__main__":
+    main_test()
