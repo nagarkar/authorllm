@@ -226,9 +226,11 @@ def add_concept(name: str, kind: str = "concept", notes: str | None = None,
 def link_concepts(from_name: str, relation: str, to_name: str,
                   manuscript: str | None = None) -> dict:
     """Record a relationship the author asserts (A relation B). Relations:
-    depends_on, permits, creates, defines, elaborates, specializes,
-    generalizes, contrasts_with, answers, motivates, foreshadows,
-    illustrates, distinguishes."""
+    depends_on, permits, creates, leads_to, defines, elaborates,
+    specializes, generalizes, contrasts_with, answers, motivates,
+    foreshadows, illustrates, distinguishes. Use leads_to for causal
+    consequence (ineffectiveness leads_to regret); reserve creates for
+    ontological production (the Field of Choice creates distinctions)."""
     def run():
         db = _db()
         return api.link_concepts(db, _manuscript(db, manuscript),

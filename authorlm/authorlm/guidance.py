@@ -44,8 +44,8 @@ def intent_coverage_notes(db: Database, manuscript: dict) -> list[str]:
     return notes
 
 # For edge (A --relation--> B): which side must the reader meet first?
-PREREQUISITE_FIRST = {"permits", "motivates", "foreshadows"}   # A before B
-PREREQUISITE_SECOND = {"depends_on"}                           # B before A
+PREREQUISITE_FIRST = {"permits", "motivates", "foreshadows", "leads_to"}  # A before B
+PREREQUISITE_SECOND = {"depends_on"}                                      # B before A
 
 
 def _first_mentions(files: dict[str, str], names: dict[str, str]) -> dict[str, int]:

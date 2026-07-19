@@ -292,6 +292,9 @@ def main_test() -> None:
             {"n-disc": "Discernment"})
         check("capitalization from headings and sentence starts counts",
               "n-disc" in heading_pos and heading_pos["n-disc"] < 20)
+        from authorlm.guidance import PREREQUISITE_FIRST
+        check("leads_to is an ordering relation (cause introduced before effect)",
+              "leads_to" in PREREQUISITE_FIRST)
 
         # --- self-improvement tasks ---
         try:
