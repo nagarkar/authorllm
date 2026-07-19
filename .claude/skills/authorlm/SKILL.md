@@ -55,7 +55,10 @@ with `file_improvement`: `evidence` = the trail with file:line specifics;
 `given`/`observed`/`expected` = structured-prose repro, with the author's
 verdict verbatim in `expected`. Defects with a verifiable repro only —
 feature ideas go through the normal design workflow. Never file without
-the author's confirmation. Mention the filed task once and move on; the
+the author's confirmation. **If the defect is about to be fixed
+immediately, file FIRST, fix SECOND** — filing stamps the git commit and
+manuscript version, and an urgent fix applied before filing destroys the
+before-state the task exists to preserve. Mention the filed task once and move on; the
 queue lives in `list_improvements` / `authorlm improve list`, and must
 never bleed into briefings or guidance about the writing. To settle:
 `resolve_improvement` — `propose` is for the fixing agent (fix summary +
