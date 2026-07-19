@@ -286,6 +286,12 @@ def main_test() -> None:
               "n-space" not in _first_mentions(
                   {"01.md": "They wandered through time and space.\n"},
                   {"n-space": "Space"}))
+        heading_pos = _first_mentions(
+            {"01.md": "## Discernment\n\nVirtue is chosen for effectiveness.\n",
+             "02.md": "Discernment is the measure of distinctions.\n"},
+            {"n-disc": "Discernment"})
+        check("capitalization from headings and sentence starts counts",
+              "n-disc" in heading_pos and heading_pos["n-disc"] < 20)
 
         # --- self-improvement tasks ---
         try:
