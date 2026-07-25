@@ -291,6 +291,21 @@ def scenario_editorial_loop(root: Path) -> None:
     out = run(ws, "log")
     check("log shows transitions", "file_added" in out, out)
 
+    # State-reading API entry points catch up on fresh edits themselves —
+    # a briefing must never serve stale text (only the shell has a watcher).
+    from authorlm import api as _capi
+    from authorlm.db import Database as _CDB
+    write(ms / "04-late.md", "# Late\n\nHistory bends every Trajectory.\n")
+    _cdb = _CDB(ws / ".authorlm" / "authorlm.db")
+    _cms = dict(_cdb.one("SELECT * FROM manuscripts WHERE name = 'book'"))
+    briefing = _capi.get_briefing(_cdb, _cms, config={})
+    check("briefing catch-up collects fresh edits",
+          bool(briefing.get("caught_up", {}).get("transitions")),
+          json.dumps(briefing.get("caught_up")))
+    briefing = _capi.get_briefing(_cdb, _cms, config={})
+    check("briefing catch-up is idempotent", "caught_up" not in briefing,
+          json.dumps(briefing.get("caught_up")))
+
 
 def scenario_prerequisite_gap(root: Path) -> None:
     print("Scenario B — prerequisite gap detection")
@@ -397,7 +412,20 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
-        if ("LOAD-BEARING units of thought" in system
+        if "sole task is to find aliasing statements" in system:
+            content = json.dumps({
+                "aliases": [
+                    {"alias": "Distinction", "canonical": "Choice",
+                     "sentence": "What ye call Distinction is the choice "
+                                 "of qualities parted."},
+                    {"alias": "Persistence", "canonical": "Becoming",
+                     "sentence": "What ye call Persistence is the becoming "
+                                 "of shapes."},
+                    {"alias": "Field", "canonical": "Ghost",
+                     "sentence": "A sentence naming an unknown concept."},
+                ],
+            })
+        elif ("LOAD-BEARING units of thought" in system
                 or "ONLY relationships among the known concepts" in system):
             content = json.dumps({
                 "concepts": [
@@ -703,6 +731,62 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "Precedent — when you worked on 'Becoming'" in out, out)
         check("precedent carries the analyzed decision sequence",
               "opened the section with a sailing metaphor" in out, out)
+
+        # --- alias detection: naming sentences become merge proposals ---
+        write(ms / "03-names.md",
+              "# Names\n\nWhat ye call Distinction is the choice of "
+              "qualities parted. What ye call Persistence is the becoming "
+              "of shapes.\n")
+        out = run(ws, "extract", "--aliases")
+        check("aliases pass reports its scope", "aliases only" in out, out)
+        check("aliasing statements become proposals",
+              "2 proposal(s) against settled knowledge" in out, out)
+        out = run(ws, "proposal", "list")
+        check("alias proposals listed with both names",
+              "'Distinction' with 'Choice'" in out
+              and "'Persistence' with 'Becoming'" in out, out)
+        persistence_id = next(line.split("[")[1].split("]")[0]
+                              for line in out.splitlines() if "'Persistence'" in line)
+        distinction_id = next(line.split("[")[1].split("]")[0]
+                              for line in out.splitlines() if "'Distinction'" in line)
+        out = run(ws, "proposal", "edge", persistence_id)
+        check("alias proposal demotes to a generalizes edge",
+              "Becoming —generalizes→ Persistence" in out, out)
+        out = run(ws, "proposal", "accept", distinction_id)
+        check("alias proposal adopts as a merge",
+              "Merged 'Distinction' into 'Choice'" in out, out)
+        out = run(ws, "concept", "show", "Distinction")
+        check("merged alias resolves to canonical with the sentence absorbed",
+              "aliases: Distinction" in out
+              and "What ye call Distinction" in out, out)
+        out = run(ws, "extract", "--aliases")
+        check("settled aliasing statements are not re-proposed",
+              "proposal(s) against settled knowledge" not in out, out)
+
+        # An oversized aliases sweep must fall back to file-by-file passes —
+        # a full sweep is full, never a silently truncated prefix.
+        ws2 = root / "e2"
+        ms2 = ws2 / "manuscript"
+        write(ms2 / "01-choice.md",
+              "# A\n\nWhat ye call Distinction is the choice of qualities "
+              "parted.\n")
+        write(ms2 / "02-shapes.md",
+              "# B\n\nWhat ye call Persistence is the becoming of shapes.\n")
+        write(ws2 / ".authorlm" / "config.toml",
+              stub_config + "extraction_max_chars = 130\n")
+        run(ws2, "init", "--name", "book2", "--path", str(ms2))
+        run(ws2, "concept", "add", "Persistence")
+        out = run(ws2, "extract", "--aliases")
+        check("oversized aliases sweep goes hierarchical",
+              "hierarchical" in out and "aliases only" in out, out)
+        check("hierarchical aliases sweep covers every file",
+              "2 proposal(s) against settled knowledge" in out, out)
+
+        # --- collect --auto (the watcher's path) runs the analyzers itself ---
+        write(ms / "04-auto.md", "# Auto\n\nBecoming continues apace.\n")
+        out = run(ws, "collect", "--auto")
+        check("auto collect runs incremental analysis",
+              "Auto-analysis:" in out, out)
 
         run(ws, "session", "end")
 
@@ -1099,7 +1183,8 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
         capture_output=True, text=True, timeout=30,
     )
     check("completion resolves help topics",
-          comp.stdout.strip() == "status", comp.stdout + comp.stderr)
+          set(comp.stdout.split()) == {"status", "style"},
+          comp.stdout + comp.stderr)
     comp = subprocess.run(
         ["bash", "-c",
          'eval "$SCRIPT"; COMP_WORDS=(authorlm init --path manuscr); COMP_CWORD=3; '
@@ -1187,6 +1272,61 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     check("shell exits cleanly", result.returncode == 0, result.stderr)
 
 
+def scenario_style(root: Path) -> None:
+    print("Scenario S — style guides: composition, inheritance, overrides")
+    ws = root / "style"
+    ms = ws / "manuscript"
+    write(ms / "01-sermon.md", "# Sermon\n\nHarken unto the ground of things.\n")
+    write(ms / "02-essay.md", "# Essay\n\nPlain modern words.\n")
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "style", "guide", "House")
+    run(ws, "style", "guide", "Sermons", "--parent", "House")
+    run(ws, "style", "guide", "Essays", "--parent", "House")
+    run(ws, "style", "attach", "01-sermon.md", "Sermons")
+    run(ws, "style", "attach", "02-essay.md", "Essays")
+    run(ws, "style", "add", "lexicon", "Terms of art are capitalized.",
+        "--guide", "House")
+    out = run(ws, "style", "add", "tone", "Challenging and unflinching.",
+              "--guide", "House")
+    tone_id = out.split("[")[1].split("]")[0]
+    run(ws, "style", "add", "register", "Early Modern English, inviolable.",
+        "--guide", "Sermons")
+    run(ws, "style", "add", "register", "Contemporary English, expository.",
+        "--guide", "Essays")
+    run(ws, "style", "add", "tone", "Patient and guiding.",
+        "--file", "02-essay.md", "--overrides", tone_id)
+    out = run(ws, "style", "show", "01-sermon.md")
+    check("sermon file inherits its guide plus the root",
+          "Early Modern English" in out and "capitalized" in out
+          and "Challenging" in out, out)
+    check("sibling guide never bleeds across", "Contemporary" not in out, out)
+    out = run(ws, "style", "show", "02-essay.md")
+    check("file-local override displaces the inherited element",
+          "Patient and guiding" in out and "Challenging" not in out, out)
+    check("essay keeps root law and its own register",
+          "capitalized" in out and "Contemporary" in out, out)
+    out = run(ws, "style", "show", "03-unattached.md")
+    check("unattached file falls back to the root guide",
+          "capitalized" in out and "Early Modern" not in out, out)
+    out = run(ws, "style", "add", "vibe", "Nope.", "--guide", "House",
+              expect_exit=True)
+    check("unknown aspect refused", "unknown aspect" in out, out)
+    out = run(ws, "style", "attach", "02-esay.md", "Essays", expect_exit=True)
+    check("attach validates filenames with a suggestion",
+          "unknown file" in out and "02-essay.md" in out, out)
+    out = run(ws, "style", "add", "tone", "Nope.", "--file", "02-esay.md",
+              expect_exit=True)
+    check("file-local elements validate filenames too",
+          "unknown file" in out, out)
+    out = run(ws, "style", "guides")
+    check("overview lists guides and attachments",
+          "Sermons ← House" in out and "02-essay.md → Essays" in out, out)
+    run(ws, "style", "retire", tone_id)
+    out = run(ws, "style", "show", "01-sermon.md")
+    check("retired element leaves every composition",
+          "Challenging" not in out, out)
+
+
 def scenario_ephemeral_history() -> None:
     print("Scenario H — triage input stays out of readline history")
     try:
@@ -1208,6 +1348,7 @@ def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
     try:
         scenario_editorial_loop(root)
+        scenario_style(root)
         scenario_ephemeral_history()
         scenario_prerequisite_gap(root)
         scenario_objection(root)

@@ -277,7 +277,8 @@ def list_intents(db: Database, manuscript: dict) -> list[dict]:
 # ---------------------------------------------------------------- collect
 
 def collect(db: Database, manuscript: dict, config: dict,
-            auto: bool = False, source: str = "snapshot") -> dict:
+            auto: bool = False, source: str = "snapshot",
+            analyze: bool | None = None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -333,7 +334,7 @@ def collect(db: Database, manuscript: dict, config: dict,
     before_keys = {g["edge_id"] for g in gaps_before}
     after_keys = {g["edge_id"] for g in gaps_after}
 
-    return {
+    report = {
         "version_no": version["version_no"],
         "checksum": version["checksum"],
         "transitions": [
@@ -354,18 +355,43 @@ def collect(db: Database, manuscript: dict, config: dict,
         "gaps_new": [g for g in gaps_after if g["edge_id"] not in before_keys],
     }
 
+    # The author never has to remember the analyzers: a collected change
+    # runs incremental extraction (concepts, links, aliasing statements)
+    # when an LLM is configured. Best-effort — analysis failure must never
+    # block observation.
+    if analyze is None:
+        analyze = auto
+    if analyze:
+        llm = LLMClient(config)
+        if llm.enabled:
+            try:
+                summary = run_extraction(db, manuscript, llm) or {}
+            except Exception:
+                summary = {}
+            if summary and not summary.get("up_to_date"):
+                report["auto_analysis"] = {
+                    "new_concepts": len(summary.get("nodes", [])),
+                    "new_edges": len(summary.get("edges", [])),
+                    "proposed": summary.get("proposed", 0),
+                }
+    return report
+
 
 # ------------------------------------------------------- guidance / review
 
 def guide(db: Database, manuscript: dict, session: dict,
-          llm: LLMClient | None = None) -> dict:
+          llm: LLMClient | None = None, config: dict | None = None) -> dict:
+    caught_up = _catch_up(db, manuscript, config) if config is not None else None
     notes = intent_coverage_notes(db, manuscript)
     rows = generate_guidance(db, manuscript, session, llm=llm)
-    return {
+    result = {
         "notes": notes,
         "abstained": rows[0]["kind"] == "abstention",
         "suggestions": [dict(r) for r in rows],
     }
+    if caught_up:
+        result["caught_up"] = caught_up
+    return result
 
 
 def review(db: Database, manuscript: dict, session: dict, index: int,
@@ -408,8 +434,24 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 
 # ------------------------------------------------------------ other reads
 
-def get_briefing(db: Database, manuscript: dict, since: str | None = None) -> dict:
-    return build_briefing(db, manuscript["id"], since=since)
+def _catch_up(db: Database, manuscript: dict, config: dict) -> dict | None:
+    """Lazy catch-up collection: state-reading entry points must never serve
+    stale text. The shell has a live watcher; every other surface collects
+    on read. Returns a small report when something was collected."""
+    report = collect(db, manuscript, config, source="catch-up")
+    if report.get("unchanged") or report.get("staged"):
+        return None
+    return {"version_no": report.get("version_no"),
+            "transitions": report.get("transitions", [])}
+
+
+def get_briefing(db: Database, manuscript: dict, since: str | None = None,
+                 config: dict | None = None) -> dict:
+    caught_up = _catch_up(db, manuscript, config) if config is not None else None
+    briefing = build_briefing(db, manuscript["id"], since=since)
+    if caught_up:
+        briefing["caught_up"] = caught_up
+    return briefing
 
 
 def analyze(db: Database, manuscript: dict, llm: LLMClient) -> list[dict]:
@@ -510,6 +552,112 @@ def alias_concept(db: Database, manuscript: dict, name: str,
     for alias in aliases:
         node = cg.add_alias(db, manuscript["id"], node, alias)
     return {"name": node["name"], "aliases": cg.node_aliases(node)}
+
+
+def style_overview(db: Database, manuscript: dict) -> dict:
+    from . import styles as st
+
+    mid = manuscript["id"]
+    guides = [dict(g) for g in db.all(
+        "SELECT * FROM style_guides WHERE manuscript_id = ? ORDER BY created_at", (mid,))]
+    names = {g["id"]: g["name"] for g in guides}
+    counts = {g["id"]: db.one(
+        "SELECT COUNT(*) AS n FROM style_elements WHERE guide_id = ? AND status = 'active'",
+        (g["id"],))["n"] for g in guides}
+    attachments = [dict(a) for a in db.all(
+        "SELECT * FROM style_attachments WHERE manuscript_id = ?", (mid,))]
+    return {
+        "guides": [{"id": g["id"], "name": g["name"],
+                    "parent": names.get(g["parent"]),
+                    "elements": counts[g["id"]]} for g in guides],
+        "attachments": [{"file": a["file"], "guide": names.get(a["guide_id"])}
+                        for a in attachments],
+    }
+
+
+def style_show(db: Database, manuscript: dict, file: str) -> dict:
+    from . import styles as st
+
+    elements = st.effective_style(db, manuscript["id"], file)
+    return {"file": file, "elements": elements,
+            "rendered": st.render(db, manuscript["id"], file)}
+
+
+def define_style_guide(db: Database, manuscript: dict, name: str,
+                       parent: str | None = None) -> dict:
+    from . import styles as st
+
+    return dict(st.create_guide(db, manuscript["id"], name, parent_name=parent))
+
+
+def _validate_file(db: Database, manuscript: dict, file: str) -> None:
+    """Live references (style attachments, file-local elements) must name a
+    file the manuscript directory actually contains — there is no files
+    table, so integrity is enforced at the point of entry, against disk."""
+    from .revisions import read_manuscript_files
+
+    known = sorted(read_manuscript_files(Path(manuscript["path"])).keys())
+    if known and file not in known:
+        hint = difflib.get_close_matches(file, known, n=1)
+        raise LookupError(
+            f"unknown file '{file}'"
+            + (f" — did you mean '{hint[0]}'?" if hint else
+               f" (known: {', '.join(known)})"))
+
+
+def attach_style(db: Database, manuscript: dict, file: str, guide_name: str) -> dict:
+    from . import styles as st
+
+    guide = st.get_guide(db, manuscript["id"], guide_name)
+    if not guide:
+        raise LookupError(f"no style guide named '{guide_name}'")
+    _validate_file(db, manuscript, file)
+    st.attach_file(db, manuscript["id"], file, dict(guide))
+    return {"file": file, "guide": guide["name"]}
+
+
+def add_style_element(db: Database, manuscript: dict, aspect: str, statement: str,
+                      guide_name: str | None = None, file: str | None = None,
+                      notes: str | None = None,
+                      overrides: str | None = None) -> dict:
+    from . import styles as st
+
+    guide = None
+    if guide_name:
+        guide = st.get_guide(db, manuscript["id"], guide_name)
+        if not guide:
+            raise LookupError(f"no style guide named '{guide_name}'")
+    if file is not None:
+        _validate_file(db, manuscript, file)
+    resolved = None
+    if overrides:
+        row = db.one(
+            "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
+            "AND status = 'active'",
+            (manuscript["id"], f"%{overrides}%"),
+        )
+        if not row:
+            raise LookupError(f"no active style element matching '{overrides}'")
+        resolved = row["id"]
+    return dict(st.add_element(
+        db, manuscript["id"], aspect, statement,
+        guide=dict(guide) if guide else None, file=file, notes=notes,
+        overrides=resolved,
+    ))
+
+
+def retire_style_element(db: Database, manuscript: dict, prefix: str) -> dict:
+    from . import styles as st
+
+    row = db.one(
+        "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
+        "AND status = 'active'",
+        (manuscript["id"], f"%{prefix}%"),
+    )
+    if not row:
+        raise LookupError(f"no active style element matching '{prefix}'")
+    st.retire_element(db, dict(row))
+    return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
 def merge_concepts(db: Database, manuscript: dict,
@@ -621,10 +769,12 @@ def resolve_proposal(db: Database, manuscript: dict, prefix: str,
     row = rows[0]
     if action == "accept":
         message = prop.adopt(db, manuscript["id"], row)
+    elif action == "edge":
+        message = prop.demote_to_edge(db, manuscript["id"], row)
     elif action == "dismiss":
         message = prop.dismiss(db, manuscript["id"], row, reason=reason)
     else:
-        raise ValueError(f"unknown action '{action}' (accept|dismiss)")
+        raise ValueError(f"unknown action '{action}' (accept|edge|dismiss)")
     return {"message": message, "proposal_id": row["id"]}
 
 
@@ -674,11 +824,12 @@ def list_policies(db: Database, manuscript: dict) -> list[dict]:
 
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
-                   edges_only: bool = False) -> dict | None:
+                   edges_only: bool = False,
+                   aliases_only: bool = False) -> dict | None:
     from .extraction import extract_concepts
 
     return extract_concepts(db, manuscript, llm, files=files, full=full,
-                            edges_only=edges_only)
+                            edges_only=edges_only, aliases_only=aliases_only)
 
 
 # ----------------------------------------------- self-improvement tasks

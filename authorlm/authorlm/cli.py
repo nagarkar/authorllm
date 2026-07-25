@@ -88,7 +88,7 @@ def _report_llm(llm: LLMClient) -> None:
 
 def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                     files: list[str] | None = None, full: bool = False,
-                    edges_only: bool = False) -> None:
+                    edges_only: bool = False, aliases_only: bool = False) -> None:
     """Collect the current text (if new) and bootstrap the Concept Graph."""
     before = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
@@ -101,7 +101,7 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
         print(f"Collected revision v{version['version_no']}.")
     print("Extracting concepts and relationships with the LLM…")
     summary = extract_concepts(db, manuscript, llm, files=files, full=full,
-                               edges_only=edges_only)
+                               edges_only=edges_only, aliases_only=aliases_only)
     if summary is None:
         print("Extraction produced nothing (LLM unavailable or empty manuscript); "
               "the graph is unchanged.")
@@ -163,6 +163,7 @@ MANUSCRIPT_TABLES = [
     "evidence", "editorial_reviews", "guidance_history", "editorial_policies",
     "concept_edges", "concept_nodes", "editorial_episodes", "inferred_intents",
     "declared_intents", "sessions", "editorial_transitions",
+    "style_elements", "style_attachments", "style_guides",
     "manuscript_versions", "manuscripts",
 ]
 
@@ -1083,7 +1084,12 @@ def cmd_collect(args):
             f"Concept(s) {names} no longer appear anywhere in the text — "
             "decide their fate: proposal review (retire, or keep as placeholder)."
         ))
-    if report["extract_hint"]:
+    if report.get("auto_analysis"):
+        aa = report["auto_analysis"]
+        print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
+                     f"{aa['new_edges']} new relationship(s), "
+                     f"{aa['proposed']} proposal(s)."))
+    elif report["extract_hint"]:
         print(ui.dim(f"{report['new_paragraphs']} new/rewritten paragraph(s) — mine them "
                      "for new concepts with 'extract'."))
     gaps_before, gaps_after = report["gaps_before"], report["gaps_after"]
@@ -1114,7 +1120,7 @@ def cmd_extract(args):
             "(provider 'litellm' is the default; export GEMINI_API_KEY first)."
         )
     _run_extraction(db, manuscript, llm, files=args.files or None, full=args.full,
-                    edges_only=args.edges_only)
+                    edges_only=args.edges_only, aliases_only=args.aliases)
 
 
 def cmd_guide(args):
@@ -1660,7 +1666,8 @@ def cmd_proposal(args):
             print("No open proposals to review.")
             return
         print(f"{len(rows)} open proposal(s).")
-        print(ui.dim("Keys: [a]dopt  [d]ismiss  [s]kip (or Enter)  [x] quit"))
+        print(ui.dim("Keys: [a]dopt  [e]dge (alias → generalizes)  [d]ismiss  "
+                     "[s]kip (or Enter)  [x] quit"))
         adopted = dismissed = skipped = 0
         for index, row in enumerate(rows, start=1):
             summary, details = prop.describe(row)
@@ -1677,6 +1684,10 @@ def cmd_proposal(args):
                     choice = "x"
                 if choice in ("a", "adopt", "accept"):
                     print(f"  {ui.green(prop.adopt(db, mid, row))}")
+                    adopted += 1
+                    break
+                if choice in ("e", "edge") and row["kind"] == "alias":
+                    print(f"  {ui.cyan(prop.demote_to_edge(db, mid, row))}")
                     adopted += 1
                     break
                 if choice in ("d", "dismiss"):
@@ -1701,8 +1712,71 @@ def cmd_proposal(args):
         sys.exit(f"error: proposal is already {row['state']}.")
     if args.action == "accept":
         print(prop.adopt(db, mid, dict(row)))
+    elif args.action == "edge":
+        print(prop.demote_to_edge(db, mid, dict(row)))
     else:
         print(prop.dismiss(db, mid, dict(row), reason=args.why))
+
+
+def cmd_style(args):
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    try:
+        if args.action == "guides":
+            overview = api.style_overview(db, manuscript)
+            if not overview["guides"]:
+                print("No style guides yet. Create one: "
+                      "style guide \"House style\"")
+                return
+            print(ui.bold("Style guides:"))
+            for guide in overview["guides"]:
+                parent = f" ← {guide['parent']}" if guide["parent"] else " (root)"
+                print(f"  [{guide['id'][:8]}] {guide['name']}{parent} — "
+                      f"{guide['elements']} element(s)")
+            if overview["attachments"]:
+                print(ui.bold("Attachments:"))
+                for a in overview["attachments"]:
+                    print(f"  {a['file']} → {a['guide']}")
+        elif args.action == "guide":
+            row = api.define_style_guide(db, manuscript, args.params[0],
+                                         parent=args.parent)
+            parent = f" (parent: {args.parent})" if args.parent else " (root)"
+            print(f"Style guide [{row['id'][:8]}] '{row['name']}'{parent}")
+        elif args.action == "attach":
+            result = api.attach_style(db, manuscript, args.params[0], args.params[1])
+            print(f"{result['file']} now follows '{result['guide']}'.")
+        elif args.action == "add":
+            row = api.add_style_element(
+                db, manuscript, args.params[0], args.params[1],
+                guide_name=args.guide, file=args.file,
+                notes=args.notes, overrides=args.overrides,
+            )
+            scope = args.guide or f"{args.file} (file-local)"
+            print(f"Style element [{row['id'][:8]}] ({row['aspect']}, {scope}): "
+                  f"{row['statement']}")
+        elif args.action == "show":
+            result = api.style_show(db, manuscript, args.params[0])
+            if not result["elements"]:
+                print(f"No style elements govern {args.params[0]}.")
+                return
+            print(ui.bold(f"Effective style for {result['file']} "
+                          f"({len(result['elements'])} element(s), nearest first):"))
+            for element in result["elements"]:
+                if element["file"]:
+                    where = f"{element['file']} (file-local)"
+                else:
+                    guide_row = db.one("SELECT name FROM style_guides WHERE id = ?",
+                                       (element["guide_id"],))
+                    where = guide_row["name"] if guide_row else "?"
+                print(f"  [{element['id'][:8]}] ({element['aspect']}, {where}) "
+                      f"{element['statement']}")
+                if element["notes"]:
+                    print(ui.dim(f"      {element['notes']}"))
+        elif args.action == "retire":
+            result = api.retire_style_element(db, manuscript, args.params[0])
+            print(f"Retired style element: {result['statement']}")
+    except (LookupError, ValueError) as err:
+        sys.exit(str(err))
 
 
 def cmd_status(args):
@@ -2011,6 +2085,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--edges-only", action="store_true",
                    help="extract only relationships among existing concepts "
                         "(no new concepts; does not advance the watermark)")
+    p.add_argument("--aliases", action="store_true",
+                   help="sweep the full text for aliasing statements "
+                        "(naming/defining sentences) and file merge "
+                        "proposals; extracts nothing else and does not "
+                        "advance the watermark")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("guide", help="generate editorial guidance (or abstain)")
@@ -2117,10 +2196,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("proposal",
                        help="review conflicts between new material and settled knowledge")
-    p.add_argument("action", choices=["list", "review", "accept", "dismiss"])
-    p.add_argument("id", nargs="?", help="proposal id prefix (accept/dismiss)")
+    p.add_argument("action", choices=["list", "review", "accept", "edge", "dismiss"])
+    p.add_argument("id", nargs="?", help="proposal id prefix (accept/edge/dismiss)")
     p.add_argument("--why", help="reason when dismissing (recorded as evidence)")
     p.set_defaults(func=cmd_proposal)
+
+    p = sub.add_parser("style", help="style guides: ratified prose law per file")
+    p.add_argument("action",
+                   choices=["guides", "guide", "attach", "add", "show", "retire"])
+    p.add_argument("params", nargs="*",
+                   help="guide: <name>; attach: <file> <guide>; "
+                        "add: <aspect> \"statement\"; show: <file>; retire: <id>")
+    p.add_argument("--parent", help="guide: parent guide name")
+    p.add_argument("--guide", help="add: owning guide name")
+    p.add_argument("--file", help="add: file for a file-local element")
+    p.add_argument("--notes", help="add: free-text notes (inspect/avoid hints)")
+    p.add_argument("--overrides",
+                   help="add: id (prefix) of the inherited element this displaces")
+    p.set_defaults(func=cmd_style)
 
     p = sub.add_parser("status", help="show current state")
     p.set_defaults(func=cmd_status)
@@ -2166,7 +2259,14 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept alias <name> <alias>…")
         if args.action == "merge" and len(params) != 2:
             sys.exit("usage: concept merge <canonical> <duplicate>")
-    if args.command == "proposal" and args.action in ("accept", "dismiss") and not args.id:
+    if args.command == "style":
+        required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1}
+        if len(args.params) < required.get(args.action, 0):
+            sys.exit(f"usage: style {args.action} — see 'style --help'")
+        if args.action == "add" and bool(args.guide) == bool(args.file):
+            sys.exit('usage: style add <aspect> "statement" '
+                     "--guide NAME | --file FILE")
+    if args.command == "proposal" and args.action in ("accept", "edge", "dismiss") and not args.id:
         sys.exit(f"usage: proposal {args.action} <id-prefix>")
     if args.command == "intent" and args.action == "retire":
         args.action = "abandon"  # alias, matching 'concept retire' muscle memory

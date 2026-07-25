@@ -32,12 +32,13 @@ def create(
     db: Database, manuscript_id: str, kind: str, target: str, payload: dict,
     source: str = "extraction",
 ) -> dict | None:
-    """Record an open proposal. Returns None (creates nothing) if an open or
-    dismissed proposal with identical content already exists."""
+    """Record an open proposal. Returns None (creates nothing) if an open,
+    dismissed, or demoted proposal with identical content already exists."""
     content_hash = _content_hash(payload)
     existing = db.one(
         "SELECT id FROM knowledge_proposals WHERE manuscript_id = ? AND kind = ? "
-        "AND target = ? AND content_hash = ? AND state IN ('open', 'dismissed')",
+        "AND target = ? AND content_hash = ? "
+        "AND state IN ('open', 'dismissed', 'demoted')",
         (manuscript_id, kind, target, content_hash),
     )
     if existing:
@@ -97,6 +98,18 @@ def describe(row: dict) -> tuple[str, list[str]]:
     elif kind == "policy_revival":
         summary = f"revive retired policy: \"{payload['statement']}\""
         details = [f"new supporting explanation: {payload.get('new_explanation', '')}"]
+    elif kind == "alias":
+        summary = (f"the text identifies '{payload['alias']}' with "
+                   f"'{payload['canonical']}' — same concept?")
+        where = f" ({payload['location']})" if payload.get("location") else ""
+        details = [
+            f"“{payload.get('sentence', '')}”{where}",
+            f"adopt = merge: '{payload['alias']}' becomes an alias of "
+            f"'{payload['canonical']}' and its notes absorb this sentence · "
+            f"edge = a kind, not an identity: record '{payload['canonical']}' "
+            f"—generalizes→ '{payload['alias']}' instead · dismiss = keep "
+            "them distinct",
+        ]
     else:
         summary = f"{kind} on {row['target']}"
         details = [json.dumps(payload)]
@@ -156,12 +169,53 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         db.update("editorial_policies", row["target"], {"status": "candidate"})
         reinforce_policy(db, row["target"], "accepted")
         message = f"Policy revived as candidate: \"{payload['statement']}\""
+    elif kind == "alias":
+        from .concepts import get_concept, merge_concepts
+
+        canonical = get_concept(db, manuscript_id, payload["canonical"])
+        duplicate = db.one(
+            "SELECT * FROM concept_nodes WHERE id = ?", (row["target"],))
+        if (not canonical or not duplicate or canonical["status"] == "retired"
+                or duplicate["status"] == "retired"
+                or canonical["id"] == duplicate["id"]):
+            db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
+            return ("error: these concepts have changed since the proposal — "
+                    "nothing merged.")
+        merged = merge_concepts(db, manuscript_id, dict(canonical), dict(duplicate))
+        sentence = payload.get("sentence")
+        if sentence:
+            base = (canonical["notes"] or "").rstrip()
+            quote = f"“{sentence}”"
+            if quote.lower() not in base.lower():
+                db.update("concept_nodes", canonical["id"],
+                          {"notes": (base + " " if base else "") + quote})
+        message = (f"Merged '{payload['alias']}' into '{payload['canonical']}' "
+                   f"— {merged['repointed']} edge(s) re-pointed, "
+                   f"{merged['dropped']} retired; the notes absorbed the "
+                   "aliasing sentence.")
     else:
         return f"error: unknown proposal kind '{kind}'"
 
     db.update("knowledge_proposals", row["id"], {"state": "adopted"})
     _record_evidence(db, manuscript_id, row, "adopted")
     return message
+
+
+def demote_to_edge(db: Database, manuscript_id: str, row: dict) -> str:
+    """Alias proposals only: the author judges the aliasing sentence names a
+    kind, not an identity — record 'canonical generalizes alias' and keep
+    both concepts."""
+    if row["kind"] != "alias":
+        return "error: only alias proposals can be demoted to an edge."
+    from .concepts import link_concepts
+
+    payload = loads(row["payload"], {})
+    link_concepts(db, manuscript_id, payload["canonical"], "generalizes",
+                  payload["alias"])
+    db.update("knowledge_proposals", row["id"], {"state": "demoted"})
+    _record_evidence(db, manuscript_id, row, "demoted-to-edge")
+    return (f"Recorded {payload['canonical']} —generalizes→ "
+            f"{payload['alias']} — kept as distinct concepts.")
 
 
 def dismiss(db: Database, manuscript_id: str, row: dict, reason: str | None = None) -> str:

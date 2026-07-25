@@ -74,6 +74,34 @@ CREATE TABLE IF NOT EXISTS declared_intents (
     outcome TEXT
 );
 
+CREATE TABLE IF NOT EXISTS style_guides (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent TEXT                             -- style_guides.id | NULL = root
+);
+
+CREATE TABLE IF NOT EXISTS style_attachments (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,
+    guide_id TEXT NOT NULL,                 -- style_guides.id
+    UNIQUE (manuscript_id, file)            -- one guide per file
+);
+
+CREATE TABLE IF NOT EXISTS style_elements (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    guide_id TEXT,        -- owning guide | NULL when file-local
+    file TEXT,            -- filename for file-local overrides | NULL
+    aspect TEXT NOT NULL, -- register|lexicon|syntax|structure|formatting|citation|rhetoric|figure|tone
+    statement TEXT NOT NULL,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'active',  -- active | retired
+    overrides TEXT,       -- style_elements.id displaced by this element
+    CHECK ((guide_id IS NULL) != (file IS NULL))
+);
+
 CREATE TABLE IF NOT EXISTS inferred_intents (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,

@@ -143,13 +143,14 @@ def abandon_intent(intent_id: str, reason: str | None = None,
 @mcp.tool()
 def collect_revision(manuscript: str | None = None) -> dict:
     """Snapshot the manuscript now: detects transitions, realizes concepts,
-    infers co-occurrence edges, and reports the prerequisite-gap delta.
-    Call after the author says they saved/finished edits."""
+    runs incremental extraction (concepts, links, aliasing statements) when
+    an LLM is configured, and reports the prerequisite-gap delta. Call
+    after the author says they saved/finished edits."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         api.ensure_session(db, ms, client_id=CONNECTION_ID)
-        return api.collect(db, ms, api.load_config(_WORKSPACE))
+        return api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
     return _guard(run)
 
 
@@ -163,7 +164,8 @@ def get_guidance(manuscript: str | None = None) -> dict:
         db = _db()
         ms = _manuscript(db, manuscript)
         session, _ = api.ensure_session(db, ms, client_id=CONNECTION_ID)
-        return api.guide(db, ms, session, llm=_llm())
+        return api.guide(db, ms, session, llm=_llm(),
+                         config=api.load_config(_WORKSPACE))
     return _guard(run)
 
 
@@ -192,7 +194,8 @@ def get_briefing(manuscript: str | None = None) -> dict:
     outstanding questions, suggested focus areas, learning velocity."""
     def run():
         db = _db()
-        return api.get_briefing(db, _manuscript(db, manuscript))
+        return api.get_briefing(db, _manuscript(db, manuscript),
+                                config=api.load_config(_WORKSPACE))
     return _guard(run)
 
 
@@ -234,6 +237,73 @@ def alias_concept(name: str, aliases: list[str],
     def run():
         db = _db()
         return api.alias_concept(db, _manuscript(db, manuscript), name, aliases)
+    return _guard(run)
+
+
+@mcp.tool()
+def get_style(file: str | None = None, manuscript: str | None = None) -> dict:
+    """The style system. With `file`, the effective style guide governing
+    that file (composed from its guide chain, nearest scope first, override
+    links applied) plus a rendered form for drafting. Without `file`, an
+    overview: every guide, its parent, element count, and file attachments."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        if file:
+            return api.style_show(db, ms, file)
+        return api.style_overview(db, ms)
+    return _guard(run)
+
+
+@mcp.tool()
+def define_style_guide(name: str, parent: str | None = None,
+                       manuscript: str | None = None) -> dict:
+    """Create a named style guide. Guides form a single-parent tree; the
+    parentless guide is the manuscript root (house style). Files attach to
+    exactly one guide via attach_style; unattached files follow the root."""
+    def run():
+        db = _db()
+        return api.define_style_guide(db, _manuscript(db, manuscript),
+                                      name, parent=parent)
+    return _guard(run)
+
+
+@mcp.tool()
+def attach_style(file: str, guide: str, manuscript: str | None = None) -> dict:
+    """Attach a manuscript file to a style guide (re-attach to switch
+    styles — one operation, no element copying)."""
+    def run():
+        db = _db()
+        return api.attach_style(db, _manuscript(db, manuscript), file, guide)
+    return _guard(run)
+
+
+@mcp.tool()
+def add_style_element(aspect: str, statement: str, guide: str | None = None,
+                      file: str | None = None, notes: str | None = None,
+                      overrides: str | None = None,
+                      manuscript: str | None = None) -> dict:
+    """Record a ratified style rule. aspect: register | lexicon | syntax |
+    structure | formatting | citation | rhetoric | figure | tone. Scope to
+    exactly one of `guide` (name) or `file` (file-local override). `notes`
+    holds free-text inspect/avoid hints; `overrides` names the id (prefix)
+    of an inherited element this one displaces."""
+    def run():
+        db = _db()
+        return api.add_style_element(
+            db, _manuscript(db, manuscript), aspect, statement,
+            guide_name=guide, file=file, notes=notes, overrides=overrides)
+    return _guard(run)
+
+
+@mcp.tool()
+def retire_style_element(element_id: str, manuscript: str | None = None) -> dict:
+    """Retire a style element by id (prefix) — it leaves every composition
+    but stays historically accessible."""
+    def run():
+        db = _db()
+        return api.retire_style_element(db, _manuscript(db, manuscript),
+                                        element_id)
     return _guard(run)
 
 
@@ -325,8 +395,10 @@ def list_proposals(manuscript: str | None = None) -> dict:
 @mcp.tool()
 def resolve_proposal(proposal_id: str, action: str, reason: str | None = None,
                      manuscript: str | None = None) -> dict:
-    """Settle a proposal per the author's decision. action: accept |
-    dismiss. Pass their reasoning as `reason` when dismissing."""
+    """Settle a proposal per the author's decision. action: accept | edge |
+    dismiss. `edge` applies to alias proposals only: the sentence names a
+    kind rather than an identity, so record 'canonical generalizes alias'
+    instead of merging. Pass their reasoning as `reason` when dismissing."""
     def run():
         db = _db()
         return api.resolve_proposal(db, _manuscript(db, manuscript),
@@ -414,15 +486,19 @@ def close_session(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def extract_concepts(files: list[str] | None = None, full: bool = False,
-                     edges_only: bool = False,
+                     edges_only: bool = False, aliases_only: bool = False,
                      manuscript: str | None = None) -> dict:
     """LLM-mine the manuscript for concepts and relationships (incremental
     by default: only files changed since the last extraction). New items
-    arrive as hypotheses for the author to triage."""
+    arrive as hypotheses for the author to triage. aliases_only sweeps the
+    full text for aliasing statements (naming/defining sentences) and files
+    merge proposals; it extracts nothing else."""
     def run():
         db = _db()
         return api.run_extraction(db, _manuscript(db, manuscript), _llm(),
-                                  files=files, full=full, edges_only=edges_only)
+                                  files=files, full=full,
+                                  edges_only=edges_only,
+                                  aliases_only=aliases_only)
     return _guard(run)
 
 

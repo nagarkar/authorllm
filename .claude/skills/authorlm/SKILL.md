@@ -83,9 +83,13 @@ encoded test), `close` only after the author confirms, `dismiss` needs
 their reason verbatim.
 
 ## Standing duties
-- Open conversations about the manuscript with `get_briefing` when it's the
-  first touch in a while; surface open proposals and outstanding questions
-  as questions to the author.
+- Open conversations about the manuscript with `get_briefing`; it (and
+  `get_guidance`) collects any fresh edits itself and reports them under
+  `caught_up`. When that section is present, narrate the change
+  (`authorlm diff`) in prose terms — what changed and where, separating
+  prose changes from formatting churn — BEFORE the learning summary.
+  Surface open proposals and outstanding questions as questions to the
+  author.
 - Surface `list_proposals` items when present — they are conflicts between
   new writing and settled knowledge; the author must decide, you must ask.
 - Never edit conceptual manuscript content unless explicitly asked; the

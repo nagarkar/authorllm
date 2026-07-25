@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 
 from . import proposals
-from .concepts import add_concept, concept_pattern, link_concepts, scan_realizations
+from .concepts import (add_concept, concept_pattern, get_concept,
+                       link_concepts, scan_realizations)
 from .db import Database
 from .llm import LLMClient
 from .revisions import read_manuscript_files
@@ -45,7 +46,8 @@ EXTRACTION_SYSTEM = (
     "terminology, singular form. Aim for 10–20 strong nodes; quality over "
     "coverage. Return JSON of the shape "
     '{"concepts": [{"name": str, "kind": str, "notes": str}], '
-    '"links": [{"from": str, "relation": str, "to": str}]} '
+    '"links": [{"from": str, "relation": str, "to": str}], '
+    '"aliases": [{"alias": str, "canonical": str, "sentence": str}]} '
     f"where kind is one of {sorted(VALID_KINDS)}. "
     f"Never exceed {MAX_CONCEPTS} concepts. "
 )
@@ -78,7 +80,33 @@ RELATION_GUIDE = (
     "link rather than guessing."
 )
 
-EXTRACTION_SYSTEM = EXTRACTION_SYSTEM + RELATION_GUIDE
+ALIAS_GUIDE = (
+    "Report ALIASING STATEMENTS under \"aliases\": sentences that identify "
+    "or name one known concept in terms of another ('What ye call Experience "
+    "is the discernment of qualities separated'; 'We call it The Chid'). "
+    "Match names case-insensitively here — a lowercase occurrence inside a "
+    "defining or naming sentence still counts, unlike casual reuse "
+    "elsewhere. Each item: alias = the subordinate name, canonical = the "
+    "fundamental name, sentence = the exact sentence copied verbatim from "
+    "the text. Direction: in 'X is the Y of Z' the head Y is canonical; in "
+    "a naming ceremony ('we call it X', 'ye name it X') the pre-existing "
+    "term is canonical and the bestowed name is the alias; in a bare "
+    "'X is Y', Y is canonical. Only sentences that identify or (re)name "
+    "qualify — kinship, causation, or resemblance is not aliasing. Report "
+    "only pairs where BOTH names are known concepts. "
+)
+
+EXTRACTION_SYSTEM = EXTRACTION_SYSTEM + RELATION_GUIDE + ALIAS_GUIDE
+
+ALIASES_ONLY_SYSTEM = (
+    "You are an editorial assistant analyzing a philosophy manuscript. The "
+    "concept inventory is already established and is listed as KNOWN "
+    "CONCEPTS at the top of the text — do NOT extract concepts or "
+    "relationships. Your sole task is to find aliasing statements. "
+    + ALIAS_GUIDE +
+    'Return JSON of the shape {"aliases": [{"alias": str, "canonical": str, '
+    '"sentence": str}]} using known concept names verbatim.'
+)
 
 EDGES_ONLY_SYSTEM = (
     "You are an editorial assistant analyzing a philosophy manuscript. "
@@ -266,7 +294,8 @@ def _normalize(text: str | None) -> str:
 def extract_concepts(
     db: Database, manuscript: dict, llm: LLMClient,
     files: list[str] | None = None, full: bool = False,
-    edges_only: bool = False, _inventory: bool = False,
+    edges_only: bool = False, aliases_only: bool = False,
+    _inventory: bool = False,
 ) -> dict | None:
     """Ask the LLM for concepts/links and merge them into the graph.
 
@@ -277,6 +306,10 @@ def extract_concepts(
     unavailable or returned nothing usable.
     """
     mid = manuscript["id"]
+    if aliases_only and not files:
+        # An aliases pass is a deliberate audit of the whole text — naming
+        # sentences live in already-mined prose, not just fresh paragraphs.
+        full = True
     changed, latest_id, old_files, new_files = changed_files_since_extraction(db, manuscript)
     target: set[str] | None = None
     scope = "full manuscript"
@@ -312,7 +345,7 @@ def extract_concepts(
         }
         for name in selected:
             sub = extract_concepts(db, manuscript, llm, files=[name],
-                                   _inventory=True)
+                                   aliases_only=aliases_only, _inventory=True)
             if not sub or sub.get("up_to_date"):
                 continue
             for key in ("nodes", "edges", "realized"):
@@ -323,6 +356,7 @@ def extract_concepts(
         aggregate["scope"] = (
             f"hierarchical: {len(selected)} file(s) in reading order, "
             f"one pass each (cap {max_chars} chars)"
+            + (", aliases only" if aliases_only else "")
         )
         return aggregate
 
@@ -338,8 +372,8 @@ def extract_concepts(
 
     def in_attention(*names: str) -> bool:
         return any(concept_pattern(n).search(attention) for n in names if n)
-    if edges_only:
-        scope += ", edges only"
+    if edges_only or aliases_only:
+        scope += ", edges only" if edges_only else ", aliases only"
         inventory = "; ".join(
             row["name"] for row in db.all(
                 "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
@@ -347,7 +381,8 @@ def extract_concepts(
                 (mid,),
             )
         )
-        system = EDGES_ONLY_SYSTEM + triage_feedback(db, mid)
+        system = (EDGES_ONLY_SYSTEM if edges_only else ALIASES_ONLY_SYSTEM) \
+            + triage_feedback(db, mid)
         text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
     else:
         system = EXTRACTION_SYSTEM + triage_feedback(db, mid)
@@ -380,7 +415,7 @@ def extract_concepts(
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
     proposed = 0
 
-    for item in [] if edges_only else result.get("concepts", []):
+    for item in [] if edges_only or aliases_only else result.get("concepts", []):
         if not isinstance(item, dict) or not str(item.get("name", "")).strip():
             skipped += 1
             continue
@@ -468,7 +503,7 @@ def extract_concepts(
             (mid,),
         )
     }
-    for item in result.get("links", []):
+    for item in [] if aliases_only else result.get("links", []):
         if not isinstance(item, dict):
             skipped += 1
             continue
@@ -505,6 +540,45 @@ def extract_concepts(
             ):
                 proposed += 1
 
+    # Aliasing statements become proposals — a merge is the author's call,
+    # never the extractor's. Validation is deterministic: both names must
+    # resolve to distinct live concepts and the sentence must be a verbatim
+    # quote of the text sent to the model.
+    flat_text = " ".join(text.split()).lower()
+    for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        alias_name = str(item.get("alias", "")).strip()[:80]
+        canonical_name = str(item.get("canonical", "")).strip()[:80]
+        sentence = " ".join(str(item.get("sentence", "")).split())[:300]
+        if not alias_name or not canonical_name or not sentence:
+            skipped += 1
+            continue
+        a_node = get_concept(db, mid, alias_name)
+        c_node = get_concept(db, mid, canonical_name)
+        if (not a_node or not c_node or a_node["id"] == c_node["id"]
+                or a_node["status"] == "retired" or c_node["status"] == "retired"):
+            suppressed += 1
+            continue
+        if sentence.lower() not in flat_text:
+            suppressed += 1  # the model must quote the text, not paraphrase it
+            continue
+        if not in_attention(alias_name, canonical_name):
+            suppressed += 1
+            continue
+        location = next(
+            (fname for fname, ftext in (new_files or {}).items()
+             if sentence.lower() in " ".join(ftext.split()).lower()),
+            None,
+        )
+        if proposals.create(
+            db, mid, "alias", a_node["id"],
+            {"alias": a_node["name"], "canonical": c_node["name"],
+             "sentence": sentence, "location": location},
+        ):
+            proposed += 1
+
     # Realize extracted concepts against the latest collected version.
     latest = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
@@ -518,7 +592,7 @@ def extract_concepts(
     # Advance the extraction watermark so the next run diffs from here.
     # An edges-only pass leaves it alone: the text has not been mined for
     # concepts, so a later incremental run must still see these files.
-    if latest_id and not edges_only:
+    if latest_id and not edges_only and not aliases_only:
         meta = json.loads(manuscript["metadata"] or "{}")
         meta["last_extracted_version"] = latest_id
         db.update("manuscripts", mid, {"metadata": json.dumps(meta)})

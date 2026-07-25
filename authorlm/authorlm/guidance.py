@@ -349,11 +349,24 @@ def generate_guidance(
 
     # Optional LLM enrichment: draft text for the first bridge suggestion.
     if llm and candidates and candidates[0]["kind"] == "bridge":
+        # Drafts arrive in the target file's ratified register: when the
+        # active intent names a file, its effective style guide rides along.
+        style_context = ""
+        target_file = next(
+            (m.group(0) for i in intents
+             for m in [re.search(r"[\w./-]+\.md", i["statement"])] if m),
+            None,
+        )
+        if target_file:
+            from .styles import render as render_style
+
+            style_context = render_style(db, mid, target_file)
         draft = llm.complete(
             "You are an editorial collaborator for a philosophy manuscript. "
             "Draft a short bridge paragraph. Reply with the paragraph only. "
             "Format any mathematics as MathJax: inline math in $...$, display "
-            "equations in $$...$$.",
+            "equations in $$...$$."
+            + (f"\n{style_context}" if style_context else ""),
             candidates[0]["explanation"],
         )
         if draft:
