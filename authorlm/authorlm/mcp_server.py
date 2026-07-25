@@ -215,10 +215,39 @@ def add_concept(name: str, kind: str = "concept", notes: str | None = None,
                 manuscript: str | None = None) -> dict:
     """Add (or revive) a concept the author declares. kind: concept |
     definition | objection | example | metaphor | question |
-    historical_reference | mathematical_construct."""
+    historical_reference | mathematical_construct | syllogism (a syllogism
+    node's premises attach with depends_on, its conclusion with leads_to).
+    On an existing concept, fresh notes refine the stored notes."""
     def run():
         db = _db()
         return api.add_concept(db, _manuscript(db, manuscript), name, kind, notes)
+    return _guard(run)
+
+
+@mcp.tool()
+def alias_concept(name: str, aliases: list[str],
+                  manuscript: str | None = None) -> dict:
+    """Declare alternate names (synonyms) for a concept. Aliases resolve in
+    every name lookup and count as mentions of the concept in text scans —
+    use this for synonym rings instead of separate nodes joined by mutual
+    defines edges."""
+    def run():
+        db = _db()
+        return api.alias_concept(db, _manuscript(db, manuscript), name, aliases)
+    return _guard(run)
+
+
+@mcp.tool()
+def merge_concepts(canonical: str, duplicate: str,
+                   manuscript: str | None = None) -> dict:
+    """Merge two concepts the author declares to be the same idea: the
+    duplicate's live edges are re-pointed at the canonical concept
+    (self-edges and already-present edges retire), the duplicate node
+    retires, and its name and aliases become aliases of the canonical."""
+    def run():
+        db = _db()
+        return api.merge_concepts(db, _manuscript(db, manuscript),
+                                  canonical, duplicate)
     return _guard(run)
 
 
@@ -228,9 +257,11 @@ def link_concepts(from_name: str, relation: str, to_name: str,
     """Record a relationship the author asserts (A relation B). Relations:
     depends_on, permits, creates, leads_to, defines, elaborates,
     specializes, generalizes, contrasts_with, answers, motivates,
-    foreshadows, illustrates, distinguishes. Use leads_to for causal
-    consequence (ineffectiveness leads_to regret); reserve creates for
-    ontological production (the Field of Choice creates distinctions)."""
+    foreshadows, illustrates, distinguishes, refutes. Use leads_to for
+    causal consequence (ineffectiveness leads_to regret); reserve creates
+    for ontological production (the Field of Choice creates distinctions);
+    use refutes when A argues against B — a position the text repudiates —
+    and contrasts_with only when both sides are commitments of the work."""
     def run():
         db = _db()
         return api.link_concepts(db, _manuscript(db, manuscript),

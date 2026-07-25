@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 
-from .concepts import concept_pattern, mention_pattern, node_name
+from .concepts import concept_pattern, mention_pattern, node_name, node_names
 from .db import Database, ko_fields, loads, new_id
 from .llm import LLMClient
 
@@ -33,7 +33,8 @@ def intent_coverage_notes(db: Database, manuscript: dict) -> list[str]:
         "SELECT * FROM declared_intents WHERE manuscript_id = ? AND status = 'active'",
         (manuscript["id"],),
     ):
-        if not any(concept_pattern(n["name"]).search(intent["statement"]) for n in nodes):
+        if not any(concept_pattern(nm).search(intent["statement"])
+                   for n in nodes for nm in node_names(n)):
             notes.append(
                 f"Your intent \"{intent['statement']}\" names no concept in the "
                 f"Concept Graph, so no intent-specific suggestions can be "
@@ -45,23 +46,25 @@ def intent_coverage_notes(db: Database, manuscript: dict) -> list[str]:
 
 # For edge (A --relation--> B): which side must the reader meet first?
 PREREQUISITE_FIRST = {"permits", "motivates", "foreshadows", "leads_to"}  # A before B
-PREREQUISITE_SECOND = {"depends_on"}                                      # B before A
+PREREQUISITE_SECOND = {"depends_on", "refutes"}                           # B before A
 
 
-def _first_mentions(files: dict[str, str], names: dict[str, str]) -> dict[str, int]:
+def _first_mentions(files: dict[str, str], names: dict[str, list[str]]) -> dict[str, int]:
     """Global first-mention position of each concept id across the
-    manuscript (files in sorted order)."""
+    manuscript (files in sorted order). A concept counts as mentioned
+    under its primary name or any alias."""
     from .structure import ordered_items
 
     positions: dict[str, int] = {}
     offset = 0
     for _, text in ordered_items(files):
-        for node_id, concept in names.items():
+        for node_id, concept_names in names.items():
             if node_id in positions:
                 continue
-            match = mention_pattern(concept).search(text)
-            if match:
-                positions[node_id] = offset + match.start()
+            starts = [m.start() for m in
+                      (mention_pattern(nm).search(text) for nm in concept_names) if m]
+            if starts:
+                positions[node_id] = offset + min(starts)
         offset += len(text) + 1
     return positions
 
@@ -74,7 +77,7 @@ def compute_prerequisite_gaps(db: Database, mid: str, files: dict[str, str]) -> 
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
         (mid,),
     )}
-    names = {nid: n["name"] for nid, n in nodes.items()}
+    names = {nid: node_names(n) for nid, n in nodes.items()}
     mentions = _first_mentions(files, names)
     gaps = []
     for edge in db.all(
@@ -97,21 +100,23 @@ def compute_prerequisite_gaps(db: Database, mid: str, files: dict[str, str]) -> 
         if second not in mentions:
             continue
         text = None
+        first_name = nodes[first]["name"]
+        second_name = nodes[second]["name"]
         if first not in mentions:
-            text = (f"'{names[second]}' appears in the text, but its "
-                    f"prerequisite '{names[first]}' never does.")
+            text = (f"'{second_name}' appears in the text, but its "
+                    f"prerequisite '{first_name}' never does.")
         elif mentions[second] < mentions[first]:
-            text = (f"'{names[second]}' first appears before its prerequisite "
-                    f"'{names[first]}' is introduced.")
+            text = (f"'{second_name}' first appears before its prerequisite "
+                    f"'{first_name}' is introduced.")
         if text:
             gaps.append({
                 "edge_id": edge["id"],
                 "relation": edge["relation"],
                 "status": edge["status"],
-                "from_name": names[edge["from_node"]],
-                "to_name": names[edge["to_node"]],
-                "first": names[first],
-                "second": names[second],
+                "from_name": nodes[edge["from_node"]]["name"],
+                "to_name": nodes[edge["to_node"]]["name"],
+                "first": first_name,
+                "second": second_name,
                 "text": text,
             })
     return gaps
@@ -150,7 +155,7 @@ def generate_guidance(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
         (mid,),
     )}
-    names = {nid: n["name"] for nid, n in nodes.items()}
+    names = {nid: node_names(n) for nid, n in nodes.items()}
     mentions = _first_mentions(files, names)
     validated = db.all(
         "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND status = 'validated' "
@@ -173,7 +178,8 @@ def generate_guidance(
         for node in nodes.values():
             if node["status"] != "declared":
                 continue
-            if not concept_pattern(node["name"]).search(intent["statement"]):
+            if not any(concept_pattern(nm).search(intent["statement"])
+                       for nm in node_names(node)):
                 continue
             related = db.all(
                 "SELECT * FROM concept_edges WHERE manuscript_id = ? AND relation != 'co_occurs' "
@@ -186,7 +192,7 @@ def generate_guidance(
                 for e in related
             ]
             anchors = [
-                f"{names[e[side]]} (introduced in {nodes[e[side]]['introduced_in']})"
+                f"{nodes[e[side]]['name']} (introduced in {nodes[e[side]]['introduced_in']})"
                 for e in related
                 for side in ("from_node", "to_node")
                 if e[side] != node["id"] and nodes[e[side]]["status"] == "realized"

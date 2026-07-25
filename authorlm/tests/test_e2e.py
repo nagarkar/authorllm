@@ -154,7 +154,6 @@ def scenario_editorial_loop(root: Path) -> None:
     out = run(ws, "session", "start")
     check("second briefing reports realized concept",
           "Trajectory (introduced in 03-trajectories.md)" in out, out)
-    check("second briefing surfaces inferred edges", "co_occurs" in out, out)
     check("second briefing suggests remaining focus", "Introduce 'History'" in out, out)
 
     out = run(ws, "guide")
@@ -210,9 +209,29 @@ def scenario_editorial_loop(root: Path) -> None:
     out = run(ws, "policy", "answer", policy_prefix, "Policy holds except inside examples")
     check("question answered as declared evidence", "Answer recorded" in out, out)
 
+    # Inferred edges now come only from the extractor — plant its style of
+    # hypothesis directly so confirmation and edge triage stay covered.
+    from authorlm.db import Database as _IDB, ko_fields as _iko
+    _idb = _IDB(ws / ".authorlm" / "authorlm.db")
+    _imid = _idb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
+
+    def _plant(from_name: str, relation: str, to_name: str) -> None:
+        ids = {
+            nm: _idb.one(
+                "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+                (_imid, nm))["id"]
+            for nm in (from_name, to_name)
+        }
+        row = _iko("ce")
+        row.update(manuscript_id=_imid, from_node=ids[from_name],
+                   relation=relation, to_node=ids[to_name],
+                   status="inferred", support=0, evidence="[]")
+        _idb.insert("concept_edges", row)
+
+    _plant("Choice", "elaborates", "Field")
     edge_prefix = None
     for line in run(ws, "concept", "list").splitlines():
-        if "co_occurs" in line:
+        if "elaborates" in line:
             edge_prefix = line.split("[")[1].split("]")[0]
             break
     check("found inferred edge", edge_prefix is not None)
@@ -223,6 +242,8 @@ def scenario_editorial_loop(root: Path) -> None:
     check("collect with no changes is a no-op", "No changes" in out, out)
 
     # --- edge triage: bulk review of inferred relationships ---
+    _plant("Choice", "elaborates", "History")
+    _plant("Distinction", "foreshadows", "History")
     import subprocess as _sp
     result = _sp.run(
         [sys.executable, "main.py", "--workspace", str(ws),
@@ -235,12 +256,13 @@ def scenario_editorial_loop(root: Path) -> None:
     check("edge triage retypes by relation name",
           "(→ " in result.stdout and "depends_on" in result.stdout, result.stdout)
     check("edge triage summary reports decisions",
-          "Edge triage: confirmed 0, retyped 1, rejected 1, skipped 0." in result.stdout,
+          "Edge triage: confirmed 0, retyped 1, rejected 1, merged 0, skipped 0."
+          in result.stdout,
           result.stdout)
     out = run(ws, "concept", "list")
     check("retyped edge is declared with new relation",
           "—depends_on→" in out and "(declared" in out, out)
-    check("rejected edge left the graph view", out.count("co_occurs") == 0, out)
+    check("rejected edge left the graph view", out.count("foreshadows") == 0, out)
 
     # Edge triage decisions feed the next extraction prompt.
     from authorlm.db import Database as _EDB
@@ -274,7 +296,7 @@ def scenario_prerequisite_gap(root: Path) -> None:
     print("Scenario B — prerequisite gap detection")
     ws = root / "b"
     ms = ws / "manuscript"
-    write(ms / "01-intro.md", "# Intro\n\nGravity bends every trajectory we draw.\n")
+    write(ms / "01-intro.md", "# Intro\n\nGravity bends every Trajectory we draw.\n")
 
     run(ws, "init", "--name", "book", "--path", str(ms))
     run(ws, "session", "start")
@@ -306,6 +328,14 @@ def scenario_prerequisite_gap(root: Path) -> None:
     out = run(ws, "guide")
     check("historical references never drive prerequisite gaps",
           "Maupertuis" not in out, out)
+
+    # Guidance ordering must only ever use relations the shared vocabulary
+    # accepts — every surface (extraction, triage, guidance) reads one set.
+    from authorlm.extraction import VALID_RELATIONS
+    from authorlm.guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
+    check("ordering relations all belong to the shared relation vocabulary",
+          (PREREQUISITE_FIRST | PREREQUISITE_SECOND) <= VALID_RELATIONS,
+          str((PREREQUISITE_FIRST | PREREQUISITE_SECOND) - VALID_RELATIONS))
     run(ws, "session", "end")
 
 
@@ -344,6 +374,18 @@ def scenario_objection(root: Path) -> None:
     check("double retire blocked", "already retired" in out, out)
     out = run(ws, "concept", "add", "Parmenides objection")
     check("re-adding revives as declared", "declared" in out, out)
+
+    # Adding an existing concept with notes refines them in place; adding
+    # without notes must never clobber what's there.
+    run(ws, "concept", "add", "Parmenides objection",
+        "--notes", "Reframed: becoming needs no defense.")
+    out = run(ws, "concept", "show", "Parmenides objection")
+    check("re-add with notes updates the existing concept",
+          "becoming needs no defense" in out, out)
+    run(ws, "concept", "add", "Parmenides objection")
+    out = run(ws, "concept", "show", "Parmenides objection")
+    check("re-add without notes leaves notes untouched",
+          "becoming needs no defense" in out, out)
     run(ws, "session", "end")
 
 
@@ -479,7 +521,8 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("triage shows full untruncated notes",
               " ".join(long_note.split()) in flat_stdout, result.stdout)
         check("triage summary reports decisions",
-              "Triage: kept 1, retyped 1, retired 1, skipped 1." in result.stdout,
+              "Triage: kept 1, retyped 1, retired 1, merged 0, skipped 1."
+              in result.stdout,
               result.stdout)
         check("triage echoes each decision",
               "(kept)" in result.stdout and "(retired)" in result.stdout
@@ -777,6 +820,110 @@ def scenario_llm_and_unregister(root: Path) -> None:
         server.shutdown()
 
 
+def scenario_alias_and_syllogism(root: Path) -> None:
+    print("Scenario A2 — aliases and syllogism kind")
+    ws = root / "alias"
+    ms = ws / "manuscript"
+    write(ms / "01.md", "# One\n\nBeing precedes thought.\n")
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "session", "start")
+    run(ws, "concept", "add", "Field of Choice")
+    out = run(ws, "concept", "alias", "Field of Choice", "Chid", "Sanatana")
+    check("alias records alternate names", "Chid" in out and "Sanatana" in out, out)
+    out = run(ws, "concept", "show", "Chid")
+    check("lookup by alias resolves to the canonical concept",
+          "Field of Choice" in out, out)
+    out = run(ws, "concept", "add", "Chid")
+    check("adding by an alias never duplicates the concept",
+          "Field of Choice" in out, out)
+    write(ms / "01.md",
+          "# One\n\nBeing precedes thought. The Chid sunders every quality.\n")
+    run(ws, "collect")
+    out = run(ws, "concept", "show", "Field of Choice")
+    check("alias mention in text realizes the canonical concept",
+          "realized" in out, out)
+    run(ws, "concept", "add", "Pleroma")
+    out = run(ws, "concept", "alias", "Pleroma", "Chid", expect_exit=True)
+    check("alias colliding with another concept is refused",
+          "already names" in out, out)
+    run(ws, "concept", "retire", "Pleroma")
+    out = run(ws, "concept", "alias", "Field of Choice", "Pleroma")
+    check("aliasing a retired name absorbs it", "Pleroma" in out, out)
+    out = run(ws, "concept", "show", "Pleroma")
+    check("absorbed name resolves to the canonical concept",
+          "Field of Choice" in out, out)
+    out = run(ws, "concept", "add", "Entailment of becoming", "--kind", "syllogism")
+    check("syllogism is a valid node kind", "syllogism" in out, out)
+    run(ws, "concept", "link", "Entailment of becoming", "depends_on", "Field of Choice")
+    run(ws, "concept", "link", "Entailment of becoming", "leads_to", "Becoming")
+    out = run(ws, "concept", "show", "Entailment of becoming")
+    check("syllogism premises and conclusion link with existing relations",
+          "depends_on" in out and "leads_to" in out, out)
+
+    # Merge: the duplicate's edges re-point to the canonical (already-present
+    # edges retire), its name becomes an alias, the node retires.
+    run(ws, "concept", "add", "The Becoming")
+    run(ws, "concept", "link", "The Becoming", "contrasts_with", "Stasis")
+    run(ws, "concept", "link", "Entailment of becoming", "leads_to", "The Becoming")
+    out = run(ws, "concept", "merge", "Becoming", "The Becoming")
+    check("merge re-points and retires edges",
+          "1 edge(s) re-pointed, 1 retired" in out, out)
+    out = run(ws, "concept", "show", "The Becoming")
+    check("merged name is an alias of the canonical",
+          "aliases: The Becoming" in out, out)
+    check("duplicate's edges now live on the canonical", "Stasis" in out, out)
+
+    # The [a] key in edge triage: an inferred edge between two names the
+    # author declares identical merges them and settles the edge.
+    run(ws, "concept", "add", "Ground")
+    run(ws, "concept", "add", "Foundation")
+    from authorlm.db import Database as _ADB, ko_fields as _ako
+    _adb = _ADB(ws / ".authorlm" / "authorlm.db")
+    _amid = _adb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
+    _aids = {
+        nm: _adb.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (_amid, nm))["id"]
+        for nm in ("Ground", "Foundation")
+    }
+    _arow = _ako("ce")
+    _arow.update(manuscript_id=_amid, from_node=_aids["Ground"],
+                 relation="elaborates", to_node=_aids["Foundation"],
+                 status="inferred", support=0, evidence="[]")
+    _adb.insert("concept_edges", _arow)
+    import subprocess as _sp
+    result = _sp.run(
+        [sys.executable, "main.py", "--workspace", str(ws),
+         "concept", "triage", "--edges"],
+        input="a\n1\n", capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("edge triage alias-merge merges the pair",
+          "(merged '" in result.stdout, result.stdout)
+    check("edge triage summary counts the merge",
+          "merged 1" in result.stdout, result.stdout)
+    out = run(ws, "concept", "show", "Ground")
+    check("one node now answers to both names",
+          "aliases:" in out and "Ground" in out and "Foundation" in out, out)
+
+    # Keystrokes recorded by readline inside triage must be popped on exit
+    # so the shell's up-arrow history stays clean.
+    try:
+        import readline
+    except ImportError:
+        readline = None
+    if readline is not None:
+        from authorlm.cli import _ephemeral_history
+        base = readline.get_current_history_length()
+        with _ephemeral_history():
+            readline.add_history("k")
+            readline.add_history("r")
+        check("triage keystrokes leave no readline history",
+              readline.get_current_history_length() == base,
+              f"history grew: {base} → {readline.get_current_history_length()}")
+    run(ws, "session", "end")
+
+
 def scenario_errors(root: Path) -> None:
     print("Scenario D — guard rails")
     ws = root / "d"
@@ -1040,12 +1187,31 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     check("shell exits cleanly", result.returncode == 0, result.stderr)
 
 
+def scenario_ephemeral_history() -> None:
+    print("Scenario H — triage input stays out of readline history")
+    try:
+        import readline
+    except ImportError:
+        print("  (readline unavailable — skipped)")
+        return
+    from authorlm.cli import _ephemeral_history
+    base = readline.get_current_history_length()
+    with _ephemeral_history():
+        readline.add_history("k")
+        readline.add_history("r")
+    check("triage-scoped input leaves no readline history",
+          readline.get_current_history_length() == base,
+          f"history length {readline.get_current_history_length()} != {base}")
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
     try:
         scenario_editorial_loop(root)
+        scenario_ephemeral_history()
         scenario_prerequisite_gap(root)
         scenario_objection(root)
+        scenario_alias_and_syllogism(root)
         scenario_errors(root)
         scenario_llm_and_unregister(root)
         scenario_shell_watch_obsidian(root)

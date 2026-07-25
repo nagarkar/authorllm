@@ -2,8 +2,8 @@
 
 Declared concepts and relationships are authoritative observations. When a
 declared concept first appears in manuscript text it becomes *realized*.
-Repeated co-occurrence of two concepts in the same paragraph produces an
-*inferred* edge, which remains a hypothesis until reinforced (§21.7).
+*Inferred* edges are the extractor's hypotheses and remain hypotheses until
+the author settles them in review or triage (§21.7).
 """
 
 from __future__ import annotations
@@ -13,24 +13,21 @@ import re
 
 from .db import Database, ko_fields, loads
 
-# An inferred co-occurrence edge needs this much support to be reported.
-CO_OCCURRENCE_THRESHOLD = 2
-
-
 def add_concept(
     db: Database, manuscript_id: str, name: str, kind: str = "concept",
     notes: str | None = None,
 ) -> dict:
     existing = get_concept(db, manuscript_id, name)
     if existing:
+        updates = {}
         if existing["status"] == "retired":
             # Re-adding a retired concept revives it as a fresh declaration.
-            db.update(
-                "concept_nodes", existing["id"],
-                {"status": "declared", "introduced_in": None},
-            )
-            return {**dict(existing), "status": "declared", "introduced_in": None}
-        return dict(existing)
+            updates.update(status="declared", introduced_in=None)
+        if notes is not None and notes != existing["notes"]:
+            updates["notes"] = notes
+        if updates:
+            db.update("concept_nodes", existing["id"], updates)
+        return {**dict(existing), **updates}
     row = ko_fields("cn")
     row.update(
         manuscript_id=manuscript_id, name=name, kind=kind,
@@ -41,10 +38,91 @@ def add_concept(
 
 
 def get_concept(db: Database, manuscript_id: str, name: str):
-    return db.one(
+    """Look a concept up by name or by any of its aliases. A live node
+    always wins; a retired exact-name match is returned only when no live
+    node answers to the name (so revive-by-add and double-retire checks
+    still see it)."""
+    exact = db.one(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?)",
         (manuscript_id, name),
     )
+    if exact and exact["status"] != "retired":
+        return exact
+    lowered = name.lower()
+    for row in db.all(
+        "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired' AND aliases != '[]'",
+        (manuscript_id,),
+    ):
+        if any(a.lower() == lowered for a in loads(row["aliases"], [])):
+            return row
+    return exact
+
+
+def node_aliases(node) -> list[str]:
+    try:
+        raw = node["aliases"]
+    except (KeyError, IndexError):
+        return []
+    return loads(raw, []) if raw else []
+
+
+def node_names(node) -> list[str]:
+    """Every name that counts as this concept: primary name plus aliases."""
+    return [node["name"], *node_aliases(node)]
+
+
+def add_alias(db: Database, manuscript_id: str, node: dict, alias: str) -> dict:
+    """Declare an alternate name for a concept. Aliases resolve in lookups
+    and count as mentions in text scans. An alias may not collide with the
+    name or alias of a different live concept."""
+    other = get_concept(db, manuscript_id, alias)
+    if other and other["id"] != node["id"] and other["status"] != "retired":
+        raise ValueError(f"'{alias}' already names concept '{other['name']}'")
+    aliases = node_aliases(node)
+    if alias.lower() == node["name"].lower() or \
+            any(a.lower() == alias.lower() for a in aliases):
+        return dict(node)
+    aliases.append(alias)
+    payload = json.dumps(aliases)
+    db.update("concept_nodes", node["id"], {"aliases": payload})
+    return {**dict(node), "aliases": payload}
+
+
+def merge_concepts(db: Database, manuscript_id: str,
+                   canonical: dict, duplicate: dict) -> dict:
+    """Absorb `duplicate` into `canonical`: its live edges are re-pointed at
+    the canonical (self-edges and duplicates of edges the canonical already
+    has retire instead), the emptied node retires, and its name and aliases
+    become aliases of the canonical."""
+    if canonical["id"] == duplicate["id"]:
+        raise ValueError("cannot merge a concept into itself")
+    repointed = dropped = 0
+    for edge in db.all(
+        "SELECT * FROM concept_edges WHERE manuscript_id = ? "
+        "AND (from_node = ? OR to_node = ?) AND status NOT IN ('rejected', 'retired')",
+        (manuscript_id, duplicate["id"], duplicate["id"]),
+    ):
+        new_from = canonical["id"] if edge["from_node"] == duplicate["id"] else edge["from_node"]
+        new_to = canonical["id"] if edge["to_node"] == duplicate["id"] else edge["to_node"]
+        existing = db.one(
+            "SELECT * FROM concept_edges WHERE manuscript_id = ? AND from_node = ? "
+            "AND to_node = ? AND relation = ? AND id != ?",
+            (manuscript_id, new_from, new_to, edge["relation"], edge["id"]),
+        )
+        if new_from == new_to or existing:
+            db.update("concept_edges", edge["id"], {"status": "retired"})
+            dropped += 1
+        else:
+            db.update("concept_edges", edge["id"],
+                      {"from_node": new_from, "to_node": new_to})
+            repointed += 1
+    db.update("concept_nodes", duplicate["id"], {"status": "retired"})
+    node = dict(canonical)
+    for alias in node_names(duplicate):
+        node = add_alias(db, manuscript_id, node, alias)
+    return {"canonical": node["name"], "aliases": node_aliases(node),
+            "repointed": repointed, "dropped": dropped}
 
 
 def retire_concept(db: Database, manuscript_id: str, node: dict) -> int:
@@ -124,11 +202,11 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status = 'declared'",
         (manuscript_id,),
     ):
-        pattern = _word_pattern(node["name"])
+        patterns = [_word_pattern(n) for n in node_names(node)]
         # Reading order (TOC-authoritative): the first location in reading
         # order is the concept's primary location — definition precedence.
         for fname, text in ordered_items(files):
-            if pattern.search(text):
+            if any(p.search(text) for p in patterns):
                 meta = loads(node["metadata"], {})
                 meta.update(realized_at=version["created_at"], realized_version=version["id"])
                 db.update(
@@ -142,61 +220,6 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
                 realized.append({**dict(node), "status": "realized", "introduced_in": fname})
                 break
     return realized
-
-
-def scan_co_occurrences(db: Database, manuscript_id: str, version: dict) -> list[dict]:
-    """Count paragraph-level co-occurrence of known concepts; create or
-    reinforce inferred edges. Returns edges that newly crossed the
-    reporting threshold."""
-    from .structure import content_files
-
-    files: dict[str, str] = content_files(loads(version["files"], {}))
-    nodes = db.all(
-        "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
-        (manuscript_id,),
-    )
-    if len(nodes) < 2:
-        return []
-    patterns = {n["id"]: _word_pattern(n["name"]) for n in nodes}
-    counts: dict[tuple[str, str], int] = {}
-    for text in files.values():
-        for para in re.split(r"\n\s*\n", text):
-            present = [n["id"] for n in nodes if patterns[n["id"]].search(para)]
-            for i, a in enumerate(present):
-                for b in present[i + 1:]:
-                    key = (min(a, b), max(a, b))
-                    counts[key] = counts.get(key, 0) + 1
-
-    newly_significant = []
-    for (a, b), count in counts.items():
-        if count < CO_OCCURRENCE_THRESHOLD:
-            continue
-        declared = db.one(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? AND relation != 'co_occurs' "
-            "AND status NOT IN ('rejected', 'retired') "
-            "AND ((from_node = ? AND to_node = ?) OR (from_node = ? AND to_node = ?))",
-            (manuscript_id, a, b, b, a),
-        )
-        if declared:
-            continue  # an explicit relationship already covers this pair
-        edge = db.one(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? AND relation = 'co_occurs' "
-            "AND from_node = ? AND to_node = ?",
-            (manuscript_id, a, b),
-        )
-        if edge:
-            if edge["support"] != count:
-                db.update("concept_edges", edge["id"], {"support": count})
-            continue
-        row = ko_fields("ce")
-        row.update(
-            manuscript_id=manuscript_id, from_node=a, relation="co_occurs",
-            to_node=b, status="inferred", support=count,
-            evidence=json.dumps([version["id"]]),
-        )
-        db.insert("concept_edges", row)
-        newly_significant.append(row)
-    return newly_significant
 
 
 def rescan_primary_locations(db: Database, manuscript_id: str,

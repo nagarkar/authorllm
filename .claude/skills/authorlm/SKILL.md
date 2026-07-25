@@ -25,10 +25,27 @@ surface is to keep that evidence flowing while the author just talks.
 5. When they confirm or correct conceptual claims in conversation ("yes,
    becoming depends on choice", "that edge is wrong") → `link_concepts`,
    `confirm_edge`, `reject_edge`, `confirm_concept`, `retire_concept`.
-   Conversation IS triage — never send them to a menu.
+   Conversation IS triage for anything needing judgment — don't push
+   those to a menu (but for bulk piles, see "Triage at scale" below).
 6. When they finish a piece of work → `complete_intent` (then relay the
    episode analysis: what patterns their edits showed). When they're done
    for the day → `close_session` and report learning velocity.
+
+## Triage at scale (shell, not chat)
+Conversational triage captures reasoning — reserve it for items the author
+would hesitate on; their explanations are the evidence that seeds policies.
+When a bulk pile has built up (dozens of unconfirmed concepts or inferred
+edges), recommend the CLI's rapid loop instead of walking the list in chat:
+- `authorlm concept triage -m <manuscript>` — keystroke-per-item loop over
+  unconfirmed extracted concepts (confirm / skip / retire / retype / reword
+  notes), recorded as triage evidence just like MCP calls.
+- `authorlm concept triage --edges -m <manuscript>` — same loop for
+  inferred relationships.
+- `authorlm concept confirm --all` / `--all-kind <kind>` — bulk confirm
+  when a whole category is obviously fine.
+Division of labor: shell for the uncontroversial bulk; anything the author
+skips or hesitates over comes back to conversation, where the why gets
+recorded in their own words.
 
 ## Google Docs bridge (CLI, not MCP — by design)
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can

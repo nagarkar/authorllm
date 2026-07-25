@@ -14,19 +14,19 @@ import re
 from pathlib import Path
 
 from . import proposals
-from .concepts import add_concept, concept_pattern, link_concepts, scan_co_occurrences, scan_realizations
+from .concepts import add_concept, concept_pattern, link_concepts, scan_realizations
 from .db import Database
 from .llm import LLMClient
 from .revisions import read_manuscript_files
 
 VALID_KINDS = {
     "concept", "definition", "objection", "example", "metaphor", "question",
-    "historical_reference", "mathematical_construct",
+    "historical_reference", "mathematical_construct", "syllogism",
 }
 VALID_RELATIONS = {
     "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
     "specializes", "answers", "foreshadows", "illustrates", "permits",
-    "creates", "distinguishes", "defines",
+    "creates", "distinguishes", "defines", "leads_to", "refutes",
 }
 MAX_TEXT_CHARS = 24000
 MAX_CONCEPTS = 40
@@ -39,7 +39,9 @@ EXTRACTION_SYSTEM = (
     "adjective, or ordinary technical vocabulary is NOT a concept. "
     "People, texts, schools, and traditions the author cites as sources or "
     "context get kind 'historical_reference'; formal or mathematical "
-    "apparatus gets kind 'mathematical_construct'. Prefer the author's own "
+    "apparatus gets kind 'mathematical_construct'; a named argument whose "
+    "premises jointly entail a conclusion gets kind 'syllogism' (premises "
+    "attach with depends_on, the conclusion with leads_to). Prefer the author's own "
     "terminology, singular form. Aim for 10–20 strong nodes; quality over "
     "coverage. Return JSON of the shape "
     '{"concepts": [{"name": str, "kind": str, "notes": str}], '
@@ -64,6 +66,10 @@ RELATION_GUIDE = (
     "motivates its ASKER, never the character who responds to it; for the "
     "responder use answers (Responder answers Question). "
     "foreshadows: A hints at B before B is treated. "
+    "leads_to: B is the causal consequence of A. "
+    "refutes: A argues against B — B is a position the text repudiates, "
+    "not endorses; distinct from contrasts_with, where both sides are "
+    "commitments of the work. "
     "illustrates: A is an example, image, or metaphor for B. "
     "distinguishes: A draws the distinction that separates B. "
     "Include a link ONLY when the text itself asserts or demonstrates the "
@@ -95,6 +101,8 @@ def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
     target = f"{node['name']} ({node['kind']})"
     if signal == "retyped" and new_kind:
         target = f"{node['name']}: {node['kind']} → {new_kind}"
+    elif signal == "merged" and new_kind:
+        target = f"{node['name']} → alias of {new_kind}"
     row = ko_fields("ev")
     row.update(
         manuscript_id=manuscript_id,
@@ -506,7 +514,6 @@ def extract_concepts(
     realized = []
     if latest:
         realized = scan_realizations(db, mid, dict(latest))
-        scan_co_occurrences(db, mid, dict(latest))
 
     # Advance the extraction watermark so the next run diffs from here.
     # An edges-only pass leaves it alone: the text has not been mined for

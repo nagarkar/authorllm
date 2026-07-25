@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from .analysis import find_precedents
-from .concepts import concept_pattern
+from .concepts import concept_pattern, node_names
 from .db import Database, loads
 from .guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
 from .llm import LLMClient
@@ -84,7 +84,8 @@ def build_plan(db: Database, manuscript: dict) -> dict:
         ]
         matching = [
             i["statement"] for i in intents
-            if concept_pattern(node["name"]).search(i["statement"])
+            if any(concept_pattern(nm).search(i["statement"])
+                   for nm in node_names(node))
         ]
 
         if realized_neighbors:

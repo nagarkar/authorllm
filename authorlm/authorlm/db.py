@@ -97,10 +97,11 @@ CREATE TABLE IF NOT EXISTS concept_nodes (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'concept',   -- concept | definition | objection | example | metaphor | question | historical_reference | mathematical_construct
+    kind TEXT NOT NULL DEFAULT 'concept',   -- concept | definition | objection | example | metaphor | question | historical_reference | mathematical_construct | syllogism
     status TEXT NOT NULL DEFAULT 'declared',-- declared | realized
     introduced_in TEXT,
-    notes TEXT
+    notes TEXT,
+    aliases TEXT NOT NULL DEFAULT '[]'      -- JSON list of alternate names
 );
 
 CREATE TABLE IF NOT EXISTS concept_edges (
@@ -215,6 +216,11 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(concept_nodes)")}
+        if "aliases" not in cols:
+            self.conn.execute(
+                "ALTER TABLE concept_nodes ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'"
+            )
         self.conn.commit()
 
     def insert(self, table: str, row: dict[str, Any]) -> str:

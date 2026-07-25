@@ -201,7 +201,8 @@ def intent_preview(db: Database, manuscript: dict, statement: str) -> dict:
         return {"matched": [], "suggestions": [], "graph_empty": True}
     matched = []
     for node in nodes:
-        if not cg.concept_pattern(node["name"]).search(statement):
+        if not any(cg.concept_pattern(nm).search(statement)
+                   for nm in cg.node_names(node)):
             continue
         entry: dict[str, Any] = {
             "name": node["name"], "status": node["status"],
@@ -305,7 +306,6 @@ def collect(db: Database, manuscript: dict, config: dict,
         ses.attach_transitions(db, episode, transitions)
         attached = True
     realized = cg.scan_realizations(db, mid, version)
-    inferred = cg.scan_co_occurrences(db, mid, version)
     repointed, vanished = cg.rescan_primary_locations(db, mid, version)
     vanished_proposals = []
     for node in vanished:
@@ -343,12 +343,6 @@ def collect(db: Database, manuscript: dict, config: dict,
         "attached_to_episode": attached,
         "realized": [
             {"name": n["name"], "introduced_in": n["introduced_in"]} for n in realized
-        ],
-        "inferred_edges": [
-            {"from_name": cg.node_name(db, e["from_node"]),
-             "to_name": cg.node_name(db, e["to_node"]),
-             "support": e["support"]}
-            for e in inferred
         ],
         "repointed": repointed,
         "vanished": vanished_proposals,
@@ -505,6 +499,32 @@ def show_concept(db: Database, manuscript: dict, name: str) -> dict:
 def add_concept(db: Database, manuscript: dict, name: str,
                 kind: str = "concept", notes: str | None = None) -> dict:
     return dict(cg.add_concept(db, manuscript["id"], name, kind=kind, notes=notes))
+
+
+def alias_concept(db: Database, manuscript: dict, name: str,
+                  aliases: list[str]) -> dict:
+    node = cg.get_concept(db, manuscript["id"], name)
+    if not node:
+        raise LookupError(f"no concept named '{name}'")
+    node = dict(node)
+    for alias in aliases:
+        node = cg.add_alias(db, manuscript["id"], node, alias)
+    return {"name": node["name"], "aliases": cg.node_aliases(node)}
+
+
+def merge_concepts(db: Database, manuscript: dict,
+                   canonical_name: str, duplicate_name: str) -> dict:
+    canonical = cg.get_concept(db, manuscript["id"], canonical_name)
+    if not canonical:
+        raise LookupError(f"no concept named '{canonical_name}'")
+    duplicate = cg.get_concept(db, manuscript["id"], duplicate_name)
+    if not duplicate:
+        raise LookupError(f"no concept named '{duplicate_name}'")
+    result = cg.merge_concepts(db, manuscript["id"], dict(canonical), dict(duplicate))
+    from .extraction import record_triage
+
+    record_triage(db, manuscript["id"], dict(duplicate), "merged", canonical["name"])
+    return result
 
 
 def link_concepts(db: Database, manuscript: dict, from_name: str,

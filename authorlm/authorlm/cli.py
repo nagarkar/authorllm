@@ -10,6 +10,7 @@ producing an inspectable artifact in SQLite:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ from . import sessions as ses
 from . import ui
 from .briefing import build_briefing
 from .db import Database, ko_fields, loads
-from .extraction import extract_concepts
+from .extraction import VALID_KINDS, extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions
@@ -438,7 +439,9 @@ def _intent_preview(db: Database, manuscript: dict, statement: str) -> None:
     )]
     if not nodes:
         return
-    matched = [n for n in nodes if cg.concept_pattern(n["name"]).search(statement)]
+    matched = [n for n in nodes
+               if any(cg.concept_pattern(nm).search(statement)
+                      for nm in cg.node_names(n))]
     if not matched:
         names = [n["name"] for n in nodes]
         lower_map = {n.lower(): n for n in names}
@@ -525,6 +528,20 @@ TRIAGE_KINDS = {
 }
 
 
+def _prefix_choice(choice: str, options) -> tuple[str | None, list[str]]:
+    """Resolve typed input against option names by unambiguous prefix.
+    Prefixes need ≥2 characters so the single-letter command keys
+    (k/r/f/a/s/x…) stay reserved. Returns (match, ambiguous_matches)."""
+    if choice in options:
+        return choice, []
+    if len(choice) < 2:
+        return None, []
+    matches = sorted(o for o in options if o.startswith(choice))
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
 def _unconfirmed_nodes(db: Database, mid: str) -> list[dict]:
     return [
         dict(node) for node in db.all(
@@ -561,6 +578,25 @@ def _retire_node(db: Database, mid: str, node: dict) -> int:
     return cg.retire_concept(db, mid, node)
 
 
+@contextlib.contextmanager
+def _ephemeral_history():
+    """Keystrokes typed at inner prompts (triage keys, notes rewording)
+    are working input, not commands — pop whatever readline recorded
+    inside the block so the shell's up-arrow history stays clean."""
+    try:
+        import readline
+    except ImportError:
+        yield
+        return
+    start = readline.get_current_history_length()
+    try:
+        yield
+    finally:
+        while readline.get_current_history_length() > start:
+            readline.remove_history_item(
+                readline.get_current_history_length() - 1)
+
+
 def _run_triage(db: Database, mid: str) -> None:
     nodes = _unconfirmed_nodes(db, mid)
     if not nodes:
@@ -568,12 +604,13 @@ def _run_triage(db: Database, mid: str) -> None:
         return
     print(f"{len(nodes)} unconfirmed concept(s).")
     print(ui.dim("Keys: [k]eep  [r]etire  [s]kip (or Enter)  [n] reword notes  "
+                 "[a] alias of another concept  "
                  "[x] quit — or retype: [c]oncept [d]efinition [o]bjection "
                  "[e]xample [m]etaphor [q]uestion [h]istorical_reference "
                  "[t] mathematical_construct"))
     import textwrap
 
-    kept = retyped = retired = skipped = 0
+    kept = retyped = retired = skipped = merged = 0
     for index, node in enumerate(nodes, start=1):
         where = f", in {node['introduced_in']}" if node["introduced_in"] else ""
         name_line = (f"{ui.dim(f'[{index}/{len(nodes)}]')} {ui.bold(node['name'])} "
@@ -623,6 +660,26 @@ def _run_triage(db: Database, mid: str) -> None:
                 skipped += 1
                 echo(ui.dim("(skipped)"), clean)
                 break
+            if choice in ("a", "alias"):
+                try:
+                    canonical_name = input("  alias of> ").strip()
+                except EOFError:
+                    canonical_name = ""
+                canonical = cg.get_concept(db, mid, canonical_name) \
+                    if canonical_name else None
+                if not canonical or canonical["id"] == node["id"]:
+                    print(ui.dim("  ? name an existing, different concept"))
+                    clean = False
+                    continue
+                from .extraction import record_triage
+                result = cg.merge_concepts(db, mid, dict(canonical), dict(node))
+                record_triage(db, mid, dict(node), "merged", canonical["name"])
+                merged += 1
+                echo(ui.cyan(
+                    f"(→ alias of '{canonical['name']}', "
+                    f"{result['repointed']} edge(s) re-pointed, "
+                    f"{result['dropped']} retired)"), clean)
+                break
             if choice in ("n", "notes", "reword"):
                 try:
                     new_notes = input("  notes> ").strip()
@@ -643,17 +700,25 @@ def _run_triage(db: Database, mid: str) -> None:
             if choice in ("x", "quit"):
                 skipped += len(nodes) - index + 1
                 print(f"Triage: kept {kept}, retyped {retyped}, retired {retired}, "
-                      f"skipped {skipped}.")
+                      f"merged {merged}, skipped {skipped}.")
                 return
-            kind = TRIAGE_KINDS.get(choice, choice if choice in TRIAGE_KINDS.values() else None)
+            kind = TRIAGE_KINDS.get(choice)
+            if not kind:
+                kind, ambiguous = _prefix_choice(choice, VALID_KINDS)
+                if ambiguous:
+                    print(ui.dim("  ? ambiguous: " + " / ".join(ambiguous)))
+                    clean = False
+                    continue
             if kind:
                 _confirm_node(db, mid, node, kind)
                 retyped += 1
                 echo(ui.cyan(f"(→ {kind})"), clean)
                 break
-            print(ui.dim("  ? use k / r / s / x or a kind key (c d o e m q h t)"))
+            print(ui.dim("  ? use k / r / s / a / x, a kind key (c d o e m q h t), "
+                         "or a kind prefix (e.g. syl)"))
             clean = False
-    print(f"Triage: kept {kept}, retyped {retyped}, retired {retired}, skipped {skipped}.")
+    print(f"Triage: kept {kept}, retyped {retyped}, retired {retired}, "
+          f"merged {merged}, skipped {skipped}.")
 
 
 def _record_edge_triage(db: Database, mid: str, description: str, signal: str) -> None:
@@ -667,7 +732,7 @@ def _record_edge_triage(db: Database, mid: str, description: str, signal: str) -
 
 
 def _run_edge_triage(db: Database, mid: str) -> None:
-    from .extraction import VALID_RELATIONS
+    from .extraction import VALID_RELATIONS, record_triage
 
     relations = sorted(VALID_RELATIONS)
     edges = [dict(e) for e in db.all(
@@ -680,12 +745,18 @@ def _run_edge_triage(db: Database, mid: str) -> None:
         return
     print(f"{len(edges)} inferred relationship(s).")
     print(ui.dim("Keys: [k]onfirm as-is  [r]eject  [f]lip direction  "
-                 "[s]kip (or Enter)  [x] quit — or retype the relation:"))
+                 "[a] these are one concept (alias-merge)  "
+                 "[s]kip (or Enter)  [x] quit — or retype the relation "
+                 "by number, name, or unique prefix (ans, cre, dep, ref…):"))
     print(ui.dim("  " + "  ".join(
         f"[{number}]{relation}" for number, relation in enumerate(relations, start=1)
     )))
-    confirmed = retyped = rejected = skipped = 0
+    confirmed = retyped = rejected = skipped = merged = 0
     for index, edge in enumerate(edges, start=1):
+        current = db.one("SELECT * FROM concept_edges WHERE id = ?", (edge["id"],))
+        if not current or current["status"] != "inferred":
+            continue  # settled as a side effect of an earlier merge this run
+        edge = dict(current)
         from_id, to_id = edge["from_node"], edge["to_node"]
         from_name, to_name = cg.node_name(db, from_id), cg.node_name(db, to_id)
         support = ui.dim(f"  ×{edge['support']}") if edge["relation"] == "co_occurs" else ""
@@ -724,19 +795,43 @@ def _run_edge_triage(db: Database, mid: str) -> None:
                 flipped = not flipped
                 print(ui.dim(f"  direction now: {current_to} → {current_from}"))
                 continue
+            if choice in ("a", "alias"):
+                keep = input(f"  canonical? [1] {current_from}  [2] {current_to} "
+                             "> ").strip()
+                if keep not in ("1", "2"):
+                    print(ui.dim("  ? 1 or 2"))
+                    continue
+                cf_id = to_id if flipped else from_id
+                ct_id = from_id if flipped else to_id
+                canon_id, dup_id = (cf_id, ct_id) if keep == "1" else (ct_id, cf_id)
+                canonical = dict(db.one(
+                    "SELECT * FROM concept_nodes WHERE id = ?", (canon_id,)))
+                duplicate = dict(db.one(
+                    "SELECT * FROM concept_nodes WHERE id = ?", (dup_id,)))
+                result = cg.merge_concepts(db, mid, canonical, duplicate)
+                record_triage(db, mid, duplicate, "merged", canonical["name"])
+                merged += 1
+                summary = (f"(merged '{duplicate['name']}' into "
+                           f"'{canonical['name']}': {result['repointed']} "
+                           f"edge(s) re-pointed, {result['dropped']} retired)")
+                print(f"  {ui.cyan(summary)}")
+                break
             if choice in ("s", "skip", ""):
                 skipped += 1
                 break
             if choice in ("x", "quit"):
                 skipped += len(edges) - index + 1
                 print(f"Edge triage: confirmed {confirmed}, retyped {retyped}, "
-                      f"rejected {rejected}, skipped {skipped}.")
+                      f"rejected {rejected}, merged {merged}, skipped {skipped}.")
                 return
             relation = None
             if choice.isdigit() and 1 <= int(choice) <= len(relations):
                 relation = relations[int(choice) - 1]
-            elif choice in VALID_RELATIONS:
-                relation = choice
+            else:
+                relation, ambiguous = _prefix_choice(choice, VALID_RELATIONS)
+                if ambiguous:
+                    print(ui.dim("  ? ambiguous: " + " / ".join(ambiguous)))
+                    continue
             if relation:
                 settle(relation)
                 retyped += 1
@@ -748,9 +843,10 @@ def _run_edge_triage(db: Database, mid: str) -> None:
                 )
                 print(f"  {ui.cyan(f'(→ {description})')}")
                 break
-            print(ui.dim("  ? use k / r / f / s / x, a relation number, or its name"))
+            print(ui.dim("  ? use k / r / f / a / s / x, a relation number, "
+                         "its name, or a unique prefix (ans, cre, dep, ref…)"))
     print(f"Edge triage: confirmed {confirmed}, retyped {retyped}, "
-          f"rejected {rejected}, skipped {skipped}.")
+          f"rejected {rejected}, merged {merged}, skipped {skipped}.")
 
 
 def cmd_concept(args):
@@ -848,6 +944,29 @@ def cmd_concept(args):
               + (f" — kind: {args.kind}" if args.kind else "")
               + (f" — notes: {ui.shorten(args.notes, 60)}" if args.notes is not None else "")
               + ".")
+    elif args.action == "alias":
+        node = cg.get_concept(db, mid, args.name)
+        if not node:
+            sys.exit(f"No concept named '{args.name}'.")
+        node = dict(node)
+        try:
+            for alias in args.params[1:]:
+                node = cg.add_alias(db, mid, node, alias)
+        except ValueError as err:
+            sys.exit(str(err))
+        print(f"'{node['name']}' also answers to: "
+              f"{', '.join(cg.node_aliases(node))}")
+    elif args.action == "merge":
+        try:
+            result = api.merge_concepts(db, manuscript,
+                                        args.params[0], args.params[1])
+        except (LookupError, ValueError) as err:
+            sys.exit(str(err))
+        print(f"Merged '{args.params[1]}' into '{result['canonical']}' — "
+              f"{result['repointed']} edge(s) re-pointed, "
+              f"{result['dropped']} retired.")
+        print(f"'{result['canonical']}' also answers to: "
+              f"{', '.join(result['aliases'])}")
     elif args.action == "show":
         node = cg.get_concept(db, mid, args.name)
         if not node:
@@ -856,6 +975,8 @@ def cmd_concept(args):
         print(f"{ui.bold(node['name'])}  [{node['id']}]")
         print(f"  kind: {node['kind']}   status: {node['status']}"
               + (f"   introduced in: {node['introduced_in']}" if node["introduced_in"] else ""))
+        if cg.node_aliases(node):
+            print(f"  aliases: {', '.join(cg.node_aliases(node))}")
         if meta.get("origin") == "extracted":
             state = "confirmed" if meta.get("confirmed") else "unconfirmed"
             print(f"  origin: extracted ({state})")
@@ -875,10 +996,11 @@ def cmd_concept(args):
     elif args.action == "triage":
         run_nodes = args.nodes or not args.edges
         run_edges = args.edges or not args.nodes
-        if run_nodes:
-            _run_triage(db, mid)
-        if run_edges:
-            _run_edge_triage(db, mid)
+        with _ephemeral_history():
+            if run_nodes:
+                _run_triage(db, mid)
+            if run_edges:
+                _run_edge_triage(db, mid)
     else:  # list / graph
         node_filter = "" if args.all else " AND status != 'retired'"
         nodes = db.all(
@@ -961,12 +1083,6 @@ def cmd_collect(args):
             f"Concept(s) {names} no longer appear anywhere in the text — "
             "decide their fate: proposal review (retire, or keep as placeholder)."
         ))
-    edges = report["inferred_edges"]
-    if edges:
-        shown = ", ".join(f"{e['from_name']}↔{e['to_name']}" for e in edges[:6])
-        more = f", … +{len(edges) - 6}" if len(edges) > 6 else ""
-        print(f"New inferred relationship(s) ({len(edges)}): {shown}{more} "
-              + ui.dim("— details in your next briefing."))
     if report["extract_hint"]:
         print(ui.dim(f"{report['new_paragraphs']} new/rewritten paragraph(s) — mine them "
                      "for new concepts with 'extract'."))
@@ -1838,13 +1954,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("concept", help="manage the Concept Graph")
     p.add_argument("action",
                    choices=["add", "link", "list", "show", "confirm", "unconfirm",
-                            "reject-edge", "reject", "retire", "triage", "edit"])
+                            "reject-edge", "reject", "retire", "triage", "edit",
+                            "alias", "merge"])
     p.add_argument("params", nargs="*",
                    help="add/show/confirm/unconfirm/reject-edge/edit: name or edge id; "
-                        "link: <from> <relation> <to>; retire: one or more names")
+                        "link: <from> <relation> <to>; retire: one or more names; "
+                        "alias: <name> <alias>…; merge: <canonical> <duplicate>")
     p.add_argument("--kind", default=None,
                    choices=["concept", "definition", "objection", "example", "metaphor",
-                            "question", "historical_reference", "mathematical_construct"],
+                            "question", "historical_reference", "mathematical_construct",
+                            "syllogism"],
                    help="node kind — used by add, and by confirm to retype")
     p.add_argument("--notes", help="free-text notes stored on the concept")
     p.add_argument("--all", action="store_true",
@@ -2043,6 +2162,10 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept retire <name>… | --all-kind KIND")
         if args.action == "edit" and not (args.name and (args.notes is not None or args.kind)):
             sys.exit("usage: concept edit <name> --notes \"...\" [--kind KIND]")
+        if args.action == "alias" and len(params) < 2:
+            sys.exit("usage: concept alias <name> <alias>…")
+        if args.action == "merge" and len(params) != 2:
+            sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "proposal" and args.action in ("accept", "dismiss") and not args.id:
         sys.exit(f"usage: proposal {args.action} <id-prefix>")
     if args.command == "intent" and args.action == "retire":
