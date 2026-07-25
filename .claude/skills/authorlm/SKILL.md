@@ -31,6 +31,25 @@ surface is to keep that evidence flowing while the author just talks.
    episode analysis: what patterns their edits showed). When they're done
    for the day → `close_session` and report learning velocity.
 
+## Drafting on request
+Only draft prose when the author explicitly asks. Before writing a single
+sentence, assemble the machinery — a draft in the wrong register is worse
+than no draft:
+1. Resolve the target file (the active intent usually names it), then
+   `get_style(file)`: the rendered effective guide is law — register,
+   lexicon, syntax, tone, every ratified element.
+2. `get_concepts` for every concept the passage touches: the notes are
+   the author's ratified definitions — reuse their words, keep terms of
+   art capitalized, never reintroduce conventional meanings of redefined
+   terms, and keep every claim consistent with the graph's edges (a
+   `refutes` target is never endorsed; aliases are one concept).
+3. Check validated policies (briefing / list_policies) that bear on
+   ordering and placement; `get_guidance` precedents show how the author
+   introduced similar concepts before. `get_plan` names what is unwritten.
+Present the draft as a suggestion for the author to place, edit, or
+reject — never write it into the manuscript unless explicitly asked, and
+record their reaction (with their reasoning verbatim) as evidence.
+
 ## Triage at scale (shell, not chat)
 Conversational triage captures reasoning — reserve it for items the author
 would hesitate on; their explanations are the evidence that seeds policies.

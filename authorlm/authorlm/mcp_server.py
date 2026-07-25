@@ -34,7 +34,14 @@ mcp = FastMCP(
         "relationships conversationally, or finishing a piece of work "
         "(complete_intent, close_session). Prefer recording the author's "
         "actual words as explanations. Never edit conceptual manuscript "
-        "content without being asked."
+        "content without being asked. When the author asks you to DRAFT "
+        "prose, assemble the machinery first: get_style(file) — the "
+        "rendered effective guide is law (register, lexicon, syntax, "
+        "tone); get_concepts for every concept the passage touches (the "
+        "notes are the author's ratified definitions — use their words, "
+        "keep claims consistent with the graph, never endorse a refuted "
+        "position); and the validated policies from list_policies or the "
+        "briefing. Offer the draft for the author to place or reject."
     ),
 )
 
