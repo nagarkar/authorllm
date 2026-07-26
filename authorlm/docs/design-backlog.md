@@ -22,14 +22,3 @@ ratify / accept-as-override = deliberate switch / reject = prose drifted,
 fix the text). Build after living with the seeded guides long enough to
 know what drift looks like.
 
-## Operational tone for the collaborator
-The author's "Nietzschean Hammer" spec: feedback that is incisive,
-clinical, brief; instructional prefixes CS #N (EME grammar, rhythm,
-rhetorical funnel) and GC #N (scientific validation, existential
-challenge). Configures the critic, not the text — belongs in the authorlm
-skill (house rules), pending the author's go-ahead to install verbatim.
-
-## Production profiles (out of AuthorLM scope, parked)
-TTS delivery and Publisher/typography guidance from the author's style
-profile govern performance and book production, not prose. Keep as
-documents; revisit only if AuthorLM ever grows a production surface.
