@@ -244,16 +244,17 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
     if not config.get("gdocs", {}).get("reconcile_on_start", True):
         return
     links = gdocs.doc_status(db, manuscript)
-    if not any(isinstance(e, dict) and e.get("doc_id")
-               for r, e in links.items() if not r.startswith("_")):
+    if not links.get("_master_id"):
         return
     try:
         service = gdocs.get_service(config, args.workspace, interactive=False)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=False)
     except ValueError:
-        print(ui.dim("Linked Google Docs exist but Drive isn't authorized "
+        print(ui.dim("A master Google Doc exists but Drive isn't authorized "
                      "here — run 'doc auth' to enable session-start sync."))
         return
-    report = gdocs.reconcile(db, manuscript, service)
+    report = gdocs.reconcile(db, manuscript, service, docs_service=docs_service)
     if report["in_sync"]:
         print(ui.dim("Google Docs in sync: " + ", ".join(report["in_sync"])))
     if report["pulled"]:
@@ -261,6 +262,9 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
         cmd_collect(args)
     if report["pushed"]:
         print(ui.green("Pushed local edits to Docs: " + ", ".join(report["pushed"])))
+    if report.get("pending_push"):
+        print(ui.yellow("Local edits awaiting push (Docs API unavailable): "
+                        + ", ".join(report["pending_push"])))
     for relpath in report["conflicts"]:
         print(ui.yellow(
             f"CONFLICT: {relpath} changed both locally and in its Google Doc "
@@ -1271,11 +1275,13 @@ def cmd_doc(args):
                 if doc["concepts"] else ""
             link = links.get(doc["file"], {})
             cloud = ""
-            if link.get("doc_id"):
-                url = f"https://docs.google.com/document/d/{link['doc_id']}/edit"
+            master_id = links.get("_master_id")
+            if isinstance(link, dict) and link.get("tab_id") and master_id:
+                from .gdocs import tab_url
+
                 marker = ui.yellow("[checked out to Google Docs]") if link.get("checked_out") \
-                    else ui.dim("[linked]")
-                cloud = f"  {marker} {ui.dim(ui.link(url))}"
+                    else ui.dim("[tab]")
+                cloud = f"  {marker} {ui.dim(ui.link(tab_url(master_id, link['tab_id'])))}"
             print(f"  {doc['file']}  ({doc['paragraphs']} paragraph(s)){concepts}{cloud}")
         if listing["retired"]:
             print(ui.bold("Retired:") + ui.dim(f"  (in {docs.RETIRED_DIR}/, invisible to observation)"))
@@ -1293,14 +1299,16 @@ def cmd_doc(args):
         links = doc_status(db, manuscript)
         matches = {rel: e for rel, e in links.items()
                    if not rel.startswith("_") and args.name.lower() in rel.lower()
-                   and e.get("doc_id")}
-        if not matches:
-            sys.exit(f"error: no linked Google Doc matching '{args.name}' — "
-                     "push it first.")
+                   and isinstance(e, dict) and e.get("tab_id")}
+        if not matches or not links.get("_master_id"):
+            sys.exit(f"error: no tab matching '{args.name}' in the master "
+                     "Doc — push it first.")
         if len(matches) > 1:
             sys.exit(f"error: '{args.name}' is ambiguous: {', '.join(matches)}")
+        from .gdocs import tab_url
+
         relpath, entry = next(iter(matches.items()))
-        url = f"https://docs.google.com/document/d/{entry['doc_id']}/edit"
+        url = tab_url(links["_master_id"], entry["tab_id"])
         import webbrowser
 
         webbrowser.open(url)
@@ -1315,39 +1323,58 @@ def cmd_doc(args):
             # push/pull never open a consent browser — 'doc auth' is the
             # single interactive doorway.
             service = gdocs.get_service(config, args.workspace, interactive=False)
+            docs_service = gdocs.get_docs_service(config, args.workspace,
+                                                  interactive=False)
         except ValueError as err:
             sys.exit(f"error: {err}")
-        if not args.name:
-            sys.exit(f"usage: doc {args.action} <file>")
         try:
             if args.action == "push":
-                result = gdocs.push_doc(db, manuscript, args.name,
-                                        title=args.title, service=service)
-                if result["locally_normalized"]:
-                    print(ui.dim(f"Normalized {result['relpath']} locally first "
+                # One tab per file in a single master Doc; no file argument
+                # pushes the whole manuscript.
+                targets = ([args.name] if args.name
+                           else gdocs._reading_order_files(manuscript))
+                normalized_any = False
+                result = None
+                for target in targets:
+                    result = gdocs.push_doc(db, manuscript, target,
+                                            title=args.title, service=service,
+                                            docs_service=docs_service)
+                    normalized_any = normalized_any or result["locally_normalized"]
+                    print(f"Pushed {result['relpath']} → tab "
+                          f"{ui.dim(ui.link(result['url']))}")
+                if normalized_any:
+                    print(ui.dim("Some files were normalized locally first "
                                  "(canonical markdown)."))
                     cmd_collect(args)
-                verb = "Created" if result["created"] else "Updated"
-                print(f"{verb} Google Doc for {result['relpath']}: "
-                      f"{ui.link(result['url'])}")
-                print(ui.yellow("Checked out to Google Docs — edit there, then "
-                                f"'doc pull {result['relpath']}'. Avoid local "
-                                "edits meanwhile."))
+                print(f"Master Doc: "
+                      f"{ui.link(gdocs.tab_url(result['doc_id']))}")
+                print(ui.yellow("Checked out to Google Docs — edit there, "
+                                "then 'doc pull'. Avoid local edits meanwhile."))
                 if args.open:
                     import webbrowser
 
-                    webbrowser.open(result["url"])
+                    webbrowser.open(gdocs.tab_url(result["doc_id"]))
             else:
-                result = gdocs.pull_doc(db, manuscript, args.name, service=service,
-                                        force=args.force)
+                result = gdocs.pull_doc(db, manuscript, args.name or None,
+                                        service=service, force=args.force)
+                for relpath in result["changed"]:
+                    print(f"Pulled {relpath} from its tab (normalized).")
+                for relpath in result["missing"]:
+                    print(ui.yellow(f"warning: no tab found for {relpath} — "
+                                    "was its tab renamed? Tab titles must "
+                                    "stay exact filenames."))
+                for relpath in result["conflicts"]:
+                    print(ui.yellow(
+                        f"CONFLICT: {relpath} changed both locally and in its "
+                        f"tab — untouched. 'doc pull {relpath} --force' takes "
+                        "the Doc's side."))
                 if result["changed"]:
-                    print(f"Pulled {result['relpath']} from Google Docs "
-                          "(normalized). Collecting:")
+                    print("Collecting:")
                     cmd_collect(args)
-                else:
-                    print(f"{result['relpath']} is identical to the Doc — "
-                          "clean round trip, nothing to collect.")
-                print(ui.dim("Checkout cleared — local editing is safe again."))
+                elif not result["conflicts"] and not result["missing"]:
+                    print("All tabs identical to local files — clean round "
+                          "trip, nothing to collect.")
+                print(ui.dim("Checkouts cleared — local editing is safe again."))
         except (LookupError, FileExistsError, ValueError) as err:
             sys.exit(f"error: {err}")
         return

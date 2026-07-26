@@ -1327,6 +1327,85 @@ def scenario_style(root: Path) -> None:
           "Challenging" not in out, out)
 
 
+def scenario_transplant() -> None:
+    print("Scenario T — push-to-tab transplant emitter (captured Google JSON)")
+    from authorlm.gdocs import transplant_requests
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "tempdoc_import.json").read_text())
+    reqs = transplant_requests(fixture, "t.target")
+
+    inserts = [r["insertText"] for r in reqs if "insertText" in r]
+    rebuilt = "".join(i["text"] for i in inserts)
+    check("transplant rebuilds the full text in order",
+          rebuilt.startswith("The Probe Sermon\n")
+          and "Harken: qualities are the measurable shadows." in rebuilt
+          and "He loveth Man" in rebuilt
+          and "$x^2$" in rebuilt, rebuilt)
+    check("every request targets the destination tab",
+          all(("t.target" in json.dumps(r)) for r in reqs), str(reqs[:2]))
+
+    # Index arithmetic: each insert lands exactly where the previous ended.
+    cursor = 1
+    ordered = True
+    for i in inserts:
+        ordered = ordered and i["location"]["index"] == cursor
+        cursor += len(i["text"])
+    check("insert cursor arithmetic is gapless", ordered, str(inserts))
+
+    heading = [r for r in reqs if "updateParagraphStyle" in r]
+    check("heading style carried over",
+          any(r["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+              == "HEADING_1" for r in heading), str(heading))
+    styles = [r["updateTextStyle"] for r in reqs if "updateTextStyle" in r]
+    styled_words = {
+        rebuilt[s["range"]["startIndex"] - 1:s["range"]["endIndex"] - 1]:
+        s["textStyle"] for s in styles}
+    check("italic and bold ranges cover the right words",
+          styled_words.get("qualities", {}).get("italic")
+          and styled_words.get("measurable", {}).get("bold"), str(styled_words))
+    bullets = [r for r in reqs if "createParagraphBullets" in r]
+    check("numbered list becomes numbered bullets",
+          len(bullets) == 2 and all(
+              b["createParagraphBullets"]["bulletPreset"]
+              == "NUMBERED_DECIMAL_ALPHA_ROMAN" for b in bullets), str(bullets))
+
+    # Horizontal rules import as text-less elements — they must survive as
+    # literal --- paragraphs, not vanish.
+    hr_doc = {"body": {"content": [
+        {"paragraph": {"elements": [{"textRun": {"content": "Above.\n"}}]}},
+        {"paragraph": {"elements": [{"horizontalRule": {}},
+                                    {"textRun": {"content": "\n"}}]}},
+        {"paragraph": {"elements": [{"textRun": {"content": "Below.\n"}}]}},
+    ]}}
+    hr_reqs = transplant_requests(hr_doc, "t.x")
+    hr_text = "".join(r["insertText"]["text"] for r in hr_reqs
+                      if "insertText" in r)
+    check("horizontal rules survive transplant as --- paragraphs",
+          hr_text == "Above.\n---\nBelow.\n", hr_text)
+
+    # The pull side: splitting a whole-master export on tab-title headings.
+    from authorlm.gdocs import split_tabbed_export
+    export = "\n".join([
+        "# **Tab 1**", "",
+        "# **preface.md**", "", "Intro prose.", "",
+        "# **sermons.md**", "",
+        "# **The First Sermon**", "", "Harken.", "",
+        "# **discernment.md**", "", "Plain words.",
+    ])
+    parts = split_tabbed_export(
+        export, {"preface.md", "sermons.md", "discernment.md"})
+    check("split keys every known tab",
+          set(parts) == {"preface.md", "sermons.md", "discernment.md"},
+          str(parts))
+    check("content H1 in export style is never a boundary",
+          "# **The First Sermon**" in parts["sermons.md"]
+          and "Harken." in parts["sermons.md"], str(parts))
+    check("unknown leading tab is ignored, sections stay clean",
+          parts["preface.md"].strip() == "Intro prose."
+          and parts["discernment.md"].strip() == "Plain words.", str(parts))
+
+
 def scenario_ephemeral_history() -> None:
     print("Scenario H — triage input stays out of readline history")
     try:
@@ -1349,6 +1428,7 @@ def main_test() -> None:
     try:
         scenario_editorial_loop(root)
         scenario_style(root)
+        scenario_transplant()
         scenario_ephemeral_history()
         scenario_prerequisite_gap(root)
         scenario_objection(root)

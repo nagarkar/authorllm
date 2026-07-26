@@ -48,6 +48,10 @@ def normalize_markdown(text: str) -> str:
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
     text = "\n".join(line.rstrip() for line in text.split("\n"))
+    # Horizontal rules get uniform blank-line padding (tab exports emit
+    # them flush against neighbors; local files usually pad them).
+    text = re.sub(r"\n*^(---|\*\*\*|___)$\n*", r"\n\n---\n\n", text,
+                  flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
     text = text.strip("\n")
     return text + "\n" if text else ""
@@ -70,8 +74,16 @@ def get_credentials(config: dict, workspace: str | None = None,
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        token_path.write_text(creds.to_json())
+        from google.auth.exceptions import RefreshError
+
+        try:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json())
+        except RefreshError:
+            # Token expired or revoked upstream: fall through to the clean
+            # non-interactive error, or to the consent flow under 'doc auth'
+            # — never a raw traceback.
+            creds = None
     if not creds or not creds.valid:
         if not interactive:
             raise ValueError(
@@ -94,6 +106,82 @@ def get_credentials(config: dict, workspace: str | None = None,
     return creds
 
 
+def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
+    """Convert an imported Doc (documents.get JSON) into batchUpdate
+    requests that rebuild the same content inside `tab_id` of another
+    document.
+
+    This is the push-to-tab pipeline's core: markdown → (Drive import, so
+    Google owns md→Doc conversion) → temp-doc JSON → these requests →
+    target tab. Handles what the manuscripts use — headings, bold, italic,
+    underline, links, and list bullets; anything else inserts as plain
+    text rather than failing."""
+    def numbered(list_id: str | None) -> bool:
+        glyph = (doc.get("lists", {}).get(list_id or "", {})
+                 .get("listProperties", {}).get("nestingLevels", [{}])[0]
+                 .get("glyphType", ""))
+        return glyph in ("DECIMAL", "ALPHA", "ROMAN", "UPPER_ALPHA",
+                         "UPPER_ROMAN")
+
+    requests: list[dict] = []
+    cursor = 1  # tab bodies start at index 1
+    for element in doc.get("body", {}).get("content", []):
+        paragraph = element.get("paragraph")
+        if not paragraph:
+            continue  # section breaks, tables: not manuscript territory
+        style = paragraph.get("paragraphStyle", {}).get(
+            "namedStyleType", "NORMAL_TEXT")
+        runs = [(e["textRun"].get("content", ""),
+                 e["textRun"].get("textStyle", {}))
+                for e in paragraph.get("elements", []) if "textRun" in e]
+        text = "".join(t for t, _ in runs)
+        # A rule paragraph carries a horizontalRule element plus a bare
+        # newline run — the rule wins. A literal --- paragraph exports back
+        # to a markdown rule (the Docs API has no insert-rule request).
+        if any("horizontalRule" in e for e in paragraph.get("elements", [])):
+            requests.append({"insertText": {
+                "location": {"tabId": tab_id, "index": cursor},
+                "text": "---\n"}})
+            cursor += 4
+            continue
+        if not text:
+            continue
+        start = cursor
+        requests.append({"insertText": {
+            "location": {"tabId": tab_id, "index": start}, "text": text}})
+        cursor += len(text)
+        if style != "NORMAL_TEXT":
+            requests.append({"updateParagraphStyle": {
+                "range": {"tabId": tab_id,
+                          "startIndex": start, "endIndex": cursor},
+                "paragraphStyle": {"namedStyleType": style},
+                "fields": "namedStyleType"}})
+        offset = start
+        for run_text, text_style in runs:
+            fields = {k: True for k in ("bold", "italic", "underline")
+                      if text_style.get(k)}
+            link = text_style.get("link", {}).get("url")
+            payload: dict = dict(fields)
+            if link:
+                payload["link"] = {"url": link}
+            if payload and run_text.strip():
+                requests.append({"updateTextStyle": {
+                    "range": {"tabId": tab_id, "startIndex": offset,
+                              "endIndex": offset + len(run_text)},
+                    "textStyle": payload,
+                    "fields": ",".join(sorted(payload))}})
+            offset += len(run_text)
+        if paragraph.get("bullet"):
+            preset = ("NUMBERED_DECIMAL_ALPHA_ROMAN"
+                      if numbered(paragraph["bullet"].get("listId"))
+                      else "BULLET_DISC_CIRCLE_SQUARE")
+            requests.append({"createParagraphBullets": {
+                "range": {"tabId": tab_id,
+                          "startIndex": start, "endIndex": cursor - 1},
+                "bulletPreset": preset}})
+    return requests
+
+
 def get_service(config: dict, workspace: str | None = None,
                 interactive: bool = True):
     from googleapiclient.discovery import build
@@ -103,6 +191,138 @@ def get_service(config: dict, workspace: str | None = None,
         credentials=get_credentials(config, workspace, interactive=interactive),
         cache_discovery=False,
     )
+
+
+def get_docs_service(config: dict, workspace: str | None = None,
+                     interactive: bool = True):
+    from googleapiclient.discovery import build
+
+    return build(
+        "docs", "v1",
+        credentials=get_credentials(config, workspace, interactive=interactive),
+        cache_discovery=False,
+    )
+
+
+# ------------------------------------------------------------ tabbed model
+
+def _reading_order_files(manuscript: dict) -> list[str]:
+    from .revisions import read_manuscript_files
+    from .structure import reading_order
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    order, _ = reading_order(files)
+    return order
+
+
+def _doc_tabs(docs_service, master_id: str) -> list[tuple[str, str]]:
+    """[(tab_id, title)] for every tab of the master Doc, document order."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    found: list[tuple[str, str]] = []
+
+    def walk(tabs):
+        for tab in tabs or []:
+            props = tab.get("tabProperties", {})
+            found.append((props.get("tabId"), props.get("title", "")))
+            walk(tab.get("childTabs"))
+
+    walk(doc.get("tabs"))
+    return found
+
+
+def _tab_end(docs_service, master_id: str, tab_id: str) -> int:
+    """End index of a tab's body — the delete-before-rewrite bound."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+
+    def find(tabs):
+        for tab in tabs or []:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                return tab
+            hit = find(tab.get("childTabs"))
+            if hit:
+                return hit
+        return None
+
+    tab = find(doc.get("tabs")) or {}
+    content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+    return content[-1]["endIndex"] if content else 1
+
+
+def tab_url(master_id: str, tab_id: str | None = None) -> str:
+    base = f"https://docs.google.com/document/d/{master_id}/edit"
+    return f"{base}?tab={tab_id}" if tab_id else base
+
+
+def ensure_master(db: Database, manuscript: dict, meta: dict,
+                  drive, docs_service) -> str:
+    """One master Doc per manuscript, one tab per file (tab title = the
+    filename, reading order). Creates whatever is missing, retires the
+    blank default tab, drops old per-file doc links, and records
+    _master_id plus per-file tab ids."""
+    entry = meta.setdefault("gdocs", {})
+    master_id = entry.get("_master_id")
+    if not master_id:
+        folder_id = _ensure_folder(manuscript, meta, drive)
+        result = drive.files().create(
+            body={"name": manuscript["name"], "mimeType": GDOC_MIME,
+                  "parents": [folder_id]},
+            fields="id",
+        ).execute()
+        master_id = entry["_master_id"] = result["id"]
+    existing = {title: tid for tid, title in _doc_tabs(docs_service, master_id)}
+    order = _reading_order_files(manuscript)
+    missing = [f for f in order if f not in existing]
+    if missing:
+        reply = docs_service.documents().batchUpdate(
+            documentId=master_id,
+            body={"requests": [
+                {"addDocumentTab": {"tabProperties": {"title": name}}}
+                for name in missing
+            ]},
+        ).execute()
+        for name, r in zip(missing, reply.get("replies", [])):
+            existing[name] = r["addDocumentTab"]["tabProperties"]["tabId"]
+    # The blank default tab is noise once real tabs exist.
+    stray = [tid for title, tid in existing.items()
+             if title not in order and title.startswith("Tab ")]
+    if stray and len(existing) > len(stray):
+        try:
+            docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"deleteTab": {"tabId": tid}}
+                                   for tid in stray]},
+            ).execute()
+        except Exception:
+            pass  # a lingering empty default tab is cosmetic, never fatal
+    for name in order:
+        file_entry = entry.setdefault(name, {})
+        file_entry.pop("doc_id", None)  # old per-file doc link, superseded
+        file_entry["tab_id"] = existing[name]
+    _save_mapping(db, manuscript, meta)
+    return master_id
+
+
+def split_tabbed_export(text: str, known_files) -> dict[str, str]:
+    """Split a whole-master markdown export into per-file sections. Tab
+    titles export as top-level headings ('# **<title>**'); only headings
+    naming a known mapped file are boundaries — content headings, even
+    H1s, pass through untouched."""
+    pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        match = pattern.match(line)
+        name = match.group(1).strip() if match else None
+        if name in known_files:
+            current = name
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() + "\n"
+            for name, lines in sections.items()}
 
 
 # ---------------------------------------------------------------- mapping
@@ -153,9 +373,13 @@ def _ensure_folder(manuscript: dict, meta: dict, service) -> str:
 
 
 def push_doc(db: Database, manuscript: dict, query: str,
-             title: str | None = None, service=None) -> dict:
-    """Normalize the local file, then create/update its linked Google Doc
-    from the markdown. Marks the file checked out to Docs."""
+             title: str | None = None, service=None,
+             docs_service=None) -> dict:
+    """Tabbed push: normalize the local file, then rebuild its tab of the
+    master Doc — markdown → temp-doc import (Google owns the conversion)
+    → transplant into the tab → temp deleted. Marks the file checked out."""
+    import hashlib
+
     from googleapiclient.http import MediaInMemoryUpload
 
     relpath, path = _resolve(manuscript, query)
@@ -166,84 +390,113 @@ def push_doc(db: Database, manuscript: dict, query: str,
         path.write_text(normalized, encoding="utf-8")
 
     meta = _mapping(db, manuscript)
-    entry = meta.setdefault("gdocs", {}).setdefault(relpath, {})
-    media = MediaInMemoryUpload(normalized.encode("utf-8"), mimetype=MARKDOWN_MIME)
-    created = False
-    if entry.get("doc_id"):
-        service.files().update(fileId=entry["doc_id"], media_body=media).execute()
-    else:
-        folder_id = _ensure_folder(manuscript, meta, service)
-        result = service.files().create(
-            body={"name": title or Path(relpath).stem, "mimeType": GDOC_MIME,
-                  "parents": [folder_id]},
-            media_body=media, fields="id",
-        ).execute()
-        entry["doc_id"] = result["id"]
-        created = True
+    created = not meta.get("gdocs", {}).get("_master_id")
+    master_id = ensure_master(db, manuscript, meta, service, docs_service)
+    entry = meta["gdocs"][relpath]
+    tab_id = entry["tab_id"]
+
+    media = MediaInMemoryUpload(normalized.encode("utf-8"),
+                                mimetype=MARKDOWN_MIME)
+    temp = service.files().create(
+        body={"name": f"authorlm-temp-{Path(relpath).stem}",
+              "mimeType": GDOC_MIME},
+        media_body=media, fields="id",
+    ).execute()
+    try:
+        temp_doc = docs_service.documents().get(documentId=temp["id"]).execute()
+    finally:
+        service.files().delete(fileId=temp["id"]).execute()
+
+    requests: list[dict] = []
+    end = _tab_end(docs_service, master_id, tab_id)
+    if end > 2:
+        requests.append({"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
+    requests += transplant_requests(temp_doc, tab_id)
+    if requests:
+        docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}).execute()
+
     entry["checked_out"] = True
     # Snapshot what was pushed: pull uses it to detect two-sided edits.
-    import hashlib
-
     entry["pushed_hash"] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
     _save_mapping(db, manuscript, meta)
     return {
         "relpath": relpath,
-        "doc_id": entry["doc_id"],
-        "url": f"https://docs.google.com/document/d/{entry['doc_id']}/edit",
+        "doc_id": master_id,
+        "url": tab_url(master_id, tab_id),
         "created": created,
         "locally_normalized": locally_normalized,
     }
 
 
-def pull_doc(db: Database, manuscript: dict, query: str, service=None,
-             force: bool = False) -> dict:
-    """Export the linked Doc as markdown, normalize, and write the local
-    file. Clears the checkout. Caller collects afterwards.
+def pull_doc(db: Database, manuscript: dict, query: str | None = None,
+             service=None, force: bool = False) -> dict:
+    """Tabbed pull: export the master Doc once, split it into per-tab
+    sections, normalize, and write the queried file — or every mapped file
+    when query is None. Clears checkouts. Caller collects afterwards.
 
-    Conflict guard: if the local file changed since the push AND the Doc's
-    content differs from it, both sides were edited — refuse unless
-    `force` (Doc wins; the local edits remain in version history)."""
+    Per-file conflict guard: if a file changed locally since the push AND
+    its tab differs from it, both sides were edited — skipped unless
+    `force` (the Doc wins; local edits stay in version history)."""
     import hashlib
 
-    relpath, path = _resolve(manuscript, query)
     meta = _mapping(db, manuscript)
-    entry = meta.get("gdocs", {}).get(relpath)
-    if not entry or not entry.get("doc_id"):
-        raise LookupError(f"'{relpath}' has no linked Google Doc — push it first")
+    links = meta.get("gdocs", {})
+    master_id = links.get("_master_id")
+    if not master_id:
+        raise LookupError("no master Google Doc yet — 'doc push' first")
     data = service.files().export(
-        fileId=entry["doc_id"], mimeType=MARKDOWN_MIME
-    ).execute()
-    text = normalize_markdown(
-        data.decode("utf-8") if isinstance(data, bytes) else str(data)
-    )
-    current = path.read_text(encoding="utf-8") if path.exists() else ""
-    changed = text != current
-    local_hash = hashlib.sha256(current.encode()).hexdigest()[:16]
-    pushed_hash = entry.get("pushed_hash")
-    if (changed and not force and pushed_hash
-            and local_hash != pushed_hash):
-        raise ValueError(
-            f"conflict: {relpath} was edited locally since the push, and the "
-            "Google Doc also changed. Reconcile by hand (doc open + local "
-            "editor), or 'doc pull --force' to take the Doc's version — your "
-            "local edits stay recoverable in version history"
-        )
-    if changed:
-        path.write_text(text, encoding="utf-8")
-    entry["checked_out"] = False
-    # The pulled content is the new agreed base for three-way comparison.
-    entry["pushed_hash"] = hashlib.sha256(text.encode()).hexdigest()[:16]
+        fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    sections = split_tabbed_export(whole, set(mapped))
+    targets = mapped
+    if query:
+        relpath, _ = _resolve(manuscript, query)
+        if relpath not in mapped:
+            raise LookupError(f"'{relpath}' has no tab in the master Doc — "
+                              "'doc push' first")
+        targets = [relpath]
+    report: dict = {"changed": [], "unchanged": [], "conflicts": [],
+                    "missing": [], "doc_id": master_id}
+    for relpath in targets:
+        if relpath not in sections:
+            report["missing"].append(relpath)
+            continue
+        text = normalize_markdown(sections[relpath])
+        path = Path(manuscript["path"]) / relpath
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        entry = links[relpath]
+        local_hash = hashlib.sha256(current.encode()).hexdigest()[:16]
+        if (text != current and not force and entry.get("pushed_hash")
+                and local_hash != entry["pushed_hash"]):
+            report["conflicts"].append(relpath)
+            continue
+        if text != current:
+            path.write_text(text, encoding="utf-8")
+            report["changed"].append(relpath)
+        else:
+            report["unchanged"].append(relpath)
+        entry["checked_out"] = False
+        # The pulled content is the new agreed base for three-way compare.
+        entry["pushed_hash"] = hashlib.sha256(text.encode()).hexdigest()[:16]
     _save_mapping(db, manuscript, meta)
-    return {"relpath": relpath, "doc_id": entry["doc_id"], "changed": changed}
+    return report
 
 
-def reconcile(db: Database, manuscript: dict, service) -> dict:
-    """Session-start reconciliation over every linked file, using the
-    three-way state (agreed base / local / Doc):
+def reconcile(db: Database, manuscript: dict, service,
+              docs_service=None) -> dict:
+    """Session-start reconciliation over the master Doc's tabs, using the
+    three-way state (agreed base / local / tab):
 
-    - Doc == local            → in sync (checkout cleared)
-    - only the Doc changed    → auto-pull (safe: local matches the base)
-    - only local changed      → auto-push (safe: Doc matches the base)
+    - tab == local            → in sync (checkout cleared)
+    - only the tab changed    → auto-pull (safe: local matches the base)
+    - only local changed      → auto-push (safe: tab matches the base);
+                                needs the Docs service — reported as
+                                pending_push when it's unavailable
     - both changed            → CONFLICT — touch nothing, report loudly
     - no base recorded + drift → treated as a conflict (can't judge safety)
 
@@ -251,24 +504,29 @@ def reconcile(db: Database, manuscript: dict, service) -> dict:
     block a writing session."""
     import hashlib as _hashlib
 
-    from googleapiclient.http import MediaInMemoryUpload
-
     report: dict = {"in_sync": [], "pulled": [], "pushed": [],
-                    "conflicts": [], "errors": []}
+                    "pending_push": [], "conflicts": [], "errors": []}
     meta = _mapping(db, manuscript)
     links = meta.get("gdocs", {})
+    master_id = links.get("_master_id")
+    if not master_id:
+        return report
+    try:
+        data = service.files().export(
+            fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    except Exception as err:  # network, API — never block the session
+        report["errors"].append({"file": "(master doc)", "error": str(err)})
+        return report
+    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    sections = split_tabbed_export(whole, set(mapped))
     dirty = False
-    for relpath, entry in links.items():
-        if relpath.startswith("_") or not isinstance(entry, dict) \
-                or not entry.get("doc_id"):
-            continue
+    for relpath in mapped:
+        entry = links[relpath]
         try:
-            data = service.files().export(
-                fileId=entry["doc_id"], mimeType=MARKDOWN_MIME
-            ).execute()
-            doc_text = normalize_markdown(
-                data.decode("utf-8") if isinstance(data, bytes) else str(data)
-            )
+            doc_text = normalize_markdown(sections.get(relpath, ""))
             path = Path(manuscript["path"]) / relpath
             local_text = normalize_markdown(
                 path.read_text(encoding="utf-8") if path.exists() else ""
@@ -290,13 +548,17 @@ def reconcile(db: Database, manuscript: dict, service) -> dict:
                 dirty = True
                 report["pulled"].append(relpath)
             elif base and doc_hash == base:
-                media = MediaInMemoryUpload(local_text.encode("utf-8"),
-                                            mimetype=MARKDOWN_MIME)
-                service.files().update(fileId=entry["doc_id"],
-                                       media_body=media).execute()
-                entry["pushed_hash"] = local_hash
-                dirty = True
-                report["pushed"].append(relpath)
+                if docs_service is None:
+                    report["pending_push"].append(relpath)
+                else:
+                    if dirty:
+                        _save_mapping(db, manuscript, meta)
+                        dirty = False
+                    push_doc(db, manuscript, relpath, service=service,
+                             docs_service=docs_service)
+                    meta = _mapping(db, manuscript)
+                    links = meta.get("gdocs", {})
+                    report["pushed"].append(relpath)
             else:
                 report["conflicts"].append(relpath)
         except Exception as err:  # network, API — never block the session
