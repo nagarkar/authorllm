@@ -89,6 +89,19 @@ def add_alias(db: Database, manuscript_id: str, node: dict, alias: str) -> dict:
     return {**dict(node), "aliases": payload}
 
 
+def remove_alias(db: Database, manuscript_id: str, node: dict,
+                 alias: str) -> dict:
+    """Withdraw an alias: the name stops resolving in lookups and stops
+    counting as a mention in every text scan."""
+    aliases = node_aliases(node)
+    kept = [a for a in aliases if a.lower() != alias.lower()]
+    if len(kept) == len(aliases):
+        raise ValueError(f"'{node['name']}' has no alias '{alias}'")
+    payload = json.dumps(kept)
+    db.update("concept_nodes", node["id"], {"aliases": payload})
+    return {**dict(node), "aliases": payload}
+
+
 def merge_concepts(db: Database, manuscript_id: str,
                    canonical: dict, duplicate: dict) -> dict:
     """Absorb `duplicate` into `canonical`: its live edges are re-pointed at

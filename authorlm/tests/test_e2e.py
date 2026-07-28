@@ -1326,6 +1326,20 @@ def scenario_style(root: Path) -> None:
     check("retired element leaves every composition",
           "Challenging" not in out, out)
 
+    # Aliases are reversible: --remove withdraws one without touching others.
+    run(ws, "concept", "add", "Field of Choice")
+    run(ws, "concept", "alias", "Field of Choice", "Chid", "Sanatana")
+    out = run(ws, "concept", "alias", "Field of Choice", "--remove", "Chid")
+    check("remove withdraws exactly the named alias",
+          "aliases now: Sanatana" in out, out)
+    out = run(ws, "concept", "show", "Chid", expect_exit=True)
+    check("a removed alias no longer resolves", "matches" in out.lower()
+          or "no concept" in out.lower(), out)
+    out = run(ws, "concept", "alias", "Field of Choice", "--remove", "Chid",
+              expect_exit=True)
+    check("removing an absent alias fails loudly",
+          "has no alias" in out, out)
+
 
 def scenario_transplant() -> None:
     print("Scenario T — push-to-tab transplant emitter (captured Google JSON)")

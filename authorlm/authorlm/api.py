@@ -544,13 +544,14 @@ def add_concept(db: Database, manuscript: dict, name: str,
 
 
 def alias_concept(db: Database, manuscript: dict, name: str,
-                  aliases: list[str]) -> dict:
+                  aliases: list[str], remove: bool = False) -> dict:
     node = cg.get_concept(db, manuscript["id"], name)
     if not node:
         raise LookupError(f"no concept named '{name}'")
     node = dict(node)
     for alias in aliases:
-        node = cg.add_alias(db, manuscript["id"], node, alias)
+        node = (cg.remove_alias(db, manuscript["id"], node, alias) if remove
+                else cg.add_alias(db, manuscript["id"], node, alias))
     return {"name": node["name"], "aliases": cg.node_aliases(node)}
 
 

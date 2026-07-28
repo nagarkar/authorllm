@@ -954,13 +954,19 @@ def cmd_concept(args):
         if not node:
             sys.exit(f"No concept named '{args.name}'.")
         node = dict(node)
+        removing = getattr(args, "remove", None)
         try:
-            for alias in args.params[1:]:
-                node = cg.add_alias(db, mid, node, alias)
+            for alias in (removing or args.params[1:]):
+                node = (cg.remove_alias(db, mid, node, alias) if removing
+                        else cg.add_alias(db, mid, node, alias))
         except ValueError as err:
             sys.exit(str(err))
-        print(f"'{node['name']}' also answers to: "
-              f"{', '.join(cg.node_aliases(node))}")
+        remaining = cg.node_aliases(node)
+        if removing:
+            print(f"'{node['name']}' aliases now: "
+                  + (", ".join(remaining) if remaining else "(none)"))
+        else:
+            print(f"'{node['name']}' also answers to: {', '.join(remaining)}")
     elif args.action == "merge":
         try:
             result = api.merge_concepts(db, manuscript,
@@ -2073,6 +2079,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="confirm/retire every unconfirmed extracted concept of this kind")
     p.add_argument("--nodes", action="store_true", help="triage: concepts only")
     p.add_argument("--edges", action="store_true", help="triage: relationships only")
+    p.add_argument("--remove", nargs="+", metavar="ALIAS",
+                   help="alias: withdraw these aliases instead of adding")
     p.set_defaults(func=cmd_concept)
 
     p = sub.add_parser("collect", help="snapshot the manuscript and detect transitions")
@@ -2282,8 +2290,10 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept retire <name>… | --all-kind KIND")
         if args.action == "edit" and not (args.name and (args.notes is not None or args.kind)):
             sys.exit("usage: concept edit <name> --notes \"...\" [--kind KIND]")
-        if args.action == "alias" and len(params) < 2:
-            sys.exit("usage: concept alias <name> <alias>…")
+        if args.action == "alias" and len(params) < 2 \
+                and not getattr(args, "remove", None):
+            sys.exit("usage: concept alias <name> <alias>… "
+                     "| concept alias <name> --remove <alias>…")
         if args.action == "merge" and len(params) != 2:
             sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "style":

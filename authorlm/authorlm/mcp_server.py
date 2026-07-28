@@ -235,15 +235,16 @@ def add_concept(name: str, kind: str = "concept", notes: str | None = None,
 
 
 @mcp.tool()
-def alias_concept(name: str, aliases: list[str],
+def alias_concept(name: str, aliases: list[str], remove: bool = False,
                   manuscript: str | None = None) -> dict:
-    """Declare alternate names (synonyms) for a concept. Aliases resolve in
-    every name lookup and count as mentions of the concept in text scans —
-    use this for synonym rings instead of separate nodes joined by mutual
-    defines edges."""
+    """Declare alternate names (synonyms) for a concept — or withdraw them
+    with remove=true. Aliases resolve in every name lookup and count as
+    mentions of the concept in text scans — use this for synonym rings
+    instead of separate nodes joined by mutual defines edges."""
     def run():
         db = _db()
-        return api.alias_concept(db, _manuscript(db, manuscript), name, aliases)
+        return api.alias_concept(db, _manuscript(db, manuscript), name,
+                                 aliases, remove=remove)
     return _guard(run)
 
 
