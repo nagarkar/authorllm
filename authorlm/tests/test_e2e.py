@@ -763,6 +763,13 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("settled aliasing statements are not re-proposed",
               "proposal(s) against settled knowledge" not in out, out)
 
+        # A merged-away name is an alias now, not a banned retiree — the
+        # extractor re-proposing it must resolve, never suggest revival.
+        run(ws, "extract", "--full")
+        out = run(ws, "proposal", "list")
+        check("no revival proposal for a name living on as an alias",
+              "revive retired concept 'Distinction'" not in out, out)
+
         # An oversized aliases sweep must fall back to file-by-file passes —
         # a full sweep is full, never a silently truncated prefix.
         ws2 = root / "e2"

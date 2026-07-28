@@ -405,12 +405,22 @@ def extract_concepts(
         return None
 
     # A retired concept stays retired: extraction may never resurrect what
-    # the author rejected, even if the model proposes it again.
+    # the author rejected, even if the model proposes it again. But a
+    # retired name living on as a live concept's alias is not banned —
+    # mentions of it resolve to the live concept, never to a revival.
     banned = {
         row["name"].lower() for row in db.all(
             "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND status = 'retired'",
             (mid,),
         )
+    }
+    banned -= {
+        alias.lower()
+        for row in db.all(
+            "SELECT aliases FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired' AND aliases != '[]'", (mid,),
+        )
+        for alias in json.loads(row["aliases"] or "[]")
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
     proposed = 0
