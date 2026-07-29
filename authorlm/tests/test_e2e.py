@@ -1405,6 +1405,34 @@ def scenario_transplant() -> None:
     check("horizontal rules survive transplant as --- paragraphs",
           hr_text == "Above.\n---\nBelow.\n", hr_text)
 
+    # Tab reordering: iterated single moves must converge to TOC order
+    # under remove-then-insert semantics, and no-op once matched.
+    from authorlm.gdocs import next_tab_move
+
+    def settle(current, desired, budget=20):
+        current = list(current)
+        while budget:
+            move = next_tab_move(current, desired)
+            if move is None:
+                return current
+            props = move["updateDocumentTabProperties"]["tabProperties"]
+            current.remove(props["tabId"])
+            current.insert(props["index"], props["tabId"])
+            budget -= 1
+        return current
+
+    check("tab moves converge to the desired order",
+          settle(["a", "b", "c", "d"], ["c", "a", "d", "b"])
+          == ["c", "a", "d", "b"], "")
+    check("tab moves converge on the live drift shape",
+          settle(["p", "s", "r", "d", "ch", "i", "re", "m", "gc", "gl"],
+                 ["p", "s", "r", "d", "gc", "ch", "i", "re", "gl", "m"])
+          == ["p", "s", "r", "d", "gc", "ch", "i", "re", "gl", "m"], "")
+    check("reorder is a no-op when order already matches",
+          next_tab_move(["a", "b", "c"], ["a", "b", "c"]) is None, "")
+    check("unknown desired ids are ignored",
+          settle(["a", "b"], ["b", "x", "a"]) == ["b", "a"], "")
+
     # The pull side: splitting a whole-master export on tab-title headings.
     from authorlm.gdocs import split_tabbed_export
     export = "\n".join([

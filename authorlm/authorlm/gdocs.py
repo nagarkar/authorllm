@@ -300,8 +300,40 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         file_entry = entry.setdefault(name, {})
         file_entry.pop("doc_id", None)  # old per-file doc link, superseded
         file_entry["tab_id"] = existing[name]
+    # Tab order follows the TOC reading order, always: one move per call
+    # with a fresh read between moves, until reality matches the TOC.
+    desired_ids = [existing[name] for name in order]
+    try:
+        for _ in range(len(desired_ids) * 2):
+            current_ids = [tid for tid, _ in _doc_tabs(docs_service, master_id)]
+            move = next_tab_move(current_ids, desired_ids)
+            if move is None:
+                break
+            docs_service.documents().batchUpdate(
+                documentId=master_id, body={"requests": [move]}).execute()
+    except Exception:
+        pass  # a stale order is cosmetic, never fatal to a push
     _save_mapping(db, manuscript, meta)
     return master_id
+
+
+def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
+    """The single next reorder request bringing `current` toward `desired`
+    (tab ids; ids absent from `desired` keep their place at the end), or
+    None when the order already matches. One move per API call with a fresh
+    read in between — immune to the API's batched-move index semantics.
+    Pure — unit-testable without Google."""
+    ordered = [tid for tid in desired if tid in current]
+    keep = set(ordered)
+    filtered = [tid for tid in current if tid in keep]
+    for position, want in enumerate(ordered):
+        if filtered[position] != want:
+            occupant = filtered[position]
+            return {"updateDocumentTabProperties": {
+                "tabProperties": {"tabId": want,
+                                  "index": current.index(occupant)},
+                "fields": "index"}}
+    return None
 
 
 def split_tabbed_export(text: str, known_files) -> dict[str, str]:
