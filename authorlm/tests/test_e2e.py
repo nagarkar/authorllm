@@ -1430,6 +1430,11 @@ def scenario_transplant() -> None:
           == ["p", "s", "r", "d", "gc", "ch", "i", "re", "gl", "m"], "")
     check("reorder is a no-op when order already matches",
           next_tab_move(["a", "b", "c"], ["a", "b", "c"]) is None, "")
+    from authorlm.gdocs import manifest_text
+    manifest = manifest_text("SMSTTD", 2)
+    check("manifest names the manuscript and doc version",
+          "Manuscript: SMSTTD" in manifest and "Doc version: 2" in manifest,
+          manifest)
     check("unknown desired ids are ignored",
           settle(["a", "b"], ["b", "x", "a"]) == ["b", "a"], "")
 

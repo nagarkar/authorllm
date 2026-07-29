@@ -271,6 +271,8 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
             fields="id",
         ).execute()
         master_id = entry["_master_id"] = result["id"]
+        # Each new incarnation of the master Doc bumps the doc version.
+        entry["_doc_version"] = entry.get("_doc_version", 0) + 1
     existing = {title: tid for tid, title in _doc_tabs(docs_service, master_id)}
     order = _reading_order_files(manuscript)
     missing = [f for f in order if f not in existing]
@@ -300,6 +302,24 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         file_entry = entry.setdefault(name, {})
         file_entry.pop("doc_id", None)  # old per-file doc link, superseded
         file_entry["tab_id"] = existing[name]
+    # The manifest tab identifies the manuscript and the Doc incarnation —
+    # renaming the Doc in Drive is fine; the manifest stays authoritative.
+    try:
+        manifest_id = existing.get(MANIFEST_TITLE)
+        if not manifest_id:
+            reply = docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"addDocumentTab": {
+                    "tabProperties": {"title": MANIFEST_TITLE}}}]},
+            ).execute()
+            manifest_id = reply["replies"][0]["addDocumentTab"][
+                "tabProperties"]["tabId"]
+        entry["_manifest_tab"] = manifest_id
+        _write_manifest(docs_service, master_id, manifest_id,
+                        manuscript["name"], entry.get("_doc_version", 1))
+    except Exception:
+        pass  # the manifest is metadata — never fatal to a push
+
     # Tab order follows the TOC reading order, always: one move per call
     # with a fresh read between moves, until reality matches the TOC.
     desired_ids = [existing[name] for name in order]
@@ -315,6 +335,32 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         pass  # a stale order is cosmetic, never fatal to a push
     _save_mapping(db, manuscript, meta)
     return master_id
+
+
+MANIFEST_TITLE = "manifest"
+
+
+def manifest_text(manuscript_name: str, doc_version: int) -> str:
+    """The manifest tab's content: identifies the manuscript regardless of
+    what the user renames the Doc to, and records which incarnation of the
+    master document this is (incremented each time a new Doc is created)."""
+    return (f"Manuscript: {manuscript_name}\n"
+            f"Doc version: {doc_version}\n"
+            "Managed by AuthorLM — this tab is rewritten on every push.\n")
+
+
+def _write_manifest(docs_service, master_id: str, tab_id: str,
+                    manuscript_name: str, doc_version: int) -> None:
+    requests: list[dict] = []
+    end = _tab_end(docs_service, master_id, tab_id)
+    if end > 2:
+        requests.append({"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
+    requests.append({"insertText": {
+        "location": {"tabId": tab_id, "index": 1},
+        "text": manifest_text(manuscript_name, doc_version)}})
+    docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}).execute()
 
 
 def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
