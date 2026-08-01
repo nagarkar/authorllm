@@ -13,9 +13,17 @@ surface is to keep that evidence flowing while the author just talks.
 1. When the author states a writing goal ("let's introduce gravity in
    preface.md") → `resolve_file` if a file is named, then `declare_intent`.
    Relay the preview (matched concepts, gaps, precedents) conversationally.
-2. When they ask what/how to write → `get_guidance`. Present suggestions
-   *with their explanations* — the why matters more than the what. If it
-   abstains, say so plainly; abstention is a valid answer, not a failure.
+2. Run `get_guidance` ONCE PER SESSION unprompted — right after the
+   opening briefing, or at the first declared intent. This is the
+   reinforcement channel: policy reminders only earn (or lose) the
+   evidence that promotes or retires them when the author reacts, and a
+   session without a guidance review leaves every candidate frozen. Also
+   run it whenever they ask what/how to write. Present suggestions *with
+   their explanations* — the why matters more than the what — and
+   surface policy reminders as direct questions ("does this rule of
+   yours apply here?"), then record verdicts via `review_suggestion`.
+   If it abstains, say so plainly; abstention is a valid answer, not a
+   failure.
 3. When they react to a suggestion — in any wording — → `review_suggestion`.
    **Record their actual reasoning verbatim as `explanation`.** An explained
    rejection is the highest-value evidence the system can receive.
