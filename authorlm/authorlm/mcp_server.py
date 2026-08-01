@@ -446,6 +446,53 @@ def list_policies(manuscript: str | None = None) -> dict:
 
 
 @mcp.tool()
+def retire_policy(prefix: str, reason: str, manuscript: str | None = None) -> dict:
+    """Retire an editorial policy the author rejects (author-initiated
+    curation). Kept for history; the statement is banned from re-seeding —
+    fresh supporting evidence files a revival proposal instead. Record the
+    author's reason verbatim."""
+    def run():
+        db = _db()
+        return api.retire_policy(db, _manuscript(db, manuscript), prefix, reason)
+    return _guard(run)
+
+
+@mcp.tool()
+def merge_policies(duplicate: str, canonical: str,
+                   reason: str | None = None,
+                   manuscript: str | None = None) -> dict:
+    """Fold a duplicate policy's belief record (support counts, questions)
+    into the canonical policy and retire the duplicate. Use when two
+    learned policies state the same rule in different words."""
+    def run():
+        db = _db()
+        return api.merge_policies(db, _manuscript(db, manuscript),
+                                  duplicate, canonical, reason)
+    return _guard(run)
+
+
+@mcp.tool()
+def convert_policy_to_style(prefix: str, aspect: str,
+                            statement: str | None = None,
+                            guide: str | None = None,
+                            file: str | None = None,
+                            notes: str | None = None,
+                            reason: str | None = None,
+                            manuscript: str | None = None) -> dict:
+    """Convert a learned policy into a ratified style element: creates the
+    element (in `guide`, or file-local via `file`; statement defaults to
+    the policy's) and retires the policy with a recorded linkage. Use when
+    a policy is really a timeless how-prose-reads rule, not a revision
+    decision."""
+    def run():
+        db = _db()
+        return api.convert_policy(db, _manuscript(db, manuscript), prefix,
+                                  aspect, statement=statement, guide=guide,
+                                  file=file, notes=notes, reason=reason)
+    return _guard(run)
+
+
+@mcp.tool()
 def get_doc_links(manuscript: str | None = None) -> dict:
     """Google Docs link state for a manuscript's files: which files have a
     linked Doc (with URL) and which are currently checked out — i.e. the

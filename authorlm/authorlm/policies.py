@@ -123,6 +123,85 @@ def seed_candidate_policy(
     return row
 
 
+def _curation_evidence(db: Database, manuscript_id: str, signal: str,
+                       target: str, policy_id: str) -> None:
+    ev = ko_fields("ev")
+    ev.update(
+        manuscript_id=manuscript_id, episode_id=None,
+        evidence_type="policy_curation", signal=signal,
+        target=target[:200], supports_policy=policy_id, weight="high",
+    )
+    db.insert("evidence", ev)
+
+
+def retire_policy(db: Database, manuscript_id: str, policy: dict,
+                  reason: str) -> dict:
+    """Author-initiated retirement: the policy is wrong or unwanted. Kept
+    for history; seed_candidate_policy treats retired statements as banned
+    (fresh support files a revival proposal instead)."""
+    meta = loads(policy["metadata"], {})
+    meta["curation"] = {"action": "retired", "reason": reason}
+    db.update("editorial_policies", policy["id"],
+              {"status": "retired", "metadata": json.dumps(meta)})
+    _curation_evidence(db, manuscript_id, "retired",
+                       f"{policy['statement']} — {reason}", policy["id"])
+    return {"id": policy["id"], "statement": policy["statement"],
+            "status": "retired"}
+
+
+def merge_policies(db: Database, manuscript_id: str, duplicate: dict,
+                   canonical: dict, reason: str | None = None) -> dict:
+    """Fold a duplicate policy's belief record into the canonical one and
+    retire the duplicate. The duplicate's statement stays in the table
+    (retired), so it remains banned from re-seeding."""
+    supporting = canonical["supporting"] + duplicate["supporting"]
+    contradicting = canonical["contradicting"] + duplicate["contradicting"]
+    conf = _confidence(supporting, contradicting)
+    status = _lifecycle_status(canonical["status"], supporting,
+                               contradicting, conf)
+    questions = loads(canonical["outstanding_questions"], [])
+    for question in loads(duplicate["outstanding_questions"], []):
+        if question not in questions:
+            questions.append(question)
+    changes = {
+        "supporting": supporting, "contradicting": contradicting,
+        "confidence": conf, "status": status,
+        "outstanding_questions": json.dumps(questions),
+    }
+    db.update("editorial_policies", canonical["id"], changes)
+    meta = loads(duplicate["metadata"], {})
+    meta["curation"] = {"action": "merged", "into": canonical["id"]}
+    if reason:
+        meta["curation"]["reason"] = reason
+    db.update("editorial_policies", duplicate["id"],
+              {"status": "retired", "metadata": json.dumps(meta)})
+    _curation_evidence(
+        db, manuscript_id, "merged",
+        f"{duplicate['statement']} ⇒ {canonical['statement']}",
+        canonical["id"])
+    return {**dict(canonical), **changes,
+            "merged": duplicate["statement"]}
+
+
+def convert_policy(db: Database, manuscript_id: str, policy: dict,
+                   element: dict, reason: str | None = None) -> dict:
+    """Retire a policy whose substance now lives as a style element. The
+    element is created by the caller (style machinery needs the manuscript
+    record); this records the linkage and the ban."""
+    meta = loads(policy["metadata"], {})
+    meta["curation"] = {"action": "converted", "style_element": element["id"]}
+    if reason:
+        meta["curation"]["reason"] = reason
+    db.update("editorial_policies", policy["id"],
+              {"status": "retired", "metadata": json.dumps(meta)})
+    _curation_evidence(
+        db, manuscript_id, "converted",
+        f"{policy['statement']} ⇒ style element {element['id']}",
+        policy["id"])
+    return {"id": policy["id"], "statement": policy["statement"],
+            "status": "retired", "style_element": element["id"]}
+
+
 def record_review(
     db: Database,
     manuscript_id: str,

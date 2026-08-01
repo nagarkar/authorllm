@@ -209,6 +209,45 @@ def scenario_editorial_loop(root: Path) -> None:
     out = run(ws, "policy", "answer", policy_prefix, "Policy holds except inside examples")
     check("question answered as declared evidence", "Answer recorded" in out, out)
 
+    # --- policy curation: retire / merge / convert-to-style ---
+    from authorlm import policies as _cpol
+    from authorlm.db import Database as _CDB
+    _cdb = _CDB(ws / ".authorlm" / "authorlm.db")
+    _cmid = _cdb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
+    dup = _cpol.seed_candidate_policy(
+        _cdb, _cmid, "Trim throat-clearing openers.", source="test")
+    canon = _cpol.seed_candidate_policy(
+        _cdb, _cmid, "Cut redundant opening phrases.", source="test")
+    out = run(ws, "policy", "merge", dup["id"], canon["id"])
+    check("policy merge folds duplicate into canonical",
+          'Merged "Trim throat-clearing openers."' in out and "2+ / 0-" in out,
+          out)
+    out = run(ws, "policy", "list")
+    check("merged duplicate leaves the policy list",
+          "Trim throat-clearing openers." not in out
+          and "Cut redundant opening phrases." in out, out)
+    run(ws, "style", "guide", "Curation guide")
+    out = run(ws, "policy", "convert", canon["id"], "--aspect", "formatting",
+              "--guide", "Curation guide")
+    check("policy converts to a style element",
+          "converted to style element" in out, out)
+    out = run(ws, "policy", "list")
+    check("converted policy leaves the policy list",
+          "Cut redundant opening phrases." not in out, out)
+    out = run(ws, "style", "guides")
+    check("converted element lives in its guide",
+          "Curation guide" in out and "1 element(s)" in out, out)
+    victim = _cpol.seed_candidate_policy(
+        _cdb, _cmid, "Always use semicolons.", source="test")
+    out = run(ws, "policy", "retire", victim["id"],
+              "--reason", "author rejects this rule")
+    check("policy retire records author verdict",
+          "banned from re-seeding" in out, out)
+    reseed = _cpol.seed_candidate_policy(
+        _cdb, _cmid, "Always use semicolons.", source="test")
+    check("retired statement re-seeds as revival proposal, not a new policy",
+          reseed.get("kind") == "revival_proposal", str(reseed))
+
     # Inferred edges now come only from the extractor — plant its style of
     # hypothesis directly so confirmation and edge triage stay covered.
     from authorlm.db import Database as _IDB, ko_fields as _iko

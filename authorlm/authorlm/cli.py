@@ -1254,7 +1254,7 @@ def cmd_policy(args):
     if args.action == "list":
         rows = db.all(
             "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
-            "ORDER BY confidence DESC",
+            "AND status != 'retired' ORDER BY confidence DESC",
             (manuscript["id"],),
         )
         if not rows:
@@ -1272,6 +1272,32 @@ def cmd_policy(args):
         if any_questions:
             print(ui.dim('  → answer: policy answer <id> "your answer" '
                          "[--index N]  (N = the Q number, default 1)"))
+    elif args.action == "retire":
+        try:
+            result = api.retire_policy(db, manuscript, args.id, args.reason)
+        except (LookupError, ValueError) as err:
+            sys.exit(str(err))
+        print(f"Policy retired: \"{result['statement']}\" "
+              "(statement stays banned from re-seeding).")
+    elif args.action == "merge":
+        try:
+            result = api.merge_policies(db, manuscript, args.id, args.answer,
+                                        reason=args.reason)
+        except (LookupError, ValueError) as err:
+            sys.exit(str(err))
+        print(f"Merged \"{result['merged']}\" into \"{result['statement']}\" "
+              f"— now {result['supporting']}+ / {result['contradicting']}- "
+              f"[{result['status']}, confidence {result['confidence']}].")
+    elif args.action == "convert":
+        try:
+            result = api.convert_policy(
+                db, manuscript, args.id, args.aspect,
+                statement=args.statement, guide=args.guide, file=args.file,
+                notes=args.notes, reason=args.reason)
+        except (LookupError, ValueError) as err:
+            sys.exit(str(err))
+        print(f"Policy \"{result['statement']}\" converted to style element "
+              f"[{result['style_element'][:8]}] (policy retired).")
     else:  # answer
         policy = _find_by_prefix(db, "editorial_policies", args.id, manuscript["id"])
         questions = loads(policy["outstanding_questions"], [])
@@ -2186,21 +2212,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser(
-        "policy", help="list policies / answer outstanding questions",
+        "policy", help="list / answer questions / curate (retire, merge, convert)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="example:\n"
                "  policy list                     shows each policy's [id] and its\n"
                "                                  numbered open questions (Q1, Q2, …)\n"
                '  policy answer pol-d970 "Only inside worked examples" --index 2\n'
                "                                  closes Q2 of policy pol-d970; the\n"
-               "                                  answer becomes declared evidence",
+               "                                  answer becomes declared evidence\n"
+               '  policy retire pol-4c5d --reason "garbled inference"\n'
+               "  policy merge pol-8e69 pol-2c85  fold the duplicate (first) into\n"
+               "                                  the canonical (second)\n"
+               '  policy convert pol-3b85 --aspect formatting --guide "Essays"\n'
+               "                                  policy becomes a ratified style\n"
+               "                                  element; the policy is retired",
     )
-    p.add_argument("action", choices=["list", "answer"])
-    p.add_argument("id", nargs="?", help="policy id prefix, from 'policy list' (answer)")
-    p.add_argument("answer", nargs="?", help="your answer")
+    p.add_argument("action", choices=["list", "answer", "retire", "merge",
+                                      "convert"])
+    p.add_argument("id", nargs="?",
+                   help="policy id prefix, from 'policy list'")
+    p.add_argument("answer", nargs="?",
+                   help="answer text (answer) / canonical policy id (merge)")
     p.add_argument("--index", type=int, default=1,
                    help="which open question to answer — the Q number shown by "
                         "'policy list' (default 1)")
+    p.add_argument("--reason", help="why (retire: required)")
+    p.add_argument("--aspect", help="convert: style aspect for the new element")
+    p.add_argument("--statement", help="convert: reworded statement "
+                                       "(default: the policy statement)")
+    p.add_argument("--guide", help="convert: owning style guide name")
+    p.add_argument("--file", help="convert: file for a file-local element")
+    p.add_argument("--notes", help="convert: free-text notes (inspect/avoid hints)")
     p.set_defaults(func=cmd_policy)
 
     p = sub.add_parser(
@@ -2359,6 +2401,13 @@ def main(argv: list[str] | None = None) -> None:
         args.id = args.statement
     if args.command == "policy" and args.action == "answer" and not (args.id and args.answer):
         sys.exit("usage: policy answer <id-prefix> \"answer text\"")
+    if args.command == "policy" and args.action == "retire" and not (args.id and args.reason):
+        sys.exit('usage: policy retire <id-prefix> --reason "why"')
+    if args.command == "policy" and args.action == "merge" and not (args.id and args.answer):
+        sys.exit("usage: policy merge <duplicate-id-prefix> <canonical-id-prefix>")
+    if args.command == "policy" and args.action == "convert" and not (args.id and args.aspect):
+        sys.exit("usage: policy convert <id-prefix> --aspect ASPECT "
+                 "[--guide NAME | --file FILE]")
     args.func(args)
 
 

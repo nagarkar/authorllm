@@ -816,11 +816,57 @@ def get_doc_links(db: Database, manuscript: dict) -> dict:
 def list_policies(db: Database, manuscript: dict) -> list[dict]:
     rows = []
     for row in db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? ORDER BY confidence DESC",
+        "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+        "AND status != 'retired' ORDER BY confidence DESC",
         (manuscript["id"],),
     ):
         rows.append({**dict(row), "questions": loads(row["outstanding_questions"], [])})
     return rows
+
+
+def _policy_by_prefix(db: Database, manuscript: dict, prefix: str) -> dict:
+    rows = db.all(
+        "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+        "AND status != 'retired' AND id LIKE ?",
+        (manuscript["id"], f"%{prefix}%"),
+    )
+    if not rows:
+        raise LookupError(f"no live policy matching '{prefix}'")
+    if len(rows) > 1:
+        raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} matches)")
+    return dict(rows[0])
+
+
+def retire_policy(db: Database, manuscript: dict, prefix: str,
+                  reason: str) -> dict:
+    from . import policies as pol
+
+    policy = _policy_by_prefix(db, manuscript, prefix)
+    return pol.retire_policy(db, manuscript["id"], policy, reason)
+
+
+def merge_policies(db: Database, manuscript: dict, duplicate: str,
+                   canonical: str, reason: str | None = None) -> dict:
+    from . import policies as pol
+
+    dup = _policy_by_prefix(db, manuscript, duplicate)
+    canon = _policy_by_prefix(db, manuscript, canonical)
+    if dup["id"] == canon["id"]:
+        raise LookupError("duplicate and canonical are the same policy")
+    return pol.merge_policies(db, manuscript["id"], dup, canon, reason)
+
+
+def convert_policy(db: Database, manuscript: dict, prefix: str, aspect: str,
+                   statement: str | None = None, guide: str | None = None,
+                   file: str | None = None, notes: str | None = None,
+                   reason: str | None = None) -> dict:
+    from . import policies as pol
+
+    policy = _policy_by_prefix(db, manuscript, prefix)
+    element = add_style_element(
+        db, manuscript, aspect, statement or policy["statement"],
+        guide_name=guide, file=file, notes=notes)
+    return pol.convert_policy(db, manuscript["id"], policy, element, reason)
 
 
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
