@@ -189,6 +189,69 @@ the shape of each analyzer is deliberately unspecified.
   conversationally or via a keystroke triage loop (concept-triage
   pattern) when the pile is bulk.
 
+## R8 — Trigger inventory (exhaustive)
+
+"At collect" is not one command — collect is the observation choke-point
+reached from six entry points, and auditors hooked there fire from ALL of
+them identically:
+
+| Entry point | What the author did | Auditors triggered |
+|---|---|---|
+| `authorlm collect` | explicit snapshot | extraction + style (R2) + concept (R3) on the delta |
+| `authorlm doc pull <file>` | edited in Google Docs, pulled back | same — pull normalizes, writes, collects |
+| `authorlm watch` | saved a file while the watcher runs | same, auto-collect on change |
+| `authorlm shell` (open) | started an interactive session | catch-up collect, same auditors on whatever changed since last time |
+| MCP `collect_revision` | told the assistant "I saved / I wrote" | same |
+| MCP `get_briefing` / `get_guidance` | opened a conversation / asked for guidance | both catch-up-collect internally (`caught_up`), same auditors |
+| — clean round trip / no delta | nothing changed | **zero LLM calls, zero findings** (R6.2) |
+
+Episode-boundary triggers:
+
+| Entry point | Auditors triggered |
+|---|---|
+| `complete_intent` (CLI `intent complete`, or MCP) | episode analysis + jurisdiction router (R5) + policy conformance (R4) over the episode's transitions |
+| `close_session` / `session end` | closes open episodes, then same as above for each |
+| `authorlm analyze` | manual re-run for episodes the automatic path missed (e.g. no LLM configured at the time) |
+
+On-demand triggers (never implicit):
+
+| Entry point | Scope |
+|---|---|
+| `authorlm audit <file>` / MCP equivalent | one file, full text against its effective guide + graph + in-scope policies |
+| `authorlm audit --all` | whole manuscript; expected use: after attaching a guide to an uncovered file, pre-publication |
+
+## R9 — Author workflow walkthrough (normative)
+
+The auditors must fit this session shape without adding ceremony; the
+author's actions are the ones already habitual (nothing new to remember):
+
+1. **Session open** (chat or `shell`): briefing runs → catch-up collect →
+   any delta is audited (R7.1) → briefing reports: prose changes first,
+   then learning news, then **audit findings as proposals** — bounded per
+   R6.5, suppressed classes reported as counts (R4.4).
+2. **Guidance, once per session** (skill duty): policy reminders and
+   structural findings surface as direct questions; verdicts recorded
+   with reasoning verbatim. This is reinforcement channel #1.
+3. **Declare intent → write.** Writing happens in Google Docs or locally;
+   nothing audits keystrokes; nothing ever blocks a save (R7.5).
+4. **Pull / collect:** each pull triggers the delta auditors. Findings
+   queue; the assistant narrates the diff first (house rule), findings
+   second. Verdicts can be given conversationally in any wording —
+   recording them is the surface's job, not the author's.
+5. **Complete intent:** episode analysis + policy audit of the finished
+   piece; the assistant relays decisions/patterns and any conformance
+   findings; verdicts are reinforcement channel #2.
+6. **Bulk piles** go to the keystroke triage loop (`concept triage`
+   pattern) — a future `audit triage` must exist for finding piles;
+   anything the author hesitates on returns to conversation where the
+   why gets recorded.
+7. **Session close:** open episodes analyzed; learning velocity reported.
+
+Constraint restated as a requirement: the author never invokes an auditor
+in the normal loop — auditors ride existing actions (open, pull, intent
+complete, close). The only new verbs the author ever types are the
+optional on-demand audits (R8) and the triage loop (R9.6).
+
 ## Open questions
 
 1. Scoping mechanism for policies (R4.3): file/guide/manuscript, or
