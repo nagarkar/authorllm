@@ -602,6 +602,51 @@ def _ephemeral_history():
                 readline.get_current_history_length() - 1)
 
 
+@contextlib.contextmanager
+def _concept_name_completion(db: Database, mid: str):
+    """Tab-completion over live concept names and aliases, for prompts
+    that read a concept name (triage's 'alias of>'). Names contain
+    spaces, so the whole line is the completion unit; matching is
+    case-insensitive prefix. Completer state is restored on exit."""
+    try:
+        import readline
+    except ImportError:
+        yield
+        return
+
+    matches: list[str] = []
+
+    def complete(text: str, state: int):
+        if state == 0:
+            lowered = text.lower()
+            names: set[str] = set()
+            for row in db.all(
+                "SELECT name, aliases FROM concept_nodes "
+                "WHERE manuscript_id = ? AND status != 'retired'",
+                (mid,),
+            ):
+                names.add(row["name"])
+                names.update(loads(row["aliases"], []))
+            matches[:] = sorted(
+                n for n in names if n.lower().startswith(lowered))
+        return matches[state] if state < len(matches) else None
+
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    readline.set_completer(complete)
+    readline.set_completer_delims("\n")
+    if getattr(readline, "backend", "") == "editline" \
+            or "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+    try:
+        yield
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
+
+
 def _run_triage(db: Database, mid: str) -> None:
     nodes = _unconfirmed_nodes(db, mid)
     if not nodes:
@@ -667,7 +712,8 @@ def _run_triage(db: Database, mid: str) -> None:
                 break
             if choice in ("a", "alias"):
                 try:
-                    canonical_name = input("  alias of> ").strip()
+                    with _concept_name_completion(db, mid):
+                        canonical_name = input("  alias of> ").strip()
                 except EOFError:
                     canonical_name = ""
                 canonical = cg.get_concept(db, mid, canonical_name) \
