@@ -220,9 +220,13 @@ TTL, pre-warmed otherwise).
 
 **Initiation contract.** The author starts a writeup by supplying:
 1. an **outline** of the piece (any granularity; prose or bullets),
-2. at least one **opening paragraph** in their own hand — this anchors
-   voice concretely, over and above the style guide, and is the first
-   accepted beat (the model never writes the first words of a chapter),
+2. an **opening paragraph** — the author's own when they have one (it
+   anchors voice concretely, over and above the style guide, and becomes
+   the first accepted beat); when not provided — notably in revision
+   mode, where the existing accepted text already anchors the voice —
+   the model *proposes* the chapter's first words as an ordinary beat,
+   gated like any other (ratified by the author 2026-08-02, resolving
+   former open question 5),
 3. the **placement** in the manuscript: position in toc.md.
 
 **The TOC prefix defines the continuity contract.** Everything before the
@@ -291,8 +295,10 @@ bigger step-3 edit, and the loop resumes with the pulled text as L2.
 4. Mid-chapter surgery: is "defer to a revision pass" (cache-friendly)
    acceptable authorially, or must the loop support cheap mid-transcript
    edits (accepting the invalidation)?
-5. Does the opening-paragraph requirement generalize — should every
-   *section* require an author-written seed, or only the chapter?
+5. ~~Does the opening-paragraph requirement generalize?~~ **Resolved
+   2026-08-02** during the first manual trial (rebirth.md bridge): the
+   author-written seed is preferred but optional; absent one, the model
+   proposes the first words as a gated beat (see §7.2).
 6. Where does the ratified beat plan live — session-only, or as a
    first-class artifact the plan/TOC system can see (`get_plan`
    integration)?
