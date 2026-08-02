@@ -148,16 +148,20 @@ def abandon_intent(intent_id: str, reason: str | None = None,
 
 
 @mcp.tool()
-def collect_revision(manuscript: str | None = None) -> dict:
+def collect_revision(manuscript: str | None = None,
+                     verbose: bool = False) -> dict:
     """Snapshot the manuscript now: detects transitions, realizes concepts,
     runs incremental extraction (concepts, links, aliasing statements) when
     an LLM is configured, and reports the prerequisite-gap delta. Call
-    after the author says they saved/finished edits."""
+    after the author says they saved/finished edits. Compact by default
+    (gap counts + resolved/new deltas); verbose=True returns the full
+    gaps_before/gaps_after rows."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         api.ensure_session(db, ms, client_id=CONNECTION_ID)
-        return api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
+        report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
+        return report if verbose else api.compact_collect(report)
     return _guard(run)
 
 
@@ -194,29 +198,37 @@ def review_suggestion(index: int, decision: str,
 
 
 @mcp.tool()
-def get_briefing(manuscript: str | None = None) -> dict:
+def get_briefing(manuscript: str | None = None,
+                 verbose: bool = False) -> dict:
     """The session-opening learning briefing: policies strengthened or
     weakened, newly realized concepts, unconfirmed extractions, open
     proposals, inferred relationships awaiting confirmation, contradictions,
-    outstanding questions, suggested focus areas, learning velocity."""
+    outstanding questions, suggested focus areas, learning velocity.
+    Compact by default (counts + actionable projections); verbose=True
+    returns full rows."""
     def run():
         db = _db()
-        return api.get_briefing(db, _manuscript(db, manuscript),
-                                config=api.load_config(_WORKSPACE))
+        briefing = api.get_briefing(db, _manuscript(db, manuscript),
+                                    config=api.load_config(_WORKSPACE))
+        return briefing if verbose else api.compact_briefing(briefing)
     return _guard(run)
 
 
 @mcp.tool()
 def get_concepts(manuscript: str | None = None, name: str | None = None,
-                 include_all: bool = False) -> dict:
-    """The Concept Graph. With `name`, full detail for one concept (notes
-    untruncated, every live edge). include_all adds retired/rejected."""
+                 include_all: bool = False, verbose: bool = False) -> dict:
+    """The Concept Graph. With `name`, detail for one concept (notes
+    untruncated — they are the ratified definition — with compact edge
+    lines). include_all adds retired/rejected. Compact by default;
+    verbose=True returns full rows."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         if name:
-            return api.show_concept(db, ms, name)
-        return api.list_concepts(db, ms, include_all=include_all)
+            result = api.show_concept(db, ms, name)
+            return result if verbose else api.compact_show_concept(result)
+        result = api.list_concepts(db, ms, include_all=include_all)
+        return result if verbose else api.compact_concepts(result)
     return _guard(run)
 
 

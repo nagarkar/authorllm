@@ -869,6 +869,141 @@ def convert_policy(db: Database, manuscript: dict, prefix: str, aspect: str,
     return pol.convert_policy(db, manuscript["id"], policy, element, reason)
 
 
+# ---------------------------------------- compact projections (MCP surface)
+# The conversational surface pays per token; the CLI renders full rows
+# itself. These projections drop row boilerplate (version, created_at,
+# created_by, schema_version, metadata, manuscript_id) and keep what a
+# conversation can act on: names, kinds, statuses, and the ids the
+# follow-up tools need (proposal / edge resolution). Full rows remain one
+# verbose=True away.
+
+_NOTE_PREVIEW = 160
+
+
+def _preview(text: str | None) -> str | None:
+    if not text:
+        return None
+    return text if len(text) <= _NOTE_PREVIEW else text[:_NOTE_PREVIEW - 1] + "…"
+
+
+def _compact_concept(row: dict) -> dict:
+    out = {"name": row["name"], "kind": row["kind"], "status": row["status"]}
+    if row.get("introduced_in"):
+        out["introduced_in"] = row["introduced_in"]
+    notes = _preview(row.get("notes"))
+    if notes:
+        out["notes"] = notes
+    aliases = loads(row.get("aliases"), [])
+    if aliases:
+        out["aliases"] = aliases
+    return out
+
+
+def _compact_edge(edge: dict) -> dict:
+    return {"id": edge["id"],
+            "edge": f"{edge['from_name']} —{edge['relation']}→ {edge['to_name']}",
+            "status": edge["status"]}
+
+
+def _compact_gap(gap: dict) -> dict:
+    return {"edge_id": gap["edge_id"], "text": gap["text"],
+            "status": gap["status"]}
+
+
+def _compact_policy(policy: dict) -> dict:
+    return {"id": policy["id"], "statement": policy["statement"],
+            "status": policy["status"], "confidence": policy["confidence"],
+            "support": f"{policy['supporting']}+/{policy['contradicting']}-"}
+
+
+def compact_collect(report: dict) -> dict:
+    """Delta-only projection of a collect report: gap counts plus the
+    resolved/new gaps, never the full before/after lists."""
+    if "version_no" not in report:
+        return report  # {"unchanged": True} or {"staged": [...]}
+    out = {key: report[key] for key in (
+        "version_no", "checksum", "transitions", "attached_to_episode",
+        "realized", "repointed", "vanished", "new_paragraphs", "extract_hint",
+    ) if key in report}
+    out["gaps"] = {"before": len(report["gaps_before"]),
+                   "after": len(report["gaps_after"])}
+    out["gaps_resolved"] = [_compact_gap(g) for g in report["gaps_resolved"]]
+    out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
+    if "auto_analysis" in report:
+        out["auto_analysis"] = report["auto_analysis"]
+    return out
+
+
+def compact_briefing(briefing: dict) -> dict:
+    """Compact projection of the session briefing: counts + actionable
+    items, no raw rows."""
+    from collections import Counter
+
+    out = {"since": briefing["since"]}
+    if "caught_up" in briefing:
+        out["caught_up"] = briefing["caught_up"]
+    out["policy_changes"] = briefing["policy_changes"]  # built compact
+    out["new_policies"] = [_compact_policy(p) for p in briefing["new_policies"]]
+    out["realized_concepts"] = {
+        "count": len(briefing["realized_concepts"]),
+        "names": [n["name"] for n in briefing["realized_concepts"]],
+    }
+    out["unconfirmed_concepts"] = {
+        "count": len(briefing["unconfirmed_concepts"]),
+        "items": [_compact_concept(n) for n in briefing["unconfirmed_concepts"]],
+    }
+    out["proposals"] = {
+        "count": len(briefing["proposals"]),
+        "by_kind": dict(Counter(p["kind"] for p in briefing["proposals"])),
+        "items": [{"id": p["id"], "kind": p["kind"], "summary": p["summary"]}
+                  for p in briefing["proposals"]],
+    }
+    out["inferred_edges"] = {
+        "count": len(briefing["inferred_edges"]),
+        "items": [_compact_edge(e) for e in briefing["inferred_edges"]],
+    }
+    out["contradictions"] = [
+        {"suggestion": c["suggestion"], "explanation": c["explanation"]}
+        for c in briefing["contradictions"]
+    ]
+    out["outstanding_questions"] = briefing["outstanding_questions"]
+    out["active_intents"] = [
+        {"id": i["id"], "statement": i["statement"], "status": i["status"]}
+        for i in briefing["active_intents"]
+    ]
+    out["focus_areas"] = [
+        {"name": f["node"]["name"],
+         "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
+        for f in briefing["focus_areas"]
+    ]
+    out["toc_unlisted"] = briefing["toc_unlisted"]
+    out["learning_velocity"] = briefing["learning_velocity"]
+    return out
+
+
+def compact_concepts(result: dict) -> dict:
+    """Compact projection of the whole-graph listing."""
+    return {
+        "node_count": len(result["nodes"]),
+        "nodes": [_compact_concept(dict(n)) for n in result["nodes"]],
+        "edge_count": len(result["edges"]),
+        "edges": [_compact_edge(e) for e in result["edges"]],
+    }
+
+
+def compact_show_concept(result: dict) -> dict:
+    """Single-concept detail: the node keeps full notes (they are the
+    ratified definition); only row boilerplate and edge rows compact."""
+    node = dict(result["node"])
+    keep = {key: node[key]
+            for key in ("id", "name", "kind", "status", "introduced_in", "notes")
+            if node.get(key) is not None}
+    aliases = loads(node.get("aliases"), [])
+    if aliases:
+        keep["aliases"] = aliases
+    return {"node": keep, "edges": [_compact_edge(e) for e in result["edges"]]}
+
+
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
                    edges_only: bool = False,

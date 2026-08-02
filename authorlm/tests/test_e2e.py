@@ -248,6 +248,41 @@ def scenario_editorial_loop(root: Path) -> None:
     check("retired statement re-seeds as revival proposal, not a new policy",
           reseed.get("kind") == "revival_proposal", str(reseed))
 
+    # --- compact MCP projections: delta-only, no row boilerplate ---
+    from authorlm import api as _capi
+    _cms = _capi.get_manuscript(_cdb, "book")
+    compact = _capi.compact_briefing(_capi.get_briefing(_cdb, _cms))
+    blob = json.dumps(compact)
+    check("compact briefing drops row boilerplate",
+          "created_by" not in blob and "schema_version" not in blob, blob[:400])
+    check("compact briefing carries counts",
+          isinstance(compact["unconfirmed_concepts"]["count"], int)
+          and isinstance(compact["proposals"]["count"], int)
+          and isinstance(compact["inferred_edges"]["count"], int), str(compact)[:400])
+    gap = {"edge_id": "ce-x", "relation": "depends_on", "status": "declared",
+           "from_name": "A", "to_name": "B", "first": "A", "second": "B",
+           "text": "'B' first appears before its prerequisite 'A' is introduced."}
+    synth = {"version_no": 1, "checksum": "x", "transitions": [],
+             "attached_to_episode": False, "realized": [], "repointed": [],
+             "vanished": [], "new_paragraphs": 0, "extract_hint": False,
+             "gaps_before": [gap], "gaps_after": [], "gaps_resolved": [gap],
+             "gaps_new": []}
+    ccollect = _capi.compact_collect(synth)
+    check("compact collect swaps before/after lists for counts",
+          "gaps_before" not in ccollect
+          and ccollect["gaps"] == {"before": 1, "after": 0}
+          and ccollect["gaps_resolved"] == [
+              {"edge_id": "ce-x", "text": gap["text"], "status": "declared"}],
+          str(ccollect))
+    check("compact collect passes non-version reports through",
+          _capi.compact_collect({"unchanged": True}) == {"unchanged": True})
+    cgraph = _capi.compact_concepts(_capi.list_concepts(_cdb, _cms))
+    check("compact concept listing projects to name/kind/status",
+          cgraph["node_count"] == len(cgraph["nodes"])
+          and all(set(n) <= {"name", "kind", "status", "introduced_in",
+                             "notes", "aliases"} for n in cgraph["nodes"]),
+          str(cgraph)[:400])
+
     # Inferred edges now come only from the extractor — plant its style of
     # hypothesis directly so confirmation and edge triage stay covered.
     from authorlm.db import Database as _IDB, ko_fields as _iko
