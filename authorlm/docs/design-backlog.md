@@ -60,6 +60,23 @@ stores full snapshots; `authorlm diff` covers it) and growth-curve
 reports (never asked for twice). Ratified 2026-07-31; build when the
 churn annoys again.
 
+## Autoregressive paragraph-level co-writing loop
+Full design in `autoregressive-writing-design.md` (ratified 2026-08-01).
+Beat-by-beat chapter writing: author supplies outline + ≥1 opening
+paragraph + TOC placement; system expands to a ratified beat plan
+(DOC-style leaf beats), then proposes one unit at a time conditioned on
+style law + Concept Graph + validated policies + accepted text, with the
+author gating every beat and each verdict/rewrite captured as evidence
+(beat-level granularity: ~15 recorded judgments per chapter vs 1 for a
+one-shot draft). Economics rest on Common Core P2 via prompt caching:
+layered payload ordered by volatility, breakpoints at law/frame/tail,
+1h TTL on stable layers — ~85% saving on re-read tokens across a
+30-beat chapter. Adopts Re³'s recursive payload assembly and DOC's
+detailed outliner; replaces their controllers/rerankers with the
+auditors and the author. Build after the auditors (they are the loop's
+inner critics); the manual conversational version of the loop is
+available today on request.
+
 ## Style drift detector (style v2)
 The collect-hook analyzer the style system was designed around and then
 deliberately deferred: detect (a) new style elements the author's prose
