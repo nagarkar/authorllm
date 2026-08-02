@@ -302,3 +302,39 @@ bigger step-3 edit, and the loop resumes with the pulled text as L2.
 6. Where does the ratified beat plan live — session-only, or as a
    first-class artifact the plan/TOC system can see (`get_plan`
    integration)?
+
+## 10. First manual trial — findings (2026-08-02)
+
+Trial: the rebirth.md seam bridge (intent di-d82b3c3163c0, episode
+ep-303a8c13ea82). Four beats proposed, four accepted unmodified; one new
+concept ('Life is a trajectory') realized mid-loop by the collect.
+Findings against the open questions:
+
+- **Q3 (k-candidates):** no data pressure — k=1 sufficed 4/4 in revision
+  mode, where the existing text tightly constrains the target. Expect k
+  to matter for fresh drafting, not seams.
+- **Q4 (mid-chapter surgery):** the entire trial WAS mid-chapter surgery
+  (edits at the opening, middle, and close of an existing essay). For
+  the built version this means **revision mode cannot ride the
+  append-only rolling transcript** — its beats target arbitrary
+  positions, so either each revision beat re-assembles the payload
+  (fresh L2 from the file, no conversation-cache accrual) or the loop
+  accepts tail invalidation per beat. Revision mode and fresh-drafting
+  mode have different cache profiles; design them as two modes of one
+  loop.
+- **Q6 (plan artifact):** conversational ratification was sufficient at
+  4-beat scale; a persisted plan artifact is a >~8-beat concern.
+- **Q2 (self-check):** implicit same-call checking only; never
+  adversarially tested. Still open.
+- **Q1 (tail window):** no data — manual mode holds full context.
+- **Operational, not in the original design:** (a) initiation must gate
+  on Google-Docs checkout state — the trial hit an expired OAuth token
+  and a checked-out file before the first append; pull-and-clear belongs
+  in step 0. (b) Per-beat collection should use the compact path — the
+  MCP collect_revision dump (~68KB with gaps_before/after) is exactly
+  the R6.3 anti-pattern; the CLI collect's five-line summary is the
+  right per-beat shape. (c) Beat verdicts had no recording channel of
+  their own (review_suggestion only covers guidance batches) — the
+  built version needs beat proposals registered as reviewable items so
+  accepts/rejects feed policy reinforcement directly, not only via
+  episode analysis at completion.
