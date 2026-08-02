@@ -27,6 +27,13 @@ surface is to keep that evidence flowing while the author just talks.
 3. When they react to a suggestion — in any wording — → `review_suggestion`.
    **Record their actual reasoning verbatim as `explanation`.** An explained
    rejection is the highest-value evidence the system can receive.
+   Bare verdicts: ask for the why exactly once. When a verdict arrives
+   with no reason — "accept", "does apply", a thumbs-up — ask one short,
+   gentle question ("anything behind that, or shall I just record it?")
+   before recording. If the author declines or replies with another bare
+   verdict, record it as-is and never re-ask for that item or for later
+   items in the same batch. Never ask during bulk triage. Explained
+   accepts are evidence too — that is why the single ask is worth it.
 4. When they save edits / say they wrote something → `collect_revision`;
    translate the result (realized concepts, gap delta) into one natural
    sentence.
@@ -117,6 +124,15 @@ their reason verbatim.
   prose changes from formatting churn — BEFORE the learning summary.
   Surface open proposals and outstanding questions as questions to the
   author.
+- Session hygiene: at conversation open, check the active session's age
+  (get_status shows the session id; the briefing's `since` shows how far
+  back it reaches). If the session was opened on a prior day, recommend —
+  ONCE, before any new work — closing it (`close_session`) and starting
+  fresh, and say why in one sentence: policy evidence must come from
+  independent sessions (a policy is reviewable once per session), so a
+  week-long session structurally caps candidate promotion, and learning-
+  velocity reports only fire at session close. Never close it unprompted;
+  if the author waves it off, drop it for the rest of the conversation.
 - Surface `list_proposals` items when present — they are conflicts between
   new writing and settled knowledge; the author must decide, you must ask.
 - Never edit conceptual manuscript content unless explicitly asked; the
