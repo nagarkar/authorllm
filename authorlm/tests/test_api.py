@@ -122,69 +122,180 @@ def main_test() -> None:
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
 
-        class StubFiles:
-            def __init__(self):
-                self.docs = {}
-                self.counter = 0
+        # In-memory Drive + Docs fake for the tabbed master-Doc model:
+        # one object serves as both `service` and `docs_service`. Master
+        # Doc state is tabs of literal markdown; the temp-import Doc is
+        # modeled as one plain-text paragraph per line, and export renders
+        # each tab under a '# **<title>**' heading — the same shape
+        # split_tabbed_export expects from the real API.
+        from authorlm.gdocs import FOLDER_MIME, doc_status
+
+        class FakeRequest:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def execute(self):
+                return self._payload
+
+        class FakeFiles:
+            def __init__(self, state):
+                self.state = state
 
             def create(self, body=None, media_body=None, fields=None):
-                self.counter += 1
-                doc_id = f"doc-{self.counter}"
-                self.docs[doc_id] = media_body
-                return type("R", (), {"execute": lambda s, d=doc_id: {"id": d}})()
+                self.state["counter"] += 1
+                fid = f"doc-{self.state['counter']}"
+                if media_body is not None:  # markdown import (temp/export)
+                    self.state["uploads"][fid] = media_body.getbytes(
+                        0, media_body.size()).decode("utf-8")
+                elif (body or {}).get("mimeType") == FOLDER_MIME:
+                    self.state["folders"].append(fid)
+                else:  # a native Doc, born with the blank default tab
+                    self.state["tab_counter"] += 1
+                    tab_id = f"tab-{self.state['tab_counter']}"
+                    self.state["docs"][fid] = [
+                        {"id": tab_id, "title": "Tab 1", "text": ""}]
+                return FakeRequest({"id": fid})
 
             def update(self, fileId=None, media_body=None):
-                self.docs[fileId] = media_body
-                return type("R", (), {"execute": lambda s: {}})()
+                self.state["uploads"][fileId] = media_body.getbytes(
+                    0, media_body.size()).decode("utf-8")
+                return FakeRequest({})
 
-            def __init_export__(self):
-                pass
-
-            export_payload = b"# Title\n\nEdited in Docs \\- with escapes.\r\n"
+            def delete(self, fileId=None):
+                self.state["uploads"].pop(fileId, None)
+                return FakeRequest({})
 
             def export(self, fileId=None, mimeType=None):
-                payload = self.export_payload
-                return type("R", (), {"execute": lambda s: payload})()
+                whole = "\n".join(f"# **{t['title']}**\n\n{t['text']}"
+                                  for t in self.state["docs"][fileId])
+                return FakeRequest(whole.encode("utf-8"))
 
-        class StubDrive:
+        class FakeDocuments:
+            def __init__(self, state):
+                self.state = state
+
+            def get(self, documentId=None, includeTabsContent=None):
+                if documentId in self.state["uploads"]:
+                    content = [{"paragraph": {"elements": [
+                        {"textRun": {"content": line + "\n"}}]}}
+                        for line in
+                        self.state["uploads"][documentId].splitlines()]
+                    return FakeRequest({"body": {"content": content}})
+                tabs = [{"tabProperties": {"tabId": t["id"],
+                                           "title": t["title"]},
+                         "documentTab": {"body": {"content":
+                             [{"endIndex": len(t["text"]) + 1}]
+                             if t["text"] else []}}}
+                        for t in self.state["docs"][documentId]]
+                return FakeRequest({"tabs": tabs})
+
+            def batchUpdate(self, documentId=None, body=None):
+                tabs = self.state["docs"][documentId]
+
+                def tab(tid):
+                    return next(t for t in tabs if t["id"] == tid)
+
+                replies = []
+                for req in (body or {}).get("requests", []):
+                    if "addDocumentTab" in req:
+                        self.state["tab_counter"] += 1
+                        new = {"id": f"tab-{self.state['tab_counter']}",
+                               "title": req["addDocumentTab"]
+                               ["tabProperties"]["title"], "text": ""}
+                        tabs.append(new)
+                        replies.append({"addDocumentTab": {
+                            "tabProperties": {"tabId": new["id"]}}})
+                        continue
+                    replies.append({})
+                    if "deleteTab" in req:
+                        tabs.remove(tab(req["deleteTab"]["tabId"]))
+                    elif "updateDocumentTabProperties" in req:
+                        props = req["updateDocumentTabProperties"][
+                            "tabProperties"]
+                        moved = tab(props["tabId"])
+                        tabs.remove(moved)
+                        tabs.insert(props["index"], moved)
+                    elif "deleteContentRange" in req:
+                        tab(req["deleteContentRange"]["range"]
+                            ["tabId"])["text"] = ""
+                    elif "insertText" in req:
+                        tab(req["insertText"]["location"]["tabId"])[
+                            "text"] += req["insertText"]["text"]
+                return FakeRequest({"replies": replies})
+
+        class FakeGoogle:
             def __init__(self):
-                self._files = StubFiles()
+                self.state = {"counter": 0, "tab_counter": 0,
+                              "folders": [], "docs": {}, "uploads": {}}
+                self._files = FakeFiles(self.state)
+                self._documents = FakeDocuments(self.state)
 
             def files(self):
                 return self._files
 
-        stub = StubDrive()
-        pushed = push_doc(db, manuscript, "01-choice.md", service=stub)
-        check("push creates a per-manuscript folder, then the Doc",
-              pushed["created"] and pushed["doc_id"] == "doc-2")
+            def documents(self):
+                return self._documents
+
+            def set_tab(self, title, text):  # simulate an edit in Docs
+                for tabs in self.state["docs"].values():
+                    for t in tabs:
+                        if t["title"] == title:
+                            t["text"] = text
+
+        stub = FakeGoogle()
+        pushed = push_doc(db, manuscript, "01-choice.md",
+                          service=stub, docs_service=stub)
+        check("push creates folder, master Doc, and the file's tab",
+              pushed["created"] and pushed["doc_id"] == "doc-2"
+              and "tab=" in pushed["url"])
         manuscript = api.get_manuscript(db)  # refresh metadata
-        from authorlm.gdocs import doc_status
-        check("push mapping persisted with checkout and folder id",
-              doc_status(db, manuscript)["01-choice.md"]["checked_out"] is True
-              and doc_status(db, manuscript)["_folder_id"] == "doc-1")
+        status = doc_status(db, manuscript)
+        check("push mapping persisted: checkout, folder, master, tab id",
+              status["01-choice.md"]["checked_out"] is True
+              and status["01-choice.md"]["tab_id"]
+              and status["_folder_id"] == "doc-1"
+              and status["_master_id"] == "doc-2")
+        master = stub.state["docs"]["doc-2"]
+        check("master carries one tab per file plus the manifest, "
+              "default tab retired",
+              [t["title"] for t in master] == ["01-choice.md", "manifest"])
+        check("push transplants the file's markdown into its tab",
+              master[0]["text"] == (ms / "01-choice.md").read_text()
+              and not stub.state["uploads"])  # temp import Doc deleted
+        check("manifest tab names the manuscript and doc incarnation",
+              "Manuscript: book" in master[1]["text"]
+              and "Doc version: 1" in master[1]["text"])
+        stub.set_tab("01-choice.md",
+                     "# Title\n\nEdited in Docs \\- with escapes.\n")
         pulled = pull_doc(db, manuscript, "01-choice.md", service=stub)
         check("pull writes normalized export and clears checkout",
-              pulled["changed"]
+              pulled["changed"] == ["01-choice.md"]
               and (ms / "01-choice.md").read_text()
               == "# Title\n\nEdited in Docs - with escapes.\n"
-              and doc_status(db, manuscript)["01-choice.md"]["checked_out"] is False)
-        pushed2 = push_doc(db, manuscript, "01-choice.md", service=stub)
-        check("second push updates the same Doc (no new folder)",
+              and doc_status(db, manuscript)["01-choice.md"]["checked_out"]
+              is False)
+        pushed2 = push_doc(db, manuscript, "01-choice.md",
+                           service=stub, docs_service=stub)
+        check("second push reuses the master Doc (no new folder or Doc)",
               not pushed2["created"] and pushed2["doc_id"] == "doc-2"
-              and stub._files.counter == 2)
+              and stub.state["folders"] == ["doc-1"]
+              and list(stub.state["docs"]) == ["doc-2"])
 
-        # Two-sided edit: local changed since push AND Doc differs → conflict.
+        # Two-sided edit: local changed since push AND the tab differs
+        # from what was pushed → conflict, skipped unless forced.
         (ms / "01-choice.md").write_text("# Title\n\nLocal divergence.\n")
         manuscript = api.get_manuscript(db)
-        try:
-            pull_doc(db, manuscript, "01-choice.md", service=stub)
-            check("two-sided edits raise a conflict", False)
-        except ValueError as err:
-            check("two-sided edits raise a conflict", "conflict" in str(err))
-        forced = pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
+        stub.set_tab("01-choice.md", "# Title\n\nEdited in Docs again.\n")
+        report = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("two-sided edits conflict, file untouched",
+              report["conflicts"] == ["01-choice.md"]
+              and "Local divergence" in (ms / "01-choice.md").read_text(),
+              str(report))
+        forced = pull_doc(db, manuscript, "01-choice.md", service=stub,
+                          force=True)
         check("pull --force takes the Doc's version",
-              forced["changed"]
-              and "Edited in Docs" in (ms / "01-choice.md").read_text())
+              forced["changed"] == ["01-choice.md"]
+              and "Edited in Docs again" in (ms / "01-choice.md").read_text())
 
         # --- session-start reconciliation: all four outcomes ---
         from authorlm.gdocs import reconcile
@@ -197,21 +308,25 @@ def main_test() -> None:
 
         (ms / "01-choice.md").write_text("# Title\n\nLocal-only progress.\n")
         report = reconcile(db, manuscript, stub)
+        check("reconcile: local-only change without a Docs service is pending",
+              report["pending_push"] == ["01-choice.md"], str(report))
+        report = reconcile(db, manuscript, stub, docs_service=stub)
         check("reconcile: only-local change auto-pushes",
-              report["pushed"] == ["01-choice.md"], str(report))
-        # Drive now reflects the push; the next reconcile sees sync.
-        stub._files.export_payload = b"# Title\n\nLocal-only progress.\n"
+              report["pushed"] == ["01-choice.md"]
+              and stub.state["docs"]["doc-2"][0]["text"]
+              == "# Title\n\nLocal-only progress.\n", str(report))
+        # The tab now reflects the push; the next reconcile sees sync.
         report = reconcile(db, manuscript, stub)
         check("reconcile: after push, next start is in sync",
               report["in_sync"] == ["01-choice.md"], str(report))
-        stub._files.export_payload = b"# Title\n\nDoc-only revision now.\n"
+        stub.set_tab("01-choice.md", "# Title\n\nDoc-only revision now.\n")
         report = reconcile(db, manuscript, stub)
         check("reconcile: only-Doc change auto-pulls",
               report["pulled"] == ["01-choice.md"]
               and "Doc-only revision" in (ms / "01-choice.md").read_text(),
               str(report))
         (ms / "01-choice.md").write_text("# Title\n\nBoth sides now differ.\n")
-        stub._files.export_payload = b"# Title\n\nDoc went another way.\n"
+        stub.set_tab("01-choice.md", "# Title\n\nDoc went another way.\n")
         report = reconcile(db, manuscript, stub)
         check("reconcile: two-sided edits conflict, files untouched",
               report["conflicts"] == ["01-choice.md"]
@@ -236,12 +351,12 @@ def main_test() -> None:
 
         exported = export_manuscript(db, manuscript, service=stub)
         check("export creates the manuscript Doc in the existing folder",
-              exported["created"] and exported["doc_id"] == "doc-3"
-              and stub._files.counter == 3)
+              exported["created"] and exported["doc_id"] is not None
+              and stub.state["folders"] == ["doc-1"])
         exported2 = export_manuscript(db, manuscript, service=stub)
         check("re-export updates the same Doc (no new one)",
-              not exported2["created"] and exported2["doc_id"] == "doc-3"
-              and stub._files.counter == 3)
+              not exported2["created"]
+              and exported2["doc_id"] == exported["doc_id"])
 
         # A Doc deleted by hand in Drive is transient — recreated on export.
         class Gone(Exception):
@@ -252,7 +367,8 @@ def main_test() -> None:
         exported3 = export_manuscript(db, manuscript, service=stub)
         stub._files.update = original_update
         check("a hand-deleted export Doc is recreated",
-              exported3["created"] and exported3["doc_id"] == "doc-4")
+              exported3["created"]
+              and exported3["doc_id"] != exported["doc_id"])
 
         titled = export_manuscript(db, manuscript, service=None, title="My Book")
         check("retitled export replaces the stale local file",
@@ -275,7 +391,7 @@ def main_test() -> None:
             "The mutable we name the realm of qualities.\n\n"
             "When ye discern difference in position and direction, ye name it Space.\n"
         )}
-        gap_names = {"n-space": "Space", "n-realm": "Realm of Qualities"}
+        gap_names = {"n-space": ["Space"], "n-realm": ["Realm of Qualities"]}
         mentions = _first_mentions(gap_files, gap_names)
         check("casual word use does not count as a concept mention",
               mentions["n-realm"] < mentions["n-space"],
@@ -285,11 +401,11 @@ def main_test() -> None:
         check("a concept only ever used casually has no first mention",
               "n-space" not in _first_mentions(
                   {"01.md": "They wandered through time and space.\n"},
-                  {"n-space": "Space"}))
+                  {"n-space": ["Space"]}))
         heading_pos = _first_mentions(
             {"01.md": "## Discernment\n\nVirtue is chosen for effectiveness.\n",
              "02.md": "Discernment is the measure of distinctions.\n"},
-            {"n-disc": "Discernment"})
+            {"n-disc": ["Discernment"]})
         check("capitalization from headings and sentence starts counts",
               "n-disc" in heading_pos and heading_pos["n-disc"] < 20)
         from authorlm.guidance import PREREQUISITE_FIRST
@@ -388,7 +504,10 @@ def main_test() -> None:
             "diff_versions", "list_policies", "close_session",
             "extract_concepts", "get_plan", "get_doc_links",
             "file_improvement", "list_improvements", "improvement_bundle",
-            "resolve_improvement",
+            "resolve_improvement", "alias_concept", "merge_concepts",
+            "retire_policy", "merge_policies", "convert_policy_to_style",
+            "define_style_guide", "add_style_element", "retire_style_element",
+            "attach_style", "get_style",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,

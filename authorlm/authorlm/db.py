@@ -198,6 +198,38 @@ CREATE TABLE IF NOT EXISTS evidence (
     weight TEXT NOT NULL DEFAULT 'medium'
 );
 
+CREATE TABLE IF NOT EXISTS doc_comments (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    comment_id TEXT NOT NULL,     -- Drive comment id (dedupe + resolve handle)
+    file TEXT,                    -- relpath; NULL when the quote match is ambiguous
+    location TEXT,                -- file#nearest-heading (transition convention)
+    quoted TEXT,                  -- the anchor text the comment was attached to
+    content TEXT NOT NULL,        -- the author's words, verbatim
+    author TEXT,
+    comment_created TEXT,         -- Doc-side timestamp
+    replies TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL DEFAULT 'ingested', -- ingested | resolved
+    UNIQUE (manuscript_id, comment_id)
+);
+
+CREATE TABLE IF NOT EXISTS writeups (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    intent_id TEXT NOT NULL,      -- declared_intents.id; N writeups per intent
+    file TEXT NOT NULL,           -- relpath; exactly one file per writeup
+    mode TEXT NOT NULL DEFAULT 'fresh',     -- fresh (revision mode not built)
+    status TEXT NOT NULL DEFAULT 'active',  -- active | completed | abandoned
+    source_version_id TEXT,       -- manuscript_versions.id pinned at start;
+                                  -- raw material for drafting, restore target
+                                  -- for abandon
+    plan TEXT NOT NULL DEFAULT '[]',        -- JSON: ordered beat specs, each
+                                  -- carrying a stable monotonic n (never
+                                  -- reused across replans)
+    cursor INTEGER NOT NULL DEFAULT 0,      -- index into plan of the current beat
+    learnings TEXT NOT NULL DEFAULT '[]'    -- JSON: distilled session lessons
+);
+
 CREATE TABLE IF NOT EXISTS improvement_tasks (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT,           -- provenance only; NULL = tool-global defect

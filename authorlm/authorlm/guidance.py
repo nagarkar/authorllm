@@ -20,6 +20,16 @@ MAX_SUGGESTIONS = 6
 INTENT_KINDS = {"bridge", "policy_reminder"}       # generated from your intent
 STRUCTURAL_KINDS = {"prerequisite", "objection"}   # standing manuscript findings
 
+# Every kind generate_guidance() itself produces. guidance_history also holds
+# rows of other kinds (e.g. 'beat' proposals from the write loop) that share
+# the review pathway but have their own lifecycle — queries that manage
+# guidance batches must filter to this allowlist, never to "everything".
+GUIDANCE_KINDS = frozenset(
+    {"bridge", "prerequisite", "definition", "objection", "policy_reminder",
+     "focus", "abstention"}
+)
+_GUIDANCE_KINDS_SQL = ", ".join("?" for _ in GUIDANCE_KINDS)
+
 
 def intent_coverage_notes(db: Database, manuscript: dict) -> list[str]:
     """Explain when an active intent can't drive suggestions: it names no
@@ -133,11 +143,14 @@ def generate_guidance(
     mid = manuscript["id"]
     batch_id = new_id("gb")
 
-    # Newly generated guidance supersedes unreviewed proposals in this session.
+    # Newly generated guidance supersedes unreviewed proposals in this
+    # session. Guidance kinds only: a pending 'beat' proposal from the write
+    # loop must survive a mid-writeup guidance run.
     db.conn.execute(
         "UPDATE guidance_history SET state = 'superseded' "
-        "WHERE session_id = ? AND state = 'proposed'",
-        (session["id"],),
+        f"WHERE session_id = ? AND state = 'proposed' "
+        f"AND kind IN ({_GUIDANCE_KINDS_SQL})",
+        (session["id"], *GUIDANCE_KINDS),
     )
     db.conn.commit()
 

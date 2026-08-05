@@ -27,7 +27,9 @@ from . import sessions as ses
 from .analysis import analyze_pending, find_precedents
 from .briefing import build_briefing
 from .db import Database, ko_fields, loads
-from .guidance import compute_prerequisite_gaps, generate_guidance, intent_coverage_notes
+from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
+                       compute_prerequisite_gaps, generate_guidance,
+                       intent_coverage_notes)
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions, massive_deletions
 
@@ -41,6 +43,9 @@ __all__ = [
     "add_concept", "link_concepts", "confirm_concept", "retire_concept",
     "confirm_edge", "reject_edge", "list_proposals", "resolve_proposal",
     "list_policies", "run_extraction", "get_plan", "get_doc_links",
+    "write_start", "write_plan", "write_status", "write_propose",
+    "write_accept", "write_reject", "write_learn", "write_complete",
+    "write_abandon", "get_profile",
 ]
 
 
@@ -399,10 +404,13 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
            llm: LLMClient | None = None) -> dict:
     if decision not in ("accepted", "rejected", "modified", "deferred"):
         raise ValueError(f"unknown decision '{decision}'")
+    # Guidance kinds only: 'beat' rows from the write loop live in this
+    # table too, and an interleaved beat must not hijack "the latest batch".
     latest_batch = db.one(
-        "SELECT batch_id FROM guidance_history WHERE session_id = ? "
-        "ORDER BY created_at DESC LIMIT 1",
-        (session["id"],),
+        f"SELECT batch_id FROM guidance_history WHERE session_id = ? "
+        f"AND kind IN ({_GUIDANCE_KINDS_SQL}) "
+        f"ORDER BY created_at DESC LIMIT 1",
+        (session["id"], *GUIDANCE_KINDS),
     )
     if not latest_batch:
         raise LookupError("no guidance generated in this session — run guide first")
@@ -430,6 +438,373 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
         episode["id"] if episode else None, llm=llm,
     )
     return {"guidance": dict(guidance), **result}
+
+
+# ------------------------------------------------------------- write loop
+#
+# The beat-by-beat co-writing loop (docs/autoregressive-writing-design.md).
+# The author's collaborator (the skill) drafts; these verbs are the
+# deterministic state machine and evidence channel: beat proposals are
+# guidance_history rows (kind='beat', batch_id=writeup id, batch_index=the
+# beat's stable n) so verdicts flow through record_review — evidence,
+# policy reinforcement, and explanation-seeding — unchanged.
+
+BEAT_KIND = "beat"
+
+
+def _resolve_relpath(manuscript: dict, query: str) -> str:
+    from .docs import _match
+    from .revisions import iter_manuscript_paths
+
+    candidates = iter_manuscript_paths(Path(manuscript["path"]))
+    path = _match(candidates, query)
+    return str(path.relative_to(Path(manuscript["path"])))
+
+
+def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
+    """The active writeup (or one matched by id prefix)."""
+    if prefix:
+        rows = db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? AND id LIKE ?",
+            (manuscript["id"], f"%{prefix}%"),
+        )
+        if not rows:
+            raise LookupError(f"no writeup matching '{prefix}'")
+        if len(rows) > 1:
+            raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} writeups)")
+        return dict(rows[0])
+    rows = db.all(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
+        (manuscript["id"],),
+    )
+    if not rows:
+        raise LookupError("no active writeup — start one: write start <file> --intent <id>")
+    if len(rows) > 1:
+        files = ", ".join(r["file"] for r in rows)
+        raise LookupError(f"multiple active writeups ({files}) — pass --writeup")
+    return dict(rows[0])
+
+
+def _checkout_gate(db: Database, manuscript: dict, relpath: str) -> None:
+    """The Google Doc is the working copy while a file is checked out —
+    local writes during that window would be discarded by the next pull."""
+    from .gdocs import doc_status
+
+    entry = doc_status(db, manuscript).get(relpath)
+    if isinstance(entry, dict) and entry.get("checked_out"):
+        raise ValueError(
+            f"{relpath} is checked out to Google Docs — the Doc is the "
+            f"working copy. Run 'doc pull {relpath}' first."
+        )
+
+
+def _current_beat(writeup: dict) -> dict:
+    plan = loads(writeup["plan"], [])
+    if not plan:
+        raise LookupError("no ratified beat plan — set one: write plan (JSON on stdin)")
+    if writeup["cursor"] >= len(plan):
+        raise LookupError("all planned beats are done — write complete (or "
+                          "extend the plan: write plan --replace)")
+    return plan[writeup["cursor"]]
+
+
+def _beat_proposal(db: Database, writeup: dict, n: int):
+    return db.one(
+        "SELECT * FROM guidance_history WHERE batch_id = ? AND batch_index = ? "
+        "AND state = 'proposed' ORDER BY created_at DESC LIMIT 1",
+        (writeup["id"], n),
+    )
+
+
+def _beat_tallies(db: Database, writeup: dict) -> dict:
+    rows = db.all(
+        "SELECT state, COUNT(*) AS n FROM guidance_history "
+        "WHERE batch_id = ? GROUP BY state",
+        (writeup["id"],),
+    )
+    return {r["state"]: r["n"] for r in rows}
+
+
+def write_start(db: Database, manuscript: dict, config: dict,
+                file: str, intent_prefix: str) -> dict:
+    """Initiate a fresh-drafting writeup: gate, pin the current version as
+    raw material, truncate the file, and collect the honest 'removed'
+    transition. The old text is never at risk — it lives in the pinned
+    version and restores on abandon."""
+    mid = manuscript["id"]
+    relpath = _resolve_relpath(manuscript, file)
+    intent = _find_intent(db, manuscript, intent_prefix)
+    if intent["status"] != "active":
+        raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
+    attachment = db.one(
+        "SELECT * FROM style_attachments WHERE manuscript_id = ? AND file = ?",
+        (mid, relpath),
+    )
+    if not attachment:
+        raise ValueError(
+            f"{relpath} has no attached style guide — the effective guide is "
+            f"the drafting law. Attach one first: style attach {relpath} <guide>."
+        )
+    _checkout_gate(db, manuscript, relpath)
+    existing = db.one(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active'",
+        (mid, relpath),
+    )
+    if existing:
+        raise ValueError(f"writeup {existing['id']} is already active on {relpath}")
+
+    ensure_session(db, manuscript)
+    # Two collects: the first captures any uncollected edits so the pinned
+    # source version is complete; the second records the truncation.
+    collect(db, manuscript, config, source="write-start")
+    source = db.one(
+        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+        "ORDER BY version_no DESC LIMIT 1",
+        (mid,),
+    )
+    if source is None:
+        raise LookupError("no collected version to pin — is the manuscript empty?")
+    (Path(manuscript["path"]) / relpath).write_text("", encoding="utf-8")
+    collect(db, manuscript, config, source="write-start")
+
+    row = ko_fields("wu")
+    row.update(
+        manuscript_id=mid, intent_id=intent["id"], file=relpath, mode="fresh",
+        status="active", source_version_id=source["id"], plan="[]",
+        cursor=0, learnings="[]",
+        metadata=json.dumps({"next_n": 1}),
+    )
+    db.insert("writeups", row)
+    source_text = loads(source["files"], {}).get(relpath, "")
+    return {"writeup": row, "intent": intent,
+            "source_version_no": source["version_no"],
+            "source_chars": len(source_text)}
+
+
+def write_plan(db: Database, manuscript: dict, beats: list,
+               prefix: str | None = None, replace: bool = False) -> dict:
+    """Persist the ratified beat plan (ratification itself is
+    conversational). Each spec gets a stable monotonic n, never reused, so
+    replanning cannot corrupt recorded verdicts. With replace, beats before
+    the cursor are kept and the remainder is replaced."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    if not isinstance(beats, list) or not beats:
+        raise ValueError("expected a non-empty JSON array of beat specs")
+    plan = loads(writeup["plan"], [])
+    if plan and not replace:
+        raise ValueError("a plan exists — pass --replace to amend the "
+                         "remaining (unwritten) beats")
+    meta = loads(writeup["metadata"], {})
+    next_n = meta.get("next_n", 1)
+    fresh = []
+    for spec in beats:
+        if not isinstance(spec, dict):
+            raise ValueError("each beat spec must be a JSON object "
+                             '(e.g. {"role": "opener", "concepts": [...], '
+                             '"budget": 120, "notes": "..."})')
+        beat = {k: v for k, v in spec.items() if k != "n"}
+        beat["n"] = next_n
+        next_n += 1
+        fresh.append(beat)
+    kept = plan[:writeup["cursor"]] if replace else []
+    new_plan = kept + fresh
+    meta["next_n"] = next_n
+    db.update("writeups", writeup["id"],
+              {"plan": json.dumps(new_plan), "metadata": json.dumps(meta)})
+    return {"writeup_id": writeup["id"], "kept": len(kept),
+            "added": len(fresh), "plan": new_plan, "cursor": writeup["cursor"]}
+
+
+def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
+    """The resume entry point: where the writeup stands, what's next."""
+    writeup = _writeup(db, manuscript, prefix)
+    plan = loads(writeup["plan"], [])
+    cursor = writeup["cursor"]
+    current = plan[cursor] if cursor < len(plan) else None
+    pending = _beat_proposal(db, writeup, current["n"]) if current else None
+    return {
+        "writeup": {k: writeup[k] for k in
+                    ("id", "intent_id", "file", "mode", "status",
+                     "source_version_id", "cursor")},
+        "plan": plan,
+        "current_beat": current,
+        "pending_proposal": dict(pending) if pending else None,
+        "learnings": loads(writeup["learnings"], []),
+        "tallies": _beat_tallies(db, writeup),
+    }
+
+
+def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
+                  prefix: str | None = None) -> dict:
+    """Register a draft for the current beat as a reviewable item. The
+    explanation is mandatory — which concepts the draft realizes, what
+    precedent it follows — because that is what verdict evidence hangs off."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    _checkout_gate(db, manuscript, writeup["file"])
+    if not text or not text.strip():
+        raise ValueError("no draft text on stdin")
+    if not explanation or not explanation.strip():
+        raise ValueError("--why is required: which concepts this draft "
+                         "realizes, which precedent it follows, length vs budget")
+    beat = _current_beat(writeup)
+    session, _ = ensure_session(db, manuscript)
+    # A redraft supersedes the pending proposal; reviewed rows are history.
+    db.conn.execute(
+        "UPDATE guidance_history SET state = 'superseded' "
+        "WHERE batch_id = ? AND batch_index = ? AND state = 'proposed'",
+        (writeup["id"], beat["n"]),
+    )
+    db.conn.commit()
+    row = ko_fields("gd")
+    row.update(
+        manuscript_id=manuscript["id"], session_id=session["id"],
+        intent_id=writeup["intent_id"], batch_id=writeup["id"],
+        batch_index=beat["n"], kind=BEAT_KIND,
+        suggestion=text.strip(), explanation=explanation.strip(),
+        state="proposed",
+    )
+    db.insert("guidance_history", row)
+    return {"writeup_id": writeup["id"], "beat": beat, "guidance_id": row["id"]}
+
+
+def write_accept(db: Database, manuscript: dict, config: dict,
+                 text: str | None = None, reason: str | None = None,
+                 prefix: str | None = None,
+                 llm: LLMClient | None = None) -> dict:
+    """The atomic step 4: the accepted text is appended to the file, the
+    revision is collected (transitions attach to the episode), the verdict
+    is recorded through the review pathway, and the cursor advances. With
+    reworded text on stdin the decision is 'modified' and the draft→final
+    diff is recoverable (draft in the guidance row, final in the version)."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    _checkout_gate(db, manuscript, writeup["file"])
+    beat = _current_beat(writeup)
+    proposal = _beat_proposal(db, writeup, beat["n"])
+    if not proposal:
+        raise LookupError(f"nothing proposed for beat {beat['n']} — "
+                          "write propose first")
+    accepted = (text if text and text.strip() else proposal["suggestion"]).strip()
+    decision = "accepted" if accepted == proposal["suggestion"].strip() else "modified"
+
+    path = Path(manuscript["path"]) / writeup["file"]
+    existing = path.read_text(encoding="utf-8")
+    prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
+    path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
+
+    session, _ = ensure_session(db, manuscript)
+    report = collect(db, manuscript, config, source="write-accept")
+    if decision == "modified":
+        meta = loads(proposal["metadata"], {})
+        meta["accepted_text"] = accepted
+        db.update("guidance_history", proposal["id"],
+                  {"metadata": json.dumps(meta)})
+    episode = ses.current_episode(db, manuscript["id"], session)
+    review_result = pol.record_review(
+        db, manuscript["id"], dict(proposal), decision, reason,
+        episode["id"], llm=llm,
+    )
+    plan = loads(writeup["plan"], [])
+    db.update("writeups", writeup["id"], {"cursor": writeup["cursor"] + 1})
+    done = writeup["cursor"] + 1 >= len(plan)
+    next_beat = plan[writeup["cursor"] + 1] if not done else None
+    return {"decision": decision, "beat": beat, "collect": report,
+            "review": review_result, "next_beat": next_beat,
+            "plan_complete": done}
+
+
+def write_reject(db: Database, manuscript: dict, reason: str,
+                 prefix: str | None = None,
+                 llm: LLMClient | None = None) -> dict:
+    """Reject the pending draft. The reason is required at the tool level:
+    an explained rejection is the highest-value evidence the system can
+    receive, and beat rejections without a why teach nothing."""
+    if not reason or not reason.strip():
+        raise ValueError("--reason is required: the author's why, verbatim")
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    beat = _current_beat(writeup)
+    proposal = _beat_proposal(db, writeup, beat["n"])
+    if not proposal:
+        raise LookupError(f"nothing proposed for beat {beat['n']} — "
+                          "write propose first")
+    session, _ = ensure_session(db, manuscript)
+    episode = ses.current_episode(db, manuscript["id"], session)
+    review_result = pol.record_review(
+        db, manuscript["id"], dict(proposal), "rejected", reason.strip(),
+        episode["id"], llm=llm,
+    )
+    return {"beat": beat, "review": review_result,
+            "note": "cursor unchanged — redraft with the reason in context"}
+
+
+def write_learn(db: Database, manuscript: dict, lesson: str,
+                prefix: str | None = None) -> dict:
+    """Append a distilled session lesson (recorded only when a pattern
+    recurs across verdicts). Session-local scaffolding: episode analysis at
+    completion is what promotes recurring lessons through ratification."""
+    if not lesson or not lesson.strip():
+        raise ValueError("empty lesson")
+    writeup = _writeup(db, manuscript, prefix)
+    learnings = loads(writeup["learnings"], [])
+    learnings.append(lesson.strip())
+    db.update("writeups", writeup["id"], {"learnings": json.dumps(learnings)})
+    return {"writeup_id": writeup["id"], "learnings": learnings}
+
+
+def write_complete(db: Database, manuscript: dict, config: dict,
+                   prefix: str | None = None) -> dict:
+    """Close the writeup: final collect, then the extraction pass that was
+    deferred during the loop (per-beat collects are deterministic-only).
+    Intent completion stays a separate, conversational complete_intent."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    report = collect(db, manuscript, config, source="write-complete")
+    extraction = None
+    llm = LLMClient(config)
+    if llm.enabled:
+        try:
+            extraction = run_extraction(db, manuscript, llm)
+        except Exception:
+            extraction = None
+    plan = loads(writeup["plan"], [])
+    remaining = max(0, len(plan) - writeup["cursor"])
+    db.update("writeups", writeup["id"], {"status": "completed"})
+    return {"writeup_id": writeup["id"], "intent_id": writeup["intent_id"],
+            "beats_done": writeup["cursor"], "beats_unwritten": remaining,
+            "tallies": _beat_tallies(db, writeup),
+            "learnings": loads(writeup["learnings"], []),
+            "collect": report, "extraction": extraction}
+
+
+def write_abandon(db: Database, manuscript: dict, config: dict,
+                  prefix: str | None = None) -> dict:
+    """Abandon the writeup and restore the file from the pinned source
+    version — a truncated file with a dead writeup is the worst end state."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
+                    (writeup["source_version_id"],))
+    restored = False
+    if source:
+        content = loads(source["files"], {}).get(writeup["file"])
+        if content is not None:
+            (Path(manuscript["path"]) / writeup["file"]).write_text(
+                content, encoding="utf-8")
+            restored = True
+    report = collect(db, manuscript, config, source="write-abandon")
+    db.update("writeups", writeup["id"], {"status": "abandoned"})
+    return {"writeup_id": writeup["id"], "restored": restored,
+            "collect": report}
 
 
 # ------------------------------------------------------------ other reads
@@ -793,6 +1168,27 @@ def get_plan(db: Database, manuscript: dict, llm: LLMClient | None = None,
     return result
 
 
+def get_profile(manuscript: dict, key: str | None = None) -> dict:
+    """Declared context about the project (market intelligence,
+    positioning, …) from _profiles/ — author-authored reference, returned
+    VERBATIM (never compacted: these are the author's words). Consult for
+    positioning/audience/publisher questions; never drafting law. Without
+    `key`, lists the profiles on record."""
+    root = Path(manuscript["path"]) / "_profiles"
+    files = sorted(root.glob("*.md")) if root.exists() else []
+    if key is None:
+        return {"profiles": [
+            {"key": f.stem,
+             "words": len(f.read_text(encoding="utf-8").split())}
+            for f in files]}
+    name = key if key.endswith(".md") else f"{key}.md"
+    path = root / name
+    if not path.exists():
+        available = ", ".join(f.stem for f in files) or "none yet"
+        raise LookupError(f"no profile '{key}' — available: {available}")
+    return {"key": path.stem, "content": path.read_text(encoding="utf-8")}
+
+
 def get_doc_links(db: Database, manuscript: dict) -> dict:
     """Google Docs link state per file: doc id, URL, and whether the file
     is currently checked out (the Doc is the working copy). Pure DB read —
@@ -934,34 +1330,51 @@ def compact_collect(report: dict) -> dict:
     return out
 
 
+# A "compact" briefing must stay readable in one MCP response even when the
+# triage backlog is huge (271 unconfirmed concepts once produced a 144KB
+# "compact" result — the R6.3 anti-pattern). Counts stay exact; item lists
+# carry at most this many rows plus a pointer to the bulk surface.
+BRIEFING_HEAD = 15
+
+
+def _head(items: list, more_hint: str) -> dict:
+    """Bounded head of a briefing list: exact count, first BRIEFING_HEAD
+    items, and where to see the rest when truncated."""
+    out = {"count": len(items), "items": items[:BRIEFING_HEAD]}
+    if len(items) > BRIEFING_HEAD:
+        out["more"] = f"{len(items) - BRIEFING_HEAD} more — {more_hint}"
+    return out
+
+
 def compact_briefing(briefing: dict) -> dict:
-    """Compact projection of the session briefing: counts + actionable
-    items, no raw rows."""
+    """Compact projection of the session briefing: counts + a bounded head
+    of actionable items, no raw rows (bulk piles live on their dedicated
+    surfaces: triage, list_proposals, get_plan)."""
     from collections import Counter
 
     out = {"since": briefing["since"]}
     if "caught_up" in briefing:
         out["caught_up"] = briefing["caught_up"]
+    if briefing.get("profiles"):
+        out["profiles"] = briefing["profiles"]
     out["policy_changes"] = briefing["policy_changes"]  # built compact
     out["new_policies"] = [_compact_policy(p) for p in briefing["new_policies"]]
     out["realized_concepts"] = {
         "count": len(briefing["realized_concepts"]),
         "names": [n["name"] for n in briefing["realized_concepts"]],
     }
-    out["unconfirmed_concepts"] = {
-        "count": len(briefing["unconfirmed_concepts"]),
-        "items": [_compact_concept(n) for n in briefing["unconfirmed_concepts"]],
-    }
+    out["unconfirmed_concepts"] = _head(
+        [_compact_concept(n) for n in briefing["unconfirmed_concepts"]],
+        "triage with 'authorlm concept triage'")
     out["proposals"] = {
-        "count": len(briefing["proposals"]),
+        **_head([{"id": p["id"], "kind": p["kind"], "summary": p["summary"]}
+                 for p in briefing["proposals"]],
+                "review via list_proposals"),
         "by_kind": dict(Counter(p["kind"] for p in briefing["proposals"])),
-        "items": [{"id": p["id"], "kind": p["kind"], "summary": p["summary"]}
-                  for p in briefing["proposals"]],
     }
-    out["inferred_edges"] = {
-        "count": len(briefing["inferred_edges"]),
-        "items": [_compact_edge(e) for e in briefing["inferred_edges"]],
-    }
+    out["inferred_edges"] = _head(
+        [_compact_edge(e) for e in briefing["inferred_edges"]],
+        "triage with 'authorlm concept triage --edges'")
     out["contradictions"] = [
         {"suggestion": c["suggestion"], "explanation": c["explanation"]}
         for c in briefing["contradictions"]
@@ -971,11 +1384,11 @@ def compact_briefing(briefing: dict) -> dict:
         {"id": i["id"], "statement": i["statement"], "status": i["status"]}
         for i in briefing["active_intents"]
     ]
-    out["focus_areas"] = [
-        {"name": f["node"]["name"],
-         "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
-        for f in briefing["focus_areas"]
-    ]
+    out["focus_areas"] = _head(
+        [{"name": f["node"]["name"],
+          "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
+         for f in briefing["focus_areas"]],
+        "full plan via get_plan")
     out["toc_unlisted"] = briefing["toc_unlisted"]
     out["learning_velocity"] = briefing["learning_velocity"]
     return out

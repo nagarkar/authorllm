@@ -32,24 +32,71 @@ def content_files(files: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in files.items() if not is_structural(k)}
 
 
+# A TOC entry: "- name.md" with two spaces of indentation per nesting
+# level. Depth is structural (child essays nest under their parent) and
+# mirrors the master Doc's tab hierarchy via the gdocs sync.
+_TOC_ENTRY = re.compile(r"^(\s*)-\s+(\S+\.md)\s*$")
+
+
+def parse_toc_tree(toc_text: str) -> list[tuple[str, int]]:
+    """Ordered (filename, depth) entries from toc.md's dash list.
+    Lines that aren't dash entries (headings, prose) are ignored."""
+    out: list[tuple[str, int]] = []
+    for line in toc_text.splitlines():
+        m = _TOC_ENTRY.match(line)
+        if m:
+            out.append((m.group(2), len(m.group(1)) // 2))
+    return out
+
+
+def serialize_toc_tree(entries: list[tuple[str, int]]) -> str:
+    """toc.md text for ordered (filename, depth) entries."""
+    lines = ["# Table of Contents", ""]
+    lines += [f"{'  ' * depth}- {name}" for name, depth in entries]
+    return "\n".join(lines) + "\n"
+
+
+def tree_to_parents(entries: list[tuple[str, int]]) -> list[tuple]:
+    """DFS (name, parent-name-or-None) pairs from (name, depth) entries —
+    the comparable structure shared with the Doc's tab tree."""
+    out: list[tuple] = []
+    stack: list[tuple[str, int]] = []
+    for name, depth in entries:
+        while stack and stack[-1][1] >= depth:
+            stack.pop()
+        out.append((name, stack[-1][0] if stack else None))
+        stack.append((name, depth))
+    return out
+
+
+def parents_to_tree(pairs: list[tuple]) -> list[tuple[str, int]]:
+    """Inverse of tree_to_parents (pairs must be in DFS order)."""
+    depth_of: dict = {None: -1}
+    out: list[tuple[str, int]] = []
+    for name, parent in pairs:
+        depth = depth_of.get(parent, -1) + 1
+        depth_of[name] = depth
+        out.append((name, depth))
+    return out
+
+
 def reading_order(files: dict[str, str]) -> tuple[list[str], list[str]]:
     """(ordered content-file names, files-missing-from-toc).
 
-    TOC order when toc.md parses; alphabetical otherwise. Unlisted files
-    are appended alphabetically and reported so the author can complete
-    the TOC."""
+    TOC order when toc.md parses (depth-first flatten of the tree);
+    alphabetical otherwise. Unlisted files are appended alphabetically
+    and reported so the author can complete the TOC."""
     names = sorted(content_files(files))
     toc_text = files.get(TOC_FILENAME)
     if not toc_text:
         return names, []
-    ordered: list[str] = []
-    for line in toc_text.splitlines():
-        for name in names:
-            if name in ordered:
-                continue
-            stem = re.escape(name.rsplit(".", 1)[0])
-            if name in line or re.search(rf"\b{stem}\b", line):
-                ordered.append(name)
+    ordered = [n for n, _ in parse_toc_tree(toc_text) if n in names]
+    if not ordered:
+        # Legacy formats (numbered lists, prose lines): scan for names.
+        for line in toc_text.splitlines():
+            for name in names:
+                if name not in ordered and name in line:
+                    ordered.append(name)
     if not ordered:
         return names, []
     unlisted = [n for n in names if n not in ordered]

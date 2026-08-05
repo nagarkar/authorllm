@@ -3,11 +3,14 @@
 Two providers, selected in <workspace>/.authorlm/config.toml:
 
 - "litellm" (default): routes through the LiteLLM SDK in-process, so any
-  model LiteLLM supports works — e.g. Gemini with GEMINI_API_KEY exported:
+  model LiteLLM supports works — e.g. Gemini with GEMINI_API_KEY exported,
+  or with the key carried in the config itself (for shells that lack the
+  provider env vars, e.g. sandboxed skill sessions):
 
       [llm]
       enabled = true
       model = "gemini/gemini-2.5-flash"
+      api_key = "..."   # optional; the named env var wins when set
 
 - "openai": any OpenAI-compatible HTTP endpoint (LiteLLM proxy, Ollama,
   LM Studio) via the standard library — no dependencies:
@@ -50,7 +53,14 @@ class LLMClient:
         self.provider = llm.get("provider", "litellm")
         self.model = llm.get("model", DEFAULT_MODEL)
         self.base_url = llm.get("base_url", "http://localhost:4000/v1").rstrip("/")
-        self.api_key = os.environ.get(llm.get("api_key_env", "AUTHORLM_LLM_KEY"), "")
+        # Key resolution: the named env var wins; an `api_key` field in
+        # config.toml is the fallback. The config path exists because callers
+        # like the Claude Code skill run the CLI from shells without the
+        # provider env vars — a key in ~/.authorlm/config.toml makes the CLI
+        # fully capable everywhere (chmod 600 applies). For litellm the key
+        # is passed per-call; for openai it is the bearer header.
+        self.api_key = (os.environ.get(llm.get("api_key_env", "AUTHORLM_LLM_KEY"), "")
+                        or llm.get("api_key", ""))
         self.timeout = llm.get("timeout_seconds", 120)
         # Cap on manuscript text sent per extraction call — cost control and
         # extraction quality (concept selection degrades on very long inputs).
@@ -168,6 +178,10 @@ class LLMClient:
                     messages=messages,
                     temperature=TEMPERATURE,
                     timeout=self.timeout,
+                    # Explicit key (env var or config api_key) overrides
+                    # litellm's own provider-env detection; absent, litellm
+                    # reads GEMINI_API_KEY etc. itself as before.
+                    **({"api_key": self.api_key} if self.api_key else {}),
                 )
                 usage = getattr(response, "usage", None)
                 return (

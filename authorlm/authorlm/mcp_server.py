@@ -276,6 +276,21 @@ def get_style(file: str | None = None, manuscript: str | None = None) -> dict:
 
 
 @mcp.tool()
+def get_profile(key: str | None = None, manuscript: str | None = None) -> dict:
+    """Author-declared context about the project (market intelligence,
+    positioning, …), returned verbatim. Consult FIRST for positioning,
+    audience, format, or publisher-facing questions — interpret manuscript
+    stats against the recorded ambition, not generic norms. Never cite a
+    profile as authority for a prose decision unless the author invokes
+    it. Without `key`, lists the profiles on record. Read-only: profiles
+    are written via the CLI ('authorlm profile set <key>')."""
+    def run():
+        db = _db()
+        return api.get_profile(_manuscript(db, manuscript), key)
+    return _guard(run)
+
+
+@mcp.tool()
 def define_style_guide(name: str, parent: str | None = None,
                        manuscript: str | None = None) -> dict:
     """Create a named style guide. Guides form a single-parent tree; the

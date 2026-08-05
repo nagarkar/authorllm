@@ -146,8 +146,25 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         (manuscript_id, since),
     )["n"]
 
+    # Profiles on record (declared context — market, positioning): one
+    # line so every session knows they exist. Content stays on demand
+    # via get_profile.
+    from pathlib import Path
+
+    profiles = []
+    ms_row = db.one("SELECT path FROM manuscripts WHERE id = ?",
+                    (manuscript_id,))
+    if ms_row:
+        root = Path(ms_row["path"]) / "_profiles"
+        if root.exists():
+            profiles = [
+                {"key": f.stem,
+                 "words": len(f.read_text(encoding="utf-8").split())}
+                for f in sorted(root.glob("*.md"))]
+
     return {
         "since": since,
+        "profiles": profiles,
         "policy_changes": policy_changes,
         "new_policies": new_policies,
         "realized_concepts": realized_concepts,

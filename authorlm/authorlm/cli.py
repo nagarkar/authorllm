@@ -1163,6 +1163,264 @@ def cmd_collect(args):
         print(ui.green(line) if len(gaps_after) < len(gaps_before) else ui.dim(line))
 
 
+def _stdin_text() -> str | None:
+    """Piped stdin, or None on a TTY / when empty. Prose and plan JSON
+    arrive this way — multi-paragraph text as an argument is a quoting
+    disaster; heredocs are the natural idiom."""
+    if sys.stdin.isatty():
+        return None
+    text = sys.stdin.read()
+    return text if text.strip() else None
+
+
+def _print_beat_collect(report: dict) -> None:
+    """The compact per-beat collect summary (the anti-pattern is the full
+    dump: gaps_before/after alone ran to ~68KB in the first manual trial)."""
+    if report.get("unchanged"):
+        return
+    print(f"Collected v{report['version_no']} — "
+          f"{len(report['transitions'])} transition(s).")
+    for node in report.get("realized", []):
+        print(f"Concept realized: '{node['name']}'.")
+    new_gaps = report.get("gaps_new", [])
+    if new_gaps:
+        print(ui.yellow("New prerequisite gap(s): " + "; ".join(
+            f"'{g['second']}' needs '{g['first']}'" for g in new_gaps)))
+    resolved = report.get("gaps_resolved", [])
+    if resolved:
+        print(ui.green(f"{len(resolved)} prerequisite gap(s) resolved."))
+
+
+def _print_beat_spec(beat: dict, label: str = "Beat") -> None:
+    parts = [f"n={beat['n']}"]
+    if beat.get("role"):
+        parts.append(beat["role"])
+    if beat.get("concepts"):
+        parts.append("concepts: " + ", ".join(beat["concepts"]))
+    if beat.get("budget"):
+        parts.append(f"budget ~{beat['budget']}")
+    print(f"{label} [{' | '.join(parts)}]" +
+          (f": {beat['notes']}" if beat.get("notes") else ""))
+
+
+def cmd_write(args):
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+    prefix = getattr(args, "writeup", None)
+    try:
+        if args.action == "start":
+            if not args.params:
+                sys.exit("usage: write start <file> --intent <id>")
+            if not args.intent:
+                sys.exit("write start requires --intent <id> — declare one "
+                         "first (the writeup is bound to it)")
+            result = api.write_start(db, manuscript, config,
+                                     args.params[0], args.intent)
+            w = result["writeup"]
+            print(f"Writeup [{w['id'][:11]}] on {w['file']} "
+                  f"(intent {result['intent']['id'][:11]}).")
+            print(f"Pinned v{result['source_version_no']} as raw material "
+                  f"({result['source_chars']} chars); file truncated.")
+            print("Next: ratify the beat plan — write plan (JSON on stdin).")
+        elif args.action == "plan":
+            raw = _stdin_text()
+            if raw is None:
+                sys.exit("write plan expects a JSON array of beat specs on "
+                         "stdin (view the plan with write status)")
+            try:
+                beats = json.loads(raw)
+            except json.JSONDecodeError as err:
+                sys.exit(f"invalid plan JSON: {err}")
+            result = api.write_plan(db, manuscript, beats, prefix=prefix,
+                                    replace=args.replace)
+            kept = f"kept {result['kept']} written, " if result["kept"] else ""
+            print(f"Plan ratified: {kept}{result['added']} beat(s) ahead.")
+            for beat in result["plan"][result["cursor"]:]:
+                _print_beat_spec(beat, label="  •")
+        elif args.action == "status":
+            result = api.write_status(db, manuscript, prefix=prefix)
+            w = result["writeup"]
+            plan = result["plan"]
+            print(f"Writeup [{w['id'][:11]}] on {w['file']} ({w['status']}) — "
+                  f"beat {min(w['cursor'] + 1, len(plan))}/{len(plan)}."
+                  if plan else
+                  f"Writeup [{w['id'][:11]}] on {w['file']} ({w['status']}) — no plan yet.")
+            if result["current_beat"]:
+                _print_beat_spec(result["current_beat"], label="Current")
+            if result["pending_proposal"]:
+                print(f"Pending proposal [{result['pending_proposal']['id'][:11]}] "
+                      "awaits a verdict (accept / reject --reason).")
+            if result["tallies"]:
+                print("Verdicts: " + ", ".join(
+                    f"{k} {v}" for k, v in sorted(result["tallies"].items())))
+            for lesson in result["learnings"]:
+                print(ui.dim(f"  learning: {lesson}"))
+        elif args.action == "propose":
+            text = _stdin_text()
+            result = api.write_propose(db, manuscript, text or "",
+                                       args.why or "", prefix=prefix)
+            _print_beat_spec(result["beat"])
+            print(f"Draft registered [{result['guidance_id'][:11]}] — "
+                  "author verdict: accept / accept with reworded stdin / "
+                  "reject --reason.")
+        elif args.action == "accept":
+            llm = LLMClient(config)
+            result = api.write_accept(db, manuscript, config,
+                                      text=_stdin_text(), reason=args.reason,
+                                      prefix=prefix, llm=llm)
+            print(f"Beat n={result['beat']['n']} {result['decision']}.")
+            _print_beat_collect(result["collect"])
+            if result["plan_complete"]:
+                print(ui.green("Plan complete — write complete when done."))
+            elif result["next_beat"]:
+                _print_beat_spec(result["next_beat"], label="Next")
+        elif args.action == "reject":
+            llm = LLMClient(config)
+            result = api.write_reject(db, manuscript, args.reason or "",
+                                      prefix=prefix, llm=llm)
+            print(f"Beat n={result['beat']['n']} rejected — reason recorded "
+                  "verbatim. Redraft with the reason in context.")
+            if result["review"].get("seeded_policy"):
+                print(ui.dim("Seeded candidate policy: "
+                             f"{result['review']['seeded_policy']['statement']}"))
+        elif args.action == "learn":
+            # stdin only, like propose/accept/plan: a positional lesson after
+            # -m trips argparse's greedy-empty nargs='*' and dies unrecognized.
+            lesson = _stdin_text()
+            if lesson is None:
+                sys.exit("write learn expects the lesson on stdin "
+                         "(e.g. a heredoc)")
+            result = api.write_learn(db, manuscript, lesson, prefix=prefix)
+            print(f"Learning recorded ({len(result['learnings'])} this writeup).")
+        elif args.action == "complete":
+            result = api.write_complete(db, manuscript, config, prefix=prefix)
+            unwritten = (f", {result['beats_unwritten']} unwritten"
+                         if result["beats_unwritten"] else "")
+            print(f"Writeup [{result['writeup_id'][:11]}] completed — "
+                  f"{result['beats_done']} beat(s){unwritten}.")
+            if result["tallies"]:
+                print("Verdicts: " + ", ".join(
+                    f"{k} {v}" for k, v in sorted(result["tallies"].items())))
+            for lesson in result["learnings"]:
+                print(ui.dim(f"  learning: {lesson}"))
+            print("Intent completion is separate: intent complete "
+                  f"{result['intent_id'][:11]} (runs episode analysis).")
+        elif args.action == "abandon":
+            result = api.write_abandon(db, manuscript, config, prefix=prefix)
+            restored = ("file restored from the pinned source version"
+                        if result["restored"] else
+                        ui.yellow("source version missing — file NOT restored"))
+            print(f"Writeup [{result['writeup_id'][:11]}] abandoned; {restored}.")
+    except (LookupError, ValueError) as err:
+        sys.exit(str(err))
+
+
+def cmd_profile(args):
+    """Manuscript profiles: declared context (market, positioning, …) in
+    _profiles/ — observation-invisible, synced with a separate workspace
+    Doc. Consulted on demand; never drafting law."""
+    from . import gdocs
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    root = Path(manuscript["path"]) / "_profiles"
+    key = getattr(args, "key", None)
+    filename = (key if key and key.endswith(".md") else f"{key}.md") if key else None
+    try:
+        if args.action == "list":
+            files = sorted(root.glob("*.md")) if root.exists() else []
+            if not files:
+                print("No profiles yet. Create one: profile set market "
+                      "(content on stdin).")
+                return
+            for f in files:
+                words = len(f.read_text(encoding="utf-8").split())
+                print(f"  {f.stem} — {words:,} words")
+        elif args.action == "show":
+            if not filename:
+                sys.exit("usage: profile show <key>")
+            path = root / filename
+            if not path.exists():
+                sys.exit(f"no profile '{key}' — see 'profile list'")
+            print(path.read_text(encoding="utf-8"))
+        elif args.action == "set":
+            if not filename:
+                sys.exit("usage: profile set <key>  (content on stdin)")
+            text = _stdin_text()
+            if text is None:
+                sys.exit("profile set expects the content on stdin")
+            root.mkdir(parents=True, exist_ok=True)
+            (root / filename).write_text(text.strip() + "\n", encoding="utf-8")
+            print(f"Profile '{key}' stored "
+                  f"({len(text.split()):,} words). Overwrites are whole — "
+                  "profiles are declarations.")
+        elif args.action in ("push", "pull"):
+            config = _load_config(args)
+            try:
+                service = gdocs.get_service(config, args.workspace,
+                                            interactive=False)
+                docs_service = gdocs.get_docs_service(config, args.workspace,
+                                                      interactive=False)
+            except ValueError as err:
+                sys.exit(f"error: {err}")
+            bridge = gdocs.workspace_bridge(manuscript)
+            if args.action == "push":
+                targets = ([filename] if filename
+                           else gdocs._reading_order_files(bridge))
+                if not targets:
+                    sys.exit("no profiles to push — 'profile set' first")
+                for target in targets:
+                    result = gdocs.push_doc(db, manuscript, target,
+                                            service=service,
+                                            docs_service=docs_service,
+                                            bridge=bridge)
+                    print(f"Pushed profile {result['relpath']} → tab "
+                          f"{ui.dim(ui.link(result['url']))}")
+                print(ui.yellow("Checked out to the workspace Doc — edit "
+                                "there, then 'profile pull'."))
+            else:
+                result = gdocs.pull_doc(db, manuscript, filename,
+                                        service=service,
+                                        docs_service=docs_service,
+                                        bridge=bridge)
+                for relpath in result.get("adopted", []):
+                    print(ui.green(f"New profile imported from Doc tab: "
+                                   f"{relpath}"))
+                for relpath in result.get("readopted", []):
+                    print(f"Relinked workspace tab for {relpath}.")
+                for old, new in result.get("renamed", []):
+                    print(ui.yellow(f"warning: the tab for {old} is now "
+                                    f"titled '{new}' — rename it back."))
+                for t in result.get("ambiguous_tabs", []):
+                    print(ui.yellow(f"warning: duplicate/ambiguous tab "
+                                    f"'{t}' left untouched."))
+                if result.get("ignored_tabs"):
+                    print(ui.dim("Ignoring non-profile tab(s): "
+                                 + ", ".join(result["ignored_tabs"])))
+                for relpath in result["changed"]:
+                    print(f"Pulled profile {relpath} (normalized).")
+                for relpath in result["conflicts"]:
+                    print(ui.yellow(f"CONFLICT: {relpath} changed both "
+                                    "locally and in its tab — untouched."))
+                comments = result.get("comments") or []
+                if comments:
+                    print(ui.bold(f"Comments to address ({len(comments)}):"))
+                    for c in comments:
+                        print(f"  • [{c['location']}] on \"{c['quote']}\"")
+                        print(f"    {c['content']}")
+                    print(ui.dim("Resolved in the Doc with ingestion "
+                                 "receipts."))
+                if not result["changed"] and not result["conflicts"] \
+                        and not comments and not result.get("adopted"):
+                    print("Profiles identical to the workspace Doc — clean "
+                          "round trip.")
+                print(ui.dim("Checkouts cleared — local editing is safe "
+                             "again."))
+    except (LookupError, ValueError) as err:
+        sys.exit(str(err))
+
+
 def cmd_extract(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -1410,7 +1668,8 @@ def cmd_doc(args):
                 # One tab per file in a single master Doc; no file argument
                 # pushes the whole manuscript.
                 targets = ([args.name] if args.name
-                           else gdocs._reading_order_files(manuscript))
+                           else gdocs._reading_order_files(
+                               gdocs.manuscript_bridge(manuscript)))
                 normalized_any = False
                 result = None
                 for target in targets:
@@ -1424,6 +1683,16 @@ def cmd_doc(args):
                     print(ui.dim("Some files were normalized locally first "
                                  "(canonical markdown)."))
                     cmd_collect(args)
+                try:
+                    sync = gdocs.sync_tab_structure(db, manuscript,
+                                                    docs_service)
+                except Exception as err:  # sync must never break a push
+                    sync = {"skipped": f"tab-structure sync failed ({err})"}
+                if sync.get("moved"):
+                    print(f"Repositioned {sync['moved']} tab(s) to match "
+                          "toc.md's order and hierarchy.")
+                elif sync.get("skipped") and "pull first" in sync["skipped"]:
+                    print(ui.yellow(f"Tab order not synced: {sync['skipped']}."))
                 print(f"Master Doc: "
                       f"{ui.link(gdocs.tab_url(result['doc_id']))}")
                 print(ui.yellow("Checked out to Google Docs — edit there, "
@@ -1434,7 +1703,51 @@ def cmd_doc(args):
                     webbrowser.open(gdocs.tab_url(result["doc_id"]))
             else:
                 result = gdocs.pull_doc(db, manuscript, args.name or None,
-                                        service=service, force=args.force)
+                                        service=service, force=args.force,
+                                        with_comments=not args.no_comments,
+                                        docs_service=docs_service)
+                for relpath in result.get("adopted", []):
+                    print(ui.green(f"New essay imported from Doc tab: "
+                                   f"{relpath} — add it to toc.md."))
+                for relpath in result.get("readopted", []):
+                    print(f"Relinked Doc tab for {relpath} (tab was "
+                          f"recreated or the mapping was lost).")
+                for old, new in result.get("renamed", []):
+                    print(ui.yellow(f"warning: the tab for {old} is now "
+                                    f"titled '{new}' — tab titles must stay "
+                                    "exact filenames; rename it back."))
+                for title in result.get("ambiguous_tabs", []):
+                    print(ui.yellow(f"warning: duplicate/ambiguous tab "
+                                    f"'{title}' left untouched — resolve it "
+                                    "by hand in the Doc."))
+                if result.get("tabs_error"):
+                    print(ui.yellow("warning: tab reconciliation skipped "
+                                    f"({result['tabs_error']})"))
+                if result.get("container_renamed"):
+                    expected, actual = result["container_renamed"]
+                    print(ui.yellow(f"warning: the container tab was renamed "
+                                    f"'{actual}' — its name is protected; "
+                                    f"rename it back to '{expected}'."))
+                if result.get("container_pending"):
+                    names = ", ".join(result["container_pending"])
+                    print(ui.yellow(f"One-time drags needed: move {names} "
+                                    "under the container tab in the Doc "
+                                    "(the API cannot move root-level tabs)."))
+                if result.get("ignored_tabs"):
+                    print(ui.dim("Ignoring non-manuscript tab(s): "
+                                 + ", ".join(result["ignored_tabs"])))
+                if result.get("toc_updated"):
+                    print(ui.green("toc.md updated from the Doc's tab "
+                                   "order/hierarchy."))
+                if result.get("toc_ahead"):
+                    print("toc.md is ahead of the Doc's tab order — the "
+                          "next 'doc push' will reposition the tabs.")
+                if result.get("toc_conflict"):
+                    print(ui.yellow("TOC order conflict: toc.md and the "
+                                    "Doc's tab order both changed "
+                                    f"({result['toc_conflict']}) — reorder "
+                                    "one side to match the other, then "
+                                    "pull or push."))
                 for relpath in result["changed"]:
                     print(f"Pulled {relpath} from its tab (normalized).")
                 for relpath in result["missing"]:
@@ -1446,12 +1759,34 @@ def cmd_doc(args):
                         f"CONFLICT: {relpath} changed both locally and in its "
                         f"tab — untouched. 'doc pull {relpath} --force' takes "
                         "the Doc's side."))
+                for relpath in result.get("local_ahead", []):
+                    print(f"{relpath}: local file is ahead (its tab is "
+                          f"unchanged since the last push) — kept local. "
+                          f"'doc push {relpath}' refreshes the tab.")
                 if result["changed"]:
                     print("Collecting:")
                     cmd_collect(args)
-                elif not result["conflicts"] and not result["missing"]:
-                    print("All tabs identical to local files — clean round "
+                elif (not result["conflicts"] and not result["missing"]
+                      and not result.get("local_ahead")):
+                    scope = (f"Tab for {args.name}" if args.name
+                             else "All tabs")
+                    print(f"{scope} identical to local files — clean round "
                           "trip, nothing to collect.")
+                comments = result.get("comments") or []
+                if comments:
+                    print(ui.bold(f"Comments to address ({len(comments)}):"))
+                    for c in comments:
+                        print(f"  • [{c['location']}] on \"{c['quote']}\"")
+                        print(f"    {c['content']}")
+                    print(ui.dim(
+                        f"Resolved {result.get('comments_resolved', 0)} in "
+                        "the Doc with ingestion receipts. Address every "
+                        "comment above; when acting on one, record the "
+                        "author's words verbatim as the evidence/reason."))
+                if result.get("comments_error"):
+                    print(ui.yellow("warning: comment harvest failed "
+                                    f"({result['comments_error']}) — pull "
+                                    "completed without it."))
                 print(ui.dim("Checkouts cleared — local editing is safe again."))
         except (LookupError, FileExistsError, ValueError) as err:
             sys.exit(f"error: {err}")
@@ -2159,6 +2494,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_collect)
 
+    p = sub.add_parser(
+        "write",
+        help="beat-by-beat co-writing loop: propose → author verdict → append "
+             "(docs/autoregressive-writing-design.md)")
+    p.add_argument("action",
+                   choices=["start", "plan", "status", "propose", "accept",
+                            "reject", "learn", "complete", "abandon"])
+    p.add_argument("params", nargs="*", help="start: <file>")
+    p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--writeup", help="writeup id prefix (default: the active writeup)")
+    p.add_argument("--why", help="propose: which concepts the draft realizes, "
+                                 "which precedent it follows (required)")
+    p.add_argument("--reason", help="reject: the author's why, verbatim "
+                                    "(required); accept: optional")
+    p.add_argument("--replace", action="store_true",
+                   help="plan: replace the remaining (unwritten) beats")
+    p.set_defaults(func=cmd_write)
+
     p = sub.add_parser("diff", help="colored diff between collected versions "
                                     "(default: the last two)")
     p.add_argument("params", nargs="*",
@@ -2180,7 +2533,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="pull: take the Doc's version even if the local file "
                         "changed since the push (local edits stay in history)")
+    p.add_argument("--no-comments", action="store_true",
+                   help="pull: skip harvesting open Doc comments (default: "
+                        "ingest them and resolve each with a receipt)")
     p.set_defaults(func=cmd_doc)
+
+    p = sub.add_parser(
+        "profile",
+        help="manuscript profiles: declared context (market intelligence, "
+             "positioning) in _profiles/ — synced with a separate workspace Doc")
+    p.add_argument("action", choices=["list", "show", "set", "push", "pull"])
+    p.add_argument("key", nargs="?",
+                   help="profile key, e.g. 'market' (set/show; optional for "
+                        "push/pull)")
+    p.set_defaults(func=cmd_profile)
 
     p = sub.add_parser("extract",
                        help="LLM-extract concepts/links (incremental: only files "

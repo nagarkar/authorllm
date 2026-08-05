@@ -985,6 +985,478 @@ def scenario_llm_and_unregister(root: Path) -> None:
         server.shutdown()
 
 
+def run_stdin(workspace: Path, stdin_text: str, *argv: str,
+              expect_exit: bool = False) -> str:
+    """run() with stdin replaced — the write loop's prose and plan JSON
+    travel over stdin. io.StringIO reports isatty() False, matching a pipe."""
+    old = sys.stdin
+    sys.stdin = io.StringIO(stdin_text)
+    try:
+        return run(workspace, *argv, expect_exit=expect_exit)
+    finally:
+        sys.stdin = old
+
+
+ESSAY = """# The Essay
+
+The old opening paragraph, soon to be raw material.
+
+The old second paragraph, about fields and their positions.
+"""
+
+BEAT_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "open with the primal act"},
+    {"role": "development", "concepts": ["Distinction"], "budget": 80},
+    {"role": "close", "concepts": ["Field"], "budget": 60},
+])
+
+DRAFT_1 = ("Every act of thought begins with a choice; the essay begins "
+           "there too, deliberately.")
+DRAFT_2 = ("Distinction is the visible form the choice takes, considered "
+           "abstractly.")
+DRAFT_2B = ("To choose is to distinguish: watch any morning decision and "
+            "the distinction is already there.")
+DRAFT_2B_REWORDED = ("To choose is to distinguish: watch any morning "
+                     "decision closely and the distinction is already there, "
+                     "unasked for.")
+DRAFT_4 = "A field of further choices opens from each distinction made."
+
+
+def scenario_write_loop(root: Path) -> None:
+    print("Scenario W — beat-by-beat write loop (autoregressive writeup)")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "w"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-essay.md", ESSAY)
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Rewrite the essay on Choice")
+        intent_id = out.split("[")[1].split("]")[0]
+
+        # --- gates -------------------------------------------------------
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked without a style attachment",
+              "no attached style guide" in out, out)
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "02-essay.md", "House")
+
+        # A checked-out file blocks initiation (the Doc is the working copy).
+        from authorlm.db import Database as _DB
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+        _row = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")
+        _meta = json.loads(_row["metadata"] or "{}")
+        _meta["gdocs"] = {"02-essay.md": {"doc_id": "stub", "checked_out": True}}
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked while checked out to Docs",
+              "checked out to Google Docs" in out, out)
+        _meta["gdocs"]["02-essay.md"]["checked_out"] = False
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id)
+        check("writeup starts: pins the source and truncates",
+              "Pinned v" in out and "truncated" in out, out)
+        check("file is empty on disk after start",
+              (ms / "02-essay.md").read_text() == "", out)
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("second writeup on the same file blocked",
+              "already active" in out, out)
+
+        # --- plan --------------------------------------------------------
+        out = run_stdin(ws, DRAFT_1, "write", "propose", "--why", "opener",
+                        expect_exit=True)
+        check("propose before a plan is blocked",
+              "no ratified beat plan" in out, out)
+        out = run_stdin(ws, BEAT_PLAN, "write", "plan")
+        check("plan ratified with three beats", "3 beat(s) ahead" in out, out)
+        out = run_stdin(ws, BEAT_PLAN, "write", "plan", expect_exit=True)
+        check("re-planning without --replace blocked",
+              "pass --replace" in out, out)
+
+        # --- beat 1: accept as proposed -----------------------------------
+        out = run_stdin(ws, DRAFT_1, "write", "propose", expect_exit=True)
+        check("propose without --why blocked", "--why is required" in out, out)
+        out = run_stdin(ws, DRAFT_1, "write", "propose",
+                        "--why", "realizes Choice; opener per the plan")
+        check("draft registered for beat 1",
+              "n=1" in out and "Draft registered" in out, out)
+        # A mid-writeup guidance run must not clobber the pending proposal
+        # (GUIDANCE_KINDS allowlist).
+        run(ws, "guide")
+        out = run_stdin(ws, "", "write", "status")
+        check("pending proposal survives a guidance run",
+              "Pending proposal" in out, out)
+        out = run_stdin(ws, "", "write", "accept")
+        check("beat 1 accepted as proposed", "n=1 accepted" in out, out)
+        check("accepted text landed in the file",
+              DRAFT_1 in (ms / "02-essay.md").read_text(), out)
+
+        # --- learnings: stdin-only (a positional after -m trips argparse) ---
+        out = run_stdin(ws, "author tightens openers — propose tighter",
+                        "write", "learn")
+        check("learning recorded from stdin", "Learning recorded (1" in out, out)
+        out = run_stdin(ws, "", "write", "learn", expect_exit=True)
+        check("learn without stdin errors cleanly",
+              "expects the lesson on stdin" in out, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("status shows recorded learnings",
+              "learning: author tightens openers" in out, out)
+
+        # --- beat 2: reject with reason, redraft, accept reworded ---------
+        run_stdin(ws, DRAFT_2, "write", "propose",
+                  "--why", "realizes Distinction")
+        out = run_stdin(ws, "", "write", "reject", expect_exit=True)
+        check("reject without a reason blocked at the tool level",
+              "--reason is required" in out, out)
+        out = run_stdin(ws, "", "write", "reject",
+                        "--reason", "Too abstract; ground it in a lived moment")
+        check("rejection recorded with cursor unchanged",
+              "n=2 rejected" in out and "Redraft" in out, out)
+        check("explained rejection seeds a candidate policy",
+              "Seeded candidate policy" in out
+              and "Introduce intuition before formalism." in out, out)
+        run_stdin(ws, DRAFT_2B, "write", "propose",
+                  "--why", "redraft: grounded in a lived moment")
+        out = run_stdin(ws, DRAFT_2B_REWORDED, "write", "accept")
+        check("reworded accept records a modified decision",
+              "n=2 modified" in out, out)
+        check("the author's rewording is what landed in the file",
+              DRAFT_2B_REWORDED in (ms / "02-essay.md").read_text()
+              and DRAFT_2B not in (ms / "02-essay.md").read_text(), out)
+
+        # --- replan: replace the remaining beat ---------------------------
+        out = run_stdin(ws, json.dumps([{"role": "close",
+                                         "concepts": ["Field"],
+                                         "budget": 60}]),
+                        "write", "plan", "--replace")
+        check("replace keeps written beats and renumbers ahead",
+              "kept 2 written" in out and "1 beat(s) ahead" in out, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("replacement beat has a fresh stable n (never reused)",
+              "n=4" in out, out)
+
+        # --- beat 4: accept and complete -----------------------------------
+        run_stdin(ws, DRAFT_4, "write", "propose", "--why", "realizes Field")
+        out = run_stdin(ws, "", "write", "accept")
+        check("plan reports complete after the last beat",
+              "Plan complete" in out, out)
+        out = run_stdin(ws, "", "write", "complete")
+        check("complete closes the writeup with verdict tallies",
+              "completed — 3 beat(s)" in out
+              and "accepted 2" in out and "modified 1" in out
+              and "rejected 1" in out, out)
+        check("complete points at intent completion",
+              "intent complete" in out, out)
+        text = (ms / "02-essay.md").read_text()
+        check("final file is the three beats in order, old text gone",
+              text.index(DRAFT_1) < text.index(DRAFT_2B_REWORDED) < text.index(DRAFT_4)
+              and "old opening paragraph" not in text, text)
+
+        # --- reconstruction: beats and verdicts are one query --------------
+        wu = _db.one("SELECT * FROM writeups WHERE status = 'completed'")
+        rows = _db.all(
+            "SELECT gh.batch_index, gh.state FROM guidance_history gh "
+            "WHERE gh.batch_id = ? ORDER BY gh.batch_index, gh.created_at",
+            (wu["id"],),
+        )
+        states = [(r["batch_index"], r["state"]) for r in rows]
+        check("writeup history reconstructs from guidance rows",
+              states == [(1, "accepted"), (2, "rejected"), (2, "modified"),
+                         (4, "accepted")], repr(states))
+
+        # --- compact briefing stays bounded under a huge backlog -----------
+        from authorlm import api as _api
+        fake_node = {"name": "N", "kind": "concept", "status": "declared",
+                     "introduced_in": None, "notes": "", "aliases": "[]"}
+        fake = {"since": "", "policy_changes": [], "new_policies": [],
+                "realized_concepts": [], "contradictions": [],
+                "outstanding_questions": [], "active_intents": [],
+                "focus_areas": [], "toc_unlisted": [], "learning_velocity": {},
+                "proposals": [],
+                "unconfirmed_concepts": [dict(fake_node, name=f"N{i}")
+                                         for i in range(300)],
+                "inferred_edges": []}
+        compact = _api.compact_briefing(fake)
+        uc = compact["unconfirmed_concepts"]
+        check("compact briefing bounds huge backlogs",
+              uc["count"] == 300 and len(uc["items"]) == _api.BRIEFING_HEAD
+              and "285 more" in uc.get("more", ""),
+              json.dumps(uc)[:300])
+
+        # --- abandon restores the pinned source ----------------------------
+        run(ws, "style", "attach", "01-choice.md", "House")
+        run_stdin(ws, "", "write", "start", "01-choice.md",
+                  "--intent", intent_id)
+        check("second writeup truncated its file",
+              (ms / "01-choice.md").read_text() == "", "")
+        out = run_stdin(ws, "", "write", "abandon")
+        check("abandon restores the file", "file restored" in out, out)
+        check("restored content matches the pinned version",
+              (ms / "01-choice.md").read_text() == CH1, "")
+
+        # --- profiles: declared context, observation-invisible ------------
+        run(ws, "collect")  # settle any pending changes first
+        out = run_stdin(ws, "# Market\n\nRational seekers, audio-first.",
+                        "profile", "set", "market")
+        check("profile set stores the declaration",
+              "Profile 'market' stored" in out, out)
+        out = run(ws, "profile", "list")
+        check("profile list shows keys with word counts",
+              "market — " in out, out)
+        out = run(ws, "profile", "show", "market")
+        check("profile show returns content verbatim",
+              "Rational seekers, audio-first." in out, out)
+        out = run(ws, "collect")
+        check("profiles are invisible to observation",
+              "No changes" in out, out)
+        from authorlm import api as _papi
+        _pm = {"path": str(ms), "name": "book"}
+        got = _papi.get_profile(_pm, "market")
+        check("api.get_profile returns verbatim content",
+              "Rational seekers" in got["content"], str(got))
+        listing = _papi.get_profile(_pm)
+        check("api.get_profile lists profiles",
+              listing["profiles"][0]["key"] == "market", str(listing))
+        from authorlm.gdocs import workspace_bridge
+        wb = workspace_bridge(_pm)
+        check("workspace bridge: own mapping key, no toc sync, lean manifest",
+              wb.meta_key == "gdocs_workspace" and not wb.toc_sync
+              and not wb.rich_manifest
+              and wb.root.name == "_profiles", str(vars(wb)))
+        run(ws, "session", "end")
+    finally:
+        server.shutdown()
+
+
+def scenario_doc_comments(root: Path) -> None:
+    """Doc-comments ingestion: quote location, verbatim storage, dedupe,
+    and the resolve round-trip against a fake Drive service."""
+    print("Scenario DC — doc comments ingestion and resolution")
+    from authorlm.db import Database, ko_fields
+    from authorlm.gdocs import (ingest_comments, locate_quote,
+                                resolve_comments_with_receipt)
+
+    ws = root / "dc" / ".authorlm"
+    ws.mkdir(parents=True)
+    db = Database(ws / "authorlm.db")
+    manuscript = {"id": "ms-test", "path": str(root / "dc")}
+    files = {
+        "one.md": ("# **Essay One**\n\nAlpha paragraph about choice.\n\n"
+                   "## **The Middle**\n\nBeta paragraph, quite distinctive "
+                   "text here.\n"),
+        "two.md": "# **Essay Two**\n\nGamma paragraph about choice.\n",
+    }
+
+    rel, heading = locate_quote(files, "quite distinctive text")
+    check("quote located to file and nearest heading",
+          rel == "one.md" and heading == "**The Middle**", f"{rel}#{heading}")
+    rel, heading = locate_quote(files, "about choice")
+    check("ambiguous quote stays unattributed", rel is None, f"{rel}")
+    rel, heading = locate_quote(files, "no such text anywhere")
+    check("missing quote stays unattributed", rel is None, f"{rel}")
+
+    long_comment = "Please rework this — " + "with care, " * 30
+    comments = [
+        {"id": "c1", "content": long_comment,
+         "quotedFileContent": {"value": "Beta paragraph, quite distinctive "
+                                        "text here."},
+         "author": {"displayName": "Author"},
+         "createdTime": "2026-08-03T00:00:00Z", "replies": []},
+        {"id": "c2", "content": "Which essay is better?",
+         "quotedFileContent": {"value": "about choice"},
+         "author": {"displayName": "Author"},
+         "createdTime": "2026-08-03T00:01:00Z", "replies": []},
+    ]
+    projection = ingest_comments(db, manuscript, comments, files)
+    check("ingestion stores one row per comment",
+          db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
+    check("comment content is stored and projected verbatim",
+          projection[0]["content"] == long_comment
+          and db.one("SELECT content FROM doc_comments WHERE comment_id='c1'")
+          ["content"] == long_comment, projection[0]["content"])
+    check("anchor quote is clamped in the projection",
+          len(projection[0]["quote"]) <= 60, projection[0]["quote"])
+    check("located comment carries transition-style location",
+          projection[0]["location"] == "one.md#**The Middle**",
+          projection[0]["location"])
+    check("ambiguous comment reported unattributed",
+          projection[1]["location"] == "(unattributed)",
+          projection[1]["location"])
+    ingest_comments(db, manuscript, comments, files)
+    check("re-ingestion dedupes on comment id",
+          db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
+
+    # --- tab reconciliation: adopt / re-adopt / rename / ambiguity --------
+    from authorlm.gdocs import MANIFEST_TITLE, classify_tabs
+    links2 = {"a.md": {"tab_id": "t.a"}, "b.md": {"tab_id": "t.b"}}
+    tabs = [("t.a", "a.md"), ("t.b", "b-renamed.md"),
+            ("t.m", MANIFEST_TITLE), ("t.new", "new.md"),
+            ("t.re", "c.md"), ("t.dup", "a.md"), ("t.x", "notes")]
+    cls = classify_tabs(tabs, links2, {"a.md", "b.md", "c.md"})
+    check("unknown md tab with no local file → adopted",
+          cls["adopted"] == [("new.md", "t.new")], str(cls))
+    check("unknown md tab matching a local file → readopted",
+          cls["readopted"] == [("c.md", "t.re")], str(cls))
+    check("known id with changed title → renamed",
+          cls["renamed"] == [("b.md", "b-renamed.md")], str(cls))
+    check("duplicate of a live mapped tab → ambiguous, never relinked",
+          cls["ambiguous"] == ["a.md"], str(cls))
+    check("manifest and non-md tabs ignored",
+          MANIFEST_TITLE in cls["ignored"] and "notes" in cls["ignored"],
+          str(cls))
+    twins = classify_tabs([("t.1", "x.md"), ("t.2", "x.md")], {}, set())
+    check("two unknown tabs with the same name → both ambiguous",
+          twins["ambiguous"] == ["x.md", "x.md"] and not twins["adopted"],
+          str(twins))
+
+    # --- manifest inventory: chapters, word counts, hierarchy, bars ------
+    from authorlm.gdocs import manifest_text
+    inv = [("part1.md", 0, 100), ("intro.md", 1, 400), ("notesish.md", 1, 0)]
+    m = manifest_text("book", 3, inventory=inv, pushed_at="2026-08-04T00:00Z")
+    check("manifest lists chapters with word counts",
+          "part1.md — 100 words" in m and "intro.md — 400 words" in m, m)
+    check("manifest totals and counts chapters",
+          "3 chapter(s), 500 words" in m, m)
+    check("manifest shows hierarchy by indentation",
+          "\n    intro.md" in m and "\npart1.md" in m, m)
+    check("manifest bars scale to the largest chapter",
+          m.count("█") == 20 + 5 + 0, m)
+    check("manifest declares itself write-only",
+          "Write-only" in m and "rewritten on every push" in m, m)
+
+    from authorlm.gdocs import chapter_stats
+    sample = ("# Heading\n\nThe cat sat on the mat. It was warm. "
+              "Everything considered, the philosophical implications "
+              "remained extraordinarily complicated.\n")
+    cs = chapter_stats(sample)
+    check("chapter stats compute ASL/AWL/FRE",
+          5 < cs["asl"] < 7 and 3 < cs["awl"] < 7 and 0 <= cs["fre"] <= 100,
+          str(cs))
+    check("headings are excluded from readability prose",
+          chapter_stats("# Just A Heading\n") == {}, "")
+    m2 = manifest_text("book", 3, inventory=inv,
+                       stats={"intro.md": {"asl": 15.2, "awl": 4.61,
+                                           "fre": 62.4}},
+                       pushed_at="2026-08-04T00:00Z")
+    check("manifest carries per-chapter readability codes",
+          "intro.md — 400 words · ASL 15 · AWL 4.6 · FRE 62" in m2, m2)
+    check("manifest explains the codes",
+          "Codes: ASL avg sentence length" in m2, m2)
+    check("manifest summary block computes pages and read time",
+          "Statistics: 500 words total" in m2 and "pages @275" in m2
+          and "h read" in m2, m2)
+
+    # --- toc tree parse/serialize and structure classification -----------
+    from authorlm.gdocs import classify_structure, walk_tabs
+    from authorlm.structure import (parse_toc_tree, parents_to_tree,
+                                    serialize_toc_tree, tree_to_parents)
+    toc_text = ("# Table of Contents\n\n- a.md\n- b.md\n  - c.md\n"
+                "    - d.md\n  - e.md\n- f.md\n")
+    tree = parse_toc_tree(toc_text)
+    check("toc tree parses names and depths",
+          tree == [("a.md", 0), ("b.md", 0), ("c.md", 1), ("d.md", 2),
+                   ("e.md", 1), ("f.md", 0)], str(tree))
+    check("toc tree serializes back losslessly",
+          parse_toc_tree(serialize_toc_tree(tree)) == tree, "")
+    pairs = tree_to_parents(tree)
+    check("tree_to_parents computes DFS parents",
+          pairs == [("a.md", None), ("b.md", None), ("c.md", "b.md"),
+                    ("d.md", "c.md"), ("e.md", "b.md"), ("f.md", None)],
+          str(pairs))
+    check("parents_to_tree inverts tree_to_parents",
+          parents_to_tree(pairs) == tree, str(parents_to_tree(pairs)))
+
+    doc_tabs = [{"tabProperties": {"tabId": "t.a", "title": "a.md"},
+                 "childTabs": [
+                     {"tabProperties": {"tabId": "t.s", "title": "scratch"},
+                      "childTabs": [
+                          {"tabProperties": {"tabId": "t.c",
+                                             "title": "c.md"}}]}]}]
+    props, dpairs = [], []
+    walk_tabs(doc_tabs, props, dpairs)
+    check("non-md tabs are transparent to md hierarchy",
+          dpairs == [("a.md", None), ("c.md", "a.md")], str(dpairs))
+
+    base = [("a.md", None), ("b.md", None)]
+    moved = [("b.md", None), ("a.md", None)]
+    check("structure: equal → insync",
+          classify_structure(base, base, base) == "insync", "")
+    check("structure: doc moved → doc_moved",
+          classify_structure(moved, base, base) == "doc_moved", "")
+    check("structure: local moved → local_moved",
+          classify_structure(base, moved, base) == "local_moved", "")
+    check("structure: both moved → conflict",
+          classify_structure(moved, [("b.md", None)], base) == "conflict", "")
+    check("structure: no base, additions only → doc_moved",
+          classify_structure(base + [("x.md", "a.md")], base, None)
+          == "doc_moved", "")
+    check("structure: no base, real disagreement → unsynced",
+          classify_structure(moved, base, None) == "unsynced", "")
+
+    # --- three-way pull classification (the stale-tab false conflict) ---
+    import hashlib as _hashlib
+
+    from authorlm.gdocs import three_way
+    base_text = "# One\n\nOriginal paragraph.\n"
+    base_hash = _hashlib.sha256(base_text.encode()).hexdigest()[:16]
+    check("three-way: identical → unchanged",
+          three_way(base_text, base_text, base_hash) == "unchanged", "")
+    check("three-way: only tab moved → changed (safe pull)",
+          three_way("# One\n\nDoc edit.\n", base_text, base_hash) == "changed", "")
+    check("three-way: only local moved → local_ahead, never conflict",
+          three_way(base_text, "# One\n\nLocal edit.\n", base_hash)
+          == "local_ahead", "")
+    check("three-way: both moved → conflict",
+          three_way("# One\n\nDoc edit.\n", "# One\n\nLocal edit.\n",
+                    base_hash) == "conflict", "")
+    check("three-way: no recorded base + drift → changed (Doc wins)",
+          three_way("# One\n\nDoc edit.\n", base_text, None) == "changed", "")
+
+    class FakeReplies:
+        calls: list = []
+
+        def create(self, fileId, commentId, body, fields):
+            FakeReplies.calls.append((commentId, body))
+
+            class R:
+                @staticmethod
+                def execute():
+                    if commentId == "c2":
+                        raise RuntimeError("boom")
+                    return {"id": "r1"}
+            return R()
+
+    class FakeService:
+        def replies(self):
+            return FakeReplies()
+
+    resolved = resolve_comments_with_receipt(
+        db, FakeService(), "doc-id", "ms-test", ["c1", "c2"])
+    check("resolve sends receipt replies with action=resolve",
+          FakeReplies.calls[0][1]["action"] == "resolve"
+          and "Ingested into AuthorLM" in FakeReplies.calls[0][1]["content"],
+          repr(FakeReplies.calls[0]))
+    check("successful resolve marks the row resolved",
+          db.one("SELECT state FROM doc_comments WHERE comment_id='c1'")
+          ["state"] == "resolved", "")
+    check("failed resolve leaves the row ingested for the next pull",
+          resolved == 1
+          and db.one("SELECT state FROM doc_comments WHERE comment_id='c2'")
+          ["state"] == "ingested", f"resolved={resolved}")
+
+
 def scenario_alias_and_syllogism(root: Path) -> None:
     print("Scenario A2 — aliases and syllogism kind")
     ws = root / "alias"
@@ -1459,6 +1931,21 @@ def scenario_transplant() -> None:
     check("italic and bold ranges cover the right words",
           styled_words.get("qualities", {}).get("italic")
           and styled_words.get("measurable", {}).get("bold"), str(styled_words))
+    # Inserted text inherits the tab's residual character style (the italic
+    # snowball): every insertion must carry an explicit reset BEFORE the
+    # true run styles are applied.
+    resets = [s for s in styles
+              if s["textStyle"] == {"bold": False, "italic": False,
+                                    "underline": False}]
+    check("every insertion is followed by an explicit style reset",
+          len(resets) == len(inserts),
+          f"{len(resets)} resets / {len(inserts)} inserts")
+    first_style_idx = next(i for i, r in enumerate(reqs)
+                           if "updateTextStyle" in r)
+    check("reset precedes the first true run style",
+          reqs[first_style_idx]["updateTextStyle"]["textStyle"]
+          == {"bold": False, "italic": False, "underline": False},
+          str(reqs[first_style_idx]))
     bullets = [r for r in reqs if "createParagraphBullets" in r]
     check("numbered list becomes numbered bullets",
           len(bullets) == 2 and all(
@@ -1563,6 +2050,8 @@ def main_test() -> None:
         scenario_alias_and_syllogism(root)
         scenario_errors(root)
         scenario_llm_and_unregister(root)
+        scenario_write_loop(root)
+        scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
