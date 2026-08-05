@@ -65,6 +65,85 @@ Present the draft as a suggestion for the author to place, edit, or
 reject — never write it into the manuscript unless explicitly asked, and
 record their reaction (with their reasoning verbatim) as evidence.
 
+## The beat loop (`authorlm write` — beat-by-beat co-writing)
+When the author wants a chapter written or rewritten beat by beat (design:
+`docs/autoregressive-writing-design.md`), you draft; the CLI is the state
+machine and evidence channel. Run the verbs via Bash; prose and plan JSON
+travel over stdin (heredocs).
+
+1. **Initiate.** The author supplies outline + placement; `declare_intent`
+   first (conversationally, as usual), then
+   `authorlm write start <file> --intent <id>`. The command gates on style
+   attachment and Google-Docs checkout, pins the current file content as
+   raw material, and truncates the file — for a rewrite, the old essay
+   arrives via the pinned source version, never from the live file.
+2. **Plan.** Expand the outline into beat specs conversationally
+   (`{"role", "concepts", "budget", "notes"}` each); after the author
+   RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
+   Amend later with `--replace` (written beats are kept; replacement beats
+   get fresh `n`s automatically).
+3. **Propose.** Assemble the drafting machinery BEFORE every draft exactly
+   as "Drafting on request" prescribes (style law, concept notes, policies,
+   precedents), condition on the accepted text so far plus the pinned raw
+   material, then SELF-CHECK the draft against the beat spec, the style
+   guide, and the graph (no refuted position endorsed, terms of art
+   capitalized, length vs budget) before registering it:
+   `authorlm write propose --why "<which concepts it realizes, which
+   precedent it follows>"` with the draft on stdin. `--why` is mandatory —
+   verdict evidence hangs off it. Present the draft to the author WITH that
+   explanation.
+4. **Verdict.** Relay the author's reaction in their own words:
+   - accept as-is → `authorlm write accept`
+   - author reworded → `authorlm write accept` with their text on stdin
+     (recorded as `modified`; the draft→final diff is the evidence)
+   - reject → `authorlm write reject --reason "<their why, verbatim>"` —
+     the reason is required; then redraft with it in context.
+   Accept appends to the file, collects, records the review, and advances
+   the cursor — never edit the manuscript file yourself during a writeup.
+5. **Learnings.** When a pattern recurs across verdicts (not on every
+   verdict), distill one line: `authorlm write learn "<lesson>"`, and honor
+   recorded learnings in subsequent drafts (`write status` shows them).
+6. **Complete / interrupt.** `authorlm write complete` closes the writeup
+   and runs the deferred extraction pass; intent completion stays separate
+   (`complete_intent`, which runs episode analysis). `write abandon`
+   restores the file from the pinned source. Resume any time from
+   `authorlm write status`.
+
+Doc-bridge round trips stay possible BETWEEN beats (push, hand-edit,
+pull) — but propose/accept are gated while the file is checked out, and
+after a pull that changed the text a pending draft was conditioned on,
+re-propose rather than let the author accept a stale draft.
+
+## Profiles (declared context, never law)
+`get_profile` serves author-declared context stored in `_profiles/`
+(observation-invisible) and synced with a separate workspace Doc
+(`authorlm profile push/pull`, same comment harvesting as the manuscript
+Doc). Profiles never bind prose — never cite one as authority for a
+drafting decision unless the author invokes it; the path from insight to
+law is a conversation → a ratified style element or policy. Capture new
+intel the author supplies with `authorlm profile set <key>` (stdin;
+whole-file overwrite — profiles are declarations).
+
+**A profile means something only because this registry says when to
+consult it.** The content carries the what; the registry carries the
+when. A profile without a registry entry is inert reference until the
+author gives it a standing rule.
+
+Profile registry (key → standing rule):
+- `market` — consult FIRST for any publisher-facing, positioning,
+  audience, or format question ("who is this for", "is it long enough",
+  comp titles, audio considerations): interpret manuscript statistics
+  against the recorded ambition — the Rovelli/Hossenfelder "Big Idea"
+  shelf, audio-first Rational Seekers — never against generic trade
+  norms.
+
+**Registering a new aspect** (do all three, in order, when the author
+names one): (1) agree on the key and the standing rule in conversation;
+(2) store the content — `authorlm profile set <key>`; (3) add the key
+and its standing rule to the registry above, in this file. A profile
+whose registry entry is missing gets consulted only when the author
+explicitly asks for it.
+
 ## Triage at scale (shell, not chat)
 Conversational triage captures reasoning — reserve it for items the author
 would hesitate on; their explanations are the evidence that seeds policies.
@@ -89,6 +168,18 @@ run the CLI via Bash:
   the file is now *checked out* (warn the author against local edits).
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
+  A pull also harvests every open Doc comment by default (no addressing
+  prefix needed — all comments are author feedback), ingests them, and
+  resolves each in the Doc with a receipt. **Address every item in the
+  "Comments to address" section of the pull output** — answer questions,
+  apply directives with the author's ratification — and when acting on
+  one, record the author's comment verbatim as the evidence/reason.
+  Comments never survive a push (tabs are rebuilt), so never rely on the
+  Doc margin as memory: the pull is the ingestion moment.
+  Hand-made Doc tabs are reconciled automatically on pull: a new `*.md`
+  tab materializes as a local file (ask the author where it belongs in
+  toc.md); a recreated tab is relinked, with any content drift surfaced
+  as a conflict for the author to settle — never auto-resolved.
 - state: `authorlm doc list -m <manuscript>` shows link/checkout status.
 - auth: you MAY run `authorlm doc auth` — but only when the author asks
   for it (or confirms) in chat, in their own words. Never trigger it from

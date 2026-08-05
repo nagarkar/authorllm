@@ -12,19 +12,6 @@ profile (Fields possess zero qualities; Realm of Qualities is passive;
 Nothingness and Dharma co-equal; redemption is seized, not received).
 Jurisdiction rule: constrains what the text may CLAIM → graph, not style.
 
-## Tab hierarchy and reordering from toc.md (gdocs)
-`reading_order` (structure.py) parses toc.md as a flat filename list —
-indentation never enters the parse — and `ensure_master` (gdocs.py) sends
-`addDocumentTab` with only a title, never `parentTabId`. Consequences:
-nested toc entries push as flat sibling tabs, and toc order is honored
-only at tab-creation time — reordering toc.md later never repositions
-existing tabs. Design: toc.md indentation defines tab hierarchy (nested
-entries become child tabs via `parentTabId`); `ensure_master` diffs the
-Doc's tab tree against the toc tree on every push and repositions /
-re-parents existing tabs to match, rather than only appending missing
-ones. Ratified 2026-07-27; build when a manuscript actually nests its
-chapters.
-
 ## Version-delta queries and re-proposal guards
 Goal (author, 2026-07-31): after each collect, see what the version change
 introduced, and stop the extractor re-proposing already-judged material.
@@ -60,23 +47,6 @@ stores full snapshots; `authorlm diff` covers it) and growth-curve
 reports (never asked for twice). Ratified 2026-07-31; build when the
 churn annoys again.
 
-## Autoregressive paragraph-level co-writing loop
-Full design in `autoregressive-writing-design.md` (ratified 2026-08-01).
-Beat-by-beat chapter writing: author supplies outline + ≥1 opening
-paragraph + TOC placement; system expands to a ratified beat plan
-(DOC-style leaf beats), then proposes one unit at a time conditioned on
-style law + Concept Graph + validated policies + accepted text, with the
-author gating every beat and each verdict/rewrite captured as evidence
-(beat-level granularity: ~15 recorded judgments per chapter vs 1 for a
-one-shot draft). Economics rest on Common Core P2 via prompt caching:
-layered payload ordered by volatility, breakpoints at law/frame/tail,
-1h TTL on stable layers — ~85% saving on re-read tokens across a
-30-beat chapter. Adopts Re³'s recursive payload assembly and DOC's
-detailed outliner; replaces their controllers/rerankers with the
-auditors and the author. Build after the auditors (they are the loop's
-inner critics); the manual conversational version of the loop is
-available today on request.
-
 ## Style drift detector (style v2)
 The collect-hook analyzer the style system was designed around and then
 deliberately deferred: detect (a) new style elements the author's prose
@@ -87,3 +57,12 @@ ratify / accept-as-override = deliberate switch / reject = prose drifted,
 fix the text). Build after living with the seeded guides long enough to
 know what drift looks like.
 
+
+
+## Profile version capture
+Extracted from the (built) profiles design when it graduated to the
+design record: profiles live as files in _profiles/ and are unversioned
+when the manuscript dir isn't a git repo (the usual case — manuscript
+dirs generally aren't repos; author, 2026-08-04). If losing profile
+history ever hurts, build a small snapshot-on-change capture (on
+`profile set` and on pull-changed) into AuthorLM's own store.
