@@ -8,7 +8,7 @@ editorial knowledge happens silently.
 
 from __future__ import annotations
 
-from .concepts import node_name, unrealized_with_dependents
+from .concepts import unrealized_with_dependents
 from .db import Database, loads
 
 EPOCH = "1970-01-01T00:00:00Z"
@@ -86,17 +86,14 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         if meta.get("origin") == "extracted" and not meta.get("confirmed"):
             unconfirmed_concepts.append(dict(node))
 
-    inferred_edges = [
-        {
-            **dict(edge),
-            "from_name": node_name(db, edge["from_node"]),
-            "to_name": node_name(db, edge["to_node"]),
-        }
-        for edge in db.all(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? AND status = 'inferred'",
-            (manuscript_id,),
-        )
-    ]
+    inferred_edges = [dict(edge) for edge in db.all(
+        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
+        "FROM concept_edges ce "
+        "JOIN concept_nodes fn ON fn.id = ce.from_node "
+        "JOIN concept_nodes tn ON tn.id = ce.to_node "
+        "WHERE ce.manuscript_id = ? AND ce.status = 'inferred'",
+        (manuscript_id,),
+    )]
 
     contradictions = [
         dict(r) for r in db.all(
