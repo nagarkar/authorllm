@@ -508,15 +508,14 @@ def list_concepts(db: Database, manuscript: dict, include_all: bool = False) -> 
     nodes = [dict(n) for n in db.all(
         f"SELECT * FROM concept_nodes WHERE manuscript_id = ?{node_filter}", (mid,)
     )]
-    edge_filter = "" if include_all else " AND status NOT IN ('rejected', 'retired')"
-    edges = [
-        {**dict(e),
-         "from_name": cg.node_name(db, e["from_node"]),
-         "to_name": cg.node_name(db, e["to_node"])}
-        for e in db.all(
-            f"SELECT * FROM concept_edges WHERE manuscript_id = ?{edge_filter}", (mid,)
-        )
-    ]
+    edge_filter = "" if include_all else " AND ce.status NOT IN ('rejected', 'retired')"
+    edges = [dict(e) for e in db.all(
+        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
+        "FROM concept_edges ce "
+        "JOIN concept_nodes fn ON fn.id = ce.from_node "
+        "JOIN concept_nodes tn ON tn.id = ce.to_node "
+        f"WHERE ce.manuscript_id = ?{edge_filter}", (mid,)
+    )]
     return {"nodes": nodes, "edges": edges}
 
 
@@ -524,17 +523,16 @@ def show_concept(db: Database, manuscript: dict, name: str) -> dict:
     node = cg.get_concept(db, manuscript["id"], name)
     if not node:
         raise LookupError(f"no concept named '{name}'")
-    edges = [
-        {**dict(e),
-         "from_name": cg.node_name(db, e["from_node"]),
-         "to_name": cg.node_name(db, e["to_node"])}
-        for e in db.all(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? "
-            "AND status NOT IN ('rejected', 'retired') "
-            "AND (from_node = ? OR to_node = ?)",
-            (manuscript["id"], node["id"], node["id"]),
-        )
-    ]
+    edges = [dict(e) for e in db.all(
+        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
+        "FROM concept_edges ce "
+        "JOIN concept_nodes fn ON fn.id = ce.from_node "
+        "JOIN concept_nodes tn ON tn.id = ce.to_node "
+        "WHERE ce.manuscript_id = ? "
+        "AND ce.status NOT IN ('rejected', 'retired') "
+        "AND (ce.from_node = ? OR ce.to_node = ?)",
+        (manuscript["id"], node["id"], node["id"]),
+    )]
     return {"node": dict(node), "edges": edges}
 
 
