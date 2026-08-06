@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from authorlm import api  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.db import loads  # noqa: E402
 
 PASSED = 0
 
@@ -70,6 +71,67 @@ def main_test() -> None:
         check("collect reports prerequisite gaps structurally",
               len(report["gaps_after"]) == 1
               and report["gaps_after"][0]["second"] == "Gravity")
+
+        # --- massive_deletions boundary conditions (auto-collect safety net) ---
+        # Isolated manuscript: the shrink_ratio/min_chars math needs an exact,
+        # uncluttered file history.
+        md_root = root / "md-ws"
+        md_ms = md_root / "manuscript"
+        md_ms.mkdir(parents=True)
+        big_text = "Paragraph. " * 200  # 2200 chars, well over min_chars
+        (md_ms / "safety.md").write_text(big_text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(md_root), "init", "--name", "safety",
+                      "--path", str(md_ms)])
+        md_db = api.open_db(str(md_root))
+        md_manuscript = api.get_manuscript(md_db)
+        api.collect(md_db, md_manuscript, {})  # v1 baseline: 2200 chars
+
+        (md_ms / "safety.md").write_text(big_text[:1760])  # 80% remains
+        report = api.collect(md_db, md_manuscript, {}, auto=True)
+        check("auto-collect proceeds under the shrink_ratio threshold",
+              "staged" not in report)
+
+        (md_ms / "safety.md").write_text(big_text[:50])  # ~97% removed vs. v2
+        report = api.collect(md_db, md_manuscript, {}, auto=True)
+        check("auto-collect stages a massive deletion instead of collecting",
+              report.get("staged") == [{"file": "safety.md", "removed_percent": 97}])
+
+        report = api.collect(md_db, md_manuscript, {}, auto=False)
+        check("a manual collect proceeds through a massive deletion",
+              "staged" not in report and "unchanged" not in report)
+
+        (md_ms / "tiny.md").write_text("x" * 100)  # under min_chars
+        api.collect(md_db, md_manuscript, {})
+        (md_ms / "tiny.md").write_text("")
+        report = api.collect(md_db, md_manuscript, {}, auto=True)
+        check("files under min_chars are exempt from the deletion safety net",
+              "staged" not in report)
+
+        # --- history show/restore (MVP.md 'Deliberately deferred': version
+        # access & restoration — implementable at any time, no schema change) ---
+        try:
+            api.get_version(md_db, md_manuscript, 99)
+            check("get_version rejects an unknown version number", False)
+        except LookupError as err:
+            check("get_version rejects an unknown version number", "v99" in str(err))
+
+        v1 = api.get_version(md_db, md_manuscript, 1)
+        check("get_version returns the requested snapshot",
+              loads(v1["files"], {})["safety.md"] == big_text)
+
+        restored = api.restore_version(md_db, md_manuscript, 1, {})
+        check("restore_version writes the old content back to disk",
+              (md_ms / "safety.md").read_text() == big_text)
+        check("restore_version deletes files absent from the restored version",
+              not (md_ms / "tiny.md").exists())
+        check("restoring advances history rather than rewinding it",
+              restored["version_no"] == 6
+              and restored["transitions"])
+        latest = api.get_version(md_db, md_manuscript, 6)
+        check("the restored snapshot is itself a new, real version",
+              loads(latest["files"], {})["safety.md"] == big_text
+              and "tiny.md" not in loads(latest["files"], {}))
 
         declared = api.declare_intent(db, manuscript, "Expand on gravity")
         check("declare_intent returns intent + preview",

@@ -29,7 +29,9 @@ from .briefing import build_briefing
 from .db import Database, ko_fields, loads
 from .guidance import compute_prerequisite_gaps, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
-from .revisions import collect_revision, detect_transitions, massive_deletions
+from .revisions import (
+    collect_revision, detect_transitions, massive_deletions, read_manuscript_files,
+)
 
 __all__ = [
     "open_db", "load_config", "make_llm",
@@ -37,7 +39,8 @@ __all__ = [
     "status", "ensure_session", "close_session", "expire_idle_session",
     "declare_intent", "intent_preview", "complete_intent", "abandon_intent",
     "list_intents", "collect", "guide", "review", "get_briefing",
-    "analyze", "diff_versions", "list_concepts", "show_concept",
+    "analyze", "diff_versions", "get_version", "restore_version",
+    "list_concepts", "show_concept",
     "add_concept", "link_concepts", "confirm_concept", "retire_concept",
     "confirm_edge", "reject_edge", "list_proposals", "resolve_proposal",
     "list_policies", "run_extraction", "get_plan", "get_doc_links",
@@ -498,6 +501,38 @@ def diff_versions(db: Database, manuscript: dict, older: int | None = None,
             lineterm="",
         ))
     return {"old": old_label, "new": new_label, "files": files}
+
+
+def get_version(db: Database, manuscript: dict, version_no: int) -> dict:
+    """A single collected revision snapshot, by version number."""
+    version = db.one(
+        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? AND version_no = ?",
+        (manuscript["id"], version_no),
+    )
+    if not version:
+        last = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],),
+        )
+        raise LookupError(
+            f"no version v{version_no} (have v1..v{last['version_no'] if last else 0})")
+    return version
+
+
+def restore_version(db: Database, manuscript: dict, version_no: int, config: dict) -> dict:
+    """Write a past version's files to disk and collect them as a new
+    revision (MVP.md 'Deliberately deferred': history is never rewound,
+    only advanced — restoration persists forward as a new snapshot)."""
+    version = get_version(db, manuscript, version_no)
+    files = loads(version["files"], {})
+    root = Path(manuscript["path"])
+    for name in set(read_manuscript_files(root)) - set(files):
+        (root / name).unlink()
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return collect(db, manuscript, config, source=f"restore:v{version_no}")
 
 
 # ----------------------------------------------------------- concept graph
