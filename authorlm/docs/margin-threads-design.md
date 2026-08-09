@@ -129,10 +129,12 @@ re-proposing", and a fresh proposal is drafted against current text.
   ends byte-equivalent to local, PROVEN by a re-export read-back;
   mismatch → one retry → loud conflict, never a silent rebuild).
   Anchors on unchanged text survive by construction.
-- INTERIM RULE until step 3 ships: a tab with open threads defers
-  general content pushes (reconciler's "pending push" vocabulary);
-  tabs without threads push normally. Rebuild-push of a thread-bearing
-  tab only ever on the author's explicit word.
+- SHIPPED (step 3): thread-bearing tabs push surgically by paragraph
+  diff (export-space diff, positional paragraph mapping, temp-doc
+  imports for changed paragraphs, read-back proof with one retry);
+  edits overlapping a pending span refuse loudly. Tabs without open
+  threads keep the battle-tested rebuild push. The interim
+  defer-general-pushes rule is lifted.
 - Checkout semantics unchanged.
 
 ## Evidence (the third channel)

@@ -851,12 +851,17 @@ def push_doc(db: Database, manuscript: dict, query: str,
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
     if threads_mod.open_threads(db, manuscript["id"], relpath):
-        # Interim rule until the surgical diff push ships: a rebuild
-        # push would orphan every open margin thread on this tab.
-        raise LookupError(
-            f"'{relpath}' has open margin threads — general push is "
-            "deferred (settle the threads, or ask explicitly for a "
-            "rebuild push, which will orphan them)")
+        # Surgical path: a rebuild would orphan the open margin threads,
+        # so thread-bearing tabs push by paragraph diff instead.
+        result = diff_push(db, manuscript, relpath, service, docs_service,
+                           bridge=bridge)
+        meta_now = _mapping(db, manuscript)
+        master = meta_now.get(bridge.meta_key, {}).get("_master_id")
+        tab = (meta_now.get(bridge.meta_key, {}).get(relpath) or {}).get(
+            "tab_id")
+        result.update(doc_id=master, url=tab_url(master, tab),
+                      created=False, locally_normalized=False)
+        return result
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
     locally_normalized = normalized != text
@@ -1755,3 +1760,203 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
         actions.append({"comment_id": thread["comment_id"],
                         "file": thread["file"], "action": "withdrawn"})
     return actions
+
+
+# ---------------------------------------------------- surgical diff push
+# (margin-threads step 3: partial in means, total in result)
+
+def _shift_requests(requests: list[dict], delta: int) -> list[dict]:
+    """Rebase transplant requests (built against index 1) to an
+    arbitrary insertion point."""
+    def shift(obj):
+        if isinstance(obj, dict):
+            return {k: (v + delta if k in ("index", "startIndex", "endIndex")
+                        and isinstance(v, int) else shift(v))
+                    for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [shift(x) for x in obj]
+        return obj
+    return shift(requests)
+
+
+def _doc_paragraphs(docs_service, master_id: str,
+                    tab_id: str) -> list[dict]:
+    """Non-empty paragraphs of a tab with their doc index ranges:
+    [{start, end, text}] in order. Rule paragraphs surface as '---' so
+    they align positionally with the markdown export."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    out: list[dict] = []
+
+    def walk(tabs):
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    para = item.get("paragraph")
+                    if not para:
+                        continue
+                    if any("horizontalRule" in e
+                           for e in para.get("elements", [])):
+                        out.append({"start": item.get("startIndex", 0),
+                                    "end": item.get("endIndex", 0),
+                                    "text": "---"})
+                        continue
+                    text = "".join(
+                        e["textRun"].get("content", "")
+                        for e in para.get("elements", [])
+                        if "textRun" in e)
+                    if text.strip():
+                        out.append({"start": item.get("startIndex", 0),
+                                    "end": item.get("endIndex", 0),
+                                    "text": text})
+            walk(tab.get("childTabs", []))
+    walk(doc.get("tabs", []))
+    return out
+
+
+def _md_paragraphs(markdown: str) -> list[str]:
+    return [p for p in re.split(r"\n\s*\n", markdown) if p.strip()]
+
+
+def diff_push(db: Database, manuscript: dict, relpath: str,
+              service, docs_service,
+              bridge: DocBridge | None = None) -> dict:
+    """Push local changes into a tab by editing only the changed
+    paragraphs — anchors (margin threads, ingested comments) on
+    untouched text survive by construction. Diffs in EXPORT space (both
+    sides normalized markdown), maps paragraphs positionally onto the
+    tab's structure, imports replacement paragraphs through the
+    temp-doc pipeline so Google owns md→rich conversion, and PROVES the
+    result by read-back equivalence (one retry, then a loud conflict —
+    never a silent rebuild). Bails to a conflict whenever an edit
+    overlaps a pending thread span."""
+    import hashlib as _hashlib
+
+    from difflib import SequenceMatcher
+
+    from googleapiclient.http import MediaInMemoryUpload
+
+    from .revisions import strip_embed_lines as _strip_embeds
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    mid = manuscript["id"]
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    entry = links.get(relpath) or {}
+    tab_id = entry.get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{relpath}' has no tab in the master Doc")
+
+    local_md = _strip_embeds(normalize_markdown(
+        (bridge.root / relpath).read_text(encoding="utf-8")))
+
+    def tab_markdown() -> str:
+        data = service.files().export(
+            fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+        whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+        boundaries = {f for f, e in links.items()
+                      if not f.startswith("_") and isinstance(e, dict)
+                      and e.get("tab_id")} | {MANIFEST_TITLE}
+        return normalize_markdown(
+            split_tabbed_export(whole, boundaries).get(relpath, ""))
+
+    for attempt in (1, 2):
+        tab_md = tab_markdown()
+        tab_paras = _md_paragraphs(tab_md)
+        canonical = [threads_mod.strip_pending(p)[0].strip("\n")
+                     for p in tab_paras]
+        local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
+        if canonical == local_paras:
+            entry["pushed_hash"] = _hashlib.sha256(
+                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+            entry["checked_out"] = True
+            links[relpath] = entry
+            _save_mapping(db, manuscript, meta)
+            return {"relpath": relpath, "mode": "diff", "ops": 0}
+
+        doc_paras = _doc_paragraphs(docs_service, master_id, tab_id)
+        if len(doc_paras) != len(tab_paras):
+            raise LookupError(
+                f"diff push: tab structure and export disagree "
+                f"({len(doc_paras)} vs {len(tab_paras)} paragraphs) — "
+                "settle threads and use a rebuild push")
+
+        requests: list[dict] = []
+        opcodes = SequenceMatcher(None, canonical, local_paras,
+                                  autojunk=False).get_opcodes()
+        ops = 0
+        for tag, i1, i2, j1, j2 in reversed(opcodes):
+            if tag == "equal":
+                continue
+            ops += 1
+            if any("<<" in tab_paras[i] for i in range(i1, i2)):
+                raise LookupError(
+                    "diff push: the edit overlaps a pending margin "
+                    "thread — settle the thread first "
+                    f"[{tag} {i1}:{i2} tab={tab_paras[i1:i2]!r} "
+                    f"local={local_paras[j1:j2]!r}]")
+            if tag in ("replace", "delete") and i2 > i1:
+                start = doc_paras[i1]["start"]
+                end = doc_paras[i2 - 1]["end"]
+                if i2 == len(doc_paras):
+                    end -= 1  # the tab's final newline is not deletable
+                requests.append({"deleteContentRange": {"range": {
+                    "tabId": tab_id, "startIndex": start,
+                    "endIndex": end}}})
+            if tag in ("replace", "insert") and j2 > j1:
+                chunk = "\n\n".join(local_paras[j1:j2]) + "\n"
+                media = MediaInMemoryUpload(chunk.encode("utf-8"),
+                                            mimetype=MARKDOWN_MIME)
+                temp = service.files().create(
+                    body={"name": f"authorlm-diff-{Path(relpath).stem}",
+                          "mimeType": GDOC_MIME},
+                    media_body=media, fields="id",
+                ).execute()
+                try:
+                    temp_doc = docs_service.documents().get(
+                        documentId=temp["id"]).execute()
+                finally:
+                    service.files().delete(fileId=temp["id"]).execute()
+                if i1 < len(doc_paras):
+                    # Insert BEFORE an existing paragraph: imported
+                    # paragraphs each end with a newline, so the block
+                    # closes cleanly against what follows.
+                    position = doc_paras[i1]["start"]
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id),
+                        position - 1))
+                else:
+                    # Append at tab end: open a fresh paragraph first —
+                    # inserting at end-1 lands INSIDE the last
+                    # paragraph, before its trailing newline.
+                    position = doc_paras[-1]["end"] - 1
+                    requests.append([{"insertText": {
+                        "location": {"tabId": tab_id, "index": position},
+                        "text": "\n"}}])
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id), position))
+
+        flat: list[dict] = []
+        for r in requests:
+            flat.extend(r if isinstance(r, list) else [r])
+        if flat:
+            docs_service.documents().batchUpdate(
+                documentId=master_id, body={"requests": flat}).execute()
+
+        verify = [threads_mod.strip_pending(p)[0].strip("\n")
+                  for p in _md_paragraphs(tab_markdown())]
+        if verify == local_paras:
+            entry["pushed_hash"] = _hashlib.sha256(
+                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+            entry["checked_out"] = True
+            links[relpath] = entry
+            _save_mapping(db, manuscript, meta)
+            return {"relpath": relpath, "mode": "diff", "ops": ops}
+        if attempt == 2:
+            raise LookupError(
+                "diff push: read-back verification failed twice — the "
+                "tab and local disagree; resolve by pull or an explicit "
+                "rebuild push")
+    raise LookupError("diff push: unreachable")

@@ -326,8 +326,16 @@ def main_test() -> None:
                 return FakeRequest({})
 
             def export(self, fileId=None, mimeType=None):
-                whole = "\n".join(f"# **{t['title']}**\n\n{t['text']}"
-                                  for t in self.state["docs"][fileId])
+                def as_markdown(text):
+                    # The real exporter separates doc paragraphs with
+                    # blank lines; the fake stores one paragraph per
+                    # line (empties tolerated for legacy set_tab text).
+                    paras = [ln for ln in text.split("\n") if ln.strip()]
+                    return "\n\n".join(paras) + ("\n" if paras else "")
+
+                whole = "\n".join(
+                    f"# **{t['title']}**\n\n{as_markdown(t['text'])}"
+                    for t in self.state["docs"][fileId])
                 return FakeRequest(whole.encode("utf-8"))
 
         class FakeDocuments:
@@ -341,16 +349,24 @@ def main_test() -> None:
                         for line in
                         self.state["uploads"][documentId].splitlines()]
                     return FakeRequest({"body": {"content": content}})
+                def paragraphs(text):
+                    items, pos = [], 1
+                    for line in text.split("\n"):
+                        content = line + "\n"
+                        items.append({
+                            "startIndex": pos,
+                            "endIndex": pos + len(content),
+                            "paragraph": {"elements": [
+                                {"startIndex": pos,
+                                 "endIndex": pos + len(content),
+                                 "textRun": {"content": content}}]}})
+                        pos += len(content)
+                    return items
+
                 tabs = [{"tabProperties": {"tabId": t["id"],
                                            "title": t["title"]},
                          "documentTab": {"body": {"content":
-                             [{"startIndex": 1,
-                               "endIndex": len(t["text"]) + 1,
-                               "paragraph": {"elements": [
-                                   {"startIndex": 1,
-                                    "endIndex": len(t["text"]) + 1,
-                                    "textRun": {"content": t["text"]}}]}}]
-                             if t["text"] else []}}}
+                             paragraphs(t["text"]) if t["text"] else []}}}
                         for t in self.state["docs"][documentId]]
                 return FakeRequest({"tabs": tabs})
 
@@ -652,14 +668,31 @@ def main_test() -> None:
                    "reply": "go ahead", "verdict": "approve"}],
               str(pulled_v.get("thread_replies")))
 
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\nA new closing thought.\n")
+        pushed_s = push_doc(db, manuscript, "01-choice.md",
+                            service=stub, docs_service=stub)
+        tab_after = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                         if t2["title"] == "01-choice.md")
+        check("surgical diff push edits around open threads",
+              pushed_s.get("mode") == "diff" and pushed_s.get("ops") == 1
+              and "A new closing thought." in tab_after
+              and "<<Doc went another way.>>" in tab_after
+              and not stub.state["comments"]["c-1"]["resolved"], tab_after)
+
+        original_local = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").write_text(original_local.replace(
+            "Doc went another way.", "Doc went a third way."))
         try:
             push_doc(db, manuscript, "01-choice.md",
                      service=stub, docs_service=stub)
-            check("interim rule defers general pushes on thread-bearing "
-                  "tabs", False)
+            check("diff push refuses edits overlapping pending spans",
+                  False)
         except LookupError as err:
-            check("interim rule defers general pushes on thread-bearing "
-                  "tabs", "open margin threads" in str(err))
+            check("diff push refuses edits overlapping pending spans",
+                  "pending margin thread" in str(err))
+        (ms / "01-choice.md").write_text(original_local)
 
         # Drive entity-encodes quotes and bodies; fetch unescapes them
         # (it-49edf0c323d1).
