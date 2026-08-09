@@ -1,0 +1,3 @@
+{"ts": "2026-08-06T04:18:51+00:00", "surface": "cli", "verb": "status", "manuscript": "SMSTTD", "duration_ms": 36, "ok": true}
+{"ts": "2026-08-06T04:26:43+00:00", "surface": "cli", "verb": "sweep", "action": "readiness", "manuscript": "SMSTTD", "duration_ms": 43, "ok": true}
+{"ts": "2026-08-06T04:27:01+00:00", "surface": "cli", "verb": "sweep", "action": "ontology", "manuscript": "SMSTTD", "duration_ms": 11825, "ok": true}
