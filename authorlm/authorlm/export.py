@@ -123,6 +123,10 @@ def _settings_path(manuscript: dict) -> Path:
     return Path(manuscript["path"]) / EXPORT_DIR / "settings.toml"
 
 
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def load_settings(manuscript: dict) -> dict:
     """Per-manuscript export settings: _exports/settings.toml over
     defaults. Deterministic tooling — the file is the state, and the
@@ -153,7 +157,7 @@ def set_setting(manuscript: dict, key: str, value: str) -> dict:
     lines = ["# AuthorLM export settings — 'authorlm export set <key> "
              "<value>', or edit directly."]
     for name in _SETTINGS_DEFAULTS:
-        lines.append(f'{name} = "{settings[name]}"')
+        lines.append(f'{name} = "{_toml_escape(settings[name])}"')
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return settings
 
