@@ -1721,12 +1721,17 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
             th.set_state(db, thread, state,
                          author_reply_id=verdict_reply_id)
             fresh = dict(th.get_thread(db, mid, thread["comment_id"]))
+            meta_now = loads(fresh.get("metadata"), {}) or {}
             signal = ("declined" if verdict == "decline" else
-                      "modified" if (loads(fresh.get("metadata"), {}) or {})
-                      .get("original_new") else "accepted")
+                      "modified" if meta_now.get("original_new")
+                      else "accepted")
             th.record_margin_verdict(db, mid, fresh, signal)
-            actions.append({"comment_id": thread["comment_id"],
-                            "file": thread["file"], "action": state})
+            action = {"comment_id": thread["comment_id"],
+                      "file": thread["file"], "action": state}
+            if signal == "modified":
+                action["diff"] = (f"«{clamp(meta_now['original_new'])}» → "
+                                  f"«{clamp(fresh['proposed_new'] or '')}»")
+            actions.append(action)
         try:
             from .threads import PREFIX
 

@@ -194,6 +194,16 @@ run the CLI via Bash:
   Pushes on thread-bearing tabs run SURGICALLY (paragraph diff,
   read-back proven); edits overlapping a pending span are refused —
   settle the thread first. Never hand-edit the reserved markers.
+  **Margin learnings duty (same rule as the beat loop): at the moment
+  you process verdicts, examine every MODIFIED acceptance's
+  proposal→final diff against recent ones. When a pattern recurs (≥2
+  instances — e.g. the author keeps shifting your past tense to the
+  historical present), surface it THEN, unprompted, as a ratification
+  question with the instances quoted. Do not let diffs sit in the
+  evidence table waiting to be asked about; the author should never
+  have to request this analysis.** Keep proposed_old minimal — prefer
+  the comment's anchored span when the change fits inside it, so the
+  strikethrough covers no more than what truly changes.
   Hand-made Doc tabs are reconciled automatically on pull: a new `*.md`
   tab materializes as a local file (ask the author where it belongs in
   toc.md); a recreated tab is relinked, with any content drift surfaced

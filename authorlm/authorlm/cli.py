@@ -2210,6 +2210,8 @@ def cmd_doc(args):
                     print(ui.green(
                         f"Thread {act['action']}: {act['file']} "
                         f"(comment {act['comment_id']})"))
+                    if act.get("diff"):
+                        print(ui.dim(f"  modified: {act['diff']}"))
                 board = (result.get("threads") or {}).get("counts")
                 if board:
                     print(ui.dim("Margin threads: " + ", ".join(
