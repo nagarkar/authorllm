@@ -168,14 +168,32 @@ run the CLI via Bash:
   the file is now *checked out* (warn the author against local edits).
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
-  A pull also harvests every open Doc comment by default (no addressing
-  prefix needed — all comments are author feedback), ingests them, and
-  resolves each in the Doc with a receipt. **Address every item in the
-  "Comments to address" section of the pull output** — answer questions,
-  apply directives with the author's ratification — and when acting on
-  one, record the author's comment verbatim as the evidence/reason.
-  Comments never survive a push (tabs are rebuilt), so never rely on the
-  Doc margin as memory: the pull is the ingestion moment.
+  A pull also harvests every open Doc comment (no addressing prefix
+  needed — all comments are author feedback) and advances the MARGIN
+  THREADS state machine (docs/margin-threads-design.md). THE MARGIN IS
+  A WORKING CONVERSATION; THE DB IS ITS MEMORY — comments are never
+  auto-resolved, and threads survive pushes by construction.
+  For each item in "Comments to address": when a text change is implied,
+  draft the fix with the full drafting machinery, then register it —
+  `authorlm doc propose <comment-id>` with {"old","new","note"} JSON on
+  stdin. The tab gains the pending form `<<old>>{{new}}` (reserved
+  grammar; old struck through, new in green, the author's comment still
+  anchored); local files keep the OLD text until approval. Pure
+  questions: answer in chat; the author settles the thread.
+  Verdicts are deterministic whole-reply keywords in the margin
+  (approve: go ahead / make the change / apply / yes / ok / lgtm;
+  decline: no / don't / revert / reject; anything else is conversation
+  routed to chat). The next pull executes them: approve applies and
+  CLOSES the thread (the author may edit the {{new}} half first —
+  modified acceptance, their words win); decline reverts and closes;
+  resolving a proposed thread withdraws it. Chat stays sovereign:
+  `authorlm doc decide <comment-id> --approve|--decline --reason "…"`
+  — and the reason, verbatim, is the one margin path that can seed a
+  policy (through the scoped, decline-by-default distiller; margin
+  verdicts always land as evidence regardless).
+  Pushes on thread-bearing tabs run SURGICALLY (paragraph diff,
+  read-back proven); edits overlapping a pending span are refused —
+  settle the thread first. Never hand-edit the reserved markers.
   Hand-made Doc tabs are reconciled automatically on pull: a new `*.md`
   tab materializes as a local file (ask the author where it belongs in
   toc.md); a recreated tab is relinked, with any content drift surfaced

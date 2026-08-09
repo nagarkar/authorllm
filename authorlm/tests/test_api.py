@@ -776,6 +776,46 @@ def main_test() -> None:
               and th.get_thread(db, manuscript["id"], "c-4")["state"]
               == "withdrawn", tab_after)
 
+        # Step 4: terminal verdicts are the third evidence channel.
+        ev = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'margin_thread'", (manuscript["id"],))]
+        signals = sorted(e["signal"] for e in ev)
+        check("margin verdicts land as evidence "
+              "(modified/declined/withdrawn)",
+              signals == ["declined", "modified", "withdrawn"]
+              and any("became" in e["target"] for e in ev
+                      if e["signal"] == "modified"), str(signals))
+
+        # Chat door: an explained decline; without an LLM the guardrail
+        # seeds nothing — the evidence still lands verbatim.
+        import json as _mjson
+
+        from authorlm.gdocs import decide_thread
+        stub.add_comment("c-5", "firmer road", "colour?")
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        propose_change(db, manuscript, "c-5",
+                       old="The Doc took the firmer road.",
+                       new="A road of copper.", note="try copper",
+                       service=stub, docs_service=stub)
+        decided = decide_thread(db, manuscript, "c-5", "decline",
+                                reason="Copper is the wrong register here",
+                                service=stub, docs_service=stub, llm=None)
+        ev2 = db.one(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type='margin_thread' AND signal='declined' "
+            "ORDER BY created_at DESC", (manuscript["id"],))
+        check("chat-decided decline records the reason verbatim and "
+              "seeds nothing without the distiller",
+              decided["state"] == "declined"
+              and _mjson.loads(ev2["metadata"] or "{}").get("explanation")
+              == "Copper is the wrong register here"
+              and stub.state["comments"]["c-5"]["resolved"]
+              and db.one(
+                  "SELECT COUNT(*) AS n FROM editorial_policies "
+                  "WHERE manuscript_id = ? AND source = 'margin-thread'",
+                  (manuscript["id"],))["n"] == 0, str(decided))
+
         # --- single-manuscript export (doc create-manuscript) ---
         from authorlm.export import combined_markdown, export_manuscript
 

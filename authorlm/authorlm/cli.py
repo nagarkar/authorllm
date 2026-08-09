@@ -2005,6 +2005,23 @@ def cmd_doc(args):
               "in-context (old struck through, new in green); the author "
               "approves in-thread or in chat.")
         return
+    if args.action == "decide":
+        from . import gdocs as gd
+        from .llm import LLMClient
+
+        if not args.name or not (args.approve or args.decline):
+            sys.exit("usage: doc decide <comment-id> --approve|--decline "
+                     '[--reason "why"]')
+        config = _load_config(args)
+        result = gd.decide_thread(
+            db, manuscript, args.name,
+            "approve" if args.approve else "decline",
+            reason=args.reason,
+            service=gd.get_service(config, args.workspace),
+            docs_service=gd.get_docs_service(config, args.workspace),
+            llm=LLMClient(config))
+        print(f"Thread {result['state']} ({result['signal']}).")
+        return
     if args.action == "list":
         listing = docs.list_docs(db, manuscript)
         if not listing["active"] and not listing["retired"]:
@@ -2949,7 +2966,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["list", "add", "retire", "revive",
                                       "push", "pull", "open", "auth",
                                       "create-manuscript", "threads",
-                                      "propose"])
+                                      "propose", "decide"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
                                            "(retire/revive/push/pull)")
     p.add_argument("--title", help="heading for a new document / Doc title "
@@ -2959,6 +2976,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="pull: take the Doc's version even if the local file "
                         "changed since the push (local edits stay in history)")
+    p.add_argument("--approve", action="store_true",
+                   help="decide: approve the thread (apply and close)")
+    p.add_argument("--decline", action="store_true",
+                   help="decide: decline the thread (revert and close)")
+    p.add_argument("--reason", help="decide: the author's reasoning, "
+                                    "verbatim — feeds the scoped distiller")
     p.add_argument("--no-comments", action="store_true",
                    help="pull: skip harvesting open Doc comments (default: "
                         "ingest them and resolve each with a receipt)")

@@ -168,6 +168,16 @@ inside every pull; no new ritual. Chat remains a full control surface.
   list documented; the propose verb joins the drafting rules (chat
   drafts, CLI is the state machine — the beat-loop division of labor).
 
+## Status: ALL FIVE STEPS SHIPPED (2026-08-08)
+
+Steps 4-5 landed with: margin_thread evidence rows on every terminal
+verdict (accepted / modified with proposal→final diff / declined /
+withdrawn); `doc decide --approve|--decline --reason` as the sovereign
+chat door and the explained-verdict path; seed_margin_candidate with
+the author's guardrail verbatim in the distiller prompt (decline by
+default, narrowest honest scope, ids for guides/manuscript, path for
+files); doctrine rewritten in the authorlm skill and README.
+
 ## Build order
 
 1. Design doc (this file); doc_threads table; grammar + pull-strip;

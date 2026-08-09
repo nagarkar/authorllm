@@ -1720,6 +1720,11 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
                        else "reverted and closed")
             th.set_state(db, thread, state,
                          author_reply_id=verdict_reply_id)
+            fresh = dict(th.get_thread(db, mid, thread["comment_id"]))
+            signal = ("declined" if verdict == "decline" else
+                      "modified" if (loads(fresh.get("metadata"), {}) or {})
+                      .get("original_new") else "accepted")
+            th.record_margin_verdict(db, mid, fresh, signal)
             actions.append({"comment_id": thread["comment_id"],
                             "file": thread["file"], "action": state})
         try:
@@ -1757,6 +1762,7 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
         _replace_pending(db, manuscript, thread, thread["proposed_old"],
                          service, docs_service, bridge)
         th.set_state(db, thread, "withdrawn")
+        th.record_margin_verdict(db, mid, thread, "withdrawn")
         actions.append({"comment_id": thread["comment_id"],
                         "file": thread["file"], "action": "withdrawn"})
     return actions
@@ -1960,3 +1966,62 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 "tab and local disagree; resolve by pull or an explicit "
                 "rebuild push")
     raise LookupError("diff push: unreachable")
+
+
+def decide_thread(db: Database, manuscript: dict, comment_id: str,
+                  verdict: str, reason: str | None = None,
+                  service=None, docs_service=None, llm=None,
+                  bridge: DocBridge | None = None) -> dict:
+    """Chat stays sovereign: decide a proposed thread from outside the
+    margin. Same text operations, same receipts, same evidence — and the
+    one path where an EXPLAINED verdict is natural, so the reason (the
+    author's words verbatim) feeds the scoped distiller."""
+    from . import threads as th
+    from .styles import guide_chain as _guide_chain
+
+    if verdict not in ("approve", "decline"):
+        raise ValueError("verdict must be approve or decline")
+    bridge = bridge or manuscript_bridge(manuscript)
+    mid = manuscript["id"]
+    thread = th.get_thread(db, mid, comment_id)
+    if thread is None:
+        raise LookupError(f"no thread for comment '{comment_id}'")
+    thread = dict(thread)
+    if thread["state"] != "proposed":
+        raise ValueError(f"thread is {thread['state']}, not proposed")
+    replacement = (thread["proposed_new"] if verdict == "approve"
+                   else thread["proposed_old"])
+    if not _replace_pending(db, manuscript, thread, replacement,
+                            service, docs_service, bridge):
+        th.set_state(db, thread, "stale")
+        raise LookupError("the passage changed since this proposal — "
+                          "it is now stale; re-propose against current text")
+    state = "cleaned" if verdict == "approve" else "declined"
+    th.set_state(db, thread, state)
+    fresh = dict(th.get_thread(db, mid, comment_id))
+    signal = ("declined" if verdict == "decline" else
+              "modified" if (loads(fresh.get("metadata"), {}) or {})
+              .get("original_new") else "accepted")
+    th.record_margin_verdict(
+        db, mid, fresh, signal, explanation=reason, llm=llm,
+        guide_chain=_guide_chain(db, mid, thread["file"]))
+    receipt = ("applied and closed (decided in chat)"
+               if verdict == "approve"
+               else "reverted and closed (decided in chat)")
+    if reason:
+        receipt += f" — {reason}"
+    try:
+        service.replies().create(
+            fileId=_mapping(db, manuscript)[bridge.meta_key]["_master_id"],
+            commentId=comment_id,
+            body={"content": th.PREFIX + receipt, "action": "resolve"},
+            fields="id",
+        ).execute()
+        row = db.one(
+            "SELECT id FROM doc_comments WHERE manuscript_id = ? "
+            "AND comment_id = ?", (mid, comment_id))
+        if row:
+            db.update("doc_comments", row["id"], {"state": "resolved"})
+    except Exception:
+        pass
+    return {"comment_id": comment_id, "state": state, "signal": signal}

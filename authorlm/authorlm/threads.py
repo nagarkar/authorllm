@@ -145,3 +145,33 @@ def ledger(db: Database, manuscript_id: str) -> dict:
         counts[row["state"]] = row["n"]
     return {"counts": counts,
             "open": open_threads(db, manuscript_id)}
+
+
+def record_margin_verdict(db: Database, manuscript_id: str, thread: dict,
+                          signal: str, explanation: str | None = None,
+                          llm=None, guide_chain: list | None = None) -> None:
+    """Terminal margin verdicts are the third evidence channel: always
+    recorded as evidence; candidate policies only through the scoped,
+    decline-capable distiller (never by force of habit)."""
+    from .gdocs import clamp
+
+    target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '')}»"
+    if signal == "modified":
+        original = (loads(thread.get("metadata"), {}) or {}).get(
+            "original_new", "")
+        target += (f" — proposal «{clamp(original)}» became "
+                   f"«{clamp(thread['proposed_new'] or '')}»")
+    row = ko_fields("ev")
+    row.update(
+        manuscript_id=manuscript_id, episode_id=None,
+        evidence_type="margin_thread", signal=signal, target=target,
+        supports_policy=None, weight="high",
+    )
+    if explanation:
+        row["metadata"] = json.dumps({"explanation": explanation})
+    db.insert("evidence", row)
+    if explanation:
+        from .policies import seed_margin_candidate
+
+        seed_margin_candidate(db, manuscript_id, explanation,
+                              thread["file"], guide_chain or [], llm)

@@ -267,3 +267,63 @@ def record_review(
         )
 
     return {"review": review, "policies": updated_policies, "seeded_policy": seeded}
+
+
+MARGIN_DISTILL_SYSTEM = (
+    "You distill an author's editorial feedback from a Google Doc margin "
+    "thread into a reusable policy, or decline. THE GUARDRAIL, in the "
+    "author's own ratified words: if 'a general principal is not possible "
+    "and the discussion is overly specific to a particular thread, we "
+    "should not try to create a learning proposal by force of habit or "
+    "necessity' — declining is the DEFAULT posture; a policy must be a "
+    "principle the author would apply again elsewhere. Also choose the "
+    "NARROWEST honest scope: 'file' if the principle is about this essay "
+    "only; 'guide' if it applies to the essay's family (the guide chain "
+    "is provided); 'manuscript' only if it is genuinely house-wide.\n"
+    "Reply with exactly one of:\n"
+    "NONE\n"
+    "or\n"
+    "SCOPE: file|guide|manuscript\n"
+    "STATEMENT: <one normative sentence>"
+)
+
+
+def seed_margin_candidate(db: Database, manuscript_id: str,
+                          explanation: str, file: str,
+                          guide_chain: list[dict],
+                          llm: LLMClient | None) -> dict | None:
+    """Margin-thread explanations seed candidates only through the
+    scoped, decline-capable distiller — never raw (the author's
+    overreach guardrail). Without an LLM, the explanation stays
+    evidence and nothing is seeded."""
+    if not llm or not getattr(llm, "enabled", False):
+        return None
+    chain = ", ".join(f"{g['name']} ({g['id']})" for g in guide_chain)
+    reply = llm.complete(
+        MARGIN_DISTILL_SYSTEM,
+        f"FILE: {file}\nGUIDE CHAIN (nearest first): {chain}\n"
+        f"AUTHOR FEEDBACK (verbatim): {explanation}")
+    if not reply or reply.strip().upper() == "NONE":
+        return None
+    scope_kind, statement = None, None
+    for line in reply.strip().splitlines():
+        if line.upper().startswith("SCOPE:"):
+            scope_kind = line.split(":", 1)[1].strip().lower()
+        elif line.upper().startswith("STATEMENT:"):
+            statement = line.split(":", 1)[1].strip().strip('"')
+    if not statement or scope_kind not in ("file", "guide", "manuscript"):
+        return None
+    seeded = seed_candidate_policy(db, manuscript_id, statement,
+                                   source="margin-thread", llm=None)
+    if seeded and seeded.get("id"):
+        scope_ref = (file if scope_kind == "file"
+                     else guide_chain[0]["id"] if scope_kind == "guide"
+                     and guide_chain else manuscript_id)
+        meta = loads(db.one(
+            "SELECT metadata FROM editorial_policies WHERE id = ?",
+            (seeded["id"],))["metadata"], {}) or {}
+        meta.update(scope_kind=scope_kind, scope_ref=scope_ref,
+                    original_explanation=explanation)
+        db.update("editorial_policies", seeded["id"],
+                  {"metadata": json.dumps(meta)})
+    return seeded

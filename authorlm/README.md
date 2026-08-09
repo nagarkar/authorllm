@@ -174,6 +174,23 @@ outstanding questions.
 | `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
 
+## Margin threads (Doc comment conversations)
+
+Comments in the master Doc are working conversations, not one-shot
+feedback. A pull ingests new comments (never auto-resolving them); the
+collaborator drafts a fix and registers it with `doc propose`, which
+edits the tab into `<<old>>{{new}}` — old struck through, new in green,
+the author's comment still anchored. The author replies a verdict
+keyword in the margin ("go ahead", "lgtm" / "no", "revert"), edits the
+green text first if they wish (modified acceptance — their words win),
+or resolves the thread to withdraw the proposal. The next pull executes
+the verdict, closes the thread with a receipt, and mirrors the result
+locally. Pushes on thread-bearing tabs are surgical paragraph diffs
+(read-back proven), so anchors survive. Every terminal verdict lands as
+evidence; explained verdicts (`doc decide … --reason`) can seed scoped
+candidate policies through a decline-by-default distiller.
+Design: docs/margin-threads-design.md.
+
 ## How learning works
 
 - **Accepting / modifying** a suggestion strengthens the policies it relied
