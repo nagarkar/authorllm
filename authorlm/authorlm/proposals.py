@@ -110,6 +110,17 @@ def describe(row: dict) -> tuple[str, list[str]]:
             f"—generalizes→ '{payload['alias']}' instead · dismiss = keep "
             "them distinct",
         ]
+    elif kind == "incongruence":
+        summary = (f"text contradicts settled knowledge about "
+                   f"'{payload.get('concept', '?')}' "
+                   f"({payload.get('file', '?')})")
+        details = [
+            f"“{payload.get('quote', '')}”",
+            f"settled: {payload.get('claim', '')}",
+            f"why: {payload.get('why', '')}",
+            "adopt = acknowledged, I will fix the text (or the graph) · "
+            "dismiss = the text is right / no real conflict",
+        ]
     else:
         summary = f"{kind} on {row['target']}"
         details = [json.dumps(payload)]
@@ -193,6 +204,14 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
                    f"— {merged['repointed']} edge(s) re-pointed, "
                    f"{merged['dropped']} retired; the notes absorbed the "
                    "aliasing sentence.")
+    elif kind == "incongruence":
+        # No object mutation: the author is the execution engine. Adoption
+        # records the acknowledged conflict as evidence; the fix (text or
+        # graph) is the author's next edit.
+        message = (f"Acknowledged: “{payload.get('quote', '')[:80]}…” "
+                   f"conflicts with settled knowledge about "
+                   f"'{payload.get('concept', '?')}' — fix the text or "
+                   "the graph, and the next collect records it.")
     else:
         return f"error: unknown proposal kind '{kind}'"
 

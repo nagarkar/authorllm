@@ -125,8 +125,18 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
         + (f"; skipped {summary['skipped']} malformed item(s)" if summary["skipped"] else "")
         + (f"; suppressed {summary['suppressed']} previously-rejected concept(s)"
            if summary.get("suppressed") else "")
+        + (f"; dropped {summary['ungrounded_links']} ungrounded link(s) "
+           "(endpoint not in the mined text)"
+           if summary.get("ungrounded_links") else "")
+        + (f"; {len(summary['below_bar'])} below the recurrence bar"
+           if summary.get("below_bar") else "")
         + "."
     )
+    if summary.get("below_bar"):
+        print(ui.dim(
+            "Below the recurrence bar (single-context phrases, not "
+            "admitted; self-healing on a future mention): "
+            + ", ".join(f"'{n}'" for n in summary["below_bar"])))
     if summary.get("proposed"):
         print(ui.yellow(
             f"{summary['proposed']} proposal(s) against settled knowledge — "
@@ -1140,6 +1150,27 @@ def cmd_collect(args):
             f"Concept(s) {names} no longer appear anywhere in the text — "
             "decide their fate: proposal review (retire, or keep as placeholder)."
         ))
+    if report.get("hypotheses_dropped"):
+        names = ", ".join(f"'{n}'" for n in report["hypotheses_dropped"])
+        print(ui.dim(
+            f"Dropped unconfirmed hypothesis(es) whose text vanished: "
+            f"{names} (never ratified — no verdict needed)."))
+    for stale in report.get("suggestions_stale", []):
+        print(ui.dim(f"Suggestion now moot (marked stale): "
+                     f"{stale['suggestion']}"))
+    if report.get("illustrations"):
+        ill = report["illustrations"]
+        if ill.get("unrendered"):
+            print(ui.yellow(
+                f"New illustrations found ({len(ill['unrendered'])} "
+                "unrendered):"))
+            for slot in ill["unrendered"]:
+                print(f"  • {slot['file']}:{slot['line']}  "
+                      f"[Illustration: {slot['prompt']}]")
+        if ill.get("orphaned"):
+            print(ui.dim(
+                "Orphaned illustration file(s) — no tag matches their "
+                "prompt any more: " + ", ".join(ill["orphaned"])))
     if report.get("auto_analysis"):
         aa = report["auto_analysis"]
         print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
@@ -1161,6 +1192,347 @@ def cmd_collect(args):
         if notes:
             line += "  (" + " · ".join(notes) + ")"
         print(ui.green(line) if len(gaps_after) < len(gaps_before) else ui.dim(line))
+
+
+def cmd_illus(args):
+    from pathlib import Path
+
+    from . import illus
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    root = Path(manuscript["path"])
+
+    def resolve_slot(required=True):
+        if not args.name:
+            if required:
+                raise SystemExit("name a slot by a fragment of its prompt")
+            return None
+        matches = illus.find_slot(root, args.name)
+        if not matches:
+            raise SystemExit(f"no illustration tag matches '{args.name}'")
+        if len(matches) > 1:
+            for m in matches:
+                print(f"  {m['file']}:{m['line']}  [Illustration: {m['prompt']}]")
+            raise SystemExit(f"'{args.name}' is ambiguous — narrow the fragment")
+        return matches[0]
+
+    if args.action == "prompt":
+        slot = resolve_slot()
+        assembled = illus.effective_prompt(db, manuscript, slot)
+        print(f"# {assembled['file']}:{assembled['line']}  "
+              f"desc {assembled['desc_hash']}  "
+              f"style {assembled['style_hash']}")
+        if assembled["caption"]:
+            print(f"# caption (export only, not sent to the model): "
+                  f"{assembled['caption']}")
+        print(assembled["composed"])
+        return
+
+    if args.action == "list":
+        rows = illus.slot_status(db, manuscript)
+        if not rows:
+            print("No illustration slots. Declare one in prose: "
+                  "[Illustration: prompt | caption: optional caption]")
+            return
+        for r in rows:
+            head = f"{r['file']}:{r['line']}  [{r['state']}]"
+            if r["candidates"]:
+                head += f"  {r['candidates']} candidate(s)"
+            if r["embedded"]:
+                head += f"  → {r['embedded']}"
+            print(head)
+            print(f"    [Illustration: {r['prompt']}"
+                  + (f" | caption: {r['caption']}" if r["caption"] else "")
+                  + "]")
+        stale = [r for r in rows if r["state"] == "stale-style"]
+        if stale:
+            print(ui.dim(
+                f"{len(stale)} slot(s) predate the current illustration law — "
+                "'illus render <fragment>' for a fresh take, or "
+                "'illus render <fragment> --from N' to evolve the image "
+                "you approved."))
+        return
+
+    if args.action == "render":
+        config = _load_config(args)
+        if args.name:
+            targets = [resolve_slot()]
+        else:
+            targets = [
+                {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
+                 "caption": None,
+                 "desc_hash": illus.desc_hash(s["prompt"])}
+                for s in illus.slot_report(root)["unrendered"]]
+            if not targets:
+                print("Every declared slot is rendered — name a fragment to "
+                      "re-render one.")
+                return
+            if args.from_n is not None:
+                raise SystemExit("--from needs a single slot — name a fragment")
+        for slot in targets:
+            print(f"Rendering {slot['file']}:{slot['line']} "
+                  f"[Illustration: {slot['prompt'][:60]}…]"
+                  if len(slot["prompt"]) > 60 else
+                  f"Rendering {slot['file']}:{slot['line']} "
+                  f"[Illustration: {slot['prompt']}]")
+            try:
+                result = illus.render_slot(db, manuscript, slot, config,
+                                           from_n=args.from_n,
+                                           count=args.count)
+            except (RuntimeError, LookupError) as err:
+                print(ui.yellow(f"  render failed: {err}"))
+                continue
+            for name in result["written"]:
+                print(f"  wrote _illustrations/{name}")
+            if not result["had_embed"]:
+                print(f"  embedded → {result['embedded']}")
+            else:
+                print(ui.dim(
+                    f"  embed kept at {result['embedded']} — "
+                    "'illus pick' to switch"))
+        return
+
+    if args.action == "pick":
+        slot = resolve_slot()
+        if args.candidate is None:
+            raise SystemExit("pick needs a candidate number, e.g. "
+                             f"illus pick '{args.name}' 2")
+        cands = illus.slot_candidates(root, slot["desc_hash"])
+        target = next((c for c in cands
+                       if int(c["n"]) == args.candidate), None)
+        if target is None:
+            have = ", ".join(c["n"] for c in cands) or "none"
+            raise SystemExit(f"no candidate {args.candidate:02d} "
+                             f"(rendered: {have})")
+        illus.set_embed(root / slot["file"], slot["desc_hash"],
+                        target["name"])
+        print(f"Picked candidate {args.candidate:02d} — embed now "
+              f"{target['name']}. Picks are pinned: renders never move them.")
+        return
+
+    if args.action == "prune":
+        removed = illus.prune(manuscript)
+        if not removed:
+            print("Nothing to prune — every candidate is embedded and "
+                  "its prompt still exists.")
+        for name in removed:
+            print(f"removed _illustrations/{name}")
+
+
+def cmd_sweep(args):
+    from pathlib import Path
+
+    from . import api, hygiene, sweeps
+    from .revisions import read_manuscript_files
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+
+    if args.action == "readiness":
+        report = sweeps.readiness(db, manuscript)
+        for item in report["items"]:
+            mark = ui.green("✓") if item["ok"] else ui.yellow("✗")
+            print(f"  {mark} {item['check']}: {item['detail']}")
+        print(ui.green("READY: no publication blockers.") if report["ready"]
+              else ui.yellow("NOT READY — blockers: "
+                             + ", ".join(report["blocking"])))
+        return
+
+    if args.action == "ontology":
+        llm = api.LLMClient(_load_config(args))
+        if not llm.enabled:
+            raise SystemExit("the ontology sweep needs the LLM enabled "
+                             "([llm] in config.toml)")
+        summary = sweeps.ontology(db, manuscript, llm, file=args.file)
+        print(f"Ontology sweep over {summary['scope']}: "
+              f"{summary['pairs']} (paragraph, settled-claims) pair(s) "
+              f"checked, {summary['findings']} incongruence proposal(s)"
+              + (f", {summary['dropped_ungrounded']} ungrounded finding(s) "
+                 "dropped" if summary["dropped_ungrounded"] else "")
+              + ".")
+        if summary.get("note"):
+            print(ui.dim(summary["note"]))
+        if summary["findings"]:
+            print(ui.yellow("Review them: proposal review"))
+        line = llm.stats_line()
+        if line:
+            print(ui.dim(line))
+        return
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    report = hygiene.sweep(db, manuscript, files)
+
+    concepts = report["ungrounded_concepts"]
+    edges = report["ungrounded_edges"]
+    below_bar = report.get("below_bar", [])
+    for stale in report["suggestions_stale"]:
+        print(ui.dim(f"Suggestion now moot (marked stale): "
+                     f"{stale['suggestion']}"))
+    if concepts:
+        print(ui.yellow(
+            f"{len(concepts)} unconfirmed extracted concept(s) appear "
+            "nowhere in the text (name or alias):"))
+        for c in concepts:
+            print(f"  • {c['name']} ({c['kind']}, {c['status']})")
+    if edges:
+        print(ui.yellow(
+            f"{len(edges)} inferred relationship(s) have an endpoint "
+            "mentioned nowhere in the text:"))
+        for e in edges:
+            print(f"  • {e['edge']}  (unmentioned: "
+                  f"{', '.join(e['unmentioned'])})")
+    if below_bar:
+        print(ui.yellow(
+            f"{len(below_bar)} unconfirmed extracted node(s) fail the "
+            "recurrence bar (your ratified criterion: used multiple "
+            "times, spread beyond one section):"))
+        for c in below_bar:
+            print(f"  • {c['name']} ({c['kind']}: {c['contexts']} "
+                  f"context(s), {c['sections']} section(s), "
+                  f"{c['files']} file(s))")
+    if (not concepts and not edges and not below_bar
+            and not report["suggestions_stale"]):
+        print("Hygiene clean: every unconfirmed concept and inferred edge "
+              "is grounded and recurrent, no pending suggestion is moot.")
+        return
+
+    if args.apply:
+        for c in concepts:
+            api.retire_concept(db, manuscript, c["name"])
+            print(f"retired '{c['name']}'")
+        for e in edges:
+            api.reject_edge(db, manuscript, e["id"])
+            print(f"rejected {e['edge']}")
+        for c in below_bar:
+            api.retire_concept(db, manuscript, c["name"])
+            print(f"retired '{c['name']}' (below the recurrence bar)")
+    elif concepts or edges or below_bar:
+        print(ui.dim(
+            "Report only — 'sweep hygiene --apply' retires the ungrounded "
+            "and below-bar concepts and rejects the ungrounded edges (or "
+            "triage them individually: concept triage)."))
+
+
+def cmd_lens(args):
+    import json as _json
+
+    from . import api, lenses
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+
+    if args.action == "add":
+        prompt = _stdin_text()
+        if not args.name or not prompt:
+            raise SystemExit("usage: authorlm lens add <name>  "
+                             "(the lens prompt on stdin)")
+        path = lenses.add_lens(manuscript, args.name, prompt)
+        print(f"Lens '{args.name}' ratified → {path}")
+        return
+
+    if args.action == "list":
+        rows = lenses.list_lenses(manuscript)
+        if not rows:
+            print("No lenses defined. Create one: authorlm lens add "
+                  "<name>  (prompt on stdin)")
+        for row in rows:
+            print(f"  {row['name']}: {row['summary']}")
+        return
+
+    if args.action == "review":
+        decisions = [d for d, on in (("accepted", args.accept),
+                                     ("rejected", args.reject),
+                                     ("modified", args.modify),
+                                     ("deferred", args.defer)) if on]
+        if not args.name or not args.name.isdigit() or len(decisions) != 1:
+            raise SystemExit("usage: authorlm lens review <n> "
+                             "--accept|--reject|--modify|--defer "
+                             '[--explain "why"]')
+        session, _ = api.ensure_session(db, manuscript)
+        result = api.review(db, manuscript, session, int(args.name),
+                            decisions[0], args.explain,
+                            llm=api.LLMClient(_load_config(args)),
+                            kinds=(lenses.LENS_KIND,))
+        print(f"Recorded: [{args.name}] {decisions[0]}"
+              + (f" — “{args.explain}”" if args.explain else ""))
+        if result.get("seeded_policy"):
+            print(ui.dim("Your explanation seeded a candidate policy: "
+                         f"\"{result['seeded_policy']['statement']}\""))
+        return
+
+    if not args.name or not args.file:
+        raise SystemExit(f"usage: authorlm lens {args.action} <name> <file>")
+    session, _ = api.ensure_session(db, manuscript)
+    if args.action == "run":
+        llm = api.LLMClient(_load_config(args))
+        if not llm.enabled:
+            raise SystemExit("lens run needs the LLM enabled — for an "
+                             "external (Claude) pass, use lens register")
+        result = lenses.run_lens(db, manuscript, session, args.name,
+                                 args.file, llm)
+        line = llm.stats_line()
+    else:  # register — the door for externally produced findings
+        raw = _stdin_text()
+        try:
+            payload = _json.loads(raw) if raw else None
+        except _json.JSONDecodeError as err:
+            raise SystemExit(f"invalid findings JSON on stdin: {err}")
+        findings = (payload or {}).get("findings") \
+            if isinstance(payload, dict) else payload
+        if not isinstance(findings, list):
+            raise SystemExit('lens register expects JSON on stdin: '
+                             '{"findings": [{"quote": "...", '
+                             '"note": "..."}]}')
+        result = lenses.register_findings(db, manuscript, session,
+                                          args.name, args.file, findings)
+        line = None
+    print(f"Lens '{result['lens']}' on {result['file']}: "
+          f"{len(result['findings'])} finding(s)"
+          + (f", {result['dropped_ungrounded']} ungrounded dropped"
+             if result["dropped_ungrounded"] else "") + ".")
+    for i, row in enumerate(result["findings"], start=1):
+        print(f"  [{i}] {row['suggestion']}")
+        print(ui.dim(f"      {row['explanation']}"))
+    if result["findings"]:
+        print(ui.dim("Verdicts: authorlm lens review <n> "
+                     "--accept|--reject [--explain \"why\"]"))
+    if line:
+        print(ui.dim(line))
+
+
+def cmd_export(args):
+    from . import export as ex
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+
+    if args.action == "show":
+        settings = ex.load_settings(manuscript)
+        print(f"Export settings ({ex._settings_path(manuscript)}):")
+        for key, hint in sorted(ex.SETTINGS_KEYS.items()):
+            value = settings[key] or ui.dim("(default)")
+            print(f"  {key} = {value}")
+            print(ui.dim(f"      {hint}"))
+        return
+
+    if args.action == "set":
+        if not args.key or args.value is None:
+            raise SystemExit("usage: authorlm export set <key> <value>")
+        settings = ex.set_setting(manuscript, args.key, args.value)
+        print(f"{args.key} = {settings[args.key]}")
+        return
+
+    try:
+        result = ex.export_published(db, manuscript, fmt=args.action,
+                                     variant=args.variant)
+    except (RuntimeError, LookupError) as err:
+        raise SystemExit(ui.yellow(f"export failed: {err}"))
+    print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
+    if args.action in result:
+        print(f"Wrote {result[args.action]}.")
+    for warning in result["warnings"]:
+        print(ui.yellow(f"warning: {warning}"))
 
 
 def _stdin_text() -> str | None:
@@ -1750,6 +2122,14 @@ def cmd_doc(args):
                                     "pull or push."))
                 for relpath in result["changed"]:
                     print(f"Pulled {relpath} from its tab (normalized).")
+                for relpath, refs in (result.get("dangling_images")
+                                      or {}).items():
+                    print(ui.yellow(
+                        f"warning: {relpath} carried {len(refs)} pasted "
+                        "image(s) the Doc bridge cannot transport "
+                        f"({', '.join(sorted(set(refs)))}) — stripped. "
+                        "Images belong in _illustrations/ via "
+                        "[Illustration: …] tags."))
                 for relpath in result["missing"]:
                     print(ui.yellow(f"warning: no tab found for {relpath} — "
                                     "was its tab renamed? Tab titles must "
@@ -2539,6 +2919,68 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doc)
 
     p = sub.add_parser(
+        "sweep",
+        help="sweep framework (docs/sweep-framework.md): hygiene + "
+             "readiness (pure, zero tokens), ontology (narrowing auditor)")
+    p.add_argument("action", choices=["hygiene", "readiness", "ontology"])
+    p.add_argument("file", nargs="?",
+                   help="ontology: audit this file (default: files changed "
+                        "in the last collected revision)")
+    p.add_argument("--apply", action="store_true",
+                   help="hygiene: retire the ungrounded concepts and reject "
+                        "the ungrounded edges (default: report only)")
+    p.set_defaults(func=cmd_sweep)
+
+    p = sub.add_parser(
+        "lens",
+        help="author-defined lenses (_lenses/*.md prompts): add, list, "
+             "run <name> <file>, register (external findings on stdin), "
+             "review <n>")
+    p.add_argument("action",
+                   choices=["add", "list", "run", "register", "review"])
+    p.add_argument("name", nargs="?",
+                   help="lens name (add/run/register) or finding index "
+                        "(review)")
+    p.add_argument("file", nargs="?", help="manuscript file (run/register)")
+    p.add_argument("--accept", action="store_true")
+    p.add_argument("--reject", action="store_true")
+    p.add_argument("--modify", action="store_true")
+    p.add_argument("--defer", action="store_true")
+    p.add_argument("--explain", help="the author's reasoning, verbatim — "
+                                     "the highest-value evidence")
+    p.set_defaults(func=cmd_lens)
+
+    p = sub.add_parser(
+        "export",
+        help="publishing exports: md/docx/epub built locally (pandoc) with "
+             "picked illustrations embedded; settings in _exports/settings.toml")
+    p.add_argument("action", choices=["show", "set", "md", "docx", "epub"])
+    p.add_argument("key", nargs="?", help="setting name (set)")
+    p.add_argument("value", nargs="?", help="setting value (set)")
+    p.add_argument("--variant", choices=["images", "slots", "stripped"],
+                   help="override the illustration variant for this export")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser(
+        "illus",
+        help="illustration slots ([Illustration: …] tags): list, render "
+             "(LLM image → _illustrations/), pick a candidate, prune, "
+             "prompt (the exact composed prompt a render would send)")
+    p.add_argument("action",
+                   choices=["list", "render", "pick", "prune", "prompt"])
+    p.add_argument("name", nargs="?",
+                   help="prompt fragment selecting a slot (render/pick); "
+                        "render without it does every unrendered slot")
+    p.add_argument("candidate", nargs="?", type=int,
+                   help="candidate number (pick)")
+    p.add_argument("-n", "--count", type=int, default=1,
+                   help="render: how many candidates to generate")
+    p.add_argument("--from", dest="from_n", type=int, metavar="N",
+                   help="render: evolve candidate N under the current "
+                        "illustration law (image-conditioned continuity)")
+    p.set_defaults(func=cmd_illus)
+
+    p = sub.add_parser(
         "profile",
         help="manuscript profiles: declared context (market intelligence, "
              "positioning) in _profiles/ — synced with a separate workspace Doc")
@@ -2774,7 +3216,28 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "policy" and args.action == "convert" and not (args.id and args.aspect):
         sys.exit("usage: policy convert <id-prefix> --aspect ASPECT "
                  "[--guide NAME | --file FILE]")
-    args.func(args)
+    import time as _time
+
+    from . import tracelog
+
+    def _trace(ok: bool, error: str | None = None) -> None:
+        tracelog.record(
+            args.command, surface="cli",
+            workspace=getattr(args, "workspace", None),
+            action=getattr(args, "action", None),
+            manuscript=getattr(args, "manuscript", None),
+            duration_ms=int((_time.monotonic() - t0) * 1000),
+            ok=ok, error=error)
+
+    t0 = _time.monotonic()
+    try:
+        args.func(args)
+    except BaseException as err:
+        clean_exit = isinstance(err, SystemExit) and not err.code
+        _trace(clean_exit, None if clean_exit
+               else f"{type(err).__name__}: {err}")
+        raise
+    _trace(True)
 
 
 if __name__ == "__main__":

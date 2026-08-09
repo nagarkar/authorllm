@@ -122,6 +122,166 @@ def main_test() -> None:
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
 
+        # An empty heading paragraph in the Doc (e.g. a blank Subtitle
+        # line) must be dropped — never merged into the next heading
+        # ('## ##', it-7b127d3164ff).
+        empty_heading = ("# **Title**\n\n## \n\n"
+                         "## Septem Plus Sermones Ad Mortuos, 2026\n")
+        check("normalizer drops empty headings instead of merging",
+              normalize_markdown(empty_heading)
+              == ("# **Title**\n\n"
+                  "## Septem Plus Sermones Ad Mortuos, 2026\n"),
+              repr(normalize_markdown(empty_heading)))
+
+        # --- illustration slots: tag grammar + scan-derived registry ---
+        from authorlm.illus import (desc_hash, parse_tag, slot_report,
+                                    strip_dangling)
+
+        tag = parse_tag(
+            "[Illustration: a tracker kneeling | caption: The tracker]")
+        check("illustration tag grammar parses prompt and caption",
+              tag["prompt"] == "a tracker kneeling"
+              and tag["caption"] == "The tracker", str(tag))
+        check("caption and whitespace stay outside slot identity",
+              desc_hash("a tracker kneeling")
+              == desc_hash("a  tracker\tkneeling")
+              and parse_tag("[Illustration: a tracker kneeling]")["caption"]
+              is None
+              and parse_tag("prose mentioning [Illustration: x] inline")
+              is None)
+
+        scratch = root / "illus-scratch"
+        scratch.mkdir()
+        (scratch / "ch.md").write_text(
+            "# C\n\n[Illustration: two turns in opposite order]\n")
+        rep = slot_report(scratch)
+        check("scan reports an unrendered slot with file and line",
+              rep["unrendered"] == [{"file": "ch.md", "line": 3,
+                                     "prompt": "two turns in opposite order"}]
+              and not rep["orphaned"], str(rep))
+        ill_dir = scratch / "_illustrations"
+        ill_dir.mkdir()
+        h = desc_hash("two turns in opposite order")
+        candidate = f"two-turns-in-opposite-{h}-0000-01.png"
+        (ill_dir / candidate).write_bytes(b"")
+        check("a matching candidate marks the slot rendered",
+              not slot_report(scratch)["unrendered"])
+        (scratch / "ch.md").write_text(
+            "# C\n\n[Illustration: two turns, reworded]\n")
+        rep = slot_report(scratch)
+        check("editing the prompt un-renders the slot and orphans the file",
+              rep["unrendered"][0]["prompt"] == "two turns, reworded"
+              and rep["orphaned"] == [candidate], str(rep))
+
+        dirty = ("Prose kept. ![][image1]\n\n"
+                 "[image1]: <data:image/png;base64,abc>\n")
+        clean, refs = strip_dangling(dirty)
+        check("dangling Doc image refs strip cleanly and are reported",
+              "image1" not in clean and "Prose kept." in clean
+              and len(refs) == 2, repr((clean, refs)))
+
+        # A collect surfaces unrendered slots so the author never has to
+        # remember to ask ("new illustrations found").
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n[Illustration: choice as a forking path]\n")
+        report = api.collect(db, manuscript, {})
+        check("collect reports new illustration slots",
+              report["illustrations"]["unrendered"][0]["prompt"]
+              == "choice as a forking path"
+              and api.compact_collect(report)["illustrations"]
+              == report["illustrations"], str(report.get("illustrations")))
+
+        # --- illus rendering: candidates, pinning, style law, prune ---
+        import struct
+        import zlib
+
+        from authorlm import illus as illus_mod
+        from authorlm.revisions import (read_manuscript_files
+                                        as read_files_for_test,
+                                        strip_embed_lines
+                                        as strip_embed_lines_for_test)
+
+        def tiny_png() -> bytes:
+            def chunk(t, d):
+                return (struct.pack(">I", len(d)) + t + d
+                        + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF))
+            return (b"\x89PNG\r\n\x1a\n"
+                    + chunk(b"IHDR",
+                            struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00"))
+                    + chunk(b"IEND", b""))
+
+        gen_calls = []
+
+        def fake_gen(prompt, input_png):
+            gen_calls.append((prompt, input_png))
+            return tiny_png()
+
+        slot = illus_mod.find_slot(ms, "forking path")[0]
+        h = slot["desc_hash"]
+        r1 = illus_mod.render_slot(db, manuscript, slot, {},
+                                   generator=fake_gen)
+        first = f"choice-as-a-forking-{h}-0000-01.png"
+        choice_text = (ms / "01-choice.md").read_text()
+        check("render writes candidate 01 and embeds the first render",
+              r1["written"] == [first] and not r1["had_embed"]
+              and f"![](_illustrations/{first})" in choice_text, str(r1))
+        blob = (ms / "_illustrations" / first).read_bytes()
+        check("candidate PNG carries the prompt as metadata",
+              b"authorlm:prompt" in blob
+              and "choice as a forking path".encode() in blob)
+        check("embed lines are invisible to observation",
+              "_illustrations" not in
+              read_files_for_test(ms)["01-choice.md"]
+              and api.collect(db, manuscript, {}).get("unchanged") is True)
+
+        r2 = illus_mod.render_slot(db, manuscript, slot, {}, count=2,
+                                   generator=fake_gen)
+        check("re-render appends numbered candidates, embed stays pinned",
+              [n[-6:-4] for n in r2["written"]] == ["02", "03"]
+              and r2["had_embed"]
+              and illus_mod.embed_target(
+                  (ms / "01-choice.md").read_text(), h) == first, str(r2))
+
+        api.add_style_element(db, manuscript, "illustration",
+                              "woodcut, high-contrast linework",
+                              file="01-choice.md")
+        law = illus_mod.illustration_law(db, manuscript["id"], "01-choice.md")
+        shash = illus_mod.style_hash(law)
+        check("illustration law renders from illustration-aspect elements",
+              "woodcut" in law and shash != "0000"
+              and illus_mod.style_hash("") == "0000")
+        status = [s for s in illus_mod.slot_status(db, manuscript)
+                  if s["file"] == "01-choice.md"][0]
+        check("a new illustration rule marks the embedded slot stale-style",
+              status["state"] == "stale-style"
+              and status["candidates"] == 3, str(status))
+
+        r3 = illus_mod.render_slot(db, manuscript, slot, {}, from_n=1,
+                                   generator=fake_gen)
+        check("render --from passes the source image and the new law",
+              gen_calls[-1][1] is not None
+              and law in gen_calls[-1][0]
+              and r3["written"] == [
+                  f"choice-as-a-forking-{h}-{shash}-04.png"], str(r3))
+        assembled = illus_mod.effective_prompt(db, manuscript, slot)
+        check("effective_prompt is byte-identical to what the renderer "
+              "sends",
+              assembled["composed"] == gen_calls[-1][0]
+              and assembled["style_hash"] == shash
+              and assembled["law"] and assembled["law"] in
+              assembled["composed"], str(assembled))
+
+        illus_mod.set_embed(ms / "01-choice.md", h, r3["written"][0])
+        removed = illus_mod.prune(manuscript)
+        check("prune removes every unpicked candidate, keeps the pick",
+              sorted(removed) == sorted([first,
+                  f"choice-as-a-forking-{h}-0000-02.png",
+                  f"choice-as-a-forking-{h}-0000-03.png"])
+              and (ms / "_illustrations" / r3["written"][0]).exists(),
+              str(removed))
+
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
         # Doc state is tabs of literal markdown; the temp-import Doc is
@@ -256,15 +416,23 @@ def main_test() -> None:
               and status["_folder_id"] == "doc-1"
               and status["_master_id"] == "doc-2")
         master = stub.state["docs"]["doc-2"]
-        check("master carries one tab per file plus the manifest, "
-              "default tab retired",
-              [t["title"] for t in master] == ["01-choice.md", "manifest"])
-        check("push transplants the file's markdown into its tab",
-              master[0]["text"] == (ms / "01-choice.md").read_text()
+        tab_text = {t["title"]: t["text"] for t in master}
+        check("master carries the container tab, one tab per file, and "
+              "the manifest; default tab retired",
+              [t["title"] for t in master]
+              == ["book", "01-choice.md", "manifest"],
+              str([t["title"] for t in master]))
+        check("push transplants the file's markdown into its tab, "
+              "embed lines stripped (Doc shows only the tag)",
+              tab_text["01-choice.md"]
+              == strip_embed_lines_for_test(
+                  (ms / "01-choice.md").read_text())
+              and "_illustrations" not in tab_text["01-choice.md"]
+              and "[Illustration:" in tab_text["01-choice.md"]
               and not stub.state["uploads"])  # temp import Doc deleted
         check("manifest tab names the manuscript and doc incarnation",
-              "Manuscript: book" in master[1]["text"]
-              and "Doc version: 1" in master[1]["text"])
+              "Manuscript: book" in tab_text["manifest"]
+              and "Doc version: 1" in tab_text["manifest"])
         stub.set_tab("01-choice.md",
                      "# Title\n\nEdited in Docs \\- with escapes.\n")
         pulled = pull_doc(db, manuscript, "01-choice.md", service=stub)
@@ -297,6 +465,40 @@ def main_test() -> None:
               forced["changed"] == ["01-choice.md"]
               and "Edited in Docs again" in (ms / "01-choice.md").read_text())
 
+        # A Doc-pasted image exports as a dangling ![][imageN] ref: the
+        # pull strips it (the bridge cannot transport images) and warns.
+        stub.set_tab("01-choice.md",
+                     "# Title\n\nProse kept. ![][image9]\n\n"
+                     "[image9]: <data:image/png;base64,abc>\n")
+        pulled_img = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("pull strips Doc-pasted image refs and warns",
+              pulled_img["dangling_images"]["01-choice.md"]
+              and "image9" not in (ms / "01-choice.md").read_text()
+              and "Prose kept." in (ms / "01-choice.md").read_text(),
+              str(pulled_img))
+
+        # Embed round trip: the embed line never reaches the Doc, and a
+        # pull restores the pinned pick under its tag.
+        picked_name = r3["written"][0]
+        (ms / "01-choice.md").write_text(
+            "# Title\n\n[Illustration: choice as a forking path]\n"
+            f"![](_illustrations/{picked_name})\n\nProse below.\n")
+        push_doc(db, manuscript, "01-choice.md",
+                 service=stub, docs_service=stub)
+        tab_now = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                       if t["title"] == "01-choice.md")
+        check("push keeps the tag but never the embed line",
+              "[Illustration: choice as a forking path]" in tab_now
+              and "_illustrations" not in tab_now, tab_now)
+        stub.set_tab("01-choice.md", tab_now.replace(
+            "Prose below.", "Prose below, edited in the Doc."))
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        round_tripped = (ms / "01-choice.md").read_text()
+        check("pull re-inserts the pinned embed under its tag",
+              f"[Illustration: choice as a forking path]\n"
+              f"![](_illustrations/{picked_name})" in round_tripped
+              and "edited in the Doc" in round_tripped, round_tripped)
+
         # --- session-start reconciliation: all four outcomes ---
         from authorlm.gdocs import reconcile
 
@@ -313,7 +515,8 @@ def main_test() -> None:
         report = reconcile(db, manuscript, stub, docs_service=stub)
         check("reconcile: only-local change auto-pushes",
               report["pushed"] == ["01-choice.md"]
-              and stub.state["docs"]["doc-2"][0]["text"]
+              and next(t["text"] for t in stub.state["docs"]["doc-2"]
+                       if t["title"] == "01-choice.md")
               == "# Title\n\nLocal-only progress.\n", str(report))
         # The tab now reflects the push; the next reconcile sees sync.
         report = reconcile(db, manuscript, stub)
@@ -337,7 +540,7 @@ def main_test() -> None:
         from authorlm.export import combined_markdown, export_manuscript
 
         (ms / "00-intro.md").write_text("# Intro\n\nWelcome.\n")
-        (ms / "toc.md").write_text("- 01-choice\n- 00-intro\n")
+        (ms / "toc.md").write_text("- 01-choice.md\n- 00-intro.md\n")
         manuscript = api.get_manuscript(db)
         text, order, unlisted = combined_markdown(manuscript)
         check("combined markdown follows toc.md reading order",
@@ -381,6 +584,266 @@ def main_test() -> None:
               "_export" not in report["in_sync"] + report["pulled"]
               + report["pushed"] + report["conflicts"]
               + [e["file"] for e in report["errors"]], str(report))
+
+        # --- publishing exports: variants, settings, local pandoc ---
+        from authorlm.export import (export_published, load_settings,
+                                     publish_markdown, set_setting)
+
+        (ms / "00-intro.md").write_text(
+            "# Intro\n\nWelcome.\n\n"
+            "[Illustration: a winding path | caption: The path]\n\n"
+            "[Illustration: an unrendered idea]\n")
+        path_hash = illus_mod.desc_hash("a winding path")
+        winding = f"a-winding-path-{path_hash}-0000-01.png"
+        (ms / "_illustrations" / winding).write_bytes(tiny_png())
+        text, order, warnings = publish_markdown(manuscript, "images")
+        check("images variant embeds candidates with captions, keeps "
+              "unrendered slots as notes and warns",
+              f"![The path](_illustrations/{winding})" in text
+              and "[Illustration: an unrendered idea]" in text
+              and any("unrendered" in w for w in warnings), text)
+        stripped_text, _, _ = publish_markdown(manuscript, "stripped")
+        check("stripped variant removes every tag (audio-clean)",
+              "[Illustration" not in stripped_text
+              and "Welcome." in stripped_text)
+        slots_text, _, _ = publish_markdown(manuscript, "slots")
+        check("slots variant keeps tags verbatim as production notes",
+              "[Illustration: a winding path | caption: The path]"
+              in slots_text)
+
+        set_setting(manuscript, "author", "Chitta Darshana")
+        set_setting(manuscript, "variant", "slots")
+        check("export settings persist in _exports/settings.toml",
+              load_settings(manuscript)["author"] == "Chitta Darshana"
+              and load_settings(manuscript)["variant"] == "slots"
+              and (ms / "_exports" / "settings.toml").exists())
+        try:
+            set_setting(manuscript, "nope", "x")
+            refused = False
+        except LookupError:
+            refused = True
+        check("unknown export settings are refused", refused)
+
+        import shutil as _shutil
+        if _shutil.which("pandoc"):
+            published = export_published(db, manuscript, fmt="docx",
+                                         variant="images")
+            docx = Path(published["docx"])
+            check("pandoc docx export lands in _exports/ with images",
+                  docx.exists() and docx.stat().st_size > 1000,
+                  str(published))
+        else:
+            print("  note: pandoc not on PATH — docx conversion untested "
+                  "in this run")
+
+        # --- hygiene: deterministic filters + retroactive sweep ---
+        import json as _json
+
+        from authorlm import hygiene
+        from authorlm.concepts import link_concepts
+
+        ghost = api.add_concept(db, manuscript, "Spectral Machinery")
+        db.update("concept_nodes", ghost["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        link_concepts(db, manuscript["id"], "Spectral Machinery",
+                      "creates", "Choice", status="inferred")
+        hygiene_files = read_files_for_test(ms)
+        swept = hygiene.sweep(db, manuscript, hygiene_files)
+        check("sweep flags ungrounded extracted concepts and their edges",
+              any(c["name"] == "Spectral Machinery"
+                  for c in swept["ungrounded_concepts"])
+              and any("Spectral Machinery" in e["unmentioned"]
+                      for e in swept["ungrounded_edges"]), str(swept))
+        check("sweep never flags grounded or author-confirmed material",
+              not any(c["name"] == "Choice"
+                      for c in swept["ungrounded_concepts"]))
+
+        # Staleness: a bridge suggestion whose concept the author then
+        # writes is marked stale at collect — review never offers a no-op.
+        session, _ = api.ensure_session(db, manuscript)
+        api.add_concept(db, manuscript, "Undertow")
+        api.declare_intent(db, manuscript, "Introduce Undertow in ch1")
+        guided = api.guide(db, manuscript, session)
+        check("guide proposes the declared, unrealized concept",
+              any("Undertow" in r["suggestion"]
+                  for r in guided["suggestions"]), str(guided))
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n\nThe Undertow pulls every choice back toward habit.\n")
+        report = api.collect(db, manuscript, {})
+        check("collect marks the now-moot suggestion stale",
+              any("Undertow" in s["suggestion"]
+                  for s in report.get("suggestions_stale", []))
+              and api.compact_collect(report)["suggestions_stale"]
+              == report["suggestions_stale"], str(report.get(
+                  "suggestions_stale")))
+        row = db.one(
+            "SELECT * FROM guidance_history WHERE manuscript_id = ? "
+            "AND state = 'stale'", (manuscript["id"],))
+        check("the stale state is persisted on the guidance row",
+              row is not None and "Undertow" in row["suggestion"])
+
+        # --- recurrence bar (ratified 2026-08-08): same-paragraph
+        # collapse; >=2 contexts spanning >=2 sections or files ---
+        bar_files = {
+            "a.md": ("# One\n\nThe Undertow pulls. The Undertow drags.\n\n"
+                     "Plain prose here.\n\n## Two\n\nMore prose.\n"),
+            "b.md": "# Other\n\nNothing relevant.\n",
+        }
+        ok, stats = hygiene.passes_recurrence_bar(bar_files, ["Undertow"])
+        check("twice in one paragraph is one context — fails the bar",
+              not ok and stats["contexts"] == 1, str(stats))
+        bar_files["a.md"] += "\nThe Undertow returns in section two.\n"
+        ok, stats = hygiene.passes_recurrence_bar(bar_files, ["Undertow"])
+        check("two contexts across two sections of one file pass the bar",
+              ok and stats["contexts"] == 2 and stats["sections"] == 2,
+              str(stats))
+        bar_files["a.md"] = ("# One\n\nThe Undertow pulls.\n\n"
+                             "The Undertow drags on, same section.\n")
+        ok, stats = hygiene.passes_recurrence_bar(bar_files, ["Undertow"])
+        check("two contexts in ONE section of one file fail the spread",
+              not ok and stats["contexts"] == 2 and stats["sections"] == 1,
+              str(stats))
+        bar_files["b.md"] = "# Other\n\nThe Undertow crosses files.\n"
+        ok, stats = hygiene.passes_recurrence_bar(bar_files, ["Undertow"])
+        check("cross-file recurrence passes the bar",
+              ok and stats["files"] == 2, str(stats))
+
+        # The sweep reports unconfirmed gated nodes that fail the bar —
+        # mentioned (not ungrounded) but single-context.
+        motif = api.add_concept(db, manuscript, "Fleeting Motif",
+                                kind="metaphor")
+        db.update("concept_nodes", motif["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\nA Fleeting Motif appears exactly once.\n")
+        swept = hygiene.sweep(db, manuscript, read_files_for_test(ms))
+        check("sweep separates below-bar from ungrounded",
+              any(c["name"] == "Fleeting Motif" and c["contexts"] == 1
+                  for c in swept["below_bar"])
+              and not any(c["name"] == "Fleeting Motif"
+                          for c in swept["ungrounded_concepts"])
+              and not any(c["name"] == "Spectral Machinery"
+                          for c in swept["below_bar"]), str(swept["below_bar"]))
+
+        # A vanished UNCONFIRMED hypothesis dies quietly (retired +
+        # reported); only author-confirmed knowledge earns a proposal
+        # (it-8f24c757d3c7).
+        fleeting = api.add_concept(db, manuscript, "Fleeting Phrase")
+        db.update("concept_nodes", fleeting["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        with_phrase = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").write_text(
+            with_phrase + "\nThe Fleeting Phrase appears here once.\n")
+        api.collect(db, manuscript, {})
+        (ms / "01-choice.md").write_text(with_phrase)
+        report = api.collect(db, manuscript, {})
+        check("vanished unconfirmed hypotheses are dropped, not proposed",
+              report["hypotheses_dropped"] == ["Fleeting Phrase"]
+              and "Fleeting Phrase" not in report["vanished"]
+              and db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                         (fleeting["id"],))["status"] == "retired"
+              and db.one(
+                  "SELECT id FROM knowledge_proposals WHERE kind = 'vanished' "
+                  "AND target = ?", (fleeting["id"],)) is None,
+              str(report.get("hypotheses_dropped")))
+
+        # --- sweep framework vanguards: readiness, ontology, lens ---
+        from authorlm import lenses, sweeps
+
+        ready = sweeps.readiness(db, manuscript)
+        checks_present = {i["check"] for i in ready["items"]}
+        check("readiness sweep covers the registries deterministically",
+              {"illustrations rendered", "proposals settled",
+               "toc covers every file", "pandoc available",
+               "export settings set"} <= checks_present
+              and isinstance(ready["ready"], bool), str(ready))
+        check("readiness flags the unrendered slot as a blocker",
+              not ready["ready"]
+              and "illustrations rendered" in ready["blocking"], str(ready))
+
+        class FakeLLM:
+            enabled = True
+
+            def __init__(self, payload):
+                self.payload = payload
+                self.system = self.user = None
+
+            def complete_json(self, system, user):
+                self.system, self.user = system, user
+                return self.payload
+
+            def stats_line(self):
+                return None
+
+        api.add_concept(db, manuscript, "Tremor",
+                        notes="The Tremor is never caused; it causes.")
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n\nSome say the Tremor is caused by the collision of "
+              "qualities, and that its cause can be measured precisely "
+              "by any patient observer of the fields.\n")
+        grounded_quote = ("Some say the Tremor is caused by the collision "
+                         "of qualities")
+        onto_llm = FakeLLM({"findings": [
+            {"item": 1, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "The Tremor is never caused; it causes.",
+             "why": "The text gives the Tremor a cause."},
+            {"item": 1, "concept": "Tremor",
+             "quote": "a sentence that is not in the paragraph",
+             "claim": "x", "why": "hallucinated"},
+        ]})
+        onto = sweeps.ontology(db, manuscript, onto_llm, file="01-choice.md")
+        check("ontology narrows deterministically and gates findings",
+              onto["pairs"] >= 1 and onto["findings"] == 1
+              and onto["dropped_ungrounded"] == 1
+              and "SETTLED" in onto_llm.user
+              and "never caused" in onto_llm.user, str(onto))
+        from authorlm import proposals as props
+        incongruence = [r for r in props.open_proposals(db, manuscript["id"])
+                        if r["kind"] == "incongruence"]
+        check("incongruence findings land as proposals with a verdict "
+              "grammar",
+              len(incongruence) == 1
+              and "Tremor" in props.describe(incongruence[0])[0]
+              and "Acknowledged" in props.adopt(db, manuscript["id"],
+                                                incongruence[0]))
+
+        lenses.add_lens(manuscript, "clarity",
+                        "Flag sentences that assert a claim without "
+                        "argument or example.")
+        check("lens ratified into _lenses/ and listed",
+              lenses.list_lenses(manuscript)[0]["name"] == "clarity")
+        lens_llm = FakeLLM({"findings": [
+            {"quote": grounded_quote, "note": "Asserted without argument."},
+            {"quote": "nowhere text", "note": "hallucinated"},
+        ]})
+        session, _ = api.ensure_session(db, manuscript)
+        run = lenses.run_lens(db, manuscript, session, "clarity",
+                              "01-choice.md", lens_llm)
+        check("lens run gates findings and stores its own batch",
+              len(run["findings"]) == 1 and run["dropped_ungrounded"] == 1
+              and run["findings"][0]["kind"] == "lens"
+              and "THE LENS" in lens_llm.system
+              and "never caused; it causes" in lens_llm.system, str(run))
+        verdict = api.review(db, manuscript, session, 1, "rejected",
+                             "Assertion is fine here — the sermon register "
+                             "argues by declaration.", kinds=("lens",))
+        check("lens verdicts flow through record_review as evidence",
+              verdict["review"]["decision"] == "rejected"
+              and db.one("SELECT state FROM guidance_history WHERE id = ?",
+                         (run["findings"][0]["id"],))["state"] != "proposed")
+        registered = lenses.register_findings(
+            db, manuscript, session, "clarity", "01-choice.md",
+            [{"quote": grounded_quote, "note": "External agent finding."},
+             {"quote": "still nowhere", "note": "dropped"}])
+        check("registration door hygiene-gates external findings into the "
+              "same store",
+              len(registered["findings"]) == 1
+              and registered["dropped_ungrounded"] == 1
+              and _json.loads(registered["findings"][0]["metadata"])[
+                  "source"] == "external")
 
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
@@ -507,7 +970,8 @@ def main_test() -> None:
             "resolve_improvement", "alias_concept", "merge_concepts",
             "retire_policy", "merge_policies", "convert_policy_to_style",
             "define_style_guide", "add_style_element", "retire_style_element",
-            "attach_style", "get_style",
+            "attach_style", "get_style", "get_profile", "run_sweep",
+            "get_illustration_prompt",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,

@@ -555,6 +555,9 @@ def scenario_llm_and_unregister(root: Path) -> None:
         ms = ws / "manuscript"
         write(ms / "01-choice.md", CH1)
         write(ms / "02-fields.md", CH2)
+        # CH3 gives 'Field' cross-file recurrence; 'Becoming' stays a
+        # single lowercase mention — below the ratified recurrence bar.
+        write(ms / "03-trajectories.md", CH3)
         stub_config = (
             "# AuthorLM test configuration (TOML — native comments)\n"
             "[llm]\n"
@@ -567,7 +570,9 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         out = run(ws, "init", "--name", "book", "--path", str(ms))
         check("init auto-collects before extraction", "Collected revision v1" in out, out)
-        check("init extracts concepts", "Extracted 5 new concept(s)" in out, out)
+        check("init extracts concepts", "Extracted 4 new concept(s)" in out, out)
+        check("the recurrence bar drops the single-context candidate",
+              "1 below the recurrence bar" in out and "'Becoming'" in out, out)
         check("valid links kept; unknown relation and unknown concept dropped",
               "2 inferred relationship(s)" in out and "skipped 2" in out, out)
         check("step reports live calls and token usage",
@@ -576,8 +581,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(ws, "concept", "list")
         check("extracted concept realized against text",
               "Choice (concept, realized" in out, out)
-        check("unmentioned concept stays declared",
-              "Becoming (concept, declared" in out, out)
+        check("below-bar concept was never admitted",
+              "Becoming" not in out, out)
+        check("exempt-kind unmentioned concept stays a declared hypothesis",
+              "Basilides (historical_reference, declared" in out, out)
         check("historical_reference kind preserved",
               "Basilides (historical_reference" in out, out)
         check("extracted nodes marked unconfirmed",
@@ -587,13 +594,13 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         out = run(ws, "briefing")
         check("briefing lists extracted concepts for triage",
-              "Extracted concepts awaiting your confirmation (5)" in out, out)
-        out = run(ws, "concept", "confirm", "Becoming", "--kind", "question")
+              "Extracted concepts awaiting your confirmation (4)" in out, out)
+        out = run(ws, "concept", "confirm", "Basilides", "--kind", "question")
         check("confirm retypes and confirms a node",
-              "Confirmed concept 'Becoming' (question)" in out, out)
+              "Confirmed concept 'Basilides' (question)" in out, out)
         out = run(ws, "briefing")
         check("confirmed node leaves the triage list",
-              "awaiting your confirmation (4)" in out, out)
+              "awaiting your confirmation (3)" in out, out)
 
         out = run(ws, "extract")
         check("incremental re-extraction is a no-op without changes",
@@ -617,13 +624,13 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "(notes updated)" in result.stdout
               and "the primal act of cutting" in result.stdout,
               result.stdout)
-        check("triage walks unconfirmed nodes", "[1/4] Choice" in result.stdout,
+        check("triage walks unconfirmed nodes", "[1/3] Choice" in result.stdout,
               result.stdout)
         flat_stdout = " ".join(result.stdout.split())
         check("triage shows full untruncated notes",
               " ".join(long_note.split()) in flat_stdout, result.stdout)
         check("triage summary reports decisions",
-              "Triage: kept 1, retyped 1, retired 1, merged 0, skipped 1."
+              "Triage: kept 1, retyped 1, retired 1, merged 0, skipped 0."
               in result.stdout,
               result.stdout)
         check("triage echoes each decision",
@@ -635,7 +642,8 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("triage retire applied", "Field" not in out, out)
 
         out = run(ws, "concept", "confirm", "--all")
-        check("bulk confirm sweeps the rest", "Confirmed 1 concept(s)." in out, out)
+        check("bulk confirm sweeps the rest (nothing left — triage settled all)",
+              "Confirmed 0 concept(s)." in out, out)
         out = run(ws, "briefing")
         check("nothing left to triage after bulk confirm",
               "Extracted concepts awaiting your confirmation" not in out, out)
@@ -760,10 +768,15 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "—distinguishes→ Distinction (inferred" in out, out)
 
         run(ws, "session", "start")
+        # The author declares Becoming — declaration bypasses the
+        # recurrence bar (declaration is ratification, ratified 2026-08-08).
+        out = run(ws, "concept", "add", "Becoming")
+        check("author declaration bypasses the recurrence bar",
+              "Becoming" in out, out)
         out = run(ws, "intent", "declare", "Develop the notion of Becoming")
         becoming_id = out.split("[")[1].split("]")[0]
         out = run(ws, "guide")
-        check("bridge suggested for extracted concept", "Introduce 'Becoming'" in out, out)
+        check("bridge suggested for the declared concept", "Introduce 'Becoming'" in out, out)
         check("LLM drafts bridge text", "A drafted bridge paragraph from the stub" in out, out)
 
         out = run(ws, "review", "1", "--reject",
@@ -856,7 +869,11 @@ def scenario_llm_and_unregister(root: Path) -> None:
         write(ws2 / ".authorlm" / "config.toml",
               stub_config + "extraction_max_chars = 130\n")
         run(ws2, "init", "--name", "book2", "--path", str(ms2))
-        run(ws2, "concept", "add", "Persistence")
+        # This tiny two-file world leaves the stub's concepts below the
+        # recurrence bar; the aliasing test needs them live, so the
+        # author declares them (declaration bypasses the bar).
+        for name in ("Persistence", "Choice", "Distinction", "Becoming"):
+            run(ws2, "concept", "add", name)
         out = run(ws2, "extract", "--aliases")
         check("oversized aliases sweep goes hierarchical",
               "hierarchical" in out and "aliases only" in out, out)

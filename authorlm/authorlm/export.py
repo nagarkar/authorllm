@@ -98,3 +98,158 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
         result["url"] = f"https://docs.google.com/document/d/{entry['doc_id']}/edit"
     _save_mapping(db, manuscript, meta)
     return result
+
+
+# ------------------------------------------------ publishing (docx / epub)
+
+SETTINGS_KEYS = {
+    "title": "book title (metadata + output filename); default: the "
+             "manuscript name",
+    "author": "author byline (docx/epub metadata)",
+    "variant": "illustration handling: images (embed picked candidates) | "
+               "slots (keep [Illustration: …] tags as production notes) | "
+               "stripped (remove tags — audio-clean)",
+    "language": "publication language code (epub metadata), default en",
+    "reference_docx": "path to a pandoc reference .docx for Word styling "
+                      "(fonts, margins); empty = pandoc defaults",
+    "cover_image": "path to an epub cover image; empty = no cover",
+}
+_SETTINGS_DEFAULTS = {"title": "", "author": "", "variant": "images",
+                      "language": "en", "reference_docx": "",
+                      "cover_image": ""}
+
+
+def _settings_path(manuscript: dict) -> Path:
+    return Path(manuscript["path"]) / EXPORT_DIR / "settings.toml"
+
+
+def load_settings(manuscript: dict) -> dict:
+    """Per-manuscript export settings: _exports/settings.toml over
+    defaults. Deterministic tooling — the file is the state, and the
+    author may edit it directly."""
+    import tomllib
+
+    settings = dict(_SETTINGS_DEFAULTS)
+    path = _settings_path(manuscript)
+    if path.exists():
+        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+        for key, value in loaded.items():
+            if key in settings:
+                settings[key] = value
+    return settings
+
+
+def set_setting(manuscript: dict, key: str, value: str) -> dict:
+    if key not in SETTINGS_KEYS:
+        raise LookupError(
+            f"unknown export setting '{key}' (one of: "
+            f"{', '.join(sorted(SETTINGS_KEYS))})")
+    if key == "variant" and value not in ("images", "slots", "stripped"):
+        raise ValueError("variant must be images | slots | stripped")
+    settings = load_settings(manuscript)
+    settings[key] = value
+    path = _settings_path(manuscript)
+    path.parent.mkdir(exist_ok=True)
+    lines = ["# AuthorLM export settings — 'authorlm export set <key> "
+             "<value>', or edit directly."]
+    for name in _SETTINGS_DEFAULTS:
+        lines.append(f'{name} = "{settings[name]}"')
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return settings
+
+
+def publish_markdown(manuscript: dict,
+                     variant: str) -> tuple[str, list[str], list[str]]:
+    """The publishable single-file markdown: the machinery-free
+    concatenation with illustration slots resolved per the variant.
+    Returns (text, order, warnings)."""
+    from .illus import (ILLUS_DIR, capture_embeds, desc_hash, parse_tag,
+                        slot_candidates)
+
+    root = Path(manuscript["path"])
+    files = read_manuscript_files(root)
+    order, _unlisted = reading_order(files)
+    warnings: list[str] = []
+    parts: list[str] = []
+    for name in order:
+        text = normalize_markdown(files[name]).rstrip("\n")
+        if variant != "slots":
+            raw = (root / name).read_text(encoding="utf-8")
+            picks = capture_embeds(raw)
+            lines: list[str] = []
+            for line in text.split("\n"):
+                tag = parse_tag(line)
+                if not tag:
+                    lines.append(line)
+                    continue
+                if variant == "stripped":
+                    continue
+                h = desc_hash(tag["prompt"])
+                target = picks.get(h)
+                if target and not (root / ILLUS_DIR / target).exists():
+                    target = None
+                if target is None:
+                    cands = slot_candidates(root, h)
+                    target = cands[-1]["name"] if cands else None
+                if target is None:
+                    warnings.append(
+                        f"{name}: unrendered slot kept as a note — "
+                        f"[Illustration: {tag['prompt'][:60]}]")
+                    lines.append(line)
+                else:
+                    caption = tag.get("caption") or ""
+                    lines.append(f"![{caption}]({ILLUS_DIR}/{target})")
+            text = normalize_markdown("\n".join(lines)).rstrip("\n")
+        if text:
+            parts.append(text)
+    combined = "\n\n".join(parts)
+    return (combined + "\n" if combined else ""), order, warnings
+
+
+def export_published(db: Database, manuscript: dict, fmt: str,
+                     variant: str | None = None) -> dict:
+    """Publishing export: write the publishable markdown to _exports/
+    and, for docx/epub, convert it locally with pandoc — images embed
+    from _illustrations/, no Doc or Drive involved."""
+    import shutil
+    import subprocess
+
+    settings = load_settings(manuscript)
+    variant = variant or settings["variant"] or "images"
+    title = settings["title"] or manuscript["name"]
+    text, order, warnings = publish_markdown(manuscript, variant)
+    if not order:
+        raise LookupError("the manuscript has no content files to combine")
+    root = Path(manuscript["path"])
+    export_dir = root / EXPORT_DIR
+    export_dir.mkdir(exist_ok=True)
+    md_path = export_dir / export_filename(title)
+    md_path.write_text(text, encoding="utf-8")
+    result = {"markdown": str(md_path), "variant": variant,
+              "warnings": warnings}
+    if fmt == "md":
+        return result
+
+    if shutil.which("pandoc") is None:
+        raise RuntimeError(
+            "pandoc is required for docx/epub export — brew install pandoc")
+    out_path = md_path.with_suffix(f".{fmt}")
+    command = ["pandoc", str(md_path), "-o", str(out_path),
+               "--from", "markdown+smart", "--standalone"]
+    if fmt == "docx":
+        # No metadata title block: title.md leads as front matter (the
+        # ratified export shape) and pandoc would render a duplicate.
+        if settings["reference_docx"]:
+            command += ["--reference-doc", settings["reference_docx"]]
+    if fmt == "epub":
+        command += ["--metadata", f"title={title}",
+                    "--metadata", f"lang={settings['language'] or 'en'}"]
+        if settings["author"]:
+            command += ["--metadata", f"author={settings['author']}"]
+        if settings["cover_image"]:
+            command += ["--epub-cover-image", settings["cover_image"]]
+    proc = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"pandoc failed: {proc.stderr.strip()[:400]}")
+    result[fmt] = str(out_path)
+    return result

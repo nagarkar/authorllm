@@ -30,6 +30,8 @@ from .db import Database, ko_fields, loads
 from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
                        compute_prerequisite_gaps, generate_guidance,
                        intent_coverage_notes)
+from . import hygiene
+from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions, massive_deletions
 
@@ -314,13 +316,23 @@ def collect(db: Database, manuscript: dict, config: dict,
     realized = cg.scan_realizations(db, mid, version)
     repointed, vanished = cg.rescan_primary_locations(db, mid, version)
     vanished_proposals = []
+    hypotheses_dropped = []
     for node in vanished:
-        created = prop.create(
-            db, mid, "vanished", node["id"],
-            {"name": node["name"], "was_in": node["introduced_in"]},
-        )
-        if created:
-            vanished_proposals.append(node["name"])
+        meta = loads(node.get("metadata"), {})
+        if meta.get("origin") == "extracted" and not meta.get("confirmed"):
+            # An unconfirmed hypothesis was never knowledge: when its text
+            # vanishes it dies quietly — the author must not be asked to
+            # adjudicate the disappearance of something they never
+            # accepted (it-8f24c757d3c7).
+            cg.retire_concept(db, mid, dict(node))
+            hypotheses_dropped.append(node["name"])
+        else:
+            created = prop.create(
+                db, mid, "vanished", node["id"],
+                {"name": node["name"], "was_in": node["introduced_in"]},
+            )
+            if created:
+                vanished_proposals.append(node["name"])
 
     new_paragraphs = 0
     for transition in transitions:
@@ -352,6 +364,7 @@ def collect(db: Database, manuscript: dict, config: dict,
         ],
         "repointed": repointed,
         "vanished": vanished_proposals,
+        "hypotheses_dropped": hypotheses_dropped,
         "new_paragraphs": new_paragraphs,
         "extract_hint": extract_hint,
         "gaps_before": gaps_before,
@@ -359,6 +372,29 @@ def collect(db: Database, manuscript: dict, config: dict,
         "gaps_resolved": [g for g in gaps_before if g["edge_id"] not in after_keys],
         "gaps_new": [g for g in gaps_after if g["edge_id"] not in before_keys],
     }
+
+    # Hygiene: suggestions this revision made moot (the author wrote the
+    # concept a bridge suggestion proposed; a prerequisite gap closed) are
+    # marked stale so review never offers a no-op — a no-op the author
+    # rejects would poison the policy evidence.
+    staled = hygiene.stale_suggestions(
+        db, mid,
+        realized_ids={n["id"] for n in realized},
+        resolved_edge_ids={g["edge_id"] for g in report["gaps_resolved"]},
+    )
+    if staled:
+        report["suggestions_stale"] = staled
+
+    # Illustration slots are a scan-derived registry; a collect is the
+    # moment the author learns about unrendered tags ("new illustrations
+    # found") without having to remember to ask. Reporting only — collect
+    # never renders anything.
+    try:
+        slots = illus_slot_report(Path(manuscript["path"]))
+    except OSError:
+        slots = None
+    if slots and (slots["unrendered"] or slots["orphaned"]):
+        report["illustrations"] = slots
 
     # The author never has to remember the analyzers: a collected change
     # runs incremental extraction (concepts, links, aliasing statements)
@@ -401,19 +437,27 @@ def guide(db: Database, manuscript: dict, session: dict,
 
 def review(db: Database, manuscript: dict, session: dict, index: int,
            decision: str, explanation: str | None,
-           llm: LLMClient | None = None) -> dict:
+           llm: LLMClient | None = None,
+           kinds: tuple[str, ...] | None = None) -> dict:
     if decision not in ("accepted", "rejected", "modified", "deferred"):
         raise ValueError(f"unknown decision '{decision}'")
-    # Guidance kinds only: 'beat' rows from the write loop live in this
-    # table too, and an interleaved beat must not hijack "the latest batch".
+    # Kind-scoped batches: guidance kinds by default; 'beat' rows from the
+    # write loop and 'lens' findings live in this table too, each reviewed
+    # through their own surface — an interleaved batch of another kind
+    # must not hijack "the latest batch".
+    kinds = kinds or GUIDANCE_KINDS
+    kinds_sql = ", ".join("?" for _ in kinds)
     latest_batch = db.one(
         f"SELECT batch_id FROM guidance_history WHERE session_id = ? "
-        f"AND kind IN ({_GUIDANCE_KINDS_SQL}) "
+        f"AND kind IN ({kinds_sql}) "
         f"ORDER BY created_at DESC LIMIT 1",
-        (session["id"], *GUIDANCE_KINDS),
+        (session["id"], *kinds),
     )
     if not latest_batch:
-        raise LookupError("no guidance generated in this session — run guide first")
+        raise LookupError(
+            "no lens findings in this session — run a lens first"
+            if kinds == ("lens",) else
+            "no guidance generated in this session — run guide first")
     guidance = db.one(
         "SELECT * FROM guidance_history WHERE batch_id = ? AND batch_index = ?",
         (latest_batch["batch_id"], index),
@@ -1319,7 +1363,8 @@ def compact_collect(report: dict) -> dict:
         return report  # {"unchanged": True} or {"staged": [...]}
     out = {key: report[key] for key in (
         "version_no", "checksum", "transitions", "attached_to_episode",
-        "realized", "repointed", "vanished", "new_paragraphs", "extract_hint",
+        "realized", "repointed", "vanished", "hypotheses_dropped",
+        "new_paragraphs", "extract_hint",
     ) if key in report}
     out["gaps"] = {"before": len(report["gaps_before"]),
                    "after": len(report["gaps_after"])}
@@ -1327,6 +1372,10 @@ def compact_collect(report: dict) -> dict:
     out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
     if "auto_analysis" in report:
         out["auto_analysis"] = report["auto_analysis"]
+    if "illustrations" in report:
+        out["illustrations"] = report["illustrations"]
+    if "suggestions_stale" in report:
+        out["suggestions_stale"] = report["suggestions_stale"]
     return out
 
 

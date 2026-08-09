@@ -62,10 +62,29 @@ def _llm():
 
 
 def _guard(fn) -> dict[str, Any]:
+    import sys
+    import time
+
+    from . import tracelog
+
+    # The calling @mcp.tool() function's name is the verb being traced.
+    verb = sys._getframe(1).f_code.co_name
+    t0 = time.monotonic()
     try:
-        return {"ok": True, "result": fn()}
+        result = {"ok": True, "result": fn()}
+        error = None
     except (LookupError, ValueError) as err:
-        return {"ok": False, "error": str(err)}
+        result = {"ok": False, "error": str(err)}
+        error = f"{type(err).__name__}: {err}"
+    except BaseException as err:
+        tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        ok=False, error=f"{type(err).__name__}: {err}")
+        raise
+    tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    ok=error is None, error=error)
+    return result
 
 
 @mcp.tool()
@@ -162,6 +181,70 @@ def collect_revision(manuscript: str | None = None,
         api.ensure_session(db, ms, client_id=CONNECTION_ID)
         report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
         return report if verbose else api.compact_collect(report)
+    return _guard(run)
+
+
+@mcp.tool()
+def run_sweep(kind: str, manuscript: str | None = None,
+              file: str | None = None) -> dict:
+    """Run a sweep (docs/sweep-framework.md). kind: 'hygiene' (ungrounded
+    concepts/edges, moot suggestions — deterministic, zero tokens),
+    'readiness' (pre-publication checklist — deterministic), or 'ontology'
+    (narrowing auditor: changed paragraphs vs settled Concept Graph
+    claims; findings become incongruence proposals for the author's
+    verdict; `file` audits one file instead of the changed set). Report
+    the result conversationally; never act on findings without the
+    author."""
+    def run():
+        from pathlib import Path
+
+        from . import hygiene as hy
+        from . import sweeps
+        from .revisions import read_manuscript_files
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        if kind == "hygiene":
+            return hy.sweep(db, ms,
+                            read_manuscript_files(Path(ms["path"])))
+        if kind == "readiness":
+            return sweeps.readiness(db, ms)
+        if kind == "ontology":
+            llm = _llm()
+            if llm is None or not llm.enabled:
+                raise ValueError("the ontology sweep needs the LLM "
+                                 "configured ([llm] in config.toml)")
+            return sweeps.ontology(db, ms, llm, file=file)
+        raise ValueError("kind must be hygiene | readiness | ontology")
+    return _guard(run)
+
+
+@mcp.tool()
+def get_illustration_prompt(fragment: str,
+                            manuscript: str | None = None) -> dict:
+    """The exact composed prompt a render of an illustration slot would
+    send to the image model — the effective illustration law for the
+    slot's file plus the tag's prompt text — assembled through the same
+    code path the renderer uses, so it cannot diverge. `fragment`
+    selects the slot by a substring of its prompt. Use when debugging
+    why an image came out a certain way, or before a render to preview
+    what the model will be told. Returns {file, line, prompt, caption,
+    desc_hash, style_hash, law, composed}."""
+    def run():
+        from pathlib import Path
+
+        from .illus import effective_prompt, find_slot
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        matches = find_slot(Path(ms["path"]), fragment)
+        if not matches:
+            raise LookupError(f"no illustration tag matches '{fragment}'")
+        if len(matches) > 1:
+            raise LookupError(
+                f"'{fragment}' is ambiguous — matches: "
+                + "; ".join(f"{m['file']}:{m['line']}" for m in matches))
+        return effective_prompt(db, ms, matches[0])
     return _guard(run)
 
 
@@ -319,7 +402,7 @@ def add_style_element(aspect: str, statement: str, guide: str | None = None,
                       overrides: str | None = None,
                       manuscript: str | None = None) -> dict:
     """Record a ratified style rule. aspect: register | lexicon | syntax |
-    structure | formatting | citation | rhetoric | figure | tone. Scope to
+    structure | formatting | citation | rhetoric | figure (figurative language, prose) | tone | illustration (image law, consumed only by the illustration renderer). Scope to
     exactly one of `guide` (name) or `file` (file-local override). `notes`
     holds free-text inspect/avoid hints; `overrides` names the id (prefix)
     of an inherited element this one displaces."""

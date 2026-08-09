@@ -190,6 +190,37 @@ run the CLI via Bash:
 After any pull, narrate what actually changed (`authorlm diff`), separating
 prose changes from formatting churn.
 
+## Illustrations (tags in prose, candidates on disk, picks are pinned)
+The author declares an image as a single-line paragraph anywhere in the
+manuscript — `[Illustration: prompt | caption: optional reader-facing
+caption]` — and that tag is never consumed or replaced. Collect/pull
+output reports new unrendered slots ("new illustrations found"); relay
+that and ASK before rendering — rendering is always an explicit,
+consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
+Candidates land in `_illustrations/` as
+`slug-deschash-stylehash-NN.{png,jpg}`; the embed line under the tag is
+derived machinery (observation-invisible, stripped on push, re-inserted
+on pull). An explicit `illus pick <fragment> <N>` is the author's
+approval and PINS the candidate — renders never move a pinned embed.
+`--from N` evolves an approved image under new style law instead of
+starting fresh.
+
+Image style law is the `illustration` aspect of the style system —
+inheritance, file overrides, and ratification work exactly like prose
+law. NEVER record image guidance under aspect `figure`: that means
+figurative language (prose law) and must not reach image prompts
+(it-3e79bce24f73 is the scar).
+
+**Debugging why an image came out a certain way**: the effective prompt
+is deterministic and inspectable — `authorlm illus prompt <fragment>`
+(CLI) or the `get_illustration_prompt` MCP tool returns the exact
+composed text a render would send (effective illustration law + tag
+prompt, with desc/style hashes), assembled through the renderer's own
+code path. Check it FIRST when the author questions an image's style or
+content — a wrong image usually means wrong ratified law, and this shows
+which rule did it. Every rendered file also carries its prompt, law,
+model, and date in its metadata (PNG iTXt / JPEG COM segments).
+
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
 and the author confirms the behavior is wrong, file it *at that moment*

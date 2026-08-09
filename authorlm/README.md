@@ -11,17 +11,32 @@ no evidence, it abstains.
 
 ## Requirements
 
-Python 3.10+. The core is pure standard library (SQLite, difflib) and works
-fully without an LLM. For LLM-backed features (concept extraction, policy
-distillation, bridge drafting): `pip install litellm` and an API key for
-your chosen model (see Configuration).
+- **Python 3.11+**. The core is pure standard library (SQLite, difflib)
+  and works fully without an LLM or network.
+- **LLM features** (concept extraction, policy distillation, bridge
+  drafting): `pip install litellm` plus an API key for your chosen model
+  (see Configuration).
+- **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
+- **Google Docs bridge** (`doc push/pull`, reconciliation):
+  `pip install google-api-python-client google-auth-httplib2
+  google-auth-oauthlib`, plus an OAuth client secret in
+  `~/.authorlm/config.toml` under `[gdocs]` (one-time `authorlm doc auth`
+  opens the consent browser).
+- **Publishing exports** (docx/epub with embedded illustrations):
+  `pandoc` — `brew install pandoc` on macOS.
 
-## Install
+## Install / build
 
 ```bash
 cd authorlm
-pip install -e .        # gives you the `authorlm` command
+pip install -e .              # gives you the `authorlm` command
+pip install -e ".[llm,mcp]"   # …with the LLM and MCP extras in one step
 ```
+
+There is no separate build step — the package is pure Python, installed
+editable, so source edits take effect immediately. One exception: the MCP
+server is a long-running process; after changing its code, restart it with
+`pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
 AuthorLM keeps **one global database in `~/.authorlm/`** (the database and
 `config.toml`), so `authorlm` works from any directory and manuscripts can
@@ -150,6 +165,10 @@ outstanding questions.
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
 | `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
 | `doc create-manuscript` | Combine every chapter (reading order per `toc.md`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
+| `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
+| `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
+| `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
 | `guide` | Generate explained suggestions, or abstain |
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
 | `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
@@ -291,11 +310,18 @@ and the test suites report totals the same way.
 ## Testing
 
 ```bash
+python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
 python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
 python3 tests/test_live_llm.py  # real LLM path, with record/replay
 ```
 
-**Hermetic suite** (70 checks, five scenarios): the full editorial loop
+**API suite**: exercises `authorlm.api` (the logic layer beneath every
+surface) directly — including the Google Docs bridge against an in-memory
+Drive/Docs fake — and asserts the MCP server exposes the exact
+hand-curated tool set (extend the `expected` list there when adding a
+tool).
+
+**Hermetic suite** (five scenarios): the full editorial loop
 (RFC Appendix A shape), prerequisite-gap detection, unanswered objections,
 guard rails, and LLM features + unregister against a stub OpenAI-compatible
 server — no network or keys needed.
@@ -308,6 +334,38 @@ and replayed thereafter, so an unchanged suite makes zero live calls and
 runs without a key. Changing a prompt, the sample text, or the model
 re-records exactly the affected calls (or delete a cache file to force
 one). With no key and an incomplete cache, the suite skips loudly.
+
+## Logging & traces
+
+Every CLI command and MCP tool call appends one JSON line to
+`~/.authorlm/logs/trace.jsonl` (or `<workspace>/.authorlm/logs/` under
+`-w`): timestamp, surface (cli/mcp), verb, action, manuscript, duration in
+milliseconds, ok/error. Always on, zero dependencies, best-effort (a
+broken trace never breaks the operation), and size-rotated at 5 MB to
+`trace.jsonl.1`.
+
+The log is designed to be **read by agents**, not just humans: a
+scheduled reviewer periodically scans it for slow operations (e.g. p95
+duration per verb, LLM-bound verbs that got slower) and repeated errors,
+and proposes optimizations or flags defects for the author to confirm.
+Useful one-liners:
+
+```bash
+# slowest operations of the last run
+jq -r '[.duration_ms, .verb, .action // ""] | @tsv' ~/.authorlm/logs/trace.jsonl | sort -rn | head
+
+# errors only
+jq -c 'select(.ok == false)' ~/.authorlm/logs/trace.jsonl | tail
+```
+
+The scheduled cloud reviewer ("AuthorLM daily improvement PR") runs
+against a fresh GitHub checkout and cannot see `~/.authorlm` — it reads
+the snapshot committed at `_diagnostics/trace.jsonl` instead. Refresh it
+whenever you want the next run to see current telemetry:
+
+```bash
+cp ~/.authorlm/logs/trace.jsonl authorlm/_diagnostics/trace.jsonl
+```
 
 ## Data
 

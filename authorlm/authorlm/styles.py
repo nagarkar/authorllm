@@ -14,8 +14,13 @@ from .db import Database, ko_fields
 
 ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
-    "citation", "rhetoric", "figure", "tone",
+    "citation", "rhetoric", "figure", "tone", "illustration",
 }
+# 'figure' is figurative language — metaphor and analogy law for PROSE.
+# 'illustration' is image law, consumed only by the illustration
+# renderer (illus.illustration_law). The two must never mix: prose
+# motif guidance injected into an image prompt draws literal chains
+# and flames (it-3e79bce24f73).
 
 
 def create_guide(db: Database, manuscript_id: str, name: str,

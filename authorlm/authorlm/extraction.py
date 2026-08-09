@@ -15,7 +15,8 @@ from pathlib import Path
 
 from . import proposals
 from .concepts import (add_concept, concept_pattern, get_concept,
-                       link_concepts, scan_realizations)
+                       link_concepts, node_names, scan_realizations)
+from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database
 from .llm import LLMClient
 from .revisions import read_manuscript_files
@@ -50,6 +51,14 @@ EXTRACTION_SYSTEM = (
     '"aliases": [{"alias": str, "canonical": str, "sentence": str}]} '
     f"where kind is one of {sorted(VALID_KINDS)}. "
     f"Never exceed {MAX_CONCEPTS} concepts. "
+    "CONCEPT ADMISSION LAW (ratified by the author, verbatim): \"Concepts "
+    "are words or groups of words that are used multiple times. A phrase "
+    "is something that might occur once or twice, but isn't a continuing "
+    "motif.\" A vivid phrase, simile, or memorable sentence that lives in "
+    "one passage is NOT a concept and NOT a metaphor node — do not "
+    "propose it. The system independently verifies recurrence across the "
+    "whole manuscript and drops single-context candidates of kinds "
+    "concept, metaphor, and example. "
 )
 
 RELATION_GUIDE = (
@@ -341,16 +350,19 @@ def extract_concepts(
         selected = [n for n in order if target is None or n in target]
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
-            "suppressed": 0, "proposed": 0, "truncated": False,
+            "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
+            "proposed": 0,
+            "truncated": False,
         }
         for name in selected:
             sub = extract_concepts(db, manuscript, llm, files=[name],
                                    aliases_only=aliases_only, _inventory=True)
             if not sub or sub.get("up_to_date"):
                 continue
-            for key in ("nodes", "edges", "realized"):
+            for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
-            for key in ("skipped", "suppressed", "proposed"):
+            for key in ("skipped", "suppressed", "ungrounded_links",
+                        "proposed"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
         aggregate["scope"] = (
@@ -400,7 +412,9 @@ def extract_concepts(
                     "graph — do not re-extract them, but you MAY link to them."
                 )
                 text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
-    result = llm.complete_json(system, text)
+    # Extraction is schema-driven pattern work: thinking disabled
+    # (it-0ae002ed7321 — thinking tokens were 80% of a 4-minute pass).
+    result = llm.complete_json(system, text, thinking_budget=0)
     if not isinstance(result, dict):
         return None
 
@@ -424,6 +438,9 @@ def extract_concepts(
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
     proposed = 0
+    ungrounded_links = 0
+    below_bar: list[str] = []
+    disk_files: dict[str, str] | None = None
 
     for item in [] if edges_only or aliases_only else result.get("concepts", []):
         if not isinstance(item, dict) or not str(item.get("name", "")).strip():
@@ -475,6 +492,20 @@ def extract_concepts(
                 ):
                     proposed += 1
                 continue
+        if before is None and kind in RECURRENCE_GATED_KINDS:
+            # The recurrence bar (ratified 2026-08-08, gate-as-law): the
+            # model cannot count recurrence — an incremental payload only
+            # shows changed text — so the system counts, against the whole
+            # current manuscript. Below-bar candidates drop, self-healing:
+            # the next mention arrives in changed text and re-proposes.
+            # Never fed to triage_feedback — the bar rejected them, not
+            # the author.
+            if disk_files is None:
+                disk_files = read_manuscript_files(Path(manuscript["path"]))
+            admitted, _stats = passes_recurrence_bar(disk_files, [name])
+            if not admitted:
+                below_bar.append(name)
+                continue
         node = add_concept(db, mid, name, kind=kind, notes=notes)
         if before is None:
             # Machine-extracted nodes are hypotheses awaiting the author's
@@ -506,13 +537,24 @@ def extract_concepts(
         if len(new_nodes) >= MAX_CONCEPTS:
             break
 
-    known = {
-        row["name"].lower()
+    known_nodes = {
+        row["name"].lower(): row
         for row in db.all(
-            "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
+            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
             (mid,),
         )
     }
+    known = set(known_nodes)
+
+    def endpoint_in_text(name: str) -> bool:
+        # Hygiene gate (design: sweep framework): a link is proposed only
+        # when the text asserts it, so both endpoints (or their aliases)
+        # must be mentioned in the payload the model actually saw — an
+        # incremental run's KNOWN CONCEPTS inventory is linkable, but not
+        # out of thin air.
+        node = known_nodes.get(name.lower())
+        names = node_names(node) if node else [name]
+        return any(concept_pattern(nm).search(text) for nm in names if nm)
     for item in [] if aliases_only else result.get("links", []):
         if not isinstance(item, dict):
             skipped += 1
@@ -531,6 +573,9 @@ def extract_concepts(
             # Honesty over volume: an unknown relation is dropped, not
             # coerced into 'elaborates' — coercion manufactures wrong edges.
             skipped += 1
+            continue
+        if not (endpoint_in_text(src) and endpoint_in_text(dst)):
+            ungrounded_links += 1
             continue
         before = db.one(
             "SELECT id FROM concept_edges WHERE manuscript_id = ? AND relation = ? "
@@ -613,6 +658,8 @@ def extract_concepts(
         "realized": realized,
         "skipped": skipped,
         "suppressed": suppressed,
+        "ungrounded_links": ungrounded_links,
+        "below_bar": below_bar,
         "proposed": proposed,
         "scope": scope,
         "truncated": truncated,

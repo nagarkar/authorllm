@@ -24,7 +24,8 @@ import re
 from pathlib import Path
 
 from .db import Database, loads
-from .revisions import iter_manuscript_paths
+from .illus import capture_embeds, reembed, strip_dangling
+from .revisions import iter_manuscript_paths, strip_embed_lines
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 GDOC_MIME = "application/vnd.google-apps.document"
@@ -35,7 +36,8 @@ MARKDOWN_MIME = "text/markdown"
 
 _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
-_HEADING = re.compile(r"^(#{1,6})\s+", re.MULTILINE)
+_HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
+_EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
 
 
 def normalize_markdown(text: str) -> str:
@@ -47,7 +49,14 @@ def normalize_markdown(text: str) -> str:
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
+    # Doc-pasted images export as dangling ![][imageN] refs — churn, not
+    # content. Stripping here (not just in pull) keeps push, pull, and
+    # session-start reconciliation agreeing on the canonical text.
+    text, _ = strip_dangling(text)
     text = "\n".join(line.rstrip() for line in text.split("\n"))
+    # Empty heading paragraphs (a Doc styling artifact, e.g. a blank
+    # Subtitle line) are dropped, never merged into a neighbor.
+    text = _EMPTY_HEADING.sub("", text)
     # Horizontal rules get uniform blank-line padding (tab exports emit
     # them flush against neighbors; local files usually pad them).
     text = re.sub(r"\n*^(---|\*\*\*|___)$\n*", r"\n\n---\n\n", text,
@@ -829,6 +838,10 @@ def push_doc(db: Database, manuscript: dict, query: str,
     locally_normalized = normalized != text
     if locally_normalized:
         path.write_text(normalized, encoding="utf-8")
+    # Illustration embed lines are local derived machinery — the Doc
+    # shows only the readable [Illustration: …] tags. The stripped text
+    # is also the hashed base, so pull comparisons stay embed-free.
+    normalized = strip_embed_lines(normalized)
 
     meta = _mapping(db, manuscript)
     created = not meta.get(bridge.meta_key, {}).get("_master_id")
@@ -1188,9 +1201,18 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         if relpath not in sections:
             report["missing"].append(relpath)
             continue
+        # Warn on Doc-pasted images before normalize strips their refs:
+        # the Doc's markdown bridge cannot carry images, so they'd vanish.
+        _, dangling = strip_dangling(sections[relpath])
+        if dangling:
+            report.setdefault("dangling_images", {})[relpath] = dangling
         text = normalize_markdown(sections[relpath])
         path = bridge.root / relpath
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        # The bridge's canonical text is embed-free: illustration embed
+        # lines are local derived machinery, so every comparison strips
+        # them and a pull re-inserts them (the prior pick wins).
+        current = strip_embed_lines(current_raw)
         entry = links[relpath]
         state = three_way(text, current, entry.get("pushed_hash"))
         if relpath in readopted_files and state == "changed" and current:
@@ -1209,12 +1231,14 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             entry["checked_out"] = False
             continue
         if text != current:
-            path.write_text(text, encoding="utf-8")
+            path.write_text(reembed(text, bridge.root,
+                                    capture_embeds(current_raw)),
+                            encoding="utf-8")
             report["changed"].append(relpath)
         elif not path.exists():
             # An adopted tab with no content still materializes: the file
             # must exist for toc placement and future pushes.
-            path.write_text(text, encoding="utf-8")
+            path.write_text(reembed(text, bridge.root), encoding="utf-8")
             report["changed"].append(relpath)
         else:
             report["unchanged"].append(relpath)
@@ -1317,9 +1341,11 @@ def reconcile(db: Database, manuscript: dict, service,
         try:
             doc_text = normalize_markdown(sections.get(relpath, ""))
             path = Path(manuscript["path"]) / relpath
-            local_text = normalize_markdown(
-                path.read_text(encoding="utf-8") if path.exists() else ""
-            )
+            local_raw = (path.read_text(encoding="utf-8")
+                         if path.exists() else "")
+            # Embed-free comparison, like push/pull: local embed lines
+            # are derived machinery the Doc never carries.
+            local_text = strip_embed_lines(normalize_markdown(local_raw))
             base = entry.get("pushed_hash")
             local_hash = _hashlib.sha256(local_text.encode()).hexdigest()[:16]
             doc_hash = _hashlib.sha256(doc_text.encode()).hexdigest()[:16]
@@ -1332,7 +1358,9 @@ def reconcile(db: Database, manuscript: dict, service,
                     dirty = True
                 report["in_sync"].append(relpath)
             elif base and local_hash == base:
-                path.write_text(doc_text, encoding="utf-8")
+                path.write_text(reembed(doc_text, Path(manuscript["path"]),
+                                        capture_embeds(local_raw)),
+                                encoding="utf-8")
                 entry.update(checked_out=False, pushed_hash=doc_hash)
                 dirty = True
                 report["pulled"].append(relpath)

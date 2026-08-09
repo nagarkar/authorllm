@@ -17,6 +17,17 @@ from .db import Database, ko_fields, loads
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
 
+# Illustration embed lines (`![](_illustrations/….png)` under a tag) are
+# DERIVED machinery — written by `illus render`/`pick`, stripped on Doc
+# push, re-inserted after pull. Observation must not see them: the author
+# never wrote them, so they must never appear in transitions or episodes.
+EMBED_LINE = re.compile(r"^!\[[^\]]*\]\((?:\./)?_illustrations/[^)]+\)[ \t]*$")
+
+
+def strip_embed_lines(text: str) -> str:
+    lines = [ln for ln in text.split("\n") if not EMBED_LINE.match(ln)]
+    return "\n".join(lines)
+
 
 def iter_manuscript_paths(root: Path) -> dict[str, Path]:
     """Manuscript files by relative path. Directories whose name starts with
@@ -38,7 +49,7 @@ def iter_manuscript_paths(root: Path) -> dict[str, Path]:
 
 def read_manuscript_files(root: Path) -> dict[str, str]:
     return {
-        rel: path.read_text(encoding="utf-8")
+        rel: strip_embed_lines(path.read_text(encoding="utf-8"))
         for rel, path in iter_manuscript_paths(root).items()
     }
 
