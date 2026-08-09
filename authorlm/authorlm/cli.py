@@ -1968,6 +1968,43 @@ def cmd_doc(args):
               "~/.authorlm/gdocs_token.json.")
         return
     manuscript = _manuscript(db, args)
+    if args.action == "threads":
+        from . import threads as th
+
+        board = th.ledger(db, manuscript["id"])
+        if not board["counts"]:
+            print("No margin threads yet. They begin when a Doc comment "
+                  "gets a proposal: doc propose <comment-id>.")
+            return
+        print("Margin threads: " + ", ".join(
+            f"{n} {state}" for state, n in sorted(board["counts"].items())))
+        for row in board["open"]:
+            print(f"  [{row['state']}] {row['file']}  "
+                  f"«{(row['anchor_quote'] or '')[:50]}»  — {row['note']}")
+        return
+    if args.action == "propose":
+        import json as _json
+
+        from . import gdocs as gd
+
+        if not args.name:
+            sys.exit("usage: doc propose <comment-id> "
+                     '(stdin: {"old": …, "new": …, "note": …})')
+        payload = _stdin_text()
+        if not payload:
+            sys.exit("propose reads the proposal from stdin as JSON: "
+                     '{"old": "exact current text", "new": "replacement", '
+                     '"note": "one-line why"}')
+        spec = _json.loads(payload)
+        service = gd.get_service(_load_config(args), args.workspace)
+        docs_service = gd.get_docs_service(_load_config(args), args.workspace)
+        result = gd.propose_change(
+            db, manuscript, args.name, spec["old"], spec["new"],
+            spec.get("note", ""), service=service, docs_service=docs_service)
+        print(f"Proposed on {result['file']} — the change is visible "
+              "in-context (old struck through, new in green); the author "
+              "approves in-thread or in chat.")
+        return
     if args.action == "list":
         listing = docs.list_docs(db, manuscript)
         if not listing["active"] and not listing["retired"]:
@@ -2152,6 +2189,14 @@ def cmd_doc(args):
                              else "All tabs")
                     print(f"{scope} identical to local files — clean round "
                           "trip, nothing to collect.")
+                for act in result.get("thread_actions", []):
+                    print(ui.green(
+                        f"Thread {act['action']}: {act['file']} "
+                        f"(comment {act['comment_id']})"))
+                board = (result.get("threads") or {}).get("counts")
+                if board:
+                    print(ui.dim("Margin threads: " + ", ".join(
+                        f"{n} {s}" for s, n in sorted(board.items()))))
                 comments = result.get("comments") or []
                 if comments:
                     print(ui.bold(f"Comments to address ({len(comments)}):"))
@@ -2903,7 +2948,8 @@ def build_parser() -> argparse.ArgumentParser:
                                    "push/pull (Google Docs), create-manuscript, auth")
     p.add_argument("action", choices=["list", "add", "retire", "revive",
                                       "push", "pull", "open", "auth",
-                                      "create-manuscript"])
+                                      "create-manuscript", "threads",
+                                      "propose"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
                                            "(retire/revive/push/pull)")
     p.add_argument("--title", help="heading for a new document / Doc title "

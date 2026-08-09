@@ -213,6 +213,25 @@ CREATE TABLE IF NOT EXISTS doc_comments (
     UNIQUE (manuscript_id, comment_id)
 );
 
+CREATE TABLE IF NOT EXISTS doc_threads (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    comment_id TEXT NOT NULL,     -- Drive comment id (the thread's join key)
+    file TEXT NOT NULL,           -- relpath of the tab the thread lives in
+    anchor_quote TEXT,            -- the span the author's comment anchors
+    proposed_old TEXT,            -- exact text to be replaced (verbatim law)
+    proposed_new TEXT,            -- exact replacement
+    note TEXT,                    -- short body of our prefixed proposal reply
+    state TEXT NOT NULL DEFAULT 'proposed',
+        -- proposed | conversation | applied | cleaned | declined |
+        -- withdrawn | stale
+    our_reply_ids TEXT NOT NULL DEFAULT '[]',   -- JSON: replies we posted
+    last_author_reply_id TEXT,    -- idempotency watermark for verdicts
+    scope_kind TEXT,              -- file | guide | manuscript (evidence step)
+    scope_ref TEXT,               -- relpath, sg-*, or ms-* (ids where they exist)
+    UNIQUE (manuscript_id, comment_id)
+);
+
 CREATE TABLE IF NOT EXISTS writeups (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,

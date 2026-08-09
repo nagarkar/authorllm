@@ -344,7 +344,12 @@ def main_test() -> None:
                 tabs = [{"tabProperties": {"tabId": t["id"],
                                            "title": t["title"]},
                          "documentTab": {"body": {"content":
-                             [{"endIndex": len(t["text"]) + 1}]
+                             [{"startIndex": 1,
+                               "endIndex": len(t["text"]) + 1,
+                               "paragraph": {"elements": [
+                                   {"startIndex": 1,
+                                    "endIndex": len(t["text"]) + 1,
+                                    "textRun": {"content": t["text"]}}]}}]
                              if t["text"] else []}}}
                         for t in self.state["docs"][documentId]]
                 return FakeRequest({"tabs": tabs})
@@ -379,13 +384,46 @@ def main_test() -> None:
                         tab(req["deleteContentRange"]["range"]
                             ["tabId"])["text"] = ""
                     elif "insertText" in req:
-                        tab(req["insertText"]["location"]["tabId"])[
-                            "text"] += req["insertText"]["text"]
+                        target = tab(req["insertText"]["location"]["tabId"])
+                        loc = req["insertText"]["location"]
+                        if "index" in loc:
+                            i = loc["index"] - 1
+                            target["text"] = (target["text"][:i]
+                                              + req["insertText"]["text"]
+                                              + target["text"][i:])
+                        else:
+                            target["text"] += req["insertText"]["text"]
                 return FakeRequest({"replies": replies})
+
+        class FakeComments:
+            def __init__(self, state):
+                self.state = state
+
+            def list(self, fileId=None, pageToken=None, includeDeleted=None,
+                     fields=None):
+                return FakeRequest({"comments": [
+                    c for c in self.state["comments"].values()
+                    if not c.get("resolved")]})
+
+        class FakeReplies:
+            def __init__(self, state):
+                self.state = state
+
+            def create(self, fileId=None, commentId=None, body=None,
+                       fields=None):
+                self.state["reply_counter"] += 1
+                reply = {"id": f"r-{self.state['reply_counter']}",
+                         "content": body["content"],
+                         "author": {"displayName": "author"}}
+                self.state["comments"][commentId]["replies"].append(reply)
+                if body.get("action") == "resolve":
+                    self.state["comments"][commentId]["resolved"] = True
+                return FakeRequest({"id": reply["id"]})
 
         class FakeGoogle:
             def __init__(self):
                 self.state = {"counter": 0, "tab_counter": 0,
+                              "comments": {}, "reply_counter": 0,
                               "folders": [], "docs": {}, "uploads": {}}
                 self._files = FakeFiles(self.state)
                 self._documents = FakeDocuments(self.state)
@@ -395,6 +433,25 @@ def main_test() -> None:
 
             def documents(self):
                 return self._documents
+
+            def comments(self):
+                return FakeComments(self.state)
+
+            def replies(self):
+                return FakeReplies(self.state)
+
+            def add_comment(self, comment_id, quoted, content):
+                self.state["comments"][comment_id] = {
+                    "id": comment_id, "content": content,
+                    "quotedFileContent": {"value": quoted},
+                    "resolved": False, "replies": [],
+                    "author": {"displayName": "author"},
+                    "createdTime": "2026-08-08T00:00:00Z"}
+
+            def author_reply(self, comment_id, content):
+                self.state["comments"][comment_id]["replies"].append(
+                    {"content": content,
+                     "author": {"displayName": "author"}})
 
             def set_tab(self, title, text):  # simulate an edit in Docs
                 for tabs in self.state["docs"].values():
@@ -536,6 +593,156 @@ def main_test() -> None:
               and "Both sides now differ" in (ms / "01-choice.md").read_text(),
               str(report))
 
+        # --- margin threads: propose in-context; canonical stays old ---
+        from authorlm import threads as th
+        from authorlm.gdocs import propose_change
+
+        strip_out = th.strip_pending("A <<old>>{{new}} B")
+        check("pending grammar strips to canonical old; strays warn",
+              strip_out == ("A old B", [])
+              and th.strip_pending("stray << here")[1], str(strip_out))
+        check("verdict grammar is deterministic, whole-reply only",
+              th.classify_reply("Go ahead!") == "approve"
+              and th.classify_reply("no") == "decline"
+              and th.classify_reply("go ahead but soften it")
+              == "conversation"
+              and th.is_ours("AuthorLM: proposed — x")
+              and not th.is_ours("looks wrong to me"))
+
+        pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
+        stub.add_comment("c-1", "Doc went another way",
+                         "Can we make this stronger?")
+        pulled_c = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("comments are ingested but never auto-resolved",
+              any(c["comment_id"] == "c-1" for c in pulled_c["comments"])
+              and not stub.state["comments"]["c-1"]["resolved"]
+              and pulled_c["threads"]["counts"] == {},
+              str(pulled_c.get("comments")))
+
+        prop = propose_change(
+            db, manuscript, "c-1", old="Doc went another way.",
+            new="The Doc chose a firmer road.", note="strengthen per comment",
+            service=stub, docs_service=stub)
+        tab_now = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                       if t2["title"] == "01-choice.md")
+        check("propose wraps the anchor and inserts the proposal in place",
+              "<<Doc went another way.>>{{The Doc chose a firmer road.}}"
+              in tab_now
+              and stub.state["comments"]["c-1"]["replies"][0]["content"]
+              .startswith("AuthorLM: proposed")
+              and th.get_thread(db, manuscript["id"], "c-1")["state"]
+              == "proposed", tab_now)
+
+        pulled_p = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        local_now = (ms / "01-choice.md").read_text()
+        check("canonical local text stays OLD while the proposal pends",
+              "01-choice.md" in pulled_p["unchanged"]
+              and "Doc went another way." in local_now
+              and "{{" not in local_now, local_now)
+        check("re-pull is idempotent; the ledger reports the thread",
+              not pulled_p["comments"]
+              and pulled_p["threads"]["counts"].get("proposed") == 1,
+              str(pulled_p["threads"]))
+
+        stub.author_reply("c-1", "go ahead")
+        pulled_v = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("author verdicts surface classified for the state machine",
+              pulled_v["thread_replies"] == [
+                  {"comment_id": "c-1", "state": "proposed",
+                   "reply": "go ahead", "verdict": "approve"}],
+              str(pulled_v.get("thread_replies")))
+
+        try:
+            push_doc(db, manuscript, "01-choice.md",
+                     service=stub, docs_service=stub)
+            check("interim rule defers general pushes on thread-bearing "
+                  "tabs", False)
+        except LookupError as err:
+            check("interim rule defers general pushes on thread-bearing "
+                  "tabs", "open margin threads" in str(err))
+
+        # Drive entity-encodes quotes and bodies; fetch unescapes them
+        # (it-49edf0c323d1).
+        from authorlm.gdocs import fetch_open_comments
+        stub.add_comment("c-ent", "one&#39;s own", "entities &#39;here&#39;")
+        fetched = {c["id"]: c for c in fetch_open_comments(stub, "doc-2")}
+        check("comment quotes and bodies are HTML-unescaped at fetch",
+              fetched["c-ent"]["quotedFileContent"]["value"] == "one's own"
+              and fetched["c-ent"]["content"] == "entities 'here'",
+              str(fetched.get("c-ent")))
+        stub.state["comments"]["c-ent"]["resolved"] = True
+
+        # Export escaping survives the strip (markers arrive as \<\<
+        # with ~~ strikethrough in the markdown export).
+        exported = ("~~\\<\\<the old way.\\>\\>~~"
+                    "{{the new way.}}")
+        stripped_exp = th.strip_pending(normalize_markdown(exported))
+        check("export-escaped pending spans strip to canonical old",
+              stripped_exp == ("the old way.\n", []), str(stripped_exp))
+
+        # Approve with the author's in-place edit: modified acceptance.
+        stub.author_reply("c-1", "AuthorLM: proposed — courtesy")
+        tab = next(t2 for t2 in stub.state["docs"]["doc-2"]
+                   if t2["title"] == "01-choice.md")
+        tab["text"] = tab["text"].replace(
+            "{{The Doc chose a firmer road.}}",
+            "{{The Doc took the firmer road.}}")
+        stub.author_reply("c-1", "go ahead")
+        pulled_a = pull_doc(db, manuscript, "01-choice.md", service=stub,
+                            docs_service=stub)
+        tab_after = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                         if t2["title"] == "01-choice.md")
+        thread_a = th.get_thread(db, manuscript["id"], "c-1")
+        check("approve applies the author-edited version and closes",
+              "The Doc took the firmer road." in tab_after
+              and "<<" not in tab_after
+              and thread_a["state"] == "cleaned"
+              and thread_a["proposed_new"] == "The Doc took the firmer road."
+              and stub.state["comments"]["c-1"]["resolved"]
+              and any(a["action"] == "cleaned"
+                      for a in pulled_a["thread_actions"]), tab_after)
+        check("approved text lands in the local file",
+              "The Doc took the firmer road."
+              in (ms / "01-choice.md").read_text())
+
+        # Decline reverts and closes.
+        stub.add_comment("c-3", "firmer road", "hmm")
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        propose_change(db, manuscript, "c-3",
+                       old="The Doc took the firmer road.",
+                       new="A road of iron.", note="try iron",
+                       service=stub, docs_service=stub)
+        stub.author_reply("c-3", "revert")
+        pull_doc(db, manuscript, "01-choice.md", service=stub,
+                 docs_service=stub)
+        tab_after = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                         if t2["title"] == "01-choice.md")
+        check("decline reverts the span and closes the thread",
+              "A road of iron." not in tab_after
+              and "The Doc took the firmer road." in tab_after
+              and "<<" not in tab_after
+              and th.get_thread(db, manuscript["id"], "c-3")["state"]
+              == "declined"
+              and stub.state["comments"]["c-3"]["resolved"], tab_after)
+
+        # Withdraw: author resolves a proposed thread without a verdict.
+        stub.add_comment("c-4", "firmer road", "or gold?")
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        propose_change(db, manuscript, "c-4",
+                       old="The Doc took the firmer road.",
+                       new="A road of gold.", note="try gold",
+                       service=stub, docs_service=stub)
+        stub.state["comments"]["c-4"]["resolved"] = True
+        pull_doc(db, manuscript, "01-choice.md", service=stub,
+                 docs_service=stub)
+        tab_after = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                         if t2["title"] == "01-choice.md")
+        check("author-resolving a proposal withdraws and reverts it",
+              "A road of gold." not in tab_after
+              and "<<" not in tab_after
+              and th.get_thread(db, manuscript["id"], "c-4")["state"]
+              == "withdrawn", tab_after)
+
         # --- single-manuscript export (doc create-manuscript) ---
         from authorlm.export import combined_markdown, export_manuscript
 
@@ -545,7 +752,7 @@ def main_test() -> None:
         text, order, unlisted = combined_markdown(manuscript)
         check("combined markdown follows toc.md reading order",
               order == ["01-choice.md", "00-intro.md"] and not unlisted
-              and text.index("Both sides") < text.index("Welcome"), text)
+              and text.index("firmer road") < text.index("Welcome"), text)
 
         local_only = export_manuscript(db, manuscript, service=None)
         export_path = ms / "_exports" / "book.md"

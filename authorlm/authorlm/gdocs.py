@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 from .db import Database, loads
+from . import threads as threads_mod
 from .illus import capture_embeds, reembed, strip_dangling
 from .revisions import iter_manuscript_paths, strip_embed_lines
 
@@ -34,7 +35,7 @@ MARKDOWN_MIME = "text/markdown"
 
 # ------------------------------------------------------------- normalizer
 
-_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
+_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
@@ -231,10 +232,26 @@ def fetch_open_comments(service, doc_id: str) -> list[dict]:
             fileId=doc_id, pageToken=token, includeDeleted=False,
             fields="nextPageToken,comments(id,content,quotedFileContent,"
                    "resolved,author(displayName),createdTime,"
-                   "replies(content,author(displayName)))",
+                   "replies(id,content,author(displayName)))",
         ).execute()
-        comments += [c for c in resp.get("comments", [])
-                     if not c.get("resolved")]
+        # Drive entity-encodes quoted text and comment bodies (&#39;
+        # for an apostrophe): unescape at the boundary so attribution
+        # matches the manuscript and evidence stores the author's actual
+        # characters (it-49edf0c323d1).
+        import html as _html
+
+        for c in resp.get("comments", []):
+            if c.get("resolved"):
+                continue
+            if c.get("quotedFileContent", {}).get("value"):
+                c["quotedFileContent"]["value"] = _html.unescape(
+                    c["quotedFileContent"]["value"])
+            if c.get("content"):
+                c["content"] = _html.unescape(c["content"])
+            for reply in c.get("replies", []):
+                if reply.get("content"):
+                    reply["content"] = _html.unescape(reply["content"])
+            comments.append(c)
         token = resp.get("nextPageToken")
         if not token:
             return sorted(comments, key=lambda c: c.get("createdTime", ""))
@@ -833,6 +850,13 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    if threads_mod.open_threads(db, manuscript["id"], relpath):
+        # Interim rule until the surgical diff push ships: a rebuild
+        # push would orphan every open margin thread on this tab.
+        raise LookupError(
+            f"'{relpath}' has open margin threads — general push is "
+            "deferred (settle the threads, or ask explicitly for a "
+            "rebuild push, which will orphan them)")
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
     locally_normalized = normalized != text
@@ -1207,6 +1231,12 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         if dangling:
             report.setdefault("dangling_images", {})[relpath] = dangling
         text = normalize_markdown(sections[relpath])
+        # Margin threads: pending spans (<<old>>{{new}}) are review
+        # state living only in the Doc; canonical local text is the old
+        # half until the author approves (docs/margin-threads-design.md).
+        text, marker_warns = threads_mod.strip_pending(text)
+        if marker_warns:
+            report.setdefault("marker_warnings", {})[relpath] = marker_warns
         path = bridge.root / relpath
         current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
         # The bridge's canonical text is embed-free: illustration embed
@@ -1292,11 +1322,40 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             files = {bridge.display_prefix + rel: text
                      for rel, text in
                      read_manuscript_files(bridge.root).items()}
+            # Margin threads: comments are conversations now — never
+            # auto-resolved. New comments are ingested and surfaced to
+            # chat for proposal drafting; replies on threads we own are
+            # the verdict machine's input (step 2).
+            fresh = [c for c in open_comments
+                     if threads_mod.get_thread(
+                         db, manuscript["id"], c["id"]) is None
+                     and db.one(
+                         "SELECT id FROM doc_comments WHERE "
+                         "manuscript_id = ? AND comment_id = ?",
+                         (manuscript["id"], c["id"])) is None]
             report["comments"] = ingest_comments(
-                db, manuscript, open_comments, files)
-            report["comments_resolved"] = resolve_comments_with_receipt(
-                db, service, master_id, manuscript["id"],
-                [c["comment_id"] for c in report["comments"]])
+                db, manuscript, fresh, files)
+            report["thread_replies"] = []
+            for c in open_comments:
+                thread = threads_mod.get_thread(
+                    db, manuscript["id"], c["id"])
+                if thread is None:
+                    continue
+                for reply in c.get("replies", []):
+                    content = reply.get("content", "")
+                    if content and not threads_mod.is_ours(content):
+                        report["thread_replies"].append({
+                            "comment_id": c["id"],
+                            "state": thread["state"],
+                            "reply": content,
+                            "verdict": threads_mod.classify_reply(content),
+                        })
+        # The verdict machine runs even when nothing is open: a fully
+        # resolved margin is exactly when withdraw sweeps must fire.
+        report["thread_actions"] = advance_threads(
+            db, manuscript, open_comments, service, docs_service,
+            bridge)
+    report["threads"] = threads_mod.ledger(db, manuscript["id"])
     return report
 
 
@@ -1340,6 +1399,9 @@ def reconcile(db: Database, manuscript: dict, service,
         entry = links[relpath]
         try:
             doc_text = normalize_markdown(sections.get(relpath, ""))
+            # Pending margin-thread spans are review state, not content:
+            # canonical comparison uses the old half on the Doc side too.
+            doc_text, _ = threads_mod.strip_pending(doc_text)
             path = Path(manuscript["path"]) / relpath
             local_raw = (path.read_text(encoding="utf-8")
                          if path.exists() else "")
@@ -1383,3 +1445,313 @@ def reconcile(db: Database, manuscript: dict, service,
     if dirty:
         _save_mapping(db, manuscript, meta)
     return report
+
+
+# ------------------------------------------------------- margin threads
+# (docs/margin-threads-design.md — the Docs/Drive side; deterministic
+# grammar and records live in threads.py)
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]]:
+    """(doc_start_index, content) for every text run in a tab, in order."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    runs: list[tuple[int, str]] = []
+
+    def walk(tabs):
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    for el in item.get("paragraph", {}).get("elements", []):
+                        run = el.get("textRun")
+                        if run and run.get("content"):
+                            runs.append((el.get("startIndex", 0),
+                                         run["content"]))
+            walk(tab.get("childTabs", []))
+    walk(doc.get("tabs", []))
+    return runs
+
+
+def _locate_in_tab(docs_service, master_id: str, tab_id: str,
+                   needle: str) -> tuple[int, int] | None:
+    """(start, end) doc indices (UTF-16 units) of the FIRST verbatim
+    occurrence of `needle` in the tab, or None. Exactness is law: no
+    normalization, no fuzz (design: an approval authorizes one exact
+    transformation)."""
+    runs = _tab_runs(docs_service, master_id, tab_id)
+    full = "".join(content for _, content in runs)
+    offset = full.find(needle)
+    if offset < 0:
+        return None
+
+    def doc_index(py_offset: int) -> int:
+        seen = 0
+        for start, content in runs:
+            if py_offset <= seen + len(content):
+                return start + _utf16_len(content[: py_offset - seen])
+            seen += len(content)
+        raise ValueError("offset beyond tab text")
+
+    return doc_index(offset), doc_index(offset + len(needle))
+
+
+def propose_change(db: Database, manuscript: dict, comment_id: str,
+                   old: str, new: str, note: str,
+                   service=None, docs_service=None,
+                   bridge: DocBridge | None = None) -> dict:
+    """Register a proposal on an author comment: edit the tab into the
+    pending-change form <<old>>{{new}} (anchor survives — boundary
+    insertions only), style it like track-changes, post the prefixed
+    reply, and record the thread. The prose itself was drafted in chat;
+    this is the state machine's write."""
+    from .threads import PREFIX, create_thread, get_thread, render_pending
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    mid = manuscript["id"]
+    comment = db.one(
+        "SELECT * FROM doc_comments WHERE manuscript_id = ? AND comment_id = ?",
+        (mid, comment_id),
+    )
+    if comment is None:
+        raise LookupError(f"no ingested comment '{comment_id}' — pull first")
+    if get_thread(db, mid, comment_id):
+        raise ValueError("this comment already has a thread")
+    relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
+    if not relpath:
+        raise LookupError("the comment's file could not be attributed — "
+                          "propose needs a located anchor")
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    entry = links.get(relpath) or {}
+    tab_id = entry.get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{relpath}' has no tab in the master Doc")
+
+    span = _locate_in_tab(docs_service, master_id, tab_id, old)
+    if span is None:
+        raise LookupError(
+            "the proposal's old text was not found verbatim in the tab — "
+            "the passage may have changed; re-draft against current text")
+    start, end = span
+    old16 = _utf16_len(old)
+    tail = ">>" + "{{" + new + "}}"
+    requests = [
+        {"insertText": {"location": {"tabId": tab_id, "index": end},
+                        "text": tail}},
+        {"insertText": {"location": {"tabId": tab_id, "index": start},
+                        "text": "<<"}},
+        # After both inserts: `<<old>>` spans [start, start+4+len(old)],
+        # `{{new}}` follows it.
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": start,
+                      "endIndex": start + 4 + old16},
+            "textStyle": {"strikethrough": True},
+            "fields": "strikethrough"}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id,
+                      "startIndex": start + 4 + old16,
+                      "endIndex": start + 4 + old16 + 4 + _utf16_len(new)},
+            "textStyle": {"foregroundColor": {"color": {"rgbColor": {
+                "red": 0.13, "green": 0.55, "blue": 0.13}}}},
+            "fields": "foregroundColor"}},
+    ]
+    docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}).execute()
+
+    reply_id = None
+    try:
+        reply = service.replies().create(
+            fileId=master_id, commentId=comment_id,
+            body={"content": PREFIX + "proposed — " + note},
+            fields="id",
+        ).execute()
+        reply_id = reply.get("id")
+    except Exception:
+        pass  # the marker edit is the proposal; the reply is a courtesy
+
+    thread = create_thread(
+        db, mid, comment_id, relpath, comment["quoted"], old, new, note,
+        reply_id, scope_kind="file", scope_ref=relpath,
+    )
+    return {"thread_id": thread["id"], "file": relpath,
+            "pending": render_pending(old, new), "reply_id": reply_id}
+
+
+def _replace_pending(db: Database, manuscript: dict, thread: dict,
+                     replacement: str, service, docs_service,
+                     bridge: DocBridge) -> bool:
+    """Replace a thread's exact pending span with `replacement` in the
+    Doc tab, clear the track-changes styling, and mirror the outcome
+    into the local file. Exactness is law: returns False (stale) when
+    the span is not found verbatim."""
+    from .threads import render_pending
+
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    tab_id = (links.get(thread["file"]) or {}).get("tab_id")
+    if not (master_id and tab_id):
+        return False
+    # Structure-exact, content-flexible: the OLD half must match the
+    # record verbatim (it is what gets deleted), but the author may have
+    # edited the {{new}} half in place — a modified acceptance, honored
+    # exactly like the beat loop's (their text wins; the diff is
+    # evidence).
+    prefix = f"<<{thread['proposed_old']}>>"
+    runs = _tab_runs(docs_service, master_id, tab_id)
+    full = "".join(content for _, content in runs)
+    at = full.find(prefix)
+    if at < 0 or not full[at + len(prefix):].startswith("{{"):
+        return False
+    close = full.find("}}", at + len(prefix) + 2)
+    if close < 0:
+        return False
+    actual_new = full[at + len(prefix) + 2: close]
+    if replacement == thread["proposed_new"] and actual_new != replacement:
+        import json as _json
+
+        from .db import loads as _loads
+
+        meta = _loads(thread.get("metadata"), {}) or {}
+        meta["original_new"] = thread["proposed_new"]
+        db.update("doc_threads", thread["id"],
+                  {"proposed_new": actual_new,
+                   "metadata": _json.dumps(meta)})
+        replacement = actual_new
+    pending = full[at: close + 2]
+    span = _locate_in_tab(docs_service, master_id, tab_id, pending)
+    if span is None:
+        return False
+    start, end = span
+    requests = [
+        {"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": start, "endIndex": end}}},
+        {"insertText": {"location": {"tabId": tab_id, "index": start},
+                        "text": replacement}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": start,
+                      "endIndex": start + _utf16_len(replacement)},
+            "textStyle": {}, "fields": "strikethrough,foregroundColor"}},
+    ]
+    docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}).execute()
+
+    # Read-back verification (ratified: equivalence or loud failure).
+    runs = _tab_runs(docs_service, master_id, tab_id)
+    if pending in "".join(content for _, content in runs):
+        return False
+
+    # Mirror into the local file: canonical text was the OLD half all
+    # along, so approval replaces old→final there; a revert needs no
+    # local change (local never held the proposal).
+    path = bridge.root / thread["file"]
+    if path.exists() and replacement != thread["proposed_old"]:
+        text = path.read_text(encoding="utf-8")
+        if thread["proposed_old"] in text:
+            path.write_text(
+                text.replace(thread["proposed_old"], replacement, 1),
+                encoding="utf-8")
+    return True
+
+
+def advance_threads(db: Database, manuscript: dict, open_comments: list,
+                    service, docs_service,
+                    bridge: DocBridge) -> list[dict]:
+    """The verdict machine (docs/margin-threads-design.md): act on the
+    latest unprocessed author reply of each open thread. Approve →
+    cleanup (pending span becomes the new text); decline → revert (span
+    becomes the old text); anything else is conversation and is left
+    for chat. Every action replies a receipt and records state."""
+    from . import threads as th
+
+    actions: list[dict] = []
+    if docs_service is None:
+        return actions
+    mid = manuscript["id"]
+    by_id = {c["id"]: c for c in open_comments}
+    for thread in th.open_threads(db, mid):
+        comment = by_id.get(thread["comment_id"])
+        if comment is None:
+            continue
+        verdict = None
+        verdict_reply_id = None
+        for reply in comment.get("replies", []):
+            content = reply.get("content", "")
+            if not content or th.is_ours(content):
+                continue
+            if (thread["last_author_reply_id"]
+                    and reply.get("id") == thread["last_author_reply_id"]):
+                verdict = None  # everything up to the watermark is old
+                continue
+            verdict = th.classify_reply(content)
+            verdict_reply_id = reply.get("id")
+        if verdict not in ("approve", "decline") \
+                or thread["state"] != "proposed":
+            continue
+        replacement = (thread["proposed_new"] if verdict == "approve"
+                       else thread["proposed_old"])
+        ok = _replace_pending(db, manuscript, thread, replacement,
+                              service, docs_service, bridge)
+        if not ok:
+            receipt = ("stale — the passage changed since this proposal; "
+                       "re-proposing in chat")
+            th.set_state(db, thread, "stale",
+                         author_reply_id=verdict_reply_id)
+            actions.append({"comment_id": thread["comment_id"],
+                            "file": thread["file"], "action": "stale"})
+        else:
+            # The verdict WAS the author's decision: terminal verdicts
+            # close their thread (the receipt is the resolving reply).
+            # In-context review lives in the pending phase, where the
+            # anchor survives; an orphaned open thread maps nothing.
+            state = "cleaned" if verdict == "approve" else "declined"
+            receipt = ("applied and closed — reopen or comment anew if "
+                       "it reads wrong" if verdict == "approve"
+                       else "reverted and closed")
+            th.set_state(db, thread, state,
+                         author_reply_id=verdict_reply_id)
+            actions.append({"comment_id": thread["comment_id"],
+                            "file": thread["file"], "action": state})
+        try:
+            from .threads import PREFIX
+
+            body = {"content": PREFIX + receipt}
+            if actions[-1]["action"] in ("cleaned", "declined"):
+                body["action"] = "resolve"
+            reply = service.replies().create(
+                fileId=_mapping(db, manuscript)[bridge.meta_key]["_master_id"],
+                commentId=thread["comment_id"],
+                body=body, fields="id",
+            ).execute()
+            th.set_state(db, dict(th.get_thread(db, mid,
+                                                thread["comment_id"])),
+                         actions[-1]["action"], reply_id=reply.get("id"))
+            if "action" in body:
+                row = db.one(
+                    "SELECT id FROM doc_comments WHERE manuscript_id = ? "
+                    "AND comment_id = ?", (mid, thread["comment_id"]))
+                if row:
+                    db.update("doc_comments", row["id"],
+                              {"state": "resolved"})
+        except Exception:
+            pass  # the text edit is the act; the receipt is a courtesy
+
+    # Withdraw sweep: a PROPOSED thread whose comment vanished from the
+    # open set means the author resolved it without approving — the
+    # proposal is withdrawn: revert the pending span, record a bare
+    # rejection-shaped closure (no re-asking in the margin).
+    open_ids = {c["id"] for c in open_comments}
+    for thread in th.open_threads(db, mid):
+        if thread["state"] != "proposed" or thread["comment_id"] in open_ids:
+            continue
+        _replace_pending(db, manuscript, thread, thread["proposed_old"],
+                         service, docs_service, bridge)
+        th.set_state(db, thread, "withdrawn")
+        actions.append({"comment_id": thread["comment_id"],
+                        "file": thread["file"], "action": "withdrawn"})
+    return actions
