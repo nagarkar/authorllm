@@ -1270,9 +1270,10 @@ def cmd_illus(args):
 
             llm = _LLM(_load_config(args))
             print(f"{len(rows)} open placement proposal(s).")
-            print(ui.dim("Keys: [a]ccept  [v] revise the description  "
-                         "[x] reject (asks your reason — recorded "
-                         "verbatim)  [s]kip (or Enter)  [q]uit"))
+            print(ui.dim("Keys: [k]eep (accept)  [v] revise the "
+                         "description  [r]eject (asks your reason — "
+                         "recorded verbatim)  [s]kip (or Enter)  "
+                         "[x] quit"))
 
             def block(text, dim=False):
                 wrapped = textwrap.fill(text, width=76,
@@ -1296,9 +1297,9 @@ def cmd_illus(args):
                     try:
                         choice = input("> ").strip().lower()
                     except EOFError:
-                        choice = "q"
+                        choice = "x"
                     try:
-                        if choice in ("a", "accept"):
+                        if choice in ("k", "keep", "accept"):
                             placement.decide(db, manuscript, row["id"],
                                              "accept", llm=llm)
                             print(f"  accepted → tag written into "
@@ -1314,7 +1315,7 @@ def cmd_illus(args):
                             print("  accepted (modified — the diff is "
                                   "evidence)")
                             break
-                        if choice in ("x", "reject"):
+                        if choice in ("r", "reject"):
                             why = input("  reason (verbatim evidence; "
                                         "Enter for none)> ").strip() or None
                             placement.decide(db, manuscript, row["id"],
@@ -1327,9 +1328,10 @@ def cmd_illus(args):
                     if choice in ("s", "", "skip"):
                         print("  skipped")
                         break
-                    if choice in ("q", "quit"):
+                    if choice in ("x", "quit"):
                         quit_walk = True
                         break
+                    print(ui.dim("  ? use k / v / r / s / x"))
             print("Done. Accepted tags are in the local files — collect, "
                   "push, and render follow (no prompting needed).")
             return
@@ -2717,8 +2719,8 @@ def cmd_proposal(args):
             print("No open proposals to review.")
             return
         print(f"{len(rows)} open proposal(s).")
-        print(ui.dim("Keys: [a]dopt  [e]dge (alias → generalizes)  [d]ismiss  "
-                     "[s]kip (or Enter)  [x] quit"))
+        print(ui.dim("Keys: [k]eep (adopt)  [e]dge (alias → generalizes)  "
+                     "[r]eject (dismiss)  [s]kip (or Enter)  [x] quit"))
         adopted = dismissed = skipped = 0
         for index, row in enumerate(rows, start=1):
             summary, details = prop.describe(row)
@@ -2733,7 +2735,7 @@ def cmd_proposal(args):
                     choice = input("> ").strip().lower()
                 except EOFError:
                     choice = "x"
-                if choice in ("a", "adopt", "accept"):
+                if choice in ("k", "keep", "adopt", "accept"):
                     print(f"  {ui.green(prop.adopt(db, mid, row))}")
                     adopted += 1
                     break
@@ -2741,7 +2743,7 @@ def cmd_proposal(args):
                     print(f"  {ui.cyan(prop.demote_to_edge(db, mid, row))}")
                     adopted += 1
                     break
-                if choice in ("d", "dismiss"):
+                if choice in ("r", "reject", "dismiss"):
                     print(f"  {ui.yellow(prop.dismiss(db, mid, row))}")
                     dismissed += 1
                     break
@@ -2753,7 +2755,7 @@ def cmd_proposal(args):
                     print(f"Proposals: adopted {adopted}, dismissed {dismissed}, "
                           f"skipped {skipped}.")
                     return
-                print(ui.dim("  ? use a / d / s / x"))
+                print(ui.dim("  ? use k / e / r / s / x"))
         print(f"Proposals: adopted {adopted}, dismissed {dismissed}, skipped {skipped}.")
         return
 
