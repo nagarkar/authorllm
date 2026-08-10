@@ -209,6 +209,16 @@ def main_test() -> None:
         check("diff_versions returns per-file line lists",
               diff["new"] == "v1" and "01-choice.md" in diff["files"])
 
+        # New chapter files must be acknowledged distinctly, not buried
+        # in transitions (session start prints report["new_files"]).
+        (ms / "late-arrival.md").write_text("# **Late**\n\nA new chapter.\n")
+        late = api.collect(db, manuscript, {})
+        check("collect surfaces new files distinctly",
+              late.get("new_files") == ["late-arrival.md"],
+              str(late.get("new_files")))
+        (ms / "late-arrival.md").unlink()
+        api.collect(db, manuscript, {})
+
         graph = api.list_concepts(db, manuscript)
         check("list_concepts returns nodes and named edges",
               len(graph["nodes"]) == 2

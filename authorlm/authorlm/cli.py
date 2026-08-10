@@ -266,6 +266,19 @@ def cmd_session(args):
     if args.action == "start":
         _expire_idle_session(db, manuscript, args)
         _reconcile_gdocs(db, manuscript, args)
+        # Session start must never open blind to work done between
+        # sessions — collect first, and say so when new chapters appear.
+        try:
+            opening = api.collect(db, manuscript, _load_config(args),
+                                  source="session-open")
+            if opening.get("new_files"):
+                print(ui.yellow("New chapter file(s) since last session: "
+                                + ", ".join(opening["new_files"])))
+            if opening.get("version_no") and not opening.get("unchanged"):
+                print(f"Collected revision v{opening['version_no']} at "
+                      "session start.")
+        except Exception as err:
+            print(ui.dim(f"note: opening collect skipped ({err})"))
         try:
             session = ses.start_session(db, manuscript["id"])
         except ValueError as err:
@@ -1102,6 +1115,9 @@ def cmd_collect(args):
         return
 
     print(f"Collected revision v{report['version_no']} ({report['checksum'][:12]}).")
+    if report.get("new_files"):
+        print(ui.yellow("New chapter file(s) observed: "
+                        + ", ".join(report["new_files"])))
     print(f"Detected {len(report['transitions'])} editorial transition(s).")
     for transition in report["transitions"][:10]:
         print(f"  • [{transition['kind']}] {transition['location']}: {transition['summary']}")

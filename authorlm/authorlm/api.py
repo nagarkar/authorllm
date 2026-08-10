@@ -362,6 +362,8 @@ def collect(db: Database, manuscript: dict, config: dict,
             for t in transitions
         ],
         "attached_to_episode": attached,
+        "new_files": [t["location"] for t in transitions
+                      if t["kind"] == "file_added"],
         "realized": [
             {"name": n["name"], "introduced_in": n["introduced_in"]} for n in realized
         ],
@@ -864,7 +866,8 @@ def _catch_up(db: Database, manuscript: dict, config: dict) -> dict | None:
     if report.get("unchanged") or report.get("staged"):
         return None
     return {"version_no": report.get("version_no"),
-            "transitions": report.get("transitions", [])}
+            "transitions": report.get("transitions", []),
+            "new_files": report.get("new_files", [])}
 
 
 def get_briefing(db: Database, manuscript: dict, since: str | None = None,
