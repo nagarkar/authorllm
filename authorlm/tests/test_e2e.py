@@ -1538,6 +1538,14 @@ def scenario_alias_and_syllogism(root: Path) -> None:
     check("merged name is an alias of the canonical",
           "aliases: The Becoming" in out, out)
     check("duplicate's edges now live on the canonical", "Stasis" in out, out)
+    out = run(ws, "concept", "merge", "No Such Canonical", "The Becoming",
+              expect_exit=True)
+    check("merge refuses an unknown canonical name",
+          "no concept named 'No Such Canonical'" in out, out)
+    out = run(ws, "concept", "merge", "Becoming", "No Such Duplicate",
+              expect_exit=True)
+    check("merge refuses an unknown duplicate name",
+          "no concept named 'No Such Duplicate'" in out, out)
 
     # The [a] key in edge triage: an inferred edge between two names the
     # author declares identical merges them and settles the edge.
