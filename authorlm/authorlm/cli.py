@@ -1263,6 +1263,77 @@ def cmd_illus(args):
             for i in range(1, len(rows) + 1):
                 if i not in excepted:
                     verdicts.setdefault(i, ("accept", None))
+        if not verdicts and rows and ui.is_tty():
+            # The interactive walk — the same one-by-one triage the
+            # concept graph taught the author's hands.
+            import textwrap
+
+            llm = _LLM(_load_config(args))
+            print(f"{len(rows)} open placement proposal(s).")
+            print(ui.dim("Keys: [a]ccept  [v] revise the description  "
+                         "[x] reject (asks your reason — recorded "
+                         "verbatim)  [s]kip (or Enter)  [q]uit"))
+
+            def block(text, dim=False):
+                wrapped = textwrap.fill(text, width=76,
+                                        initial_indent="    ",
+                                        subsequent_indent="    ")
+                print(ui.dim(wrapped) if dim else wrapped)
+
+            quit_walk = False
+            for index, row in enumerate(rows, 1):
+                if quit_walk:
+                    break
+                kind = ("revision of existing tag" if row["revises"]
+                        else "new placement")
+                print(f"{ui.dim(f'[{index}/{len(rows)}]')} "
+                      f"{ui.bold(row['file'])} — {kind}")
+                block(f"after: «{row['anchor']}»", dim=True)
+                block(f"[Illustration: {row['description']}]")
+                block(f"criterion {row['criterion']} — {row['rationale']}",
+                      dim=True)
+                while True:
+                    try:
+                        choice = input("> ").strip().lower()
+                    except EOFError:
+                        choice = "q"
+                    try:
+                        if choice in ("a", "accept"):
+                            placement.decide(db, manuscript, row["id"],
+                                             "accept", llm=llm)
+                            print(f"  accepted → tag written into "
+                                  f"{row['file']}")
+                            break
+                        if choice in ("v", "revise"):
+                            new_desc = input("  new description> ").strip()
+                            if not new_desc:
+                                continue
+                            placement.decide(
+                                db, manuscript, row["id"], "accept",
+                                revised_description=new_desc, llm=llm)
+                            print("  accepted (modified — the diff is "
+                                  "evidence)")
+                            break
+                        if choice in ("x", "reject"):
+                            why = input("  reason (verbatim evidence; "
+                                        "Enter for none)> ").strip() or None
+                            placement.decide(db, manuscript, row["id"],
+                                             "reject", reason=why, llm=llm)
+                            print("  rejected")
+                            break
+                    except (LookupError, ValueError) as err:
+                        print(ui.yellow(f"  {err}"))
+                        break
+                    if choice in ("s", "", "skip"):
+                        print("  skipped")
+                        break
+                    if choice in ("q", "quit"):
+                        quit_walk = True
+                        break
+            print("Done. Accepted tags are in the local files — collect, "
+                  "push, and render follow (no prompting needed).")
+            return
+
         if not verdicts:
             if not rows:
                 print("No open placement proposals. Stage some with: "
