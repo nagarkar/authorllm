@@ -292,6 +292,29 @@ def _record_evidence(db: Database, manuscript: dict, row: dict,
                                                        row["file"]), llm)
 
 
+def distill_batch(db: Database, manuscript: dict,
+                  items: list[tuple[str, str]], llm) -> dict | None:
+    """One distiller call for a whole triage batch — evidence is
+    recorded per verdict instantly (decide with llm=None), and the
+    pattern-hunting happens here, once, where the decline-by-default
+    guardrail can actually see whether a pattern spans two instances.
+    items: (file, explanation) pairs from this batch."""
+    if not items or not llm or not getattr(llm, "enabled", False):
+        return None
+    from collections import Counter
+
+    from .policies import seed_margin_candidate
+    from .styles import guide_chain
+
+    combined = ("Illustration-triage verdicts from one sitting "
+                "(a candidate needs a pattern across at least two):\n"
+                + "\n".join(f"- [{f}] {e}" for f, e in items))
+    file = Counter(f for f, _ in items).most_common(1)[0][0]
+    return seed_margin_candidate(db, manuscript["id"], combined, file,
+                                 guide_chain(db, manuscript["id"], file),
+                                 llm)
+
+
 def decide(db: Database, manuscript: dict, proposal_id: str, verdict: str,
            revised_description: str | None = None,
            reason: str | None = None, llm=None) -> dict:

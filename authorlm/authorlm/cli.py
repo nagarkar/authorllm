@@ -1303,6 +1303,9 @@ def cmd_illus(args):
                 print(ui.dim(wrapped) if dim else wrapped)
 
             quit_walk = False
+            # Verdicts record instantly (no LLM in the loop); the
+            # distiller runs ONCE over the whole batch at the end.
+            explanations: list[tuple[str, str]] = []
             for index, row in enumerate(rows, 1):
                 if quit_walk:
                     break
@@ -1322,7 +1325,7 @@ def cmd_illus(args):
                     try:
                         if choice in ("k", "keep", "accept"):
                             placement.decide(db, manuscript, row["id"],
-                                             "accept", llm=llm)
+                                             "accept", llm=None)
                             print(f"  accepted → tag written into "
                                   f"{row['file']}")
                             break
@@ -1334,7 +1337,11 @@ def cmd_illus(args):
                                 continue
                             placement.decide(
                                 db, manuscript, row["id"], "accept",
-                                revised_description=new_desc, llm=llm)
+                                revised_description=new_desc, llm=None)
+                            explanations.append((row["file"], (
+                                f"description revised: "
+                                f"«{row['description']}» became "
+                                f"«{new_desc}»")))
                             print("  accepted (modified — the diff is "
                                   "evidence)")
                             break
@@ -1342,7 +1349,11 @@ def cmd_illus(args):
                             why = input("  reason (verbatim evidence; "
                                         "Enter for none)> ").strip() or None
                             placement.decide(db, manuscript, row["id"],
-                                             "reject", reason=why, llm=llm)
+                                             "reject", reason=why,
+                                             llm=None)
+                            if why:
+                                explanations.append(
+                                    (row["file"], f"rejected: {why}"))
                             print("  rejected")
                             break
                     except (LookupError, ValueError) as err:
@@ -1355,6 +1366,15 @@ def cmd_illus(args):
                         quit_walk = True
                         break
                     print(ui.dim("  ? use k / v / r / s / x"))
+            if explanations:
+                print(ui.dim(f"Distilling {len(explanations)} "
+                             "explanation(s) for reusable patterns…"))
+                candidate = placement.distill_batch(
+                    db, manuscript, explanations, llm)
+                if candidate:
+                    print(ui.yellow(
+                        "Pattern candidate proposed for your review: "
+                        + ui.shorten(candidate.get("statement", ""), 70)))
             print("Done. Accepted tags are in the local files — collect, "
                   "push, and render follow (no prompting needed).")
             return
@@ -1375,7 +1395,7 @@ def cmd_illus(args):
             print("\nVerdicts: illus triage --accept-all-except N… | "
                   "--accept N… | --revise N \"desc\" | --reject N --reason …")
             return
-        llm = _LLM(_load_config(args))
+        batch: list[tuple[str, str]] = []
         for n in sorted(verdicts):
             if not 1 <= n <= len(rows):
                 print(ui.yellow(f"no proposal numbered {n} — skipped"))
@@ -1386,13 +1406,25 @@ def cmd_illus(args):
                 result = placement.decide(
                     db, manuscript, row["id"], verdict,
                     revised_description=revised, reason=args.reason,
-                    llm=llm)
+                    llm=None)
             except (LookupError, ValueError) as err:
                 print(ui.yellow(f"{n}. {err}"))
                 continue
+            if result.get("modified"):
+                batch.append((row["file"],
+                              f"description revised to «{revised}»"))
+            elif verdict == "reject" and args.reason:
+                batch.append((row["file"], f"rejected: {args.reason}"))
             note = (" (modified — diff recorded as evidence)"
                     if result.get("modified") else "")
             print(f"{n}. {result['state']}: {row['file']}{note}")
+        if batch:
+            candidate = placement.distill_batch(
+                db, manuscript, batch, _LLM(_load_config(args)))
+            if candidate:
+                print(ui.yellow(
+                    "Pattern candidate proposed for your review: "
+                    + ui.shorten(candidate.get("statement", ""), 70)))
         print("Accepted tags are in the local files — collect, push, and "
               "render follow (skill: no prompting needed).")
         return
