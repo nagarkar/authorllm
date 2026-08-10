@@ -1191,6 +1191,27 @@ def _print_collect_report(report):
         print(ui.green(line) if len(gaps_after) < len(gaps_before) else ui.dim(line))
 
 
+def _input_prefilled(prompt: str, initial: str) -> str:
+    """input() with the line pre-filled for in-place editing — revising
+    a description must not require retyping (or copy-pasting text the
+    terminal has wrapped). Falls back to plain input() where readline
+    is unavailable."""
+    try:
+        import readline
+    except ImportError:
+        return input(prompt)
+
+    def hook():
+        readline.insert_text(initial)
+        readline.redisplay()
+
+    readline.set_startup_hook(hook)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook(None)
+
+
 def cmd_illus(args):
     from pathlib import Path
 
@@ -1306,7 +1327,9 @@ def cmd_illus(args):
                                   f"{row['file']}")
                             break
                         if choice in ("v", "revise"):
-                            new_desc = input("  new description> ").strip()
+                            new_desc = _input_prefilled(
+                                "  new description> ",
+                                row["description"]).strip()
                             if not new_desc:
                                 continue
                             placement.decide(
