@@ -69,9 +69,47 @@ law, so a correction never needs repeating. Forming patterns are
 surfaced at triage time unprompted (the margin-learnings duty,
 extended).
 
-## Status: SHIPPED 2026-08-10
+## First live run and the hardening pass (2026-08-10, same day)
 
-placement.py (scan / sweep_stale / decide / placement_law), the
-illus_proposals table, CLI + MCP surfaces, pick evidence, and the
-verdict-matrix tests (stage, idempotence, modified acceptance with
-diff-as-evidence, rejection verbatim, stale rule).
+The first manuscript-wide scan staged 38 proposals; 22 needed
+rejection (58%). Diagnosis and the four fixes, ratified by the author
+("clearly, we need to fix this"):
+
+1. **Sermons zero-rule violated (6)** — the law WAS in the prompt; its
+   exception clause ("threshold pieces are the only images…") parsed as
+   an invitation and the lens proposed at every sermon boundary.
+   Fixes: absolute per-file exclusions are now STRUCTURE, not prose —
+   `illustrations = "none"` in toc.toml skips the file before any call
+   (sermons.md carries it); the element was reworded to close the
+   loophole (se-fb4bc → se-f0e00). Guarded again at arbitration: staged
+   proposals on excluded files are cut deterministically.
+2. **Duplicate metaphor homes (~8)** — per-chapter calls are blind to
+   each other, so "concretized once" was unenforceable. Fix: the
+   ARBITRATION PASS — one cheap-model call over all staged proposals
+   after every scan, cutting duplicate homes (narrowing-auditor
+   pattern). Arbiter/guard cuts carry their reason in row metadata and
+   are NEVER author evidence.
+3. **In-image text violations (5)** — the placement lens never saw the
+   render law. Fix: the illustration-aspect law is composed into the
+   placement prompt; descriptions are born renderable.
+4. **Over-pacing (flex ceiling everywhere)** — fix: a DETERMINISTIC
+   budget, arithmetic not judgment: per chapter,
+   `max(1, words // 750) − existing tags − open proposals`; at zero the
+   file is skipped without a call; the lens ranks strongest-first and
+   staging truncates at the budget.
+
+Also hardened: scan dedupes against proposals in EVERY state — what
+the author rejected never resurrects.
+
+Three of the four fixes are deterministic; only arbitration spends
+tokens, exactly where cross-chapter judgment is genuinely needed (the
+sweep framework's token-bill doctrine, applied).
+
+## Status: SHIPPED 2026-08-10 (hardened same day)
+
+placement.py (scan / arbitrate / sweep_stale / decide /
+placement_law), the illus_proposals table, CLI + MCP surfaces, pick
+evidence, and the verdict-matrix tests (stage, idempotence, budget
+skip, toc exclusion, arbiter cuts without evidence, no-resurrect,
+modified acceptance with diff-as-evidence, rejection verbatim, stale
+rule).

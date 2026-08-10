@@ -1222,14 +1222,25 @@ def cmd_illus(args):
                                 files=[args.name] if args.name else None)
         print(f"Scanned {len(report['files'])} chapter(s) "
               f"({report['calls']} spot-finder call(s)).")
+        if report.get("skipped_at_budget"):
+            print(ui.dim("At pacing budget (not scanned): "
+                         + ", ".join(report["skipped_at_budget"])))
         if report["dropped_unverifiable"]:
             print(ui.dim(f"{report['dropped_unverifiable']} proposal(s) "
-                         "dropped — anchor not found verbatim."))
+                         "dropped — unverifiable anchor or past budget."))
+        arb = report.get("arbitration") or {}
+        for item in arb.get("arbiter_cut", []):
+            print(ui.dim(f"arbiter cut {item['id']}: {item['reason']}"))
+        if arb.get("guard_cut"):
+            print(ui.dim(f"guard cut {len(arb['guard_cut'])} proposal(s) "
+                         "on illustration-excluded files."))
+        remaining = arb.get("open", len(report["staged"]))
         if not report["staged"]:
             print("Nothing new staged.")
         else:
-            print(ui.yellow(f"{len(report['staged'])} placement proposal(s) "
-                            "staged — review with: illus triage"))
+            print(ui.yellow(f"{len(report['staged'])} staged, {remaining} "
+                            "open after arbitration — review with: "
+                            "illus triage"))
         return
 
     if args.action == "triage":

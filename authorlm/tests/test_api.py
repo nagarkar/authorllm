@@ -1336,15 +1336,17 @@ def main_test() -> None:
         # --- illustration placement pipeline: scan → stage → triage ---
         from authorlm import placement
 
+        anchor_para = ("The road is a ladder laid flat, and every step "
+                       "asks again.")
+        filler = " ".join(["The road runs on and the walker keeps walking "
+                           "toward what is not yet."] * 120)
+        (ms / "04-road.md").write_text(
+            f"# **The Road**\n\n{filler}\n\n{anchor_para}\n")
+        api.collect(db, manuscript, {})
         api.add_style_element(db, manuscript, "illustration-placement",
                               "Concretize a recurring metaphor once, at "
                               "its strongest occurrence.",
-                              file="01-choice.md")
-        anchor_para = ("The road is a ladder laid flat, and every step "
-                       "asks again.")
-        (ms / "01-choice.md").write_text(
-            (ms / "01-choice.md").read_text()
-            + f"\n\n{anchor_para}\n")
+                              file="04-road.md")
         spot_llm = FakeLLM({"proposals": [
             {"anchor": anchor_para,
              "description": "a ladder lying flat along a road, rungs "
@@ -1356,21 +1358,22 @@ def main_test() -> None:
              "rationale": "bad anchor", "revises": None},
         ]})
         report = placement.scan(db, manuscript, spot_llm,
-                                files=["01-choice.md"])
+                                files=["04-road.md"])
         check("spot-finder stages verbatim-verified proposals and drops "
               "unverifiable anchors",
               len(report["staged"]) == 1
               and report["dropped_unverifiable"] == 1
               and "PLACEMENT LAW" in spot_llm.user
+              and "BUDGET" in spot_llm.user
               and "strongest occurrence" in spot_llm.user, str(report))
         check("scan is idempotent against open proposals",
               placement.scan(db, manuscript, spot_llm,
-                             files=["01-choice.md"])["staged"] == [])
+                             files=["04-road.md"])["staged"] == [])
         staged = placement.open_proposals(db, manuscript["id"])[0]
         result = placement.decide(
             db, manuscript, staged["id"], "accept",
             revised_description="a ladder lying flat along an empty road")
-        text_now = (ms / "01-choice.md").read_text()
+        text_now = (ms / "04-road.md").read_text()
         check("modified acceptance writes the revised tag after the anchor",
               result["modified"]
               and ("[Illustration: a ladder lying flat along an empty "
@@ -1387,7 +1390,7 @@ def main_test() -> None:
         spot_llm2 = FakeLLM({"proposals": [
             {"anchor": anchor_para, "description": "second idea",
              "criterion": "2", "rationale": "r", "revises": None}]})
-        placement.scan(db, manuscript, spot_llm2, files=["01-choice.md"])
+        placement.scan(db, manuscript, spot_llm2, files=["04-road.md"])
         p2 = placement.open_proposals(db, manuscript["id"])[0]
         placement.decide(db, manuscript, p2["id"], "reject",
                          reason="Too decorative for this essay.")
@@ -1396,14 +1399,70 @@ def main_test() -> None:
                   "SELECT metadata FROM evidence WHERE evidence_type = "
                   "'illus_triage' ORDER BY created_at DESC")["metadata"])
               ["explanation"] == "Too decorative for this essay.")
-        placement.scan(db, manuscript, spot_llm2, files=["01-choice.md"])
-        (ms / "01-choice.md").write_text(
-            (ms / "01-choice.md").read_text().replace(anchor_para,
-                                                      "The road changed."))
+        check("a rejected proposal never resurrects on re-scan",
+              placement.scan(db, manuscript, spot_llm2,
+                             files=["04-road.md"])["staged"] == [])
+        spot_llm3 = FakeLLM({"proposals": [
+            {"anchor": anchor_para, "description": "third idea",
+             "criterion": "2", "rationale": "r", "revises": None}]})
+        placement.scan(db, manuscript, spot_llm3, files=["04-road.md"])
+        (ms / "04-road.md").write_text(
+            (ms / "04-road.md").read_text().replace(anchor_para,
+                                                    "The road changed."))
         staled = placement.sweep_stale(db, manuscript)
         check("proposals whose anchor vanished go stale, never guessed",
               len(staled) == 1
               and not placement.open_proposals(db, manuscript["id"]))
+
+        # Deterministic guards: toc exclusion + pacing budget + arbiter.
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n'
+            'illustrations = "none"\n\n'
+            '[[chapter]]\nfile = "04-road.md"\n')
+        report = placement.scan(db, manuscript, spot_llm2,
+                                files=["00-intro.md"])
+        check("toc illustrations=none files are never scanned",
+              report["calls"] == 0 and report["files"] == [], str(report))
+        (ms / "05-tiny.md").write_text(
+            "# **Tiny**\n\nShort words here.\n\n"
+            "[Illustration: existing emblem]\n")
+        tiny_report = placement.scan(db, manuscript, spot_llm2,
+                                     files=["05-tiny.md"])
+        check("a chapter at its pacing budget is skipped deterministically",
+              tiny_report["calls"] == 0
+              and tiny_report["skipped_at_budget"] == ["05-tiny.md"],
+              str(tiny_report))
+        # Arbiter: two duplicate-metaphor proposals across files; the
+        # arbiter keeps one, cuts the other with a reason — no evidence.
+        anchor_choice = "And the second is like unto the first."
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text() + f"\n\n{anchor_choice}\n")
+        dup0 = FakeLLM({"proposals": [
+            {"anchor": "The road changed.",
+             "description": "a ladder to the clouds",
+             "criterion": "2", "rationale": "r", "revises": None}]})
+        placement.scan(db, manuscript, dup0, files=["04-road.md"])
+        dup1 = FakeLLM({"proposals": [
+            {"anchor": anchor_choice, "description": "a ladder to the sky",
+             "criterion": "2", "rationale": "r", "revises": None}]})
+        placement.scan(db, manuscript, dup1, files=["01-choice.md"])
+        pid = [r["id"] for r in placement.open_proposals(db, manuscript["id"])
+               if r["file"] == "01-choice.md"][0]
+        ev_before = db.one("SELECT COUNT(*) AS n FROM evidence "
+                           "WHERE evidence_type = 'illus_triage'")["n"]
+        arb_llm = FakeLLM({"cut": [{"id": pid,
+                                    "reason": "duplicate ladder home"}]})
+        arb = placement.arbitrate(db, manuscript, arb_llm)
+        cut_row = dict(db.one(
+            "SELECT * FROM illus_proposals WHERE id = ?", (pid,)))
+        check("arbiter cuts duplicates with a reason, never as evidence",
+              [c["id"] for c in arb["arbiter_cut"]] == [pid]
+              and cut_row["state"] == "rejected"
+              and _json.loads(cut_row["metadata"])["by"] == "arbiter"
+              and db.one("SELECT COUNT(*) AS n FROM evidence WHERE "
+                         "evidence_type = 'illus_triage'")["n"] == ev_before,
+              str(arb))
 
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time

@@ -35,6 +35,15 @@ the chapter's word count and its existing illustrations. Where an
 EXISTING illustration tag's description could be materially improved,
 propose a revision instead of a new placement.
 
+You will also receive the IMAGE LAW the renders obey — every
+description you write must be renderable under it (in particular:
+no words, labels, or inscriptions inside the image unless that law
+explicitly permits them for this chapter).
+
+You will receive a BUDGET: the maximum number of NEW placements for
+this chapter (revisions of existing tags are free). Order proposals
+strongest first — anything past the budget is discarded.
+
 Return JSON:
 {"proposals": [{
   "anchor": "<the VERBATIM final sentence of the paragraph the
@@ -47,6 +56,25 @@ Return JSON:
               tag's current description copied exactly>"
 }]}
 """
+
+ARBITER_SYSTEM = """\
+You are the placement arbiter for a philosophy manuscript's
+illustrations. You receive the ratified placement law and ALL staged
+placement proposals across chapters. Per the law, a recurring metaphor
+is concretized ONCE at its single strongest occurrence, and pacing is
+manuscript-wide — but each per-chapter scan ran blind to the others.
+
+Your ONLY job: find proposals that duplicate the same metaphor,
+diagram, or subject across chapters and keep the single strongest home
+for each; also cut proposals that plainly violate the law. Do not
+otherwise judge image quality — the author triages the survivors.
+
+Return JSON: {"cut": [{"id": "<proposal id>", "reason": "<one line>"}]}
+"""
+
+# Deterministic pacing ceiling: the ratified flex limit is 2 per 1,500
+# words, i.e. one per PACE_WORDS. Arithmetic, not model judgment.
+PACE_WORDS = 750
 
 _TAG = re.compile(r"^\[Illustration:\s*(?P<prompt>[^\]|]+?)\s*(\|.*)?\]\s*$")
 
@@ -99,37 +127,61 @@ def sweep_stale(db: Database, manuscript: dict) -> list[dict]:
 def scan(db: Database, manuscript: dict, llm: LLMClient,
          files: list[str] | None = None) -> dict:
     """Run the spot-finder over main-matter chapters (one call per
-    chapter), staging validated proposals. Front matter never gets
-    slots; per-guide law (e.g. the sermons' zero rule) rides in the
-    prompt. Anchors are validated verbatim — an unverifiable proposal
-    is dropped and counted, never guessed at."""
+    chapter), staging validated proposals. Deterministic guards do the
+    enforcement the law states absolutely: front matter never gets
+    slots; files marked `illustrations = "none"` in toc.toml are never
+    scanned; each chapter's NEW placements are budget-capped by word
+    count (PACE_WORDS). Anchors are validated verbatim — an
+    unverifiable proposal is dropped and counted, never guessed at.
+    Ends with the arbitration pass (cross-chapter dedup)."""
+    from .illus import illustration_law
     from .revisions import read_manuscript_files
-    from .structure import is_structural, matter_map, reading_order
+    from .structure import (TOC_FILENAME, is_structural, matter_map,
+                            reading_order, toc_attrs)
 
     if not llm or not getattr(llm, "enabled", False):
         raise RuntimeError("the spot-finder needs an LLM (config [llm])")
     mid = manuscript["id"]
     disk = read_manuscript_files(Path(manuscript["path"]))
     matter = matter_map(disk)
+    attrs = toc_attrs(disk.get(TOC_FILENAME) or "")
     order, _ = reading_order(disk)
     targets = [n for n in order
                if not is_structural(n)
                and matter.get(n, "main") == "main"
+               and attrs.get(n, {}).get("illustrations") != "none"
                and (files is None or n in files)]
     sweep_stale(db, manuscript)
+    # Dedupe against EVERY prior proposal, any state: what the author
+    # rejected must not resurrect on the next scan.
     already = {(r["file"], r["anchor"], r["description"])
-               for r in open_proposals(db, mid)}
-    staged, dropped, calls = [], 0, 0
+               for r in db.all(
+                   "SELECT file, anchor, description FROM illus_proposals "
+                   "WHERE manuscript_id = ?", (mid,))}
+    staged, dropped, calls, skipped_budget = [], 0, 0, []
     for name in targets:
         text = disk[name]
-        law = placement_law(db, mid, name)
         tags = _existing_tags(text)
-        user = (f"{law}\n\nCHAPTER: {name} ({len(text.split())} words)\n"
+        budget = max(1, len(text.split()) // PACE_WORDS) - len(tags)
+        open_here = len([r for r in open_proposals(db, mid, file=name)
+                         if not r["revises"]])
+        budget -= open_here
+        if budget <= 0:
+            skipped_budget.append(name)
+            continue
+        law = placement_law(db, mid, name)
+        img_law = illustration_law(db, mid, name)
+        user = (f"{law}\n\n"
+                + (f"IMAGE LAW (descriptions must be renderable under "
+                   f"it):\n{img_law}\n\n" if img_law else "")
+                + f"CHAPTER: {name} ({len(text.split())} words)\n"
+                f"BUDGET: at most {budget} new placement(s)\n"
                 f"EXISTING ILLUSTRATIONS ({len(tags)}): "
                 + ("; ".join(tags) if tags else "none")
                 + f"\n\nTEXT:\n{text}")
         reply = llm.complete_json(PLACEMENT_SYSTEM, user)
         calls += 1
+        staged_here = 0
         for item in (reply or {}).get("proposals", []) or []:
             anchor = str(item.get("anchor") or "").strip()
             desc = str(item.get("description") or "").strip()
@@ -138,6 +190,9 @@ def scan(db: Database, manuscript: dict, llm: LLMClient,
             if not anchor or not desc or anchor not in text or (
                     revises and revises not in tags):
                 dropped += 1
+                continue
+            if not revises and staged_here >= budget:
+                dropped += 1  # past the deterministic budget — discarded
                 continue
             key = (name, anchor, desc)
             if key in already:
@@ -151,8 +206,62 @@ def scan(db: Database, manuscript: dict, llm: LLMClient,
                        revises=revises, state="proposed")
             db.insert("illus_proposals", row)
             staged.append(row)
-    return {"files": targets, "calls": calls,
-            "staged": staged, "dropped_unverifiable": dropped}
+            if not revises:
+                staged_here += 1
+    report = {"files": targets, "calls": calls, "staged": staged,
+              "dropped_unverifiable": dropped,
+              "skipped_at_budget": skipped_budget}
+    if staged:
+        report["arbitration"] = arbitrate(db, manuscript, llm)
+    return report
+
+
+def arbitrate(db: Database, manuscript: dict, llm: LLMClient) -> dict:
+    """The cross-chapter pass the per-chapter scans cannot do: one
+    cheap-model call over ALL staged proposals, cutting duplicate homes
+    for the same metaphor/diagram (the law's 'concretized once').
+    Deterministic pre-pass: proposals on files toc.toml excludes are
+    cut by guard, no model involved. Arbiter cuts carry their reason in
+    metadata — they are pipeline hygiene, never author evidence."""
+    from .revisions import read_manuscript_files
+    from .structure import TOC_FILENAME, toc_attrs
+
+    mid = manuscript["id"]
+    disk = read_manuscript_files(Path(manuscript["path"]))
+    attrs = toc_attrs(disk.get(TOC_FILENAME) or "")
+    guard_cut = []
+    for row in open_proposals(db, mid):
+        if attrs.get(row["file"], {}).get("illustrations") == "none":
+            db.update("illus_proposals", row["id"],
+                      {"state": "rejected", "metadata": json.dumps(
+                          {"by": "guard", "reason":
+                           "file excluded (toc.toml illustrations = "
+                           "\"none\")"})})
+            guard_cut.append(row["id"])
+    rows = open_proposals(db, mid)
+    if len(rows) < 2 or not llm or not getattr(llm, "enabled", False):
+        return {"guard_cut": guard_cut, "arbiter_cut": [],
+                "open": len(rows)}
+    law = placement_law(db, mid, rows[0]["file"])
+    listing = "\n".join(
+        f"- id {r['id']} | {r['file']} | criterion {r['criterion']} | "
+        f"[{r['description']}] | after «{r['anchor'][:60]}»"
+        for r in rows)
+    reply = llm.complete_json(
+        ARBITER_SYSTEM, f"{law}\n\nSTAGED PROPOSALS:\n{listing}")
+    valid = {r["id"] for r in rows}
+    cut = []
+    for item in (reply or {}).get("cut", []) or []:
+        pid = str(item.get("id") or "").strip()
+        if pid not in valid:
+            continue
+        db.update("illus_proposals", pid,
+                  {"state": "rejected", "metadata": json.dumps(
+                      {"by": "arbiter",
+                       "reason": str(item.get("reason") or "")[:200]})})
+        cut.append({"id": pid, "reason": item.get("reason")})
+    return {"guard_cut": guard_cut, "arbiter_cut": cut,
+            "open": len(open_proposals(db, mid))}
 
 
 def _record_evidence(db: Database, manuscript: dict, row: dict,
