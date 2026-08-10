@@ -15,10 +15,13 @@ from .db import Database, ko_fields
 ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
     "citation", "rhetoric", "figure", "tone", "illustration",
+    "illustration-placement",
 }
 # 'figure' is figurative language — metaphor and analogy law for PROSE.
 # 'illustration' is image law, consumed only by the illustration
-# renderer (illus.illustration_law). The two must never mix: prose
+# renderer (illus.illustration_law). 'illustration-placement' is
+# where-images-belong law, consumed only by the placement spot-finder —
+# never composed into render prompts. The three must never mix: prose
 # motif guidance injected into an image prompt draws literal chains
 # and flames (it-3e79bce24f73).
 

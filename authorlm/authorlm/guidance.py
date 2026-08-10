@@ -88,7 +88,15 @@ def compute_prerequisite_gaps(db: Database, mid: str, files: dict[str, str]) -> 
         (mid,),
     )}
     names = {nid: node_names(n) for nid, n in nodes.items()}
-    mentions = _first_mentions(files, names)
+    # Front matter is a window (ratified policy): it may preview any
+    # concept, so its mentions neither create gaps nor satisfy
+    # prerequisites. Scan main and back matter only.
+    from .structure import matter_map
+
+    matter = matter_map(files)
+    scannable = {name: text for name, text in files.items()
+                 if matter.get(name, "main") != "front"}
+    mentions = _first_mentions(scannable, names)
     gaps = []
     for edge in db.all(
         "SELECT * FROM concept_edges WHERE manuscript_id = ? AND relation != 'co_occurs' "

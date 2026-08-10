@@ -1026,10 +1026,12 @@ def main_test() -> None:
         from authorlm.export import combined_markdown, export_manuscript
 
         (ms / "00-intro.md").write_text("# Intro\n\nWelcome.\n")
-        (ms / "toc.md").write_text("- 01-choice.md\n- 00-intro.md\n")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n')
         manuscript = api.get_manuscript(db)
         text, order, unlisted = combined_markdown(manuscript)
-        check("combined markdown follows toc.md reading order",
+        check("combined markdown follows toc.toml reading order",
               order == ["01-choice.md", "00-intro.md"] and not unlisted
               and text.index("firmer road") < text.index("Welcome"), text)
 

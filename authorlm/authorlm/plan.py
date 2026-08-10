@@ -96,7 +96,7 @@ def build_plan(db: Database, manuscript: dict) -> dict:
                          f"(near '{anchor['name']}')")
         else:
             placement_file = None
-            placement = "a new standalone document (add it to toc.md where it belongs)"
+            placement = "a new standalone document (add it to toc.toml where it belongs)"
 
         reasons = []
         if matching:

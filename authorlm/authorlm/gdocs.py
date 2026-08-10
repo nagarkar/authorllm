@@ -425,7 +425,7 @@ def workspace_bridge(manuscript: dict) -> DocBridge:
 
 def _reading_order_files(bridge: DocBridge) -> list[str]:
     """Tab order for a bridge's files: TOC order for the manuscript root
-    (reading_order falls back to alphabetical when no toc.md exists —
+    (reading_order falls back to alphabetical when no toc.toml exists —
     which is exactly right for the workspace directory)."""
     from .revisions import read_manuscript_files
     from .structure import reading_order
@@ -563,11 +563,15 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
             manifest_id = reply["replies"][0]["addDocumentTab"][
                 "tabProperties"]["tabId"]
         entry["_manifest_tab"] = manifest_id
+        from .revisions import read_manuscript_files as _rmf
+        from .structure import matter_map as _matter_map
+
         _write_manifest(docs_service, master_id, manifest_id,
                         bridge.doc_name, entry.get("_doc_version", 1),
                         inventory=build_manifest_inventory(bridge.root),
                         stats=(build_manifest_stats(bridge.root)
-                               if bridge.rich_manifest else None))
+                               if bridge.rich_manifest else None),
+                        matter=_matter_map(_rmf(bridge.root)))
     except Exception:
         pass  # the manifest is metadata — never fatal to a push
 
@@ -642,7 +646,8 @@ def chapter_stats(text: str) -> dict:
 def manifest_text(manuscript_name: str, doc_version: int,
                   inventory: list[tuple[str, int, int]] | None = None,
                   stats: dict[str, dict] | None = None,
-                  pushed_at: str | None = None) -> str:
+                  pushed_at: str | None = None,
+                  matter: dict[str, str] | None = None) -> str:
     """The manifest tab's content: identifies the manuscript regardless of
     what the user renames the Doc to, records which incarnation of the
     master document this is, and inventories every chapter with its word
@@ -670,14 +675,9 @@ def manifest_text(manuscript_name: str, doc_version: int,
             lines.append(f"{line}  {bar}")
 
         # Summary statistics (the numbers publishers ask about first).
-        # Back matter = the appendix.md subtree, by convention.
-        top = None
-        back = 0
-        for name, depth, words in inventory:
-            if depth == 0:
-                top = name
-            if top == "appendix.md":
-                back += words
+        # Back matter = files the TOC marks matter="back".
+        back = sum(words for name, _, words in inventory
+                   if (matter or {}).get(name) == "back")
         substantive = sorted(w for _, _, w in inventory if w > 200)
         median = (substantive[len(substantive) // 2] if substantive else 0)
         summary = (f"Statistics: {total:,} words total"
@@ -717,7 +717,8 @@ def build_manifest_stats(root: Path) -> dict[str, dict]:
 def _write_manifest(docs_service, master_id: str, tab_id: str,
                     manuscript_name: str, doc_version: int,
                     inventory: list[tuple[str, int, int]] | None = None,
-                    stats: dict[str, dict] | None = None) -> None:
+                    stats: dict[str, dict] | None = None,
+                    matter: dict[str, str] | None = None) -> None:
     requests: list[dict] = []
     end = _tab_end(docs_service, master_id, tab_id)
     if end > 2:
@@ -726,7 +727,7 @@ def _write_manifest(docs_service, master_id: str, tab_id: str,
     requests.append({"insertText": {
         "location": {"tabId": tab_id, "index": 1},
         "text": manifest_text(manuscript_name, doc_version, inventory,
-                              stats)}})
+                              stats, matter=matter)}})
     docs_service.documents().batchUpdate(
         documentId=master_id, body={"requests": requests}).execute()
 
@@ -981,7 +982,7 @@ def walk_tabs(tabs: list, tab_props: list, doc_pairs: list,
 def classify_structure(doc_pairs: list, local_pairs: list,
                        base_pairs: list | None) -> str:
     """Three-way state of the TOC↔tab-tree sync, on DFS (name, parent)
-    pairs: insync | doc_moved (rewrite toc.md) | local_moved (push
+    pairs: insync | doc_moved (rewrite toc.toml) | local_moved (push
     repositions tabs) | conflict (both moved) | unsynced (no base and the
     sides disagree beyond pure additions)."""
     if doc_pairs == local_pairs:
@@ -1002,11 +1003,12 @@ def classify_structure(doc_pairs: list, local_pairs: list,
 
 def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
                          local_tree: list) -> list:
-    """Rewrite toc.md to the Doc's tab structure. Entries with no tab
+    """Rewrite toc.toml to the Doc's tab structure. Entries with no tab
     (never-pushed local files) are preserved after their previous
-    predecessor. Returns the new (name, depth) tree."""
+    predecessor; per-file attributes (matter) ride through unchanged.
+    Returns the new (name, depth) tree."""
     from .structure import (TOC_FILENAME, parents_to_tree,
-                            serialize_toc_tree)
+                            serialize_toc_tree, toc_attrs)
 
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
@@ -1019,14 +1021,17 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
         pos = (next((k + 1 for k, (n, _) in enumerate(new_tree)
                      if n == pred), 0) if pred else 0)
         new_tree.insert(pos, (name, depth))
-    (Path(manuscript["path"]) / TOC_FILENAME).write_text(
-        serialize_toc_tree(new_tree), encoding="utf-8")
+    toc_path = Path(manuscript["path"]) / TOC_FILENAME
+    attrs = (toc_attrs(toc_path.read_text(encoding="utf-8"))
+             if toc_path.exists() else {})
+    toc_path.write_text(serialize_toc_tree(new_tree, attrs),
+                        encoding="utf-8")
     return new_tree
 
 
 def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     """Push direction of the TOC↔tab sync: reposition/re-parent the master
-    Doc's tabs to match toc.md. Applies only when the Doc side hasn't
+    Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
     moved since the last sync (local_moved / insync); a doc-side change
     means 'pull first'."""
     from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents
@@ -1038,7 +1043,7 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
         return {"skipped": "no master doc"}
     toc_path = Path(manuscript["path"]) / TOC_FILENAME
     if not toc_path.exists():
-        return {"skipped": "no toc.md"}
+        return {"skipped": "no toc.toml"}
     tab_props: list = []
     doc_pairs: list = []
     doc = docs_service.documents().get(
@@ -1285,7 +1290,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 
     # TOC ↔ tab-structure sync (pull direction): the Doc's tab order and
     # nesting are the author's reordering interface. Three-way, like file
-    # content: only-Doc-moved rewrites toc.md; only-local-moved defers to
+    # content: only-Doc-moved rewrites toc.toml; only-local-moved defers to
     # the next push; both → conflict, touch nothing.
     if doc_pairs and query is None and bridge.toc_sync:
         from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents

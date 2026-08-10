@@ -404,10 +404,10 @@ def _print_briefing(db: Database, manuscript: dict):
 
     if briefing["toc_unlisted"]:
         print(ui.yellow(
-            "\nFiles missing from toc.md (reading order falls back to "
+            "\nFiles missing from toc.toml (reading order falls back to "
             "alphabetical for them): " + ", ".join(briefing["toc_unlisted"])
         ))
-        print(ui.dim("  → add them to toc.md in their true reading position."))
+        print(ui.dim("  → add them to toc.toml in their true reading position."))
 
     if briefing["focus_areas"]:
         areas = briefing["focus_areas"]
@@ -2113,7 +2113,7 @@ def cmd_doc(args):
                     sync = {"skipped": f"tab-structure sync failed ({err})"}
                 if sync.get("moved"):
                     print(f"Repositioned {sync['moved']} tab(s) to match "
-                          "toc.md's order and hierarchy.")
+                          "toc.toml's order and hierarchy.")
                 elif sync.get("skipped") and "pull first" in sync["skipped"]:
                     print(ui.yellow(f"Tab order not synced: {sync['skipped']}."))
                 print(f"Master Doc: "
@@ -2131,7 +2131,7 @@ def cmd_doc(args):
                                         docs_service=docs_service)
                 for relpath in result.get("adopted", []):
                     print(ui.green(f"New essay imported from Doc tab: "
-                                   f"{relpath} — add it to toc.md."))
+                                   f"{relpath} — add it to toc.toml."))
                 for relpath in result.get("readopted", []):
                     print(f"Relinked Doc tab for {relpath} (tab was "
                           f"recreated or the mapping was lost).")
@@ -2160,13 +2160,13 @@ def cmd_doc(args):
                     print(ui.dim("Ignoring non-manuscript tab(s): "
                                  + ", ".join(result["ignored_tabs"])))
                 if result.get("toc_updated"):
-                    print(ui.green("toc.md updated from the Doc's tab "
+                    print(ui.green("toc.toml updated from the Doc's tab "
                                    "order/hierarchy."))
                 if result.get("toc_ahead"):
-                    print("toc.md is ahead of the Doc's tab order — the "
+                    print("toc.toml is ahead of the Doc's tab order — the "
                           "next 'doc push' will reposition the tabs.")
                 if result.get("toc_conflict"):
-                    print(ui.yellow("TOC order conflict: toc.md and the "
+                    print(ui.yellow("TOC order conflict: toc.toml and the "
                                     "Doc's tab order both changed "
                                     f"({result['toc_conflict']}) — reorder "
                                     "one side to match the other, then "
@@ -2251,7 +2251,7 @@ def cmd_doc(args):
         print(f"Combined {len(result['files'])} file(s) → {result['path']}")
         if result["unlisted"]:
             print(ui.yellow(
-                "Files missing from toc.md were appended alphabetically: "
+                "Files missing from toc.toml were appended alphabetically: "
                 + ", ".join(result["unlisted"])
             ))
         if result["doc_id"]:
@@ -2504,7 +2504,7 @@ def cmd_plan(args):
             print(ui.dim(f"    precedent — {item['precedent']['label']}: "
                          + "; then ".join(item["precedent"]["actions"])))
     if result["toc_unlisted"]:
-        print(ui.yellow("\nNote: files missing from toc.md: "
+        print(ui.yellow("\nNote: files missing from toc.toml: "
                         + ", ".join(result["toc_unlisted"])))
     if args.draft:
         for draft in result.get("drafts", []):

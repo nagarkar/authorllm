@@ -296,6 +296,69 @@ def _changed_paragraph_text(old_files: dict, new_files: dict, target: set[str]) 
     return "\n\n".join(parts)
 
 
+_SECTION_HEAD = re.compile(r"^#{1,6}[ \t]")
+
+
+def _sections(text: str) -> list[str]:
+    """Heading-delimited sections (preamble first). The section is the
+    extraction unit (ratified 2026-08-10): each carries its heading line,
+    so every payload stays self-locating."""
+    out: list[list[str]] = []
+    cur: list[str] = []
+    for line in text.split("\n"):
+        if _SECTION_HEAD.match(line) and cur:
+            out.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        out.append(cur)
+    return [s for s in ("\n".join(c).strip() for c in out) if s]
+
+
+def _changed_sections(old_text: str, new_text: str) -> list[str]:
+    """Sections of new_text not present verbatim in old_text — one edited
+    paragraph sends its section, not its 11,000-word file. Moved-but-
+    unchanged sections are excluded (verbatim membership, order-blind)."""
+    old = set(_sections(old_text))
+    return [s for s in _sections(new_text) if s not in old]
+
+
+def _section_payloads(units: list[tuple[str, str]], cap: int) -> list[str]:
+    """'=== name ===' labelled chunks batched into payloads ≤ cap chars.
+    An oversized chunk splits at section boundaries first, then hard-
+    splits as a last resort — extraction never truncates."""
+    pieces: list[tuple[str, str]] = []
+    for name, chunk in units:
+        if len(chunk) <= cap:
+            pieces.append((name, chunk))
+            continue
+        cur = ""
+        for section in _sections(chunk):
+            candidate = f"{cur}\n\n{section}" if cur else section
+            if cur and len(candidate) > cap:
+                pieces.append((name, cur))
+                cur = section
+            else:
+                cur = candidate
+            while len(cur) > cap:
+                pieces.append((name, cur[:cap]))
+                cur = cur[cap:]
+        if cur:
+            pieces.append((name, cur))
+    payloads: list[list[str]] = []
+    size = 0
+    for name, chunk in pieces:
+        part = f"=== {name} ===\n{chunk}"
+        if payloads and size + len(part) + 2 <= cap:
+            payloads[-1].append(part)
+            size += len(part) + 2
+        else:
+            payloads.append([part])
+            size = len(part)
+    return ["\n\n".join(p) for p in payloads]
+
+
 def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
@@ -304,7 +367,7 @@ def extract_concepts(
     db: Database, manuscript: dict, llm: LLMClient,
     files: list[str] | None = None, full: bool = False,
     edges_only: bool = False, aliases_only: bool = False,
-    _inventory: bool = False,
+    _inventory: bool = False, _text_override: str | None = None,
 ) -> dict | None:
     """Ask the LLM for concepts/links and merge them into the graph.
 
@@ -334,9 +397,76 @@ def extract_concepts(
         incremental = True
 
     max_chars = getattr(llm, "extraction_max_chars", MAX_TEXT_CHARS)
-    text, truncated = _manuscript_text(manuscript, target, max_chars=max_chars)
+
+    def _passes(payloads: list[str], scope_label: str) -> dict:
+        """One extraction pass per payload, inventory carried, results
+        aggregated — the no-truncation guarantee for oversized scopes."""
+        aggregate: dict = {
+            "nodes": [], "edges": [], "realized": [], "skipped": 0,
+            "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
+            "proposed": 0, "truncated": False, "scope": scope_label,
+        }
+        for payload in payloads:
+            sub = extract_concepts(db, manuscript, llm,
+                                   files=sorted(target or []),
+                                   aliases_only=aliases_only,
+                                   _inventory=True,
+                                   _text_override=payload)
+            if not sub or sub.get("up_to_date"):
+                continue
+            for key in ("nodes", "edges", "realized", "below_bar"):
+                aggregate[key].extend(sub.get(key, []))
+            for key in ("skipped", "suppressed", "ungrounded_links",
+                        "proposed"):
+                aggregate[key] += sub.get(key, 0)
+        return aggregate
+
+    if _text_override is not None:
+        text, truncated = _text_override, False
+    elif incremental and old_files is not None and not edges_only:
+        # Ratified 2026-08-10: the extraction unit is the SECTION under
+        # its heading. One edited paragraph in an 11,000-word chapter
+        # sends its section, not the file — the known-concept inventory
+        # in the prompt supplies the linking context the rest of the
+        # file would have provided.
+        from .structure import is_structural, reading_order
+
+        order, _ = reading_order(new_files)
+        units = []
+        for name in order:
+            if name not in target or is_structural(name):
+                continue
+            delta = _changed_sections(old_files.get(name, ""),
+                                      new_files.get(name, ""))
+            if delta:
+                units.append((name, "\n\n".join(delta)))
+        if not units:
+            return {"up_to_date": True}
+        payloads = _section_payloads(units, max_chars)
+        scope = (f"{len(units)} changed file(s), changed sections only"
+                 + (f", {len(payloads)} pass(es)"
+                    if len(payloads) > 1 else ""))
+        if len(payloads) > 1:
+            return _passes(payloads, scope)
+        text, truncated = payloads[0], False
+    else:
+        text, truncated = _manuscript_text(manuscript, target,
+                                           max_chars=max_chars)
     if not text.strip():
         return None
+
+    if truncated and files and not edges_only:
+        # Explicit files whose combined text exceeds one payload (e.g. a
+        # deliberate re-mine of metaphysic.md): batch their sections into
+        # multiple passes rather than truncating the back half away.
+        disk = read_manuscript_files(Path(manuscript["path"]))
+        units = [(n, disk[n]) for n in sorted(target or []) if n in disk]
+        payloads = _section_payloads(units, max_chars)
+        if len(payloads) > 1:
+            return _passes(
+                payloads,
+                f"{len(units)} file(s), sections in "
+                f"{len(payloads)} pass(es) (cap {max_chars} chars)")
 
     if truncated and not edges_only and not files:
         # Hierarchical extraction: the scope exceeds one payload, so run one

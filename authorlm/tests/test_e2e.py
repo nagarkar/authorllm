@@ -687,8 +687,9 @@ def scenario_llm_and_unregister(root: Path) -> None:
             stub_config + "# tiny cap to force truncation\nextraction_max_chars = 50\n"
         )
         out = run(ws, "extract", "--full")
-        check("configured cap triggers truncation warning",
-              "truncated" in out and "extract <file>" in out, out)
+        check("configured cap batches sections instead of truncating",
+              "truncated" not in out
+              and ("hierarchical" in out or "pass(es)" in out), out)
 
         config_path.write_text(stub_config)
 
@@ -905,17 +906,19 @@ def scenario_llm_and_unregister(root: Path) -> None:
         mg = wg / "manuscript"
         write(mg / "z-first.md", "# One\n\nAlpha opens everything here.\n")
         write(mg / "a-second.md", "# Two\n\nBeta rests on alpha throughout.\n")
-        write(mg / "toc.md", "# TOC\n\n1. z-first.md\n2. a-second.md\n")
+        write(mg / "toc.toml",
+              '[[chapter]]\nfile = "z-first.md"\n\n'
+              '[[chapter]]\nfile = "a-second.md"\n# Contents\n')
         write(wg / ".authorlm" / "config.toml", stub_config)
         run(wg, "init", "--name", "book", "--path", str(mg), "--no-extract")
         run(wg, "concept", "add", "Alpha")
         run(wg, "concept", "add", "Beta")
-        run(wg, "concept", "add", "Contents")  # appears only in toc.md
+        run(wg, "concept", "add", "Contents")  # appears only in toc.toml
         run(wg, "concept", "link", "Beta", "depends_on", "Alpha")
         out = run(wg, "collect")
         check("TOC order suppresses the false alphabetical gap",
               "Prerequisite gaps" not in out, out)
-        check("toc.md is structure, not content (no realization from it)",
+        check("toc.toml is structure, not content (no realization from it)",
               "Concept realized: 'Contents'" not in out, out)
         out = run(wg, "concept", "list")
         check("definition precedence follows reading order",
@@ -924,8 +927,8 @@ def scenario_llm_and_unregister(root: Path) -> None:
         write(mg / "b-extra.md", "# Extra\n\nUnlisted prose.\n")
         run(wg, "collect")
         out = run(wg, "briefing")
-        check("briefing flags files missing from toc.md",
-              "missing from toc.md" in out and "b-extra.md" in out, out)
+        check("briefing flags files missing from toc.toml",
+              "missing from toc.toml" in out and "b-extra.md" in out, out)
 
         # Primary location re-points when introducing text is deleted.
         write(mg / "z-first.md", "# One\n\nAn opening without the old term.\n")
@@ -1379,14 +1382,23 @@ def scenario_doc_comments(root: Path) -> None:
     from authorlm.gdocs import classify_structure, walk_tabs
     from authorlm.structure import (parse_toc_tree, parents_to_tree,
                                     serialize_toc_tree, tree_to_parents)
-    toc_text = ("# Table of Contents\n\n- a.md\n- b.md\n  - c.md\n"
-                "    - d.md\n  - e.md\n- f.md\n")
+    toc_text = (
+        '[[chapter]]\nfile = "a.md"\n\n'
+        '[[chapter]]\nfile = "b.md"\n\n'
+        '[[chapter]]\nfile = "c.md"\nparent = "b.md"\n\n'
+        '[[chapter]]\nfile = "d.md"\nparent = "c.md"\nmatter = "back"\n\n'
+        '[[chapter]]\nfile = "e.md"\nparent = "b.md"\n\n'
+        '[[chapter]]\nfile = "f.md"\n')
     tree = parse_toc_tree(toc_text)
     check("toc tree parses names and depths",
           tree == [("a.md", 0), ("b.md", 0), ("c.md", 1), ("d.md", 2),
                    ("e.md", 1), ("f.md", 0)], str(tree))
-    check("toc tree serializes back losslessly",
-          parse_toc_tree(serialize_toc_tree(tree)) == tree, "")
+    from authorlm.structure import toc_attrs
+    attrs = toc_attrs(toc_text)
+    round_trip = serialize_toc_tree(tree, attrs)
+    check("toc tree serializes back losslessly, attributes riding through",
+          parse_toc_tree(round_trip) == tree
+          and toc_attrs(round_trip).get("d.md") == {"matter": "back"}, round_trip)
     pairs = tree_to_parents(tree)
     check("tree_to_parents computes DFS parents",
           pairs == [("a.md", None), ("b.md", None), ("c.md", "b.md"),

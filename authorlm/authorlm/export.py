@@ -1,7 +1,7 @@
 """Single-file manuscript export — a transient, regenerate-on-demand artifact.
 
 `doc create-manuscript` combines every content file (reading order per
-toc.md) into `_exports/<Manuscript Name>.md` and mirrors it to one Google
+toc.toml) into `_exports/<Manuscript Name>.md` and mirrors it to one Google
 Doc named after the manuscript. Both artifacts are disposable: neither is
 ever observed (the underscore directory is invisible to collection; the
 Doc is push-only, never reconciled or pulled), and every export overwrites
@@ -33,7 +33,7 @@ def export_filename(name: str) -> str:
 
 
 def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
-    """(combined text, ordered file names, files missing from toc.md).
+    """(combined text, ordered file names, files missing from toc.toml).
 
     Pure concatenation of the normalized content files in reading order —
     no added headings or separators; the combination is mechanical, the

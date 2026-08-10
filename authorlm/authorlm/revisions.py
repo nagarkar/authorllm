@@ -34,9 +34,13 @@ def iter_manuscript_paths(root: Path) -> dict[str, Path]:
     '.' or '_' are invisible to observation — this keeps editor internals
     (.obsidian/, .trash/) and AuthorLM's own exports (_concepts/) out of the
     observed manuscript."""
+    from .structure import TOC_FILENAME
+
     paths: dict[str, Path] = {}
     for path in sorted(root.rglob("*")):
-        if not (path.is_file() and path.suffix.lower() in MANUSCRIPT_EXTENSIONS):
+        if not (path.is_file()
+                and (path.suffix.lower() in MANUSCRIPT_EXTENSIONS
+                     or path.name == TOC_FILENAME)):
             continue
         relative = path.relative_to(root)
         if any(part.startswith((".", "_")) for part in relative.parts[:-1]):
