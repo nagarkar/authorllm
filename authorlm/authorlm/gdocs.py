@@ -365,13 +365,31 @@ def resolve_comments_with_receipt(db: Database, service, doc_id: str,
     return resolved
 
 
+# Sockets to Google must never wait forever: a stalled connection with
+# no timeout froze `authorlm shell` at start (reconcile's status call
+# blocked in poll() indefinitely, 2026-08-10). googleapiclient's
+# httplib2 transport takes its timeout at construction; AuthorizedHttp
+# wraps it with the credentials the same way build() would.
+HTTP_TIMEOUT_SECONDS = 60
+
+
+def _authorized_http(config: dict, workspace: str | None,
+                     interactive: bool):
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+
+    return AuthorizedHttp(
+        get_credentials(config, workspace, interactive=interactive),
+        http=httplib2.Http(timeout=HTTP_TIMEOUT_SECONDS))
+
+
 def get_service(config: dict, workspace: str | None = None,
                 interactive: bool = True):
     from googleapiclient.discovery import build
 
     return build(
         "drive", "v3",
-        credentials=get_credentials(config, workspace, interactive=interactive),
+        http=_authorized_http(config, workspace, interactive),
         cache_discovery=False,
     )
 
@@ -382,7 +400,7 @@ def get_docs_service(config: dict, workspace: str | None = None,
 
     return build(
         "docs", "v1",
-        credentials=get_credentials(config, workspace, interactive=interactive),
+        http=_authorized_http(config, workspace, interactive),
         cache_discovery=False,
     )
 
