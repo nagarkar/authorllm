@@ -267,18 +267,21 @@ def cmd_session(args):
         _expire_idle_session(db, manuscript, args)
         _reconcile_gdocs(db, manuscript, args)
         # Session start must never open blind to work done between
-        # sessions — collect first, and say so when new chapters appear.
-        try:
-            opening = api.collect(db, manuscript, _load_config(args),
-                                  source="session-open")
-            if opening.get("new_files"):
-                print(ui.yellow("New chapter file(s) since last session: "
-                                + ", ".join(opening["new_files"])))
-            if opening.get("version_no") and not opening.get("unchanged"):
-                print(f"Collected revision v{opening['version_no']} at "
-                      "session start.")
-        except Exception as err:
-            print(ui.dim(f"note: opening collect skipped ({err})"))
+        # sessions — collect first, with the full report (new chapters,
+        # transitions, realizations) so nothing arrives unacknowledged.
+        # Virgin manuscripts (no baseline version) keep the classic flow:
+        # first collect runs after the author declares their concepts.
+        has_baseline = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "LIMIT 1", (manuscript["id"],))
+        if has_baseline:
+            try:
+                opening = api.collect(db, manuscript, _load_config(args),
+                                      source="session-open")
+                if not opening.get("unchanged"):
+                    _print_collect_report(opening)
+            except Exception as err:
+                print(ui.dim(f"note: opening collect skipped ({err})"))
         try:
             session = ses.start_session(db, manuscript["id"])
         except ValueError as err:
@@ -1098,6 +1101,10 @@ def cmd_collect(args):
     manuscript = _manuscript(db, args)
     report = api.collect(db, manuscript, _load_config(args),
                          auto=getattr(args, "auto", False))
+    _print_collect_report(report)
+
+
+def _print_collect_report(report):
     if report.get("staged"):
         for item in report["staged"]:
             print(ui.yellow(
