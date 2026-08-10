@@ -173,6 +173,28 @@ def main_test() -> None:
               api.status(db, manuscript)["session"] is None
               and closed["id"] == session["id"])
 
+        # --- idle session expiry ---
+        check("expire_idle_session is a no-op with no active session",
+              api.expire_idle_session(db, manuscript, {}) is None)
+        idle_session, _ = api.ensure_session(db, manuscript)
+        db.update("sessions", idle_session["id"],
+                  {"started_at": "2020-01-01T00:00:00.000000Z"})
+        check("expire_idle_session honors a configured idle_hours threshold",
+              api.expire_idle_session(
+                  db, manuscript, {"session": {"idle_hours": 999999}}) is None)
+        expired = api.expire_idle_session(db, manuscript, {})
+        check("expire_idle_session closes a session idle past the default threshold",
+              expired is not None
+              and expired["session"]["id"] == idle_session["id"]
+              and expired["idle_hours"] > 3
+              and api.status(db, manuscript)["session"] is None)
+
+        idle_session2, _ = api.ensure_session(db, manuscript)
+        db.update("sessions", idle_session2["id"], {"started_at": "not-a-date"})
+        check("expire_idle_session tolerates an unparseable timestamp",
+              api.expire_idle_session(db, manuscript, {}) is None)
+        api.close_session(db, manuscript)
+
         # --- Google Docs bridge: normalizer + stub-service round trip ---
         from authorlm.gdocs import normalize_markdown, pull_doc, push_doc
 

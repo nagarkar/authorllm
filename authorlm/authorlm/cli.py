@@ -203,41 +203,15 @@ def cmd_unregister(args):
     print("The manuscript files on disk were not touched.")
 
 
-def _session_last_activity(db: Database, session: dict) -> str:
-    candidates = [session["started_at"]]
-    for table in ("manuscript_versions", "guidance_history", "declared_intents"):
-        row = db.one(
-            f"SELECT MAX(created_at) AS latest FROM {table} WHERE session_id = ?",
-            (session["id"],),
-        )
-        if row and row["latest"]:
-            candidates.append(row["latest"])
-    return max(candidates)
-
-
 def _expire_idle_session(db: Database, manuscript: dict, args) -> None:
     """Lazy idle expiry: if the active session has been quiet longer than the
     threshold, close it retroactively at its last activity time — announced,
     with the normal closing pipeline (episode analysis) run."""
-    from datetime import datetime, timezone
-
-    session = ses.active_session(db, manuscript["id"])
-    if not session:
+    expired = api.expire_idle_session(db, manuscript, _load_config(args))
+    if not expired:
         return
-    idle_hours = _load_config(args).get("session", {}).get("idle_hours", 3)
-    last = _session_last_activity(db, dict(session))
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
-            last_dt = datetime.strptime(last, fmt).replace(tzinfo=timezone.utc)
-            break
-        except ValueError:
-            continue
-    else:
-        return
-    idle = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
-    if idle < idle_hours:
-        return
-    ses.end_session(db, manuscript["id"], ended_at=last)
+    session, last, idle = (
+        expired["session"], expired["last_activity"], expired["idle_hours"])
     print(ui.yellow(
         f"Session {session['id']} had been idle for {idle:.1f}h — closed it "
         f"retroactively at its last activity ({last[:16].replace('T', ' ')} UTC)."
@@ -2736,30 +2710,33 @@ def cmd_improve(args):
     if not args.id:
         sys.exit(f"error: improve {args.action} needs a task id (see 'improve list')")
 
-    if args.action == "show":
-        from . import improvements as imp
-        task = imp.find_task(db, args.id)
-        print(f"[{task['id']}] ({task['status']}) {task['title']}")
-        print(f"Filed: {task['created_at']}"
-              + (f"  session: {task['session_id']}" if task["session_id"] else ""))
-        print(f"\nEvidence:\n{task['evidence']}")
-        print(f"\nGiven: {task['given']}\nObserved: {task['observed']}"
-              f"\nExpected: {task['expected']}")
-        if task["resolution"]:
-            print(f"\nResolution: {task['resolution']}")
-        return
+    try:
+        if args.action == "show":
+            from . import improvements as imp
+            task = imp.find_task(db, args.id)
+            print(f"[{task['id']}] ({task['status']}) {task['title']}")
+            print(f"Filed: {task['created_at']}"
+                  + (f"  session: {task['session_id']}" if task["session_id"] else ""))
+            print(f"\nEvidence:\n{task['evidence']}")
+            print(f"\nGiven: {task['given']}\nObserved: {task['observed']}"
+                  f"\nExpected: {task['expected']}")
+            if task["resolution"]:
+                print(f"\nResolution: {task['resolution']}")
+            return
 
-    if args.action == "run":
-        result = api.improvement_bundle(db, args.id)
-        print(result["bundle"])
-        print(ui.dim(f"\n[task {result['task_id']} is now {result['status']} — "
-                     "paste the bundle into a Claude Code session in the repo]"),
-              file=sys.stderr)
-        return
+        if args.action == "run":
+            result = api.improvement_bundle(db, args.id)
+            print(result["bundle"])
+            print(ui.dim(f"\n[task {result['task_id']} is now {result['status']} — "
+                         "paste the bundle into a Claude Code session in the repo]"),
+                  file=sys.stderr)
+            return
 
-    # propose | close | dismiss
-    result = api.resolve_improvement(db, args.id, args.action, args.note)
-    print(f"Task {result['task_id']}: {result['message']}")
+        # propose | close | dismiss
+        result = api.resolve_improvement(db, args.id, args.action, args.note)
+        print(f"Task {result['task_id']}: {result['message']}")
+    except (LookupError, ValueError) as err:
+        sys.exit(str(err))
 
 
 def cmd_diff(args):

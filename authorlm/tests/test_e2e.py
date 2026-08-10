@@ -1600,6 +1600,26 @@ def scenario_errors(root: Path) -> None:
     out = run(ws, "collect")
     out = run(ws, "session", "end")
 
+    # improve: bad task ids error cleanly instead of raising a raw traceback.
+    out = run(ws, "improve", "show", "bogus-id", expect_exit=True)
+    check("improve show on an unknown id errors cleanly",
+          "no improvement task matching" in out and "Traceback" not in out, out)
+    out = run(ws, "improve", "run", "bogus-id", expect_exit=True)
+    check("improve run on an unknown id errors cleanly",
+          "no improvement task matching" in out and "Traceback" not in out, out)
+    out = run(ws, "improve", "dismiss", "bogus-id", "--note", "n/a", expect_exit=True)
+    check("improve dismiss on an unknown id errors cleanly",
+          "no improvement task matching" in out and "Traceback" not in out, out)
+
+    out = run(ws, "improve", "add", "--title", "CLI gap", "--evidence", "e",
+             "--given", "g", "--observed", "o", "--expected", "x")
+    check("improve add files a task", "Filed improvement task" in out, out)
+    task_id = out.split("Filed improvement task ", 1)[1].split(":", 1)[0]
+    out = run(ws, "improve", "list")
+    check("improve list shows the filed task", task_id in out, out)
+    out = run(ws, "improve", "show", task_id)
+    check("improve show prints the task detail", "CLI gap" in out, out)
+
 
 def scenario_shell_watch_obsidian(root: Path) -> None:
     print("Scenario F — Obsidian export, observation-ignore, shell, watcher")
