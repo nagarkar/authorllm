@@ -168,8 +168,6 @@ def generate_guidance(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
         (mid,),
     )}
-    names = {nid: node_names(n) for nid, n in nodes.items()}
-    mentions = _first_mentions(files, names)
     validated = db.all(
         "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND status = 'validated' "
         "ORDER BY confidence DESC",

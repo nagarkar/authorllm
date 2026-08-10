@@ -168,6 +168,69 @@ def main_test() -> None:
         check("confirm_concept retypes",
               api.show_concept(db, manuscript, "Gravity")["node"]["kind"] == "definition")
 
+        # --- concept/edge/proposal curation via api (the CLI has its own
+        # code paths for these, so api.* itself was never exercised) ---
+        api.add_concept(db, manuscript, "Scratch")
+        retired = api.retire_concept(db, manuscript, "Scratch")
+        check("retire_concept retires a concept with no edges",
+              retired == {"name": "Scratch", "edges_retired": 0})
+        try:
+            api.retire_concept(db, manuscript, "Scratch")
+            check("retiring an already-retired concept raises", False)
+        except ValueError as err:
+            check("retiring an already-retired concept raises", "already retired" in str(err))
+        try:
+            api.retire_concept(db, manuscript, "Nobody")
+            check("retiring an unknown concept raises", False)
+        except LookupError:
+            check("retiring an unknown concept raises", True)
+
+        from authorlm import concepts as cg
+
+        api.add_concept(db, manuscript, "Freedom")
+        inferred = cg.link_concepts(db, manuscript["id"], "Gravity", "supports", "Freedom",
+                                    status="inferred")
+        confirmed = api.confirm_edge(db, manuscript, inferred["id"][:8])
+        check("confirm_edge declares an inferred edge",
+              confirmed == {"from_name": "Gravity", "relation": "supports", "to_name": "Freedom"})
+        check("confirm_edge persisted the status change",
+              api.show_concept(db, manuscript, "Freedom")["edges"][0]["status"] == "declared")
+        inferred2 = cg.link_concepts(db, manuscript["id"], "Freedom", "supports", "Choice",
+                                     status="inferred")
+        rejected = api.reject_edge(db, manuscript, inferred2["id"][:8])
+        check("reject_edge rejects an inferred edge",
+              rejected == {"from_name": "Freedom", "relation": "supports", "to_name": "Choice"})
+        try:
+            api.confirm_edge(db, manuscript, "zzzzzzzz")
+            check("confirming an unknown edge prefix raises", False)
+        except LookupError:
+            check("confirming an unknown edge prefix raises", True)
+
+        from authorlm import proposals as prop
+
+        open_proposal = prop.create(db, manuscript["id"], "revival", "Scratch",
+                                    {"name": "Scratch"})
+        listed = api.list_proposals(db, manuscript)
+        check("list_proposals surfaces an open proposal with summary/details",
+              any(p["id"] == open_proposal["id"] and "revive retired concept" in p["summary"]
+                  for p in listed))
+        try:
+            api.resolve_proposal(db, manuscript, open_proposal["id"][:8], "bogus")
+            check("resolving a proposal with an unknown action raises", False)
+        except ValueError:
+            check("resolving a proposal with an unknown action raises", True)
+        try:
+            api.resolve_proposal(db, manuscript, "zzzzzzzz", "dismiss")
+            check("resolving an unknown proposal prefix raises", False)
+        except LookupError:
+            check("resolving an unknown proposal prefix raises", True)
+        resolved = api.resolve_proposal(db, manuscript, open_proposal["id"][:8], "dismiss",
+                                        "not needed")
+        check("resolve_proposal dismisses and returns a message",
+              resolved["proposal_id"] == open_proposal["id"] and resolved["message"])
+        check("dismissed proposal no longer appears in list_proposals",
+              not any(p["id"] == open_proposal["id"] for p in api.list_proposals(db, manuscript)))
+
         closed = api.close_session(db, manuscript)
         check("close_session ends the active session",
               api.status(db, manuscript)["session"] is None
