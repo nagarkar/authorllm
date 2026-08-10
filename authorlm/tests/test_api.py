@@ -58,6 +58,9 @@ def main_test() -> None:
               load_settings(manuscript)["title"] == 'A "Great" Book'
               and load_settings(manuscript)["reference_docx"]
               == "C:\\styles\\ref.docx")
+        # Reset: the pandoc export test below runs on this same
+        # manuscript and must not inherit the fake reference docx.
+        set_setting(manuscript, "reference_docx", "")
 
         # --- trace log: shape, error truncation, rotation, never-raises ---
         import json as _tjson
