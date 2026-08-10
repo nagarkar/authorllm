@@ -220,6 +220,73 @@ def run_sweep(kind: str, manuscript: str | None = None,
 
 
 @mcp.tool()
+def scan_illustrations(file: str | None = None,
+                       manuscript: str | None = None) -> dict:
+    """Run the illustration spot-finder (cheap-model lens) over main-
+    matter chapters — or one file — staging placement proposals per the
+    ratified illustration-placement law (criteria, pacing; front matter
+    and per-guide exclusions apply). Proposals land in a STAGING table,
+    never in text: present them to the author for triage. Returns
+    {files, calls, staged, dropped_unverifiable}."""
+    def run():
+        from . import placement
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        llm = _llm()
+        if llm is None or not llm.enabled:
+            raise ValueError("the spot-finder needs the LLM configured "
+                             "([llm] in config.toml)")
+        report = placement.scan(db, ms, llm,
+                                files=[file] if file else None)
+        report["staged"] = [
+            {"id": r["id"], "file": r["file"], "anchor": r["anchor"][:90],
+             "description": r["description"], "criterion": r["criterion"],
+             "rationale": r["rationale"], "revises": r["revises"]}
+            for r in report["staged"]]
+        return report
+    return _guard(run)
+
+
+@mcp.tool()
+def triage_illustrations(proposal_id: str | None = None,
+                         verdict: str | None = None,
+                         revised_description: str | None = None,
+                         reason: str | None = None,
+                         manuscript: str | None = None) -> dict:
+    """List or decide staged illustration placements. With no arguments:
+    the open proposals (stale ones swept first). With proposal_id +
+    verdict 'accept'|'reject': apply the author's decision — accept
+    writes the tag into the local file after its anchor (then collect,
+    push, and render follow without further prompting, per the skill);
+    a revised_description is a modified acceptance whose diff is
+    recorded as learning-loop evidence; record rejection reasons
+    VERBATIM in the author's words."""
+    def run():
+        from . import placement
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        staled = placement.sweep_stale(db, ms)
+        if proposal_id is None:
+            return {"stale": [r["id"] for r in staled],
+                    "open": [
+                        {"id": r["id"], "file": r["file"],
+                         "anchor": r["anchor"][:90],
+                         "description": r["description"],
+                         "criterion": r["criterion"],
+                         "rationale": r["rationale"],
+                         "revises": r["revises"]}
+                        for r in placement.open_proposals(db, ms["id"])]}
+        if verdict not in ("accept", "reject"):
+            raise ValueError("verdict must be accept or reject")
+        return placement.decide(db, ms, proposal_id, verdict,
+                                revised_description=revised_description,
+                                reason=reason, llm=_llm())
+    return _guard(run)
+
+
+@mcp.tool()
 def get_illustration_prompt(fragment: str,
                             manuscript: str | None = None) -> dict:
     """The exact composed prompt a render of an illustration slot would

@@ -1214,6 +1214,82 @@ def cmd_illus(args):
             raise SystemExit(f"'{args.name}' is ambiguous — narrow the fragment")
         return matches[0]
 
+    if args.action == "scan":
+        from . import placement
+        from .llm import LLMClient as _LLM
+
+        report = placement.scan(db, manuscript, _LLM(_load_config(args)),
+                                files=[args.name] if args.name else None)
+        print(f"Scanned {len(report['files'])} chapter(s) "
+              f"({report['calls']} spot-finder call(s)).")
+        if report["dropped_unverifiable"]:
+            print(ui.dim(f"{report['dropped_unverifiable']} proposal(s) "
+                         "dropped — anchor not found verbatim."))
+        if not report["staged"]:
+            print("Nothing new staged.")
+        else:
+            print(ui.yellow(f"{len(report['staged'])} placement proposal(s) "
+                            "staged — review with: illus triage"))
+        return
+
+    if args.action == "triage":
+        from . import placement
+        from .llm import LLMClient as _LLM
+
+        for row in placement.sweep_stale(db, manuscript):
+            print(ui.dim(f"stale (anchor changed): {row['file']} — "
+                         f"{row['description'][:60]}"))
+        rows = placement.open_proposals(db, manuscript["id"])
+        verdicts: dict[int, tuple[str, str | None]] = {}
+        for pair in (args.revise or []):
+            verdicts[int(pair[0])] = ("accept", pair[1])
+        for n in (args.reject or []):
+            verdicts[n] = ("reject", None)
+        for n in (args.accept or []):
+            verdicts.setdefault(n, ("accept", None))
+        if args.accept_all_except is not None:
+            excepted = set(args.accept_all_except)
+            for i in range(1, len(rows) + 1):
+                if i not in excepted:
+                    verdicts.setdefault(i, ("accept", None))
+        if not verdicts:
+            if not rows:
+                print("No open placement proposals. Stage some with: "
+                      "illus scan")
+                return
+            for i, row in enumerate(rows, 1):
+                kind = ("revision of existing tag" if row["revises"]
+                        else "new placement")
+                why = f"criterion {row['criterion']} — {row['rationale']}"
+                print(f"{i}. {row['file']} — {kind}\n"
+                      f"   after: «{row['anchor'][:90]}»\n"
+                      f"   [Illustration: {row['description']}]\n"
+                      f"   {ui.dim(why)}")
+            print("\nVerdicts: illus triage --accept-all-except N… | "
+                  "--accept N… | --revise N \"desc\" | --reject N --reason …")
+            return
+        llm = _LLM(_load_config(args))
+        for n in sorted(verdicts):
+            if not 1 <= n <= len(rows):
+                print(ui.yellow(f"no proposal numbered {n} — skipped"))
+                continue
+            verdict, revised = verdicts[n]
+            row = rows[n - 1]
+            try:
+                result = placement.decide(
+                    db, manuscript, row["id"], verdict,
+                    revised_description=revised, reason=args.reason,
+                    llm=llm)
+            except (LookupError, ValueError) as err:
+                print(ui.yellow(f"{n}. {err}"))
+                continue
+            note = (" (modified — diff recorded as evidence)"
+                    if result.get("modified") else "")
+            print(f"{n}. {result['state']}: {row['file']}{note}")
+        print("Accepted tags are in the local files — collect, push, and "
+              "render follow (skill: no prompting needed).")
+        return
+
     if args.action == "prompt":
         slot = resolve_slot()
         assembled = illus.effective_prompt(db, manuscript, slot)
@@ -1304,6 +1380,18 @@ def cmd_illus(args):
                              f"(rendered: {have})")
         illus.set_embed(root / slot["file"], slot["desc_hash"],
                         target["name"])
+        # Render-side learning loop: which candidate won (and over what
+        # field) is evidence for future illustration law.
+        from .db import ko_fields as _ko
+
+        ev = _ko("ev")
+        ev.update(manuscript_id=manuscript["id"], episode_id=None,
+                  evidence_type="illus_render", signal="picked",
+                  target=(f"{slot['file']}: «{slot['prompt'][:80]}» — "
+                          f"picked {target['name']} over "
+                          f"{max(len(cands) - 1, 0)} other candidate(s)"),
+                  supports_policy=None, weight="medium")
+        db.insert("evidence", ev)
         print(f"Picked candidate {args.candidate:02d} — embed now "
               f"{target['name']}. Picks are pinned: renders never move them.")
         return
@@ -3065,10 +3153,12 @@ def build_parser() -> argparse.ArgumentParser:
              "(LLM image → _illustrations/), pick a candidate, prune, "
              "prompt (the exact composed prompt a render would send)")
     p.add_argument("action",
-                   choices=["list", "render", "pick", "prune", "prompt"])
+                   choices=["list", "render", "pick", "prune", "prompt",
+                            "scan", "triage"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
-                        "render without it does every unrendered slot")
+                        "render without it does every unrendered slot; "
+                        "scan: one file (default: all main matter)")
     p.add_argument("candidate", nargs="?", type=int,
                    help="candidate number (pick)")
     p.add_argument("-n", "--count", type=int, default=1,
@@ -3076,6 +3166,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from", dest="from_n", type=int, metavar="N",
                    help="render: evolve candidate N under the current "
                         "illustration law (image-conditioned continuity)")
+    p.add_argument("--accept", nargs="+", type=int, metavar="N",
+                   help="triage: accept these proposal numbers")
+    p.add_argument("--accept-all-except", nargs="*", type=int, metavar="N",
+                   dest="accept_all_except",
+                   help="triage: accept every open proposal except these")
+    p.add_argument("--revise", nargs=2, metavar=("N", "DESC"),
+                   action="append",
+                   help="triage: accept N with a revised description "
+                        "(modified acceptance — the diff is evidence)")
+    p.add_argument("--reject", nargs="+", type=int, metavar="N",
+                   help="triage: reject these proposal numbers")
+    p.add_argument("--reason",
+                   help="triage: the author's words for a rejection "
+                        "(recorded verbatim as evidence)")
     p.set_defaults(func=cmd_illus)
 
     p = sub.add_parser(

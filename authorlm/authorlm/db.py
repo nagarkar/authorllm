@@ -232,6 +232,20 @@ CREATE TABLE IF NOT EXISTS doc_threads (
     UNIQUE (manuscript_id, comment_id)
 );
 
+CREATE TABLE IF NOT EXISTS illus_proposals (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,           -- relpath the placement targets
+    anchor TEXT NOT NULL,         -- verbatim paragraph tail the tag follows
+    description TEXT NOT NULL,    -- proposed [Illustration: …] description
+    criterion TEXT,               -- which ratified placement criterion
+    rationale TEXT,               -- the spot-finder's one-line why
+    revises TEXT,                 -- existing tag prompt when this is a
+                                  -- revision, else NULL (new placement)
+    state TEXT NOT NULL DEFAULT 'proposed'
+        -- proposed | accepted | rejected | stale
+);
+
 CREATE TABLE IF NOT EXISTS writeups (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,

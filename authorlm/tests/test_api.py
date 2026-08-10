@@ -1333,6 +1333,78 @@ def main_test() -> None:
               and _json.loads(registered["findings"][0]["metadata"])[
                   "source"] == "external")
 
+        # --- illustration placement pipeline: scan → stage → triage ---
+        from authorlm import placement
+
+        api.add_style_element(db, manuscript, "illustration-placement",
+                              "Concretize a recurring metaphor once, at "
+                              "its strongest occurrence.",
+                              file="01-choice.md")
+        anchor_para = ("The road is a ladder laid flat, and every step "
+                       "asks again.")
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + f"\n\n{anchor_para}\n")
+        spot_llm = FakeLLM({"proposals": [
+            {"anchor": anchor_para,
+             "description": "a ladder lying flat along a road, rungs "
+                            "receding to the horizon",
+             "criterion": "2", "rationale": "metaphor at its strongest",
+             "revises": None},
+            {"anchor": "no such text anywhere",
+             "description": "dropped", "criterion": "2",
+             "rationale": "bad anchor", "revises": None},
+        ]})
+        report = placement.scan(db, manuscript, spot_llm,
+                                files=["01-choice.md"])
+        check("spot-finder stages verbatim-verified proposals and drops "
+              "unverifiable anchors",
+              len(report["staged"]) == 1
+              and report["dropped_unverifiable"] == 1
+              and "PLACEMENT LAW" in spot_llm.user
+              and "strongest occurrence" in spot_llm.user, str(report))
+        check("scan is idempotent against open proposals",
+              placement.scan(db, manuscript, spot_llm,
+                             files=["01-choice.md"])["staged"] == [])
+        staged = placement.open_proposals(db, manuscript["id"])[0]
+        result = placement.decide(
+            db, manuscript, staged["id"], "accept",
+            revised_description="a ladder lying flat along an empty road")
+        text_now = (ms / "01-choice.md").read_text()
+        check("modified acceptance writes the revised tag after the anchor",
+              result["modified"]
+              and ("[Illustration: a ladder lying flat along an empty "
+                   "road]") in text_now
+              and text_now.index(anchor_para)
+              < text_now.index("[Illustration: a ladder"), text_now[-300:])
+        ev_row = db.one(
+            "SELECT * FROM evidence WHERE evidence_type = 'illus_triage' "
+            "ORDER BY created_at DESC")
+        check("triage revision lands as modified evidence with the diff",
+              ev_row["signal"] == "modified"
+              and "became" in ev_row["target"], str(dict(ev_row)))
+        # Reject with a reason; then stale when the anchor vanishes.
+        spot_llm2 = FakeLLM({"proposals": [
+            {"anchor": anchor_para, "description": "second idea",
+             "criterion": "2", "rationale": "r", "revises": None}]})
+        placement.scan(db, manuscript, spot_llm2, files=["01-choice.md"])
+        p2 = placement.open_proposals(db, manuscript["id"])[0]
+        placement.decide(db, manuscript, p2["id"], "reject",
+                         reason="Too decorative for this essay.")
+        check("rejection records the author's reason verbatim",
+              _json.loads(db.one(
+                  "SELECT metadata FROM evidence WHERE evidence_type = "
+                  "'illus_triage' ORDER BY created_at DESC")["metadata"])
+              ["explanation"] == "Too decorative for this essay.")
+        placement.scan(db, manuscript, spot_llm2, files=["01-choice.md"])
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text().replace(anchor_para,
+                                                      "The road changed."))
+        staled = placement.sweep_stale(db, manuscript)
+        check("proposals whose anchor vanished go stale, never guessed",
+              len(staled) == 1
+              and not placement.open_proposals(db, manuscript["id"]))
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.
@@ -1459,7 +1531,8 @@ def main_test() -> None:
             "retire_policy", "merge_policies", "convert_policy_to_style",
             "define_style_guide", "add_style_element", "retire_style_element",
             "attach_style", "get_style", "get_profile", "run_sweep",
-            "get_illustration_prompt",
+            "get_illustration_prompt", "scan_illustrations",
+            "triage_illustrations",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,

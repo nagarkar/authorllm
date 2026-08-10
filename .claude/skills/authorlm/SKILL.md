@@ -249,6 +249,34 @@ content — a wrong image usually means wrong ratified law, and this shows
 which rule did it. Every rendered file also carries its prompt, law,
 model, and date in its metadata (PNG iTXt / JPEG COM segments).
 
+### Placement pipeline (spot-finding, staging, triage — ratified 2026-08-10)
+Where illustrations BELONG is its own law: aspect
+`illustration-placement`, consumed only by the spot-finder, never
+composed into render prompts. `authorlm illus scan [file]` (or the
+`scan_illustrations` MCP tool) runs a cheap-model pass per main-matter
+chapter and stages placement proposals — and description revisions for
+existing tags — in a table, NEVER in text or the Doc. The author
+triages: `illus triage` lists numbered proposals; verdicts by
+`--accept-all-except N…`, `--accept N…`, `--revise N "desc"`,
+`--reject N --reason "…"` — or conversationally via
+`triage_illustrations`. When the author asks in chat for illustrations
+in a specific essay, you may hand-draft proposals into the same staging
+table (chat is sovereign; same triage, same evidence).
+
+Two standing duties:
+- **After acceptance, finish without prompting**: insert happens on
+  accept; you then collect, push, and `illus render` the new/changed
+  slots WITHOUT asking — the acceptance was the consent. (The
+  ask-before-rendering rule above still governs tags the author typed
+  by hand and that surface on pull.)
+- **Triage verdicts are the illustration learning loop**: revisions are
+  modified acceptances (original → final diff recorded as evidence),
+  rejection reasons are recorded verbatim, and `illus pick` records
+  render-side evidence. Surface forming patterns at triage time
+  UNPROMPTED once two independent instances exist (the margin-learnings
+  duty, extended); candidates go through the same decline-by-default
+  scoped distiller and the author's ratification.
+
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
 and the author confirms the behavior is wrong, file it *at that moment*
