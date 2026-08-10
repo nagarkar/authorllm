@@ -227,14 +227,20 @@ that and ASK before rendering — rendering is always an explicit,
 consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
 **Prompt-critique duty (unprompted, before any render)**: when a pull
 or collect surfaces NEW or CHANGED illustration descriptions, critique
-them on the spot against the description-craft rules — concrete nouns
-with bound attributes (never abstractions like "modern clothes");
-positive phrasing only (no "no X" — negations plant what they forbid);
-one idea per clause; camera/composition language welcome; renderable
-under the file's image law (no in-image text). Propose improved
+them on the spot against `~/.authorlm/illustration-craft.md` — the
+single source of description-craft law (general rules + per-model
+carveouts; the spot-finder reads the same file). Propose improved
 wording conversationally for the author's approval; never rewrite a
 tag silently. This catches fidelity failures before the render spend —
 image critique was deliberately deferred in its favor (2026-08-10).
+**Externalized descriptions**: `[Illustration: excerpt… ⇢ slug.md]`
+means the CANONICAL text lives in `_illustrations/prompts/slug.md`;
+the inline excerpt is machine-maintained at collect (edits to it are
+discarded with a warning — edit the .md). `illus externalize
+<fragment>` moves a description out (desc_hash and renders survive);
+deleting the `⇢ ref` moves it back inline. Collect offers
+externalization for descriptions over 50 words or rendered-and-stable
+ones; offers only — the author always pulls the trigger.
 Candidates land in `_illustrations/` as
 `slug-deschash-stylehash-NN.{png,jpg}`; the embed line under the tag is
 derived machinery (observation-invisible, stripped on push, re-inserted
