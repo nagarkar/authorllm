@@ -695,7 +695,7 @@ def manifest_text(manuscript_name: str, doc_version: int,
                          "approximate (higher = easier; 60–70 ≈ plain "
                          "English).")
         lines += ["", f"Pushed: {pushed_at or now_iso()[:16] + 'Z'}",
-                  "A chapter listed above but missing from the tabs was "
+                  "If a chapter listed above has no matching tab, it was "
                   "deleted after this push."]
     return "\n".join(lines) + "\n"
 
