@@ -900,6 +900,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
     if requests:
         docs_service.documents().batchUpdate(
             documentId=master_id, body={"requests": requests}).execute()
+    apply_tab_spacing(docs_service, master_id, tab_id,
+                      doc_spacing(manuscript))
 
     entry["checked_out"] = True
     # Snapshot what was pushed: pull uses it to detect two-sided edits.
@@ -1790,6 +1792,72 @@ def _shift_requests(requests: list[dict], delta: int) -> list[dict]:
     return shift(requests)
 
 
+# The standard tab format, ratified 2026-08-10: the author picked the
+# discernment tab's spacing as manuscript law. Body text only — headings
+# keep the Doc's own heading spacing.
+DOC_SPACING = {"line_spacing": 115, "space_above": 0, "space_below": 6}
+
+
+def doc_spacing(manuscript: dict) -> dict:
+    """[gdocs.spacing] in _exports/settings.toml overrides DOC_SPACING."""
+    from .export import load_settings
+
+    spacing = dict(DOC_SPACING)
+    spacing.update((load_settings(manuscript).get("gdocs") or {})
+                   .get("spacing") or {})
+    return spacing
+
+
+def apply_tab_spacing(docs_service, master_id: str, tab_id: str,
+                      spacing: dict) -> int:
+    """Impose the standard paragraph spacing on a tab's NORMAL_TEXT
+    paragraphs. Imported content arrives with Google's defaults (no
+    space after paragraph), so every content write re-applies the
+    standard. Returns the number of style requests sent."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    ranges: list[list[int]] = []
+
+    def walk(tabs):
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    para = item.get("paragraph")
+                    if not para:
+                        continue
+                    named = para.get("paragraphStyle", {}).get(
+                        "namedStyleType", "NORMAL_TEXT")
+                    if named != "NORMAL_TEXT":
+                        continue
+                    start = item.get("startIndex", 0)
+                    end = item.get("endIndex", 0)
+                    if not end or end <= start:
+                        continue
+                    if ranges and ranges[-1][1] == start:
+                        ranges[-1][1] = end
+                    else:
+                        ranges.append([start, end])
+            walk(tab.get("childTabs", []))
+
+    walk(doc.get("tabs", []))
+    requests = [{"updateParagraphStyle": {
+        "range": {"tabId": tab_id, "startIndex": s, "endIndex": e},
+        "paragraphStyle": {
+            "lineSpacing": spacing["line_spacing"],
+            "spaceAbove": {"magnitude": spacing["space_above"],
+                           "unit": "PT"},
+            "spaceBelow": {"magnitude": spacing["space_below"],
+                           "unit": "PT"},
+        },
+        "fields": "lineSpacing,spaceAbove,spaceBelow"}}
+        for s, e in ranges]
+    if requests:
+        docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}).execute()
+    return len(requests)
+
+
 def _doc_paragraphs(docs_service, master_id: str,
                     tab_id: str) -> list[dict]:
     """Non-empty paragraphs of a tab with their doc index ranges:
@@ -1959,6 +2027,9 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
                   for p in _md_paragraphs(tab_markdown())]
         if verify == local_paras:
+            if flat:
+                apply_tab_spacing(docs_service, master_id, tab_id,
+                                  doc_spacing(manuscript))
             entry["pushed_hash"] = _hashlib.sha256(
                 "\n\n".join(local_paras).encode()).hexdigest()[:16]
             entry["checked_out"] = True
