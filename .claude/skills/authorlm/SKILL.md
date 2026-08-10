@@ -225,6 +225,16 @@ caption]` — and that tag is never consumed or replaced. Collect/pull
 output reports new unrendered slots ("new illustrations found"); relay
 that and ASK before rendering — rendering is always an explicit,
 consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
+**Prompt-critique duty (unprompted, before any render)**: when a pull
+or collect surfaces NEW or CHANGED illustration descriptions, critique
+them on the spot against the description-craft rules — concrete nouns
+with bound attributes (never abstractions like "modern clothes");
+positive phrasing only (no "no X" — negations plant what they forbid);
+one idea per clause; camera/composition language welcome; renderable
+under the file's image law (no in-image text). Propose improved
+wording conversationally for the author's approval; never rewrite a
+tag silently. This catches fidelity failures before the render spend —
+image critique was deliberately deferred in its favor (2026-08-10).
 Candidates land in `_illustrations/` as
 `slug-deschash-stylehash-NN.{png,jpg}`; the embed line under the tag is
 derived machinery (observation-invisible, stripped on push, re-inserted
