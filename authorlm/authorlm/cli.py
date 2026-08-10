@@ -2844,15 +2844,42 @@ def cmd_log(args):
 def cmd_history(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    for row in db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-        (manuscript["id"],),
-    ):
-        files = loads(row["files"], {})
-        print(
-            f"v{row['version_no']}  {row['created_at']}  {row['checksum'][:12]}  "
-            f"{len(files)} file(s)  session={row['session_id'] or '-'}"
-        )
+    action = args.action or "list"
+
+    if action == "list":
+        for row in db.all(
+            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
+            (manuscript["id"],),
+        ):
+            files = loads(row["files"], {})
+            print(
+                f"v{row['version_no']}  {row['created_at']}  {row['checksum'][:12]}  "
+                f"{len(files)} file(s)  session={row['session_id'] or '-'}"
+            )
+        return
+
+    if not args.version:
+        sys.exit(f"error: 'history {action}' needs a version number, e.g. 'history {action} 3'.")
+    number = int(args.version.lstrip("v"))
+
+    if action == "show":
+        try:
+            version = api.get_version(db, manuscript, number)
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+        for name, text in sorted(loads(version["files"], {}).items()):
+            print(ui.dim(f"--- {name} ---"))
+            print(text)
+        return
+
+    # restore
+    try:
+        report = api.restore_version(db, manuscript, number, _load_config(args))
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    print(f"Restored v{number}'s content to disk and collected it as v{report['version_no']} "
+          "— history advances, it is never rewound.")
+    print(f"Detected {len(report['transitions'])} editorial transition(s) versus the prior revision.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3224,7 +3251,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_log)
 
-    p = sub.add_parser("history", help="list collected manuscript versions")
+    p = sub.add_parser("history", help="list/show/restore collected manuscript versions")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "show", "restore"])
+    p.add_argument("version", nargs="?", help="version number, e.g. '3' or 'v3' (show/restore)")
     p.set_defaults(func=cmd_history)
 
     return parser
