@@ -127,6 +127,12 @@ def _dispatch(base_argv: list[str], tokens: list[str]) -> None:
     except SystemExit as err:
         if isinstance(err.code, str):
             print(err.code)
+    except KeyboardInterrupt:
+        print("(interrupted)")
+    except Exception as err:  # noqa: BLE001 — the REPL must survive
+        # A command's crash (network timeout, bug) returns to the prompt;
+        # it must never take the whole shell session down with it.
+        print(f"error ({type(err).__name__}): {err}")
 
 
 def _collect_via_watcher(base_argv: list[str], lock: threading.Lock, prompt: str) -> None:

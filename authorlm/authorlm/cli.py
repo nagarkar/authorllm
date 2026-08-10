@@ -1482,6 +1482,7 @@ def cmd_illus(args):
                 return
             if args.from_n is not None:
                 raise SystemExit("--from needs a single slot — name a fragment")
+        rendered = failed = 0
         for slot in targets:
             print(f"Rendering {slot['file']}:{slot['line']} "
                   f"[Illustration: {slot['prompt'][:60]}…]"
@@ -1492,9 +1493,14 @@ def cmd_illus(args):
                 result = illus.render_slot(db, manuscript, slot, config,
                                            from_n=args.from_n,
                                            count=args.count)
-            except (RuntimeError, LookupError) as err:
-                print(ui.yellow(f"  render failed: {err}"))
+            except (RuntimeError, LookupError, OSError) as err:
+                # One slot's failure (a network timeout, a server hiccup)
+                # must never sink the rest of the run.
+                print(ui.yellow(f"  render failed "
+                                f"({type(err).__name__}): {err}"))
+                failed += 1
                 continue
+            rendered += 1
             for name in result["written"]:
                 print(f"  wrote _illustrations/{name}")
             if not result["had_embed"]:
@@ -1503,6 +1509,12 @@ def cmd_illus(args):
                 print(ui.dim(
                     f"  embed kept at {result['embedded']} — "
                     "'illus pick' to switch"))
+        if len(targets) > 1 or failed:
+            line = f"Rendered {rendered} of {len(targets)} slot(s)."
+            if failed:
+                line += (f" {failed} failed — they stay unrendered; "
+                         "re-run 'illus render' to retry just those.")
+            print(ui.yellow(line) if failed else line)
         return
 
     if args.action == "pick":

@@ -322,8 +322,18 @@ def _gemini_image(model: str, prompt: str, input_png: bytes | None,
                  "x-goog-api-key": key},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode())
+        try:
+            with urllib.request.urlopen(request,
+                                        timeout=timeout) as response:
+                payload = json.loads(response.read().decode())
+        except (TimeoutError, urllib.error.URLError) as err:
+            if (isinstance(err, urllib.error.HTTPError)):
+                raise
+            # Image generations run long and stall transiently; one
+            # fresh attempt recovers most timeouts (live: 2026-08-10).
+            with urllib.request.urlopen(request,
+                                        timeout=timeout) as response:
+                payload = json.loads(response.read().decode())
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")[:400]
         raise RuntimeError(
