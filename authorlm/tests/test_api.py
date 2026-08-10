@@ -48,6 +48,52 @@ def main_test() -> None:
         manuscript = api.get_manuscript(db)
         check("get_manuscript resolves the single manuscript",
               manuscript["name"] == "book")
+
+        # --- export settings: quotes/backslashes round-trip through TOML ---
+        from authorlm.export import load_settings, set_setting
+
+        set_setting(manuscript, "title", 'A "Great" Book')
+        set_setting(manuscript, "reference_docx", "C:\\styles\\ref.docx")
+        check("quotes and backslashes in settings round-trip through TOML",
+              load_settings(manuscript)["title"] == 'A "Great" Book'
+              and load_settings(manuscript)["reference_docx"]
+              == "C:\\styles\\ref.docx")
+
+        # --- trace log: shape, error truncation, rotation, never-raises ---
+        import json as _tjson
+
+        from authorlm import tracelog
+
+        trace_ws = root / "trace-ws"
+        tracelog.record("get_status", surface="cli", workspace=str(trace_ws),
+                        manuscript="book", duration_ms=12, ok=True)
+        trace_path = tracelog.log_dir(str(trace_ws)) / "trace.jsonl"
+        entry = _tjson.loads(trace_path.read_text().splitlines()[0])
+        check("record() writes one well-formed JSONL entry",
+              entry["verb"] == "get_status" and entry["surface"] == "cli"
+              and entry["manuscript"] == "book" and entry["duration_ms"] == 12
+              and entry["ok"] is True and "ts" in entry, entry)
+
+        tracelog.record("get_briefing", surface="mcp", workspace=str(trace_ws),
+                        ok=False, error="boom" * 200)
+        entries = [_tjson.loads(line)
+                  for line in trace_path.read_text().splitlines()]
+        check("errors are recorded and truncated to 500 chars",
+              entries[-1]["ok"] is False and len(entries[-1]["error"]) == 500)
+
+        trace_path.write_text("x" * (tracelog.MAX_BYTES + 1))
+        tracelog.record("collect_revision", surface="cli",
+                        workspace=str(trace_ws))
+        rotated = trace_path.with_suffix(".jsonl.1")
+        check("oversized trace rotates to .jsonl.1; a fresh file starts",
+              rotated.exists() and rotated.stat().st_size > tracelog.MAX_BYTES
+              and len(trace_path.read_text().splitlines()) == 1)
+
+        blocked = root / "blocked-file"
+        blocked.write_text("not a directory")
+        tracelog.record("get_status", surface="cli",
+                        workspace=str(blocked / "ws"))
+        check("a broken trace destination never raises", True)
         check("resolve_file maps a bare filename",
               api.resolve_file(db, "01-choice.md")["name"] == "book")
         check("resolve_file rejects foreign paths",
