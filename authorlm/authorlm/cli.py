@@ -3290,7 +3290,29 @@ def build_parser() -> argparse.ArgumentParser:
         "illus",
         help="illustration slots ([Illustration: …] tags): list, render "
              "(LLM image → _illustrations/), pick a candidate, prune, "
-             "prompt (the exact composed prompt a render would send)")
+             "prompt (the exact composed prompt a render would send)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples by action:\n"
+               "  illus list                      slot status: rendered, "
+               "picked, unrendered\n"
+               "  illus render                    render every unrendered "
+               "slot (one candidate each)\n"
+               "  illus render pendulum -n 3      three candidates for the "
+               "slot matching 'pendulum'\n"
+               "  illus render pendulum --from 2  evolve candidate 2 under "
+               "the current law\n"
+               "  illus pick pendulum 2           pin candidate 2 (renders "
+               "never move a pick)\n"
+               "  illus prompt pendulum           show the exact composed "
+               "prompt a render sends\n"
+               "  illus prune                     delete unpicked "
+               "candidates and orphaned files\n"
+               "  illus scan [file]               spot-finder: stage "
+               "placement proposals (all main matter)\n"
+               "  illus triage                    walk proposals one by "
+               "one: k / v / r / s / x\n"
+               "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
+               "--reason \"…\"   bulk verdicts")
     p.add_argument("action",
                    choices=["list", "render", "pick", "prune", "prompt",
                             "scan", "triage"])
