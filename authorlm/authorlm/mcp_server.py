@@ -37,11 +37,18 @@ mcp = FastMCP(
         "content without being asked. When the author asks you to DRAFT "
         "prose, assemble the machinery first: get_style(file) — the "
         "rendered effective guide is law (register, lexicon, syntax, "
-        "tone); get_concepts for every concept the passage touches (the "
-        "notes are the author's ratified definitions — use their words, "
-        "keep claims consistent with the graph, never endorse a refuted "
-        "position); and the validated policies from list_policies or the "
-        "briefing. Offer the draft for the author to place or reject."
+        "tone); get_concepts SCOPED — file=<essay> for the slice realized "
+        "in the target essay, then name= for full ratified notes of the "
+        "concepts the passage touches (unscoped returns only a summary; "
+        "the graph is too large to list whole). The notes are the "
+        "author's ratified definitions — use their words, keep claims "
+        "consistent with the graph, never endorse a refuted position. "
+        "Check the validated policies from list_policies or the briefing. "
+        "Offer the draft for the author to place or reject. For "
+        "naturally-plural curation ('retire these two and their edges') "
+        "use curate_concepts with an operations array; suggestion "
+        "verdicts stay on review_suggestion one at a time — their "
+        "explanations are the evidence stream."
     ),
 )
 

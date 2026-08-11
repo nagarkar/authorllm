@@ -40,8 +40,13 @@ surface is to keep that evidence flowing while the author just talks.
 5. When they confirm or correct conceptual claims in conversation ("yes,
    becoming depends on choice", "that edge is wrong") → `link_concepts`,
    `confirm_edge`, `reject_edge`, `confirm_concept`, `retire_concept`.
-   Conversation IS triage for anything needing judgment — don't push
-   those to a menu (but for bulk piles, see "Triage at scale" below).
+   When one breath carries several operations ("retire both and their
+   edge"), batch them in ONE `curate_concepts` call (operations array:
+   confirm / retire / link / reject_edge / alias, per-op status).
+   Suggestion verdicts are NEVER batched — `review_suggestion` stays
+   one at a time because each explanation is evidence. Conversation IS
+   triage for anything needing judgment — don't push those to a menu
+   (but for bulk piles, see "Triage at scale" below).
 6. When they finish a piece of work → `complete_intent` (then relay the
    episode analysis: what patterns their edits showed). When they're done
    for the day → `close_session` and report learning velocity.
@@ -53,11 +58,17 @@ than no draft:
 1. Resolve the target file (the active intent usually names it), then
    `get_style(file)`: the rendered effective guide is law — register,
    lexicon, syntax, tone, every ratified element.
-2. `get_concepts` for every concept the passage touches: the notes are
-   the author's ratified definitions — reuse their words, keep terms of
-   art capitalized, never reintroduce conventional meanings of redefined
-   terms, and keep every claim consistent with the graph's edges (a
-   `refutes` target is never endorsed; aliases are one concept).
+2. `get_concepts` SCOPED: one `file=<essay>` call fetches the slice
+   realized in the target essay (edges included); then `name=` for the
+   full ratified notes of each concept the passage actually touches.
+   Unscoped calls return only a summary with narrowing guidance — the
+   graph is deliberately never listed whole (~59K tokens at last
+   measure); `query=` matches name/notes/aliases when you don't know
+   the name. The notes are the author's ratified definitions — reuse
+   their words, keep terms of art capitalized, never reintroduce
+   conventional meanings of redefined terms, and keep every claim
+   consistent with the graph's edges (a `refutes` target is never
+   endorsed; aliases are one concept).
 3. Check validated policies (briefing / list_policies) that bear on
    ordering and placement; `get_guidance` precedents show how the author
    introduced similar concepts before. `get_plan` names what is unwritten.
