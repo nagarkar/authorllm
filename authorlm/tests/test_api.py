@@ -569,12 +569,18 @@ def main_test() -> None:
                         pos += len(content)
                     return items
 
-                tabs = [{"tabProperties": {"tabId": t["id"],
-                                           "title": t["title"]},
-                         "documentTab": {"body": {"content":
-                             paragraphs(t["text"]) if t["text"] else []}}}
-                        for t in self.state["docs"][documentId]]
-                return FakeRequest({"tabs": tabs})
+                flat = self.state["docs"][documentId]
+
+                def node(t):
+                    return {"tabProperties": {"tabId": t["id"],
+                                              "title": t["title"]},
+                            "documentTab": {"body": {"content":
+                                paragraphs(t["text"]) if t["text"] else []}},
+                            "childTabs": [node(c) for c in flat
+                                          if c.get("parent") == t["id"]]}
+
+                return FakeRequest({"tabs": [node(t) for t in flat
+                                             if not t.get("parent")]})
 
             def batchUpdate(self, documentId=None, body=None):
                 tabs = self.state["docs"][documentId]
@@ -586,20 +592,33 @@ def main_test() -> None:
                 for req in (body or {}).get("requests", []):
                     if "addDocumentTab" in req:
                         self.state["tab_counter"] += 1
+                        props = req["addDocumentTab"]["tabProperties"]
                         new = {"id": f"tab-{self.state['tab_counter']}",
-                               "title": req["addDocumentTab"]
-                               ["tabProperties"]["title"], "text": ""}
+                               "title": props["title"], "text": "",
+                               "parent": props.get("parentTabId")}
                         tabs.append(new)
                         replies.append({"addDocumentTab": {
                             "tabProperties": {"tabId": new["id"]}}})
                         continue
                     replies.append({})
                     if "deleteTab" in req:
-                        tabs.remove(tab(req["deleteTab"]["tabId"]))
+                        doomed = tab(req["deleteTab"]["tabId"])
+                        gone = {doomed["id"]}
+                        tabs.remove(doomed)
+                        while True:  # the API deletes the whole subtree
+                            orphans = [t for t in tabs
+                                       if t.get("parent") in gone]
+                            if not orphans:
+                                break
+                            for t in orphans:
+                                gone.add(t["id"])
+                                tabs.remove(t)
                     elif "updateDocumentTabProperties" in req:
                         props = req["updateDocumentTabProperties"][
                             "tabProperties"]
                         moved = tab(props["tabId"])
+                        if "parentTabId" in props:
+                            moved["parent"] = props["parentTabId"] or None
                         tabs.remove(moved)
                         tabs.insert(props["index"], moved)
                     elif "deleteContentRange" in req:
@@ -701,11 +720,16 @@ def main_test() -> None:
               [t["title"] for t in master]
               == ["book", "01-choice.md", "manifest"],
               str([t["title"] for t in master]))
+        def as_tab(md: str) -> str:
+            # A pushed tab carries no blank paragraphs (it-69b61b6d7fa2):
+            # markdown's separator lines are dropped in transplant.
+            return "\n".join(ln for ln in md.split("\n") if ln.strip()) + "\n"
+
         check("push transplants the file's markdown into its tab, "
-              "embed lines stripped (Doc shows only the tag)",
+              "embed lines stripped, blank separators dropped",
               tab_text["01-choice.md"]
-              == strip_embed_lines_for_test(
-                  (ms / "01-choice.md").read_text())
+              == as_tab(strip_embed_lines_for_test(
+                  (ms / "01-choice.md").read_text()))
               and "_illustrations" not in tab_text["01-choice.md"]
               and "[Illustration:" in tab_text["01-choice.md"]
               and not stub.state["uploads"])  # temp import Doc deleted
@@ -796,7 +820,7 @@ def main_test() -> None:
               report["pushed"] == ["01-choice.md"]
               and next(t["text"] for t in stub.state["docs"]["doc-2"]
                        if t["title"] == "01-choice.md")
-              == "# Title\n\nLocal-only progress.\n", str(report))
+              == "# Title\nLocal-only progress.\n", str(report))
         # The tab now reflects the push; the next reconcile sees sync.
         report = reconcile(db, manuscript, stub)
         check("reconcile: after push, next start is in sync",
@@ -1413,6 +1437,245 @@ def main_test() -> None:
         check("proposals whose anchor vanished go stale, never guessed",
               len(staled) == 1
               and not placement.open_proposals(db, manuscript["id"]))
+
+        # --- externalized descriptions: ⇢ ref grammar, hash stability,
+        # machine-maintained excerpts, offers ---
+        from authorlm import illus as il
+
+        long_desc = ("a brass orrery on a scarred oak table, " * 8
+                     + "lit from the left by a single candle")
+        (ms / "06-orrery.md").write_text(
+            "# **Orrery**\n\nBody.\n\n"
+            f"[Illustration: {long_desc} | caption: the orrery]\n")
+        api.collect(db, manuscript, {})
+        inline_slot = il.find_slot(ms, "orrery")[0]
+        h_before = inline_slot["desc_hash"]
+        offers = il.externalize_offers(ms)
+        check("a 50+ word inline description draws an externalize offer",
+              any("longer than 50 words" in o["reason"] for o in offers),
+              str(offers))
+        out = il.externalize(ms, inline_slot)
+        ref_slot = il.find_slot(ms, "orrery")[0]
+        check("externalize keeps desc_hash (renders survive) and refs "
+              "the prompts file",
+              out["desc_hash"] == h_before
+              and ref_slot["desc_hash"] == h_before
+              and ref_slot["ref"] == out["ref"]
+              and (ms / "_illustrations" / "prompts" / out["ref"]).exists()
+              and ref_slot["caption"] == "the orrery"
+              and "⇢" in (ms / "06-orrery.md").read_text())
+        # Edit the excerpt in the tag: maintenance discards the edit.
+        tampered = (ms / "06-orrery.md").read_text().replace(
+            "a brass orrery on a scarred", "a HAND-EDITED excerpt on a scarred")
+        (ms / "06-orrery.md").write_text(tampered)
+        fixes = il.maintain_excerpts(ms)
+        check("excerpt edits are discarded and called out",
+              any(f.get("discarded_edit") for f in fixes)
+              and "HAND-EDITED" not in (ms / "06-orrery.md").read_text())
+        # Edit the canonical file: excerpt refreshes, desc_hash moves.
+        (ms / "_illustrations" / "prompts" / out["ref"]).write_text(
+            "a silver orrery beneath a cracked dome\n")
+        il.maintain_excerpts(ms)
+        moved = il.find_slot(ms, "silver orrery")[0]
+        check("editing the prompts file is canonical: hash moves, "
+              "excerpt follows",
+              moved["desc_hash"] != h_before
+              and moved["excerpt"].startswith("a silver orrery"))
+        check("craft file seeds and serves the active model's carveout",
+              "bound attributes" in il.craft_text(
+                  {"llm": {"image_model":
+                           "gemini/gemini-3-pro-image-preview"}},
+                  workspace=str(root))
+              and "Garbles lettering" in il.craft_text(
+                  {"llm": {"image_model":
+                           "gemini/gemini-3-pro-image-preview"}},
+                  workspace=str(root))
+              and "Garbles lettering" not in il.craft_text(
+                  {"llm": {"image_model": "other/model"}},
+                  workspace=str(root)))
+        api.collect(db, manuscript, {})
+
+        # --- Doc mirror: the reserved 'illustrations' tab tree ---
+        from authorlm.gdocs import (ILLUS_DISPLAY_PREFIX, ILLUS_SENTINEL,
+                                    ILLUS_TAB_TITLE, push_prompt_tabs)
+
+        manuscript = api.get_manuscript(db)
+        ref = out["ref"]
+        prompt_path = ms / "_illustrations" / "prompts" / ref
+        display = ILLUS_DISPLAY_PREFIX + ref
+        prom = push_prompt_tabs(db, manuscript, stub, stub)
+        master = stub.state["docs"]["doc-2"]
+        illus_tab = next(t for t in master if t["title"] == ILLUS_TAB_TITLE)
+        slug_tab = next(t for t in master if t["title"] == ref)
+        check("full push mirrors the prompt file into the reserved tree",
+              prom["created"] == [ref] and not prom["updated"]
+              and slug_tab.get("parent") == illus_tab["id"]
+              and illus_tab.get("parent") is None
+              and slug_tab["text"].strip()
+              == "a silver orrery beneath a cracked dome"
+              and illus_tab["text"] == ILLUS_SENTINEL, str(prom))
+        manuscript = api.get_manuscript(db)
+        links_now = doc_status(db, manuscript)
+        entry_now = links_now["_illusprompt/" + ref]
+        check("reserved mapping keys record the tab and the pushed base",
+              entry_now["tab_id"] == slug_tab["id"]
+              and entry_now["pushed_hash"]
+              and links_now["_illustrations_tab"] == illus_tab["id"],
+              str(entry_now))
+
+        temp_docs_before = stub.state["counter"]
+        prom2 = push_prompt_tabs(db, manuscript, stub, stub)
+        check("an unchanged prompt pushes nothing (changed-only)",
+              not prom2["created"] and not prom2["updated"]
+              and not prom2["pruned"]
+              and stub.state["counter"] == temp_docs_before, str(prom2))
+
+        # Doc-side edit → pull writes the canonical file; collect's
+        # excerpt maintenance then follows the new text.
+        stub.set_tab(ref, "a silver orrery beneath a shattered dome")
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        check("a Doc-side prompt edit pulls into the canonical file, "
+              "never adopted as an essay",
+              display in rep["changed"]
+              and prompt_path.read_text()
+              == "a silver orrery beneath a shattered dome\n"
+              and not rep.get("adopted")
+              and ref not in doc_status(db, api.get_manuscript(db)),
+              str(rep))
+        il.maintain_excerpts(ms)
+        check("the owning tag's excerpt follows the pulled text",
+              il.find_slot(ms, "shattered dome")[0]["excerpt"]
+              .startswith("a silver orrery beneath a shattered"), "")
+
+        prompt_path.write_text("a bronze orrery in candlelight\n")
+        stub.set_tab(ref, "a golden orrery at dawn")
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        check("two-sided prompt edits conflict, file untouched",
+              display in rep["conflicts"]
+              and "bronze" in prompt_path.read_text(), str(rep))
+        forced = pull_doc(db, manuscript, ref, service=stub,
+                          docs_service=stub, force=True)
+        check("targeted prompt pull resolves by slug; --force takes the Doc",
+              display in forced["changed"]
+              and prompt_path.read_text() == "a golden orrery at dawn\n",
+              str(forced))
+
+        prompt_path.write_text("a golden orrery at dusk\n")
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        check("a local-only prompt edit is kept (tab stale, not rival)",
+              display in rep["local_ahead"]
+              and "dusk" in prompt_path.read_text(), str(rep))
+        prom3 = push_prompt_tabs(db, manuscript, stub, stub)
+        slug_tab = next(t for t in stub.state["docs"]["doc-2"]
+                        if t["title"] == ref)
+        check("push rewrites only the drifted prompt tab",
+              prom3["updated"] == [ref] and not prom3["created"]
+              and slug_tab["text"].strip() == "a golden orrery at dusk",
+              str(prom3))
+
+        # A hand-made tab in the reserved tree: warned, never adopted.
+        stub.state["tab_counter"] += 1
+        stub.state["docs"]["doc-2"].append(
+            {"id": f"tab-{stub.state['tab_counter']}", "title": "scratch.md",
+             "text": "a hand-made note", "parent": illus_tab["id"]})
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        links_after = doc_status(db, api.get_manuscript(db))
+        check("hand-made tabs under the reserved tree are inert: warned, "
+              "no essay adoption, no local file",
+              rep.get("prompt_unknown") == ["scratch.md"]
+              and not rep.get("adopted")
+              and "scratch.md" not in links_after
+              and not (ms / "scratch.md").exists(), str(rep))
+        prom4 = push_prompt_tabs(db, manuscript, stub, stub)
+        check("push leaves the hand-made tab untouched",
+              prom4["unknown"] == ["scratch.md"] and not prom4["pruned"],
+              str(prom4))
+
+        slug_tab["title"] = "renamed-by-hand.md"
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        check("a renamed prompt tab is skipped and called out",
+              rep.get("prompt_renamed") == [(ref, "renamed-by-hand.md")]
+              and "dusk" in prompt_path.read_text(), str(rep))
+        slug_tab["title"] = ref
+
+        prompt_path.unlink()
+        prom5 = push_prompt_tabs(db, manuscript, stub, stub)
+        check("a locally deleted prompt file prunes its tab and mapping",
+              prom5["pruned"] == [ref]
+              and all(t["title"] != ref
+                      for t in stub.state["docs"]["doc-2"])
+              and "_illusprompt/" + ref
+              not in doc_status(db, api.get_manuscript(db)), str(prom5))
+        prompt_path.write_text("a golden orrery at dusk\n")
+        prom6 = push_prompt_tabs(db, manuscript, stub, stub)
+        check("the file's return recreates its tab (Doc-side deletions "
+              "recover the same way)",
+              prom6["created"] == [ref], str(prom6))
+
+        stub.set_tab(ref, "a silver orrery reconsidered")
+        report = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("reconcile auto-pulls a Doc-side prompt edit",
+              display in report["pulled"]
+              and prompt_path.read_text()
+              == "a silver orrery reconsidered\n", str(report))
+        prompt_path.write_text("a silver orrery reconsidered twice\n")
+        report = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("reconcile auto-pushes a local-only prompt edit",
+              display in report["pushed"]
+              and next(t["text"] for t in stub.state["docs"]["doc-2"]
+                       if t["title"] == ref).strip()
+              == "a silver orrery reconsidered twice", str(report))
+        report = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("prompt tabs settle in sync at session start",
+              display in report["in_sync"], str(report))
+        il.maintain_excerpts(ms)
+
+        # --- prompt preview embeds: ![](../…) derived machinery ---
+        from authorlm.illus import load_prompts
+
+        orrery_slot = il.find_slot(ms, "reconsidered twice")[0]
+        cand = f"a-silver-orrery-{orrery_slot['desc_hash']}-0000-01.png"
+        (ms / "_illustrations" / cand).write_bytes(tiny_png())
+        ok_pin = il.set_embed(ms / "06-orrery.md",
+                              orrery_slot["desc_hash"], cand,
+                              il.load_prompts(ms))
+        check("set_embed finds an externalized slot by canonical hash",
+              ok_pin and f"![](_illustrations/{cand})"
+              in (ms / "06-orrery.md").read_text(), "")
+        fixes = il.maintain_excerpts(ms)
+        check("maintenance mirrors the essay's pick into the prompt file",
+              any(f.get("embed_synced") for f in fixes)
+              and prompt_path.read_text().endswith(
+                  f"\n\n![](../{cand})\n"), prompt_path.read_text())
+        check("preview embeds are invisible to identity",
+              load_prompts(ms)[ref]
+              == "a silver orrery reconsidered twice\n"
+              and il.find_slot(ms, "reconsidered twice")[0]["desc_hash"]
+              == orrery_slot["desc_hash"], "")
+        prom7 = push_prompt_tabs(db, manuscript, stub, stub)
+        check("a preview embed alone never re-pushes; the Doc never "
+              "sees it",
+              not prom7["updated"] and not prom7["created"]
+              and "![](" not in next(
+                  t["text"] for t in stub.state["docs"]["doc-2"]
+                  if t["title"] == ref), str(prom7))
+        stub.set_tab(ref, "a silver orrery, final wording")
+        rep = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        ptext = prompt_path.read_text()
+        check("pull rewrites the text and keeps the preview embed",
+              display in rep["changed"]
+              and ptext.startswith("a silver orrery, final wording\n")
+              and ptext.rstrip().endswith(f"![](../{cand})"), ptext)
+        (ms / "06-orrery.md").write_text(
+            (ms / "06-orrery.md").read_text().replace(
+                f"![](_illustrations/{cand})\n", ""))
+        il.maintain_excerpts(ms)
+        check("unpinning in the essay clears the preview embed",
+              "![](" not in prompt_path.read_text(),
+              prompt_path.read_text())
 
         # Deterministic guards: toc exclusion + pacing budget + arbiter.
         (ms / "toc.toml").write_text(

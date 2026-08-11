@@ -299,6 +299,16 @@ def collect(db: Database, manuscript: dict, config: dict,
         if flagged:
             return {"staged": [{"file": f, "removed_percent": p} for f, p in flagged]}
 
+    # Ref-tag excerpts are machine-maintained BEFORE the snapshot, so
+    # the collected version always holds canonical excerpts and a
+    # discarded excerpt edit never masquerades as an authorial change.
+    try:
+        from .illus import maintain_excerpts
+
+        excerpt_fixes = maintain_excerpts(Path(manuscript["path"]))
+    except OSError:
+        excerpt_fixes = []
+
     session = ses.active_session(db, mid)
     before = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
@@ -393,13 +403,22 @@ def collect(db: Database, manuscript: dict, config: dict,
     # Illustration slots are a scan-derived registry; a collect is the
     # moment the author learns about unrendered tags ("new illustrations
     # found") without having to remember to ask. Reporting only — collect
-    # never renders anything.
+    # never renders anything. Exception: ref-tag excerpts are machine-
+    # maintained here (regenerated from their canonical prompts file, so
+    # drift is impossible; a discarded excerpt edit is called out).
     try:
+        from .illus import externalize_offers
+
         slots = illus_slot_report(Path(manuscript["path"]))
+        offers = externalize_offers(Path(manuscript["path"]))
     except OSError:
-        slots = None
+        slots, offers = None, []
     if slots and (slots["unrendered"] or slots["orphaned"]):
         report["illustrations"] = slots
+    if excerpt_fixes or offers:
+        report.setdefault("illustrations", {})
+        report["illustrations"]["excerpt_fixes"] = excerpt_fixes
+        report["illustrations"]["externalize_offers"] = offers
 
     # The author never has to remember the analyzers: a collected change
     # runs incremental extraction (concepts, links, aliasing statements)

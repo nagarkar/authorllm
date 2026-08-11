@@ -48,6 +48,7 @@ RETRIES = 2  # transient-failure retries with exponential backoff (1s, 2s)
 
 class LLMClient:
     def __init__(self, config: dict):
+        self.config = config
         llm = config.get("llm", {})
         self.enabled = bool(llm.get("enabled"))
         self.provider = llm.get("provider", "litellm")

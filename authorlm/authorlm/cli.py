@@ -240,7 +240,14 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
         return
     report = gdocs.reconcile(db, manuscript, service, docs_service=docs_service)
     if report["in_sync"]:
-        print(ui.dim("Google Docs in sync: " + ", ".join(report["in_sync"])))
+        # Prompt tabs sync in bulk; listing every slug would drown the
+        # essay list at session start.
+        essays = [f for f in report["in_sync"]
+                  if not f.startswith(gdocs.ILLUS_DISPLAY_PREFIX)]
+        n_prompts = len(report["in_sync"]) - len(essays)
+        parts = essays + ([f"{n_prompts} illustration prompt(s)"]
+                          if n_prompts else [])
+        print(ui.dim("Google Docs in sync: " + ", ".join(parts)))
     if report["pulled"]:
         print(ui.green("Pulled Doc edits: " + ", ".join(report["pulled"])))
         cmd_collect(args)
@@ -1168,6 +1175,28 @@ def _print_collect_report(report):
             print(ui.dim(
                 "Orphaned illustration file(s) — no tag matches their "
                 "prompt any more: " + ", ".join(ill["orphaned"])))
+        for fix in ill.get("excerpt_fixes", []):
+            if fix.get("missing"):
+                print(ui.yellow(
+                    f"Illustration ref without a file: {fix['file']} "
+                    f"⇢ {fix['ref']} — restore the .md or delete the ref."))
+            elif fix.get("discarded_edit"):
+                print(ui.yellow(
+                    f"Excerpt edit discarded in {fix['file']}: the tag "
+                    f"mirrors {fix['ref']} — edit that file instead."))
+            elif "embed_synced" in fix:
+                verb = "updated" if fix["embed_synced"] else "cleared"
+                print(ui.dim(f"Preview embed {verb} in "
+                             f"_illustrations/prompts/{fix['ref']}."))
+            else:
+                print(ui.dim(f"Excerpt refreshed in {fix['file']} "
+                             f"(⇢ {fix['ref']})."))
+        for offer in ill.get("externalize_offers", []):
+            print(ui.dim(
+                f"Externalize offer: {offer['file']}:{offer['line']} "
+                f"«{offer['prompt']}…» is {offer['reason']} — "
+                "'illus externalize <fragment>' moves it to a prompts "
+                "file (renders survive)."))
     if report.get("auto_analysis"):
         aa = report["auto_analysis"]
         print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
@@ -1517,6 +1546,19 @@ def cmd_illus(args):
             print(ui.yellow(line) if failed else line)
         return
 
+    if args.action == "externalize":
+        slot = resolve_slot()
+        try:
+            result = illus.externalize(root, slot)
+        except ValueError as err:
+            raise SystemExit(f"error: {err}")
+        print(f"Externalized → _illustrations/prompts/{result['ref']} "
+              f"(desc_hash {result['desc_hash']} unchanged — renders "
+              "survive). The inline excerpt is machine-maintained; edit "
+              "the .md file from now on, or delete the ⇢ ref to go back "
+              "inline.")
+        return
+
     if args.action == "pick":
         slot = resolve_slot()
         if args.candidate is None:
@@ -1530,7 +1572,7 @@ def cmd_illus(args):
             raise SystemExit(f"no candidate {args.candidate:02d} "
                              f"(rendered: {have})")
         illus.set_embed(root / slot["file"], slot["desc_hash"],
-                        target["name"])
+                        target["name"], illus.load_prompts(root))
         # Render-side learning loop: which candidate won (and over what
         # field) is evidence for future illustration law.
         from .db import ko_fields as _ko
@@ -2281,6 +2323,16 @@ def cmd_doc(args):
                     else ui.dim("[tab]")
                 cloud = f"  {marker} {ui.dim(ui.link(tab_url(master_id, link['tab_id'])))}"
             print(f"  {doc['file']}  ({doc['paragraphs']} paragraph(s)){concepts}{cloud}")
+        from .gdocs import ILLUS_DISPLAY_PREFIX, prompt_links, tab_url
+
+        prompts = prompt_links(links)
+        if prompts and links.get("_master_id"):
+            print(ui.bold("Illustration prompts:")
+                  + ui.dim("  (editable in the Doc's 'illustrations' tabs)"))
+            for name, entry in sorted(prompts.items()):
+                print(f"  {ILLUS_DISPLAY_PREFIX}{name}  "
+                      + ui.dim(ui.link(tab_url(links["_master_id"],
+                                               entry["tab_id"]))))
         if listing["retired"]:
             print(ui.bold("Retired:") + ui.dim(f"  (in {docs.RETIRED_DIR}/, invisible to observation)"))
             for name in listing["retired"]:
@@ -2298,6 +2350,12 @@ def cmd_doc(args):
         matches = {rel: e for rel, e in links.items()
                    if not rel.startswith("_") and args.name.lower() in rel.lower()
                    and isinstance(e, dict) and e.get("tab_id")}
+        from .gdocs import ILLUS_DISPLAY_PREFIX, prompt_links
+
+        matches.update({ILLUS_DISPLAY_PREFIX + name: e
+                        for name, e in prompt_links(links).items()
+                        if args.name.lower() in name.lower()
+                        and e.get("tab_id")})
         if not matches or not links.get("_master_id"):
             sys.exit(f"error: no tab matching '{args.name}' in the master "
                      "Doc — push it first.")
@@ -2345,6 +2403,40 @@ def cmd_doc(args):
                     print(ui.dim("Some files were normalized locally first "
                                  "(canonical markdown)."))
                     cmd_collect(args)
+                if not args.name:
+                    # Full push mirrors _illustrations/prompts/ into the
+                    # reserved 'illustrations' tab tree (changed-only).
+                    try:
+                        prom = gdocs.push_prompt_tabs(db, manuscript,
+                                                      service, docs_service)
+                    except Exception as err:  # never fatal to a push
+                        prom = {"error": str(err)}
+                    if prom.get("error"):
+                        print(ui.yellow("warning: illustration prompt sync "
+                                        f"failed ({prom['error']})"))
+                    else:
+                        done = [f"{len(prom['created'])} tab(s) created"
+                                if prom.get("created") else "",
+                                f"{len(prom['updated'])} updated"
+                                if prom.get("updated") else "",
+                                f"{len(prom['pruned'])} pruned"
+                                if prom.get("pruned") else ""]
+                        done = [d for d in done if d]
+                        if done:
+                            print("Illustration prompts: " + ", ".join(done)
+                                  + ".")
+                        for name, actual in prom.get("renamed", []):
+                            print(ui.yellow(
+                                f"warning: the prompt tab for {name} is "
+                                f"titled '{actual}' — rename it back (tab "
+                                "titles must stay exact filenames)."))
+                        if prom.get("unknown"):
+                            print(ui.dim(
+                                "Ignoring hand-made tab(s) under "
+                                "'illustrations': "
+                                + ", ".join(prom["unknown"])
+                                + " (prompt files are born via "
+                                "'illus externalize')."))
                 try:
                     sync = gdocs.sync_tab_structure(db, manuscript,
                                                     docs_service)
@@ -2398,6 +2490,17 @@ def cmd_doc(args):
                 if result.get("ignored_tabs"):
                     print(ui.dim("Ignoring non-manuscript tab(s): "
                                  + ", ".join(result["ignored_tabs"])))
+                for name, actual in result.get("prompt_renamed", []):
+                    print(ui.yellow(f"warning: the prompt tab for {name} is "
+                                    f"now titled '{actual}' — untouched; "
+                                    "rename it back (tab titles must stay "
+                                    "exact filenames)."))
+                if result.get("prompt_unknown"):
+                    print(ui.dim("Ignoring hand-made tab(s) under "
+                                 "'illustrations': "
+                                 + ", ".join(result["prompt_unknown"])
+                                 + " (prompt files are born via "
+                                 "'illus externalize')."))
                 if result.get("toc_updated"):
                     print(ui.green("toc.toml updated from the Doc's tab "
                                    "order/hierarchy."))
@@ -3323,11 +3426,13 @@ def build_parser() -> argparse.ArgumentParser:
                "placement proposals (all main matter)\n"
                "  illus triage                    walk proposals one by "
                "one: k / v / r / s / x\n"
+               "  illus externalize dial          move a description to "
+               "_illustrations/prompts/<slug>.md (tag keeps excerpt ⇢ ref)\n"
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
                "--reason \"…\"   bulk verdicts")
     p.add_argument("action",
                    choices=["list", "render", "pick", "prune", "prompt",
-                            "scan", "triage"])
+                            "scan", "triage", "externalize"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "

@@ -25,7 +25,9 @@ from pathlib import Path
 
 from .db import Database, loads
 from . import threads as threads_mod
-from .illus import capture_embeds, reembed, strip_dangling
+from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
+                    join_prompt_embeds, reembed, split_prompt_embeds,
+                    strip_dangling)
 from .revisions import iter_manuscript_paths, strip_embed_lines
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -169,19 +171,28 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
             requests.append(reset_style(cursor, cursor + 4))
             cursor += 4
             continue
-        if not text:
+        if not text.strip():
+            # Markdown's blank separator lines import as bare-newline
+            # paragraphs; transplanting them doubles the Doc's paragraph
+            # spacing (it-69b61b6d7fa2). Paragraph breaks survive without
+            # them — every prose paragraph ends with its own newline —
+            # and the exporter re-inserts blank separators on pull.
             continue
         start = cursor
         requests.append({"insertText": {
             "location": {"tabId": tab_id, "index": start}, "text": text}})
         cursor += len(text)
         requests.append(reset_style(start, cursor))
-        if style != "NORMAL_TEXT":
-            requests.append({"updateParagraphStyle": {
-                "range": {"tabId": tab_id,
-                          "startIndex": start, "endIndex": cursor},
-                "paragraphStyle": {"namedStyleType": style},
-                "fields": "namedStyleType"}})
+        # Paragraph style is set EXPLICITLY for every paragraph, prose
+        # included: inserted paragraphs inherit the residual paragraph's
+        # style after deleteContentRange (the paragraph-level twin of the
+        # italic snowball above), so a tab that ended on a heading turned
+        # every pushed prose paragraph into H1 (it-641d1aa4e3c0).
+        requests.append({"updateParagraphStyle": {
+            "range": {"tabId": tab_id,
+                      "startIndex": start, "endIndex": cursor},
+            "paragraphStyle": {"namedStyleType": style},
+            "fields": "namedStyleType"}})
         offset = start
         for run_text, text_style in runs:
             fields = {k: True for k in ("bold", "italic", "underline")
@@ -857,6 +868,34 @@ def _ensure_folder(manuscript: dict, meta: dict, service) -> str:
     return result["id"]
 
 
+def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
+                 markdown: str, temp_name: str) -> None:
+    """Rebuild one tab's body from markdown: temp-doc import (Google owns
+    the conversion) → transplant into the tab → temp deleted."""
+    from googleapiclient.http import MediaInMemoryUpload
+
+    media = MediaInMemoryUpload(markdown.encode("utf-8"),
+                                mimetype=MARKDOWN_MIME)
+    temp = service.files().create(
+        body={"name": temp_name, "mimeType": GDOC_MIME},
+        media_body=media, fields="id",
+    ).execute()
+    try:
+        temp_doc = docs_service.documents().get(documentId=temp["id"]).execute()
+    finally:
+        service.files().delete(fileId=temp["id"]).execute()
+
+    requests: list[dict] = []
+    end = _tab_end(docs_service, master_id, tab_id)
+    if end > 2:
+        requests.append({"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
+    requests += transplant_requests(temp_doc, tab_id)
+    if requests:
+        docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}).execute()
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None) -> dict:
@@ -864,8 +903,6 @@ def push_doc(db: Database, manuscript: dict, query: str,
     master Doc — markdown → temp-doc import (Google owns the conversion)
     → transplant into the tab → temp deleted. Marks the file checked out."""
     import hashlib
-
-    from googleapiclient.http import MediaInMemoryUpload
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
@@ -898,27 +935,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry = meta[bridge.meta_key][relpath]
     tab_id = entry["tab_id"]
 
-    media = MediaInMemoryUpload(normalized.encode("utf-8"),
-                                mimetype=MARKDOWN_MIME)
-    temp = service.files().create(
-        body={"name": f"authorlm-temp-{Path(relpath).stem}",
-              "mimeType": GDOC_MIME},
-        media_body=media, fields="id",
-    ).execute()
-    try:
-        temp_doc = docs_service.documents().get(documentId=temp["id"]).execute()
-    finally:
-        service.files().delete(fileId=temp["id"]).execute()
-
-    requests: list[dict] = []
-    end = _tab_end(docs_service, master_id, tab_id)
-    if end > 2:
-        requests.append({"deleteContentRange": {"range": {
-            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
-    requests += transplant_requests(temp_doc, tab_id)
-    if requests:
-        docs_service.documents().batchUpdate(
-            documentId=master_id, body={"requests": requests}).execute()
+    _rewrite_tab(service, docs_service, master_id, tab_id, normalized,
+                 f"authorlm-temp-{Path(relpath).stem}")
     apply_tab_spacing(docs_service, master_id, tab_id,
                       doc_spacing(manuscript))
 
@@ -1188,11 +1206,16 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     tab_props: list[tuple[str, str]] = []
     doc_pairs: list = []
     readopted_files: set[str] = set()
+    illus_children: list[tuple[str, str]] = []
+    illus_ids: set[str] = set()
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
                 documentId=master_id, includeTabsContent=True).execute()
             walk_tabs(tab_doc.get("tabs", []), tab_props, doc_pairs)
+            if bridge.meta_key == "gdocs":
+                _, illus_children, illus_ids = illus_subtree(
+                    tab_doc.get("tabs", []), links)
             # Container integrity: the root tab named for the manuscript is
             # the Doc's identity and is protected — detect renames (the API
             # cannot fix a root tab; the author must rename it back), and
@@ -1213,7 +1236,11 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report["tabs_error"] = str(err)
     if tab_props:
         local_files = set(iter_manuscript_paths(bridge.root))
-        cls = classify_tabs(tab_props, links, local_files)
+        # The reserved illustrations subtree is invisible to essay
+        # classification: its child tabs are titled '<slug>.md' and would
+        # otherwise be adopted as new essays.
+        cls = classify_tabs([(tid, t) for tid, t in tab_props
+                             if tid not in illus_ids], links, local_files)
         ignored = [t for t in cls["ignored"] if t != MANIFEST_TITLE]
         if ignored:
             report["ignored_tabs"] = ignored
@@ -1242,15 +1269,28 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # Every tab title is a split boundary — a tab that isn't a boundary
     # would have its lines swallowed into whichever tab precedes it in the
     # export (the manifest always is one, even without the tab listing).
-    boundaries = set(mapped) | {MANIFEST_TITLE} | {t for _, t in tab_props if t}
+    # Mapped prompt-tab titles join unconditionally so a docs_service-less
+    # pull still separates them.
+    pmapped = (prompt_links(links) if bridge.meta_key == "gdocs" else {})
+    boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
+                  | set(pmapped) | {t for _, t in tab_props if t})
     sections = split_tabbed_export(whole, boundaries)
     targets = mapped
+    prompt_targets = sorted(pmapped)
     if query:
-        relpath, _ = _resolve(bridge, query)
-        if relpath not in mapped:
-            raise LookupError(f"'{relpath}' has no tab in the master Doc — "
-                              "'doc push' first")
-        targets = [relpath]
+        try:
+            relpath, _ = _resolve(bridge, query)
+        except LookupError:
+            # Not a manuscript file — an illustration prompt, perhaps.
+            pname = _match_prompt(set(pmapped), query)
+            if pname is None:
+                raise
+            targets, prompt_targets = [], [pname]
+        else:
+            if relpath not in mapped:
+                raise LookupError(f"'{relpath}' has no tab in the master Doc "
+                                  "— 'doc push' first")
+            targets, prompt_targets = [relpath], []
     for relpath in targets:
         if relpath not in sections:
             report["missing"].append(relpath)
@@ -1305,6 +1345,52 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         entry["checked_out"] = False
         # The pulled content is the new agreed base for three-way compare.
         entry["pushed_hash"] = hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    # Illustration prompt tabs: same three-way discipline, reported under
+    # their display path so conflicts and changes read like file paths.
+    # Doc-side deletions never delete locally (the file is canonical; the
+    # next push recreates the tab), so a missing section only reports.
+    if prompt_targets:
+        title_of = dict(illus_children)
+        prompts_dir = bridge.root / ILLUS_DIR / PROMPTS_SUBDIR
+        if illus_children:
+            known = {e.get("tab_id") for e in pmapped.values()}
+            unknown = [t for tid, t in illus_children if tid not in known]
+            if unknown:
+                report["prompt_unknown"] = unknown
+        for name in prompt_targets:
+            entry = pmapped[name]
+            display = ILLUS_DISPLAY_PREFIX + name
+            actual = title_of.get(entry.get("tab_id"))
+            if actual is not None and actual != name:
+                report.setdefault("prompt_renamed", []).append((name, actual))
+                continue
+            if name not in sections:
+                report["missing"].append(display)
+                continue
+            text = normalize_markdown(sections[name])
+            path = prompts_dir / name
+            raw = (path.read_text(encoding="utf-8")
+                   if path.exists() else "")
+            # Preview embeds are local derived machinery: compared
+            # embed-free, preserved across the pull's rewrite.
+            current, prior_embeds = split_prompt_embeds(raw)
+            state = three_way(text, current, entry.get("pushed_hash"))
+            if state == "conflict" and not force:
+                report["conflicts"].append(display)
+                continue
+            if state == "local_ahead" and not force:
+                report["local_ahead"].append(display)
+                continue
+            if text != current:
+                prompts_dir.mkdir(parents=True, exist_ok=True)
+                path.write_text(join_prompt_embeds(text, prior_embeds),
+                                encoding="utf-8")
+                report["changed"].append(display)
+            else:
+                report["unchanged"].append(display)
+            entry["pushed_hash"] = hashlib.sha256(
+                text.encode()).hexdigest()[:16]
 
     # TOC ↔ tab-structure sync (pull direction): the Doc's tab order and
     # nesting are the author's reordering interface. Three-way, like file
@@ -1423,7 +1509,10 @@ def reconcile(db: Database, manuscript: dict, service,
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
-    sections = split_tabbed_export(whole, set(mapped) | {MANIFEST_TITLE})
+    pmapped = prompt_links(links)
+    sections = split_tabbed_export(
+        whole, set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
+        | set(pmapped))
     dirty = False
     for relpath in mapped:
         entry = links[relpath]
@@ -1472,8 +1561,273 @@ def reconcile(db: Database, manuscript: dict, service,
                 report["conflicts"].append(relpath)
         except Exception as err:  # network, API — never block the session
             report["errors"].append({"file": relpath, "error": str(err)})
+
+    # Illustration prompt tabs: same three-way discipline. A section
+    # missing from the export (tab deleted Doc-side) only reports — the
+    # local file is canonical and the next push recreates the tab. A
+    # locally deleted file whose tab is unchanged auto-pushes, which
+    # prunes the tab.
+    prompt_ahead = []
+    for name, entry in sorted(pmapped.items()):
+        display = ILLUS_DISPLAY_PREFIX + name
+        try:
+            if name not in sections:
+                report["errors"].append({
+                    "file": display, "error": "tab missing from the Doc — "
+                    "the next 'doc push' recreates it"})
+                continue
+            doc_text = normalize_markdown(sections[name])
+            path = (Path(manuscript["path"]) / ILLUS_DIR / PROMPTS_SUBDIR
+                    / name)
+            raw = (path.read_text(encoding="utf-8")
+                   if path.exists() else "")
+            # Embed-free comparison, like push/pull: preview embeds are
+            # derived machinery the Doc never carries.
+            local_text, prior_embeds = split_prompt_embeds(
+                normalize_markdown(raw))
+            base = entry.get("pushed_hash")
+            local_hash = _hashlib.sha256(
+                local_text.encode()).hexdigest()[:16]
+            doc_hash = _hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+            if doc_text == local_text:
+                if entry.get("pushed_hash") != local_hash:
+                    entry["pushed_hash"] = local_hash
+                    dirty = True
+                report["in_sync"].append(display)
+            elif base and local_hash == base:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(join_prompt_embeds(doc_text, prior_embeds),
+                                encoding="utf-8")
+                entry["pushed_hash"] = doc_hash
+                dirty = True
+                report["pulled"].append(display)
+            elif base and doc_hash == base:
+                prompt_ahead.append(display)
+            else:
+                report["conflicts"].append(display)
+        except Exception as err:  # network, API — never block the session
+            report["errors"].append({"file": display, "error": str(err)})
+    if prompt_ahead:
+        if docs_service is None:
+            report["pending_push"].extend(prompt_ahead)
+        else:
+            if dirty:
+                _save_mapping(db, manuscript, meta)
+                dirty = False
+            try:
+                push_prompt_tabs(db, manuscript, service, docs_service)
+                meta = _mapping(db, manuscript)
+                links = meta.get("gdocs", {})
+                report["pushed"].extend(prompt_ahead)
+            except Exception as err:
+                report["errors"].append({"file": "(illustration prompts)",
+                                         "error": str(err)})
+
     if dirty:
         _save_mapping(db, manuscript, meta)
+    return report
+
+
+# ------------------------------------------- illustration prompt mirror
+# (the reserved 'illustrations' tab tree: one child tab per file in
+# _illustrations/prompts/, body = the canonical prompt text, editable in
+# the Doc and pulled back with the same three-way machinery as essays.
+# Local files stay canonical: Doc-side tab deletions are recoverable —
+# the next push recreates the tab — while a locally deleted prompt file
+# prunes its tab at the next push.)
+
+ILLUS_TAB_TITLE = "illustrations"
+ILLUS_KEY_PREFIX = "_illusprompt/"          # reserved mapping keys
+ILLUS_DISPLAY_PREFIX = "_illustrations/prompts/"
+ILLUS_SENTINEL = ("Illustration prompt descriptions — one subtab per "
+                  "prompt file; the text is the canonical description. "
+                  "Edit freely (synced back on pull); do not rename or "
+                  "hand-add subtabs.\n")
+
+
+def prompt_links(links: dict) -> dict[str, dict]:
+    """{<slug>.md: entry} for every reserved prompt key in the mapping."""
+    return {k[len(ILLUS_KEY_PREFIX):]: e for k, e in links.items()
+            if k.startswith(ILLUS_KEY_PREFIX) and isinstance(e, dict)}
+
+
+def illus_subtree(tabs: list, links: dict) -> tuple[str | None, list, set]:
+    """Locate the reserved 'illustrations' tab in a raw tab tree (by the
+    remembered id, falling back to its reserved title): (tab_id, direct
+    children as [(tab_id, title)], every subtree id including the root).
+    The id set is the classification guard — nothing under the reserved
+    tab may ever be adopted as an essay."""
+    wanted = links.get("_illustrations_tab")
+
+    def find(nodes):
+        for node in nodes or []:
+            props = node.get("tabProperties", {})
+            if (props.get("tabId") == wanted
+                    or (wanted is None
+                        and props.get("title") == ILLUS_TAB_TITLE)):
+                return node
+            hit = find(node.get("childTabs"))
+            if hit:
+                return hit
+        return None
+
+    root = find(tabs)
+    if root is None:
+        return None, [], set()
+    children = [(c.get("tabProperties", {}).get("tabId"),
+                 c.get("tabProperties", {}).get("title", ""))
+                for c in root.get("childTabs") or []]
+    ids = set()
+
+    def collect(node):
+        ids.add(node.get("tabProperties", {}).get("tabId"))
+        for child in node.get("childTabs") or []:
+            collect(child)
+
+    collect(root)
+    return root.get("tabProperties", {}).get("tabId"), children, ids
+
+
+def plan_prompt_sync(local: dict[str, str], mapped: dict[str, dict],
+                     children: list[tuple[str, str]]) -> dict:
+    """Pure diff of local prompt files against the mapping and the Doc's
+    actual child tabs: {create, rewrite, prune, unknown, renamed}.
+    Changed-only — rewrite fires on a pushed_hash mismatch; a mapped tab
+    that vanished Doc-side lands in create (deletions there are
+    recoverable); a hand-made tab is unknown and left untouched."""
+    import hashlib
+
+    title_of = dict(children)
+    known_ids = {e.get("tab_id") for e in mapped.values()}
+    plan: dict = {"create": [], "rewrite": [], "prune": [],
+                  "unknown": [], "renamed": []}
+    for name, text in sorted(local.items()):
+        entry = mapped.get(name) or {}
+        tab_id = entry.get("tab_id")
+        if tab_id in title_of:
+            if title_of[tab_id] != name:
+                plan["renamed"].append((name, title_of[tab_id]))
+            pushed = hashlib.sha256(text.encode()).hexdigest()[:16]
+            if entry.get("pushed_hash") != pushed:
+                plan["rewrite"].append(name)
+        else:
+            plan["create"].append(name)
+    name_of = {e.get("tab_id"): n for n, e in mapped.items()}
+    for tab_id, title in children:
+        if tab_id in known_ids:
+            if name_of[tab_id] not in local:
+                plan["prune"].append((name_of[tab_id], tab_id))
+        else:
+            plan["unknown"].append(title)
+    return plan
+
+
+def _match_prompt(names, query: str) -> str | None:
+    """Resolve a push/pull query against prompt file names: exact name,
+    display path, or an unambiguous substring."""
+    q = query.strip()
+    if q.startswith(ILLUS_DISPLAY_PREFIX):
+        q = q[len(ILLUS_DISPLAY_PREFIX):]
+    if q in names:
+        return q
+    hits = [n for n in names if q.lower() in n.lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _write_illus_root(docs_service, master_id: str, tab_id: str) -> None:
+    """The reserved tab's own body is a fixed sentinel, rewritten on
+    every prompt push so hand edits never accumulate there."""
+    requests: list[dict] = []
+    end = _tab_end(docs_service, master_id, tab_id)
+    if end > 2:
+        requests.append({"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
+    requests.append({"insertText": {
+        "location": {"tabId": tab_id, "index": 1},
+        "text": ILLUS_SENTINEL}})
+    docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}).execute()
+
+
+def push_prompt_tabs(db: Database, manuscript: dict, service,
+                     docs_service) -> dict:
+    """Mirror _illustrations/prompts/ into the reserved tab tree —
+    changed-only. Creates the root tab on first need (root-level like the
+    manifest, created once and never property-updated — the API 500s on
+    all root-tab property changes), creates/rewrites child tabs whose
+    pushed_hash moved, prunes tabs whose local file is gone. Never
+    touches essay tabs; the manuscript bridge only."""
+    import hashlib
+
+    meta = _mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    master_id = links.get("_master_id")
+    if not master_id:
+        return {"skipped": "no master doc"}
+    root = Path(manuscript["path"])
+    local: dict[str, str] = {}
+    directory = root / ILLUS_DIR / PROMPTS_SUBDIR
+    for path in (sorted(directory.glob("*.md"))
+                 if directory.is_dir() else []):
+        raw = path.read_text(encoding="utf-8")
+        normalized = normalize_markdown(raw)
+        if normalized != raw:
+            path.write_text(normalized, encoding="utf-8")
+        # Preview embeds are derived machinery — the Doc, the hash, and
+        # the three-way base never see them.
+        local[path.name] = split_prompt_embeds(normalized)[0]
+
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    illus_id, children, _ = illus_subtree(doc.get("tabs", []), links)
+    report: dict = {"created": [], "updated": [], "pruned": [],
+                    "unknown": [], "renamed": []}
+    if illus_id is None:
+        if not local:
+            return report  # no prompts and no tab: nothing to mirror
+        reply = docs_service.documents().batchUpdate(
+            documentId=master_id,
+            body={"requests": [{"addDocumentTab": {
+                "tabProperties": {"title": ILLUS_TAB_TITLE}}}]},
+        ).execute()
+        illus_id = reply["replies"][0]["addDocumentTab"][
+            "tabProperties"]["tabId"]
+        children = []
+    links["_illustrations_tab"] = illus_id
+
+    plan = plan_prompt_sync(local, prompt_links(links), children)
+    report["unknown"] = plan["unknown"]
+    report["renamed"] = plan["renamed"]
+    for name in plan["create"]:
+        reply = docs_service.documents().batchUpdate(
+            documentId=master_id,
+            body={"requests": [{"addDocumentTab": {"tabProperties": {
+                "title": name, "parentTabId": illus_id}}}]},
+        ).execute()
+        tab_id = reply["replies"][0]["addDocumentTab"][
+            "tabProperties"]["tabId"]
+        links[ILLUS_KEY_PREFIX + name] = {"tab_id": tab_id}
+        report["created"].append(name)
+    for name in plan["create"] + plan["rewrite"]:
+        entry = links[ILLUS_KEY_PREFIX + name]
+        _rewrite_tab(service, docs_service, master_id, entry["tab_id"],
+                     local[name], f"authorlm-temp-prompt-{Path(name).stem}")
+        entry["pushed_hash"] = hashlib.sha256(
+            local[name].encode()).hexdigest()[:16]
+        if name in plan["rewrite"]:
+            report["updated"].append(name)
+    for name, tab_id in plan["prune"]:
+        docs_service.documents().batchUpdate(
+            documentId=master_id,
+            body={"requests": [{"deleteTab": {"tabId": tab_id}}]},
+        ).execute()
+        links.pop(ILLUS_KEY_PREFIX + name, None)
+        report["pruned"].append(name)
+    try:
+        _write_illus_root(docs_service, master_id, illus_id)
+    except Exception:
+        pass  # the sentinel is cosmetic, never fatal to a push
+    _save_mapping(db, manuscript, meta)
     return report
 
 

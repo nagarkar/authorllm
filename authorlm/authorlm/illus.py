@@ -39,9 +39,21 @@ _DANGLING_REF = re.compile(r"!\[\]\[image\d+\]")
 _DANGLING_DEF = re.compile(r"^\[image\d+\]:\s.*$\n?", re.MULTILINE)
 
 
+_REF = re.compile(r"\s*⇢\s*(?P<ref>[\w.-]+\.md)\s*$")
+
+# Externalized descriptions: `[Illustration: excerpt… ⇢ slug.md]` keeps
+# a short reader-facing hint inline while the full prompt lives in
+# _illustrations/prompts/<slug>.md (the CANONICAL text — the excerpt is
+# machine-maintained and edits to it do not hold). Delete the `⇢ ref`
+# to make the inline text canonical again.
+PROMPTS_SUBDIR = "prompts"
+
+
 def parse_tag(line: str) -> dict | None:
     """The tag grammar. A slot is a full-line tag (trailing whitespace
-    tolerated); returns {prompt, caption} or None."""
+    tolerated); returns {prompt, caption, ref} or None. `prompt` is the
+    inline text — for a ref tag that is only the excerpt; resolution to
+    the full description happens in scan_text via the prompts map."""
     m = _TAG.match(line.strip())
     if not m or not line.strip().startswith("["):
         return None
@@ -51,8 +63,55 @@ def parse_tag(line: str) -> dict | None:
     if cm:
         caption = cm.group("caption").strip()
         body = body[: cm.start()]
+    ref = None
+    rm = _REF.search(body)
+    if rm:
+        ref = rm.group("ref")
+        body = body[: rm.start()]
     prompt = " ".join(body.split())
-    return {"prompt": prompt, "caption": caption} if prompt else None
+    if not prompt and not ref:
+        return None
+    return {"prompt": prompt, "caption": caption, "ref": ref}
+
+
+# Preview embeds in prompt files: `![](../<candidate>)` lines at the end
+# of a prompts/<slug>.md file are DERIVED machinery — machine-maintained
+# at collect to mirror the owning tag's pinned embed, so a local editor
+# (Obsidian) shows the image beside its description. They are invisible
+# to the desc_hash, the composed render prompt, and the Doc bridge —
+# exactly the essay embed-line convention, relocated ( `../` because the
+# prompt file lives inside _illustrations/prompts/).
+PROMPT_EMBED_LINE = re.compile(r"^!\[[^\]]*\]\(\.\./[^)]+\)[ \t]*$")
+
+
+def split_prompt_embeds(text: str) -> tuple[str, list[str]]:
+    """(canonical text, preview embed lines). The canonical half ends
+    with exactly one trailing newline — the stable base every hash and
+    Doc comparison uses."""
+    kept = [ln for ln in text.split("\n")
+            if not PROMPT_EMBED_LINE.match(ln)]
+    embeds = [ln.strip() for ln in text.split("\n")
+              if PROMPT_EMBED_LINE.match(ln)]
+    body = "\n".join(kept).rstrip("\n")
+    return (body + "\n" if body else ""), embeds
+
+
+def join_prompt_embeds(body: str, embeds: list[str]) -> str:
+    """Canonical text + preview embeds, in the canonical layout."""
+    if not embeds:
+        return body
+    return body.rstrip("\n") + "\n\n" + "\n".join(embeds) + "\n"
+
+
+def load_prompts(root: Path) -> dict[str, str]:
+    """{<slug>.md: canonical text} from _illustrations/prompts/ —
+    preview embed lines stripped."""
+    directory = Path(root) / ILLUS_DIR / PROMPTS_SUBDIR
+    if not directory.is_dir():
+        return {}
+    return {p.name: split_prompt_embeds(
+                p.read_text(encoding="utf-8"))[0]
+            for p in sorted(directory.glob("*.md"))}
 
 
 def desc_hash(prompt: str) -> str:
@@ -67,16 +126,210 @@ def slug(prompt: str) -> str:
     return "-".join(words[:4]) or "illustration"
 
 
-def scan_text(text: str) -> list[dict]:
-    """Every slot declared in a text, in order: {prompt, caption, line}
-    (1-based line numbers)."""
+def scan_text(text: str, prompts: dict[str, str] | None = None) -> list[dict]:
+    """Every slot declared in a text, in order: {prompt, excerpt,
+    caption, ref, line} (1-based). For ref tags, `prompt` and the
+    desc_hash come from the CANONICAL external file (via `prompts`,
+    from load_prompts); a missing file leaves the excerpt standing in,
+    flagged with missing_ref for the collect report."""
+    prompts = prompts or {}
     slots = []
     for lineno, line in enumerate(text.split("\n"), start=1):
         tag = parse_tag(line)
-        if tag:
-            slots.append({**tag, "line": lineno,
-                          "desc_hash": desc_hash(tag["prompt"])})
+        if not tag:
+            continue
+        slot = {**tag, "excerpt": tag["prompt"], "line": lineno}
+        if tag["ref"]:
+            full = prompts.get(tag["ref"])
+            if full is None:
+                slot["missing_ref"] = True
+            else:
+                slot["prompt"] = " ".join(full.split())
+        slot["desc_hash"] = desc_hash(slot["prompt"])
+        slots.append(slot)
     return slots
+
+
+def _excerpt_of(full: str, words: int = 8) -> str:
+    """The machine-maintained inline excerpt: first words of the
+    canonical text, ellipsized when trimmed."""
+    tokens = " ".join(full.split()).split()
+    head = " ".join(tokens[:words])
+    return head + ("…" if len(tokens) > words else "")
+
+
+def _tag_line(excerpt: str, ref: str | None, caption: str | None) -> str:
+    body = excerpt + (f" ⇢ {ref}" if ref else "")
+    if caption:
+        body += f" | caption: {caption}"
+    return f"[Illustration: {body}]"
+
+
+def externalize(root: Path, slot: dict) -> dict:
+    """Move a slot's inline description to its canonical file in
+    _illustrations/prompts/, leaving `excerpt… ⇢ slug.md` in the tag.
+    The collapsed text is unchanged, so the desc_hash — and every
+    rendered candidate — survives the move."""
+    root = Path(root)
+    if slot.get("ref"):
+        raise ValueError("this slot is already externalized "
+                         f"(⇢ {slot['ref']})")
+    directory = root / ILLUS_DIR / PROMPTS_SUBDIR
+    directory.mkdir(parents=True, exist_ok=True)
+    base = slug(slot["prompt"])
+    name, n = f"{base}.md", 2
+    while (directory / name).exists():
+        name, n = f"{base}-{n}.md", n + 1
+    (directory / name).write_text(slot["prompt"] + "\n", encoding="utf-8")
+    path = root / slot["file"]
+    lines = path.read_text(encoding="utf-8").split("\n")
+    lines[slot["line"] - 1] = _tag_line(
+        _excerpt_of(slot["prompt"]), name, slot.get("caption"))
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return {"file": slot["file"], "ref": name,
+            "desc_hash": slot["desc_hash"]}
+
+
+def maintain_excerpts(root: Path) -> list[dict]:
+    """Regenerate every ref tag's excerpt from its canonical file —
+    drift is impossible by construction. Returns the rewrites, each
+    flagged `discarded_edit` when the standing excerpt matched neither
+    the current canonical text (i.e. someone edited the excerpt, whose
+    edits do not hold). Missing files are reported, never guessed.
+
+    Also syncs each prompt file's preview embeds (`![](../<candidate>)`)
+    to mirror the owning tags' pinned embeds — same derived-machinery
+    contract as the excerpt: machine-maintained, edits do not hold."""
+    from .revisions import EMBED_LINE
+
+    root = Path(root)
+    prompts = load_prompts(root)
+    report = []
+    picked: dict[str, list[str]] = {}
+    for rel, path in iter_manuscript_paths(root).items():
+        lines = path.read_text(encoding="utf-8").split("\n")
+        changed = False
+        for i, line in enumerate(lines):
+            tag = parse_tag(line)
+            if not tag or not tag["ref"]:
+                continue
+            if i + 1 < len(lines) and EMBED_LINE.match(lines[i + 1]):
+                name = lines[i + 1].rsplit("/", 1)[-1].rstrip(") \t")
+                picks = picked.setdefault(tag["ref"], [])
+                if name not in picks:
+                    picks.append(name)
+            full = prompts.get(tag["ref"])
+            if full is None:
+                report.append({"file": rel, "ref": tag["ref"],
+                               "missing": True})
+                continue
+            expected = _excerpt_of(full)
+            if tag["prompt"] != expected:
+                report.append({"file": rel, "ref": tag["ref"],
+                               "discarded_edit": bool(tag["prompt"])})
+                lines[i] = _tag_line(expected, tag["ref"], tag["caption"])
+                changed = True
+        if changed:
+            path.write_text("\n".join(lines), encoding="utf-8")
+    directory = root / ILLUS_DIR / PROMPTS_SUBDIR
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.md")):
+            raw = path.read_text(encoding="utf-8")
+            body, embeds = split_prompt_embeds(raw)
+            want = [f"![](../{n})" for n in picked.get(path.name, [])]
+            if embeds != want:
+                path.write_text(join_prompt_embeds(body, want),
+                                encoding="utf-8")
+                report.append({"ref": path.name,
+                               "embed_synced": bool(want)})
+    return report
+
+
+def externalize_offers(root: Path, long_words: int = 50,
+                       stable_days: int = 7) -> list[dict]:
+    """Inline slots that have earned the offer: descriptions past the
+    length threshold (they distract in the Doc and on screen readers),
+    or rendered slots whose description has sat unchanged since a
+    candidate at least stable_days old. Offers only — the author
+    externalizes explicitly (illus externalize <fragment>)."""
+    import time
+
+    root = Path(root)
+    now = time.time()
+    offers = []
+    prompts = load_prompts(root)
+    for rel, path in iter_manuscript_paths(root).items():
+        for slot in scan_text(path.read_text(encoding="utf-8"), prompts):
+            if slot.get("ref"):
+                continue
+            reason = None
+            if len(slot["prompt"].split()) > long_words:
+                reason = f"longer than {long_words} words"
+            else:
+                cands = slot_candidates(root, slot["desc_hash"])
+                if cands:
+                    oldest = min(
+                        (root / ILLUS_DIR / c["name"]).stat().st_mtime
+                        for c in cands)
+                    if now - oldest > stable_days * 86400:
+                        reason = (f"rendered and unchanged for "
+                                  f"{stable_days}+ days")
+            if reason:
+                offers.append({"file": rel, "line": slot["line"],
+                               "prompt": slot["prompt"][:60],
+                               "reason": reason})
+    return offers
+
+
+# ---------------------------------------------- description craft file
+
+CRAFT_FILENAME = "illustration-craft.md"
+
+DEFAULT_CRAFT = """\
+# Illustration description craft — all manuscripts
+
+Guidelines for WRITING illustration descriptions (the spot-finder and
+the chat critique both read this file; edit freely — general rules
+first, model-specific carveouts in `## Model:` sections, of which only
+the active image model's section is used).
+
+- Concrete nouns with bound attributes — "a gray hooded sweatshirt and
+  running shoes", never abstractions like "modern clothes"
+  (abstractions get resolved in the style's era, not the text's).
+- Positive phrasing only: say what IS in the image; never "no X" or
+  "without X" (negations plant the very thing they forbid).
+- One idea per clause; short declarative clauses.
+- Camera and composition language is welcome: angle, distance, light
+  source, where the negative space sits.
+
+## Model: gemini/gemini-3-pro-image-preview
+
+- Garbles lettering: keep every surface unlettered; ask for "worn
+  illegible marks" rather than "faint script" when texture is wanted.
+- Strong period pull from style vocabulary ("engraving", "woodcut"):
+  when the scene is contemporary, name the era and specific garments
+  explicitly in the description.
+"""
+
+
+def craft_text(config: dict, workspace: str | None = None) -> str:
+    """The description-craft guidelines: general rules plus the active
+    image model's carveout section. Seeded on first read; the file is
+    the single source both the spot-finder and chat critique use."""
+    base = Path(workspace).resolve() if workspace else Path.home()
+    path = base / ".authorlm" / CRAFT_FILENAME
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(DEFAULT_CRAFT, encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    model = (config.get("llm", {}) or {}).get("image_model", "")
+    sections = re.split(r"(?m)^## Model:\s*", text)
+    out = sections[0].rstrip()
+    for section in sections[1:]:
+        name, _, body = section.partition("\n")
+        if name.strip() == model:
+            out += f"\n\n## Model: {name.strip()}\n{body.rstrip()}"
+    return out
 
 
 def candidate_files(root: Path) -> list[dict]:
@@ -98,8 +351,9 @@ def slot_report(root: Path) -> dict:
     whose prompt no longer exists anywhere (edited or deleted tags)."""
     root = Path(root)
     slots = []
+    prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
-        for slot in scan_text(path.read_text(encoding="utf-8")):
+        for slot in scan_text(path.read_text(encoding="utf-8"), prompts):
             slots.append({"file": rel, **slot})
     rendered = {c["desc"] for c in candidate_files(root)}
     declared = {s["desc_hash"] for s in slots}
@@ -207,19 +461,30 @@ def image_with_metadata(img: bytes, fields: dict[str, str]) -> bytes:
     return img  # unknown format — store untouched
 
 
-def _find_tag_line(lines: list[str], deschash: str) -> int | None:
+def _find_tag_line(lines: list[str], deschash: str,
+                   prompts: dict[str, str] | None = None) -> int | None:
+    """Index of the tag whose CANONICAL description hashes to deschash.
+    Ref tags carry only the excerpt inline, so identity needs the
+    prompts map (load_prompts) — without it an externalized slot is
+    invisible here."""
+    prompts = prompts or {}
     for i, line in enumerate(lines):
         tag = parse_tag(line)
-        if tag and desc_hash(tag["prompt"]) == deschash:
+        if not tag:
+            continue
+        full = (prompts.get(tag["ref"], tag["prompt"]) if tag["ref"]
+                else tag["prompt"])
+        if desc_hash(" ".join(full.split())) == deschash:
             return i
     return None
 
 
-def embed_target(text: str, deschash: str) -> str | None:
+def embed_target(text: str, deschash: str,
+                 prompts: dict[str, str] | None = None) -> str | None:
     """The candidate filename the slot's embed line points at (the
     line directly under the tag), or None if not embedded."""
     lines = text.split("\n")
-    i = _find_tag_line(lines, deschash)
+    i = _find_tag_line(lines, deschash, prompts)
     if i is None or i + 1 >= len(lines):
         return None
     from .revisions import EMBED_LINE
@@ -229,7 +494,8 @@ def embed_target(text: str, deschash: str) -> str | None:
     return None
 
 
-def set_embed(path: Path, deschash: str, candidate_name: str) -> bool:
+def set_embed(path: Path, deschash: str, candidate_name: str,
+              prompts: dict[str, str] | None = None) -> bool:
     """Point the slot's embed line at a candidate — insert directly
     under the tag, or rewrite the existing embed. The embed is derived
     machinery: observation, push, and the beat loop never see it."""
@@ -237,7 +503,7 @@ def set_embed(path: Path, deschash: str, candidate_name: str) -> bool:
 
     text = path.read_text(encoding="utf-8")
     lines = text.split("\n")
-    i = _find_tag_line(lines, deschash)
+    i = _find_tag_line(lines, deschash, prompts)
     if i is None:
         return False
     embed = f"![]({ILLUS_DIR}/{candidate_name})"
@@ -254,8 +520,9 @@ def find_slot(root: Path, fragment: str) -> list[dict]:
     each as {file, line, prompt, caption, desc_hash}."""
     fragment = fragment.lower()
     matches = []
+    prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(Path(root)).items():
-        for slot in scan_text(path.read_text(encoding="utf-8")):
+        for slot in scan_text(path.read_text(encoding="utf-8"), prompts):
             if fragment in slot["prompt"].lower():
                 matches.append({"file": rel, **slot})
     return matches
@@ -309,10 +576,11 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
         })
         (directory / name).write_bytes(payload)
         written.append(name)
+    prompts = load_prompts(root)
     embedded = embed_target((root / slot["file"]).read_text(encoding="utf-8"),
-                            deschash)
+                            deschash, prompts)
     if embedded is None:
-        set_embed(root / slot["file"], deschash, written[-1])
+        set_embed(root / slot["file"], deschash, written[-1], prompts)
     return {"written": written, "embedded": embedded or written[-1],
             "style_hash": shash, "had_embed": embedded is not None}
 
@@ -323,12 +591,13 @@ def slot_status(db, manuscript: dict) -> list[dict]:
     figure law) — plus the embedded candidate and candidate count."""
     root = Path(manuscript["path"])
     out = []
+    prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
         current = style_hash(illustration_law(db, manuscript["id"], rel))
-        for slot in scan_text(text):
+        for slot in scan_text(text, prompts):
             cands = slot_candidates(root, slot["desc_hash"])
-            embedded = embed_target(text, slot["desc_hash"])
+            embedded = embed_target(text, slot["desc_hash"], prompts)
             state = "unrendered"
             if cands:
                 state = "rendered"
@@ -353,11 +622,12 @@ def prune(manuscript: dict) -> list[str]:
     root = Path(manuscript["path"])
     keep: set[str] = set()
     declared: set[str] = set()
+    prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
-        for slot in scan_text(text):
+        for slot in scan_text(text, prompts):
             declared.add(slot["desc_hash"])
-            target = embed_target(text, slot["desc_hash"])
+            target = embed_target(text, slot["desc_hash"], prompts)
             if target:
                 keep.add(target)
     removed = []
@@ -369,18 +639,22 @@ def prune(manuscript: dict) -> list[str]:
     return removed
 
 
-def capture_embeds(text: str) -> dict[str, str]:
+def capture_embeds(text: str,
+                   prompts: dict[str, str] | None = None) -> dict[str, str]:
     """The pick state a text holds: {desc_hash: embedded candidate name}.
     Captured before a pull overwrites the file, so picks survive Doc
     round trips even though the Doc never carries embed lines."""
     from .revisions import EMBED_LINE
 
+    prompts = prompts or {}
     lines = text.split("\n")
     out: dict[str, str] = {}
     for i, line in enumerate(lines[:-1]):
         tag = parse_tag(line)
         if tag and EMBED_LINE.match(lines[i + 1]):
-            out[desc_hash(tag["prompt"])] = (
+            full = (prompts.get(tag["ref"], tag["prompt"])
+                    if tag["ref"] else tag["prompt"])
+            out[desc_hash(" ".join(full.split()))] = (
                 lines[i + 1].rsplit("/", 1)[-1].rstrip(") \t"))
     return out
 
@@ -394,6 +668,7 @@ def reembed(text: str, root: Path, prior: dict[str, str] | None = None) -> str:
 
     prior = prior or {}
     root = Path(root)
+    prompts = load_prompts(root)
     lines = text.split("\n")
     out: list[str] = []
     for i, line in enumerate(lines):
@@ -403,7 +678,9 @@ def reembed(text: str, root: Path, prior: dict[str, str] | None = None) -> str:
             continue
         if i + 1 < len(lines) and EMBED_LINE.match(lines[i + 1]):
             continue  # already embedded
-        h = desc_hash(tag["prompt"])
+        full = (prompts.get(tag["ref"], tag["prompt"])
+                if tag["ref"] else tag["prompt"])
+        h = desc_hash(" ".join(full.split()))
         name = prior.get(h)
         if name and not (root / ILLUS_DIR / name).exists():
             name = None
@@ -421,7 +698,19 @@ def effective_prompt(db, manuscript: dict, slot: dict) -> dict:
     image look like that". render_slot composes through this same
     function, so the two can never diverge."""
     law = illustration_law(db, manuscript["id"], slot["file"])
-    composed = (law + "\n\n" + slot["prompt"]) if law else slot["prompt"]
+    # Subject first, style second, precedence explicit — image models
+    # weight early tokens and resolve conflicts toward whatever claims
+    # authority, so the depiction must outrank the style's era/content
+    # implications (live finding 2026-08-10: 'modern clothes' lost to
+    # the engraving law's period pull). The stylehash still hashes the
+    # LAW text; a change to this template ships with a law edit, which
+    # bumps the hash and marks prior renders stale-style honestly.
+    composed = ((
+        "DEPICT (content commands — costume, era, objects, and "
+        "composition here override anything the style implies):\n"
+        f"{slot['prompt']}\n\n"
+        "STYLE (technique and rendering only):\n"
+        f"{law}") if law else slot["prompt"])
     return {
         "file": slot["file"],
         "line": slot.get("line"),

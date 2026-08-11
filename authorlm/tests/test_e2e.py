@@ -1341,6 +1341,68 @@ def scenario_doc_comments(root: Path) -> None:
           twins["ambiguous"] == ["x.md", "x.md"] and not twins["adopted"],
           str(twins))
 
+    # --- illustration prompt mirror: pure planner + subtree finder -------
+    import hashlib as _hh
+
+    from authorlm.gdocs import illus_subtree, plan_prompt_sync
+
+    local = {"a.md": "alpha", "b.md": "beta", "c.md": "gamma",
+             "e.md": "epsilon"}
+    mapped = {"b.md": {"tab_id": "t.b",
+                       "pushed_hash":
+                       _hh.sha256(b"beta").hexdigest()[:16]},
+              "c.md": {"tab_id": "t.c", "pushed_hash": "stale"},
+              "d.md": {"tab_id": "t.d", "pushed_hash": "x"},
+              "e.md": {"tab_id": "t.gone", "pushed_hash": "y"}}
+    children = [("t.b", "b.md"), ("t.c", "c-renamed.md"), ("t.d", "d.md"),
+                ("t.h", "hand.md")]
+    plan = plan_prompt_sync(local, mapped, children)
+    check("plan: new file and vanished tab → create",
+          plan["create"] == ["a.md", "e.md"], str(plan))
+    check("plan: hash drift → rewrite; matching hash → skip",
+          plan["rewrite"] == ["c.md"], str(plan))
+    check("plan: mapped tab with no local file → prune",
+          plan["prune"] == [("d.md", "t.d")], str(plan))
+    check("plan: hand-made tab → unknown, untouched",
+          plan["unknown"] == ["hand.md"], str(plan))
+    check("plan: renamed tab detected",
+          plan["renamed"] == [("c.md", "c-renamed.md")], str(plan))
+
+    tree = [{"tabProperties": {"tabId": "r1", "title": "book"},
+             "childTabs": [{"tabProperties": {"tabId": "e1",
+                                              "title": "a.md"}}]},
+            {"tabProperties": {"tabId": "il", "title": "illustrations"},
+             "childTabs": [{"tabProperties": {"tabId": "p1",
+                                              "title": "x.md"},
+                            "childTabs": [{"tabProperties": {
+                                "tabId": "p2", "title": "deep.md"}}]}]}]
+    root_id, kids, ids = illus_subtree(tree, {})
+    check("illus_subtree finds the reserved tab by title, with direct "
+          "children and every subtree id",
+          root_id == "il" and kids == [("p1", "x.md")]
+          and ids == {"il", "p1", "p2"}, str((root_id, kids, ids)))
+    root_id2, _, _ = illus_subtree(tree, {"_illustrations_tab": "r1"})
+    check("the remembered id outranks the reserved title", root_id2 == "r1",
+          str(root_id2))
+    missing = illus_subtree(tree[:1], {})
+    check("no reserved tab → (None, [], ∅)",
+          missing == (None, [], set()), str(missing))
+
+    from authorlm.illus import join_prompt_embeds, split_prompt_embeds
+
+    body, embeds = split_prompt_embeds("text line\n\n![](../c.png)\n")
+    check("preview embeds split from canonical text",
+          body == "text line\n" and embeds == ["![](../c.png)"],
+          str((body, embeds)))
+    check("join restores the canonical layout",
+          join_prompt_embeds(body, embeds)
+          == "text line\n\n![](../c.png)\n", "")
+    check("join without embeds is the body alone",
+          join_prompt_embeds(body, []) == body, "")
+    check("essay-form embed lines don't match the prompt-file grammar",
+          split_prompt_embeds("t\n![](_illustrations/c.png)\n")
+          == ("t\n![](_illustrations/c.png)\n", []), "")
+
     # --- manifest inventory: chapters, word counts, hierarchy, bars ------
     from authorlm.gdocs import manifest_text
     inv = [("part1.md", 0, 100), ("intro.md", 1, 400), ("notesish.md", 1, 0)]
@@ -1973,6 +2035,12 @@ def scenario_transplant() -> None:
     check("heading style carried over",
           any(r["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
               == "HEADING_1" for r in heading), str(heading))
+    para_styles = [r["updateParagraphStyle"]["paragraphStyle"]
+                   ["namedStyleType"] for r in heading]
+    check("every paragraph carries an explicit style — prose resets to "
+          "NORMAL_TEXT (residual-style contagion, it-641d1aa4e3c0)",
+          len(para_styles) == len(inserts)
+          and para_styles.count("NORMAL_TEXT") >= 3, str(para_styles))
     styles = [r["updateTextStyle"] for r in reqs if "updateTextStyle" in r]
     styled_words = {
         rebuilt[s["range"]["startIndex"] - 1:s["range"]["endIndex"] - 1]:

@@ -40,6 +40,9 @@ description you write must be renderable under it (in particular:
 no words, labels, or inscriptions inside the image unless that law
 explicitly permits them for this chapter).
 
+You will receive DESCRIPTION CRAFT rules — follow them literally
+when writing every description.
+
 You will receive a BUDGET: the maximum number of NEW placements for
 this chapter (revisions of existing tags are free). Order proposals
 strongest first — anything past the budget is discarded.
@@ -171,9 +174,13 @@ def scan(db: Database, manuscript: dict, llm: LLMClient,
             continue
         law = placement_law(db, mid, name)
         img_law = illustration_law(db, mid, name)
+        from .illus import craft_text
+
+        craft = craft_text(getattr(llm, "config", {}) or {})
         user = (f"{law}\n\n"
                 + (f"IMAGE LAW (descriptions must be renderable under "
                    f"it):\n{img_law}\n\n" if img_law else "")
+                + f"DESCRIPTION CRAFT:\n{craft}\n\n"
                 + f"CHAPTER: {name} ({len(text.split())} words)\n"
                 f"BUDGET: at most {budget} new placement(s)\n"
                 f"EXISTING ILLUSTRATIONS ({len(tags)}): "
