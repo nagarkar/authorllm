@@ -366,19 +366,40 @@ def get_briefing(manuscript: str | None = None,
 
 @mcp.tool()
 def get_concepts(manuscript: str | None = None, name: str | None = None,
+                 file: str | None = None, query: str | None = None,
                  include_all: bool = False, verbose: bool = False) -> dict:
-    """The Concept Graph. With `name`, detail for one concept (notes
-    untruncated — they are the ratified definition — with compact edge
-    lines). include_all adds retired/rejected. Compact by default;
-    verbose=True returns full rows."""
+    """The Concept Graph, scoped. With `name`: detail for one concept
+    (notes untruncated — they are the ratified definition). With `file`:
+    the concepts realized in that essay. With `query`: name/notes/alias
+    match. Unscoped: a summary (counts, recent names) — never the whole
+    graph; a mature graph is tens of thousands of tokens, so narrow the
+    call instead."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         if name:
             result = api.show_concept(db, ms, name)
             return result if verbose else api.compact_show_concept(result)
-        result = api.list_concepts(db, ms, include_all=include_all)
-        return result if verbose else api.compact_concepts(result)
+        if file or query:
+            return api.scoped_concepts(db, ms, file=file, query=query)
+        return api.concept_overview(db, ms)
+    return _guard(run)
+
+
+@mcp.tool()
+def curate_concepts(operations: list[dict],
+                    manuscript: str | None = None) -> dict:
+    """Batch graph curation, applied in order with per-op status. Each
+    operation: {"op": "confirm", "name", "kind"?} | {"op": "retire",
+    "name"} | {"op": "link", "from", "relation", "to"} | {"op":
+    "reject_edge", "edge_id"} | {"op": "alias", "name", "aliases",
+    "remove"?}. One failed op never blocks the rest. Suggestion verdicts
+    stay on review_suggestion, one at a time — their explanations are
+    evidence."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return api.curate_concepts(db, ms, operations)
     return _guard(run)
 
 

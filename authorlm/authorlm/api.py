@@ -1510,6 +1510,122 @@ def compact_concepts(result: dict) -> dict:
     }
 
 
+def concept_overview(db: Database, manuscript: dict) -> dict:
+    """The graph at a glance — counts by kind and status, edge count,
+    recently added names — never the rows themselves. This is what an
+    unscoped chat fetch gets: the full compact dump measured ~59K tokens
+    on a mature graph, a third of a context window (ratified 2026-08-10:
+    dumps impossible by construction; narrow with name=, file=, query=)."""
+    mid = manuscript["id"]
+    by_kind: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    for row in db.all(
+            "SELECT kind, status, COUNT(*) AS n FROM concept_nodes "
+            "WHERE manuscript_id = ? AND status != 'retired' "
+            "GROUP BY kind, status", (mid,)):
+        by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + row["n"]
+        by_status[row["status"]] = by_status.get(row["status"], 0) + row["n"]
+    recent = [r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired' ORDER BY created_at DESC LIMIT 12",
+        (mid,))]
+    edge_count = db.one(
+        "SELECT COUNT(*) AS n FROM concept_edges WHERE manuscript_id = ? "
+        "AND status NOT IN ('rejected', 'retired')", (mid,))["n"]
+    return {
+        "node_count": sum(by_kind.values()),
+        "edge_count": edge_count,
+        "by_kind": by_kind,
+        "by_status": by_status,
+        "recently_added": recent,
+        "guidance": ("The graph is too large to list whole. Narrow with "
+                     "name= (one concept, full notes), query= (name/notes/"
+                     "alias match), or file= (concepts realized in an "
+                     "essay)."),
+    }
+
+
+def scoped_concepts(db: Database, manuscript: dict,
+                    file: str | None = None,
+                    query: str | None = None) -> dict:
+    """The relevant slice of the graph, compact. `query` matches name,
+    notes, or aliases (case-insensitive substring). `file` selects
+    concepts realized in that essay: introduced there, or whose name or
+    alias appears in its text. Edges are restricted to the selected
+    nodes."""
+    mid = manuscript["id"]
+    nodes = [dict(n) for n in db.all(
+        "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired'", (mid,))]
+    if query:
+        q = query.lower()
+        nodes = [n for n in nodes
+                 if q in n["name"].lower()
+                 or q in (n.get("notes") or "").lower()
+                 or any(q in a.lower()
+                        for a in loads(n.get("aliases"), []))]
+    if file:
+        from .revisions import read_manuscript_files
+        files = read_manuscript_files(Path(manuscript["path"]))
+        rel = next((r for r in files
+                    if r == file or r.endswith("/" + file)
+                    or Path(r).name == file), None)
+        if rel is None:
+            raise LookupError(f"no manuscript file matching '{file}'")
+        text = files[rel].lower()
+        nodes = [n for n in nodes
+                 if n.get("introduced_in") == rel
+                 or n["name"].lower() in text
+                 or any(a.lower() in text
+                        for a in loads(n.get("aliases"), []))]
+    ids = {n["id"] for n in nodes}
+    edges = [
+        {**dict(e),
+         "from_name": cg.node_name(db, e["from_node"]),
+         "to_name": cg.node_name(db, e["to_node"])}
+        for e in db.all(
+            "SELECT * FROM concept_edges WHERE manuscript_id = ? "
+            "AND status NOT IN ('rejected', 'retired')", (mid,))
+        if e["from_node"] in ids and e["to_node"] in ids]
+    return compact_concepts({"nodes": nodes, "edges": edges})
+
+
+def curate_concepts(db: Database, manuscript: dict,
+                    operations: list[dict]) -> dict:
+    """Batch graph curation for naturally-plural moments: an operations
+    array of confirm / retire / link / reject_edge / alias, applied in
+    order with per-op status — one failed op never blocks the rest.
+    review_suggestion is deliberately NOT batchable: per-verdict
+    explanations are the evidence stream (ratified 2026-08-10)."""
+    results = []
+    for op in operations:
+        kind = op.get("op")
+        try:
+            if kind == "confirm":
+                out = confirm_concept(db, manuscript, op["name"],
+                                      kind=op.get("kind"))
+            elif kind == "retire":
+                out = retire_concept(db, manuscript, op["name"])
+            elif kind == "link":
+                out = link_concepts(db, manuscript, op["from"],
+                                    op["relation"], op["to"])
+            elif kind == "reject_edge":
+                out = reject_edge(db, manuscript, op["edge_id"])
+            elif kind == "alias":
+                out = alias_concept(db, manuscript, op["name"],
+                                    op.get("aliases", []),
+                                    remove=bool(op.get("remove")))
+            else:
+                raise ValueError(f"unknown op '{kind}' — expected confirm"
+                                 " | retire | link | reject_edge | alias")
+            results.append({"op": kind, "ok": True, "result": out})
+        except Exception as err:
+            results.append({"op": kind, "ok": False, "error": str(err)})
+    return {"applied": sum(1 for r in results if r["ok"]),
+            "failed": sum(1 for r in results if not r["ok"]),
+            "results": results}
+
+
 def compact_show_concept(result: dict) -> dict:
     """Single-concept detail: the node keeps full notes (they are the
     ratified definition); only row boilerplate and edge rows compact."""

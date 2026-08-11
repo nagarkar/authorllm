@@ -1720,6 +1720,54 @@ def main_test() -> None:
         check("re-reconcile never re-ingests the same comment",
               not rep_h2.get("comments"), str(rep_h2.get("comments")))
 
+        # --- scoped concept fetch + batch curation (token plan) ---
+        api.add_concept(db, manuscript, "Winding Path",
+                        notes="the road that bends")
+        api.add_concept(db, manuscript, "Iron Gate",
+                        notes="entry that resists")
+        api.add_concept(db, manuscript, "Brass Planets",
+                        notes="the orrery's cargo")
+        api.link_concepts(db, manuscript, "Winding Path", "leads_to",
+                          "Iron Gate")
+        over = api.concept_overview(db, manuscript)
+        check("unscoped fetch is a summary, never a dump",
+              "nodes" not in over and over["node_count"] >= 3
+              and "Winding Path" in over["recently_added"]
+              and "narrow" in over["guidance"].lower(), str(over)[:200])
+        hit = api.scoped_concepts(db, manuscript, query="iron gate")
+        check("query scope returns the matching slice only",
+              hit["node_count"] == 1
+              and any("Iron Gate" in str(n) for n in hit["nodes"]),
+              str(hit))
+        sliced = api.scoped_concepts(db, manuscript, file="06-orrery.md")
+        check("file scope selects concepts realized in the essay, "
+              "edges restricted to the slice",
+              sliced["node_count"] == 1
+              and any("Brass Planets" in str(n) for n in sliced["nodes"])
+              and sliced["edge_count"] == 0, str(sliced))
+        batch = api.curate_concepts(db, manuscript, [
+            {"op": "confirm", "name": "Winding Path"},
+            {"op": "alias", "name": "Iron Gate", "aliases": ["Portcullis"]},
+            {"op": "retire", "name": "Brass Planets"},
+            {"op": "retire", "name": "No Such Concept"},
+            {"op": "frobnicate", "name": "x"},
+        ])
+        check("batch curation applies in order, isolating failures",
+              batch["applied"] == 3 and batch["failed"] == 2
+              and batch["results"][3]["ok"] is False
+              and "unknown op" in batch["results"][4]["error"], str(batch))
+        check("batch results landed in the graph",
+              api.scoped_concepts(db, manuscript,
+                                  query="portcullis")["node_count"] == 1,
+              "")
+        cleanup = api.curate_concepts(db, manuscript, [
+            {"op": "retire", "name": "Winding Path"},
+            {"op": "retire", "name": "Iron Gate"},
+        ])
+        check("cleanup batch retires the scaffolding",
+              cleanup["applied"] == 2 and cleanup["failed"] == 0,
+              str(cleanup))
+
         # Deterministic guards: toc exclusion + pacing budget + arbiter.
         (ms / "toc.toml").write_text(
             '[[chapter]]\nfile = "01-choice.md"\n\n'
@@ -1887,7 +1935,8 @@ def main_test() -> None:
             "list_intents", "complete_intent", "abandon_intent",
             "collect_revision", "get_guidance", "review_suggestion",
             "get_briefing", "get_concepts", "add_concept", "link_concepts",
-            "confirm_concept", "retire_concept", "confirm_edge", "reject_edge",
+            "confirm_concept", "retire_concept", "curate_concepts",
+            "confirm_edge", "reject_edge",
             "list_proposals", "resolve_proposal", "analyze_episodes",
             "diff_versions", "list_policies", "close_session",
             "extract_concepts", "get_plan", "get_doc_links",
