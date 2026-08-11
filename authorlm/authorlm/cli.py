@@ -219,6 +219,37 @@ def _expire_idle_session(db: Database, manuscript: dict, args) -> None:
     _analyze_closed_episodes(db, manuscript, args)
 
 
+def _print_comment_harvest(result: dict) -> None:
+    """The comment half of a pull/reconcile report: thread actions, the
+    to-address queue, and harvest failures. Shared by 'doc pull' and
+    session-start reconcile (it-d469ecbf3999)."""
+    for act in result.get("thread_actions", []):
+        print(ui.green(
+            f"Thread {act['action']}: {act['file']} "
+            f"(comment {act['comment_id']})"))
+        if act.get("diff"):
+            print(ui.dim(f"  modified: {act['diff']}"))
+    board = (result.get("threads") or {}).get("counts")
+    if board:
+        print(ui.dim("Margin threads: " + ", ".join(
+            f"{n} {s}" for s, n in sorted(board.items()))))
+    comments = result.get("comments") or []
+    if comments:
+        print(ui.bold(f"Comments to address ({len(comments)}):"))
+        for c in comments:
+            print(f"  • [{c['location']}] on \"{c['quote']}\"")
+            print(f"    {c['content']}")
+        print(ui.dim(
+            f"Resolved {result.get('comments_resolved', 0)} in "
+            "the Doc with ingestion receipts. Address every "
+            "comment above; when acting on one, record the "
+            "author's words verbatim as the evidence/reason."))
+    if result.get("comments_error"):
+        print(ui.yellow("warning: comment harvest failed "
+                        f"({result['comments_error']}) — "
+                        "completed without it."))
+
+
 def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
     """Session-start sync with Google Docs: safe one-sided changes are
     applied automatically; two-sided edits are called out, untouched."""
@@ -265,6 +296,7 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
     for item in report["errors"]:
         print(ui.dim(f"warning: could not reconcile {item['file']} "
                      f"({item['error'][:80]})"))
+    _print_comment_harvest(report)
 
 
 def cmd_session(args):
@@ -2545,31 +2577,7 @@ def cmd_doc(args):
                              else "All tabs")
                     print(f"{scope} identical to local files — clean round "
                           "trip, nothing to collect.")
-                for act in result.get("thread_actions", []):
-                    print(ui.green(
-                        f"Thread {act['action']}: {act['file']} "
-                        f"(comment {act['comment_id']})"))
-                    if act.get("diff"):
-                        print(ui.dim(f"  modified: {act['diff']}"))
-                board = (result.get("threads") or {}).get("counts")
-                if board:
-                    print(ui.dim("Margin threads: " + ", ".join(
-                        f"{n} {s}" for s, n in sorted(board.items()))))
-                comments = result.get("comments") or []
-                if comments:
-                    print(ui.bold(f"Comments to address ({len(comments)}):"))
-                    for c in comments:
-                        print(f"  • [{c['location']}] on \"{c['quote']}\"")
-                        print(f"    {c['content']}")
-                    print(ui.dim(
-                        f"Resolved {result.get('comments_resolved', 0)} in "
-                        "the Doc with ingestion receipts. Address every "
-                        "comment above; when acting on one, record the "
-                        "author's words verbatim as the evidence/reason."))
-                if result.get("comments_error"):
-                    print(ui.yellow("warning: comment harvest failed "
-                                    f"({result['comments_error']}) — pull "
-                                    "completed without it."))
+                _print_comment_harvest(result)
                 print(ui.dim("Checkouts cleared — local editing is safe again."))
         except (LookupError, FileExistsError, ValueError) as err:
             sys.exit(f"error: {err}")

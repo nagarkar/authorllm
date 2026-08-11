@@ -868,6 +868,39 @@ def _ensure_folder(manuscript: dict, meta: dict, service) -> str:
     return result["id"]
 
 
+def comment_bearing(db: Database, manuscript: dict, bridge: DocBridge,
+                    relpath: str, service) -> bool:
+    """True when the live Doc holds an open comment that anchors to this
+    file's tab — or one whose anchor cannot be attributed to any file
+    (it could be anywhere, including here). A rebuild push would orphan
+    those anchors (it-77ef98f5289e); the caller routes such tabs through
+    the surgical diff push. Fetch failure counts as bearing: when the
+    margin's state is unknown, the safe path is the one that cannot
+    destroy it."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath)
+    if not links.get("_master_id") or not (
+            isinstance(entry, dict) and entry.get("tab_id")):
+        return False  # no tab yet — nothing anchored to protect
+    try:
+        comments = fetch_open_comments(service, links["_master_id"])
+    except Exception:
+        return True
+    if not comments:
+        return False
+    from .revisions import read_manuscript_files
+
+    files = {bridge.display_prefix + rel: text
+             for rel, text in read_manuscript_files(bridge.root).items()}
+    mine = bridge.display_prefix + relpath
+    for c in comments:
+        quote = (c.get("quotedFileContent") or {}).get("value", "")
+        rel, _ = locate_quote(files, quote)
+        if rel is None or rel == mine:
+            return True
+    return False
+
+
 def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
                  markdown: str, temp_name: str) -> None:
     """Rebuild one tab's body from markdown: temp-doc import (Google owns
@@ -906,9 +939,12 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
-    if threads_mod.open_threads(db, manuscript["id"], relpath):
-        # Surgical path: a rebuild would orphan the open margin threads,
-        # so thread-bearing tabs push by paragraph diff instead.
+    if (threads_mod.open_threads(db, manuscript["id"], relpath)
+            or comment_bearing(db, manuscript, bridge, relpath, service)):
+        # Surgical path: a rebuild would orphan the open margin threads
+        # AND every open comment anchor (it-77ef98f5289e), so tabs
+        # carrying either push by paragraph diff instead — anchors on
+        # untouched text survive by construction.
         result = diff_push(db, manuscript, relpath, service, docs_service,
                            bridge=bridge)
         meta_now = _mapping(db, manuscript)
@@ -1427,52 +1463,64 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     _save_mapping(db, manuscript, meta)
 
     if with_comments:
-        from .revisions import read_manuscript_files
-
-        try:
-            open_comments = fetch_open_comments(service, master_id)
-        except Exception as err:  # harvest failure must never break a pull
-            report["comments_error"] = str(err)
-            open_comments = []
-        if open_comments:
-            files = {bridge.display_prefix + rel: text
-                     for rel, text in
-                     read_manuscript_files(bridge.root).items()}
-            # Margin threads: comments are conversations now — never
-            # auto-resolved. New comments are ingested and surfaced to
-            # chat for proposal drafting; replies on threads we own are
-            # the verdict machine's input (step 2).
-            fresh = [c for c in open_comments
-                     if threads_mod.get_thread(
-                         db, manuscript["id"], c["id"]) is None
-                     and db.one(
-                         "SELECT id FROM doc_comments WHERE "
-                         "manuscript_id = ? AND comment_id = ?",
-                         (manuscript["id"], c["id"])) is None]
-            report["comments"] = ingest_comments(
-                db, manuscript, fresh, files)
-            report["thread_replies"] = []
-            for c in open_comments:
-                thread = threads_mod.get_thread(
-                    db, manuscript["id"], c["id"])
-                if thread is None:
-                    continue
-                for reply in c.get("replies", []):
-                    content = reply.get("content", "")
-                    if content and not threads_mod.is_ours(content):
-                        report["thread_replies"].append({
-                            "comment_id": c["id"],
-                            "state": thread["state"],
-                            "reply": content,
-                            "verdict": threads_mod.classify_reply(content),
-                        })
-        # The verdict machine runs even when nothing is open: a fully
-        # resolved margin is exactly when withdraw sweeps must fire.
-        report["thread_actions"] = advance_threads(
-            db, manuscript, open_comments, service, docs_service,
-            bridge)
+        harvest_comments(db, manuscript, master_id, service, docs_service,
+                         bridge, report)
     report["threads"] = threads_mod.ledger(db, manuscript["id"])
     return report
+
+
+def harvest_comments(db: Database, manuscript: dict, master_id: str,
+                     service, docs_service, bridge: DocBridge,
+                     report: dict) -> None:
+    """Fetch every open Doc comment, ingest the fresh ones, surface
+    thread replies, and run the verdict machine — the comment half of a
+    pull, shared with session-start reconcile (it-d469ecbf3999: the
+    margin is a working conversation; a session must not open blind to
+    it). Failures land in report['comments_error'], never raise."""
+    from .revisions import read_manuscript_files
+
+    try:
+        open_comments = fetch_open_comments(service, master_id)
+    except Exception as err:  # harvest failure must never break a pull
+        report["comments_error"] = str(err)
+        open_comments = []
+    if open_comments:
+        files = {bridge.display_prefix + rel: text
+                 for rel, text in
+                 read_manuscript_files(bridge.root).items()}
+        # Margin threads: comments are conversations now — never
+        # auto-resolved. New comments are ingested and surfaced to
+        # chat for proposal drafting; replies on threads we own are
+        # the verdict machine's input (step 2).
+        fresh = [c for c in open_comments
+                 if threads_mod.get_thread(
+                     db, manuscript["id"], c["id"]) is None
+                 and db.one(
+                     "SELECT id FROM doc_comments WHERE "
+                     "manuscript_id = ? AND comment_id = ?",
+                     (manuscript["id"], c["id"])) is None]
+        report["comments"] = ingest_comments(
+            db, manuscript, fresh, files)
+        report["thread_replies"] = []
+        for c in open_comments:
+            thread = threads_mod.get_thread(
+                db, manuscript["id"], c["id"])
+            if thread is None:
+                continue
+            for reply in c.get("replies", []):
+                content = reply.get("content", "")
+                if content and not threads_mod.is_ours(content):
+                    report["thread_replies"].append({
+                        "comment_id": c["id"],
+                        "state": thread["state"],
+                        "reply": content,
+                        "verdict": threads_mod.classify_reply(content),
+                    })
+    # The verdict machine runs even when nothing is open: a fully
+    # resolved margin is exactly when withdraw sweeps must fire.
+    report["thread_actions"] = advance_threads(
+        db, manuscript, open_comments, service, docs_service,
+        bridge)
 
 
 def reconcile(db: Database, manuscript: dict, service,
@@ -1625,6 +1673,11 @@ def reconcile(db: Database, manuscript: dict, service,
 
     if dirty:
         _save_mapping(db, manuscript, meta)
+    # The margin is a working conversation: a session must not open
+    # blind to it (it-d469ecbf3999). Same harvest as a pull; failures
+    # land in the report, never block the session.
+    harvest_comments(db, manuscript, master_id, service, docs_service,
+                     manuscript_bridge(manuscript), report)
     return report
 
 

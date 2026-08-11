@@ -1677,6 +1677,49 @@ def main_test() -> None:
               "![](" not in prompt_path.read_text(),
               prompt_path.read_text())
 
+        # --- comment-anchor safety: pushes route around open comments ---
+        from authorlm.gdocs import comment_bearing, manuscript_bridge
+
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        push_doc(db, manuscript, "06-orrery.md", service=stub,
+                 docs_service=stub)  # rebuild path: margin is empty
+        stub.add_comment("c-anchor", "distinctive orrery sentence",
+                         "Please reconsider this line.")
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, polished.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        guarded = push_doc(db, manuscript, "06-orrery.md", service=stub,
+                           docs_service=stub)
+        check("a push on a comment-bearing tab goes surgical",
+              guarded.get("mode") == "diff", str(guarded))
+        stub.add_comment("c-nowhere", "a quote matching no file at all",
+                         "Where does this belong?")
+        check("an unattributable anchor makes every mapped tab bearing",
+              comment_bearing(db, manuscript,
+                              manuscript_bridge(manuscript),
+                              "01-choice.md", stub) is True, "")
+        stub.state["comments"]["c-anchor"]["resolved"] = True
+        stub.state["comments"]["c-nowhere"]["resolved"] = True
+        cleared = push_doc(db, manuscript, "06-orrery.md", service=stub,
+                           docs_service=stub)
+        check("a settled margin restores the rebuild path",
+              "mode" not in cleared, str(cleared))
+
+        # --- session start is no longer blind to the margin ---
+        stub.add_comment("c-fresh", "distinctive orrery sentence",
+                         "Is brass the right metal?")
+        rep_h = reconcile(db, api.get_manuscript(db), stub,
+                          docs_service=stub)
+        check("reconcile harvests open comments at session start",
+              any("right metal" in c["content"]
+                  for c in rep_h.get("comments", [])), str(rep_h))
+        rep_h2 = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("re-reconcile never re-ingests the same comment",
+              not rep_h2.get("comments"), str(rep_h2.get("comments")))
+
         # Deterministic guards: toc exclusion + pacing budget + arbiter.
         (ms / "toc.toml").write_text(
             '[[chapter]]\nfile = "01-choice.md"\n\n'
