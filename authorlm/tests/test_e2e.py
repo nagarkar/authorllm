@@ -1927,6 +1927,12 @@ def scenario_style(root: Path) -> None:
     out = run(ws, "style", "show", "01-sermon.md")
     check("retired element leaves every composition",
           "Challenging" not in out, out)
+    out = run(ws, "style", "retire", tone_id, expect_exit=True)
+    check("retiring an already-retired element fails loudly",
+          "no active style element matching" in out, out)
+    out = run(ws, "style", "retire", "notaprefix", expect_exit=True)
+    check("retiring an unknown prefix fails loudly",
+          "no active style element matching" in out, out)
 
     # Aliases are reversible: --remove withdraws one without touching others.
     run(ws, "concept", "add", "Field of Choice")
