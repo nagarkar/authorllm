@@ -277,7 +277,11 @@ into context before showing it ONLY when its description encodes
 checkable structure — geometry, counts, spatial relations, lettering-
 freedom ("the loop closes", "four distinct idols"). For atmosphere,
 style, and taste, show it unread: the author's eye is the only judge,
-and vision tokens spent pre-screening those are waste.
+and vision tokens spent pre-screening those are waste. An image, once
+read, rides in context for the rest of the session — re-paid every
+turn, never un-seen. So: read any image at most once; never read what
+tools/gallery.py will embed (it reads from disk); SendUserFile and
+artifact pages show images without them ever entering context.
 **Debugging why an image came out a certain way**: the effective prompt
 is deterministic and inspectable — `authorlm illus prompt <fragment>`
 (CLI) or the `get_illustration_prompt` MCP tool returns the exact

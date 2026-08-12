@@ -631,22 +631,58 @@ def analyze_episodes(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def diff_versions(older: int | None = None, newer: int | None = None,
-                  file: str | None = None, manuscript: str | None = None) -> dict:
+                  file: str | None = None, manuscript: str | None = None,
+                  max_lines: int = 300) -> dict:
     """Unified diff between collected manuscript versions (default: the
-    last two). Use when the author asks what changed."""
+    last two). Use when the author asks what changed. Each file's diff
+    is capped at max_lines (default 300) with a truncation notice —
+    narrow the span or name a file for the full picture."""
     def run():
         db = _db()
-        return api.diff_versions(db, _manuscript(db, manuscript), older, newer, file)
+        result = api.diff_versions(db, _manuscript(db, manuscript),
+                                   older, newer, file)
+        files = result.get("files")
+        if isinstance(files, dict) and max_lines > 0:
+            budget = max_lines * 4  # whole-answer cap across files
+            spent = 0
+            for name, lines in files.items():
+                if not isinstance(lines, list):
+                    continue
+                if spent >= budget:
+                    files[name] = [f"… {len(lines)} changed line(s) — "
+                                   f"call with file='{name}' to see them"]
+                    continue
+                if len(lines) > max_lines:
+                    dropped = len(lines) - max_lines
+                    lines = lines[:max_lines] + [
+                        f"… (+{dropped} more lines — narrow the span or "
+                        f"pass file='{name}' with a higher max_lines)"]
+                    files[name] = lines
+                spent += len(lines)
+        return result
     return _guard(run)
 
 
 @mcp.tool()
-def list_policies(manuscript: str | None = None) -> dict:
-    """Learned editorial policies with confidence, status, support counts,
-    and outstanding questions."""
+def list_policies(manuscript: str | None = None, status: str | None = None,
+                  verbose: bool = False) -> dict:
+    """Learned editorial policies. Compact by default (statement, status,
+    confidence, support counts); status='validated' (or 'candidate',
+    'retired') filters; verbose=True returns full rows including
+    outstanding questions and provenance."""
     def run():
         db = _db()
-        return api.list_policies(db, _manuscript(db, manuscript))
+        rows = api.list_policies(db, _manuscript(db, manuscript))
+        if status:
+            rows = [p for p in rows if p.get("status") == status]
+        if verbose:
+            return {"policies": rows}
+        return {"policy_count": len(rows), "policies": [
+            {"id": p["id"], "statement": p["statement"],
+             "status": p["status"], "confidence": p["confidence"],
+             "supporting": p["supporting"],
+             "contradicting": p["contradicting"]}
+            for p in rows]}
     return _guard(run)
 
 
