@@ -266,6 +266,12 @@ law. NEVER record image guidance under aspect `figure`: that means
 figurative language (prose law) and must not reach image prompts
 (it-3e79bce24f73 is the scar).
 
+**Showing renders to the author**: when they're remote (phone), build a
+review page with `python tools/gallery.py --out <page.html> --title …
+"img::caption" …` (any number of images, captions carry file + status +
+next action; --json for complex specs) and publish it as an artifact —
+never re-type the page-builder inline; the script exists to keep that
+out of chat output.
 **Pre-screening renders (ratified 2026-08-10)**: read a rendered image
 into context before showing it ONLY when its description encodes
 checkable structure — geometry, counts, spatial relations, lettering-
