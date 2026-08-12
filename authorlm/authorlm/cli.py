@@ -1527,6 +1527,42 @@ def cmd_illus(args):
                 "you approved."))
         return
 
+    if args.action == "rerender":
+        # One verb for the revise cycle (ratified 2026-08-10): collect
+        # the description edit, render, pin the fresh candidate, prune
+        # the orphans, push the owning tab — the five-command loop that
+        # every illustration iteration otherwise walks by hand.
+        if not args.name:
+            raise SystemExit("rerender needs a fragment naming one slot")
+        config = _load_config(args)
+        cmd_collect(args)  # the edited description becomes canonical
+        slot = resolve_slot()
+        result = illus.render_slot(db, manuscript, slot, config,
+                                   count=args.count)
+        newest = result["written"][-1]
+        illus.set_embed(root / slot["file"], slot["desc_hash"], newest,
+                        illus.load_prompts(root))
+        removed = illus.prune(manuscript)
+        print(f"Rendered + pinned {newest}"
+              + (f"; pruned {len(removed)} orphan(s)" if removed else ""))
+        if not args.local:
+            from . import gdocs
+
+            try:
+                service = gdocs.get_service(config, args.workspace,
+                                            interactive=False)
+                docs_service = gdocs.get_docs_service(
+                    config, args.workspace, interactive=False)
+                res = gdocs.push_doc(db, manuscript, slot["file"],
+                                     service=service,
+                                     docs_service=docs_service)
+                print(f"Pushed {res['relpath']} → "
+                      f"{ui.dim(ui.link(res['url']))}")
+            except Exception as err:  # push is a convenience, never fatal
+                print(ui.yellow(f"Push skipped ({err}) — "
+                                f"'doc push {slot['file']}' when ready."))
+        return
+
     if args.action == "render":
         config = _load_config(args)
         if args.name:
@@ -3439,8 +3475,8 @@ def build_parser() -> argparse.ArgumentParser:
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
                "--reason \"…\"   bulk verdicts")
     p.add_argument("action",
-                   choices=["list", "render", "pick", "prune", "prompt",
-                            "scan", "triage", "externalize"])
+                   choices=["list", "render", "rerender", "pick", "prune",
+                            "prompt", "scan", "triage", "externalize"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
@@ -3452,6 +3488,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from", dest="from_n", type=int, metavar="N",
                    help="render: evolve candidate N under the current "
                         "illustration law (image-conditioned continuity)")
+    p.add_argument("--local", action="store_true",
+                   help="rerender: skip the Doc push at the end")
     p.add_argument("--accept", nargs="+", type=int, metavar="N",
                    help="triage: accept these proposal numbers")
     p.add_argument("--accept-all-except", nargs="*", type=int, metavar="N",

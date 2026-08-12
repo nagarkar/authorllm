@@ -266,6 +266,12 @@ law. NEVER record image guidance under aspect `figure`: that means
 figurative language (prose law) and must not reach image prompts
 (it-3e79bce24f73 is the scar).
 
+**Pre-screening renders (ratified 2026-08-10)**: read a rendered image
+into context before showing it ONLY when its description encodes
+checkable structure — geometry, counts, spatial relations, lettering-
+freedom ("the loop closes", "four distinct idols"). For atmosphere,
+style, and taste, show it unread: the author's eye is the only judge,
+and vision tokens spent pre-screening those are waste.
 **Debugging why an image came out a certain way**: the effective prompt
 is deterministic and inspectable — `authorlm illus prompt <fragment>`
 (CLI) or the `get_illustration_prompt` MCP tool returns the exact
