@@ -345,6 +345,12 @@ their reason verbatim.
   prose changes from formatting churn — BEFORE the learning summary.
   Surface open proposals and outstanding questions as questions to the
   author.
+- Any NEW stretch of manuscript work after a close starts with
+  `declare_intent` — it lazy-opens a session, so the work lands inside
+  an episode instead of the unattributed gap between sessions. The
+  editorial CLI verbs (render/rerender/scan, doc push/pull) lazy-open
+  one too (ratified 2026-08-11); observation (collect/status/watcher)
+  stays deliberately sessionless so history never has gaps.
 - Session hygiene: at conversation open, check the active session's age
   (get_status shows the session id; the briefing's `since` shows how far
   back it reaches). If the session was opened on a prior day, recommend —

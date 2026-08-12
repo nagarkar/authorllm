@@ -299,6 +299,20 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
     _print_comment_harvest(report)
 
 
+def _ensure_session(db, manuscript) -> None:
+    """Editorial verbs open a session lazily (ratified 2026-08-11):
+    render/rerender/scan and doc push/pull attribute their work to an
+    episode without blocking on ceremony. Observation (collect, status,
+    the watcher) stays deliberately sessionless — history must never
+    have gaps."""
+    from . import sessions as ses
+
+    if ses.active_session(db, manuscript["id"]) is None:
+        s = ses.start_session(db, manuscript["id"])
+        print(ui.dim(f"(opened session {s['id']} — editorial work is "
+                     "attributed to it; 'session end' closes it)"))
+
+
 def cmd_session(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -1297,6 +1311,7 @@ def cmd_illus(args):
         return matches[0]
 
     if args.action == "scan":
+        _ensure_session(db, manuscript)
         from . import placement
         from .llm import LLMClient as _LLM
 
@@ -1528,6 +1543,7 @@ def cmd_illus(args):
         return
 
     if args.action == "rerender":
+        _ensure_session(db, manuscript)
         # One verb for the revise cycle (ratified 2026-08-10): collect
         # the description edit, render, pin the fresh candidate, prune
         # the orphans, push the owning tab — the five-command loop that
@@ -1564,6 +1580,7 @@ def cmd_illus(args):
         return
 
     if args.action == "render":
+        _ensure_session(db, manuscript)
         config = _load_config(args)
         if args.name:
             targets = [resolve_slot()]
@@ -2442,6 +2459,7 @@ def cmd_doc(args):
     if args.action in ("push", "pull"):
         from . import gdocs
 
+        _ensure_session(db, manuscript)
         config = _load_config(args)
         try:
             # push/pull never open a consent browser — 'doc auth' is the
