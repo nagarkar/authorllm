@@ -1573,6 +1573,162 @@ def main_test() -> None:
         check("improvement tasks never leak into briefings",
               "improvement" not in str(api.get_briefing(db, manuscript)).lower())
 
+        # --- render / shell / triage resilience (live incidents 2026-08-10) ---
+        import base64
+        import contextlib
+        import io
+        import json as _rjson
+        import sys
+        import types
+        import urllib.error
+        from unittest import mock
+
+        from authorlm import gdocs as gdocs_mod
+        from authorlm import llm as llm_mod
+        from authorlm import shell as shell_mod
+        from authorlm.structure import matter_map, reading_order
+
+        class _ImageResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                png_b64 = base64.b64encode(b"PNGDATA").decode("ascii")
+                return _rjson.dumps({
+                    "candidates": [{"content": {"parts": [
+                        {"inlineData": {"data": png_b64}}]}}]
+                }).encode()
+
+        retry_calls = {"n": 0}
+
+        def urlopen_timeout_then_ok(request, timeout=None):
+            retry_calls["n"] += 1
+            retry_calls["timeout"] = timeout
+            if retry_calls["n"] == 1:
+                raise TimeoutError("stalled read")
+            return _ImageResp()
+
+        with mock.patch("urllib.request.urlopen", urlopen_timeout_then_ok):
+            png = llm_mod._gemini_image("gemini-img", "a ladder", None,
+                                        "fake-key", 17)
+        check("gemini image call retries once after TimeoutError",
+              png == b"PNGDATA" and retry_calls["n"] == 2
+              and retry_calls["timeout"] == 17, str(retry_calls))
+
+        http_calls = {"n": 0}
+
+        def urlopen_http_error(request, timeout=None):
+            http_calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://example.test", 500, "boom", hdrs=None,
+                fp=io.BytesIO(b'{"error":"no"}'))
+
+        try:
+            with mock.patch("urllib.request.urlopen", urlopen_http_error):
+                llm_mod._gemini_image("gemini-img", "prompt", None,
+                                      "fake-key", 17)
+            check("gemini HTTPError is not retried as a transient stall",
+                  False)
+        except RuntimeError as err:
+            check("gemini HTTPError is not retried as a transient stall",
+                  http_calls["n"] == 1 and "500" in str(err), str(err))
+
+        def boom_main(argv):
+            raise RuntimeError("network down")
+
+        out = io.StringIO()
+        with mock.patch("authorlm.cli.main", boom_main), \
+                contextlib.redirect_stdout(out):
+            shell_mod._dispatch(["--workspace", str(ws)], ["status"])
+        check("shell dispatch returns to the prompt after a command crash",
+              "error (RuntimeError): network down" in out.getvalue(),
+              out.getvalue())
+
+        class DistillLLM:
+            enabled = True
+
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, system, user):
+                self.calls.append((system, user))
+                return ('SCOPE: manuscript\n'
+                        'STATEMENT: "Prefer concrete metaphors over '
+                        'decorative ones."\n')
+
+        distill_llm = DistillLLM()
+        before_policies = db.one(
+            "SELECT COUNT(*) AS n FROM editorial_policies "
+            "WHERE manuscript_id = ?", (manuscript["id"],))["n"]
+        check("distill_batch no-ops without items or an enabled LLM",
+              placement.distill_batch(db, manuscript, [], distill_llm) is None
+              and placement.distill_batch(
+                  db, manuscript, [("01-choice.md", "rejected: x")],
+                  types.SimpleNamespace(enabled=False)) is None)
+        candidate = placement.distill_batch(
+            db, manuscript,
+            [("01-choice.md", "rejected: too decorative"),
+             ("04-road.md", "description revised: «a» became «b»")],
+            distill_llm)
+        check("distill_batch makes one combined distiller call for the sitting",
+              candidate is not None
+              and len(distill_llm.calls) == 1
+              and "too decorative" in distill_llm.calls[0][1]
+              and "became «b»" in distill_llm.calls[0][1]
+              and "at least two" in distill_llm.calls[0][1]
+              and db.one(
+                  "SELECT COUNT(*) AS n FROM editorial_policies "
+                  "WHERE manuscript_id = ?",
+                  (manuscript["id"],))["n"] == before_policies + 1,
+              str(candidate))
+
+        check("Google API socket timeout constant is 60s",
+              gdocs_mod.HTTP_TIMEOUT_SECONDS == 60)
+        fake_auth = types.ModuleType("google_auth_httplib2")
+        seen_http = {}
+
+        class _AuthorizedHttp:
+            def __init__(self, creds, http=None):
+                seen_http["creds"] = creds
+                seen_http["http"] = http
+
+        fake_auth.AuthorizedHttp = _AuthorizedHttp
+        sys.modules["google_auth_httplib2"] = fake_auth
+        try:
+            with mock.patch.object(gdocs_mod, "get_credentials",
+                                   return_value=object()):
+                gdocs_mod._authorized_http({}, None, False)
+            check("authorized Google HTTP client carries the socket timeout",
+                  getattr(seen_http.get("http"), "timeout", None)
+                  == gdocs_mod.HTTP_TIMEOUT_SECONDS,
+                  str(seen_http))
+        finally:
+            sys.modules.pop("google_auth_httplib2", None)
+
+        # toc.toml matter attributes + liberal parse (never raise)
+        matter_files = {
+            "toc.toml": (
+                '[[chapter]]\nfile = "front.md"\nmatter = "front"\n\n'
+                '[[chapter]]\nfile = "body.md"\n\n'
+                '[[chapter]]\nfile = "app.md"\nmatter = "back"\n\n'
+                '[[chapter]]\nfile = "weird.md"\nmatter = "sideways"\n'),
+            "front.md": "f", "body.md": "b", "app.md": "a", "weird.md": "w",
+            "orphan.md": "o",
+        }
+        check("matter_map reads front/main/back and defaults unknown/orphan",
+              matter_map(matter_files) == {
+                  "front.md": "front", "body.md": "main", "app.md": "back",
+                  "weird.md": "main", "orphan.md": "main"},
+              str(matter_map(matter_files)))
+        broken = {"toc.toml": "[[chapter]\nnot toml", "z.md": "z", "a.md": "a"}
+        ordered, missing = reading_order(broken)
+        check("broken toc.toml degrades to alphabetical order, never raises",
+              ordered == ["a.md", "z.md"] and missing == [],
+              f"{ordered=} {missing=}")
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
