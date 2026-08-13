@@ -1464,6 +1464,81 @@ def main_test() -> None:
                          "evidence_type = 'illus_triage'")["n"] == ev_before,
               str(arb))
 
+        # Revision acceptance must treat the new description as literal text
+        # — a string-template re.sub interprets \1/\U as group refs/escapes.
+        from authorlm.db import ko_fields as _ko
+
+        (ms / "06-revise.md").write_text(
+            "# **Revise**\n\nAn emblem stands at the gate.\n\n"
+            "[Illustration: old emblem at the gate]\n")
+        rev_row = _ko("ip")
+        rev_row.update(
+            manuscript_id=manuscript["id"], file="06-revise.md",
+            anchor="An emblem stands at the gate.",
+            description=r"emblem under C:\Users\author\figs with \1 mark",
+            criterion="2", rationale="clearer",
+            revises="old emblem at the gate", state="proposed")
+        db.insert("illus_proposals", rev_row)
+        rev_result = placement.decide(db, manuscript, rev_row["id"], "accept")
+        rev_text = (ms / "06-revise.md").read_text()
+        check("revision accept writes backslash-rich descriptions literally",
+              rev_result["state"] == "accepted"
+              and r"C:\Users\author\figs with \1 mark" in rev_text
+              and "[Illustration: old emblem at the gate]" not in rev_text,
+              rev_text)
+
+        # Multi-pass extraction must not advance the watermark when a later
+        # pass returns None — otherwise the missed payload is skipped forever.
+        from authorlm.extraction import extract_concepts
+
+        class FlakyLLM:
+            enabled = True
+            extraction_max_chars = 80
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, system, user, thinking_budget=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"concepts": [
+                        {"name": "AlphaConcept", "kind": "definition",
+                         "notes": "first payload"}],
+                            "links": [], "aliases": []}
+                return None  # second payload fails
+
+            def stats_line(self):
+                return None
+
+        (ms / "07-alpha.md").write_text(
+            "# Alpha\n\n" + ("AlphaConcept appears here. " * 8) + "\n")
+        (ms / "08-beta.md").write_text(
+            "# Beta\n\n" + ("BetaConcept appears here. " * 8) + "\n")
+        api.collect(db, manuscript, {})
+        latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        before_meta = _json.loads(manuscript["metadata"] or "{}")
+        flaky = FlakyLLM()
+        multi = extract_concepts(
+            db, manuscript, flaky, files=["07-alpha.md", "08-beta.md"])
+        after_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("multi-pass LLM miss leaves watermark unadvanced",
+              multi is not None
+              and multi.get("incomplete") is True
+              and after_meta.get("last_extracted_version")
+              == before_meta.get("last_extracted_version")
+              and after_meta.get("last_extracted_version") != latest["id"],
+              str({"multi": multi, "before": before_meta, "after": after_meta,
+                   "latest": latest["id"], "calls": flaky.calls}))
+        check("first multi-pass payload still commits its concepts",
+              db.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+                     "AND name = ?",
+                     (manuscript["id"], "AlphaConcept")) is not None,
+              str(multi))
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.

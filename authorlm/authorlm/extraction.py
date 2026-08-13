@@ -363,6 +363,19 @@ def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
 
+def _set_extraction_watermark(db: Database, manuscript: dict,
+                              latest_id: str | None) -> None:
+    """Advance the incremental-extract watermark and keep the in-memory
+    manuscript dict in sync (multi-pass aggregators re-read it)."""
+    if not latest_id:
+        return
+    meta = json.loads(manuscript["metadata"] or "{}")
+    meta["last_extracted_version"] = latest_id
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+
+
 def extract_concepts(
     db: Database, manuscript: dict, llm: LLMClient,
     files: list[str] | None = None, full: bool = False,
@@ -398,27 +411,39 @@ def extract_concepts(
 
     max_chars = getattr(llm, "extraction_max_chars", MAX_TEXT_CHARS)
 
-    def _passes(payloads: list[str], scope_label: str) -> dict:
+    def _passes(payloads: list[str], scope_label: str,
+                commit_watermark: bool = True) -> dict:
         """One extraction pass per payload, inventory carried, results
-        aggregated — the no-truncation guarantee for oversized scopes."""
+        aggregated — the no-truncation guarantee for oversized scopes.
+        Watermark advances only after EVERY pass succeeds: a mid-batch
+        LLM None must not mark the version extracted (silent permanent
+        skip of the remaining payloads on the next run)."""
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "proposed": 0, "truncated": False, "scope": scope_label,
         }
+        failed = False
         for payload in payloads:
             sub = extract_concepts(db, manuscript, llm,
                                    files=sorted(target or []),
                                    aliases_only=aliases_only,
                                    _inventory=True,
                                    _text_override=payload)
-            if not sub or sub.get("up_to_date"):
+            if sub is None:
+                failed = True
+                continue
+            if sub.get("up_to_date"):
                 continue
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
                         "proposed"):
                 aggregate[key] += sub.get(key, 0)
+        if commit_watermark and not failed and not aliases_only:
+            _set_extraction_watermark(db, manuscript, latest_id)
+        if failed:
+            aggregate["incomplete"] = True
         return aggregate
 
     if _text_override is not None:
@@ -447,7 +472,8 @@ def extract_concepts(
                  + (f", {len(payloads)} pass(es)"
                     if len(payloads) > 1 else ""))
         if len(payloads) > 1:
-            return _passes(payloads, scope)
+            return _passes(payloads, scope,
+                           commit_watermark=not _inventory)
         text, truncated = payloads[0], False
     else:
         text, truncated = _manuscript_text(manuscript, target,
@@ -466,7 +492,8 @@ def extract_concepts(
             return _passes(
                 payloads,
                 f"{len(units)} file(s), sections in "
-                f"{len(payloads)} pass(es) (cap {max_chars} chars)")
+                f"{len(payloads)} pass(es) (cap {max_chars} chars)",
+                commit_watermark=not _inventory)
 
     if truncated and not edges_only and not files:
         # Hierarchical extraction: the scope exceeds one payload, so run one
@@ -484,10 +511,19 @@ def extract_concepts(
             "proposed": 0,
             "truncated": False,
         }
+        failed = False
         for name in selected:
+            if not (disk.get(name) or "").strip():
+                continue  # empty chapter — nothing to mine, not a failure
             sub = extract_concepts(db, manuscript, llm, files=[name],
                                    aliases_only=aliases_only, _inventory=True)
-            if not sub or sub.get("up_to_date"):
+            if sub is None or sub.get("incomplete"):
+                # LLM miss (or nested multi-pass miss) — do not advance the
+                # watermark: the gap must remain retryable on the next extract.
+                failed = True
+                if sub is None:
+                    continue
+            if sub.get("up_to_date"):
                 continue
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
@@ -500,6 +536,10 @@ def extract_concepts(
             f"one pass each (cap {max_chars} chars)"
             + (", aliases only" if aliases_only else "")
         )
+        if not failed and not aliases_only:
+            _set_extraction_watermark(db, manuscript, latest_id)
+        if failed:
+            aggregate["incomplete"] = True
         return aggregate
 
     # Attention scope for proposals against settled knowledge: on an
@@ -777,10 +817,12 @@ def extract_concepts(
     # Advance the extraction watermark so the next run diffs from here.
     # An edges-only pass leaves it alone: the text has not been mined for
     # concepts, so a later incremental run must still see these files.
-    if latest_id and not edges_only and not aliases_only:
-        meta = json.loads(manuscript["metadata"] or "{}")
-        meta["last_extracted_version"] = latest_id
-        db.update("manuscripts", mid, {"metadata": json.dumps(meta)})
+    # Inventory sub-passes leave it alone too: the aggregator commits
+    # once after every pass succeeds (a mid-batch LLM miss must not
+    # mark the version extracted).
+    if (latest_id and not edges_only and not aliases_only
+            and not _inventory):
+        _set_extraction_watermark(db, manuscript, latest_id)
 
     return {
         "nodes": new_nodes,
