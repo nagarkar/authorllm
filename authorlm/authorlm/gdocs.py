@@ -299,17 +299,15 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
     author's comment VERBATIM (clamp the quote, never the comment)."""
     from .db import ko_fields
 
+    seen = {r["comment_id"] for r in db.all(
+        "SELECT comment_id FROM doc_comments WHERE manuscript_id = ?",
+        (manuscript["id"],))}
     out = []
     for c in comments:
         quoted = (c.get("quotedFileContent") or {}).get("value") or ""
         relpath, heading = locate_quote(files, quoted)
         location = f"{relpath}#{heading}" if relpath and heading else relpath
-        existing = db.one(
-            "SELECT id FROM doc_comments "
-            "WHERE manuscript_id = ? AND comment_id = ?",
-            (manuscript["id"], c["id"]),
-        )
-        if existing is None:
+        if c["id"] not in seen:
             row = ko_fields("dc")
             row.update(
                 manuscript_id=manuscript["id"], comment_id=c["id"],
@@ -322,6 +320,7 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
                 state="ingested",
             )
             db.insert("doc_comments", row)
+            seen.add(c["id"])
         out.append({
             "comment_id": c["id"],
             "location": location or "(unattributed)",
