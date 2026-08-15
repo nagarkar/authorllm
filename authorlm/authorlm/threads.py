@@ -58,7 +58,24 @@ def is_ours(content: str) -> bool:
     return content.lstrip().startswith(PREFIX)
 
 
+_RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
+
+
+def assert_no_pending_markers(old: str, new: str) -> None:
+    """Reject proposal text that would break the <<old>>{{new}} grammar.
+    Non-greedy parsers and find('}}') close at the first delimiter, so a
+    new half containing `}}` (e.g. nested braces) truncates the span and
+    corrupts both pull-strip and approve."""
+    for label, part in (("old", old), ("new", new)):
+        for marker in _RESERVED_MARKERS:
+            if marker in part:
+                raise ValueError(
+                    f"proposal {label} text cannot contain {marker!r} "
+                    "(reserved by the pending-change grammar)")
+
+
 def render_pending(old: str, new: str) -> str:
+    assert_no_pending_markers(old, new)
     return f"<<{old}>>{{{{{new}}}}}"
 
 
