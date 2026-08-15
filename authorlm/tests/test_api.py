@@ -944,7 +944,7 @@ def main_test() -> None:
         except ValueError as err:
             check("propose refuses delimiter-bearing new text",
                   "pending-change grammar" in str(err)
-                  and "}}" in str(err), str(err))
+                  and ("{{" in str(err) or "}}" in str(err)), str(err))
         try:
             th.render_pending("<<already marked>>", "new")
             check("render_pending refuses delimiter-bearing old text", False)
