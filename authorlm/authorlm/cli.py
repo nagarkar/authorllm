@@ -490,6 +490,8 @@ def cmd_intent(args):
             print("note: no active session — the intent is recorded but no episode was opened.")
     elif args.action == "complete":
         intent = _find_by_prefix(db, "declared_intents", args.id, manuscript["id"])
+        if intent["status"] != "active":
+            sys.exit(f"error: intent is already {intent['status']}.")
         ses.complete_intent(db, intent, args.outcome)
         print(f"Intent completed: {intent['statement']}")
         if args.outcome:

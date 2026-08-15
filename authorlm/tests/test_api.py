@@ -189,6 +189,52 @@ def main_test() -> None:
         typo = api.intent_preview(db, manuscript, "Discuss gravety maybe")
         check("preview fuzzy-suggests on typos", "Gravity" in typo["suggestions"])
 
+        # --- intent complete/abandon: active-state + lookup errors ---
+        life = api.declare_intent(db, manuscript, "Lifecycle probe intent")
+        life_id = life["intent"]["id"]
+        finished = api.complete_intent(db, manuscript, life_id[:8], "wrapped up")
+        check("complete_intent marks an active intent completed with outcome",
+              finished["intent"]["id"] == life_id
+              and db.one("SELECT status, outcome FROM declared_intents WHERE id = ?",
+                         (life_id,))["status"] == "completed"
+              and db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                         (life_id,))["outcome"] == "wrapped up")
+        try:
+            api.complete_intent(db, manuscript, life_id[:8], "again")
+            check("complete_intent rejects an already-completed intent", False)
+        except ValueError as err:
+            check("complete_intent rejects an already-completed intent",
+                  "already completed" in str(err))
+        check("rejected re-complete leaves the original outcome intact",
+              db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                     (life_id,))["outcome"] == "wrapped up")
+
+        drop = api.declare_intent(db, manuscript, "Abandon-then-complete probe")
+        drop_id = drop["intent"]["id"]
+        api.abandon_intent(db, manuscript, drop_id[:8], "changed mind")
+        try:
+            api.complete_intent(db, manuscript, drop_id[:8], "should fail")
+            check("complete_intent rejects an abandoned intent", False)
+        except ValueError as err:
+            check("complete_intent rejects an abandoned intent",
+                  "already abandoned" in str(err))
+        check("rejected complete-after-abandon preserves abandonment reason",
+              db.one("SELECT status, outcome FROM declared_intents WHERE id = ?",
+                     (drop_id,))["status"] == "abandoned"
+              and db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                         (drop_id,))["outcome"] == "changed mind")
+        try:
+            api.abandon_intent(db, manuscript, drop_id[:8], "again")
+            check("abandon_intent rejects a non-active intent", False)
+        except ValueError as err:
+            check("abandon_intent rejects a non-active intent",
+                  "already abandoned" in str(err))
+        try:
+            api.complete_intent(db, manuscript, "zzzzzzzz", None)
+            check("complete_intent rejects an unknown prefix", False)
+        except LookupError:
+            check("complete_intent rejects an unknown prefix", True)
+
         guidance = api.guide(db, manuscript, session)
         check("guide returns structured suggestions",
               not guidance["abstained"] and guidance["suggestions"])
@@ -1264,6 +1310,127 @@ def main_test() -> None:
 
             def stats_line(self):
                 return None
+
+        # --- episode analysis: learn editorial judgment from observed edits ---
+        from authorlm.analysis import MAX_DECISIONS, analyze_pending
+
+        an_root = root / "analyze-ws"
+        an_ms = an_root / "manuscript"
+        an_ms.mkdir(parents=True)
+        opening = ("# Opening\n\nChoice is the hinge of becoming.\n")
+        (an_ms / "01-choice.md").write_text(opening)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(an_root), "init", "--name", "analyze",
+                      "--path", str(an_ms)])
+        an_db = api.open_db(str(an_root))
+        an_mscript = api.get_manuscript(an_db)
+        api.collect(an_db, an_mscript, {})  # baseline version
+        an_session, _ = api.ensure_session(an_db, an_mscript)
+        an_declared = api.declare_intent(
+            an_db, an_mscript, "Develop the notion of Becoming")
+        an_intent_id = an_declared["intent"]["id"]
+        sailor = ("Like a sailor tacking, becoming threads through what "
+                  "choice has opened.")
+        (an_ms / "01-choice.md").write_text(opening + f"\n\n{sailor}\n")
+        (an_ms / "02-new.md").write_text(
+            f"# New chapter\n\n{sailor} The fresh prose must reach the analyzer.\n")
+        api.collect(an_db, an_mscript, {})
+
+        progress_calls = []
+        analysis_llm = FakeLLM({
+            "decisions": (
+                [{"action": "opened the section with a sailing metaphor",
+                  "pattern": "Open concept introductions with a lived metaphor"}]
+                + [{"action": f"local move {i}", "pattern": None}
+                   for i in range(1, MAX_DECISIONS)]
+                + [{"action": "ninth decision must be truncated",
+                    "pattern": "Should not seed"}]
+                + [{"action": "", "pattern": "empty action skipped"},
+                   "not-a-dict"]
+            ),
+            "outcome": "Developed the opening metaphor",
+        })
+        completed = api.complete_intent(
+            an_db, an_mscript, an_intent_id[:8], "done", llm=analysis_llm)
+        summaries = completed["analysis"]
+        check("complete_intent runs episode analysis over observed edits",
+              len(summaries) == 1
+              and summaries[0]["intent"] == "Develop the notion of Becoming"
+              and summaries[0]["outcome"] == "Developed the opening metaphor"
+              and len(summaries[0]["decisions"]) == MAX_DECISIONS
+              and summaries[0]["decisions"][0]["pattern"]
+              == "Open concept introductions with a lived metaphor",
+              str(summaries))
+        check("analysis prompt carries declared intent and file_added prose",
+              "DECLARED INTENT: Develop the notion of Becoming"
+              in analysis_llm.user
+              and "NEW TEXT:" in analysis_llm.user
+              and "fresh prose must reach the analyzer" in analysis_llm.user,
+              analysis_llm.user[:800])
+        seeded = an_db.one(
+            "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+            "AND statement = ?",
+            (an_mscript["id"],
+             "Open concept introductions with a lived metaphor"))
+        check("pattern seeds a medium-weight episode_analysis candidate",
+              seeded is not None and seeded["status"] == "candidate"
+              and seeded["source"] == "episode-analysis"
+              and an_db.one(
+                  "SELECT weight, evidence_type FROM evidence "
+                  "WHERE supports_policy = ?", (seeded["id"],)
+              )["weight"] == "medium"
+              and an_db.one(
+                  "SELECT evidence_type FROM evidence "
+                  "WHERE supports_policy = ?", (seeded["id"],)
+              )["evidence_type"] == "episode_analysis")
+        check("analysis is idempotent once the episode is marked analyzed",
+              api.analyze(an_db, an_mscript, analysis_llm) == [])
+
+        # Malformed decisions must not crash; episode stays pending for retry.
+        an2 = api.declare_intent(an_db, an_mscript, "Second episode for retry")
+        (an_ms / "01-choice.md").write_text(
+            (an_ms / "01-choice.md").read_text()
+            + "\n\nA second observed edit for the retry path.\n")
+        api.collect(an_db, an_mscript, {})
+        api.complete_intent(an_db, an_mscript, an2["intent"]["id"][:8],
+                            "closed without llm")
+        bad_llm = FakeLLM({"decisions": None, "outcome": "should not land"})
+        # Force a pending episode: strip analysis metadata if complete wrote none
+        # (no llm on complete above → episode closed but unanalyzed).
+        pending_before = analyze_pending(an_db, an_mscript, bad_llm)
+        check("null decisions do not crash and leave a completed analysis "
+              "with no decisions",
+              len(pending_before) == 1
+              and pending_before[0]["decisions"] == []
+              and pending_before[0]["outcome"] == "should not land",
+              str(pending_before))
+
+        an3 = api.declare_intent(an_db, an_mscript, "Third episode unavailable LLM")
+        (an_ms / "01-choice.md").write_text(
+            (an_ms / "01-choice.md").read_text()
+            + "\n\nA third edit awaiting a usable LLM reply.\n")
+        api.collect(an_db, an_mscript, {})
+        api.complete_intent(an_db, an_mscript, an3["intent"]["id"][:8], None)
+        none_llm = FakeLLM(None)
+        progress_calls.clear()
+
+        def _progress(index, total, statement):
+            progress_calls.append((index, total, statement))
+
+        stuck = analyze_pending(an_db, an_mscript, none_llm, progress=_progress)
+        ep3 = an_db.one(
+            "SELECT metadata FROM editorial_episodes WHERE intent_id = ?",
+            (an3["intent"]["id"],))
+        check("non-dict LLM reply leaves the episode pending for retry",
+              stuck == []
+              and not loads(ep3["metadata"], {}).get("analysis")
+              and progress_calls
+              and progress_calls[0][2] == "Third episode unavailable LLM",
+              str({"stuck": stuck, "meta": ep3["metadata"],
+                   "progress": progress_calls}))
+        check("disabled LLM is a no-op over pending episodes",
+              analyze_pending(an_db, an_mscript,
+                              type("Off", (), {"enabled": False})()) == [])
 
         api.add_concept(db, manuscript, "Tremor",
                         notes="The Tremor is never caused; it causes.")

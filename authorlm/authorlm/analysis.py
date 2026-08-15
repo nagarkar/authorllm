@@ -222,9 +222,15 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
         if not isinstance(result, dict):
             continue  # LLM unavailable/unusable — stays pending for later
 
+        raw_decisions = result.get("decisions")
+        if not isinstance(raw_decisions, list):
+            # null / wrong-shaped JSON must not crash mid-analyze (key
+            # present with null bypasses dict.get's default).
+            raw_decisions = []
+
         decisions = []
         policy_notes = []
-        for item in result.get("decisions", [])[:MAX_DECISIONS]:
+        for item in raw_decisions[:MAX_DECISIONS]:
             if not isinstance(item, dict) or not str(item.get("action", "")).strip():
                 continue
             action = str(item["action"]).strip()[:300]
