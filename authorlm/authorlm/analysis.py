@@ -96,24 +96,6 @@ def _pending_episodes(db: Database, manuscript_id: str) -> list[dict]:
     return pending
 
 
-def _episode_for_version(db: Database, manuscript_id: str, version_id: str):
-    """The closed episode whose transitions produced the given manuscript
-    version, if any."""
-    for transition in db.all(
-        "SELECT id FROM editorial_transitions WHERE manuscript_id = ? "
-        "AND version_after = ?",
-        (manuscript_id, version_id),
-    ):
-        episode = db.one(
-            "SELECT * FROM editorial_episodes WHERE manuscript_id = ? "
-            "AND status = 'closed' AND transition_ids LIKE ?",
-            (manuscript_id, f'%"{transition["id"]}"%'),
-        )
-        if episode:
-            return dict(episode)
-    return None
-
-
 def _precedent_from(db: Database, episode: dict, label: str) -> dict | None:
     meta = loads(episode["metadata"], {})
     decisions = (meta.get("analysis") or {}).get("decisions") or []
@@ -145,17 +127,66 @@ def find_precedents(db: Database, manuscript_id: str, concept_id: str,
         "ORDER BY CASE WHEN relation = 'co_occurs' THEN 1 ELSE 0 END",
         (manuscript_id, concept_id, concept_id),
     )
+
+    neighbor_ids = {
+        edge["to_node"] if edge["from_node"] == concept_id else edge["from_node"]
+        for edge in edges
+    }
+    neighbors: dict[str, dict] = {}
+    if neighbor_ids:
+        placeholders = ",".join("?" for _ in neighbor_ids)
+        neighbors = {
+            row["id"]: row
+            for row in db.all(
+                f"SELECT * FROM concept_nodes WHERE id IN ({placeholders})",
+                tuple(neighbor_ids),
+            )
+        }
+
+    version_ids = {
+        loads(node["metadata"], {}).get("realized_version")
+        for node in neighbors.values() if node["status"] == "realized"
+    }
+    version_ids.discard(None)
+
+    # Map realized_version -> closed episode, in two batched queries instead
+    # of one LIKE-scan of editorial_episodes per candidate transition.
+    transitions_by_version: dict[str, list[str]] = {}
+    if version_ids:
+        placeholders = ",".join("?" for _ in version_ids)
+        for transition in db.all(
+            f"SELECT id, version_after FROM editorial_transitions "
+            f"WHERE manuscript_id = ? AND version_after IN ({placeholders})",
+            (manuscript_id, *version_ids),
+        ):
+            transitions_by_version.setdefault(
+                transition["version_after"], []).append(transition["id"])
+
+    episode_by_transition: dict[str, dict] = {}
+    if transitions_by_version:
+        for episode in db.all(
+            "SELECT * FROM editorial_episodes WHERE manuscript_id = ? "
+            "AND status = 'closed'",
+            (manuscript_id,),
+        ):
+            for transition_id in loads(episode["transition_ids"], []):
+                episode_by_transition[transition_id] = dict(episode)
+
     for edge in edges:
         if len(precedents) >= limit:
             break
         other = edge["to_node"] if edge["from_node"] == concept_id else edge["from_node"]
-        neighbor = db.one("SELECT * FROM concept_nodes WHERE id = ?", (other,))
+        neighbor = neighbors.get(other)
         if not neighbor or neighbor["status"] != "realized":
             continue
         version_id = loads(neighbor["metadata"], {}).get("realized_version")
         if not version_id:
             continue
-        episode = _episode_for_version(db, manuscript_id, version_id)
+        episode = None
+        for transition_id in transitions_by_version.get(version_id, []):
+            episode = episode_by_transition.get(transition_id)
+            if episode:
+                break
         if not episode or episode["id"] in seen_episodes:
             continue
         precedent = _precedent_from(
