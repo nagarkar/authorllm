@@ -987,6 +987,25 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(wg, "collect")
         check("_drafts is invisible to observation", "No changes" in out, out)
 
+        # Prerequisite ordering between two UNREALIZED concepts — the plan's
+        # core "what to write first" promise. The one existing plan scenario
+        # above only links a realized concept to an unrealized one, which
+        # never populates write_first (realized nodes are filtered out
+        # before prerequisites_of runs).
+        run(wg, "concept", "add", "Epsilon")
+        run(wg, "concept", "add", "Zeta")
+        run(wg, "concept", "link", "Epsilon", "leads_to", "Zeta")
+        out = run(wg, "plan")
+        check("dependent concept names its unrealized prerequisite",
+              "write first: Epsilon" in out, out)
+        lines = out.splitlines()
+        epsilon_at = next(i for i, l in enumerate(lines)
+                          if "Introduce 'Epsilon'" in l)
+        zeta_at = next(i for i, l in enumerate(lines)
+                       if "Introduce 'Zeta'" in l)
+        check("the prerequisite is listed ahead of its dependent",
+              epsilon_at < zeta_at, out)
+
         # --- hierarchical extraction under a small cap ---
         write(wg / ".authorlm" / "config.toml",
               stub_config + "extraction_max_chars = 60\n")
@@ -1667,6 +1686,20 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     out = run(ws, "export-obsidian")
     check("re-export drops retired concepts",
           not (ms / "_concepts" / "Trajectory.md").exists(), out)
+
+    # Two names that sanitize to the same note filename must not silently
+    # overwrite each other's exported note.
+    run(ws, "concept", "add", "Choice/Freedom")
+    run(ws, "concept", "add", "Choice:Freedom")
+    out = run(ws, "export-obsidian")
+    stub_files = sorted(p.name for p in (ms / "_concepts").glob("Choice-Freedom*.md"))
+    check("colliding note names produce two distinct files",
+          len(stub_files) == 2, stub_files)
+    contents = {(ms / "_concepts" / f).read_text() for f in stub_files}
+    check("both colliding notes keep their own concept name",
+          any("# Choice/Freedom" in c for c in contents)
+          and any("# Choice:Freedom" in c for c in contents),
+          contents)
 
     # --- concept edit updates notes/kind ---
     out = run(ws, "concept", "edit", "Field", "--notes", "the horizon of possible moves")
