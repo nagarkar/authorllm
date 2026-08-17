@@ -17,6 +17,14 @@ from .llm import LLMClient
 
 MAX_SUGGESTIONS = 6
 
+# Registered in prompt_registry as "guidance-draft" ('authorlm prompts').
+BRIDGE_DRAFT_SYSTEM = (
+    "You are an editorial collaborator for a philosophy manuscript. "
+    "Draft a short bridge paragraph. Reply with the paragraph only. "
+    "Format any mathematics as MathJax: inline math in $...$, display "
+    "equations in $$...$$."
+)
+
 INTENT_KINDS = {"bridge", "policy_reminder"}       # generated from your intent
 STRUCTURAL_KINDS = {"prerequisite", "objection"}   # standing manuscript findings
 
@@ -381,10 +389,7 @@ def generate_guidance(
 
             style_context = render_style(db, mid, target_file)
         draft = llm.complete(
-            "You are an editorial collaborator for a philosophy manuscript. "
-            "Draft a short bridge paragraph. Reply with the paragraph only. "
-            "Format any mathematics as MathJax: inline math in $...$, display "
-            "equations in $$...$$."
+            BRIDGE_DRAFT_SYSTEM
             + (f"\n{style_context}" if style_context else ""),
             candidates[0]["explanation"],
         )

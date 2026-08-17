@@ -19,6 +19,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from . import api
+from . import critique
+from . import triage_transport
+from .db import loads as _loads
+
+TRIAGE_APP_URI = "ui://authorlm/triage-app.html"
 
 mcp = FastMCP(
     "authorlm",
@@ -80,7 +85,7 @@ def _guard(fn) -> dict[str, Any]:
     try:
         result = {"ok": True, "result": fn()}
         error = None
-    except (LookupError, ValueError) as err:
+    except (LookupError, ValueError, RuntimeError) as err:
         result = {"ok": False, "error": str(err)}
         error = f"{type(err).__name__}: {err}"
     except BaseException as err:
@@ -121,6 +126,48 @@ def get_status(manuscript: str | None = None) -> dict:
         db = _db()
         return api.status(db, _manuscript(db, manuscript))
     return _guard(run)
+
+
+@mcp.resource(
+    TRIAGE_APP_URI,
+    name="AuthorLM Triage App",
+    description="Interactive concept and edge analysis and triage",
+    mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"prefersBorder": False}},
+)
+def triage_app_resource() -> str:
+    from .triage_server import app_html
+
+    return app_html()
+
+
+@mcp.tool(
+    title="Open Triage App",
+    meta={
+        "ui": {"resourceUri": TRIAGE_APP_URI, "visibility": ["model"]},
+        "ui/resourceUri": TRIAGE_APP_URI,
+    },
+)
+def open_triage_app(manuscript: str | None = None) -> dict:
+    """Open the interactive Triage App for concepts and edges. Use when the
+    author asks to analyze, score, compare, or bulk-triage graph items."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return {"manuscript": ms["name"], "default_tab": "concepts"}
+    return _guard(run)
+
+
+@mcp.tool(
+    title="Triage App Request",
+    description="Internal request transport for the AuthorLM Triage App.",
+    meta={"ui": {"visibility": ["app"]}},
+)
+def triage_app_request(method: str, params: dict[str, Any]) -> dict:
+    """Internal app-only transport. Open the Triage App instead of calling
+    this directly."""
+    return _guard(lambda: triage_transport.dispatch(
+        method, params, workspace=_WORKSPACE, db=_db()))
 
 
 @mcp.tool()
@@ -171,6 +218,243 @@ def abandon_intent(intent_id: str, reason: str | None = None,
         db = _db()
         return api.abandon_intent(db, _manuscript(db, manuscript), intent_id, reason)
     return _guard(run)
+
+
+@mcp.tool()
+def import_critique(manifest_path: str, manuscript: str | None = None) -> dict:
+    """Load an external critique manifest (JSON): a critic's report parsed
+    into items, each classified as intent or style_element with unit,
+    ordinal, text, and scope. Everything lands as PROPOSED with critic
+    provenance — nothing becomes law or a work order until the author
+    triages. Idempotent per (source, unit, ordinal), so a corrected
+    manifest re-runs safely. Build the manifest conversationally first
+    (parse the report, map units to essay files, classify items), show
+    the author the per-unit accounting, then import."""
+    def run():
+        import json as _json
+        from pathlib import Path as _Path
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        manifest = _json.loads(_Path(manifest_path).read_text())
+        return critique.import_manifest(db, ms["id"], manifest)
+    return _guard(run)
+
+
+@mcp.tool()
+def critique_status(manuscript: str | None = None) -> dict:
+    """Per-critic tallies of imported critique items: proposed (awaiting
+    the author's verdict), accepted, rejected — intents and style
+    elements separately. Use to see whether triage homework remains."""
+    def run():
+        db = _db()
+        return {"critics": critique.status(db, _manuscript(db, manuscript)["id"])}
+    return _guard(run)
+
+
+@mcp.tool()
+def list_critique_items(scope: str | None = None,
+                        manuscript: str | None = None) -> dict:
+    """Pending (proposed) critique items in canonical order, numbered.
+    scope: an essay file (e.g. 'recapitulation.md') for that essay's
+    just-in-time sitting; 'manuscript' for manuscript-wide items only
+    (the global sitting); omit for everything. Numbers are positional
+    and go stale after verdicts land — re-list before another numbered
+    batch; ids never go stale. Present items to the author for verdicts;
+    record them with triage_critique."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        from .db import loads as _loads
+
+        items = []
+        for n, (kind, item) in enumerate(critique.queue(db, ms["id"], scope), 1):
+            meta = _loads(item["metadata"], {}).get("critique", {})
+            items.append({
+                "n": n, "id": item["id"], "kind": kind,
+                "unit": meta.get("unit"), "ordinal": meta.get("ordinal"),
+                "scope": item.get("scope") or item.get("file") or
+                ("guide" if item.get("guide_id") else "manuscript"),
+                "statement": item["statement"],
+            })
+        return {"count": len(items), "scope": scope, "items": items}
+    return _guard(run)
+
+
+@mcp.tool()
+def triage_critique(operations: list[dict], scope: str | None = None,
+                    manuscript: str | None = None) -> dict:
+    """Record the author's verdicts on proposed critique items, in batch.
+    Each operation: {"item": "<id prefix or list number>", "verdict":
+    "accept" | "reject" | "revise", "reason": "..." (reject: required —
+    the author's words, verbatim; they are the evidence), "text": "..."
+    (revise: required — the author's replacement wording; provenance
+    flips to author, the critic's original is kept as lineage)}.
+    Numbers resolve against ONE snapshot of the pending queue taken at
+    call start, in list_critique_items order with the same scope — pass
+    the same `scope` the numbers came from. One failed operation never
+    blocks the rest."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        mid = ms["id"]
+        snapshot = critique.queue(db, mid, scope)
+        results = []
+        for op in operations:
+            token = str(op.get("item", "")).strip()
+            verdict = op.get("verdict")
+            entry = {"item": token, "verdict": verdict}
+            try:
+                if verdict not in ("accept", "reject", "revise"):
+                    raise ValueError(f"unknown verdict '{verdict}'")
+                if token.isdigit():
+                    n = int(token)
+                    if not 1 <= n <= len(snapshot):
+                        raise LookupError(
+                            f"no item {n} — the pending list has "
+                            f"{len(snapshot)} item(s) for scope={scope!r}")
+                    kind, item = snapshot[n - 1]
+                else:
+                    kind, item = _critique_by_prefix(db, mid, token)
+                if verdict == "reject" and not op.get("reason"):
+                    raise ValueError("reject requires the author's verbatim "
+                                     "reason")
+                if verdict == "revise" and not op.get("text"):
+                    raise ValueError("revise requires the author's "
+                                     "replacement text")
+                fns = {("intent", "accept"): critique.accept_intent,
+                       ("intent", "reject"): critique.reject_intent,
+                       ("intent", "revise"): critique.revise_intent,
+                       ("element", "accept"): critique.accept_element,
+                       ("element", "reject"): critique.reject_element,
+                       ("element", "revise"): critique.revise_element}
+                fn = fns[(kind, verdict)]
+                if verdict == "accept":
+                    fn(db, mid, item)
+                elif verdict == "reject":
+                    fn(db, mid, item, op["reason"])
+                else:
+                    fn(db, mid, item, op["text"])
+                entry.update(ok=True, id=item["id"],
+                             statement=item["statement"][:100])
+            except (LookupError, ValueError, KeyError) as err:
+                entry.update(ok=False, error=str(err))
+            results.append(entry)
+        return {"results": results,
+                "still_proposed": len(critique.queue(db, mid, scope))}
+    return _guard(run)
+
+
+@mcp.tool()
+def list_critique_edits(essay: str, manuscript: str | None = None) -> dict:
+    """The critique pass's STAGED EDIT proposals for one essay (after
+    'critique run' in the shell): numbered, each with kind (replace |
+    insert), anchor paragraph, verbatim old, proposed new, the editor's
+    one-line why, the intent it serves, and its state (proposed |
+    accepted | rejected). Present them to the author for verdicts and
+    record them with triage_critique_edits. Running the pass, writing
+    to the Doc, resolving, and rolling back are CLI-only (Drive)."""
+    def run():
+        from . import passes
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        items = []
+        for n, t in enumerate(passes.staged_threads(db, ms["id"], essay), 1):
+            meta = _loads(t.get("metadata"), {}) or {}
+            items.append({
+                "n": n, "id": t["id"], "state": t["state"],
+                "kind": meta.get("kind"), "anchor_paragraph":
+                meta.get("anchor_paragraph"), "old": t["proposed_old"],
+                "new": t["proposed_new"], "why": t["note"],
+                "intent_id": meta.get("intent_id"),
+            })
+        return {"essay": essay, "count": len(items), "items": items}
+    return _guard(run)
+
+
+@mcp.tool()
+def triage_critique_edits(essay: str, operations: list[dict],
+                          manuscript: str | None = None) -> dict:
+    """Record the author's verdicts on staged edit proposals, in batch.
+    Each operation: {"item": "<list number or id prefix>", "verdict":
+    "accept" | "reject" | "revise" | "undo", "reason": "..." (reject: the
+    author's verbatim words), "text": "..." (revise: the author's own
+    wording — the diff is evidence)}. Verdicts are recorded only; nothing
+    touches the file or the Doc until 'critique write' in the shell.
+    Undo is free at any time before write. Numbers resolve against one
+    snapshot of list_critique_edits order. One failed op never blocks the
+    rest."""
+    def run():
+        from . import passes
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        mid = ms["id"]
+        snapshot = passes.staged_threads(db, mid, essay)
+        results = []
+        for op in operations:
+            token = str(op.get("item", "")).strip()
+            verdict = op.get("verdict")
+            entry = {"item": token, "verdict": verdict}
+            try:
+                if token.isdigit():
+                    n = int(token)
+                    if not 1 <= n <= len(snapshot):
+                        raise LookupError(f"no edit {n} (there are "
+                                          f"{len(snapshot)})")
+                    thread = snapshot[n - 1]
+                else:
+                    hits = [t for t in snapshot if token in t["id"]]
+                    if len(hits) != 1:
+                        raise LookupError(f"'{token}' matches {len(hits)} edits")
+                    thread = hits[0]
+                if verdict == "reject" and not op.get("reason"):
+                    raise ValueError("reject requires the author's verbatim "
+                                     "reason")
+                text = op.get("reason") if verdict == "reject" else op.get("text")
+                out = passes.verdict(db, mid, thread, verdict, text)
+                entry.update(ok=True, id=thread["id"], **out)
+            except (LookupError, ValueError, KeyError) as err:
+                entry.update(ok=False, error=str(err))
+            results.append(entry)
+        p = passes.active_pass(db, mid)
+        if p:
+            passes.mark_triaged(db, p, essay)
+        left = sum(1 for t in passes.staged_threads(db, mid, essay)
+                   if t["state"] == "proposed")
+        return {"results": results, "still_proposed": left,
+                "next": f"critique write {essay} (shell) once triage is done"}
+    return _guard(run)
+
+
+@mcp.tool()
+def move_style_element(element_id: str, guide: str | None = None,
+                       file: str | None = None,
+                       manuscript: str | None = None) -> dict:
+    """Re-scope a style element to another guide (by name) or to one file
+    — exactly one of guide/file. Use when a rule sits at the wrong level
+    (e.g. a Sermons-only voice rule imported at house scope). Keeps the
+    element's id, status, provenance, and history."""
+    def run():
+        db = _db()
+        return api.move_style_element(db, _manuscript(db, manuscript),
+                                      element_id, guide_name=guide, file=file)
+    return _guard(run)
+
+
+def _critique_by_prefix(db, mid: str, prefix: str):
+    for kind, table in (("intent", "declared_intents"),
+                        ("element", "style_elements")):
+        rows = db.all(
+            f"SELECT * FROM {table} WHERE manuscript_id = ? "
+            "AND status = 'proposed' AND id LIKE ?",
+            (mid, f"%{prefix}%"))
+        if len(rows) == 1:
+            return kind, dict(rows[0])
+        if len(rows) > 1:
+            raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} matches)")
+    raise LookupError(f"no proposed critique item matching '{prefix}'")
 
 
 @mcp.tool()
@@ -398,8 +682,10 @@ def curate_concepts(operations: list[dict],
                     manuscript: str | None = None) -> dict:
     """Batch graph curation, applied in order with per-op status. Each
     operation: {"op": "confirm", "name", "kind"?} | {"op": "retire",
-    "name"} | {"op": "link", "from", "relation", "to"} | {"op":
-    "reject_edge", "edge_id"} | {"op": "alias", "name", "aliases",
+    "name"} | {"op": "revive", "name"} (the inverse of retire: restores
+    status, location, and that retirement's collateral edges — use when
+    a retire was a mistake) | {"op": "link", "from", "relation", "to"} |
+    {"op": "reject_edge", "edge_id"} | {"op": "alias", "name", "aliases",
     "remove"?}. One failed op never blocks the rest. Suggestion verdicts
     stay on review_suggestion, one at a time — their explanations are
     evidence."""
@@ -414,7 +700,7 @@ def curate_concepts(operations: list[dict],
 def add_concept(name: str, kind: str = "concept", notes: str | None = None,
                 manuscript: str | None = None) -> dict:
     """Add (or revive) a concept the author declares. kind: concept |
-    definition | objection | example | metaphor | question |
+    objection | example | metaphor | question |
     historical_reference | mathematical_construct | syllogism (a syllogism
     node's premises attach with depends_on, its conclusion with leads_to).
     On an existing concept, fresh notes refine the stored notes."""

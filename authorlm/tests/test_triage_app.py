@@ -1,0 +1,587 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from authorlm import api, cli, triage, triage_analysis, triage_rules, triage_transport
+from authorlm.db import Database, ko_fields
+from authorlm.extraction import triage_feedback
+
+
+def manuscript_fixture(root: Path):
+    manuscript_path = root / "book"
+    manuscript_path.mkdir()
+    (manuscript_path / "chapter.md").write_text(
+        "# Choice\n\nChoice makes distinction possible.\n\n"
+        "A field permits further choices.\n",
+        encoding="utf-8",
+    )
+    db = Database(root / "authorlm.db")
+    manuscript = ko_fields("ms")
+    manuscript.update(name="book", path=str(manuscript_path))
+    db.insert("manuscripts", manuscript)
+    system = db.source("system")
+
+    def concept(name: str):
+        row = ko_fields("cn")
+        row.update(manuscript_id=manuscript["id"], name=name, kind="concept",
+                   status="realized", introduced_in="chapter.md", notes=f"{name} notes",
+                   aliases="[]", source_id=system,
+                   metadata=json.dumps({"origin": "extracted"}))
+        db.insert("concept_nodes", row)
+        return row
+
+    choice = concept("Choice")
+    field = concept("Field")
+    edge = ko_fields("ce")
+    edge.update(manuscript_id=manuscript["id"], from_node=choice["id"],
+                relation="permits", to_node=field["id"], status="inferred",
+                support=1, evidence="[]", source_id=system)
+    db.insert("concept_edges", edge)
+    return db, manuscript, choice, field, edge
+
+
+class FakeLLM:
+    enabled = True
+    model = "test-model"
+
+    def complete_json(self, system, user, thinking_budget=None):
+        if system == triage_analysis.ONTOLOGY_SYSTEM:
+            return {"thesis": "Choice creates fields", "argument_arc": [],
+                    "central_concepts": [], "distinctions": [], "tensions": []}
+        payload = json.loads(user)
+        return {"results": [
+            {"object_id": item["object_id"], "score": 88, "confidence": 81,
+             "why": "The manuscript uses it as part of the central argument.",
+             "evidence": ([{"passage_id": item["passages"][0]["id"],
+                            "reason": "Direct use"}]
+                          if item["passages"] else [])}
+            for item in payload["objects"]
+        ]}
+
+    def stats_line(self):
+        return "LLM: test"
+
+
+class TriageAppTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="authorlm-triage-")
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def fixture(self, root: Path | None = None):
+        result = manuscript_fixture(root or self.root)
+        self.addCleanup(result[0].conn.close)
+        return result
+
+    def settle_fixture_concepts(self, db, *nodes):
+        for node in nodes:
+            metadata = json.loads(node["metadata"])
+            metadata["confirmed"] = True
+            db.update("concept_nodes", node["id"],
+                      {"metadata": json.dumps(metadata)})
+
+    def add_pending_concept(self, db, manuscript, name, *, kind="concept"):
+        row = ko_fields("cn")
+        row.update(
+            manuscript_id=manuscript["id"], name=name, kind=kind,
+            status="realized", introduced_in=None, notes=f"{name} notes",
+            aliases="[]", source_id=db.source("system"),
+            metadata=json.dumps({"origin": "extracted"}),
+        )
+        db.insert("concept_nodes", row)
+        return row
+
+    def add_inferred_edge(self, db, manuscript, source, target, relation="permits"):
+        row = ko_fields("ce")
+        row.update(
+            manuscript_id=manuscript["id"], from_node=source["id"],
+            relation=relation, to_node=target["id"], status="inferred",
+            support=0, evidence="[]", source_id=db.source("system"),
+        )
+        db.insert("concept_edges", row)
+        return row
+
+    def test_schema_and_profiles_are_shared(self):
+        db, manuscript, *_ = self.fixture()
+        profile = triage.resolve_profile(manuscript, "concepts")
+        result = triage.snapshot(db, manuscript, "concepts")
+        self.assertEqual(result["schema"]["help"], triage.CONCEPT_TRIAGE_HELP)
+        self.assertEqual(profile["id"], "concept-keepability")
+        self.assertEqual(
+            [field["id"] for field in result["schema"]["analysis_columns"]],
+            ["score", "confidence", "why", "evidence"])
+        retire = next(action for action in result["schema"]["actions"]
+                      if action["id"] == "retire")
+        self.assertFalse(retire["reason"]["required"])
+        concept_actions = {action["id"]: action
+                           for action in result["schema"]["actions"]}
+        self.assertNotIn("reason", concept_actions["keep"])
+        self.assertIn("reason", concept_actions["retype"])
+        self.assertIn("reason", concept_actions["alias"])
+        retype_kinds = concept_actions["retype"]["parameter"]["options"]
+        self.assertNotIn("definition", retype_kinds)
+        edge_actions = {action["id"]: action for action in
+                        triage.snapshot(db, manuscript, "edges")["schema"]["actions"]}
+        self.assertNotIn("reason", edge_actions["keep"])
+        self.assertNotIn("reason", edge_actions["reject"])
+        self.assertNotIn("reason", edge_actions["flip"])
+        self.assertIn("reason", edge_actions["retype"])
+        self.assertIn("reason", edge_actions["alias"])
+
+    def test_staging_discards_reasons_for_actions_that_do_not_request_one(self):
+        db, manuscript, *_ = self.fixture()
+        concept = self.add_pending_concept(db, manuscript, "Keep without explanation")
+        triage.stage_decisions(db, manuscript, "concepts", [{
+            "object_id": concept["id"],
+            "action": "keep",
+            "reason": "This must not be stored",
+        }])
+        row = next(item for item in triage.snapshot(db, manuscript, "concepts")["rows"]
+                   if item["id"] == concept["id"])
+        self.assertIsNone(row["draft"]["reason"])
+
+    def test_retype_reason_is_recorded_as_author_evidence(self):
+        db, manuscript, *_ = self.fixture()
+        concept = self.add_pending_concept(db, manuscript, "Retype with explanation")
+        triage.stage_decisions(db, manuscript, "concepts", [{
+            "object_id": concept["id"],
+            "action": "retype",
+            "parameters": {"kind": "metaphor"},
+            "reason": "This is a sustained image.",
+        }])
+        triage.apply_selected(db, manuscript, "concepts", [concept["id"]])
+        evidence = db.one(
+            "SELECT target FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'concept_triage' ORDER BY created_at DESC LIMIT 1",
+            (manuscript["id"],),
+        )
+        self.assertIn("reason: This is a sustained image.", evidence["target"])
+
+    def test_retype_rejects_retired_definition_kind(self):
+        db, manuscript, *_ = self.fixture()
+        concept = self.add_pending_concept(db, manuscript, "Legacy kind")
+        with self.assertRaisesRegex(ValueError, "invalid concept kind 'definition'"):
+            triage.stage_decisions(db, manuscript, "concepts", [{
+                "object_id": concept["id"],
+                "action": "retype",
+                "parameters": {"kind": "definition"},
+            }])
+
+    def test_shared_help_preserves_the_existing_cli_text(self):
+        self.assertEqual(
+            triage.CONCEPT_TRIAGE_HELP,
+            "Keys: [k]eep  [r]etire  [s]kip (or Enter)  [n] reword notes  "
+            "[a] alias of another concept  [x] quit — or retype: [c]oncept "
+            "[o]bjection [e]xample [m]etaphor [q]uestion "
+            "[h]istorical_reference [t] mathematical_construct")
+        self.assertEqual(
+            triage.EDGE_TRIAGE_HELP,
+            "Keys: [k]onfirm as-is  [r]eject  [f]lip direction  "
+            "[a] these are one concept (alias-merge)  [s]kip (or Enter)  "
+            "[x] quit — or retype the relation by number, name, or unique prefix")
+
+    def test_cli_parser_exposes_deterministic_dry_run_and_apply(self):
+        args = cli.build_parser().parse_args([
+            "concept", "triage", "--deterministic", "--edges", "--apply",
+        ])
+        self.assertTrue(args.deterministic)
+        self.assertTrue(args.edges)
+        self.assertTrue(args.apply)
+
+    def test_cli_parser_rejects_retired_definition_kind(self):
+        parser = cli.build_parser()
+        for option in ("--kind", "--all-kind"):
+            with self.subTest(option=option):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args([
+                            "concept", "add", "Legacy", option, "definition",
+                        ])
+
+    def test_deterministic_plan_is_pure_and_uses_system_provenance(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        ghost = self.add_pending_concept(db, manuscript, "Spectral Machinery")
+        edge = self.add_inferred_edge(db, manuscript, ghost, choice)
+        files = {"chapter.md": (Path(manuscript["path"]) / "chapter.md").read_text()}
+
+        plan = triage_rules.plan(db, manuscript, files)
+
+        self.assertEqual(
+            {item["rule"] for item in plan["decisions"]},
+            {"concept_unmentioned", "edge_unmentioned_endpoint"})
+        self.assertNotEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
+        )["status"], "retired")
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
+        )["status"], "inferred")
+
+        result = triage.apply_deterministic(db, manuscript, plan["decisions"])
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
+        )["status"], "retired")
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
+        )["status"], "rejected")
+        evidence = db.all(
+            "SELECT e.evidence_type, s.kind FROM evidence e "
+            "JOIN sources s ON s.id = e.source_id ORDER BY e.created_at")
+        self.assertEqual([(row["evidence_type"], row["kind"]) for row in evidence],
+                         [("deterministic_triage", "system")] * 2)
+        self.assertNotIn("Spectral Machinery", triage_feedback(db, manuscript["id"]))
+
+    def test_recommendation_transport_stages_without_applying(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        ghost = self.add_pending_concept(db, manuscript, "Transport Ghost")
+
+        plan = triage_transport.dispatch(
+            "recommendations",
+            {"manuscript": manuscript["name"], "triage_type": "concepts"},
+            db=db,
+        )
+        self.assertEqual([item["object_id"] for item in plan["decisions"]],
+                         [ghost["id"]])
+        self.assertFalse(db.all("SELECT * FROM triage_drafts"))
+
+        result = triage_transport.dispatch(
+            "stage_recommendations",
+            {"manuscript": manuscript["name"], "triage_type": "concepts",
+             "object_ids": [ghost["id"]]},
+            db=db,
+        )
+        self.assertEqual(result["staged"], [ghost["id"]])
+        draft = db.one("SELECT * FROM triage_drafts WHERE object_id = ?",
+                       (ghost["id"],))
+        self.assertEqual(draft["action"], "retire")
+        self.assertNotEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
+        )["status"], "retired")
+        self.assertFalse(db.all("SELECT * FROM evidence"))
+
+    def test_recommendation_transport_rechecks_before_staging(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        ghost = self.add_pending_concept(
+            db, manuscript, "Newly Grounded", kind="objection"
+        )
+        chapter = Path(manuscript["path"]) / "chapter.md"
+        chapter.write_text(chapter.read_text() + "\nNewly Grounded now appears.\n")
+
+        with self.assertRaisesRegex(ValueError, "no longer current"):
+            triage_transport.dispatch(
+                "stage_recommendations",
+                {"manuscript": manuscript["name"], "triage_type": "concepts",
+                 "object_ids": [ghost["id"]]},
+                db=db,
+            )
+        self.assertFalse(db.all("SELECT * FROM triage_drafts"))
+
+    def test_deterministic_plan_merges_known_alias_and_rejects_self_edge(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        db.update("concept_nodes", field["id"],
+                  {"aliases": json.dumps(["Spectral Machinery"])})
+        duplicate = self.add_pending_concept(db, manuscript, "Spectral Machinery")
+        self_edge = self.add_inferred_edge(db, manuscript, choice, choice)
+        files = {"chapter.md": (Path(manuscript["path"]) / "chapter.md").read_text()}
+
+        plan = triage_rules.plan(db, manuscript, files)
+        self.assertEqual(
+            {item["rule"] for item in plan["decisions"]},
+            {"concept_known_alias", "edge_self_reference"})
+
+        triage.apply_deterministic(db, manuscript, plan["decisions"])
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (duplicate["id"],)
+        )["status"], "retired")
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_edges WHERE id = ?", (self_edge["id"],)
+        )["status"], "rejected")
+
+    def test_deterministic_plan_protects_staged_and_author_connected_concepts(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        staged = self.add_pending_concept(db, manuscript, "Staged Ghost")
+        connected = self.add_pending_concept(db, manuscript, "Connected Ghost")
+        self.add_inferred_edge(db, manuscript, staged, choice)
+        declared = self.add_inferred_edge(db, manuscript, connected, field)
+        db.update("concept_edges", declared["id"], {"status": "declared"})
+        triage.stage_decisions(db, manuscript, "concepts", [{
+            "object_id": staged["id"], "action": "keep",
+        }])
+        files = {"chapter.md": (Path(manuscript["path"]) / "chapter.md").read_text()}
+
+        plan = triage_rules.plan(
+            db, manuscript, files, include_concepts=True, include_edges=False)
+
+        self.assertFalse(plan["decisions"])
+        self.assertEqual({item["object_id"] for item in plan["protected"]},
+                         {staged["id"], connected["id"]})
+
+    def test_deterministic_apply_rejects_stale_plan_atomically(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        first = self.add_pending_concept(db, manuscript, "First Ghost")
+        second = self.add_pending_concept(db, manuscript, "Second Ghost")
+        files = {"chapter.md": (Path(manuscript["path"]) / "chapter.md").read_text()}
+        plan = triage_rules.plan(
+            db, manuscript, files, include_concepts=True, include_edges=False)
+        db.update("concept_nodes", second["id"], {"notes": "changed"})
+
+        with self.assertRaises(triage.TriageConflict):
+            triage.apply_deterministic(db, manuscript, plan["decisions"])
+
+        self.assertNotEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (first["id"],)
+        )["status"], "retired")
+        self.assertNotEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (second["id"],)
+        )["status"], "retired")
+
+    def test_hygiene_apply_reuses_deterministic_mutation_and_provenance(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        self.settle_fixture_concepts(db, choice, field)
+        ghost = self.add_pending_concept(db, manuscript, "Sweep Ghost")
+        args = SimpleNamespace(action="hygiene", apply=True)
+
+        with mock.patch.object(cli, "_open_db", return_value=db), \
+                mock.patch.object(cli, "_manuscript", return_value=manuscript), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.cmd_sweep(args)
+
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
+        )["status"], "retired")
+        evidence = db.one(
+            "SELECT evidence_type FROM evidence WHERE "
+            "json_extract(metadata, '$.object_id') = ?", (ghost["id"],))
+        self.assertEqual(evidence["evidence_type"], "deterministic_triage")
+
+    def test_cli_concept_alias_triage_keeps_raw_database_rows(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        with mock.patch("builtins.input", side_effect=["a", "Field", "x"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli._run_triage(db, manuscript["id"])
+        self.assertEqual(
+            db.one("SELECT status FROM concept_nodes WHERE id = ?", (choice["id"],))["status"],
+            "retired")
+        aliases = json.loads(db.one(
+            "SELECT aliases FROM concept_nodes WHERE id = ?", (field["id"],))["aliases"])
+        self.assertIn("Choice", aliases)
+
+    def test_selected_decisions_apply_offscreen_as_one_batch(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        triage.stage_decisions(db, manuscript, "concepts", [
+            {"object_id": choice["id"], "action": "keep"},
+            {"object_id": field["id"], "action": "retire",
+             "reason": "The manuscript uses this only as scaffolding."},
+        ])
+        result = triage.apply_selected(
+            db, manuscript, "concepts", [choice["id"], field["id"]])
+        self.assertEqual(result["count"], 2)
+        choice_meta = json.loads(db.one(
+            "SELECT metadata FROM concept_nodes WHERE id = ?", (choice["id"],))["metadata"])
+        self.assertTrue(choice_meta["confirmed"])
+        self.assertEqual(db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                                (field["id"],))["status"], "retired")
+        evidence = db.one(
+            "SELECT target FROM evidence WHERE manuscript_id = ? AND signal = 'rejected'",
+            (manuscript["id"],))
+        self.assertIn("The manuscript uses this only as scaffolding.", evidence["target"])
+        self.assertFalse(db.all("SELECT * FROM triage_drafts"))
+
+    def test_multiple_alias_drafts_apply_safely_one_at_a_time(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        agency = ko_fields("cn")
+        agency.update(
+            manuscript_id=manuscript["id"], name="Agency", kind="concept",
+            status="realized", introduced_in="chapter.md", notes="Agency notes",
+            aliases="[]", source_id=choice["source_id"],
+            metadata=json.dumps({"origin": "extracted"}),
+        )
+        db.insert("concept_nodes", agency)
+        triage.stage_decisions(db, manuscript, "concepts", [
+            {"object_id": choice["id"], "action": "alias",
+             "parameters": {"canonical_id": agency["id"]}},
+            {"object_id": field["id"], "action": "alias",
+             "parameters": {"canonical_id": agency["id"]}},
+        ])
+
+        with self.assertRaisesRegex(ValueError, "one row at a time"):
+            triage.apply_selected(
+                db, manuscript, "concepts", [choice["id"], field["id"]])
+        triage.apply_selected(db, manuscript, "concepts", [choice["id"]])
+        triage.apply_selected(db, manuscript, "concepts", [field["id"]])
+
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (choice["id"],)
+        )["status"], "retired")
+        self.assertEqual(db.one(
+            "SELECT status FROM concept_nodes WHERE id = ?", (field["id"],)
+        )["status"], "retired")
+        aliases = json.loads(db.one(
+            "SELECT aliases FROM concept_nodes WHERE id = ?", (agency["id"],)
+        )["aliases"])
+        self.assertEqual(set(aliases), {"Choice", "Field"})
+        self.assertFalse(db.all("SELECT * FROM triage_drafts"))
+
+    def test_single_and_staged_edge_mutations_have_identical_results(self):
+        single_root = self.root / "single"
+        staged_root = self.root / "staged"
+        single_root.mkdir()
+        staged_root.mkdir()
+        single_db, single_manuscript, *_, single_edge = self.fixture(single_root)
+        staged_db, staged_manuscript, *_, staged_edge = self.fixture(staged_root)
+
+        triage.apply_one(
+            single_db, single_manuscript, "edges", single_edge, "retype",
+            {"relation": "depends_on"})
+        triage.stage_decisions(staged_db, staged_manuscript, "edges", [{
+            "object_id": staged_edge["id"], "action": "retype",
+            "parameters": {"relation": "depends_on"},
+        }])
+        triage.apply_selected(
+            staged_db, staged_manuscript, "edges", [staged_edge["id"]])
+
+        single_row = single_db.one(
+            "SELECT relation, status FROM concept_edges WHERE id = ?",
+            (single_edge["id"],))
+        staged_row = staged_db.one(
+            "SELECT relation, status FROM concept_edges WHERE id = ?",
+            (staged_edge["id"],))
+        self.assertEqual(tuple(single_row), tuple(staged_row))
+        single_evidence = single_db.one(
+            "SELECT signal, target FROM evidence WHERE evidence_type = 'edge_triage'")
+        staged_evidence = staged_db.one(
+            "SELECT signal, target FROM evidence WHERE evidence_type = 'edge_triage'")
+        self.assertEqual(tuple(single_evidence), tuple(staged_evidence))
+
+    def test_edge_retype_preserves_legacy_cli_evidence_format(self):
+        db, manuscript, *_, edge = self.fixture()
+        triage.apply_one(
+            db, manuscript, "edges", edge, "flip",
+            {"relation": "depends_on"})
+        row = db.one("SELECT * FROM concept_edges WHERE id = ?", (edge["id"],))
+        self.assertEqual(row["from_node"], edge["to_node"])
+        self.assertEqual(row["to_node"], edge["from_node"])
+        evidence = db.one(
+            "SELECT signal, target FROM evidence WHERE evidence_type = 'edge_triage'")
+        self.assertEqual(evidence["signal"], "retyped")
+        self.assertEqual(
+            evidence["target"],
+            "Choice —permits→ Field ⇒ Field —depends_on→ Choice")
+
+    def test_legacy_one_shot_edge_commands_do_not_add_triage_evidence(self):
+        db, manuscript, *_, edge = self.fixture()
+        api.confirm_edge(db, manuscript, edge["id"][:8], "depends_on")
+        api.reject_edge(db, manuscript, edge["id"][:8])
+        self.assertEqual(
+            db.one("SELECT status FROM concept_edges WHERE id = ?", (edge["id"],))["status"],
+            "rejected")
+        self.assertEqual(
+            db.one("SELECT COUNT(*) AS n FROM evidence")["n"], 0)
+
+    def test_changed_row_prevents_the_whole_batch(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        triage.stage_decisions(db, manuscript, "concepts", [
+            {"object_id": choice["id"], "action": "keep"},
+            {"object_id": field["id"], "action": "keep"},
+        ])
+        db.update("concept_nodes", field["id"], {"notes": "changed elsewhere"})
+        with self.assertRaises(triage.TriageConflict):
+            triage.apply_selected(
+                db, manuscript, "concepts", [choice["id"], field["id"]])
+        choice_meta = json.loads(db.one(
+            "SELECT metadata FROM concept_nodes WHERE id = ?", (choice["id"],))["metadata"])
+        self.assertNotIn("confirmed", choice_meta)
+        self.assertEqual(len(db.all("SELECT * FROM triage_drafts")), 2)
+
+    def test_deselect_clears_pending_decision(self):
+        db, manuscript, choice, *_ = self.fixture()
+        triage.stage_decisions(db, manuscript, "concepts", [
+            {"object_id": choice["id"], "action": "keep"},
+        ])
+        triage.unstage_decisions(db, manuscript, "concepts", [choice["id"]])
+        self.assertFalse(db.all("SELECT * FROM triage_drafts"))
+
+    def test_analysis_persists_batches_and_marks_old_results_outdated(self):
+        db, manuscript, choice, field, _ = self.fixture()
+        with mock.patch.object(triage_analysis, "_llm",
+                               lambda config, profile: FakeLLM()):
+            run = triage_analysis.start_run(
+                db, manuscript, {"llm": {"enabled": True}}, "concepts",
+                [choice["id"], field["id"]])
+            first = triage_analysis.analyze_batch(
+                db, manuscript, {}, run["run_id"], [choice["id"]])
+            self.assertEqual(first["status"], "incomplete")
+            self.assertEqual(first["completed"], 1)
+            second = triage_analysis.analyze_batch(
+                db, manuscript, {}, run["run_id"], [field["id"]])
+        self.assertEqual(second["status"], "complete")
+        snap = triage.snapshot(db, manuscript, "concepts")
+        self.assertTrue(all(row["analysis"]["state"] == "current"
+                            for row in snap["rows"]))
+        (Path(manuscript["path"]) / "chapter.md").write_text(
+            "# Choice\n\nChoice now makes a different distinction.\n", encoding="utf-8")
+        dirty = triage.snapshot(db, manuscript, "concepts")
+        self.assertTrue(dirty["manuscript_version"]["local_dirty"])
+        self.assertTrue(all(row["analysis"]["state"] == "outdated"
+                            for row in dirty["rows"]))
+        api.collect(db, manuscript, {}, analyze=False)
+        stale = triage.snapshot(db, manuscript, "concepts")
+        self.assertTrue(all(row["analysis"]["state"] == "outdated"
+                            for row in stale["rows"]))
+
+    def test_analyzer_cannot_cite_another_objects_packet(self):
+        profile = {"output_fields": [
+            {"id": "score"}, {"id": "confidence"}, {"id": "why"},
+            {"id": "evidence"},
+        ]}
+        raw = {"results": [
+            {"object_id": "one", "score": 50, "confidence": 50, "why": "x",
+             "evidence": [{"passage_id": "p-two", "reason": "wrong packet"}]},
+            {"object_id": "two", "score": 50, "confidence": 50, "why": "x",
+             "evidence": []},
+        ]}
+        passages = {
+            "one": {"p-one": {"id": "p-one", "file": "a.md", "heading": "",
+                                "text": "one"}},
+            "two": {"p-two": {"id": "p-two", "file": "b.md", "heading": "",
+                                "text": "two"}},
+        }
+        with self.assertRaises(RuntimeError):
+            triage_analysis._validate_results(profile, ["one", "two"], raw, passages)
+
+    def test_run_pins_the_graph_row_version(self):
+        db, manuscript, choice, *_ = self.fixture()
+        with mock.patch.object(triage_analysis, "_llm",
+                               lambda config, profile: FakeLLM()):
+            run = triage_analysis.start_run(
+                db, manuscript, {"llm": {"enabled": True}}, "concepts", [choice["id"]])
+            pinned_version = choice["version"]
+            db.update("concept_nodes", choice["id"], {"notes": "changed after run start"})
+            triage_analysis.analyze_batch(
+                db, manuscript, {}, run["run_id"], [choice["id"]])
+        assessment = db.one(
+            "SELECT object_version FROM triage_assessments WHERE run_id = ?",
+            (run["run_id"],))
+        self.assertEqual(assessment["object_version"], pinned_version)
+        row = triage.snapshot(db, manuscript, "concepts")["rows"][0]
+        self.assertEqual(row["analysis"]["state"], "outdated")
+
+
+if __name__ == "__main__":
+    unittest.main()

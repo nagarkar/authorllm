@@ -68,7 +68,9 @@ than no draft:
    their words, keep terms of art capitalized, never reintroduce
    conventional meanings of redefined terms, and keep every claim
    consistent with the graph's edges (a `refutes` target is never
-   endorsed; aliases are one concept).
+   endorsed; aliases are one concept). A definition is NEVER its own
+   node: the kind `definition` is deprecated (2026-08-16) — "define X"
+   means refine X's notes.
 3. Check validated policies (briefing / list_policies) that bear on
    ordering and placement; `get_guidance` precedents show how the author
    introduced similar concepts before. `get_plan` names what is unwritten.
@@ -155,11 +157,22 @@ and its standing rule to the registry above, in this file. A profile
 whose registry entry is missing gets consulted only when the author
 explicitly asks for it.
 
-## Triage at scale (shell, not chat)
+## Triage at scale (interactive app)
 Conversational triage captures reasoning — reserve it for items the author
 would hesitate on; their explanations are the evidence that seeds policies.
-When a bulk pile has built up (dozens of unconfirmed concepts or inferred
-edges), recommend the CLI's rapid loop instead of walking the list in chat:
+When a bulk pile has built up, open the hosted interface with
+`open_triage_app`; it keeps deterministic graph data, LLM assessments, and
+author decisions visibly separate. Analysis never starts on open and never
+becomes a decision automatically. **Find safe recommendations** runs the same
+zero-token rules as deterministic CLI triage; recommendations remain transient
+until the author stages them, and staging still does not apply them. Use the
+review-state filter to distinguish recommended, staged, and unreviewed rows.
+Selection is independent of staging, and **Apply selected** includes selected
+rows outside the visible viewport. If Google Docs are linked, use the app's
+explicit reconcile preflight before analysis; never pull silently.
+
+The standalone equivalent is `authorlm triage-app -m <manuscript>`. The older
+rapid CLI loop remains useful in a terminal:
 - `authorlm concept triage -m <manuscript>` — keystroke-per-item loop over
   unconfirmed extracted concepts (confirm / skip / retire / retype / reword
   notes), recorded as triage evidence just like MCP calls.
@@ -167,9 +180,73 @@ edges), recommend the CLI's rapid loop instead of walking the list in chat:
   inferred relationships.
 - `authorlm concept confirm --all` / `--all-kind <kind>` — bulk confirm
   when a whole category is obviously fine.
-Division of labor: shell for the uncontroversial bulk; anything the author
-skips or hesitates over comes back to conversation, where the why gets
-recorded in their own words.
+- `authorlm concept triage --deterministic` — zero-token dry run of mechanically
+  safe alias merges, retirements, and edge rejections; inspect the report, then
+  add `--apply` only when the author asks to execute it. `--nodes` / `--edges`
+  restrict the lane. These are system decisions, not author feedback.
+Division of labor: the app for bulk comparison and application; conversation
+for anything the author skips or hesitates over, where the why gets recorded
+in their own words.
+
+## External critique intake (critic input is never law until triaged)
+Design reference: `docs/critique-pass-design.md`. When the author brings a
+critic's report (editorial analysis, beta-reader notes, any external
+feedback document):
+1. **Import** — parse the report conversationally (`critique.parse_units`
+   handles markdown), map units to essay files via toc, classify items
+   (revision tasks → intents; standing rules and preservation strands →
+   style elements), show the author the per-unit accounting, write the
+   manifest to `<manuscript>/_critiques/`, then `import_critique`. Items
+   land as PROPOSED with critic provenance (`sources` row) — never active.
+2. **Triage** — the author's verdicts, not the critic's authority, make
+   items real. Surfaces, same division of labor as concepts:
+   - Chat: `list_critique_items` (numbered; scope='manuscript' for the
+     global sitting, an essay file for just-in-time sittings), then
+     `triage_critique` with the author's verdicts — reject REQUIRES their
+     verbatim reason; revise flips provenance to the author and keeps the
+     critic's original as lineage. When the author says "accept 1, 2, 4;
+     reject 3 because …", run exactly that.
+   - Shell: `authorlm critique triage [--scope …]` interactive loop, or
+     `--accept/--reject/--revise` by list number or id prefix.
+3. **Sequencing** — global sitting first (manuscript-wide items set the
+   law every essay pass consults); per-essay items triage just-in-time
+   before that essay's edit pass, in toc reading order.
+Never let proposed items influence drafting or guidance; briefings badge
+pending counts (`critique_pending`) so the homework stays visible.
+
+### The edit pass (per essay, toc reading order — design §5–§7)
+Prerequisites: `authorlm summarize rebuild` once (the editor's working
+memory of the whole book; a stale summary blocks the run) and the essay's
+scope chain triaged (the preflight gate refuses otherwise; `--force` runs
+WITHOUT the unconfirmed items — never with them). Then, per essay:
+1. `authorlm critique run <essay>` (shell; frontier `[critique]
+   editor_model`) → stages paragraph-aligned proposals as critique threads
+   and files non-paragraph suggestions as proposed system-sourced intents.
+2. Triage the staged edits — verdicts only, nothing touches file or Doc:
+   - Chat: `list_critique_edits` (numbered; old/new/why/intent) then
+     `triage_critique_edits` with the author's verdicts — accept / reject
+     (verbatim reason) / revise (their wording; the diff is evidence) /
+     undo (free, any time before write). When the author says "accept 1,
+     3; reject 2 because …", run exactly that.
+   - Shell: `critique triage --edits <essay>` (k/r/e/u/s/x, red-struck old
+     / green new), or `--accept/--reject/--revise/--undo` by number.
+3. `authorlm critique write <essay>` (shell, Drive) → accepted edits land
+   in the essay's Doc tab as pending forms (`<<old>>{{new}}`, insertions
+   as `{{new}}` only); the pre-pass version is pinned; LOCAL KEEPS OLD.
+4. The pause: the author reads and post-edits the `{{new}}` halves in
+   Docs. Their words win. Ordinary `doc pull` never touches these forms.
+5. `authorlm critique resolve <essay>` (shell, Drive; explicit ONLY) —
+   every remaining form's current `{{new}}` becomes final; applied
+   locally, tab stripped clean, proposal→final diffs recorded as evidence
+   (≥2 modified acceptances → pattern candidate through the distiller);
+   collect; the essay's summary is rebuilt; the cursor advances. The next
+   essay runs only when the author says so.
+   `critique rollback <essay>` restores the pin (verdicts stay as evidence).
+`critique status` shows the pass table; `critique show/reason/reopen`
+answer "what did I decide?" and amend or reopen settled items without SQL.
+Related repairs: `concept revive <name>` (inverse of a mistaken retire,
+incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
+--guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
 ## Google Docs bridge (CLI, not MCP — by design)
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can

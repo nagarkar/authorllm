@@ -118,6 +118,9 @@ def seed_candidate_policy(
         contradicting=0,
         outstanding_questions="[]",
         source=source,
+        # The distiller authored the normative statement — a system
+        # conjecture until the author's reviews validate it.
+        source_id=db.source("system"),
     )
     db.insert("editorial_policies", row)
     return row

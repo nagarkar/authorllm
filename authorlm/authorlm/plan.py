@@ -24,6 +24,15 @@ from .structure import reading_order
 DRAFTS_DIR = "_drafts"
 SKIP_KINDS = {"historical_reference", "mathematical_construct"}
 
+# Registered in prompt_registry as "plan-draft" ('authorlm prompts').
+OPENING_DRAFT_SYSTEM = (
+    "You are an editorial collaborator for a philosophy manuscript. "
+    "Draft a short opening passage (2-3 paragraphs) introducing the "
+    "concept, following the author's demonstrated approach when a "
+    "precedent is given. Reply with the passage only. Format any "
+    "mathematics as MathJax: inline $...$, display $$...$$."
+)
+
 
 def build_plan(db: Database, manuscript: dict) -> dict:
     """Deterministic writing plan: one item per unrealized concept, with a
@@ -158,14 +167,7 @@ def draft_stubs(db: Database, manuscript: dict, llm: LLMClient,
                 f"Precedent — {item['precedent']['label']}, the author: "
                 + "; then ".join(item["precedent"]["actions"]) + "."
             )
-        draft = llm.complete(
-            "You are an editorial collaborator for a philosophy manuscript. "
-            "Draft a short opening passage (2-3 paragraphs) introducing the "
-            "concept, following the author's demonstrated approach when a "
-            "precedent is given. Reply with the passage only. Format any "
-            "mathematics as MathJax: inline $...$, display $$...$$.",
-            "\n".join(context),
-        )
+        draft = llm.complete(OPENING_DRAFT_SYSTEM, "\n".join(context))
         if not draft:
             continue
         drafts_dir.mkdir(exist_ok=True)

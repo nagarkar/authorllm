@@ -54,7 +54,6 @@ GRILLED AND RATIFIED 2026-08-08 — ready to build:
   or ≥2 files. Essay-local structures (Persistence Theorem) pass via
   the section spread; same-paragraph doubles fail.
 - KINDS: bar applies to concept | metaphor | example. Exempt:
-  definition (a "call this X" sentence is deliberate birth),
   historical_reference, mathematical_construct, syllogism (one-shot by
   nature), question/objection (coined names cannot recur; only 44 nodes
   total — triage stays their gate, uncapped).

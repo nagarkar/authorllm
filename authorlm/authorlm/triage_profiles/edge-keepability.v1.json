@@ -1,0 +1,15 @@
+{
+  "id": "edge-keepability",
+  "version": "1",
+  "triage_type": "edges",
+  "label": "Edge Keepability",
+  "description": "Rates whether each directed relationship belongs in the Concept Graph.",
+  "batch_size": 12,
+  "prompt": "Assess each directed concept edge's keepability from 1 to 100. A high score requires manuscript evidence for this specific relation and direction, not merely evidence that both endpoint concepts occur. Check the edge against the manuscript's ontology and argument. Penalize co-occurrence mistaken for relation, wrong direction, wrong relation type, redundancy, and unsupported inference. Judge only from the supplied consistency map and evidence passages. Do not invent evidence. Return one result for every requested object_id.",
+  "output_fields": [
+    {"id": "score", "label": "Score", "kind": "score", "width": 92},
+    {"id": "confidence", "label": "Confidence", "kind": "score", "width": 105},
+    {"id": "why", "label": "Why", "kind": "long_text", "width": 360},
+    {"id": "evidence", "label": "Manuscript evidence", "kind": "evidence", "width": 340}
+  ]
+}

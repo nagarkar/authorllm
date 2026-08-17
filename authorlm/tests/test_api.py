@@ -15,9 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api  # noqa: E402
+from authorlm import api, concepts, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
-from authorlm.db import loads  # noqa: E402
+from authorlm.db import ko_fields, loads  # noqa: E402
 
 PASSED = 0
 
@@ -219,13 +219,50 @@ def main_test() -> None:
         (ms / "late-arrival.md").unlink()
         api.collect(db, manuscript, {})
 
+        from authorlm import extraction
+
+        extraction_prompt = extraction.extraction_system()
+        check("extraction prompt keeps definitions out of concept names",
+              '"name" is the shortest stable label' in extraction_prompt
+              and "Do not promote\n  the definiens" in extraction_prompt
+              and 'emit name "Hard\nFloor"' in extraction_prompt)
+
         graph = api.list_concepts(db, manuscript)
         check("list_concepts returns nodes and named edges",
               len(graph["nodes"]) == 2
               and graph["edges"][0]["from_name"] == "Choice")
-        api.confirm_concept(db, manuscript, "Gravity", kind="definition")
+        api.confirm_concept(db, manuscript, "Gravity", kind="metaphor")
         check("confirm_concept retypes",
-              api.show_concept(db, manuscript, "Gravity")["node"]["kind"] == "definition")
+              api.show_concept(db, manuscript, "Gravity")["node"]["kind"] == "metaphor")
+        check("definition is not a concept-node kind",
+              "definition" not in concepts.NODE_KINDS)
+        check("defines remains a graph relation",
+              "defines" in extraction.VALID_RELATIONS)
+        check("definition remains a guidance kind",
+              "definition" in guidance_module.GUIDANCE_KINDS)
+        try:
+            api.add_concept(db, manuscript, "Legacy Definition", kind="definition")
+            check("add_concept rejects the retired definition kind", False)
+        except ValueError as err:
+            check("add_concept rejects the retired definition kind",
+                  "invalid concept kind 'definition'" in str(err))
+        try:
+            api.confirm_concept(db, manuscript, "Gravity", kind="definition")
+            check("confirm_concept rejects the retired definition kind", False)
+        except ValueError as err:
+            check("confirm_concept rejects the retired definition kind",
+                  "invalid concept kind 'definition'" in str(err))
+
+        retired_twin = ko_fields("cn")
+        retired_twin.update(
+            manuscript_id=manuscript["id"], name="Gravity", kind="concept",
+            status="retired", introduced_in=None, notes="retired twin",
+            aliases="[]", source_id=db.source("author"),
+        )
+        db.insert("concept_nodes", retired_twin)
+        check("exact-name lookup prefers the live concept over a retired twin",
+              concepts.get_concept(db, manuscript["id"], "Gravity")["id"]
+              != retired_twin["id"])
 
         # --- concept/edge/proposal curation via api (the CLI has its own
         # code paths for these, so api.* itself was never exercised) ---
@@ -1947,6 +1984,9 @@ def main_test() -> None:
             "attach_style", "get_style", "get_profile", "run_sweep",
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
+            "import_critique", "critique_status", "list_critique_items",
+            "triage_critique", "list_critique_edits", "triage_critique_edits",
+            "move_style_element", "open_triage_app", "triage_app_request",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,

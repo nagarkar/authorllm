@@ -31,11 +31,14 @@ no evidence, it abstains.
 cd authorlm
 pip install -e .              # gives you the `authorlm` command
 pip install -e ".[llm,mcp]"   # …with the LLM and MCP extras in one step
+pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
+pip install -e ".[all]"       # everything above
 ```
 
-There is no separate build step — the package is pure Python, installed
-editable, so source edits take effect immediately. One exception: the MCP
-server is a long-running process; after changing its code, restart it with
+There is no build step for normal installation; the compiled Triage App is
+included in the package. Frontend contributors rebuild it with `npm install &&
+npm run build` from `web/triage-app/`. The MCP server is a long-running
+process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
 AuthorLM keeps **one global database in `~/.authorlm/`** (the database and
@@ -148,8 +151,10 @@ outstanding questions.
 | `session start` / `session end` | Authoring session; opens with the learning briefing, closes with learning velocity |
 | `briefing` | Re-print the learning briefing any time |
 | `intent declare/complete/list` | Declared intents — authoritative observations that drive guidance |
-| `concept add/link/list` | Grow the Concept Graph (`--kind`: concept, definition, objection, example, metaphor, question, historical_reference, mathematical_construct) |
+| `concept add/link/list` | Grow the Concept Graph (`--kind`: concept, objection, example, metaphor, question, historical_reference, mathematical_construct, syllogism). A concept's ratified definition belongs in its notes |
 | `concept triage` | Rapid-fire review of unconfirmed extracted concepts (`k`eep, `r`etire, `n` reword, `s`kip, or a kind key to retype), then inferred relationships (`k`onfirm, `r`eject, `f`lip direction, or a relation number/name to retype). `--nodes` / `--edges` restrict to one lane |
+| `concept triage --deterministic [--apply]` | Zero-token bulk triage. Reports mechanically safe alias merges, retirements, and edge rejections; `--apply` executes the current plan atomically. Existing staged decisions and concepts attached to settled relationships are protected. `--nodes` / `--edges` restrict the plan |
+| `triage-app` | Open the local Concept/Edge Triage App. Database rows appear immediately; named analyzer profiles score on demand in bounded batches; deterministic recommendations can be staged for review; author decisions remain separate until **Apply selected**. If Google Docs are linked, analysis offers an explicit reconcile preflight rather than pulling silently |
 | `concept confirm <name> [--kind K]` | Confirm an extracted concept (optionally retyping it) |
 | `concept confirm --all` / `--all-kind K` | Bulk-confirm unconfirmed concepts (all, or by kind) |
 | `concept retire <name>… / --all-kind K` | Retire one or more concepts; `--all-kind` sweeps unconfirmed extracted ones |
@@ -173,6 +178,48 @@ outstanding questions.
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
 | `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
+
+## Triage App analyzer profiles
+
+Run `authorlm triage-app -m <manuscript>` for the standalone app, or call the
+MCP tool `open_triage_app` to render the same compiled interface in an
+MCP-Apps-capable chat host. Built-in, versioned profiles live in
+`authorlm/triage_profiles/`; manuscript overrides live in
+`<manuscript>/_triage/profiles/` and replace a built-in only when `id` and
+`version` match. A profile declares its `triage_type`, prompt, output columns,
+batch size, and optional `model`. Every run stores the resolved profile snapshot
+and hash, so later file edits do not rewrite history.
+
+Opening the app costs no tokens. **Analyze all** means unscored/outdated rows in
+the current filter; **Reanalyze all** deliberately replaces current assessments.
+Completed batches persist, but unfinished calls are neither queued nor resumed
+automatically. Analysis is advisory and cannot stage a graph decision. Google
+Docs reconciliation is also explicit: the analysis preflight can safely
+pull/push one-sided changes and surfaces two-sided conflicts untouched, or the
+author can choose the current local snapshot.
+
+**Find safe recommendations** runs the same zero-token rules as deterministic
+CLI triage and exposes their action, rule, and reason without changing the
+database. Recommendations are transient and are rechecked against the current
+manuscript and graph when staged. The review-state filter separates recommended,
+staged, and unreviewed rows; selecting a row is independent of staging it.
+Staging a recommendation creates a normal persistent draft. Only **Apply
+selected** mutates the graph.
+
+## Deterministic bulk triage
+
+`authorlm concept triage --deterministic -m <manuscript>` scans both pending
+concepts and inferred edges without an LLM call. It reports only decisions that
+follow from stored aliases, exact duplicates, manuscript mention/recurrence
+rules, or structurally invalid and duplicate relationships. The command is a
+dry run unless `--apply` is present; application rechecks row versions and
+commits the complete plan in one transaction. `--nodes` and `--edges` limit the
+scan to one lane.
+
+Machine decisions are recorded as `deterministic_triage` system evidence, not
+as author concept/edge verdicts, so they do not teach the extraction prompt a
+false author preference. A staged row, open proposal, or author-settled edge
+protects the affected concept from automatic retirement.
 
 ## Margin threads (Doc comment conversations)
 

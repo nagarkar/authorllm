@@ -34,9 +34,17 @@ APPROVE_KEYWORDS = {"go ahead", "make the change", "apply", "yes", "ok",
                     "okay", "lgtm"}
 DECLINE_KEYWORDS = {"no", "dont", "don't", "revert", "reject"}
 
+# The reserved pending-change grammar in a Doc tab (margin-threads design,
+# extended by the critique-pass design §6.3):
+#   replace:   <<old>>{{new}}   — old struck through, new in green
+#   insertion: {{new}}          — new text with no old half (critique
+#                                 passes propose new paragraphs this way)
+# Both resolve the same way: the author may edit the {{new}} half; the
+# local file keeps the OLD text (nothing, for an insertion) until resolve.
 PENDING = re.compile(
     r"(?:~~)?<<(?P<old>.*?)>>(?:~~)?\{\{(?P<new>.*?)\}\}",
     re.DOTALL)
+INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
 _ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")
 
 
@@ -59,15 +67,40 @@ def is_ours(content: str) -> bool:
 
 
 def render_pending(old: str, new: str) -> str:
+    """The pending form for a span. An empty `old` renders the insertion
+    form ({{new}} only) — the critique pass's new-paragraph proposals."""
+    if old == "":
+        return render_insertion(new)
     return f"<<{old}>>{{{{{new}}}}}"
+
+
+def render_insertion(new: str) -> str:
+    return f"{{{{{new}}}}}"
+
+
+_INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
+                             re.DOTALL)
+
+
+def _collapse(text: str, keep: str) -> str:
+    """Resolve every pending form to one half. Replaces first (their
+    {{new}} halves are consumed by the PENDING match, so the INSERTION
+    lookbehind never sees them), then insertions. Dropping an insertion
+    also drops its paragraph separator, so the OLD text is byte-clean;
+    keeping one leaves the paragraph in place."""
+    text = PENDING.sub(lambda m: m.group(keep), text)
+    if keep == "old":
+        text = _INSERTION_PARA.sub("", text)
+    return INSERTION.sub(lambda m: m.group("new") if keep == "new" else "",
+                         text)
 
 
 def strip_pending(text: str) -> tuple[str, list[str]]:
     """Canonical text for local files: pending spans collapse to their
-    OLD half. Returns (canonical, warnings). Unbalanced or stray
-    markers are never guessed at — the span is left intact and warned
-    about, to be settled in conversation."""
-    stripped = PENDING.sub(lambda m: m.group("old"), text)
+    OLD half (insertions vanish). Returns (canonical, warnings).
+    Unbalanced or stray markers are never guessed at — the span is left
+    intact and warned about, to be settled in conversation."""
+    stripped = _collapse(text, "old")
     warnings = []
     if _ANY_MARKER.search(stripped):
         warnings.append(
@@ -77,9 +110,27 @@ def strip_pending(text: str) -> tuple[str, list[str]]:
 
 
 def approved_text(text: str) -> str:
-    """What a tab's text becomes when every pending span is approved —
+    """What a tab's text becomes when every pending form is approved —
     used by the cleanup path and by equivalence checks."""
-    return PENDING.sub(lambda m: m.group("new"), text)
+    return _collapse(text, "new")
+
+
+def pending_forms(text: str) -> list[dict]:
+    """Every pending form in a tab, in document order: {kind, old, new,
+    start, end}. The resolve verb reads the author's post-edits from the
+    {{new}} halves here."""
+    found = []
+    for m in PENDING.finditer(text):
+        found.append({"kind": "replace", "old": m.group("old"),
+                      "new": m.group("new"), "start": m.start(),
+                      "end": m.end()})
+    consumed = [(f["start"], f["end"]) for f in found]
+    for m in INSERTION.finditer(text):
+        if any(s <= m.start() < e for s, e in consumed):
+            continue
+        found.append({"kind": "insert", "old": "", "new": m.group("new"),
+                      "start": m.start(), "end": m.end()})
+    return sorted(found, key=lambda f: f["start"])
 
 
 # ------------------------------------------------------------- records
@@ -89,9 +140,13 @@ def create_thread(db: Database, manuscript_id: str, comment_id: str,
                   note: str, reply_id: str | None,
                   scope_kind: str | None = None,
                   scope_ref: str | None = None) -> dict:
+    """A margin thread born from the author's Drive comment (origin_type
+    author_comment; the comment id is the origin_id). Critique-pass
+    proposals use critique.stage_edit instead (origin_type critique)."""
     row = ko_fields("dt")
     row.update(
-        manuscript_id=manuscript_id, comment_id=comment_id, file=file,
+        manuscript_id=manuscript_id, origin_type="author_comment",
+        origin_id=comment_id, file=file,
         anchor_quote=anchor_quote, proposed_old=old, proposed_new=new,
         note=note, state="proposed",
         our_reply_ids=json.dumps([reply_id] if reply_id else []),
@@ -103,21 +158,27 @@ def create_thread(db: Database, manuscript_id: str, comment_id: str,
 
 
 def get_thread(db: Database, manuscript_id: str, comment_id: str):
+    """The author-comment thread joined to a Drive comment id."""
     return db.one(
-        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND comment_id = ?",
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = 'author_comment' AND origin_id = ?",
         (manuscript_id, comment_id),
     )
 
 
 def open_threads(db: Database, manuscript_id: str,
-                 file: str | None = None) -> list[dict]:
+                 file: str | None = None,
+                 origin_type: str = "author_comment") -> list[dict]:
     """Threads still holding the margin: proposed, conversation, or
-    applied-awaiting-review."""
+    applied-awaiting-review. Scoped by origin: the pull path must only
+    ever see author-comment threads — critique threads are the explicit
+    resolve verb's business (design §6.3)."""
     rows = db.all(
         "SELECT * FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = ? "
         "AND state IN ('proposed', 'conversation', 'applied') "
         "ORDER BY created_at",
-        (manuscript_id,),
+        (manuscript_id, origin_type),
     )
     return [dict(r) for r in rows if file is None or r["file"] == file]
 

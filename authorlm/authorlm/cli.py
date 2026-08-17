@@ -11,18 +11,22 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import sys
+import textwrap
 from pathlib import Path
 
 from . import api
 from . import concepts as cg
+from . import critique as crit
 from . import policies as pol
 from . import sessions as ses
+from . import triage as triage_service
 from . import ui
 from .briefing import build_briefing
 from .db import Database, ko_fields, loads
-from .extraction import VALID_KINDS, extract_concepts
+from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions
@@ -170,6 +174,7 @@ def cmd_init(args):
 
 # Every table that carries manuscript-scoped rows, children first.
 MANUSCRIPT_TABLES = [
+    "triage_assessments", "triage_runs", "triage_drafts",
     "evidence", "editorial_reviews", "guidance_history", "editorial_policies",
     "concept_edges", "concept_nodes", "editorial_episodes", "inferred_intents",
     "declared_intents", "sessions", "editorial_transitions",
@@ -269,7 +274,29 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
         print(ui.dim("A master Google Doc exists but Drive isn't authorized "
                      "here — run 'doc auth' to enable session-start sync."))
         return
-    report = gdocs.reconcile(db, manuscript, service, docs_service=docs_service)
+    except ModuleNotFoundError as err:
+        missing = err.name or str(err)
+        print(ui.yellow(
+            "warning: session-start Google Docs sync is unavailable "
+            f"({missing}) — continuing without "
+            "reconcile. Install the gdocs extra to enable it."
+        ))
+        return
+    except Exception as err:
+        print(ui.yellow(
+            "warning: session-start Google Docs setup failed "
+            f"({err}) — continuing without reconcile."
+        ))
+        return
+    try:
+        report = gdocs.reconcile(db, manuscript, service,
+                                 docs_service=docs_service)
+    except Exception as err:
+        print(ui.yellow(
+            "warning: session-start Google Docs reconcile failed "
+            f"({err}) — continuing without reconcile."
+        ))
+        return
     if report["in_sync"]:
         # Prompt tabs sync in bulk; listing every slug would drown the
         # essay list at session start.
@@ -567,6 +594,775 @@ def cmd_intent(args):
             print(f"[{row['id'][:8]}] ({row['status']}) {row['statement']}{outcome}")
 
 
+def cmd_critique(args):
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    mid = manuscript["id"]
+    if args.action == "import":
+        if not args.target:
+            sys.exit("usage: critique import <manifest.json>")
+        manifest = json.loads(Path(args.target).read_text())
+        result = crit.import_manifest(db, mid, manifest)
+        print(f"Imported {result['intents']} intent(s) and "
+              f"{result['style_elements']} style element(s) as proposed "
+              f"({result['skipped']} already present, skipped).")
+        for err in result["errors"]:
+            print(ui.yellow(f"warning: {err}"))
+        if result["intents"] or result["style_elements"]:
+            print(ui.dim("Nothing is law yet — triage with 'critique triage' "
+                         "(the global sitting first, then per-essay)."))
+    elif args.action == "status":
+        rows = crit.status(db, mid)
+        if not rows:
+            print("No critique material imported.")
+        for r in rows:
+            i, e = r["intents"], r["elements"]
+            print(f"{r['name']}:")
+            print(f"  intents:  {i['proposed']} proposed | "
+                  f"{i['accepted']} accepted | {i['rejected']} rejected")
+            print(f"  elements: {e['proposed']} proposed | "
+                  f"{e['accepted']} accepted | {e['rejected']} rejected")
+        _critique_pass_status(db, manuscript)
+    elif args.action == "show":
+        _critique_show(db, mid, args)
+    elif args.action == "reason":
+        _critique_reason(db, mid, args)
+    elif args.action == "reopen":
+        _critique_reopen(db, mid, args)
+    elif args.action == "run":
+        _critique_run(db, manuscript, args)
+    elif args.action == "edits":
+        _critique_edits_list(db, manuscript, args)
+    elif args.action == "write":
+        _critique_write(db, manuscript, args)
+    elif args.action == "resolve":
+        _critique_resolve_essay(db, manuscript, args)
+    elif args.action == "rollback":
+        _critique_rollback(db, manuscript, args)
+    elif args.action == "list":
+        queue = _critique_queue(db, mid, args.scope)
+        if not queue:
+            print("No proposed critique items"
+                  + (f" scoped to {args.scope}." if args.scope else "."))
+            return
+        for n, (kind, item) in enumerate(queue, 1):
+            print(f"{ui.cyan(f'{n}.')} {_critique_item_line(kind, item)}")
+        print(ui.dim("\nBulk verdicts by number (same --scope!) or id prefix: "
+                     "critique triage --accept 1 2 5 | --reject 3 4 "
+                     "--reason \"…\" | --revise 6 --text \"…\""))
+    else:  # triage
+        if args.edits:
+            _critique_edits_triage(db, manuscript, args)
+        else:
+            _critique_triage(db, manuscript, args)
+
+
+# ------------------------------------------------ settled-item verbs
+
+def _critique_settled(db: Database, mid: str, token: str) -> tuple[str, dict]:
+    """Any critique item, settled or not, by id prefix."""
+    for kind, table in (("intent", "declared_intents"),
+                        ("element", "style_elements")):
+        rows = db.all(
+            f"SELECT * FROM {table} WHERE manuscript_id = ? AND id LIKE ? "
+            "AND source_id IS NOT NULL", (mid, f"%{token}%"))
+        if len(rows) == 1:
+            return kind, dict(rows[0])
+        if len(rows) > 1:
+            sys.exit(f"error: '{token}' is ambiguous ({len(rows)} matches).")
+    sys.exit(f"error: no critique item matching '{token}'.")
+
+
+def _critique_show(db: Database, mid: str, args) -> None:
+    """A settled item's status, verdict, and reason — the 'what did I
+    decide?' question, without SQL."""
+    if not (args.target or args.query):
+        sys.exit("usage: critique show <id-prefix> | critique show --query TEXT")
+    if args.query:
+        q = args.query.lower()
+        rows = []
+        for table, kind in (("declared_intents", "intent"),
+                            ("style_elements", "element")):
+            for r in db.all(f"SELECT * FROM {table} WHERE manuscript_id = ? "
+                            "AND source_id IS NOT NULL", (mid,)):
+                if q in r["statement"].lower():
+                    rows.append((kind, dict(r)))
+        if not rows:
+            print(f"No critique items match '{args.query}'.")
+        for kind, item in rows:
+            reason = item.get("outcome") if kind == "intent" else \
+                loads(item["metadata"], {}).get("rejection_reason")
+            status = {"proposed": ui.dim, "active": ui.green,
+                      "rejected": ui.yellow}.get(item["status"], str)(
+                          item["status"])
+            print(f"{_critique_label(kind, item)} {status}")
+            print(ui.wrap(item["statement"], indent="  "))
+            if reason:
+                print(ui.dim(ui.wrap("reason: " + reason, indent="  ")))
+        return
+    kind, item = _critique_settled(db, mid, args.target)
+    print(_critique_label(kind, item))
+    print(ui.wrap(item["statement"], indent="  "))
+    color = {"proposed": ui.dim, "active": ui.green, "completed": ui.green,
+             "rejected": ui.yellow}.get(item["status"], str)
+    print("  status: " + color(item["status"]))
+    reason = item.get("outcome") if kind == "intent" else \
+        loads(item["metadata"], {}).get("rejection_reason")
+    if reason:
+        print("  reason: " + reason)
+    lineage = loads(item["metadata"], {}).get("lineage")
+    if lineage:
+        print(ui.dim(f"  lineage: {json.dumps(lineage)}"))
+
+
+def _critique_reason(db: Database, mid: str, args) -> None:
+    """Amend a settled item's recorded reason (stray keystrokes and
+    wholesale markers happen; the evidence stream must be correctable)."""
+    if not (args.target and args.text):
+        sys.exit('usage: critique reason <id-prefix> --text "the real why"')
+    kind, item = _critique_settled(db, mid, args.target)
+    if item["status"] != "rejected":
+        sys.exit(f"error: only rejected items carry a reason (this one is "
+                 f"{item['status']}).")
+    if kind == "intent":
+        db.update("declared_intents", item["id"], {"outcome": args.text})
+    else:
+        meta = loads(item["metadata"], {})
+        meta["rejection_reason"] = args.text
+        db.update("style_elements", item["id"],
+                  {"metadata": json.dumps(meta)})
+    ev = ko_fields("ev")
+    ev.update(manuscript_id=mid, episode_id=None,
+              evidence_type="critique_triage", signal="reason_amended",
+              target=f"{item['statement'][:120]} — {args.text}"[:200],
+              supports_policy=None, weight="high")
+    db.insert("evidence", ev)
+    print(ui.green("reason amended") + f" [{item['id'][:8]}]")
+
+
+def _critique_reopen(db: Database, mid: str, args) -> None:
+    """Send a settled item back to proposed."""
+    if not args.target:
+        sys.exit("usage: critique reopen <id-prefix>")
+    kind, item = _critique_settled(db, mid, args.target)
+    table = "declared_intents" if kind == "intent" else "style_elements"
+    db.update(table, item["id"], {"status": "proposed"})
+    print(ui.cyan("reopened") + f" [{item['id'][:8]}] — proposed again")
+
+
+# --------------------------------------------------- the edit pass
+
+def _critique_pass_row(db: Database, manuscript: dict):
+    from . import passes
+
+    p = passes.active_pass(db, manuscript["id"])
+    if not p:
+        # The pass belongs to the (single) imported critique source.
+        srcs = db.all("SELECT id FROM sources WHERE kind = 'critic'")
+        src = srcs[0]["id"] if srcs else db.source("system")
+        p = passes.ensure_pass(db, manuscript["id"], src)
+    return p
+
+
+def _critique_pass_status(db: Database, manuscript: dict) -> None:
+    from . import passes
+
+    st = passes.status(db, manuscript)
+    if not st["pass"]:
+        print(ui.dim("No edit pass yet — 'critique run <essay>' starts one."))
+        return
+    print(ui.bold("Edit pass") + ui.dim(f"  cursor → {st['cursor_file']}"))
+    colors = {"pending": ui.dim, "proposed": ui.cyan, "triaged": ui.cyan,
+              "written": ui.yellow, "resolved": ui.green, "skipped": ui.dim}
+    for row in st["essays"]:
+        counts = " ".join(f"{k}:{v}" for k, v in row["threads"].items())
+        marker = "▶" if row["at_cursor"] else " "
+        print(f"  {marker} {row['file']:<22} "
+              f"{colors[row['state']](row['state'])}"
+              + (ui.dim(f"  {counts}") if counts else ""))
+
+
+def _critique_run(db: Database, manuscript: dict, args) -> None:
+    from . import passes
+
+    if not args.target:
+        sys.exit("usage: critique run <essay.md> [--force]")
+    file = args.target
+    p = _critique_pass_row(db, manuscript)
+    config = _load_config(args)
+    try:
+        ctx = passes.build_context(db, manuscript, file, p, force=args.force)
+    except (RuntimeError, LookupError) as err:
+        sys.exit(f"error: {err}")
+    if ctx["forced"]:
+        print(ui.yellow("--force: running WITHOUT the unconfirmed items "
+                        "(they are not in the pass)."))
+    llm = passes.editor_llm(config)
+    if not llm.enabled:
+        sys.exit("error: the LLM is disabled ([llm] enabled = false).")
+    print(ui.dim(f"editor model: {llm.model} — {len(ctx['paragraphs'])} "
+                 f"paragraphs, {len(ctx['intents'])} intent(s), "
+                 f"{len(ctx['policies'])} polic(ies), "
+                 f"{len(ctx['before'])} before / {len(ctx['after'])} after "
+                 "summaries"))
+    try:
+        result = passes.run_editor(llm, ctx)
+    except (passes.ContractError, RuntimeError) as err:
+        sys.exit(f"error: {err}")
+    out = passes.stage(db, manuscript, p, file, result)
+    n_rep = sum(1 for t in out["staged"] if t["proposed_old"])
+    n_ins = len(out["staged"]) - n_rep
+    print(ui.green(f"staged {n_rep} replacement(s) and {n_ins} insertion(s)")
+          + ui.dim(f"; {len(out['suggestions'])} suggestion(s) filed as "
+                   "proposed intents"))
+    line = llm.stats_line()
+    if line:
+        print(ui.dim(line))
+    print(ui.dim(f"Next: critique edits {file}  |  critique triage --edits "
+                 f"{file}"))
+
+
+def _edit_threads(db: Database, manuscript: dict, file: str) -> list[dict]:
+    from . import passes
+    return passes.staged_threads(db, manuscript["id"], file)
+
+
+def _render_edit(n: int, t: dict, total: int) -> None:
+    """One staged edit: id/state header, red-struck old, green new, why."""
+    meta = loads(t.get("metadata"), {}) or {}
+    kind = meta.get("kind", "replace")
+    anchor = meta.get("anchor_paragraph")
+    state = {"proposed": ui.dim, "accepted": ui.green,
+             "rejected": ui.yellow}.get(t["state"], str)(t["state"])
+    where = (f"after ¶{anchor}" if kind == "insert" else f"¶{anchor}")
+    print(f"{ui.cyan(f'{n}.')} {ui.dim(f'[{t['id'][:8]}]')} {ui.bold(where)} "
+          f"{ui.dim(kind)}  {state}"
+          + (ui.dim(f"  → {meta['intent_id'][:11]}") if meta.get("intent_id")
+             else ""))
+    if t["proposed_old"]:
+        print(ui.red_strike(ui.wrap(t["proposed_old"], indent="    ")))
+    print(ui.green(ui.wrap(t["proposed_new"], indent="    ")))
+    if t["note"]:
+        print(ui.dim(ui.wrap("why: " + t["note"], indent="    ")))
+
+
+def _critique_edits_list(db: Database, manuscript: dict, args) -> None:
+    if not args.target:
+        sys.exit("usage: critique edits <essay.md>")
+    threads = _edit_threads(db, manuscript, args.target)
+    if not threads:
+        print(f"No staged edits for {args.target} — 'critique run "
+              f"{args.target}' proposes some.")
+        return
+    for n, t in enumerate(threads, 1):
+        _render_edit(n, t, len(threads))
+        print()
+    print(ui.dim("Verdicts: critique triage --edits <essay> [--accept N… "
+                 "--reject N… --reason … --revise N --text … --undo N…]"))
+
+
+def _critique_edits_triage(db: Database, manuscript: dict, args) -> None:
+    from . import passes
+
+    file = args.edits
+    mid = manuscript["id"]
+    p = _critique_pass_row(db, manuscript)
+    threads = _edit_threads(db, manuscript, file)
+    if not threads:
+        print(f"No staged edits for {file}.")
+        return
+
+    def resolve(token: str) -> dict:
+        if token.isdigit():
+            n = int(token)
+            if not 1 <= n <= len(threads):
+                sys.exit(f"error: no edit {n} (there are {len(threads)}).")
+            return threads[n - 1]
+        hits = [t for t in threads if token in t["id"]]
+        if len(hits) != 1:
+            sys.exit(f"error: '{token}' matches {len(hits)} edits.")
+        return hits[0]
+
+    if args.accept or args.reject or args.revise or args.undo:
+        if args.reject and not args.reason:
+            sys.exit("error: --reject requires --reason (verbatim evidence).")
+        for tok in args.accept or []:
+            passes.verdict(db, mid, resolve(tok), "accept")
+            print(ui.green(f"accepted {tok}"))
+        for tok in args.reject or []:
+            passes.verdict(db, mid, resolve(tok), "reject", args.reason)
+            print(ui.yellow(f"rejected {tok}"))
+        if args.revise:
+            if not args.text:
+                sys.exit("error: --revise requires --text.")
+            passes.verdict(db, mid, resolve(args.revise), "revise", args.text)
+            print(ui.green(f"revised & accepted {args.revise}"))
+        for tok in args.undo or []:
+            passes.verdict(db, mid, resolve(tok), "undo")
+            print(ui.cyan(f"undone {tok} → proposed"))
+        passes.mark_triaged(db, p, file)
+        return
+
+    print(ui.bold(f"{len(threads)} staged edit(s) for {file}.") + "  " + ui.dim(
+        "[k]eep/accept  [r]eject (asks why)  [e]dit+accept  [u]ndo  "
+        "[s]kip  [x] quit"))
+    for n, t in enumerate(threads, 1):
+        print()
+        _render_edit(n, t, len(threads))
+        while True:
+            try:
+                choice = input("  k/r/e/u/s/x> ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                choice = "x"
+            if choice in ("k", "r", "e", "u", "s", "x", "q"):
+                break
+            if choice == "a":
+                print(ui.dim("  ? 'k' accepts here"))
+        if choice in ("x", "q"):
+            break
+        if choice == "s":
+            continue
+        try:
+            if choice == "k":
+                passes.verdict(db, mid, t, "accept")
+                print(ui.green("  accepted"))
+            elif choice == "u":
+                passes.verdict(db, mid, t, "undo")
+                print(ui.cyan("  undone → proposed"))
+            elif choice == "r":
+                reason = ui.input_text(ui.dim("  why (verbatim)> ")).strip()
+                passes.verdict(db, mid, t, "reject", reason or None)
+                print(ui.yellow("  rejected"))
+            elif choice == "e":
+                new = ui.input_text(ui.dim("  your wording> ")).strip()
+                if not new:
+                    print(ui.dim("  no text — skipped"))
+                    continue
+                passes.verdict(db, mid, t, "revise", new)
+                print(ui.green("  revised & accepted") + ui.dim(
+                    " (the diff is evidence)"))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        except ValueError as err:
+            print(ui.yellow(f"  {err}"))
+    passes.mark_triaged(db, p, file)
+    left = sum(1 for t in _edit_threads(db, manuscript, file)
+               if t["state"] == "proposed")
+    print(ui.dim(f"\n{left} still undecided. Next: critique write {file} "
+                 "(accepted edits → Doc as pending forms)."))
+
+
+def _critique_write(db: Database, manuscript: dict, args) -> None:
+    """Diff-write: accepted edits → the essay's Doc tab as pending forms.
+    Pins the pre-pass version. Local keeps OLD."""
+    from . import gdocs, passes
+
+    if not args.target:
+        sys.exit("usage: critique write <essay.md>")
+    file = args.target
+    mid = manuscript["id"]
+    p = _critique_pass_row(db, manuscript)
+    threads = _edit_threads(db, manuscript, file)
+    accepted = [t for t in threads if t["state"] == "accepted"]
+    if not accepted:
+        sys.exit(f"error: no accepted edits for {file} — triage first.")
+    # Pristine check + pin: the pass row remembers what to roll back to.
+    from .revisions import collect_revision
+    version = collect_revision(db, manuscript, session_id=None,
+                               source="critique-pin")
+    if version is None:
+        row = db.one("SELECT id FROM manuscript_versions WHERE manuscript_id "
+                     "= ? ORDER BY version_no DESC LIMIT 1", (mid,))
+        version = dict(row) if row else None
+    if version:
+        passes.pin_version(db, p, file, version["id"])
+    config = _load_config(args)
+    try:
+        service = gdocs.get_service(config, args.workspace, interactive=True)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=True)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    # Compose locally first — this is where a drifted paragraph fails
+    # loudly, before any Doc write.
+    text = (Path(manuscript["path"]) / file).read_text(encoding="utf-8")
+    try:
+        passes.compose_marked_text(text, threads)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    result = gdocs.critique_diff_write(db, manuscript, file, threads,
+                                       service, docs_service)
+    for t in result["written"]:
+        db.update("doc_threads", t["id"], {"state": "written"})
+    for t, why in result["failed"]:
+        print(ui.yellow(f"  could not write [{t['id'][:8]}]: {why}"))
+    if result["written"]:
+        passes.set_essay_state(db, p, file, "written")
+    print(ui.green(f"wrote {len(result['written'])} pending form(s)")
+          + ui.dim(f" to {result['url']}"))
+    print(ui.dim("Read and post-edit the {{new}} halves in the Doc; then "
+                 f"'critique resolve {file}' makes them final. Local keeps "
+                 "the old text until then."))
+
+
+def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
+    """The confirmation gate (design §6.3 step 5). Explicit only."""
+    from . import gdocs, passes, summaries as sums
+
+    if not args.target:
+        sys.exit("usage: critique resolve <essay.md>")
+    file = args.target
+    mid = manuscript["id"]
+    p = _critique_pass_row(db, manuscript)
+    written = passes.staged_threads(db, mid, file, states=("written",))
+    if not written:
+        sys.exit(f"error: nothing written to the Doc for {file} — "
+                 "'critique write' first (or nothing to resolve).")
+    config = _load_config(args)
+    try:
+        service = gdocs.get_service(config, args.workspace, interactive=True)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=True)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
+    final, forms = passes.final_text_from_marked(marked)
+    # Apply locally: the author's post-edits win.
+    path = Path(manuscript["path"]) / file
+    normalized = gdocs.normalize_markdown(final)
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    diffs = passes.record_resolution(db, mid, file, forms)
+    # Strip the forms from the tab: a plain push of the now-final local
+    # file rebuilds the tab clean (read-back proof inside push).
+    gdocs.push_doc(db, manuscript, file, service=service,
+                   docs_service=docs_service)
+    print(ui.green(f"resolved {file}: {len(forms)} form(s) made final")
+          + (ui.dim(f", {len(diffs)} modified acceptance(s) recorded")
+             if diffs else ""))
+    for d in diffs:
+        print(ui.dim(f"  «{gdocs.clamp(d['proposal'])}» → "
+                     f"«{gdocs.clamp(d['final'])}»"))
+    # Collect, then rebuild this essay's summary at the gate.
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="critique-resolve")
+    llm = sums.summarizer_llm(config)
+    if llm.enabled:
+        try:
+            sums.rebuild_one(db, manuscript, file, llm)
+            print(ui.dim("summary rebuilt; downstream marked upstream_stale"))
+        except Exception as err:  # noqa: BLE001
+            print(ui.yellow(f"summary rebuild failed ({err}) — run "
+                            f"'summarize rebuild {file}'"))
+    passes.set_essay_state(db, p, file, "resolved")
+    order = [f for f, _ in sums.units(manuscript)]
+    if file in order:
+        idx = order.index(file)
+        if idx >= p["cursor"]:
+            db.update("critique_passes", p["id"], {"cursor": idx + 1})
+    if diffs:
+        _critique_learnings(db, manuscript, diffs, config)
+    nxt = order[idx + 1] if file in order and idx + 1 < len(order) else None
+    print(ui.dim(f"Next essay: {nxt} — 'critique run {nxt}' when you say so."
+                 if nxt else "That was the last essay in reading order."))
+
+
+def _critique_learnings(db: Database, manuscript: dict, diffs: list[dict],
+                        config: dict) -> None:
+    """Modified acceptances feed the margin-learnings duty: at ≥2 in one
+    resolve, surface a pattern candidate through the scoped distiller."""
+    if len(diffs) < 2:
+        return
+    from . import placement
+    from .llm import LLMClient
+
+    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
+                                f"«{d['final'][:120]}»") for d in diffs]
+    llm = LLMClient(config)
+    try:
+        candidate = placement.distill_batch(db, manuscript, explanations, llm)
+    except Exception:  # noqa: BLE001
+        candidate = None
+    if candidate:
+        print(ui.yellow("Pattern candidate from your post-edits: "
+                        + ui.shorten(candidate.get("statement", ""), 70)))
+
+
+def _critique_rollback(db: Database, manuscript: dict, args) -> None:
+    """Restore the pinned pre-pass state for one essay: local file from
+    the pinned version, Doc tab re-pushed clean; verdicts stay as
+    evidence; threads → withdrawn."""
+    from . import gdocs, passes
+
+    if not args.target:
+        sys.exit("usage: critique rollback <essay.md>")
+    file = args.target
+    mid = manuscript["id"]
+    p = _critique_pass_row(db, manuscript)
+    pin = passes.pinned_version(p, file)
+    if not pin:
+        sys.exit(f"error: no pinned version for {file} — nothing was written.")
+    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?", (pin,))
+    if not row:
+        sys.exit("error: pinned version is missing from the record.")
+    files = loads(row["files"], {})
+    if file not in files:
+        sys.exit(f"error: pinned version has no {file}.")
+    (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
+    for t in passes.staged_threads(db, mid, file,
+                                   states=("written", "accepted", "proposed",
+                                           "rejected")):
+        db.update("doc_threads", t["id"], {"state": "withdrawn"})
+    config = _load_config(args)
+    try:
+        service = gdocs.get_service(config, args.workspace, interactive=True)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=True)
+        gdocs.push_doc(db, manuscript, file, service=service,
+                       docs_service=docs_service)
+        print(ui.dim("Doc tab restored."))
+    except ValueError as err:
+        print(ui.yellow(f"local restored; Doc not reachable ({err}) — "
+                        f"'doc push {file}' when it is."))
+    passes.set_essay_state(db, p, file, "pending")
+    print(ui.green(f"rolled back {file}") + ui.dim(
+        " — verdicts kept as evidence; re-run when ready."))
+
+
+def _critique_label(kind: str, item: dict) -> str:
+    """The colored identity row: cyan id, dim provenance label."""
+    meta = loads(item["metadata"], {}).get("critique", {})
+    where = item.get("scope") or item.get("file") or (
+        "guide" if item.get("guide_id") else "manuscript")
+    label = f"{meta.get('unit', '?')} #{meta.get('ordinal', '?')}"
+    return (ui.cyan(f"[{item['id'][:8]}]")
+            + ui.dim(f" ({label} | {where} | {kind})"))
+
+
+def _critique_item_line(kind: str, item: dict) -> str:
+    return f"{_critique_label(kind, item)} {item['statement']}"
+
+
+def _critique_resolve(db: Database, mid: str, prefix: str) -> tuple[str, dict]:
+    for kind, table in (("intent", "declared_intents"),
+                        ("element", "style_elements")):
+        rows = db.all(
+            f"SELECT * FROM {table} WHERE manuscript_id = ? "
+            "AND status = 'proposed' AND id LIKE ?",
+            (mid, f"%{prefix}%"))
+        if len(rows) == 1:
+            return kind, dict(rows[0])
+        if len(rows) > 1:
+            sys.exit(f"error: '{prefix}' is ambiguous ({len(rows)} matches).")
+    sys.exit(f"error: no proposed critique item matching '{prefix}'.")
+
+
+def _critique_verdict(db: Database, mid: str, kind: str, item: dict,
+                      verdict: str, text: str | None = None) -> None:
+    fns = {
+        ("intent", "accept"): crit.accept_intent,
+        ("intent", "reject"): crit.reject_intent,
+        ("intent", "revise"): crit.revise_intent,
+        ("element", "accept"): crit.accept_element,
+        ("element", "reject"): crit.reject_element,
+        ("element", "revise"): crit.revise_element,
+    }
+    fn = fns[(kind, verdict)]
+    if verdict == "accept":
+        fn(db, mid, item)
+    else:
+        fn(db, mid, item, text)
+
+
+def _critique_queue(db: Database, mid: str,
+                    scope: str | None) -> list[tuple[str, dict]]:
+    return crit.queue(db, mid, scope)
+
+
+def _critique_triage(db: Database, manuscript: dict, args) -> None:
+    mid = manuscript["id"]
+    if args.accept or args.reject or args.revise:
+        if args.reject and not args.reason:
+            sys.exit("error: --reject requires --reason (the author's "
+                     "words are the evidence).")
+        if args.revise and not args.text:
+            sys.exit("error: --revise requires --text (the author's "
+                     "replacement wording).")
+        # One snapshot for every number in this invocation: verdicts must
+        # not renumber the queue out from under later tokens.
+        queue = _critique_queue(db, mid, args.scope)
+
+        def resolve(token: str) -> tuple[str, dict]:
+            if token.isdigit():
+                n = int(token)
+                if not 1 <= n <= len(queue):
+                    sys.exit(f"error: no item {n} — the pending list has "
+                             f"{len(queue)} item(s) (did the --scope match "
+                             "your 'critique list' run?).")
+                return queue[n - 1]
+            return _critique_resolve(db, mid, token)
+
+        for token in args.accept or []:
+            kind, item = resolve(token)
+            _critique_verdict(db, mid, kind, item, "accept")
+            print(ui.green(f"accepted [{item['id'][:8]}]")
+                  + f" {item['statement'][:70]}")
+        for token in args.reject or []:
+            kind, item = resolve(token)
+            _critique_verdict(db, mid, kind, item, "reject", args.reason)
+            print(ui.yellow(f"rejected [{item['id'][:8]}]")
+                  + f" {item['statement'][:70]}")
+        if args.revise:
+            kind, item = resolve(args.revise)
+            _critique_verdict(db, mid, kind, item, "revise", args.text)
+            print(ui.green(f"revised & accepted [{item['id'][:8]}]")
+                  + ui.dim(" (provenance is now yours)"))
+        return
+    queue = _critique_queue(db, mid, args.scope)
+    if not queue:
+        print("Nothing to triage.")
+        return
+    # Keys match the concept/illustration loops: k = keep/accept ('a' is
+    # reserved for 'alias' in concept triage — same finger, same meaning
+    # everywhere), x/q both quit.
+    print(ui.bold(f"{len(queue)} proposed item(s).") + "  " + ui.dim(
+        "[k]eep/accept  [r]eject (asks why)  [e]dit+accept  [s]kip  "
+        "[x] quit"))
+    verdicts = 0
+    for kind, item in queue:
+        print()
+        print(_critique_label(kind, item))
+        print(ui.wrap(item["statement"], indent="  "))
+        try:
+            while True:
+                # Plain prompt: ANSI codes inside an input() prompt make
+                # readline miscount the line and overwrite on wrap.
+                choice = input("  k/r/e/s/x> ").strip().lower()
+                if choice in ("k", "r", "e", "s", "q", "x"):
+                    break
+                if choice == "a":
+                    print(ui.dim("  ? 'k' accepts here (concept triage "
+                                 "reserves 'a' for alias)"))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if choice in ("q", "x"):
+            break
+        if choice == "s":
+            continue
+        if choice == "r":
+            try:
+                reason = ui.input_text(
+                    ui.dim("  why (verbatim, required)> ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not reason:
+                print(ui.dim("  no reason given — skipped instead."))
+                continue
+            _critique_verdict(db, mid, kind, item, "reject", reason)
+            print(ui.yellow("  rejected") + ui.dim(" (reason kept verbatim)"))
+        elif choice == "e":
+            try:
+                new_text = ui.input_text(ui.dim("  your wording> ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not new_text:
+                print(ui.dim("  no text given — skipped instead."))
+                continue
+            _critique_verdict(db, mid, kind, item, "revise", new_text)
+            print(ui.green("  revised & accepted")
+                  + ui.dim(" (provenance is now yours; critic's original "
+                           "kept as lineage)"))
+        else:
+            _critique_verdict(db, mid, kind, item, "accept")
+            print(ui.green("  accepted"))
+        verdicts += 1
+    pend = crit.pending(db, mid, scope=args.scope)
+    remaining = len(pend["intents"]) + len(pend["elements"])
+    print(f"\n{verdicts} verdict(s) recorded; {remaining} still proposed.")
+
+
+def cmd_summarize(args):
+    from . import summaries as sums
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    if args.action == "status":
+        rows = sums.status(db, manuscript)
+        counts: dict[str, int] = {}
+        for r in rows:
+            counts[r["state"]] = counts.get(r["state"], 0) + 1
+            color = {"fresh": ui.green, "stale": ui.yellow,
+                     "upstream_stale": ui.dim, "missing": ui.yellow}[r["state"]]
+            words = f"  {r['words']}w" if r["words"] else ""
+            print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
+        print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
+        return
+    if args.action == "show":
+        if not args.file:
+            sys.exit("usage: summarize show <file>")
+        row = db.one("SELECT * FROM essay_summaries WHERE manuscript_id = ? "
+                     "AND file = ?", (manuscript["id"], args.file))
+        if not row:
+            sys.exit(f"no summary for {args.file} — run 'summarize rebuild'.")
+        print(ui.bold(args.file) + ui.dim(f"  ({row['created_at'][:19]}Z)"))
+        print(row["summary"])
+        return
+    # rebuild
+    llm = sums.summarizer_llm(_load_config(args))
+    if not llm.enabled:
+        sys.exit("error: the LLM is disabled ([llm] enabled = false) — "
+                 "summaries need it.")
+    print(ui.dim(f"summarizer model: {llm.model}"))
+    if args.file:
+        row = sums.rebuild_one(db, manuscript, args.file, llm)
+        print(ui.green(f"rebuilt {args.file}") + ui.dim(
+            f" ({len(row['summary'].split())} words); downstream summaries "
+            "marked upstream_stale"))
+    else:
+        result = sums.rebuild(
+            db, manuscript, llm, only_missing_or_stale=not args.all,
+            progress=lambda f: print(ui.dim(f"  summarizing {f}…")))
+        print(ui.green(f"built {len(result['built'])}") + ui.dim(
+            f", reused {len(result['reused'])} fresh"))
+    line = llm.stats_line()
+    if line:
+        print(ui.dim(line))
+
+
+def cmd_prompts(args):
+    from . import prompt_registry as pr
+
+    if args.action == "show":
+        if not args.name:
+            sys.exit("usage: prompts show <name>")
+        try:
+            p = pr.by_name(args.name)
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+        print(ui.bold(p.name) + ui.dim(f"  — {p.location}"))
+        print(ui.dim(f"used by: {p.verbs}"))
+        print()
+        print(p.text())
+        return
+    print(ui.bold("LLM prompts") + ui.dim(
+        " — file prompts: edit the .md/JSON artifact, no code change; inline prompts: "
+        "edit the module constant (legacy; each migrates to a file when "
+        "its verb is next touched)."))
+    print()
+    width = max(len(p.name) for p in pr.REGISTRY)
+    for p in pr.REGISTRY:
+        kind = ui.green("file  ") if p.artifact_kind == "file" else ui.dim("inline")
+        print(f"  {ui.cyan(p.name.ljust(width))}  {kind}  {p.location}")
+        print(f"  {' ' * width}  {ui.dim(p.purpose)}")
+        print(f"  {' ' * width}  {ui.dim('used by: ' + p.verbs)}")
+    print(ui.dim("\n'prompts show <name>' prints one in full."))
+
+
 def _find_by_prefix(db: Database, table: str, prefix: str, manuscript_id: str) -> dict:
     rows = db.all(
         f"SELECT * FROM {table} WHERE manuscript_id = ? AND id LIKE ?",
@@ -580,7 +1376,7 @@ def _find_by_prefix(db: Database, table: str, prefix: str, manuscript_id: str) -
 
 
 TRIAGE_KINDS = {
-    "c": "concept", "d": "definition", "o": "objection", "e": "example",
+    "c": "concept", "o": "objection", "e": "example",
     "m": "metaphor", "q": "question", "h": "historical_reference",
     "t": "mathematical_construct",
 }
@@ -613,27 +1409,16 @@ def _unconfirmed_nodes(db: Database, mid: str) -> list[dict]:
 
 
 def _confirm_node(db: Database, mid: str, node: dict, new_kind: str | None) -> None:
-    from .extraction import record_triage
-
-    meta = loads(node["metadata"], {})
-    extracted = meta.get("origin") == "extracted"
-    meta["confirmed"] = True
-    changes = {"metadata": json.dumps(meta)}
-    if new_kind and new_kind != node["kind"]:
-        changes["kind"] = new_kind
-        if extracted:
-            record_triage(db, mid, node, "retyped", new_kind)
-    elif extracted:
-        record_triage(db, mid, node, "confirmed")
-    db.update("concept_nodes", node["id"], changes)
+    action = "retype" if new_kind and new_kind != node["kind"] else "keep"
+    triage_service.apply_one(
+        db, {"id": mid}, "concepts", node, action,
+        {"kind": new_kind} if action == "retype" else {})
 
 
 def _retire_node(db: Database, mid: str, node: dict) -> int:
-    from .extraction import record_triage
-
-    if loads(node["metadata"], {}).get("origin") == "extracted":
-        record_triage(db, mid, node, "rejected")
-    return cg.retire_concept(db, mid, node)
+    result = triage_service.apply_one(
+        db, {"id": mid}, "concepts", node, "retire")
+    return result["edges_retired"]
 
 
 @contextlib.contextmanager
@@ -641,6 +1426,9 @@ def _ephemeral_history():
     """Keystrokes typed at inner prompts (triage keys, notes rewording)
     are working input, not commands — pop whatever readline recorded
     inside the block so the shell's up-arrow history stays clean."""
+    if not sys.stdin.isatty() and "readline" not in sys.modules:
+        yield
+        return
     try:
         import readline
     except ImportError:
@@ -661,6 +1449,9 @@ def _concept_name_completion(db: Database, mid: str):
     that read a concept name (triage's 'alias of>'). Names contain
     spaces, so the whole line is the completion unit; matching is
     case-insensitive prefix. Completer state is restored on exit."""
+    if not sys.stdin.isatty():
+        yield
+        return
     try:
         import readline
     except ImportError:
@@ -706,11 +1497,7 @@ def _run_triage(db: Database, mid: str) -> None:
         print("Nothing to triage — no unconfirmed extracted concepts.")
         return
     print(f"{len(nodes)} unconfirmed concept(s).")
-    print(ui.dim("Keys: [k]eep  [r]etire  [s]kip (or Enter)  [n] reword notes  "
-                 "[a] alias of another concept  "
-                 "[x] quit — or retype: [c]oncept [d]efinition [o]bjection "
-                 "[e]xample [m]etaphor [q]uestion [h]istorical_reference "
-                 "[t] mathematical_construct"))
+    print(ui.dim(triage_service.CONCEPT_TRIAGE_HELP))
     import textwrap
 
     kept = retyped = retired = skipped = merged = 0
@@ -775,9 +1562,9 @@ def _run_triage(db: Database, mid: str) -> None:
                     print(ui.dim("  ? name an existing, different concept"))
                     clean = False
                     continue
-                from .extraction import record_triage
-                result = cg.merge_concepts(db, mid, dict(canonical), dict(node))
-                record_triage(db, mid, dict(node), "merged", canonical["name"])
+                result = triage_service.apply_one(
+                    db, {"id": mid}, "concepts", dict(node), "alias",
+                    {"canonical_id": canonical["id"]})
                 merged += 1
                 echo(ui.cyan(
                     f"(→ alias of '{canonical['name']}', "
@@ -790,7 +1577,9 @@ def _run_triage(db: Database, mid: str) -> None:
                 except EOFError:
                     new_notes = ""
                 if new_notes:
-                    db.update("concept_nodes", node["id"], {"notes": new_notes})
+                    triage_service.apply_one(
+                        db, {"id": mid}, "concepts", node, "reword_notes",
+                        {"notes": new_notes})
                     node["notes"] = new_notes
                     print(f"  {ui.cyan('(notes updated)')}")
                     print(ui.dim(textwrap.fill(
@@ -808,7 +1597,7 @@ def _run_triage(db: Database, mid: str) -> None:
                 return
             kind = TRIAGE_KINDS.get(choice)
             if not kind:
-                kind, ambiguous = _prefix_choice(choice, VALID_KINDS)
+                kind, ambiguous = _prefix_choice(choice, cg.NODE_KINDS)
                 if ambiguous:
                     print(ui.dim("  ? ambiguous: " + " / ".join(ambiguous)))
                     clean = False
@@ -818,25 +1607,15 @@ def _run_triage(db: Database, mid: str) -> None:
                 retyped += 1
                 echo(ui.cyan(f"(→ {kind})"), clean)
                 break
-            print(ui.dim("  ? use k / r / s / a / x, a kind key (c d o e m q h t), "
+            print(ui.dim("  ? use k / r / s / a / x, a kind key (c o e m q h t), "
                          "or a kind prefix (e.g. syl)"))
             clean = False
     print(f"Triage: kept {kept}, retyped {retyped}, retired {retired}, "
           f"merged {merged}, skipped {skipped}.")
 
 
-def _record_edge_triage(db: Database, mid: str, description: str, signal: str) -> None:
-    ev = ko_fields("ev")
-    ev.update(
-        manuscript_id=mid, episode_id=None,
-        evidence_type="edge_triage", signal=signal,
-        target=description[:200], supports_policy=None, weight="high",
-    )
-    db.insert("evidence", ev)
-
-
 def _run_edge_triage(db: Database, mid: str) -> None:
-    from .extraction import VALID_RELATIONS, record_triage
+    from .extraction import VALID_RELATIONS
 
     relations = sorted(VALID_RELATIONS)
     edges = [dict(e) for e in db.all(
@@ -848,10 +1627,7 @@ def _run_edge_triage(db: Database, mid: str) -> None:
         print("Nothing to triage — no inferred relationships.")
         return
     print(f"{len(edges)} inferred relationship(s).")
-    print(ui.dim("Keys: [k]onfirm as-is  [r]eject  [f]lip direction  "
-                 "[a] these are one concept (alias-merge)  "
-                 "[s]kip (or Enter)  [x] quit — or retype the relation "
-                 "by number, name, or unique prefix (ans, cre, dep, ref…):"))
+    print(ui.dim(triage_service.EDGE_TRIAGE_HELP + ":"))
     print(ui.dim("  " + "  ".join(
         f"[{number}]{relation}" for number, relation in enumerate(relations, start=1)
     )))
@@ -868,11 +1644,11 @@ def _run_edge_triage(db: Database, mid: str) -> None:
               f"—{ui.cyan(edge['relation'])}→ {ui.bold(to_name)}{support}")
         flipped = False
 
-        def settle(relation: str) -> None:
-            changes = {"status": "declared", "relation": relation}
-            if flipped:
-                changes["from_node"], changes["to_node"] = to_id, from_id
-            db.update("concept_edges", edge["id"], changes)
+        def settle(relation: str, *, retyped: bool = False) -> None:
+            action = "flip" if flipped else ("retype" if retyped else "keep")
+            params = {"relation": relation} if retyped else {}
+            triage_service.apply_one(
+                db, {"id": mid}, "edges", edge, action, params)
 
         while True:
             try:
@@ -885,14 +1661,12 @@ def _run_edge_triage(db: Database, mid: str) -> None:
                 settle(edge["relation"])
                 confirmed += 1
                 description = f"{current_from} —{edge['relation']}→ {current_to}"
-                _record_edge_triage(db, mid, description, "confirmed")
                 print(f"  {ui.green(f'(confirmed: {description})')}")
                 break
             if choice in ("r", "reject"):
-                db.update("concept_edges", edge["id"], {"status": "rejected"})
+                triage_service.apply_one(
+                    db, {"id": mid}, "edges", edge, "reject")
                 rejected += 1
-                _record_edge_triage(
-                    db, mid, f"{from_name} —{edge['relation']}→ {to_name}", "rejected")
                 print(f"  {ui.yellow('(rejected)')}")
                 break
             if choice in ("f", "flip"):
@@ -912,8 +1686,9 @@ def _run_edge_triage(db: Database, mid: str) -> None:
                     "SELECT * FROM concept_nodes WHERE id = ?", (canon_id,)))
                 duplicate = dict(db.one(
                     "SELECT * FROM concept_nodes WHERE id = ?", (dup_id,)))
-                result = cg.merge_concepts(db, mid, canonical, duplicate)
-                record_triage(db, mid, duplicate, "merged", canonical["name"])
+                result = triage_service.apply_one(
+                    db, {"id": mid}, "edges", edge, "alias",
+                    {"canonical_id": canonical["id"]})
                 merged += 1
                 summary = (f"(merged '{duplicate['name']}' into "
                            f"'{canonical['name']}': {result['repointed']} "
@@ -937,20 +1712,57 @@ def _run_edge_triage(db: Database, mid: str) -> None:
                     print(ui.dim("  ? ambiguous: " + " / ".join(ambiguous)))
                     continue
             if relation:
-                settle(relation)
+                settle(relation, retyped=True)
                 retyped += 1
                 description = f"{current_from} —{relation}→ {current_to}"
-                _record_edge_triage(
-                    db, mid,
-                    f"{from_name} —{edge['relation']}→ {to_name} ⇒ {description}",
-                    "retyped",
-                )
                 print(f"  {ui.cyan(f'(→ {description})')}")
                 break
             print(ui.dim("  ? use k / r / f / a / s / x, a relation number, "
                          "its name, or a unique prefix (ans, cre, dep, ref…)"))
     print(f"Edge triage: confirmed {confirmed}, retyped {retyped}, "
           f"rejected {rejected}, merged {merged}, skipped {skipped}.")
+
+
+def _run_deterministic_triage(db: Database, manuscript: dict, *,
+                              run_nodes: bool, run_edges: bool,
+                              apply: bool) -> None:
+    from . import triage_rules
+    from .revisions import read_manuscript_files
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    result = triage_rules.plan(
+        db, manuscript, files,
+        include_concepts=run_nodes, include_edges=run_edges)
+    decisions = result["decisions"]
+    for triage_type, heading in (("concepts", "Concepts"), ("edges", "Edges")):
+        rows = [item for item in decisions if item["triage_type"] == triage_type]
+        if not rows:
+            continue
+        print(ui.bold(f"{heading} ({len(rows)}):"))
+        for item in rows:
+            print(f"  {item['action']} {item['object_label']}"
+                  + ui.dim(f" - {item['rule_label']}: {item['reason']}"))
+    for item in result["protected"]:
+        print(ui.dim(f"protected {item['object_label']} - {item['reason']}"))
+    if not decisions:
+        print("Deterministic triage found no mechanically safe decisions.")
+        return
+    if not apply:
+        print(ui.dim(
+            f"Report only - {len(decisions)} decision(s). Re-run with "
+            "--deterministic --apply to execute them atomically."))
+        return
+
+    applied = triage_service.apply_deterministic(db, manuscript, decisions)
+    action_counts = {
+        action: sum(item["action"] == action for item in decisions)
+        for action in {item["action"] for item in decisions}
+    }
+    summary = ", ".join(
+        f"{count} {action}{'' if count == 1 else 's'}"
+        for action, count in sorted(action_counts.items()))
+    print(ui.green(f"Applied {applied['count']} deterministic decision(s): "
+                   f"{summary}."))
 
 
 def cmd_concept(args):
@@ -1032,8 +1844,24 @@ def cmd_concept(args):
             edges_retired = _retire_node(db, mid, dict(node))
             print(
                 f"Retired '{node['name']}' and {edges_retired} related edge(s). "
-                f"Kept for history; revive with: concept add {node['name']!r}"
+                f"Kept for history; undo with: concept revive {node['name']!r}"
             )
+    elif args.action == "revive":
+        # The inverse of retire (a stray 'r' in triage is a real failure
+        # mode): restore status, location, and this retirement's collateral
+        # edges — no hand surgery.
+        for name in args.names:
+            row = db.one("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+                         "AND lower(name) = lower(?) AND status = 'retired'",
+                         (mid, name))
+            if not row:
+                sys.exit(f"error: no retired concept named '{name}'.")
+            result = cg.revive_concept(db, mid, dict(row))
+            where = (f" in {result['introduced_in']}" if result["introduced_in"]
+                     else "")
+            print(ui.green(f"revived '{row['name']}'")
+                  + ui.dim(f" → {result['status']}{where}; "
+                           f"{result['edges_revived']} edge(s) restored"))
     elif args.action == "edit":
         node = cg.get_concept(db, mid, args.name)
         if not node:
@@ -1106,6 +1934,11 @@ def cmd_concept(args):
     elif args.action == "triage":
         run_nodes = args.nodes or not args.edges
         run_edges = args.edges or not args.nodes
+        if args.deterministic:
+            _run_deterministic_triage(
+                db, manuscript, run_nodes=run_nodes, run_edges=run_edges,
+                apply=args.apply)
+            return
         with _ephemeral_history():
             if run_nodes:
                 _run_triage(db, mid)
@@ -1373,9 +2206,7 @@ def cmd_illus(args):
                          "[x] quit"))
 
             def block(text, dim=False):
-                wrapped = textwrap.fill(text, width=76,
-                                        initial_indent="    ",
-                                        subsequent_indent="    ")
+                wrapped = ui.wrap(text)
                 print(ui.dim(wrapped) if dim else wrapped)
 
             quit_walk = False
@@ -1402,8 +2233,8 @@ def cmd_illus(args):
                         if choice in ("k", "keep", "accept"):
                             placement.decide(db, manuscript, row["id"],
                                              "accept", llm=None)
-                            print(f"  accepted → tag written into "
-                                  f"{row['file']}")
+                            print("  " + ui.green("accepted")
+                                  + ui.dim(f" → tag written into {row['file']}"))
                             break
                         if choice in ("v", "revise"):
                             new_desc = _input_prefilled(
@@ -1418,25 +2249,26 @@ def cmd_illus(args):
                                 f"description revised: "
                                 f"«{row['description']}» became "
                                 f"«{new_desc}»")))
-                            print("  accepted (modified — the diff is "
-                                  "evidence)")
+                            print("  " + ui.green("accepted (modified)")
+                                  + ui.dim(" — the diff is evidence"))
                             break
                         if choice in ("r", "reject"):
-                            why = input("  reason (verbatim evidence; "
-                                        "Enter for none)> ").strip() or None
+                            why = ui.input_text(
+                                "  reason (verbatim evidence; "
+                                "Enter for none)> ").strip() or None
                             placement.decide(db, manuscript, row["id"],
                                              "reject", reason=why,
                                              llm=None)
                             if why:
                                 explanations.append(
                                     (row["file"], f"rejected: {why}"))
-                            print("  rejected")
+                            print("  " + ui.yellow("rejected"))
                             break
                     except (LookupError, ValueError) as err:
                         print(ui.yellow(f"  {err}"))
                         break
                     if choice in ("s", "", "skip"):
-                        print("  skipped")
+                        print("  " + ui.dim("skipped"))
                         break
                     if choice in ("x", "quit"):
                         quit_walk = True
@@ -1464,8 +2296,9 @@ def cmd_illus(args):
                 kind = ("revision of existing tag" if row["revises"]
                         else "new placement")
                 why = f"criterion {row['criterion']} — {row['rationale']}"
-                print(f"{i}. {row['file']} — {kind}\n"
-                      f"   after: «{row['anchor'][:90]}»\n"
+                print(f"{ui.cyan(f'{i}.')} {ui.bold(row['file'])}"
+                      + ui.dim(f" — {kind}") + "\n"
+                      + ui.dim(f"   after: «{row['anchor'][:90]}»") + "\n"
                       f"   [Illustration: {row['description']}]\n"
                       f"   {ui.dim(why)}")
             print("\nVerdicts: illus triage --accept-all-except N… | "
@@ -1686,7 +2519,7 @@ def cmd_illus(args):
 def cmd_sweep(args):
     from pathlib import Path
 
-    from . import api, hygiene, sweeps
+    from . import api, hygiene, sweeps, triage_rules
     from .revisions import read_manuscript_files
 
     db = _open_db(args)
@@ -1761,15 +2594,20 @@ def cmd_sweep(args):
         return
 
     if args.apply:
-        for c in concepts:
-            api.retire_concept(db, manuscript, c["name"])
-            print(f"retired '{c['name']}'")
-        for e in edges:
-            api.reject_edge(db, manuscript, e["id"])
-            print(f"rejected {e['edge']}")
-        for c in below_bar:
-            api.retire_concept(db, manuscript, c["name"])
-            print(f"retired '{c['name']}' (below the recurrence bar)")
+        plan = triage_rules.plan(db, manuscript, files)
+        report_ids = {item["id"] for item in concepts + edges + below_bar}
+        decisions = [item for item in plan["decisions"]
+                     if item["object_id"] in report_ids]
+        triage_service.apply_deterministic(db, manuscript, decisions)
+        for item in decisions:
+            verb = {"retire": "retired", "reject": "rejected",
+                    "alias": "merged"}.get(item["action"], item["action"])
+            print(f"{verb} {item['object_label']} "
+                  f"({item['rule_label']})")
+        for item in plan["protected"]:
+            if item["object_id"] in report_ids:
+                print(ui.dim(f"protected {item['object_label']} - "
+                             f"{item['reason']}"))
     elif concepts or edges or below_bar:
         print(ui.dim(
             "Report only — 'sweep hygiene --apply' retires the ungrounded "
@@ -2960,7 +3798,8 @@ def cmd_proposal(args):
                   f"{ui.bold(summary)}")
             for line in details:
                 print(ui.dim(textwrap.fill(
-                    line, width=76, initial_indent="    ", subsequent_indent="      ",
+                    line, width=ui.term_width(),
+                    initial_indent="    ", subsequent_indent="      ",
                 )))
             while True:
                 try:
@@ -3060,6 +3899,17 @@ def cmd_style(args):
         elif args.action == "retire":
             result = api.retire_style_element(db, manuscript, args.params[0])
             print(f"Retired style element: {result['statement']}")
+        elif args.action == "move":
+            # Re-scope an element to another guide (or a file). Elements
+            # imported at house scope routinely belong to one part.
+            if not (args.guide or args.file):
+                sys.exit("usage: style move <id> --guide NAME | --file FILE")
+            result = api.move_style_element(
+                db, manuscript, args.params[0], guide_name=args.guide,
+                file=args.file)
+            print(ui.green("moved") + f" [{result['id'][:8]}] → "
+                  + (f"guide '{result['guide']}'" if result.get("guide")
+                     else f"file {result['file']}"))
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
 
@@ -3286,6 +4136,13 @@ def cmd_history(args):
     print(f"Detected {len(report['transitions'])} editorial transition(s) versus the prior revision.")
 
 
+def cmd_triage_app(args):
+    from .triage_server import run
+
+    run(args.workspace, getattr(args, "manuscript", None), host=args.host,
+        port=args.port, open_browser=not args.no_open)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="authorlm",
@@ -3309,9 +4166,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     original_add_parser = sub.add_parser
 
-    def add_parser(*a, **kw):
+    # Verbs that send an LLM prompt announce it in --help and point at the
+    # registry, so the words shaping the model are always one command away.
+    from .prompt_registry import HELP_NOTE
+    LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
+                 "analyze", "lens", "sweep", "illus", "summarize", "doc",
+                 "policy", "critique", "triage-app"}
+
+    def add_parser(name, *a, **kw):
         kw.setdefault("parents", [common])
-        return original_add_parser(*a, **kw)
+        if name in LLM_VERBS:
+            desc = kw.get("description") or kw.get("help") or ""
+            kw["description"] = (desc + "\n\n" + HELP_NOTE).strip()
+            kw.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
+        return original_add_parser(name, *a, **kw)
 
     sub.add_parser = add_parser
 
@@ -3333,6 +4201,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("briefing", help="show the learning briefing")
     p.set_defaults(func=cmd_briefing)
 
+    p = sub.add_parser(
+        "triage-app",
+        help="open the interactive Concept and Edge Triage App",
+        description="Open a local, schema-driven grid for concept and edge "
+                    "analysis and triage. Analysis runs only when requested.")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="local interface to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=0,
+                   help="local port (default: choose a free port)")
+    p.add_argument("--no-open", action="store_true",
+                   help="print the URL without opening a browser")
+    p.set_defaults(func=cmd_triage_app)
+
     p = sub.add_parser("intent", help="declare/complete/abandon/list writing intents")
     p.add_argument("action", choices=["declare", "complete", "abandon", "retire", "list"])
     p.add_argument("statement", nargs="?",
@@ -3340,27 +4221,92 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--outcome", help="outcome note (complete) or reason (abandon)")
     p.set_defaults(func=cmd_intent)
 
+    p = sub.add_parser(
+        "critique",
+        help="external critique: import a report as proposed items, triage "
+             "them, then the essay-by-essay edit pass — run → triage "
+             "--edits → write → (read in Docs) → resolve "
+             "(docs/critique-pass-design.md)")
+    p.add_argument("action",
+                   choices=["import", "status", "list", "triage",
+                            "show", "reason", "reopen",
+                            "run", "edits", "write", "resolve", "rollback"])
+    p.add_argument("target", nargs="?",
+                   help="import: manifest JSON | show/reason/reopen: item id "
+                        "prefix | run/edits/write/resolve/rollback: essay file")
+    p.add_argument("--edits", metavar="ESSAY",
+                   help="triage: verdicts on the STAGED EDITS of this essay "
+                        "(k/r/e/u/s/x) instead of critique items")
+    p.add_argument("--undo", nargs="+", metavar="N|ID",
+                   help="triage --edits: send edits back to proposed")
+    p.add_argument("--force", action="store_true",
+                   help="run: proceed past the preflight gate WITHOUT the "
+                        "unconfirmed items (never with them)")
+    p.add_argument("--query", help="show: search critique items by text")
+    p.add_argument("--scope",
+                   help="list/triage: only intents scoped to this file; "
+                        "'manuscript' = only manuscript-wide items (the "
+                        "global sitting)")
+    p.add_argument("--accept", nargs="+", metavar="N|ID",
+                   help="triage: accept items by 'critique list' number or "
+                        "id prefix (non-interactive)")
+    p.add_argument("--reject", nargs="+", metavar="N|ID",
+                   help="triage: reject items by list number or id prefix "
+                        "(requires --reason)")
+    p.add_argument("--reason", help="triage: the author's verbatim reason for --reject")
+    p.add_argument("--revise", metavar="N|ID",
+                   help="triage: accept one item with the author's own "
+                        "wording (requires --text; provenance flips to author)")
+    p.add_argument("--text", help="triage: replacement wording for --revise")
+    p.set_defaults(func=cmd_critique)
+
+    p = sub.add_parser(
+        "summarize",
+        help="essay summaries — the editor's working memory of the whole "
+             "book, built autoregressively in reading order "
+             "(docs/critique-pass-design.md §4)")
+    p.add_argument("action", choices=["status", "show", "rebuild"])
+    p.add_argument("file", nargs="?",
+                   help="show: the unit; rebuild: one unit only (against "
+                        "current prior summaries; downstream marked stale)")
+    p.add_argument("--all", action="store_true",
+                   help="rebuild: every unit from scratch (default reuses "
+                        "fresh summaries and rebuilds from the first "
+                        "missing/stale one onward)")
+    p.set_defaults(func=cmd_summarize)
+
+    p = sub.add_parser(
+        "prompts",
+        help="every LLM prompt AuthorLM sends, and where to read/edit each "
+             "(file prompts under authorlm/prompts/, inline ones in modules)")
+    p.add_argument("action", nargs="?", default="list", choices=["list", "show"])
+    p.add_argument("name", nargs="?", help="show: prompt name from the list")
+    p.set_defaults(func=cmd_prompts)
+
     p = sub.add_parser("concept", help="manage the Concept Graph")
     p.add_argument("action",
                    choices=["add", "link", "list", "show", "confirm", "unconfirm",
-                            "reject-edge", "reject", "retire", "triage", "edit",
+                            "reject-edge", "reject", "retire", "revive",
+                            "triage", "edit",
                             "alias", "merge"])
     p.add_argument("params", nargs="*",
                    help="add/show/confirm/unconfirm/reject-edge/edit: name or edge id; "
                         "link: <from> <relation> <to>; retire: one or more names; "
                         "alias: <name> <alias>…; merge: <canonical> <duplicate>")
     p.add_argument("--kind", default=None,
-                   choices=["concept", "definition", "objection", "example", "metaphor",
-                            "question", "historical_reference", "mathematical_construct",
-                            "syllogism"],
+                   choices=sorted(cg.NODE_KINDS),
                    help="node kind — used by add, and by confirm to retype")
     p.add_argument("--notes", help="free-text notes stored on the concept")
     p.add_argument("--all", action="store_true",
                    help="list: include retired/rejected; confirm: all unconfirmed")
-    p.add_argument("--all-kind", metavar="KIND",
+    p.add_argument("--all-kind", metavar="KIND", choices=sorted(cg.NODE_KINDS),
                    help="confirm/retire every unconfirmed extracted concept of this kind")
     p.add_argument("--nodes", action="store_true", help="triage: concepts only")
     p.add_argument("--edges", action="store_true", help="triage: relationships only")
+    p.add_argument("--deterministic", action="store_true",
+                   help="triage: " + triage_service.DETERMINISTIC_TRIAGE_HELP)
+    p.add_argument("--apply", action="store_true",
+                   help="triage --deterministic: apply every reported decision")
     p.add_argument("--remove", nargs="+", metavar="ALIAS",
                    help="alias: withdraw these aliases instead of adding")
     p.set_defaults(func=cmd_concept)
@@ -3678,7 +4624,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("style", help="style guides: ratified prose law per file")
     p.add_argument("action",
-                   choices=["guides", "guide", "attach", "add", "show", "retire"])
+                   choices=["guides", "guide", "attach", "add", "show", "retire",
+                            "move"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
                         "add: <aspect> \"statement\"; show: <file>; retire: <id>")
@@ -3720,6 +4667,11 @@ def main(argv: list[str] | None = None) -> None:
         args.relation = params[1] if len(params) > 1 else None
         args.to_name = params[2] if len(params) > 2 else None
         args.names = params
+        if (args.deterministic or args.apply) and args.action != "triage":
+            sys.exit("usage: concept triage --deterministic [--apply] "
+                     "[--nodes|--edges]")
+        if args.apply and not args.deterministic:
+            sys.exit("error: concept triage --apply requires --deterministic")
         if args.action == "link":
             if len(params) != 3:
                 sys.exit("usage: concept link <from> <relation> <to>")
@@ -3728,6 +4680,8 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"usage: concept {args.action} <name-or-id-prefix>")
         if args.action == "confirm" and not (args.name or args.all or args.all_kind):
             sys.exit("usage: concept confirm <name-or-edge-prefix> | --all | --all-kind KIND")
+        if args.action == "revive" and not args.names:
+            sys.exit("usage: concept revive <name>…")
         if args.action == "retire" and not (args.names or args.all_kind):
             sys.exit("usage: concept retire <name>… | --all-kind KIND")
         if args.action == "edit" and not (args.name and (args.notes is not None or args.kind)):
@@ -3739,7 +4693,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.action == "merge" and len(params) != 2:
             sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "style":
-        required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1}
+        required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1,
+                    "move": 1}
         if len(args.params) < required.get(args.action, 0):
             sys.exit(f"usage: style {args.action} — see 'style --help'")
         if args.action == "add" and bool(args.guide) == bool(args.file):

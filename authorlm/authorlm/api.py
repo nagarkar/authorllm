@@ -31,6 +31,7 @@ from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
                        compute_prerequisite_gaps, generate_guidance,
                        intent_coverage_notes)
 from . import hygiene
+from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import (
@@ -328,6 +329,12 @@ def collect(db: Database, manuscript: dict, config: dict,
         attached = True
     realized = cg.scan_realizations(db, mid, version)
     repointed, vanished = cg.rescan_primary_locations(db, mid, version)
+    # Summaries: mark, don't cascade. A changed unit's own row is already
+    # stale by source_hash; downstream rows get the tolerated flag.
+    from . import summaries as sums
+
+    changed_files = sorted({t["location"].split("#", 1)[0] for t in transitions})
+    sums.mark_changed(db, manuscript, changed_files)
     vanished_proposals = []
     hypotheses_dropped = []
     for node in vanished:
@@ -1137,6 +1144,32 @@ def retire_style_element(db: Database, manuscript: dict, prefix: str) -> dict:
     return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
+def move_style_element(db: Database, manuscript: dict, prefix: str,
+                       guide_name: str | None = None,
+                       file: str | None = None) -> dict:
+    """Re-scope a style element to another guide or to a file (exactly
+    one). The element keeps its id, status, provenance, and history."""
+    if bool(guide_name) == bool(file):
+        raise ValueError("move needs exactly one of guide_name / file")
+    row = db.one(
+        "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
+        "AND status != 'retired'", (manuscript["id"], f"%{prefix}%"))
+    if not row:
+        raise LookupError(f"no live style element matching '{prefix}'")
+    if guide_name:
+        guide = db.one("SELECT * FROM style_guides WHERE manuscript_id = ? "
+                       "AND name = ?", (manuscript["id"], guide_name))
+        if not guide:
+            raise LookupError(f"no style guide named '{guide_name}'")
+        db.update("style_elements", row["id"],
+                  {"guide_id": guide["id"], "file": None})
+        return {"id": row["id"], "statement": row["statement"],
+                "guide": guide["name"], "file": None}
+    db.update("style_elements", row["id"], {"guide_id": None, "file": file})
+    return {"id": row["id"], "statement": row["statement"], "guide": None,
+            "file": file}
+
+
 def merge_concepts(db: Database, manuscript: dict,
                    canonical_name: str, duplicate_name: str) -> dict:
     canonical = cg.get_concept(db, manuscript["id"], canonical_name)
@@ -1145,11 +1178,11 @@ def merge_concepts(db: Database, manuscript: dict,
     duplicate = cg.get_concept(db, manuscript["id"], duplicate_name)
     if not duplicate:
         raise LookupError(f"no concept named '{duplicate_name}'")
-    result = cg.merge_concepts(db, manuscript["id"], dict(canonical), dict(duplicate))
-    from .extraction import record_triage
-
-    record_triage(db, manuscript["id"], dict(duplicate), "merged", canonical["name"])
-    return result
+    result = triage_service.apply_one(
+        db, manuscript, "concepts", dict(duplicate), "alias",
+        {"canonical_id": canonical["id"]})
+    return {key: result[key] for key in
+            ("canonical", "aliases", "repointed", "dropped")}
 
 
 def link_concepts(db: Database, manuscript: dict, from_name: str,
@@ -1162,19 +1195,10 @@ def confirm_concept(db: Database, manuscript: dict, name: str,
     node = cg.get_concept(db, manuscript["id"], name)
     if not node:
         raise LookupError(f"no concept named '{name}'")
-    from .extraction import record_triage
-
-    meta = loads(node["metadata"], {})
-    extracted = meta.get("origin") == "extracted"
-    meta["confirmed"] = True
-    changes: dict[str, Any] = {"metadata": json.dumps(meta)}
-    if kind and kind != node["kind"]:
-        changes["kind"] = kind
-        if extracted:
-            record_triage(db, manuscript["id"], dict(node), "retyped", kind)
-    elif extracted:
-        record_triage(db, manuscript["id"], dict(node), "confirmed")
-    db.update("concept_nodes", node["id"], changes)
+    action = "retype" if kind and kind != node["kind"] else "keep"
+    triage_service.apply_one(
+        db, manuscript, "concepts", dict(node), action,
+        {"kind": kind} if action == "retype" else {})
     return {"name": node["name"], "kind": kind or node["kind"]}
 
 
@@ -1184,12 +1208,9 @@ def retire_concept(db: Database, manuscript: dict, name: str) -> dict:
         raise LookupError(f"no concept named '{name}'")
     if node["status"] == "retired":
         raise ValueError(f"'{node['name']}' is already retired")
-    from .extraction import record_triage
-
-    if loads(node["metadata"], {}).get("origin") == "extracted":
-        record_triage(db, manuscript["id"], dict(node), "rejected")
-    edges = cg.retire_concept(db, manuscript["id"], dict(node))
-    return {"name": node["name"], "edges_retired": edges}
+    result = triage_service.apply_one(
+        db, manuscript, "concepts", dict(node), "retire")
+    return {"name": node["name"], "edges_retired": result["edges_retired"]}
 
 
 def _find_edge(db: Database, manuscript: dict, prefix: str) -> dict:
@@ -1207,10 +1228,11 @@ def _find_edge(db: Database, manuscript: dict, prefix: str) -> dict:
 def confirm_edge(db: Database, manuscript: dict, edge_prefix: str,
                  relation: str | None = None) -> dict:
     edge = _find_edge(db, manuscript, edge_prefix)
-    db.update(
-        "concept_edges", edge["id"],
-        {"relation": relation or edge["relation"], "status": "declared"},
-    )
+    action = "retype" if relation and relation != edge["relation"] else "keep"
+    triage_service.apply_one(
+        db, manuscript, "edges", edge, action,
+        {"relation": relation} if action == "retype" else {},
+        record_evidence=False)
     return {
         "from_name": cg.node_name(db, edge["from_node"]),
         "relation": relation or edge["relation"],
@@ -1220,7 +1242,8 @@ def confirm_edge(db: Database, manuscript: dict, edge_prefix: str,
 
 def reject_edge(db: Database, manuscript: dict, edge_prefix: str) -> dict:
     edge = _find_edge(db, manuscript, edge_prefix)
-    db.update("concept_edges", edge["id"], {"status": "rejected"})
+    triage_service.apply_one(
+        db, manuscript, "edges", edge, "reject", record_evidence=False)
     return {
         "from_name": cg.node_name(db, edge["from_node"]),
         "relation": edge["relation"],
@@ -1606,6 +1629,15 @@ def curate_concepts(db: Database, manuscript: dict,
                                       kind=op.get("kind"))
             elif kind == "retire":
                 out = retire_concept(db, manuscript, op["name"])
+            elif kind == "revive":
+                row = db.one(
+                    "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND "
+                    "lower(name) = lower(?) AND status = 'retired'",
+                    (manuscript["id"], op["name"]))
+                if not row:
+                    raise LookupError(f"no retired concept named '{op['name']}'")
+                out = {"name": row["name"],
+                       **cg.revive_concept(db, manuscript["id"], dict(row))}
             elif kind == "link":
                 out = link_concepts(db, manuscript, op["from"],
                                     op["relation"], op["to"])

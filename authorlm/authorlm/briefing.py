@@ -162,8 +162,20 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
                  "words": len(f.read_text(encoding="utf-8").split())}
                 for f in sorted(root.glob("*.md"))]
 
+    # Non-author-sourced material announces itself (critique-pass design
+    # §2): critic input must never silently blend into the author's record.
+    from . import critique as crit
+
+    critique_pending = [
+        {"name": r["name"],
+         "intents_proposed": r["intents"]["proposed"],
+         "elements_proposed": r["elements"]["proposed"]}
+        for r in crit.status(db, manuscript_id)
+        if r["intents"]["proposed"] or r["elements"]["proposed"]]
+
     return {
         "since": since,
+        "critique_pending": critique_pending,
         "profiles": profiles,
         "policy_changes": policy_changes,
         "new_policies": new_policies,

@@ -73,7 +73,8 @@ def attach_file(db: Database, manuscript_id: str, file: str, guide: dict) -> dic
 
 def add_element(db: Database, manuscript_id: str, aspect: str, statement: str,
                 guide: dict | None = None, file: str | None = None,
-                notes: str | None = None, overrides: str | None = None) -> dict:
+                notes: str | None = None, overrides: str | None = None,
+                status: str = "active", source_id: str | None = None) -> dict:
     if aspect not in ASPECTS:
         raise ValueError(f"unknown aspect '{aspect}' (use one of {sorted(ASPECTS)})")
     if (guide is None) == (file is None):
@@ -83,7 +84,8 @@ def add_element(db: Database, manuscript_id: str, aspect: str, statement: str,
         manuscript_id=manuscript_id,
         guide_id=guide["id"] if guide else None,
         file=file, aspect=aspect, statement=statement, notes=notes,
-        status="active", overrides=overrides,
+        status=status, overrides=overrides,
+        source_id=source_id or db.source("author"),
     )
     db.insert("style_elements", row)
     return row

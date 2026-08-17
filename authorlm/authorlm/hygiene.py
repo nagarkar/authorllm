@@ -17,7 +17,6 @@ model was never shown in text is dropped at the door.
 
 from __future__ import annotations
 
-import json
 import re
 
 from .concepts import concept_pattern, node_names
@@ -48,7 +47,7 @@ def ungrounded_concepts(db: Database, mid: str,
         if meta.get("origin") != "extracted" or meta.get("confirmed"):
             continue
         if mentioned_in(files, node_names(node)) is None:
-            out.append({"name": node["name"], "kind": node["kind"],
+            out.append({"id": node["id"], "name": node["name"], "kind": node["kind"],
                         "status": node["status"]})
     return out
 
@@ -125,6 +124,26 @@ def sweep(db: Database, manuscript: dict, files: dict[str, str]) -> dict:
     }
     ungrounded = ungrounded_concepts(db, mid, files)
     ungrounded_names = {c["name"] for c in ungrounded}
+    below_bar = below_recurrence_bar(db, mid, files, ungrounded_names)
+    return {
+        "ungrounded_concepts": ungrounded,
+        "ungrounded_edges": ungrounded_edges(db, mid, files),
+        "below_bar": below_bar,
+        "suggestions_stale": stale_suggestions(db, mid,
+                                               realized_ids=realized_now),
+    }
+
+
+def below_recurrence_bar(db: Database, mid: str, files: dict[str, str],
+                         ungrounded_names: set[str] | None = None) -> list[dict]:
+    """Unconfirmed recurring-kind concepts that fail the ratified bar.
+
+    Ungrounded concepts are excluded because the stronger zero-context rule
+    already accounts for them.
+    """
+    ungrounded_names = ungrounded_names or {
+        row["name"] for row in ungrounded_concepts(db, mid, files)
+    }
     below_bar = []
     for node in db.all(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
@@ -137,15 +156,10 @@ def sweep(db: Database, manuscript: dict, files: dict[str, str]) -> dict:
             continue
         admitted, stats = passes_recurrence_bar(files, node_names(node))
         if not admitted:
-            below_bar.append({"name": node["name"], "kind": node["kind"],
+            below_bar.append({"id": node["id"], "name": node["name"],
+                              "kind": node["kind"],
                               **stats})
-    return {
-        "ungrounded_concepts": ungrounded,
-        "ungrounded_edges": ungrounded_edges(db, mid, files),
-        "below_bar": below_bar,
-        "suggestions_stale": stale_suggestions(db, mid,
-                                               realized_ids=realized_now),
-    }
+    return below_bar
 
 
 # --------------------------------------------- recurrence bar (admission)
@@ -155,8 +169,8 @@ def sweep(db: Database, manuscript: dict, files: dict[str, str]) -> dict:
 # might occur once or twice, but isn't a continuing motif." The bar
 # gates machine-extracted hypotheses of these kinds only; declarations
 # by the author bypass it (declaration is ratification), and coined-name
-# kinds (question/objection) plus one-shot-by-nature kinds (definition,
-# historical_reference, mathematical_construct, syllogism) are exempt.
+# kinds (question/objection) plus one-shot-by-nature kinds
+# (historical_reference, mathematical_construct, syllogism) are exempt.
 RECURRENCE_GATED_KINDS = {"concept", "metaphor", "example"}
 
 _PARA_SPLIT = re.compile(r"\n\s*\n")

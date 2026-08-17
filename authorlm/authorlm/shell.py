@@ -203,11 +203,59 @@ def _install_completer(db, manuscript: dict) -> None:
         readline.parse_and_bind("tab: complete")
 
 
+HISTORY_LIMIT = 1000
+
+
+def _install_history(workspace: str):
+    """Load persistent cross-run history (~/.authorlm/shell_history) and
+    return the readline module, or None when readline is unavailable.
+    Only main-prompt commands are meant to persist; run_shell trims the
+    entries that nested prompts (triage keystrokes, reject reasons) add
+    during a command, so up-arrow and the file stay meaningful."""
+    try:
+        import readline
+    except ImportError:
+        return None
+    path = Path(workspace) / ".authorlm" / "shell_history"
+    try:
+        readline.read_history_file(str(path))
+    except (FileNotFoundError, OSError):
+        pass
+    readline.set_history_length(HISTORY_LIMIT)
+    return readline
+
+
+def _save_history(readline_mod, workspace: str) -> None:
+    if readline_mod is None:
+        return
+    path = Path(workspace) / ".authorlm" / "shell_history"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        readline_mod.write_history_file(str(path))
+    except OSError:
+        pass  # history is a convenience — never let it break exit
+
+
+def _trim_nested_history(readline_mod, baseline: int) -> None:
+    """Drop history entries added by prompts inside the command that just
+    ran (triage answers and the like). Degrades silently where libedit
+    lacks remove_history_item."""
+    if readline_mod is None or not hasattr(readline_mod, "remove_history_item"):
+        return
+    try:
+        while readline_mod.get_current_history_length() > baseline:
+            readline_mod.remove_history_item(
+                readline_mod.get_current_history_length() - 1)
+    except (ValueError, OSError):
+        pass
+
+
 def run_shell(args, db, manuscript: dict) -> None:
     from . import sessions as ses
     from .cli import _print_briefing  # late import (see _dispatch)
 
     _install_completer(db, manuscript)
+    readline_mod = _install_history(args.workspace)
 
     base_argv = ["--workspace", args.workspace, "--manuscript", manuscript["name"]]
     lock = threading.Lock()
@@ -264,10 +312,14 @@ def run_shell(args, db, manuscript: dict) -> None:
             if tokens[0] in BLOCKED_IN_SHELL:
                 print(f"error: '{tokens[0]}' cannot run inside the shell.")
                 continue
+            baseline = (readline_mod.get_current_history_length()
+                        if readline_mod else 0)
             with lock:
                 _dispatch(base_argv, tokens)
+            _trim_nested_history(readline_mod, baseline)
     finally:
         stop.set()
+        _save_history(readline_mod, args.workspace)
 
     still_active = ses.active_session(db, manuscript["id"])
     if still_active:

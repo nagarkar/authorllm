@@ -40,12 +40,51 @@ def yellow(text: str) -> str:
     return _wrap("33", text)
 
 
+def red_strike(text: str) -> str:
+    """Red + strikethrough: the OLD half of a proposed edit."""
+    return _wrap("31;9", text)
+
+
 def header(text: str) -> str:
     return _wrap("1;36", text)
 
 
 def is_tty() -> bool:
     return sys.stdout.isatty()
+
+
+def term_width(margin: int = 2, ceiling: int = 78) -> int:
+    """Usable wrap width for the live terminal. Narrow terminals get the
+    real width (minus a margin) so pre-wrapped lines are never re-broken
+    mid-word by the terminal; wide terminals stay capped for readability.
+    shutil.get_terminal_size respects COLUMNS and falls back to 80 when
+    output is piped."""
+    import shutil
+
+    return max(20, min(shutil.get_terminal_size().columns - margin, ceiling))
+
+
+def wrap(text: str, indent: str = "    ") -> str:
+    """Fill text to the live terminal width with a hanging indent."""
+    import textwrap
+
+    return textwrap.fill(text, width=term_width(),
+                         initial_indent=indent, subsequent_indent=indent)
+
+
+def input_text(prompt: str) -> str:
+    """Free-text input in plain cooked mode. Once readline is imported,
+    input() routes through its line editor, which miscounts wrapped lines
+    in some terminals and redraws long answers over the start of the line.
+    Dictated multi-sentence answers (rejection reasons, verbatim evidence)
+    are the norm here, so bypass readline and let the terminal driver wrap
+    — at the cost of arrow-key editing on that one line. Raises EOFError
+    at end of input, matching input()."""
+    print(prompt, end="", flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError
+    return line.rstrip("\n")
 
 
 def link(url: str, text: str | None = None) -> str:

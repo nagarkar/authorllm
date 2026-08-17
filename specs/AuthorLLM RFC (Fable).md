@@ -952,7 +952,7 @@ The graph allows AuthorLM to **reason about ideas rather than paragraphs**.
 
 ### **21.3 Nodes**
 
-Node kinds include: concepts, definitions, objections, examples, metaphors, mathematical constructs, historical references, open questions.
+Node kinds include: concepts, objections, examples, metaphors, mathematical constructs, historical references, open questions, and syllogisms. A concept's definition is stored in its notes.
 
 **A node represents a unit of thought rather than a unit of text.**
 
@@ -1482,7 +1482,7 @@ Exhaustive flat list of distinct named concepts, ideas, principles, and artifact
 - The Concept Graph as the central domain-specific knowledge structure (memory of ideas, not text)  
 - Concept Graph example chain: Choice —distinguishes→ Distinction —creates→ Field —permits→ Trajectory —defines→ History  
 - Concept Graph uses: prerequisite detection, topic sequencing, conceptual consistency, future chapter planning  
-- Concept Graph node types (concepts, definitions, objections, examples, metaphors, mathematical constructs, historical references, open questions); node \= unit of thought, not unit of text  
+- Concept Graph node types (concepts, objections, examples, metaphors, mathematical constructs, historical references, open questions, syllogisms); definitions are concept notes; node \= unit of thought, not unit of text
 - Concept Graph relationship types (depends on, motivates, contrasts with, elaborates, generalizes, specializes, answers, foreshadows, illustrates; also prerequisite, depends\_on, references in the data model)  
 - Concept Graph evolution (relationships strengthen, weaken, split, disappear; historical structures remain accessible through replay)  
 - Declared concepts — future concepts preserved in the graph before manuscript text exists  
@@ -1601,4 +1601,3 @@ Exhaustive flat list of distinct named concepts, ideas, principles, and artifact
 - Replay-based experimentation discipline — every change to AuthorLM itself (retrieval, prompts, learners, weighting) is a hypothesis evaluated against historical writing sessions before deployment; one variable at a time; failed experiments preserved (reinstated from V1)  
 - Four engineering-decision questions — does this improve evidence, explainability, replay, or understanding of the author; if all four answers are no, do not build it (reinstated from V1)  
 - Prompt/reasoning-artifact versioning discipline — stable identifiers, versions, declared input/output schemas, replay evaluation before deployment, versions never overwritten (reinstated from V1)
-

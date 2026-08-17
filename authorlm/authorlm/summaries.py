@@ -1,0 +1,234 @@
+"""Essay summaries — the editor's working memory (critique-pass design §4).
+
+One summary per toc unit, built autoregressively in reading order: each
+is conditioned on every prior summary, so an edit pass over essay E can
+hold "everything before E" and "everything after E" in a few thousand
+tokens. Summaries are DERIVED machinery (like renders): they live in the
+database, never in the manuscript or the Doc.
+
+Staleness is marked, not cascaded. A collect that changes essay N leaves
+N's summary with a stale `source_hash` (a lie about the text — the edit
+pass refuses to run on it) and flags downstream rows `upstream_stale`
+(tolerated). `critique resolve` rebuilds one essay's summary at its
+confirmation gate, so processing in reading order keeps every "before"
+summary fresh by construction; `summarize --rebuild` does the full pass.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+from .db import Database, ko_fields, loads
+from .llm import LLMClient
+
+PROMPT_PATH = Path(__file__).parent / "prompts" / "summarizer.md"
+DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
+
+
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def summarizer_prompt() -> str:
+    return PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def summarizer_llm(config: dict) -> LLMClient:
+    """The cheap-tier client for compression work. `[critique]
+    summarizer_model` overrides the general `[llm] model`; the LLM key,
+    provider, and cache settings are shared."""
+    llm = LLMClient(config)
+    override = (config.get("critique", {}) or {}).get("summarizer_model")
+    if override:
+        llm.model = override
+    return llm
+
+
+# ------------------------------------------------------------- reading
+
+def units(manuscript: dict) -> list[tuple[str, str]]:
+    """(file, text) pairs in toc reading order — every content file,
+    front matter included (the critic has notes even there)."""
+    from .revisions import read_manuscript_files
+    from .structure import ordered_items
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    return ordered_items(files)
+
+
+def all_summaries(db: Database, manuscript_id: str) -> dict[str, dict]:
+    return {r["file"]: dict(r) for r in db.all(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ?",
+        (manuscript_id,))}
+
+
+def status(db: Database, manuscript: dict) -> list[dict]:
+    """Per-unit freshness in reading order: fresh | stale (text changed)
+    | upstream_stale | missing."""
+    have = all_summaries(db, manuscript["id"])
+    out = []
+    for file, text in units(manuscript):
+        row = have.get(file)
+        if not row:
+            state = "missing"
+        elif row["source_hash"] != _hash(text):
+            state = "stale"
+        elif row["upstream_stale"]:
+            state = "upstream_stale"
+        else:
+            state = "fresh"
+        out.append({"file": file, "state": state,
+                    "words": len(row["summary"].split()) if row else 0,
+                    "created_at": row["created_at"] if row else None})
+    return out
+
+
+def before_after(db: Database, manuscript: dict,
+                 file: str) -> tuple[list[dict], list[dict]]:
+    """Summaries of the units before and after `file` in reading order —
+    the edit pass's book-context. Each entry: {file, summary, state}."""
+    have = all_summaries(db, manuscript["id"])
+    order = [f for f, _ in units(manuscript)]
+    if file not in order:
+        raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    idx = order.index(file)
+    texts = dict(units(manuscript))
+
+    def entry(f):
+        row = have.get(f)
+        if not row:
+            return {"file": f, "summary": None, "state": "missing"}
+        state = ("stale" if row["source_hash"] != _hash(texts[f])
+                 else "upstream_stale" if row["upstream_stale"] else "fresh")
+        return {"file": f, "summary": row["summary"], "state": state}
+
+    return ([entry(f) for f in order[:idx]],
+            [entry(f) for f in order[idx + 1:]])
+
+
+# ------------------------------------------------------------- building
+
+def _concept_slice(db: Database, manuscript: dict, file: str) -> str:
+    """The graph's file= slice as prompt text: name — notes."""
+    from . import api
+
+    try:
+        sliced = api.scoped_concepts(db, manuscript, file=file)
+    except LookupError:
+        return "(none recorded)"
+    lines = []
+    for n in sliced.get("nodes", []):
+        notes = (n.get("notes") or "").strip()
+        lines.append(f"- {n['name']}" + (f" — {notes}" if notes else ""))
+    return "\n".join(lines) or "(none recorded)"
+
+
+def _prior_block(prior: list[tuple[str, str]]) -> str:
+    if not prior:
+        return "(this is the first unit)"
+    return "\n\n".join(f"[{f}]\n{s}" for f, s in prior)
+
+
+def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
+                   prior: list[tuple[str, str]], llm: LLMClient) -> dict:
+    """Write (or rewrite) one unit's summary conditioned on `prior`
+    [(file, summary), …]. Returns the stored row."""
+    user = (
+        "PRIOR SUMMARIES (reading order):\n" + _prior_block(prior)
+        + "\n\nCONCEPTS (author's ratified definitions):\n"
+        + _concept_slice(db, manuscript, file)
+        + f"\n\nTHE UNIT: {file}\n\n{text}"
+    )
+    summary = llm.complete(summarizer_prompt(), user)
+    if not summary:
+        raise RuntimeError(f"summarizer returned nothing for {file} "
+                           "(LLM disabled or call failed)")
+    summary = summary.strip()
+    upstream_hash = _hash("\n".join(s for _, s in prior))
+    existing = db.one(
+        "SELECT id FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file))
+    fields = {"summary": summary, "source_hash": _hash(text),
+              "upstream_hash": upstream_hash, "upstream_stale": 0}
+    if existing:
+        db.update("essay_summaries", existing["id"], fields)
+        row_id = existing["id"]
+    else:
+        row = ko_fields("es")
+        row.update(manuscript_id=manuscript["id"], file=file, **fields)
+        db.insert("essay_summaries", row)
+        row_id = row["id"]
+    return dict(db.one("SELECT * FROM essay_summaries WHERE id = ?", (row_id,)))
+
+
+def rebuild(db: Database, manuscript: dict, llm: LLMClient,
+            only_missing_or_stale: bool = False,
+            progress=None) -> dict:
+    """The full sequential pass in reading order. With
+    `only_missing_or_stale`, fresh units are reused as conditioning
+    context (their text unchanged) rather than re-summarized — but a
+    stale unit forces every unit AFTER it to rebuild too, since their
+    conditioning changed (this is the one place cascade is correct:
+    the author asked for truth from scratch)."""
+    have = all_summaries(db, manuscript["id"])
+    prior: list[tuple[str, str]] = []
+    built, reused = [], []
+    cascade = False
+    for file, text in units(manuscript):
+        row = have.get(file)
+        fresh = (row is not None and row["source_hash"] == _hash(text)
+                 and not row["upstream_stale"])
+        if only_missing_or_stale and fresh and not cascade:
+            prior.append((file, row["summary"]))
+            reused.append(file)
+            continue
+        cascade = True
+        if progress:
+            progress(file)
+        new = summarize_unit(db, manuscript, file, text, prior, llm)
+        prior.append((file, new["summary"]))
+        built.append(file)
+    return {"built": built, "reused": reused}
+
+
+def rebuild_one(db: Database, manuscript: dict, file: str,
+                llm: LLMClient) -> dict:
+    """Rebuild one unit's summary against the CURRENT prior summaries
+    (the confirmation-gate rebuild), then mark everything downstream
+    upstream_stale — mark, don't cascade."""
+    order = [f for f, _ in units(manuscript)]
+    texts = dict(units(manuscript))
+    if file not in order:
+        raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    have = all_summaries(db, manuscript["id"])
+    idx = order.index(file)
+    prior = [(f, have[f]["summary"]) for f in order[:idx] if f in have]
+    new = summarize_unit(db, manuscript, file, texts[file], prior, llm)
+    for f in order[idx + 1:]:
+        if f in have:
+            db.update("essay_summaries", have[f]["id"], {"upstream_stale": 1})
+    return new
+
+
+def mark_changed(db: Database, manuscript: dict,
+                 changed_files: list[str]) -> list[str]:
+    """After a collect: flag downstream summaries of any changed unit as
+    upstream_stale. The changed unit's own row needs no flag — its
+    source_hash mismatch already says the text moved. Returns files
+    flagged."""
+    if not changed_files:
+        return []
+    order = [f for f, _ in units(manuscript)]
+    have = all_summaries(db, manuscript["id"])
+    first = min((order.index(f) for f in changed_files if f in order),
+                default=None)
+    if first is None:
+        return []
+    flagged = []
+    for f in order[first + 1:]:
+        if f in have and not have[f]["upstream_stale"]:
+            db.update("essay_summaries", have[f]["id"], {"upstream_stale": 1})
+            flagged.append(f)
+    return flagged

@@ -11,7 +11,19 @@ dependencies = []
 
 [project.optional-dependencies]
 llm = ["litellm"]
-mcp = ["mcp"]
+mcp = ["mcp<2"]
+gdocs = [
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+]
+all = [
+    "litellm",
+    "mcp<2",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+]
 
 [project.scripts]
 authorlm = "authorlm.cli:main"
@@ -19,3 +31,10 @@ authorlm-mcp = "authorlm.mcp_server:main"
 
 [tool.setuptools]
 packages = ["authorlm"]
+
+[tool.setuptools.package-data]
+authorlm = [
+    "prompts/*.md",
+    "triage_profiles/*.json",
+    "triage_dist/*.html",
+]

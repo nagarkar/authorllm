@@ -13,10 +13,19 @@ import re
 
 from .db import Database, ko_fields, loads
 
+
+NODE_KINDS = frozenset({
+    "concept", "objection", "example", "metaphor", "question",
+    "historical_reference", "mathematical_construct", "syllogism",
+})
+
+
 def add_concept(
     db: Database, manuscript_id: str, name: str, kind: str = "concept",
-    notes: str | None = None,
+    notes: str | None = None, source_id: str | None = None,
 ) -> dict:
+    if kind not in NODE_KINDS:
+        raise ValueError(f"invalid concept kind '{kind}'")
     existing = get_concept(db, manuscript_id, name)
     if existing:
         updates = {}
@@ -32,6 +41,7 @@ def add_concept(
     row.update(
         manuscript_id=manuscript_id, name=name, kind=kind,
         status="declared", introduced_in=None, notes=notes,
+        source_id=source_id or db.source("author"),
     )
     db.insert("concept_nodes", row)
     return row
@@ -43,7 +53,9 @@ def get_concept(db: Database, manuscript_id: str, name: str):
     node answers to the name (so revive-by-add and double-retire checks
     still see it)."""
     exact = db.one(
-        "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?)",
+        "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?) "
+        "ORDER BY CASE WHEN status = 'retired' THEN 1 ELSE 0 END, created_at DESC "
+        "LIMIT 1",
         (manuscript_id, name),
     )
     if exact and exact["status"] != "retired":
@@ -142,23 +154,69 @@ def retire_concept(db: Database, manuscript_id: str, node: dict) -> int:
     """Retire a concept and every edge touching it. Nothing is deleted —
     retired knowledge stays historically accessible (Common Core §8.10).
     Returns the number of edges retired."""
-    db.update("concept_nodes", node["id"], {"status": "retired"})
+    meta = loads(node.get("metadata"), {}) or {}
+    meta["retired_from"] = {"status": node.get("status"),
+                            "introduced_in": node.get("introduced_in")}
+    db.update("concept_nodes", node["id"],
+              {"status": "retired", "metadata": json.dumps(meta)})
     edges = db.all(
         "SELECT * FROM concept_edges WHERE manuscript_id = ? "
         "AND (from_node = ? OR to_node = ?) AND status NOT IN ('rejected', 'retired')",
         (manuscript_id, node["id"], node["id"]),
     )
     for edge in edges:
-        db.update("concept_edges", edge["id"], {"status": "retired"})
+        # Remember what the edge was, and that THIS retirement did it, so
+        # a revive restores exactly and only its own collateral.
+        emeta = loads(edge["metadata"], {}) or {}
+        emeta["retired_from"] = {"status": edge["status"],
+                                 "by_node": node["id"]}
+        db.update("concept_edges", edge["id"],
+                  {"status": "retired", "metadata": json.dumps(emeta)})
     return len(edges)
+
+
+def revive_concept(db: Database, manuscript_id: str, node: dict) -> dict:
+    """The inverse of retire_concept: restore the node's prior status and
+    location, and un-retire the edges that THIS node's retirement took
+    down (edges retired for other reasons stay retired). Returns
+    {status, introduced_in, edges_revived}."""
+    meta = loads(node.get("metadata"), {}) or {}
+    prior = meta.pop("retired_from", None) or {}
+    status = prior.get("status") or "declared"
+    introduced_in = prior.get("introduced_in") or node.get("introduced_in")
+    if status == "retired":
+        status = "declared"
+    db.update("concept_nodes", node["id"],
+              {"status": status, "introduced_in": introduced_in,
+               "metadata": json.dumps(meta)})
+    revived = 0
+    for edge in db.all(
+            "SELECT * FROM concept_edges WHERE manuscript_id = ? "
+            "AND (from_node = ? OR to_node = ?) AND status = 'retired'",
+            (manuscript_id, node["id"], node["id"])):
+        emeta = loads(edge["metadata"], {}) or {}
+        prior_e = emeta.get("retired_from")
+        if not prior_e or prior_e.get("by_node") != node["id"]:
+            continue
+        other = edge["to_node"] if edge["from_node"] == node["id"] else edge["from_node"]
+        other_row = db.one("SELECT status FROM concept_nodes WHERE id = ?", (other,))
+        if not other_row or other_row["status"] == "retired":
+            continue  # the far end is gone; the edge stays down
+        emeta.pop("retired_from", None)
+        db.update("concept_edges", edge["id"],
+                  {"status": prior_e.get("status") or "inferred",
+                   "metadata": json.dumps(emeta)})
+        revived += 1
+    return {"status": status, "introduced_in": introduced_in,
+            "edges_revived": revived}
 
 
 def link_concepts(
     db: Database, manuscript_id: str, from_name: str, relation: str, to_name: str,
-    status: str = "declared",
+    status: str = "declared", source_id: str | None = None,
 ) -> dict:
-    src = add_concept(db, manuscript_id, from_name)
-    dst = add_concept(db, manuscript_id, to_name)
+    src = add_concept(db, manuscript_id, from_name, source_id=source_id)
+    dst = add_concept(db, manuscript_id, to_name, source_id=source_id)
     existing = db.one(
         "SELECT * FROM concept_edges WHERE manuscript_id = ? AND from_node = ? "
         "AND to_node = ? AND relation = ?",
@@ -170,6 +228,7 @@ def link_concepts(
     row.update(
         manuscript_id=manuscript_id, from_node=src["id"], relation=relation,
         to_node=dst["id"], status=status, support=0, evidence="[]",
+        source_id=source_id or db.source("author"),
     )
     db.insert("concept_edges", row)
     return row

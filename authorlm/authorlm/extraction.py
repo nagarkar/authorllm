@@ -14,17 +14,13 @@ import re
 from pathlib import Path
 
 from . import proposals
-from .concepts import (add_concept, concept_pattern, get_concept,
+from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database
 from .llm import LLMClient
 from .revisions import read_manuscript_files
 
-VALID_KINDS = {
-    "concept", "definition", "objection", "example", "metaphor", "question",
-    "historical_reference", "mathematical_construct", "syllogism",
-}
 VALID_RELATIONS = {
     "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
     "specializes", "answers", "foreshadows", "illustrates", "permits",
@@ -32,80 +28,27 @@ VALID_RELATIONS = {
 }
 MAX_TEXT_CHARS = 24000
 MAX_CONCEPTS = 40
+EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
 
-EXTRACTION_SYSTEM = (
-    "You are an editorial assistant analyzing a philosophy manuscript. "
-    "Extract only the LOAD-BEARING units of thought: ideas the text argues "
-    "for, defines, builds upon, or answers. Apply a strict test — a term "
-    "that is merely mentioned, a person or work cited in passing, an "
-    "adjective, or ordinary technical vocabulary is NOT a concept. "
-    "People, texts, schools, and traditions the author cites as sources or "
-    "context get kind 'historical_reference'; formal or mathematical "
-    "apparatus gets kind 'mathematical_construct'; a named argument whose "
-    "premises jointly entail a conclusion gets kind 'syllogism' (premises "
-    "attach with depends_on, the conclusion with leads_to). Prefer the author's own "
-    "terminology, singular form. Aim for 10–20 strong nodes; quality over "
-    "coverage. Return JSON of the shape "
-    '{"concepts": [{"name": str, "kind": str, "notes": str}], '
-    '"links": [{"from": str, "relation": str, "to": str}], '
-    '"aliases": [{"alias": str, "canonical": str, "sentence": str}]} '
-    f"where kind is one of {sorted(VALID_KINDS)}. "
-    f"Never exceed {MAX_CONCEPTS} concepts. "
-    "CONCEPT ADMISSION LAW (ratified by the author, verbatim): \"Concepts "
-    "are words or groups of words that are used multiple times. A phrase "
-    "is something that might occur once or twice, but isn't a continuing "
-    "motif.\" A vivid phrase, simile, or memorable sentence that lives in "
-    "one passage is NOT a concept and NOT a metaphor node — do not "
-    "propose it. The system independently verifies recurrence across the "
-    "whole manuscript and drops single-context candidates of kinds "
-    "concept, metaphor, and example. "
-)
 
-RELATION_GUIDE = (
-    "Relations (A relation B) have strict meanings — "
-    "depends_on: A cannot be understood before B. "
-    "permits: A makes B possible. "
-    "creates: A brings B into being. "
-    "defines: A fixes what B means. "
-    "elaborates: A unpacks or develops B in more detail. "
-    "specializes: A is a narrower case of B. "
-    "generalizes: A is a broader case of B. "
-    "contrasts_with: the text explicitly opposes A and B. "
-    "answers: A resolves the objection or question B. "
-    "motivates: A is the driving reason for which B seeks, acts, or arises — "
-    "the motive belongs to B, the party moved by it. In dialogue, a question "
-    "motivates its ASKER, never the character who responds to it; for the "
-    "responder use answers (Responder answers Question). "
-    "foreshadows: A hints at B before B is treated. "
-    "leads_to: B is the causal consequence of A. "
-    "refutes: A argues against B — B is a position the text repudiates, "
-    "not endorses; distinct from contrasts_with, where both sides are "
-    "commitments of the work. "
-    "illustrates: A is an example, image, or metaphor for B. "
-    "distinguishes: A draws the distinction that separates B. "
-    "Include a link ONLY when the text itself asserts or demonstrates the "
-    "relation — co-mention is not a relationship, and direction matters. "
-    "Prefer 5–15 strong links; if unsure which relation holds, omit the "
-    "link rather than guessing."
-)
+def extraction_system() -> str:
+    return (EXTRACTION_PROMPT_PATH.read_text(encoding="utf-8")
+            .replace("<<VALID_KINDS>>", str(sorted(NODE_KINDS)))
+            .replace("<<MAX_CONCEPTS>>", str(MAX_CONCEPTS)))
 
-ALIAS_GUIDE = (
-    "Report ALIASING STATEMENTS under \"aliases\": sentences that identify "
-    "or name one known concept in terms of another ('What ye call Experience "
-    "is the discernment of qualities separated'; 'We call it The Chid'). "
-    "Match names case-insensitively here — a lowercase occurrence inside a "
-    "defining or naming sentence still counts, unlike casual reuse "
-    "elsewhere. Each item: alias = the subordinate name, canonical = the "
-    "fundamental name, sentence = the exact sentence copied verbatim from "
-    "the text. Direction: in 'X is the Y of Z' the head Y is canonical; in "
-    "a naming ceremony ('we call it X', 'ye name it X') the pre-existing "
-    "term is canonical and the bestowed name is the alias; in a bare "
-    "'X is Y', Y is canonical. Only sentences that identify or (re)name "
-    "qualify — kinship, causation, or resemblance is not aliasing. Report "
-    "only pairs where BOTH names are known concepts. "
-)
 
-EXTRACTION_SYSTEM = EXTRACTION_SYSTEM + RELATION_GUIDE + ALIAS_GUIDE
+def _prompt_section(prompt: str, heading: str,
+                    next_heading: str | None = None) -> str:
+    section = prompt.split(f"\n{heading}:\n", 1)[1]
+    if next_heading:
+        section = section.split(f"\n\n{next_heading}:\n", 1)[0]
+    return section.strip() + " "
+
+
+EXTRACTION_SYSTEM = extraction_system()
+RELATION_GUIDE = _prompt_section(EXTRACTION_SYSTEM, "RELATION GUIDE",
+                                 "ALIAS GUIDE")
+ALIAS_GUIDE = _prompt_section(EXTRACTION_SYSTEM, "ALIAS GUIDE")
 
 ALIASES_ONLY_SYSTEM = (
     "You are an editorial assistant analyzing a philosophy manuscript. The "
@@ -129,7 +72,8 @@ EDGES_ONLY_SYSTEM = (
 
 
 def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
-                  new_kind: str | None = None) -> None:
+                  new_kind: str | None = None,
+                  reason: str | None = None) -> None:
     """Persist a triage decision as evidence (RFC: the author contributes
     evidence, never edits knowledge directly). signal: confirmed | retyped |
     rejected."""
@@ -140,6 +84,8 @@ def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
         target = f"{node['name']}: {node['kind']} → {new_kind}"
     elif signal == "merged" and new_kind:
         target = f"{node['name']} → alias of {new_kind}"
+    if reason:
+        target += f" — reason: {reason}"
     row = ko_fields("ev")
     row.update(
         manuscript_id=manuscript_id,
@@ -159,8 +105,13 @@ def triage_feedback(db: Database, manuscript_id: str) -> str:
     nothing to teach."""
     rejected = [
         n["name"] for n in db.all(
-            "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND status = 'retired' "
-            "ORDER BY created_at DESC LIMIT 40",
+            "SELECT n.name FROM concept_nodes n WHERE n.manuscript_id = ? "
+            "AND n.status = 'retired' AND NOT EXISTS ("
+            "SELECT 1 FROM evidence e WHERE e.manuscript_id = n.manuscript_id "
+            "AND e.evidence_type = 'deterministic_triage' "
+            "AND json_extract(e.metadata, '$.triage_type') = 'concepts' "
+            "AND json_extract(e.metadata, '$.object_id') = n.id) "
+            "ORDER BY n.created_at DESC LIMIT 40",
             (manuscript_id,),
         )
     ]
@@ -527,7 +478,7 @@ def extract_concepts(
             + triage_feedback(db, mid)
         text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
     else:
-        system = EXTRACTION_SYSTEM + triage_feedback(db, mid)
+        system = extraction_system() + triage_feedback(db, mid)
         if _inventory:
             inventory = "; ".join(
                 row["name"] for row in db.all(
@@ -578,7 +529,7 @@ def extract_concepts(
             continue
         name = str(item["name"]).strip()[:80]
         kind = item.get("kind", "concept")
-        if kind not in VALID_KINDS:
+        if kind not in NODE_KINDS:
             kind = "concept"
         notes = (str(item["notes"]).strip()[:300] or None) if item.get("notes") else None
         if name.lower() in banned:
@@ -636,7 +587,8 @@ def extract_concepts(
             if not admitted:
                 below_bar.append(name)
                 continue
-        node = add_concept(db, mid, name, kind=kind, notes=notes)
+        node = add_concept(db, mid, name, kind=kind, notes=notes,
+                           source_id=db.source("system"))
         if before is None:
             # Machine-extracted nodes are hypotheses awaiting the author's
             # confirmation, exactly like inferred edges (§21.7).
@@ -713,7 +665,8 @@ def extract_concepts(
             "AND to_node = (SELECT id FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?))",
             (mid, relation, mid, src, mid, dst),
         )
-        edge = link_concepts(db, mid, src, relation, dst, status="inferred")
+        edge = link_concepts(db, mid, src, relation, dst, status="inferred",
+                             source_id=db.source("system"))
         if before is None:
             new_edges.append(edge)
         elif edge["status"] == "rejected" and in_attention(src, dst):

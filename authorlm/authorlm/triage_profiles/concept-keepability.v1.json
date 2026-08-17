@@ -1,0 +1,15 @@
+{
+  "id": "concept-keepability",
+  "version": "1",
+  "triage_type": "concepts",
+  "label": "Concept Keepability",
+  "description": "Rates whether each concept should remain in the Concept Graph.",
+  "batch_size": 12,
+  "prompt": "Assess each concept's keepability from 1 to 100. A high score requires meaningful manuscript support, a distinct role in the book's ontology, and consistency with the manuscript as a whole. Penalize incidental mentions, redundant labels, unsupported abstractions, and concepts that confuse rather than clarify the graph. Judge only from the supplied consistency map and evidence passages. Do not invent evidence. Return one result for every requested object_id.",
+  "output_fields": [
+    {"id": "score", "label": "Score", "kind": "score", "width": 92},
+    {"id": "confidence", "label": "Confidence", "kind": "score", "width": 105},
+    {"id": "why", "label": "Why", "kind": "long_text", "width": 360},
+    {"id": "evidence", "label": "Manuscript evidence", "kind": "evidence", "width": 340}
+  ]
+}

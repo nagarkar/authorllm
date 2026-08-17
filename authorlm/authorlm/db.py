@@ -14,6 +14,7 @@ import getpass
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,14 @@ CREATE TABLE IF NOT EXISTS declared_intents (
     session_id TEXT,
     statement TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',  -- active | completed | abandoned
-    outcome TEXT
+                                            -- | proposed | rejected (non-author
+                                            -- sources are born proposed; a
+                                            -- rejection is kept as evidence)
+    outcome TEXT,
+    scope TEXT,           -- file path narrowing the intent: an essay, a
+                          -- part-opener (chapter-wide via the toc parent
+                          -- chain), or NULL = manuscript-wide
+    source_id TEXT        -- sources.id: whose judgment originated this
 );
 
 CREATE TABLE IF NOT EXISTS style_guides (
@@ -97,8 +105,10 @@ CREATE TABLE IF NOT EXISTS style_elements (
     aspect TEXT NOT NULL, -- register|lexicon|syntax|structure|formatting|citation|rhetoric|figure|tone
     statement TEXT NOT NULL,
     notes TEXT,
-    status TEXT NOT NULL DEFAULT 'active',  -- active | retired
+    status TEXT NOT NULL DEFAULT 'active',  -- active | retired | proposed
+                                            -- | rejected (critique intake)
     overrides TEXT,       -- style_elements.id displaced by this element
+    source_id TEXT,
     CHECK ((guide_id IS NULL) != (file IS NULL))
 );
 
@@ -125,22 +135,24 @@ CREATE TABLE IF NOT EXISTS concept_nodes (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'concept',   -- concept | definition | objection | example | metaphor | question | historical_reference | mathematical_construct | syllogism
+    kind TEXT NOT NULL DEFAULT 'concept',   -- concept | objection | example | metaphor | question | historical_reference | mathematical_construct | syllogism
     status TEXT NOT NULL DEFAULT 'declared',-- declared | realized
     introduced_in TEXT,
     notes TEXT,
-    aliases TEXT NOT NULL DEFAULT '[]'      -- JSON list of alternate names
+    aliases TEXT NOT NULL DEFAULT '[]',     -- JSON list of alternate names
+    source_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS concept_edges (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     from_node TEXT NOT NULL,      -- concept_nodes.id
-    relation TEXT NOT NULL,       -- depends_on | motivates | contrasts_with | elaborates | permits | answers | foreshadows | illustrates | co_occurs
+    relation TEXT NOT NULL,       -- depends_on | motivates | contrasts_with | elaborates | generalizes | specializes | answers | foreshadows | illustrates | permits | creates | distinguishes | defines | leads_to | refutes | co_occurs
     to_node TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'declared',-- declared | inferred | realized
     support INTEGER NOT NULL DEFAULT 0,     -- observations supporting an inferred edge
-    evidence TEXT NOT NULL DEFAULT '[]'
+    evidence TEXT NOT NULL DEFAULT '[]',
+    source_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS editorial_policies (
@@ -152,7 +164,8 @@ CREATE TABLE IF NOT EXISTS editorial_policies (
     supporting INTEGER NOT NULL DEFAULT 0,
     contradicting INTEGER NOT NULL DEFAULT 0,
     outstanding_questions TEXT NOT NULL DEFAULT '[]',
-    source TEXT NOT NULL DEFAULT 'review-explanation'
+    source TEXT NOT NULL DEFAULT 'review-explanation',
+    source_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS guidance_history (
@@ -195,7 +208,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     signal TEXT NOT NULL,                   -- accepted | rejected | modified | deferred | declared
     target TEXT NOT NULL,
     supports_policy TEXT,                   -- editorial_policies.id
-    weight TEXT NOT NULL DEFAULT 'medium'
+    weight TEXT NOT NULL DEFAULT 'medium',
+    source_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS doc_comments (
@@ -216,20 +230,25 @@ CREATE TABLE IF NOT EXISTS doc_comments (
 CREATE TABLE IF NOT EXISTS doc_threads (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
-    comment_id TEXT NOT NULL,     -- Drive comment id (the thread's join key)
+    origin_type TEXT NOT NULL,    -- author_comment | critique  (design §6.1)
+    origin_id TEXT NOT NULL,      -- Drive comment id | critique proposal ref
+                                  -- (pass id + ordinal); the thread's join key
     file TEXT NOT NULL,           -- relpath of the tab the thread lives in
     anchor_quote TEXT,            -- the span the author's comment anchors
-    proposed_old TEXT,            -- exact text to be replaced (verbatim law)
+    proposed_old TEXT,            -- exact text to be replaced (verbatim law);
+                                  -- '' for a {{new}}-only insertion
     proposed_new TEXT,            -- exact replacement
-    note TEXT,                    -- short body of our prefixed proposal reply
+    note TEXT,                    -- short body of our prefixed proposal reply /
+                                  -- the editor's one-line why
     state TEXT NOT NULL DEFAULT 'proposed',
         -- proposed | conversation | applied | cleaned | declined |
         -- withdrawn | stale
+        -- critique threads add: accepted | rejected | written
     our_reply_ids TEXT NOT NULL DEFAULT '[]',   -- JSON: replies we posted
     last_author_reply_id TEXT,    -- idempotency watermark for verdicts
     scope_kind TEXT,              -- file | guide | manuscript (evidence step)
     scope_ref TEXT,               -- relpath, sg-*, or ms-* (ids where they exist)
-    UNIQUE (manuscript_id, comment_id)
+    UNIQUE (manuscript_id, origin_type, origin_id)
 );
 
 CREATE TABLE IF NOT EXISTS illus_proposals (
@@ -275,6 +294,87 @@ CREATE TABLE IF NOT EXISTS improvement_tasks (
     status TEXT NOT NULL DEFAULT 'open',    -- open | in_progress | proposed | resolved | dismissed
     resolution TEXT               -- fix summary + encoded test, or dismissal reason
 );
+
+CREATE TABLE IF NOT EXISTS sources (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    kind TEXT NOT NULL,           -- author | critic | system
+    name TEXT NOT NULL,           -- "nagarkar", "SMSTTD Editorial Analysis", "authorlm"
+    detail TEXT,                  -- e.g. "literary critic, docx, 2026-08-13"
+    UNIQUE (kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS essay_summaries (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,           -- toc [[chapter]] entry
+    summary TEXT NOT NULL,        -- the editor's working memory of this essay
+    source_hash TEXT NOT NULL,    -- hash of the essay text summarized; a
+                                  -- mismatch is a lie about the text and
+                                  -- blocks the edit pass
+    upstream_hash TEXT NOT NULL,  -- hash of the prior summaries this one was
+                                  -- conditioned on
+    upstream_stale INTEGER NOT NULL DEFAULT 0,  -- tolerated by the edit pass;
+                                  -- cleared by rebuild (mark, don't cascade)
+    UNIQUE (manuscript_id, file)
+);
+
+CREATE TABLE IF NOT EXISTS critique_passes (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,      -- sources.id of the critique being processed
+    cursor INTEGER NOT NULL DEFAULT 0,      -- index into toc reading order
+    essay_state TEXT NOT NULL DEFAULT '{{}}',   -- JSON: file -> pending |
+                                  -- proposed | triaged | written | resolved | skipped
+    pinned_versions TEXT NOT NULL DEFAULT '{{}}',  -- JSON: file ->
+                                  -- manuscript_versions.id (pre-pass pin, set
+                                  -- at diff-write; rollback target)
+    status TEXT NOT NULL DEFAULT 'active'   -- active | completed | abandoned
+);
+
+CREATE TABLE IF NOT EXISTS triage_runs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    triage_type TEXT NOT NULL,              -- concepts | edges
+    profile_id TEXT NOT NULL,
+    profile_version TEXT NOT NULL,
+    profile_snapshot TEXT NOT NULL,
+    manuscript_version_id TEXT NOT NULL,
+    requested_ids TEXT NOT NULL DEFAULT '[]',
+    context TEXT NOT NULL DEFAULT '{{}}',
+    status TEXT NOT NULL DEFAULT 'incomplete', -- incomplete | complete
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS triage_assessments (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES triage_runs(id),
+    triage_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    object_version INTEGER NOT NULL,
+    output TEXT NOT NULL,
+    UNIQUE (run_id, object_id)
+);
+
+CREATE TABLE IF NOT EXISTS triage_drafts (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    triage_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    object_version INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    parameters TEXT NOT NULL DEFAULT '{{}}',
+    reason TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE (manuscript_id, triage_type, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_triage_runs_lookup
+    ON triage_runs (manuscript_id, triage_type, profile_id, profile_version, created_at);
+CREATE INDEX IF NOT EXISTS idx_triage_assessments_lookup
+    ON triage_assessments (manuscript_id, triage_type, object_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_triage_drafts_lookup
+    ON triage_drafts (manuscript_id, triage_type, object_id);
 """
 
 
@@ -300,6 +400,17 @@ def ko_fields(prefix: str) -> dict[str, Any]:
     }
 
 
+# Tables whose rows originate from someone's judgment and carry provenance.
+PROVENANCE_TABLES = (
+    "declared_intents", "concept_nodes", "concept_edges",
+    "style_elements", "editorial_policies", "evidence",
+)
+
+# Evidence provenance is fully determined by evidence_type. Most types record
+# an author verdict or act; these are decisions made by AuthorLM itself.
+SYSTEM_EVIDENCE_TYPES = {"episode_analysis", "deterministic_triage"}
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -308,21 +419,111 @@ class Database:
         # WAL: background watcher writes proceed alongside interactive reads.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self._transaction_depth = 0
         self.conn.executescript(SCHEMA)
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(concept_nodes)")}
-        if "aliases" not in cols:
+        self._source_cache: dict[tuple[str, str], str] = {}
+        self._migrate()
+        self.conn.commit()
+
+    def _columns(self, table: str) -> set[str]:
+        return {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self) -> None:
+        if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(
                 "ALTER TABLE concept_nodes ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'"
             )
+        provenance_added = False
+        for table in PROVENANCE_TABLES:
+            if "source_id" not in self._columns(table):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN source_id TEXT")
+                provenance_added = True
+        if "scope" not in self._columns("declared_intents"):
+            self.conn.execute("ALTER TABLE declared_intents ADD COLUMN scope TEXT")
+        if provenance_added:
+            self._backfill_provenance()
+        if "comment_id" in self._columns("doc_threads"):
+            self._migrate_thread_origins()
+
+    def _migrate_thread_origins(self) -> None:
+        """doc_threads: comment_id → (origin_type, origin_id). Every
+        pre-existing thread was born from an author's Drive comment, so
+        the migration is mechanical: origin_type='author_comment',
+        origin_id=comment_id. SQLite cannot rewrite a UNIQUE constraint in
+        place, so the table is rebuilt (design §6.1; no back-compat)."""
+        cur = self.conn.execute("SELECT * FROM doc_threads")
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        self.conn.execute("ALTER TABLE doc_threads RENAME TO doc_threads_legacy")
+        self.conn.executescript(SCHEMA)  # recreates doc_threads in the new shape
+        for r in rows:
+            r["origin_type"] = "author_comment"
+            r["origin_id"] = r.pop("comment_id")
+            names = ", ".join(r)
+            marks = ", ".join("?" for _ in r)
+            self.conn.execute(
+                f"INSERT INTO doc_threads ({names}) VALUES ({marks})",
+                list(r.values()))
+        self.conn.execute("DROP TABLE doc_threads_legacy")
         self.conn.commit()
 
+    def _backfill_provenance(self) -> None:
+        """One-shot provenance for rows that predate the sources registry.
+        Concepts/edges the extractor produced belong to the system; the
+        system's own pattern-inference evidence likewise; everything else
+        was the author's judgment."""
+        author = self.source("author")
+        system = self.source("system")
+        self.conn.execute(
+            "UPDATE concept_nodes SET source_id = ? WHERE source_id IS NULL "
+            "AND json_extract(metadata, '$.origin') = 'extracted'", (system,))
+        self.conn.execute(
+            "UPDATE concept_edges SET source_id = ? WHERE source_id IS NULL "
+            "AND (status = 'inferred' "
+            "     OR json_extract(metadata, '$.origin') = 'extracted')", (system,))
+        placeholders = ", ".join("?" for _ in SYSTEM_EVIDENCE_TYPES)
+        self.conn.execute(
+            f"UPDATE evidence SET source_id = ? WHERE source_id IS NULL "
+            f"AND evidence_type IN ({placeholders})",
+            (system, *SYSTEM_EVIDENCE_TYPES))
+        for table in PROVENANCE_TABLES:
+            self.conn.execute(
+                f"UPDATE {table} SET source_id = ? WHERE source_id IS NULL",
+                (author,))
+
+    def source(self, kind: str, name: str | None = None,
+               detail: str | None = None) -> str:
+        """Get-or-create a row in the sources registry; returns its id.
+        `source_id` records whose judgment originated a knowledge object —
+        ratification lives in reviews/evidence, never here."""
+        if name is None:
+            name = "authorlm" if kind == "system" else getpass.getuser()
+        key = (kind, name)
+        if key in self._source_cache:
+            return self._source_cache[key]
+        row = self.one(
+            "SELECT id FROM sources WHERE kind = ? AND name = ?", (kind, name))
+        if row:
+            self._source_cache[key] = row["id"]
+            return row["id"]
+        fields = ko_fields("src")
+        fields.update(kind=kind, name=name, detail=detail)
+        self.insert("sources", fields)
+        self._source_cache[key] = fields["id"]
+        return fields["id"]
+
     def insert(self, table: str, row: dict[str, Any]) -> str:
+        if table == "evidence" and not row.get("source_id"):
+            kind = ("system" if row.get("evidence_type") in SYSTEM_EVIDENCE_TYPES
+                    else "author")
+            row["source_id"] = self.source(kind)
         cols = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
         self.conn.execute(
             f"INSERT INTO {table} ({cols}) VALUES ({placeholders})", list(row.values())
         )
-        self.conn.commit()
+        if not self._transaction_depth:
+            self.conn.commit()
         return row["id"]
 
     def update(self, table: str, obj_id: str, changes: dict[str, Any]) -> None:
@@ -332,7 +533,28 @@ class Database:
             f"UPDATE {table} SET {sets}, version = version + 1 WHERE id = ?",
             [*changes.values(), obj_id],
         )
-        self.conn.commit()
+        if not self._transaction_depth:
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Make existing insert/update-based domain verbs atomic as a group."""
+        outermost = self._transaction_depth == 0
+        if outermost:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self._transaction_depth += 1
+        try:
+            yield
+        except BaseException:
+            self._transaction_depth -= 1
+            if outermost:
+                self.conn.rollback()
+                self._source_cache.clear()
+            raise
+        else:
+            self._transaction_depth -= 1
+            if outermost:
+                self.conn.commit()
 
     def one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None:
         return self.conn.execute(sql, args).fetchone()

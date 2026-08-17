@@ -1975,28 +1975,7 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
             "the proposal's old text was not found verbatim in the tab — "
             "the passage may have changed; re-draft against current text")
     start, end = span
-    old16 = _utf16_len(old)
-    tail = ">>" + "{{" + new + "}}"
-    requests = [
-        {"insertText": {"location": {"tabId": tab_id, "index": end},
-                        "text": tail}},
-        {"insertText": {"location": {"tabId": tab_id, "index": start},
-                        "text": "<<"}},
-        # After both inserts: `<<old>>` spans [start, start+4+len(old)],
-        # `{{new}}` follows it.
-        {"updateTextStyle": {
-            "range": {"tabId": tab_id, "startIndex": start,
-                      "endIndex": start + 4 + old16},
-            "textStyle": {"strikethrough": True},
-            "fields": "strikethrough"}},
-        {"updateTextStyle": {
-            "range": {"tabId": tab_id,
-                      "startIndex": start + 4 + old16,
-                      "endIndex": start + 4 + old16 + 4 + _utf16_len(new)},
-            "textStyle": {"foregroundColor": {"color": {"rgbColor": {
-                "red": 0.13, "green": 0.55, "blue": 0.13}}}},
-            "fields": "foregroundColor"}},
-    ]
+    requests = _mark_replace_requests(tab_id, start, end, old, new)
     docs_service.documents().batchUpdate(
         documentId=master_id, body={"requests": requests}).execute()
 
@@ -2017,6 +1996,135 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
     )
     return {"thread_id": thread["id"], "file": relpath,
             "pending": render_pending(old, new), "reply_id": reply_id}
+
+
+GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
+
+
+def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
+                           new: str) -> list[dict]:
+    """Requests turning the span [start,end) (holding `old`) into the
+    styled pending form <<old>>{{new}}: old struck through, new green."""
+    old16 = _utf16_len(old)
+    return [
+        {"insertText": {"location": {"tabId": tab_id, "index": end},
+                        "text": ">>" + "{{" + new + "}}"}},
+        {"insertText": {"location": {"tabId": tab_id, "index": start},
+                        "text": "<<"}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": start,
+                      "endIndex": start + 4 + old16},
+            "textStyle": {"strikethrough": True}, "fields": "strikethrough"}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": start + 4 + old16,
+                      "endIndex": start + 4 + old16 + 4 + _utf16_len(new)},
+            "textStyle": {"foregroundColor": GREEN},
+            "fields": "foregroundColor"}},
+    ]
+
+
+def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
+    """Requests inserting a green {{new}} paragraph at doc index `at`
+    (a paragraph boundary): the critique pass's insertion form."""
+    text = "\n" + "{{" + new + "}}"
+    return [
+        {"insertText": {"location": {"tabId": tab_id, "index": at},
+                        "text": text}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": at + 1,
+                      "endIndex": at + _utf16_len(text)},
+            "textStyle": {"foregroundColor": GREEN},
+            "fields": "foregroundColor"}},
+    ]
+
+
+def critique_diff_write(db: Database, manuscript: dict, file: str,
+                        threads: list[dict], service, docs_service,
+                        bridge: DocBridge | None = None) -> dict:
+    """Critique pass diff-write (design §6.3 step 3): render every
+    ACCEPTED thread of `file` into its Doc tab as a pending form. The
+    tab is first brought level with the local file (a plain push, since
+    the local file is pristine), then each span is marked surgically,
+    last-to-first so earlier indices stay valid. Local keeps OLD.
+    Returns {written, failed:[(thread, reason)]}."""
+    from .revisions import _paragraphs
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    push_doc(db, manuscript, file, service=service,
+             docs_service=docs_service, bridge=bridge)
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    tab_id = (links.get(file) or {}).get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{file}' has no tab in the master Doc")
+    text = (bridge.root / file).read_text(encoding="utf-8")
+    paragraphs = _paragraphs(text)
+    accepted = [t for t in threads if t["state"] == "accepted"]
+
+    def anchor_of(t):
+        return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
+
+    # Last-to-first, inserts before replaces at the same anchor (an insert
+    # after paragraph n lands after n's tail; marking n's own span first
+    # would shift that tail).
+    accepted.sort(key=lambda t: (anchor_of(t),
+                                 0 if t["proposed_old"] == "" else 1),
+                  reverse=True)
+    written, failed = [], []
+    for t in accepted:
+        n = anchor_of(t)
+        try:
+            if t["proposed_old"]:
+                span = _locate_in_tab(docs_service, master_id, tab_id,
+                                      t["proposed_old"])
+                if span is None:
+                    raise LookupError("old text not found verbatim in the tab")
+                requests = _mark_replace_requests(
+                    tab_id, span[0], span[1], t["proposed_old"],
+                    t["proposed_new"])
+            else:
+                if n == 0:
+                    at = 1  # tab body start
+                else:
+                    if n > len(paragraphs):
+                        raise LookupError(f"anchor paragraph {n} out of range")
+                    span = _locate_in_tab(docs_service, master_id, tab_id,
+                                          paragraphs[n - 1])
+                    if span is None:
+                        raise LookupError("anchor paragraph not found "
+                                          "verbatim in the tab")
+                    at = span[1]
+                requests = _mark_insert_requests(tab_id, at,
+                                                 t["proposed_new"])
+            docs_service.documents().batchUpdate(
+                documentId=master_id, body={"requests": requests}).execute()
+            written.append(t)
+        except Exception as err:  # noqa: BLE001 — per-thread, keep going
+            failed.append((t, str(err)))
+    # Read-back proof: every written form must be present verbatim.
+    full = "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
+    for t in list(written):
+        form = threads_mod.render_pending(t["proposed_old"], t["proposed_new"])
+        if form not in full:
+            written.remove(t)
+            failed.append((t, "read-back: form not found after write"))
+    return {"written": written, "failed": failed,
+            "url": tab_url(master_id, tab_id)}
+
+
+def critique_tab_text(db: Database, manuscript: dict, file: str,
+                      docs_service, bridge: DocBridge | None = None) -> str:
+    """The tab's current text, verbatim (the resolve verb reads the
+    author's post-edits from the pending forms here)."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    tab_id = (links.get(file) or {}).get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{file}' has no tab in the master Doc")
+    return "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
 
 
 def _replace_pending(db: Database, manuscript: dict, thread: dict,
@@ -2112,7 +2220,7 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
     mid = manuscript["id"]
     by_id = {c["id"]: c for c in open_comments}
     for thread in th.open_threads(db, mid):
-        comment = by_id.get(thread["comment_id"])
+        comment = by_id.get(thread["origin_id"])
         if comment is None:
             continue
         verdict = None
@@ -2139,7 +2247,7 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
                        "re-proposing in chat")
             th.set_state(db, thread, "stale",
                          author_reply_id=verdict_reply_id)
-            actions.append({"comment_id": thread["comment_id"],
+            actions.append({"comment_id": thread["origin_id"],
                             "file": thread["file"], "action": "stale"})
         else:
             # The verdict WAS the author's decision: terminal verdicts
@@ -2152,13 +2260,13 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
                        else "reverted and closed")
             th.set_state(db, thread, state,
                          author_reply_id=verdict_reply_id)
-            fresh = dict(th.get_thread(db, mid, thread["comment_id"]))
+            fresh = dict(th.get_thread(db, mid, thread["origin_id"]))
             meta_now = loads(fresh.get("metadata"), {}) or {}
             signal = ("declined" if verdict == "decline" else
                       "modified" if meta_now.get("original_new")
                       else "accepted")
             th.record_margin_verdict(db, mid, fresh, signal)
-            action = {"comment_id": thread["comment_id"],
+            action = {"comment_id": thread["origin_id"],
                       "file": thread["file"], "action": state}
             if signal == "modified":
                 action["diff"] = (f"«{clamp(meta_now['original_new'])}» → "
@@ -2172,16 +2280,16 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
                 body["action"] = "resolve"
             reply = service.replies().create(
                 fileId=_mapping(db, manuscript)[bridge.meta_key]["_master_id"],
-                commentId=thread["comment_id"],
+                commentId=thread["origin_id"],
                 body=body, fields="id",
             ).execute()
             th.set_state(db, dict(th.get_thread(db, mid,
-                                                thread["comment_id"])),
+                                                thread["origin_id"])),
                          actions[-1]["action"], reply_id=reply.get("id"))
             if "action" in body:
                 row = db.one(
                     "SELECT id FROM doc_comments WHERE manuscript_id = ? "
-                    "AND comment_id = ?", (mid, thread["comment_id"]))
+                    "AND comment_id = ?", (mid, thread["origin_id"]))
                 if row:
                     db.update("doc_comments", row["id"],
                               {"state": "resolved"})
@@ -2194,13 +2302,13 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
     # rejection-shaped closure (no re-asking in the margin).
     open_ids = {c["id"] for c in open_comments}
     for thread in th.open_threads(db, mid):
-        if thread["state"] != "proposed" or thread["comment_id"] in open_ids:
+        if thread["state"] != "proposed" or thread["origin_id"] in open_ids:
             continue
         _replace_pending(db, manuscript, thread, thread["proposed_old"],
                          service, docs_service, bridge)
         th.set_state(db, thread, "withdrawn")
         th.record_margin_verdict(db, mid, thread, "withdrawn")
-        actions.append({"comment_id": thread["comment_id"],
+        actions.append({"comment_id": thread["origin_id"],
                         "file": thread["file"], "action": "withdrawn"})
     return actions
 

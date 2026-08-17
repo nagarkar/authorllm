@@ -59,17 +59,26 @@ def end_session(db: Database, manuscript_id: str, ended_at: str | None = None) -
     return dict(session)
 
 
-def declare_intent(db: Database, manuscript_id: str, statement: str) -> dict:
+def declare_intent(db: Database, manuscript_id: str, statement: str,
+                   scope: str | None = None, status: str = "active",
+                   source_id: str | None = None) -> dict:
     session = active_session(db, manuscript_id)
     row = ko_fields("di")
     row.update(
         manuscript_id=manuscript_id,
         session_id=session["id"] if session else None,
         statement=statement,
-        status="active",
+        status=status,
         outcome=None,
+        scope=scope,
+        source_id=source_id or db.source("author"),
     )
     db.insert("declared_intents", row)
+
+    if status == "proposed":
+        # Imported (non-author) intents await triage: no episode opens and
+        # no work hangs off them until the author accepts.
+        return row
 
     if session:
         episode = ko_fields("ep")
