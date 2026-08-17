@@ -1964,6 +1964,46 @@ def main_test() -> None:
         check("improvement tasks never leak into briefings",
               "improvement" not in str(api.get_briefing(db, manuscript)).lower())
 
+        # --- style_show: effective law composition (guide inheritance,
+        #     override displacement, unattached-file fallback) ---
+        (ms / "97-styled.md").write_text("# Styled\n\nProse.\n")
+        (ms / "98-child.md").write_text("# Child\n\nMore prose.\n")
+        bare = api.style_show(db, manuscript, "97-styled.md")
+        check("style_show on an unstyled file returns no law",
+              bare["elements"] == [] and bare["rendered"] == "")
+
+        api.define_style_guide(db, manuscript, "house")
+        api.add_style_element(db, manuscript, "register",
+                              "Address the reader in second person.",
+                              guide_name="house")
+        unattached = api.style_show(db, manuscript, "97-styled.md")
+        check("an unattached file inherits the root guide's law",
+              [e["statement"] for e in unattached["elements"]]
+              == ["Address the reader in second person."]
+              and "STYLE GUIDE for 97-styled.md" in unattached["rendered"]
+              and "[register] Address the reader in second person."
+              in unattached["rendered"])
+
+        api.define_style_guide(db, manuscript, "dialogue", parent="house")
+        api.attach_style(db, manuscript, "98-child.md", "dialogue")
+        guide_el = api.add_style_element(db, manuscript, "tone",
+                                         "Keep dialogue clipped.",
+                                         guide_name="dialogue")
+        attached = api.style_show(db, manuscript, "98-child.md")
+        check("an attached file inherits its guide's law plus its ancestors'",
+              {e["statement"] for e in attached["elements"]}
+              == {"Keep dialogue clipped.",
+                  "Address the reader in second person."})
+
+        api.add_style_element(db, manuscript, "tone",
+                              "Prefer terse fragments.", file="98-child.md",
+                              overrides=guide_el["id"])
+        overridden = api.style_show(db, manuscript, "98-child.md")
+        check("a file-local override displaces the guide element it names",
+              {e["statement"] for e in overridden["elements"]}
+              == {"Prefer terse fragments.",
+                  "Address the reader in second person."})
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}

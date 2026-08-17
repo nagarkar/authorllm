@@ -835,7 +835,7 @@ def _render_edit(n: int, t: dict, total: int) -> None:
     state = {"proposed": ui.dim, "accepted": ui.green,
              "rejected": ui.yellow}.get(t["state"], str)(t["state"])
     where = (f"after ¶{anchor}" if kind == "insert" else f"¶{anchor}")
-    print(f"{ui.cyan(f'{n}.')} {ui.dim(f'[{t['id'][:8]}]')} {ui.bold(where)} "
+    print(f"{ui.cyan(f'{n}.')} {ui.dim('[' + t['id'][:8] + ']')} {ui.bold(where)} "
           f"{ui.dim(kind)}  {state}"
           + (ui.dim(f"  → {meta['intent_id'][:11]}") if meta.get("intent_id")
              else ""))
