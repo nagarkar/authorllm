@@ -1964,6 +1964,89 @@ def main_test() -> None:
         check("improvement tasks never leak into briefings",
               "improvement" not in str(api.get_briefing(db, manuscript)).lower())
 
+        # --- style-element prefix ambiguity guard: add/retire/move must
+        #     never silently act on whichever row SQLite returns first
+        #     when a prefix matches more than one active element ---
+        api.define_style_guide(db, manuscript, "Ambiguity guide")
+        amb1 = api.add_style_element(db, manuscript, "tone", "Amb element one.",
+                                     guide_name="Ambiguity guide")
+        amb2 = api.add_style_element(db, manuscript, "tone", "Amb element two.",
+                                     guide_name="Ambiguity guide")
+        check("style element ids share the common 'se-' literal prefix",
+              amb1["id"].startswith("se-") and amb2["id"].startswith("se-"))
+        try:
+            api.retire_style_element(db, manuscript, "se")
+            check("retire refuses an ambiguous prefix", False)
+        except LookupError as err:
+            check("retire refuses an ambiguous prefix", "ambiguous" in str(err))
+        check("neither element was retired by the ambiguous attempt",
+              db.one("SELECT status FROM style_elements WHERE id = ?",
+                     (amb1["id"],))["status"] == "active"
+              and db.one("SELECT status FROM style_elements WHERE id = ?",
+                         (amb2["id"],))["status"] == "active")
+        try:
+            api.move_style_element(db, manuscript, "se", file="01-choice.md")
+            check("move refuses an ambiguous prefix", False)
+        except LookupError as err:
+            check("move refuses an ambiguous prefix", "ambiguous" in str(err))
+        try:
+            api.add_style_element(db, manuscript, "tone", "New with bad override",
+                                  guide_name="Ambiguity guide", overrides="se")
+            check("add_style_element refuses an ambiguous override prefix", False)
+        except LookupError as err:
+            check("add_style_element refuses an ambiguous override prefix",
+                  "ambiguous" in str(err))
+        retired_amb = api.retire_style_element(db, manuscript, amb1["id"])
+        check("a full unique id still resolves and retires",
+              retired_amb["id"] == amb1["id"] and retired_amb["status"] == "retired")
+
+        # --- docs.py: list_docs batches its per-file concept lookup + doc
+        #     lifecycle error paths (ambiguous query, retired-name collision,
+        #     revive collision) ---
+        from authorlm import docs as docs_mod
+
+        (ms / "60-alphadoc.md").write_text("# Alpha\n\nAlphaTopic appears here.\n")
+        (ms / "61-betadoc.md").write_text("# Beta\n\nBetaTopic appears here.\n")
+        api.add_concept(db, manuscript, "AlphaTopic", notes="x")
+        api.add_concept(db, manuscript, "BetaTopic", notes="y")
+        api.collect(db, manuscript, {})
+        listing = docs_mod.list_docs(db, manuscript)
+        by_file = {d["file"]: d["concepts"] for d in listing["active"]}
+        check("list_docs attributes each concept to its introducing file only",
+              by_file.get("60-alphadoc.md") == ["AlphaTopic"]
+              and by_file.get("61-betadoc.md") == ["BetaTopic"],
+              by_file)
+
+        (ms / "62-zzzprefixtest-one.md").write_text("# One\n\n")
+        (ms / "63-zzzprefixtest-two.md").write_text("# Two\n\n")
+        try:
+            docs_mod.retire_doc(manuscript, "zzzprefixtest")
+            check("retire_doc refuses an ambiguous query", False)
+        except LookupError as err:
+            check("retire_doc refuses an ambiguous query", "ambiguous" in str(err))
+        (ms / "62-zzzprefixtest-one.md").unlink()
+        (ms / "63-zzzprefixtest-two.md").unlink()
+
+        docs_mod.retire_doc(manuscript, "60-alphadoc.md")
+        try:
+            docs_mod.add_doc(manuscript, "60-alphadoc")
+            check("add_doc refuses a name retired but not revived", False)
+        except FileExistsError as err:
+            check("add_doc refuses a name retired but not revived",
+                  "revive it instead" in str(err))
+        (ms / "60-alphadoc.md").write_text("# Reborn\n\n")
+        try:
+            docs_mod.revive_doc(manuscript, "60-alphadoc")
+            check("revive_doc refuses when the manuscript already has that file",
+                  False)
+        except FileExistsError as err:
+            check("revive_doc refuses when the manuscript already has that file",
+                  "already exists in the manuscript" in str(err))
+        (ms / "60-alphadoc.md").unlink()
+        docs_mod.revive_doc(manuscript, "60-alphadoc")
+        check("revive_doc restores the file once the collision clears",
+              (ms / "60-alphadoc.md").exists())
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}

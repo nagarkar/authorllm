@@ -45,18 +45,19 @@ def _match(candidates: dict[str, Path], query: str) -> Path:
 
 def list_docs(db: Database, manuscript: dict) -> dict:
     root = Path(manuscript["path"])
+    concepts_by_file: dict[str, list[str]] = {}
+    for row in db.all(
+        "SELECT name, introduced_in FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired' AND introduced_in IS NOT NULL",
+        (manuscript["id"],),
+    ):
+        concepts_by_file.setdefault(row["introduced_in"], []).append(row["name"])
     active = []
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
         paragraphs = len([p for p in re.split(r"\n\s*\n", text) if p.strip()])
-        concepts = [
-            row["name"] for row in db.all(
-                "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                "AND introduced_in = ? AND status != 'retired'",
-                (manuscript["id"], rel),
-            )
-        ]
-        active.append({"file": rel, "paragraphs": paragraphs, "concepts": concepts})
+        active.append({"file": rel, "paragraphs": paragraphs,
+                       "concepts": concepts_by_file.get(rel, [])})
     retired_root = root / RETIRED_DIR
     retired = (
         sorted(p.name for p in retired_root.iterdir() if p.is_file())
