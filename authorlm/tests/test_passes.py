@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api, critique, passes, summaries as sums  # noqa: E402
+from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import loads  # noqa: E402
@@ -297,6 +297,25 @@ def main_test() -> None:
         check("drifted paragraph fails loudly before any Doc write", raised)
         check("strip_pending on the marked text gives back the pristine essay",
               th.strip_pending(marked)[0].strip() == ESSAY.strip())
+
+        print("critique write order (same-anchor insert before replace):")
+        # A replace of paragraph n wraps it as <<old>>{{new}}. Writing the
+        # replace first makes the subsequent insert locate `old` inside that
+        # wrapped form and plant {{insert}} between old and >>, corrupting
+        # the Doc. Inserts at the same anchor must precede replaces.
+        order = gdocs.critique_write_order([
+            {"id": "rep6", "proposed_old": "p6", "metadata":
+             json.dumps({"anchor_paragraph": 6})},
+            {"id": "ins5", "proposed_old": "", "metadata":
+             json.dumps({"anchor_paragraph": 5})},
+            {"id": "rep5", "proposed_old": "p5", "metadata":
+             json.dumps({"anchor_paragraph": 5})},
+            {"id": "ins4", "proposed_old": "", "metadata":
+             json.dumps({"anchor_paragraph": 4})},
+        ])
+        check("higher anchors first; inserts before replaces at same anchor",
+              [t["id"] for t in order] == ["rep6", "ins5", "rep5", "ins4"],
+              str([t["id"] for t in order]))
 
         print("resolution (author post-edits win):")
         for t in threads:
