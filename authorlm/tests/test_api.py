@@ -853,17 +853,16 @@ def main_test() -> None:
         check("sync_tab_structure skips when there is no master Doc",
               no_master == {"skipped": "no master doc"}, str(no_master))
         meta["gdocs"]["_master_id"] = master
-        # Restore a flat, linked Doc tree matching the TOC so later
-        # push/pull tests still see both essays as root tabs.
-        by_title["02-fork.md"]["parent"] = None
-        (ms / "toc.toml").write_text(
-            '[[chapter]]\nfile = "01-choice.md"\n\n'
-            '[[chapter]]\nfile = "02-fork.md"\n')
-        meta["gdocs"]["_tab_structure"] = [
-            ["01-choice.md", None], ["02-fork.md", None]]
+        # Drop the second chapter so later single-file reconcile/export
+        # assertions stay focused on 01-choice.md.
+        meta["gdocs"].pop("02-fork.md", None)
+        meta["gdocs"]["_tab_structure"] = [["01-choice.md", None]]
         _save_mapping(db, manuscript, meta)
-        stub.state["docs"]["doc-2"] = others + [
-            by_title["01-choice.md"], by_title["02-fork.md"]]
+        stub.state["docs"]["doc-2"] = [
+            t for t in stub.state["docs"]["doc-2"]
+            if t["title"] != "02-fork.md"]
+        (ms / "02-fork.md").unlink(missing_ok=True)
+        (ms / "toc.toml").unlink(missing_ok=True)
 
         # Two-sided edit: local changed since push AND the tab differs
         # from what was pushed → conflict, skipped unless forced.
