@@ -929,6 +929,19 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
             documentId=master_id, body={"requests": requests}).execute()
 
 
+def critique_forms_pending(db: Database, manuscript_id: str,
+                           relpath: str) -> bool:
+    """True when the essay still has critique pending forms in the Doc
+    (threads in state 'written'). open_threads deliberately excludes
+    these — critique resolve owns them — so push must check separately."""
+    return db.one(
+        "SELECT id FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = 'critique' AND file = ? AND state = 'written' "
+        "LIMIT 1",
+        (manuscript_id, relpath),
+    ) is not None
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None) -> dict:
@@ -939,6 +952,16 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    # Critique pause: Doc holds <<old>>{{new}} / {{insert}} forms the
+    # author may have post-edited; local still has OLD. open_threads
+    # only sees author_comment rows, so without this gate a rebuild
+    # (or a surgical push that only guards '<<') would wipe the forms
+    # — including via session-start reconcile auto-push.
+    if critique_forms_pending(db, manuscript["id"], relpath):
+        raise LookupError(
+            f"'{relpath}' has critique pending forms in the Doc — "
+            f"run 'critique resolve {relpath}' before pushing "
+            "(a rebuild would wipe the author's post-edits)")
     if (threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
@@ -2508,7 +2531,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             if tag == "equal":
                 continue
             ops += 1
-            if any("<<" in tab_paras[i] for i in range(i1, i2)):
+            # Replaces use <<old>>{{new}}; critique insertions are
+            # {{new}} alone — both must block overlapping surgical edits.
+            if any(("<<" in tab_paras[i] or "{{" in tab_paras[i])
+                   for i in range(i1, i2)):
                 raise LookupError(
                     "diff push: the edit overlaps a pending margin "
                     "thread — settle the thread first "
