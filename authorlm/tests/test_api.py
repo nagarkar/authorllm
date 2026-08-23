@@ -1701,6 +1701,26 @@ def main_test() -> None:
                            docs_service=stub)
         check("prompt tabs settle in sync at session start",
               display in report["in_sync"], str(report))
+
+        # A hand-made tab is not a manuscript file, but it IS a split
+        # boundary: without that, its heading and body are swallowed by
+        # whichever tab precedes it in the export and then auto-pulled
+        # over that file as if the author had written them
+        # (it-307dc1279a7e — a real 'Tab 31' after the last prompt tab).
+        settled = prompt_path.read_text()
+        stub.state["docs"]["doc-2"].append(
+            {"id": "tab-handmade", "title": "Tab 31",
+             "text": "notes to self\nnot part of any chapter",
+             "parent": None})
+        report = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("a hand-made tab is a split boundary — the preceding file "
+              "keeps its own text and the tab is reported, not merged",
+              prompt_path.read_text() == settled
+              and "Tab 31" not in prompt_path.read_text()
+              and display in report["in_sync"]
+              and "Tab 31" in report.get("ignored_tabs", []), str(report))
+        stub.state["docs"]["doc-2"].pop()
         il.maintain_excerpts(ms)
 
         # --- prompt preview embeds: ![](../…) derived machinery ---

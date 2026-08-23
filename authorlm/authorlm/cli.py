@@ -320,6 +320,9 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
             f"— untouched. Reconcile by hand (doc open {relpath} + local "
             f"editor), or 'doc pull {relpath} --force' to take the Doc's side."
         ))
+    if report.get("ignored_tabs"):
+        print(ui.dim("Ignoring non-manuscript tab(s): "
+                     + ", ".join(report["ignored_tabs"])))
     for item in report["errors"]:
         print(ui.dim(f"warning: could not reconcile {item['file']} "
                      f"({item['error'][:80]})"))
