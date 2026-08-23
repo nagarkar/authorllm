@@ -1565,7 +1565,19 @@ def reconcile(db: Database, manuscript: dict, service,
     for relpath in mapped:
         entry = links[relpath]
         try:
-            doc_text = normalize_markdown(sections.get(relpath, ""))
+            # Missing from the export ≠ empty tab. `sections.get(..., "")`
+            # treated a deleted/renamed tab as Doc-cleared content, so a
+            # local file still matching pushed_hash was auto-pulled to
+            # empty — session-start data loss (pull_doc already guards
+            # with membership; prompts below do too).
+            if relpath not in sections:
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab missing from the Doc export — local "
+                             "file left untouched; the next 'doc push' "
+                             "recreates the tab"})
+                continue
+            doc_text = normalize_markdown(sections[relpath])
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = threads_mod.strip_pending(doc_text)
