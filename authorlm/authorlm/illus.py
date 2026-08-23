@@ -315,9 +315,14 @@ the active image model's section is used).
 def craft_text(config: dict, workspace: str | None = None) -> str:
     """The description-craft guidelines: general rules plus the active
     image model's carveout section. Seeded on first read; the file is
-    the single source both the spot-finder and chat critique use."""
-    base = Path(workspace).resolve() if workspace else Path.home()
-    path = base / ".authorlm" / CRAFT_FILENAME
+    the single source both the spot-finder and chat critique use.
+
+    It lives with the project config, not in the workspace: craft rules
+    are versioned decisions, not machine state. `workspace` is accepted
+    and ignored so callers need not care."""
+    from . import paths
+
+    path = paths.craft_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_CRAFT, encoding="utf-8")

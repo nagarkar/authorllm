@@ -43,8 +43,14 @@ def _open_db(args) -> Database:
 
 
 def _load_config(args) -> dict:
-    """Load .authorlm/config.toml (native # comments, stdlib tomllib)."""
-    toml_path = _workspace(args) / ".authorlm" / "config.toml"
+    """Load the project's config.toml (native # comments, stdlib tomllib)
+    and populate the environment from .env first, so every key lookup
+    downstream sees the same environment. Config holds decisions; .env
+    holds secrets (authorlm/paths.py)."""
+    from . import paths
+
+    paths.load_env()
+    toml_path = paths.config_path()
     if toml_path.exists():
         import tomllib
         try:

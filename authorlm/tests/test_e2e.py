@@ -14,6 +14,42 @@ Run: python3 tests/test_e2e.py
 
 from __future__ import annotations
 
+import os
+
+# Offline suite: pin the project-config and .env lookups away from the
+# real ones. Without this a checkout's config.toml (llm enabled, keys in
+# .env) is picked up by every test process and the suite makes live,
+# billed model calls — and asserts against whatever they return.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+def _assert_offline() -> None:
+    """Fail loudly if the real project config or .env leaks into a test.
+
+    Before config moved into the repo, a test workspace simply had no
+    config.toml, so the LLM was off and no suite could make a billed
+    call. Now a checkout always HAS an enabled config, and that safety
+    came from nothing but the pins above — so it is asserted, not
+    assumed."""
+    import os as _os
+
+    from authorlm import paths as _paths
+
+    assert not _paths.config_path().exists(), (
+        f"test isolation broken: reading the real config at "
+        f"{_paths.config_path()}")
+    assert _paths.load_env() == [], "test isolation broken: .env was loaded"
+    leaked = [v for v in _paths_vendor_vars() if _os.environ.get(v)]
+    assert not leaked, f"test isolation broken: vendor keys in env: {leaked}"
+
+
+def _paths_vendor_vars() -> list:
+    from authorlm.llm import VENDOR_KEY_ENV
+
+    return sorted(VENDOR_KEY_ENV.values())
+
+
+
 import contextlib
 import http.server
 import io
@@ -31,7 +67,19 @@ from authorlm.cli import main  # noqa: E402
 PASSED = 0
 
 
+def _pin_config(workspace: Path) -> None:
+    """Point the config lookup at this workspace's config.toml.
+
+    Config is a project file in production (authorlm/paths.py), but the
+    suite drives many independent workspaces in one process and each
+    needs its own — a stub LLM endpoint here, an idle_hours threshold
+    there. AUTHORLM_CONFIG is the supported override for exactly this;
+    a missing file still yields {}, as the no-config tests expect."""
+    os.environ["AUTHORLM_CONFIG"] = str(workspace / ".authorlm" / "config.toml")
+
+
 def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
+    _pin_config(workspace)
     buffer = io.StringIO()
     code = 0
     try:
@@ -2176,4 +2224,5 @@ def main_test() -> None:
 
 
 if __name__ == "__main__":
+    _assert_offline()
     main_test()

@@ -10,7 +10,9 @@ __pycache__/
 # AuthorLM runtime state (databases, OAuth token caches)
 .authorlm/
 
-# Secrets — OAuth installed-app client for the Google Docs bridge
+# Secrets — API keys (.env) and the OAuth installed-app client
+.env
+authorlm/.env
 authorlm/client_secret_*.json
 
 # The author's personal manuscripts are not part of the tool
