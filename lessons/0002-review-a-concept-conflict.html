@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 2 — Review a concept conflict</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header class="hero">
+    <p class="eyebrow">AuthorLM · Lesson 2 · 9 minutes</p>
+    <h1>Review a concept conflict</h1>
+    <p class="lede">A graph proposal is not a prose edit. It is a claim that settled conceptual law should change. Your job is to decide whether the new note defines the concept better than the current one.</p>
+    <div class="meta"><span>Mission: improve SMSTTD deliberately</span><span>Live snapshot: 20 Aug 2026</span></div>
+  </header>
+
+  <section class="callout">
+    <h2>The one idea</h2>
+    <p><strong>Prefer ontology over narrative role.</strong> A concept note should say what the concept <em>is</em>. If a proposal only says where the concept appears in the argument or what it causes later, it is usually weaker than a real definition.</p>
+  </section>
+
+  <section>
+    <h2>The worked example: “Nothing”</h2>
+    <table>
+      <thead><tr><th>Source</th><th>Text</th><th>What it is doing</th></tr></thead>
+      <tbody>
+        <tr><td>Settled graph note</td><td>“The sum of all opposites, paradoxes, possibilities, and potentials, where every element is countered by its opposite, and Nothing prevails.”</td><td>Defines the concept.</td></tr>
+        <tr><td>Dismissed proposal <code>pr-58e88</code></td><td>“The starting point of the sermons' metaphysics, from which the Realm of Fields and Field of Choice arise.”</td><td>Describes the concept's role in the book.</td></tr>
+        <tr><td>Manuscript evidence</td><td><a href="../authorlm/manuscripts/SMSTTD/sermons.md">sermons.md</a> and <a href="../authorlm/manuscripts/SMSTTD/metaphysic.md">metaphysic.md</a> both define Nothing in ontological terms: clasp, opposites, paradoxes, neither being nor non-being.</td><td>Supports the settled note.</td></tr>
+      </tbody>
+    </table>
+    <p>The proposal was therefore dismissed, not because it was false, but because it was <em>inferior as law</em>. It flattened a definition into sequencing.</p>
+  </section>
+
+  <section>
+    <h2>The CLI loop</h2>
+    <ol>
+      <li>List the open proposals: <code>authorlm proposal list -m SMSTTD</code></li>
+      <li>Inspect the settled concept note: <code>authorlm concept show "Nothing" -m SMSTTD</code></li>
+      <li>Inspect manuscript support with a text search.</li>
+      <li>Record the verdict: <code>authorlm proposal dismiss ... --why "..."</code> or <code>authorlm proposal accept ...</code></li>
+    </ol>
+    <p>See the reusable <a href="../reference/authorlm-proposal-triage.html">proposal triage loop</a> and the broader <a href="../reference/authorlm-operating-map.html">operating map</a>.</p>
+  </section>
+
+  <section>
+    <h2>Practice the judgment</h2>
+
+    <div class="quiz-question" data-quiz>
+      <h3>1. Which note is stronger as concept law for “Nothing”?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="true" data-success="Correct. It defines the concept itself rather than its place in the book." data-retry="Choose the note that says what Nothing is, not merely what comes after it.">The sum of all opposites</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="That says where the concept sits in the argument, not what it is.">The starting point of metaphysics</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+
+    <div class="quiz-question" data-quiz>
+      <h3>2. Which command records a rejection together with your reason?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="false" data-success="" data-retry="That only shows the settled graph note.">authorlm concept show</button>
+        <button class="answer" data-correct="true" data-success="Correct. The reason is recorded as evidence." data-retry="Pick the proposal verb that writes a verdict and accepts a reason.">authorlm proposal dismiss</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="That only lists the queue.">authorlm proposal list</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="Adopt changes the law; it does not reject the proposal.">authorlm proposal accept</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+
+    <div class="quiz-question" data-quiz>
+      <h3>3. What does the current learning loop suppress automatically?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="false" data-success="" data-retry="Not yet. Semantically similar paraphrases can still return as new proposals.">All similar paraphrases</button>
+        <button class="answer" data-correct="true" data-success="Correct. Exact repeated payloads are suppressed after dismissal." data-retry="Think narrower: what can be compared by content hash?">An exact verbatim repeat</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="AuthorLM does not auto-accept note updates from prior dismissals.">Future good definitions</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="Policies are a different lane.">All policy questions</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section class="next-step">
+    <p class="eyebrow">Your next rep</p>
+    <h2>Pick the next live proposal</h2>
+    <p>Reply in chat with one open proposal from the current queue and give a provisional judgment in one sentence: <code>adopt</code> or <code>dismiss</code>, plus why. We will inspect it together before mutating state.</p>
+    <p>A good next target is one of the top note updates still visible in <code>authorlm proposal list -m SMSTTD</code>, such as <code>pr-c1b45</code>, <code>pr-c5ca0</code>, or <code>pr-c90c7</code>.</p>
+  </section>
+
+  <section>
+    <h2>Primary source</h2>
+    <p>Use the <a href="../.claude/skills/authorlm/SKILL.md">AuthorLM collaboration rules</a> for the lane discipline and the queue ownership rules, and the public CLI help for the exact command surface: <code>authorlm help proposal</code>.</p>
+    <p>Ask follow-up questions in chat if a proposal seems half-definition and half-role. That boundary is where the real judgment lives.</p>
+  </section>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

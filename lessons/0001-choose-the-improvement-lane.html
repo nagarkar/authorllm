@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 1 — Choose the improvement lane</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header class="hero">
+    <p class="eyebrow">AuthorLM · Lesson 1 · 8 minutes</p>
+    <h1>Choose the lane before the verb</h1>
+    <p class="lede">AuthorLM is not one editing workflow. It is several evidence-bearing state machines. Your first job is to identify which one owns the decision.</p>
+    <div class="meta"><span>Mission: improve SMSTTD deliberately</span><span>Live snapshot: 20 Aug 2026</span></div>
+  </header>
+
+  <section class="callout">
+    <h2>The one idea</h2>
+    <p><strong>The type and state of the judgment choose the tool.</strong> A critic's claim must be triaged. A graph conflict must be adjudicated. A prose goal needs an intent. A stale image needs an illustration decision. Treating them all as “edit the manuscript” destroys the evidence AuthorLM is meant to learn from.</p>
+  </section>
+
+  <section>
+    <h2>SMSTTD's live desk</h2>
+    <div class="grid">
+      <article class="card"><div class="count">179</div><h3>Critique intents</h3><p>Imported advice still proposed across the manuscript. Triage before it can govern prose.</p></article>
+      <article class="card"><div class="count">294</div><h3>Concept nodes</h3><p>Extracted claims awaiting confirmation, retirement, retyping, or clarification.</p></article>
+      <article class="card"><div class="count">760</div><h3>Graph conflicts</h3><p>New observations that disagree with settled concept notes or rejected edges.</p></article>
+      <article class="card"><div class="count">20</div><h3>Stale visuals</h3><p>Illustrations rendered before the current illustration style law.</p></article>
+    </div>
+    <p>These counts are not a to-do order. They are different kinds of uncertainty. See the reusable <a href="../reference/authorlm-operating-map.html">operating map</a>.</p>
+  </section>
+
+  <section>
+    <h2>Classify before acting</h2>
+
+    <div class="quiz-question" data-quiz>
+      <h3>1. An imported critic says the Preface should open with the Dead. The item is still proposed. What comes first?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="true" data-success="Correct. External authority becomes usable only after the author's verdict." data-retry="That acts too late in the chain. The critic's proposal is not law yet.">Use critique triage</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="The concept graph does not own an external revision request.">Use concept triage</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="A prose intent is appropriate after the imported proposal has been accepted or revised.">Use prose intent</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="Nothing visual is being judged here.">Use illustration triage</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+
+    <div class="quiz-question" data-quiz>
+      <h3>2. New manuscript text proposes a different definition of “Nothing” than the settled graph note. What comes first?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="false" data-success="" data-retry="This is not imported editorial advice.">Use critique triage</button>
+        <button class="answer" data-correct="true" data-success="Correct. Inspect the proposal lineage, then adopt or dismiss the conceptual change." data-retry="Try the lane that owns conflicts with settled conceptual knowledge.">Use concept triage</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="Writing more prose before settling the meaning would compound the conflict.">Use prose intent</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="Nothing visual is being judged here.">Use illustration triage</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+
+    <div class="quiz-question" data-quiz>
+      <h3>3. The Basilides image's composition is useful, but it predates the current illustration law. What comes first?</h3>
+      <div class="answers">
+        <button class="answer" data-correct="false" data-success="" data-retry="No critic item is being judged.">Use critique triage</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="The image is not a concept-graph claim.">Use concept triage</button>
+        <button class="answer" data-correct="false" data-success="" data-retry="The prose does not need to change to refresh the render.">Use prose intent</button>
+        <button class="answer" data-correct="true" data-success="Correct. Inspect the effective prompt, then evolve the approved candidate under current law." data-retry="Choose the lane that owns visual law and render evidence.">Use illustration triage</button>
+      </div>
+      <p class="feedback" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section class="next-step">
+    <p class="eyebrow">Your real decision</p>
+    <h2>Choose our first SMSTTD loop</h2>
+    <p>Reply in chat with the letter and one sentence explaining why. That explanation is retrieval practice now—and later, when you make a verdict, it becomes the valuable evidence AuthorLM learns from.</p>
+    <ol type="A">
+      <li><strong>Resolve a policy question</strong> — decide whether a validated rule applies in a disputed scope.</li>
+      <li><strong>Review a concept conflict</strong> — inspect proposal <code>pr-58e88</code> about “Nothing,” then adopt or dismiss it.</li>
+      <li><strong>Start a prose intent</strong> — narrow the active “Improve recapitulation” work into one session-sized goal.</li>
+      <li><strong>Refresh a stale illustration</strong> — inspect the Basilides prompt and evolve its approved composition.</li>
+    </ol>
+    <p><strong>Recommended first:</strong> B. It is small, reversible until your verdict, and teaches the boundary between manuscript observation and conceptual law.</p>
+  </section>
+
+  <section>
+    <h2>Primary source</h2>
+    <p>Read the <a href="../.claude/skills/authorlm/SKILL.md">AuthorLM collaboration rules</a>, especially the Core loop and the sections for critique, concept curation, and illustrations. This is the authoritative operating contract for chat.</p>
+    <p>Ask your agent any follow-up question—especially if two lanes seem plausible. Naming that ambiguity is part of the skill.</p>
+  </section>
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

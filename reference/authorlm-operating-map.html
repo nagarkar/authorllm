@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AuthorLM operating map</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header class="hero">
+    <p class="eyebrow">Quick reference</p>
+    <h1>AuthorLM operating map</h1>
+    <p class="lede">Choose the lane from the kind of judgment. Observation tells you what exists; a verdict teaches AuthorLM what the author believes.</p>
+  </header>
+
+  <section>
+    <h2>The seven lanes</h2>
+    <table>
+      <thead><tr><th>Signal</th><th>Lane</th><th>Inspect</th><th>Author action</th><th>Finish</th></tr></thead>
+      <tbody>
+        <tr><td>A writing goal</td><td>Intent</td><td><code>briefing</code>, <code>plan</code>, guidance</td><td>Declare the goal; accept, revise, or reject suggestions</td><td>Collect, then complete intent</td></tr>
+        <tr><td>External editorial advice</td><td>Critique intake</td><td><code>critique list/status</code></td><td>Triage the advice before it becomes law</td><td>Accepted items become active intents/style</td></tr>
+        <tr><td>Paragraph-level revision pass</td><td>Critique edits</td><td><code>critique edits</code></td><td>Accept, reject with reason, revise, or undo</td><td>Write to Doc, inspect, resolve or rollback</td></tr>
+        <tr><td>Concept or relationship uncertainty</td><td>Concept graph</td><td><code>concept show/list</code>, <code>proposal list</code></td><td>Confirm, retire, retype, link, or dismiss conflict</td><td>Graph becomes drafting context</td></tr>
+        <tr><td>A recurring editorial principle</td><td>Policy/style</td><td><code>policy list</code>, effective style</td><td>Answer questions; ratify or reject applicability</td><td>Validated law guides later work</td></tr>
+        <tr><td>Google Docs feedback</td><td>Margin thread</td><td><code>doc pull/list</code></td><td>Discuss, approve, decline, or post-edit pending text</td><td>Pull applies verdict; thread closes</td></tr>
+        <tr><td>Visual placement or rendering</td><td>Illustration</td><td><code>illus list/triage/prompt</code></td><td>Accept placement, revise description, pick render</td><td>Collect, push, render or evolve</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="callout">
+    <h2>The invariant</h2>
+    <p><strong>Critic input, model analysis, and extracted graph claims are proposals—not authorial law.</strong> The author's verdict is the boundary that changes state and creates evidence.</p>
+  </section>
+
+  <section>
+    <h2>A compact loop</h2>
+    <div class="flow" aria-label="AuthorLM decision loop">
+      <span>Observe</span><i>→</i><span>Name the lane</span><i>→</i><span>Inspect context</span><i>→</i><span>Author verdict</span><i>→</i><span>Apply</span><i>→</i><span>Record evidence</span>
+    </div>
+    <p>For prose work, insert <em>declare intent</em> before guidance and <em>collect + complete</em> after the author finishes.</p>
+  </section>
+
+  <section>
+    <h2>Sources</h2>
+    <ul>
+      <li><a href="../.claude/skills/authorlm/SKILL.md">AuthorLM collaboration rules</a></li>
+      <li><a href="../authorlm/docs/critique-pass-design.md">Critique pass design</a></li>
+      <li><a href="../authorlm/docs/autoregressive-writing-design.md">Autoregressive writing design</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
