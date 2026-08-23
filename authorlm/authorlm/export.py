@@ -18,7 +18,7 @@ from .db import Database
 from .gdocs import (GDOC_MIME, MARKDOWN_MIME, _ensure_folder, _mapping,
                     _save_mapping, normalize_markdown)
 from .revisions import read_manuscript_files
-from .structure import reading_order
+from .structure import reading_order, select_chapters
 
 EXPORT_DIR = "_exports"
 EXPORT_KEY = "_export"  # metadata.gdocs key; '_' keeps reconcile/pull away
@@ -113,10 +113,15 @@ SETTINGS_KEYS = {
     "reference_docx": "path to a pandoc reference .docx for Word styling "
                       "(fonts, margins); empty = pandoc defaults",
     "cover_image": "path to an epub cover image; empty = no cover",
+    "pdf_engine": "pandoc --pdf-engine for pdf export, default xelatex "
+                  "(pdflatex cannot set the manuscript's unicode)",
+    "pdf_font": "main font for pdf export (a wide-coverage face such as "
+                "'STIX Two Text'); empty = pandoc/LaTeX default",
 }
 _SETTINGS_DEFAULTS = {"title": "", "author": "", "variant": "images",
                       "language": "en", "reference_docx": "",
-                      "cover_image": ""}
+                      "cover_image": "", "pdf_engine": "xelatex",
+                      "pdf_font": ""}
 
 
 def _settings_path(manuscript: dict) -> Path:
@@ -162,17 +167,23 @@ def set_setting(manuscript: dict, key: str, value: str) -> dict:
     return settings
 
 
-def publish_markdown(manuscript: dict,
-                     variant: str) -> tuple[str, list[str], list[str]]:
+def publish_markdown(manuscript: dict, variant: str,
+                     only: list[str] | None = None
+                     ) -> tuple[str, list[str], list[str]]:
     """The publishable single-file markdown: the machinery-free
     concatenation with illustration slots resolved per the variant.
+    `only` narrows it to the named chapters and their TOC descendants —
+    a part of the book, built exactly like the whole.
     Returns (text, order, warnings)."""
     from .illus import (ILLUS_DIR, capture_embeds, desc_hash, parse_tag,
                         slot_candidates)
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
-    order, _unlisted = reading_order(files)
+    if only:
+        order = select_chapters(files, only)
+    else:
+        order, _unlisted = reading_order(files)
     warnings: list[str] = []
     parts: list[str] = []
     for name in order:
@@ -210,33 +221,48 @@ def publish_markdown(manuscript: dict,
     return (combined + "\n" if combined else ""), order, warnings
 
 
+def selection_slug(order: list[str]) -> str:
+    """Filename tag for a chapter selection — the selected files' stems,
+    joined, so a part-build never overwrites the whole-book artifacts."""
+    stems = [Path(name).stem for name in order]
+    slug = "+".join(stems[:3]) + ("+more" if len(stems) > 3 else "")
+    return slug[:60]
+
+
 def export_published(db: Database, manuscript: dict, fmt: str,
-                     variant: str | None = None) -> dict:
+                     variant: str | None = None,
+                     only: list[str] | None = None) -> dict:
     """Publishing export: write the publishable markdown to _exports/
-    and, for docx/epub, convert it locally with pandoc — images embed
-    from _illustrations/, no Doc or Drive involved."""
+    and, for docx/epub/pdf, convert it locally with pandoc — images
+    embed from _illustrations/, no Doc or Drive involved.
+
+    `only` builds just the named chapters (with their TOC descendants)
+    into separately-named files alongside the full-book export."""
     import shutil
     import subprocess
 
     settings = load_settings(manuscript)
     variant = variant or settings["variant"] or "images"
     title = settings["title"] or manuscript["name"]
-    text, order, warnings = publish_markdown(manuscript, variant)
+    text, order, warnings = publish_markdown(manuscript, variant, only)
     if not order:
         raise LookupError("the manuscript has no content files to combine")
+    if only:
+        title = f"{title} - {selection_slug(order)}"
     root = Path(manuscript["path"])
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
     md_path = export_dir / export_filename(title)
     md_path.write_text(text, encoding="utf-8")
     result = {"markdown": str(md_path), "variant": variant,
-              "warnings": warnings}
+              "files": order, "warnings": warnings}
     if fmt == "md":
         return result
 
     if shutil.which("pandoc") is None:
         raise RuntimeError(
-            "pandoc is required for docx/epub export — brew install pandoc")
+            "pandoc is required for docx/epub/pdf export — "
+            "brew install pandoc")
     out_path = md_path.with_suffix(f".{fmt}")
     command = ["pandoc", str(md_path), "-o", str(out_path),
                "--from", "markdown+smart", "--standalone"]
@@ -245,6 +271,12 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         # ratified export shape) and pandoc would render a duplicate.
         if settings["reference_docx"]:
             command += ["--reference-doc", settings["reference_docx"]]
+    if fmt == "pdf":
+        # xelatex, not the pdflatex default: the prose carries arrows,
+        # diacritics, and Greek that 8-bit TeX cannot set.
+        command += ["--pdf-engine", settings["pdf_engine"] or "xelatex"]
+        if settings["pdf_font"]:
+            command += ["-V", f"mainfont={settings['pdf_font']}"]
     if fmt == "epub":
         command += ["--metadata", f"title={title}",
                     "--metadata", f"lang={settings['language'] or 'en'}"]

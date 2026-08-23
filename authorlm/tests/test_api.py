@@ -1185,6 +1185,39 @@ def main_test() -> None:
             print("  note: pandoc not on PATH — docx conversion untested "
                   "in this run")
 
+        # --- chapter-scoped publishing: a part of the book, same build ---
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "02-aside.md"\nparent = "00-intro.md"\n')
+        (ms / "02-aside.md").write_text("# Aside\n\nA filed thought.\n")
+        manuscript = api.get_manuscript(db)
+        part, part_order, _ = publish_markdown(manuscript, "images",
+                                               ["00-intro"])
+        check("naming a parent builds it with its TOC descendants, "
+              "and nothing else",
+              part_order == ["00-intro.md", "02-aside.md"]
+              and "A filed thought." in part
+              and "firmer road" not in part, str(part_order))
+        try:
+            publish_markdown(manuscript, "images", ["no-such"])
+            refused = False
+        except LookupError:
+            refused = True
+        check("an unknown chapter name is refused, not silently empty",
+              refused)
+        if _shutil.which("pandoc"):
+            whole = export_published(db, manuscript, fmt="md",
+                                     variant="images")
+            scoped = export_published(db, manuscript, fmt="epub",
+                                      variant="images", only=["00-intro"])
+            epub = Path(scoped["epub"])
+            check("a chapter epub lands beside the whole-book export "
+                  "without overwriting it",
+                  epub.exists() and epub.stat().st_size > 1000
+                  and scoped["markdown"] != whole["markdown"]
+                  and Path(whole["markdown"]).exists(), str(scoped))
+
         # --- hygiene: deterministic filters + retroactive sweep ---
         import json as _json
 

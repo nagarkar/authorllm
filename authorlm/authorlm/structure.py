@@ -155,6 +155,37 @@ def reading_order(files: dict[str, str]) -> tuple[list[str], list[str]]:
     return ordered + unlisted, unlisted
 
 
+def select_chapters(files: dict[str, str],
+                    names: list[str]) -> list[str]:
+    """The named chapters plus their TOC descendants, in reading order.
+
+    Naming a parent means naming the part it heads — `ascending.md`
+    selects the chapters filed under it. Names may omit the `.md`.
+    Raises LookupError on a name the manuscript does not have."""
+    order, _unlisted = reading_order(files)
+    positions = {name: i for i, name in enumerate(order)}
+    depths = dict(parse_toc_tree(files.get(TOC_FILENAME) or ""))
+
+    wanted: set[str] = set()
+    for raw in names:
+        name = raw.strip()
+        if name not in positions and f"{name}.md" in positions:
+            name = f"{name}.md"
+        if name not in positions:
+            raise LookupError(
+                f"no such chapter '{raw}' (one of: {', '.join(order)})")
+        wanted.add(name)
+        # Descendants: the run of deeper entries following this one.
+        depth = depths.get(name)
+        if depth is None:
+            continue
+        for later in order[positions[name] + 1:]:
+            if depths.get(later, 0) <= depth:
+                break
+            wanted.add(later)
+    return [name for name in order if name in wanted]
+
+
 def ordered_items(files: dict[str, str]) -> list[tuple[str, str]]:
     """(name, text) pairs of content files in reading order."""
     order, _ = reading_order(files)

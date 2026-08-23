@@ -2725,11 +2725,16 @@ def cmd_export(args):
         return
 
     try:
+        chapters = [c for part in (args.chapters or [])
+                    for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
-                                     variant=args.variant)
+                                     variant=args.variant,
+                                     only=chapters or None)
     except (RuntimeError, LookupError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
+    if chapters:
+        print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
         print(f"Wrote {result[args.action]}.")
     for warning in result["warnings"]:
@@ -4400,13 +4405,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "export",
-        help="publishing exports: md/docx/epub built locally (pandoc) with "
-             "picked illustrations embedded; settings in _exports/settings.toml")
-    p.add_argument("action", choices=["show", "set", "md", "docx", "epub"])
+        help="publishing exports: md/docx/epub/pdf built locally (pandoc) "
+             "with picked illustrations embedded; settings in "
+             "_exports/settings.toml")
+    p.add_argument("action",
+                   choices=["show", "set", "md", "docx", "epub", "pdf"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
                    help="override the illustration variant for this export")
+    p.add_argument("--chapters", action="append", metavar="FILE,FILE",
+                   help="build only these chapters and everything filed "
+                        "under them in the TOC (repeatable; .md optional)")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(

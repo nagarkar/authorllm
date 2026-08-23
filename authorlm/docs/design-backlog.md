@@ -283,6 +283,18 @@ inputs vs outputs. Settings reference them root-relative
 (cover_image = "_assets/cover.jpeg").
 OPEN: pandoc reference-docx template (fonts/margins) — generate into
 _assets/ and restyle in Word only if the Vellum import test warrants.
+DECIDED (author 2026-08-23, "ebooks and pdfs ... restricted to specified
+chapters, not the whole manuscript"): `authorlm export <fmt> --chapters
+a,b` builds a part of the book through the same pipeline as the whole —
+same variant, same illustration resolution, images embedded exactly as
+in the full build. Naming a parent names the part it heads: the chapter
+carries its TOC descendants (`--chapters ascending` = ascending.md plus
+the seven chapters filed under it). A part-build's filename carries the
+selection (`<Title> - ascending+discernment+good-choice+more.pdf`) so it
+lands beside the whole-book artifacts and never overwrites them. An
+unknown chapter name raises rather than exporting an empty book. `pdf`
+joins md/docx/epub, engine `xelatex` (settings: pdf_engine, pdf_font) —
+pdflatex dies on the manuscript's arrows and diacritics.
 
 ## Illustration pipeline (LLM-generated images: disk, Obsidian, export)
 Grilled 2026-08-05. Motivating failure: images pasted in the Doc are
