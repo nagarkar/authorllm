@@ -436,20 +436,20 @@ def main_test() -> None:
         house = styles.create_guide(db, mid, "house")
         part_guide = styles.create_guide(db, mid, "part", parent_name="house")
         el = styles.add_element(db, mid, "tone", "Be grave.", guide=house)
-        moved = api.move_style_element(db, manuscript, el["id"][:10],
+        moved = api.move_style_law(db, manuscript, el["id"][:10],
                                        guide_name="part")
         check("move re-scopes an element to another guide by name",
               moved["guide"] == "part"
-              and db.one("SELECT guide_id FROM style_elements WHERE id = ?",
+              and db.one("SELECT guide_id FROM style_laws WHERE id = ?",
                          (el["id"],))["guide_id"] == part_guide["id"])
-        moved = api.move_style_element(db, manuscript, el["id"][:10],
+        moved = api.move_style_law(db, manuscript, el["id"][:10],
                                        file="alpha.md")
         check("move to a file clears the guide",
               moved["file"] == "alpha.md"
-              and db.one("SELECT guide_id, file FROM style_elements WHERE id "
+              and db.one("SELECT guide_id, file FROM style_laws WHERE id "
                          "= ?", (el["id"],))["guide_id"] is None)
         try:
-            api.move_style_element(db, manuscript, el["id"][:10],
+            api.move_style_law(db, manuscript, el["id"][:10],
                                    guide_name="nope")
             raised = False
         except LookupError:

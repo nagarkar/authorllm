@@ -9,6 +9,16 @@ Run: python3 tests/test_critique.py
 
 from __future__ import annotations
 
+import os
+
+# Offline suite: pin the project-config and .env lookups away from the
+# real ones. Without this a checkout's config.toml (llm enabled, keys in
+# .env) is picked up by every test process and the suite makes live,
+# billed model calls — and asserts against whatever they return.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+
 import json
 import sqlite3
 import sys
@@ -59,7 +69,7 @@ CREATE TABLE concept_edges (
     status TEXT NOT NULL DEFAULT 'declared',
     support INTEGER NOT NULL DEFAULT 0, evidence TEXT NOT NULL DEFAULT '[]'
 );
-CREATE TABLE style_elements (
+CREATE TABLE style_laws (
     id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL, created_by TEXT NOT NULL,
     schema_version TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
@@ -68,7 +78,7 @@ CREATE TABLE style_elements (
     status TEXT NOT NULL DEFAULT 'active', overrides TEXT,
     CHECK ((guide_id IS NULL) != (file IS NULL))
 );
-CREATE TABLE editorial_policies (
+CREATE TABLE editorial_beliefs (
     id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL, created_by TEXT NOT NULL,
     schema_version TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
@@ -86,7 +96,7 @@ CREATE TABLE evidence (
     schema_version TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
     manuscript_id TEXT NOT NULL, episode_id TEXT,
     evidence_type TEXT NOT NULL, signal TEXT NOT NULL, target TEXT NOT NULL,
-    supports_policy TEXT, weight TEXT NOT NULL DEFAULT 'medium'
+    supports_belief TEXT, weight TEXT NOT NULL DEFAULT 'medium'
 );
 """
 
@@ -135,20 +145,20 @@ def test_migration_backfill(root: Path) -> None:
         "se", manuscript_id=mid, guide_id="sg-x", file=None,
         aspect="tone", statement="Be unflinching", notes=None,
         status="active", overrides=None)
-    _raw_insert(conn, "style_elements", row)
-    policy_id, row = _old_row(
+    _raw_insert(conn, "style_laws", row)
+    belief_id, row = _old_row(
         "pol", manuscript_id=mid, statement="Prune redundancy",
         status="candidate", confidence=0.5, supporting=1, contradicting=0,
         outstanding_questions="[]", source="review-explanation")
-    _raw_insert(conn, "editorial_policies", row)
+    _raw_insert(conn, "editorial_beliefs", row)
     review_ev, row = _old_row(
         "ev", manuscript_id=mid, episode_id=None, evidence_type="author_review",
-        signal="accepted", target="t", supports_policy=None, weight="high")
+        signal="accepted", target="t", supports_belief=None, weight="high")
     _raw_insert(conn, "evidence", row)
     analysis_ev, row = _old_row(
         "ev", manuscript_id=mid, episode_id=None,
         evidence_type="episode_analysis", signal="pattern", target="t",
-        supports_policy=None, weight="medium")
+        supports_belief=None, weight="medium")
     _raw_insert(conn, "evidence", row)
     conn.commit()
     conn.close()
@@ -174,8 +184,8 @@ def test_migration_backfill(root: Path) -> None:
           db.one("SELECT source_id FROM concept_edges WHERE id = ?",
                  (declared_edge,))["source_id"] == author)
     for table, obj_id in (("declared_intents", intent_id),
-                          ("style_elements", element_id),
-                          ("editorial_policies", policy_id)):
+                          ("style_laws", element_id),
+                          ("editorial_beliefs", belief_id)):
         check(f"{table} row backfills to author",
               db.one(f"SELECT source_id FROM {table} WHERE id = ?",
                      (obj_id,))["source_id"] == author)
@@ -251,7 +261,7 @@ def test_fresh_db_provenance(root: Path) -> None:
     ev = ko_fields("ev")
     ev.update(manuscript_id=mid, episode_id=None,
               evidence_type="author_review", signal="accepted", target="x",
-              supports_policy=None, weight="high")
+              supports_belief=None, weight="high")
     db.insert("evidence", ev)
     check("evidence auto-stamps author for review types",
           db.one("SELECT source_id FROM evidence WHERE id = ?",
@@ -259,7 +269,7 @@ def test_fresh_db_provenance(root: Path) -> None:
     ev2 = ko_fields("ev")
     ev2.update(manuscript_id=mid, episode_id=None,
                evidence_type="episode_analysis", signal="pattern", target="y",
-               supports_policy=None, weight="medium")
+               supports_belief=None, weight="medium")
     db.insert("evidence", ev2)
     check("evidence auto-stamps system for episode analysis",
           db.one("SELECT source_id FROM evidence WHERE id = ?",
@@ -342,7 +352,7 @@ def test_import_and_triage(root: Path) -> None:
 
     result = critique.import_manifest(db, mid, _manifest())
     check("import lands intents and elements as counted",
-          result["intents"] == 2 and result["style_elements"] == 2
+          result["intents"] == 2 and result["style_laws"] == 2
           and not result["errors"])
     check("re-import is idempotent (everything skipped)",
           critique.import_manifest(db, mid, _manifest())["skipped"] == 4)
@@ -386,9 +396,9 @@ def test_import_and_triage(root: Path) -> None:
     el2 = pend["elements"][1]
     critique.reject_element(db, mid, el2, "Too broad as law.")
     check("element verdicts land (active / rejected with reason kept)",
-          db.one("SELECT status FROM style_elements WHERE id = ?",
+          db.one("SELECT status FROM style_laws WHERE id = ?",
                  (el["id"],))["status"] == "active"
-          and loads(db.one("SELECT metadata FROM style_elements WHERE id = ?",
+          and loads(db.one("SELECT metadata FROM style_laws WHERE id = ?",
                            (el2["id"],))["metadata"], {})["rejection_reason"]
           == "Too broad as law.")
 

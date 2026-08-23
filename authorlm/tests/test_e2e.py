@@ -1,12 +1,12 @@
 """End-to-end test of every MVP use case, driven through the real CLI.
 
 Includes a hermetic LLM scenario: a stub OpenAI-compatible HTTP server
-stands in for LiteLLM/Gemini, so extraction, policy distillation, and
+stands in for LiteLLM/Gemini, so extraction, belief distillation, and
 bridge drafting are tested without network or keys.
 
 Follows the RFC Appendix A shape: declare intent → briefing → guidance with
 explanations → author review (accept / reject with explanation) → revisions
-observed → transitions → episode → evidence → policy learning → next
+observed → transitions → episode → evidence → belief learning → next
 session's briefing reflects the learning.
 
 Run: python3 tests/test_e2e.py
@@ -215,85 +215,92 @@ def scenario_editorial_loop(root: Path) -> None:
         ws, "review", "1", "--reject",
         "--explain", "Contrast a temporal concept with its static counterpart first",
     )
-    check("rejection seeds candidate policy", "seeded a candidate policy" in out, out)
+    check("rejection seeds candidate belief", "seeded a candidate belief" in out, out)
 
     out = run(ws, "guide")
     check("rejected suggestion is not re-proposed", "Introduce 'History'" not in out, out)
-    check("candidate policy surfaces as reminder", "candidate policy" in out, out)
+    check("candidate belief surfaces as reminder", "candidate belief" in out, out)
 
     out = run(ws, "review", "1", "--accept")
     out = run(ws, "guide")
-    check("policy reminder deduped within a session", "abstains" in out, out)
+    check("belief reminder deduped within a session", "abstains" in out, out)
 
-    # Support must accumulate across independent sessions (§11.2).
+    # Support must accumulate across independent sessions (§11.2). The
+    # reminder must recur; whether it is still a candidate depends on the
+    # per-source bar (review-explanation promotes at 2 — an explanation the
+    # author typed, not a pattern guessed from a diff).
     run(ws, "session", "end")
     run(ws, "session", "start")
     out = run(ws, "guide")
-    check("candidate reminder recurs in a new session", "candidate policy" in out, out)
+    check("belief reminder recurs in a new session",
+          "your belief" in out.lower(), out)
+    out = run(ws, "belief", "list")
+    check("review-explanation belief validated at 2 supports",
+          "(validated" in out, out)
     out = run(ws, "review", "1", "--accept")
-    out = run(ws, "policy", "list")
-    check("policy validated after repeated cross-session support", "(validated" in out, out)
+    out = run(ws, "belief", "list")
+    check("further support keeps it validated", "(validated" in out, out)
 
     run(ws, "session", "end")
     run(ws, "session", "start")
     out = run(ws, "guide")
-    check("validated policy now reminds", "apply your policy" in out, out)
+    check("validated belief now reminds", "apply your belief" in out, out)
     out = run(ws, "review", "1", "--reject", "--explain", "Not while drafting an example")
-    check("rejecting validated policy recorded", "Recorded: [1] rejected" in out, out)
+    check("rejecting validated belief recorded", "Recorded: [1] rejected" in out, out)
 
     out = run(ws, "briefing")
-    check("briefing shows policy deltas", "Policies strengthened/weakened" in out, out)
+    check("briefing shows belief deltas", "Beliefs strengthened/weakened" in out, out)
     check("briefing shows contradiction", "Contradictions" in out, out)
     check("briefing shows outstanding question", "Outstanding questions" in out, out)
 
-    policy_prefix = None
+    belief_prefix = None
     current = None
-    for line in run(ws, "policy", "list").splitlines():
+    for line in run(ws, "belief", "list").splitlines():
         if line.strip().startswith("["):
             current = line.split("[")[1].split("]")[0]
         if "Q1:" in line:
-            policy_prefix = current
-    check("found policy with question via numbered Q lines", policy_prefix is not None)
-    out = run(ws, "policy", "answer", policy_prefix, "Policy holds except inside examples")
+            belief_prefix = current
+    check("found belief with question via numbered Q lines", belief_prefix is not None)
+    out = run(ws, "belief", "answer", belief_prefix, "Belief holds except inside examples")
     check("question answered as declared evidence", "Answer recorded" in out, out)
 
-    # --- policy curation: retire / merge / convert-to-style ---
-    from authorlm import policies as _cpol
+    # --- belief curation: retire / merge / convert-to-style ---
+    from authorlm import beliefs as _cbel
     from authorlm.db import Database as _CDB
     _cdb = _CDB(ws / ".authorlm" / "authorlm.db")
     _cmid = _cdb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
-    dup = _cpol.seed_candidate_policy(
+    dup = _cbel.seed_candidate_belief(
         _cdb, _cmid, "Trim throat-clearing openers.", source="test")
-    canon = _cpol.seed_candidate_policy(
+    canon = _cbel.seed_candidate_belief(
         _cdb, _cmid, "Cut redundant opening phrases.", source="test")
-    out = run(ws, "policy", "merge", dup["id"], canon["id"])
-    check("policy merge folds duplicate into canonical",
+    out = run(ws, "belief", "merge", dup["id"], canon["id"])
+    check("belief merge folds duplicate into canonical",
           'Merged "Trim throat-clearing openers."' in out and "2+ / 0-" in out,
           out)
-    out = run(ws, "policy", "list")
-    check("merged duplicate leaves the policy list",
+    out = run(ws, "belief", "list")
+    check("merged duplicate leaves the belief list",
           "Trim throat-clearing openers." not in out
           and "Cut redundant opening phrases." in out, out)
     run(ws, "style", "guide", "Curation guide")
-    out = run(ws, "policy", "convert", canon["id"], "--aspect", "formatting",
+    out = run(ws, "belief", "convert", canon["id"], "--aspect", "formatting",
               "--guide", "Curation guide")
-    check("policy converts to a style element",
+    check("belief converts to a style element",
           "converted to style element" in out, out)
-    out = run(ws, "policy", "list")
-    check("converted policy leaves the policy list",
+    out = run(ws, "belief", "list")
+    check("converted belief leaves the belief list",
           "Cut redundant opening phrases." not in out, out)
     out = run(ws, "style", "guides")
     check("converted element lives in its guide",
           "Curation guide" in out and "1 element(s)" in out, out)
-    victim = _cpol.seed_candidate_policy(
+    victim = _cbel.seed_candidate_belief(
         _cdb, _cmid, "Always use semicolons.", source="test")
-    out = run(ws, "policy", "retire", victim["id"],
+    out = run(ws, "belief", "retire", victim["id"],
               "--reason", "author rejects this rule")
-    check("policy retire records author verdict",
+    check("belief retire records author verdict",
           "banned from re-seeding" in out, out)
-    reseed = _cpol.seed_candidate_policy(
+    reseed = _cbel.seed_candidate_belief(
         _cdb, _cmid, "Always use semicolons.", source="test")
-    check("retired statement re-seeds as revival proposal, not a new policy",
+    check("retired statement re-seeds as revival proposal, not a new belief",
           reseed.get("kind") == "revival_proposal", str(reseed))
 
     # --- compact MCP projections: delta-only, no row boilerplate ---
@@ -577,7 +584,27 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                 "outcome": "Becoming developed through the sailing metaphor.",
             })
         elif "distill" in system.lower():
-            content = "NONE" if "one-off" in user else "Introduce intuition before formalism."
+            # Stands in for semantic matching: if an equivalent belief is
+            # already on the menu the stub MATCHes it (exercising the
+            # reinforce path), otherwise it proposes one as NEW. The real
+            # distiller decides by principle; the stub decides by substring,
+            # which is enough to drive both branches deterministically.
+            statement = "Introduce intuition before formalism."
+            menu_id = next(
+                (line.split("|")[0].strip() for line in user.splitlines()
+                 if "|" in line and "intuition before formalism" in line.lower()),
+                None)
+            if "one-off" in user:
+                content = "NONE"
+            elif menu_id:
+                content = f"MATCH: {menu_id}"
+            elif "SCOPE:" in system:
+                content = (f"NEW\nSCOPE: manuscript\nSTATEMENT: {statement}\n"
+                           f"EXAMPLE: the stub's canned case")
+            else:
+                # EXAMPLE is required: a belief with no grounding case is
+                # refused as a platitude.
+                content = f"NEW: {statement}\nEXAMPLE: the stub's canned case"
         else:
             content = "A drafted bridge paragraph from the stub."
         payload = json.dumps({
@@ -830,14 +857,14 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         out = run(ws, "review", "1", "--reject",
                   "--explain", "Ground every abstraction in a concrete case first")
-        check("explanation distilled into normative policy",
-              'seeded a candidate policy: "Introduce intuition before formalism."' in out, out)
+        check("explanation distilled into normative belief",
+              'seeded a candidate belief: "Introduce intuition before formalism."' in out, out)
 
         out = run(ws, "guide")
         out = run(ws, "review", "1", "--reject",
                   "--explain", "This was a one-off exception for this chapter")
         check("LLM declines to generalize a one-off (NONE path)",
-              "seeded a candidate policy" not in out
+              "seeded a candidate belief" not in out
               and "Explanation recorded as high-weight evidence" in out, out)
 
         # --- episode analysis: learn from the author's actual edits ---
@@ -850,10 +877,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "Analyzed episode 'Develop the notion of Becoming'" in out, out)
         check("analysis reports inferred decisions",
               "opened the section with a sailing metaphor" in out, out)
-        check("analysis seeds a candidate policy from the pattern",
+        check("analysis seeds a candidate belief from the pattern",
               "candidate seeded" in out, out)
-        out = run(ws, "policy", "list")
-        check("behavior-derived policy in the policy list",
+        out = run(ws, "belief", "list")
+        check("behavior-derived belief in the belief list",
               "Open concept introductions with a lived metaphor" in out, out)
         out = run(ws, "analyze")
         check("analysis is idempotent", "No episodes awaiting analysis" in out, out)
@@ -1192,8 +1219,8 @@ def scenario_write_loop(root: Path) -> None:
                         "--reason", "Too abstract; ground it in a lived moment")
         check("rejection recorded with cursor unchanged",
               "n=2 rejected" in out and "Redraft" in out, out)
-        check("explained rejection seeds a candidate policy",
-              "Seeded candidate policy" in out
+        check("explained rejection seeds a candidate belief",
+              "Seeded candidate belief" in out
               and "Introduce intuition before formalism." in out, out)
         run_stdin(ws, DRAFT_2B, "write", "propose",
                   "--why", "redraft: grounded in a lived moment")
@@ -1248,7 +1275,7 @@ def scenario_write_loop(root: Path) -> None:
         from authorlm import api as _api
         fake_node = {"name": "N", "kind": "concept", "status": "declared",
                      "introduced_in": None, "notes": "", "aliases": "[]"}
-        fake = {"since": "", "policy_changes": [], "new_policies": [],
+        fake = {"since": "", "belief_changes": [], "new_beliefs": [],
                 "realized_concepts": [], "contradictions": [],
                 "outstanding_questions": [], "active_intents": [],
                 "focus_areas": [], "toc_unlisted": [], "learning_velocity": {},

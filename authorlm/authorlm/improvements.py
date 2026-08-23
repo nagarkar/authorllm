@@ -238,6 +238,6 @@ def _record_evidence(db: Database, task: dict, signal: str,
         manuscript_id=task["manuscript_id"], episode_id=None,
         evidence_type="improvement_task", signal=signal,
         target=(f"{task['title']}" + (f" — {note}" if note else ""))[:200],
-        supports_policy=None, weight="medium",
+        supports_belief=None, weight="medium",
     )
     db.insert("evidence", ev)

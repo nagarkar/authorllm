@@ -100,13 +100,18 @@ REGISTRY: list[Prompt] = [
     Prompt("episode-analysis", "intent complete; analyze; complete_intent",
            "reconstruct the editorial decisions an episode's edits show",
            file=None, module="analysis.py:ANALYSIS_SYSTEM"),
-    Prompt("policy-distill", "review (explained verdicts); review_suggestion",
-           "distill an author's explanation into a normative policy, or NONE",
-           file=None, module="policies.py:DISTILL_SYSTEM"),
+    Prompt("belief-distill", "review (explained verdicts); review_suggestion; "
+           "proposal dismissal",
+           "match an author's explanation to an existing belief, distil a new "
+           "one, or decline",
+           file="belief-distill.md"),
+    Prompt("triage-screen", "proposal screen; scan_illustrations",
+           "cut queued proposals that violate the author's active law",
+           file="triage-screen.md"),
     Prompt("margin-distill", "doc pull (comment verdicts); illus triage",
            "distill a batch of margin/placement explanations into a "
            "scoped candidate",
-           file=None, module="policies.py:MARGIN_DISTILL_SYSTEM"),
+           file="margin-distill.md"),
     Prompt("guidance-draft", "guide; get_guidance",
            "draft a bridge paragraph for a guidance suggestion",
            file=None, module="guidance.py:BRIDGE_DRAFT_SYSTEM"),

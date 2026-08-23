@@ -66,7 +66,64 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+def check_show_verbs() -> None:
+    """Every entity verb exposes `show`, spelled the same way.
+
+    Four separate sessions hit a missing `show` on a different noun before
+    this was made uniform, so the check is on the parser rather than on
+    memory."""
+    from authorlm.cli import build_parser
+
+    commands = build_parser()._subparsers._group_actions[0].choices
+    for verb in ("concept", "intent", "improve", "style", "belief",
+                 "proposal", "critique", "lens", "illus", "doc"):
+        actions = [a for a in commands[verb]._actions if a.dest == "action"]
+        choices = list(actions[0].choices) if actions else []
+        check(f"`{verb}` exposes a 'show' action",
+              "show" in choices, f"{verb} actions: {choices}")
+
+
+def check_broken_pipe() -> None:
+    """`authorlm <listing> | head` must exit quietly.
+
+    Python raises BrokenPipeError when the reader closes early, and raises a
+    SECOND time flushing stdout at interpreter shutdown — which is what
+    prints 'Exception ignored in: <_io.TextIOWrapper>' after the traceback.
+    Both have to be swallowed, and the handler must survive a captured
+    stdout that has no fileno()."""
+    import io as _io
+
+    from authorlm.cli import main as _main
+
+    class ExplodesOnWrite(_io.StringIO):
+        def write(self, text):  # noqa: D102
+            raise BrokenPipeError(32, "Broken pipe")
+
+    class ExplodesOnFlush(_io.StringIO):
+        """Short output stays buffered, so the pipe only breaks when the
+        interpreter flushes at shutdown — the case a try/except around the
+        command misses entirely."""
+
+        def flush(self):  # noqa: D102
+            raise BrokenPipeError(32, "Broken pipe")
+
+    for label, stream in (("while writing", ExplodesOnWrite),
+                          ("at the shutdown flush", ExplodesOnFlush)):
+        try:
+            with contextlib.redirect_stdout(stream()):
+                _main(["--help"])
+            check(f"a pipe closed {label} exits without raising", True)
+        except SystemExit as err:
+            check(f"a pipe closed {label} exits 0, not a traceback",
+                  err.code in (0, None), f"exit code {err.code}")
+        except BrokenPipeError:
+            check(f"a pipe closed {label} exits 0, not a traceback", False,
+                  "BrokenPipeError escaped main()")
+
+
 def main_test() -> None:
+    check_broken_pipe()
+    check_show_verbs()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
@@ -343,7 +400,7 @@ def main_test() -> None:
 
         open_proposal = prop.create(db, manuscript["id"], "revival", "Scratch",
                                     {"name": "Scratch"})
-        listed = api.list_proposals(db, manuscript)
+        listed = api.list_proposals(db, manuscript)["open"]
         check("list_proposals surfaces an open proposal with summary/details",
               any(p["id"] == open_proposal["id"] and "revive retired concept" in p["summary"]
                   for p in listed))
@@ -362,7 +419,8 @@ def main_test() -> None:
         check("resolve_proposal dismisses and returns a message",
               resolved["proposal_id"] == open_proposal["id"] and resolved["message"])
         check("dismissed proposal no longer appears in list_proposals",
-              not any(p["id"] == open_proposal["id"] for p in api.list_proposals(db, manuscript)))
+              not any(p["id"] == open_proposal["id"]
+                      for p in api.list_proposals(db, manuscript)["open"]))
 
         closed = api.close_session(db, manuscript)
         check("close_session ends the active session",
@@ -524,7 +582,7 @@ def main_test() -> None:
               and illus_mod.embed_target(
                   (ms / "01-choice.md").read_text(), h) == first, str(r2))
 
-        api.add_style_element(db, manuscript, "illustration",
+        api.add_style_law(db, manuscript, "illustration",
                               "woodcut, high-contrast linework",
                               file="01-choice.md")
         law = illus_mod.illustration_law(db, manuscript["id"], "01-choice.md")
@@ -1116,7 +1174,7 @@ def main_test() -> None:
               == "Copper is the wrong register here"
               and stub.state["comments"]["c-5"]["resolved"]
               and db.one(
-                  "SELECT COUNT(*) AS n FROM editorial_policies "
+                  "SELECT COUNT(*) AS n FROM editorial_beliefs "
                   "WHERE manuscript_id = ? AND source = 'margin-thread'",
                   (manuscript["id"],))["n"] == 0, str(decided))
 
@@ -1474,7 +1532,7 @@ def main_test() -> None:
         (ms / "04-road.md").write_text(
             f"# **The Road**\n\n{filler}\n\n{anchor_para}\n")
         api.collect(db, manuscript, {})
-        api.add_style_element(db, manuscript, "illustration-placement",
+        api.add_style_law(db, manuscript, "illustration-placement",
                               "Concretize a recurring metaphor once, at "
                               "its strongest occurrence.",
                               file="04-road.md")
@@ -2064,19 +2122,21 @@ def main_test() -> None:
             "get_briefing", "get_concepts", "add_concept", "link_concepts",
             "confirm_concept", "retire_concept", "curate_concepts",
             "confirm_edge", "reject_edge",
-            "list_proposals", "resolve_proposal", "analyze_episodes",
-            "diff_versions", "list_policies", "close_session",
+            "list_proposals", "reconcile_proposals", "screen_proposals",
+            "resolve_proposal",
+            "analyze_episodes",
+            "diff_versions", "list_beliefs", "close_session",
             "extract_concepts", "get_plan", "get_doc_links",
             "file_improvement", "list_improvements", "improvement_bundle",
             "resolve_improvement", "alias_concept", "merge_concepts",
-            "retire_policy", "merge_policies", "convert_policy_to_style",
-            "define_style_guide", "add_style_element", "retire_style_element",
+            "retire_belief", "merge_beliefs", "convert_belief_to_law",
+            "define_style_guide", "add_style_law", "retire_style_law",
             "attach_style", "get_style", "get_profile", "run_sweep",
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
             "import_critique", "critique_status", "list_critique_items",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
-            "move_style_element", "open_triage_app", "triage_app_request",
+            "move_style_law", "open_triage_app", "triage_app_request",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,

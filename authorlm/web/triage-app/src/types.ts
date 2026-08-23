@@ -1,4 +1,9 @@
-export type TriageType = "concepts" | "edges";
+export type TriageType = "concepts" | "edges" | "proposals";
+
+export interface GroupBy {
+  id: string;
+  label: string;
+}
 
 export interface ColumnSchema {
   id: string;

@@ -148,7 +148,7 @@ def preflight(db: Database, manuscript: dict, file: str,
     --force runs WITHOUT them — unconfirmed items never enter the
     context package under any flag.
 
-    Candidate policies: only those seeded SINCE THIS PASS BEGAN count
+    Candidate beliefs: only those seeded SINCE THIS PASS BEGAN count
     (the pass's own verdicts distil into candidates the author should
     ratify before the next essay). The manuscript's long tail of older
     candidates was never gate material — a live record carries a hundred
@@ -160,19 +160,19 @@ def preflight(db: Database, manuscript: dict, file: str,
     proposed_intents = intents_in_scope(db, manuscript, file, "proposed")
     guides = [g["id"] for g in guide_chain(db, mid, file)]
     proposed_elements = [dict(r) for r in db.all(
-        "SELECT * FROM style_elements WHERE manuscript_id = ? AND "
+        "SELECT * FROM style_laws WHERE manuscript_id = ? AND "
         "status = 'proposed' AND (file = ? OR guide_id IN (%s))"
         % ",".join("?" * len(guides)) if guides else
-        "SELECT * FROM style_elements WHERE manuscript_id = ? AND "
+        "SELECT * FROM style_laws WHERE manuscript_id = ? AND "
         "status = 'proposed' AND file = ?",
         (mid, file, *guides) if guides else (mid, file))]
-    candidate_policies = [dict(r) for r in db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND "
+    candidate_beliefs = [dict(r) for r in db.all(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND "
         "status = 'candidate' AND created_at >= ?",
         (mid, since or "9999"))]
     blockers = {"proposed_intents": proposed_intents,
                 "proposed_elements": proposed_elements,
-                "candidate_policies": candidate_policies}
+                "candidate_beliefs": candidate_beliefs}
     return {"clear": not any(blockers.values()), **blockers}
 
 
@@ -233,8 +233,8 @@ def build_context(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' is not in the manuscript's reading order")
     paragraphs = paragraphs_of(texts[file])
     intents = intents_in_scope(db, manuscript, file, "active")
-    policies = [dict(r) for r in db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND "
+    beliefs = [dict(r) for r in db.all(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND "
         "status = 'validated' ORDER BY confidence DESC", (manuscript["id"],))]
     try:
         concepts = api.scoped_concepts(db, manuscript, file=file)
@@ -243,7 +243,7 @@ def build_context(db: Database, manuscript: dict, file: str,
     return {
         "file": file, "paragraphs": paragraphs,
         "style": render_style(db, manuscript["id"], file),
-        "intents": intents, "policies": policies, "concepts": concepts,
+        "intents": intents, "beliefs": beliefs, "concepts": concepts,
         "before": ready["before"], "after": ready["after"],
         "learnings": learnings(db, pass_row),
         "gate": gate, "forced": force and not gate["clear"],
@@ -261,8 +261,8 @@ def _gate_message(gate: dict) -> str:
     for el in gate["proposed_elements"]:
         lines.append(f"  proposed style element [{el['id'][:8]}]: "
                      f"{el['statement'][:80]}")
-    for pol in gate["candidate_policies"]:
-        lines.append(f"  candidate policy [{pol['id'][:8]}]: "
+    for pol in gate["candidate_beliefs"]:
+        lines.append(f"  candidate belief [{pol['id'][:8]}]: "
                      f"{pol['statement'][:80]}")
     return "\n".join(lines)
 
@@ -275,7 +275,7 @@ def render_user_message(ctx: dict) -> str:
     intents = "\n".join(
         f"- [{i['id']}] ({i['scope'] or 'manuscript-wide'}) {i['statement']}"
         for i in ctx["intents"])
-    policies = "\n".join(f"- {p['statement']}" for p in ctx["policies"])
+    beliefs = "\n".join(f"- {p['statement']}" for p in ctx["beliefs"])
     concepts = "\n".join(
         f"- {n['name']}" + (f" — {n['notes']}" if n.get("notes") else "")
         for n in ctx["concepts"].get("nodes", []))
@@ -288,7 +288,7 @@ def render_user_message(ctx: dict) -> str:
                         enumerate(ctx["paragraphs"], 1))
     return "\n".join([
         block("STYLE GUIDE", ctx["style"]),
-        block("POLICIES", policies),
+        block("POLICIES", beliefs),
         block("INTENTS", intents),
         block("CONCEPTS", concepts),
         block("LEARNINGS (this pass)", learn),
@@ -459,7 +459,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
     ev = ko_fields("ev")
     ev.update(manuscript_id=manuscript_id, episode_id=None,
               evidence_type="critique_edit", signal=signal,
-              target=target[:400], supports_policy=None, weight="high")
+              target=target[:400], supports_belief=None, weight="high")
     if explanation:
         ev["metadata"] = json.dumps({"explanation": explanation})
     db.insert("evidence", ev)

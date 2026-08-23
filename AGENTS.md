@@ -15,6 +15,24 @@
 - If author judgment is required, ask exactly one concise question.
 - Do not stop at status reporting when the output implies a next step.
 
+## Domain vocabulary (read before touching the code)
+
+AuthorLM splits all knowledge into what the machine **inferred by watching**
+and what the author **declared**. Two tables, one door between them:
+
+- `editorial_beliefs` — machine guesses, carry `confidence`, retractable.
+  Never authored directly.
+- `style_laws` — author-declared, binding, no confidence. Composed per file
+  into "the effective guide is law". No model in the loop.
+
+A belief graduates into law only when the author accepts it. An unratified
+rule must never be written into `style_laws`.
+
+Do NOT reason from a table or column name here — read the module docstring
+first (`policies.py`, `styles.py` state their invariant in paragraph one).
+Renamed 2026-08-20; pre-rename text says "editorial policy" for a belief and
+"style element" for a law. Full ontology: `authorlm/docs/domain-vocabulary.md`.
+
 When working on AuthorLM manuscripts or using the AuthorLM MCP server, read
 this file first and follow it fully:
 

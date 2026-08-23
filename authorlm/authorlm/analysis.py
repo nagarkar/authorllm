@@ -1,16 +1,16 @@
 """Episode Analyzer — learn editorial judgment from the author's own edits
 (RFC Common Core §3.5–3.6 decision identification; AuthorLM §17.8, §19.5).
 
-Until now policies were learned only from what the author *said* about
+Until now beliefs were learned only from what the author *said* about
 suggestions. This module closes the RFC's central loop: after an episode
 ends, the LLM performs retrospective inference over the observed
 transitions — what discrete editorial decisions do they show, and does any
 decision demonstrate a generalizable pattern? Patterns enter the ordinary
-policy machinery as candidates (source 'episode-analysis') and strengthen
+belief machinery as candidates (source 'episode-analysis') and strengthen
 across independent episodes, exactly like review evidence.
 
 Everything inferred here is a hypothesis: decisions are stored on the
-episode (replayable, inspectable), patterns become candidate policies the
+episode (replayable, inspectable), patterns become candidate beliefs the
 author can watch, reject, or see validated in the briefing. Declared
 knowledge always outranks this (Common Core §7.7).
 """
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 
-from . import policies as pol
+from . import beliefs as bel
 from .db import Database, ko_fields, loads
 from .llm import LLMClient
 
@@ -223,7 +223,7 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
             continue  # LLM unavailable/unusable — stays pending for later
 
         decisions = []
-        policy_notes = []
+        belief_notes = []
         for item in result.get("decisions", [])[:MAX_DECISIONS]:
             if not isinstance(item, dict) or not str(item.get("action", "")).strip():
                 continue
@@ -233,21 +233,21 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
             decisions.append({"action": action, "pattern": pattern})
             if not pattern:
                 continue
-            seeded = pol.seed_candidate_policy(
+            seeded = bel.seed_candidate_belief(
                 db, mid, pattern, source="episode-analysis", llm=None
             )
             if seeded is None:
                 continue
             if seeded.get("kind") == "revival_proposal":
-                policy_notes.append((seeded["statement"], "revival proposal filed"))
+                belief_notes.append((seeded["statement"], "revival proposal filed"))
                 continue
             note = "reinforced" if seeded.get("supporting", 1) > 1 else "candidate seeded"
-            policy_notes.append((seeded["statement"], note))
+            belief_notes.append((seeded["statement"], note))
             ev = ko_fields("ev")
             ev.update(
                 manuscript_id=mid, episode_id=episode["id"],
                 evidence_type="episode_analysis", signal="pattern",
-                target=pattern[:200], supports_policy=seeded.get("id"),
+                target=pattern[:200], supports_belief=seeded.get("id"),
                 # Machine-inferred behavior evidence: real, but below the
                 # author's explicit word (declared > inferred, §7.7).
                 weight="medium",
@@ -268,6 +268,6 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
             "transitions": transition_count,
             "decisions": decisions,
             "outcome": outcome,
-            "policies": policy_notes,
+            "beliefs": belief_notes,
         })
     return summaries

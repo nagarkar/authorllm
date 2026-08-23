@@ -16,6 +16,8 @@ ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
     "citation", "rhetoric", "figure", "tone", "illustration",
     "illustration-placement",
+    "concept-note", "concept-identity", "concept-lifecycle",
+    "concept-relation",
 }
 # 'figure' is figurative language — metaphor and analogy law for PROSE.
 # 'illustration' is image law, consumed only by the illustration
@@ -24,6 +26,23 @@ ASPECTS = {
 # never composed into render prompts. The three must never mix: prose
 # motif guidance injected into an image prompt draws literal chains
 # and flames (it-3e79bce24f73).
+#
+# The three 'concept-*' aspects govern the CONCEPT GRAPH, not prose, and are
+# consumed only by the proposal screen (loop.active_law). Each names the
+# QUESTION being decided, not the queue asking it, so two proposal kinds
+# that ask the same question share one aspect and law written for it
+# transfers correctly:
+#   concept-note      how a concept's note must read        (note_update)
+#   concept-identity  whether two concepts are the same     (alias,
+#                                                            variant_of_retired)
+#   concept-lifecycle whether a concept should live         (vanished, revival)
+#   concept-relation  whether a relationship should stand   (edge_reproposal)
+# edge_reproposal was briefly on concept-identity, which silently armed the
+# alias laws ("metaphor is not identity") against reproposed EDGES — a
+# relationship is not an identity claim, and the law did not transfer.
+# They are law in the same sense as the rest — ratified by the author, never
+# machine-written — but they must never reach a drafting prompt, exactly as
+# illustration law must never reach a prose one.
 
 
 def create_guide(db: Database, manuscript_id: str, name: str,
@@ -87,12 +106,12 @@ def add_element(db: Database, manuscript_id: str, aspect: str, statement: str,
         status=status, overrides=overrides,
         source_id=source_id or db.source("author"),
     )
-    db.insert("style_elements", row)
+    db.insert("style_laws", row)
     return row
 
 
 def retire_element(db: Database, element: dict) -> None:
-    db.update("style_elements", element["id"], {"status": "retired"})
+    db.update("style_laws", element["id"], {"status": "retired"})
 
 
 def guide_chain(db: Database, manuscript_id: str, file: str) -> list[dict]:
@@ -120,13 +139,13 @@ def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
     rows, then each guide up the chain — minus every element displaced by
     a nearer element's `overrides` link."""
     layers: list[list[dict]] = [[dict(e) for e in db.all(
-        "SELECT * FROM style_elements WHERE manuscript_id = ? AND file = ? "
+        "SELECT * FROM style_laws WHERE manuscript_id = ? AND file = ? "
         "AND status = 'active' ORDER BY created_at",
         (manuscript_id, file),
     )]]
     for guide in guide_chain(db, manuscript_id, file):
         layers.append([dict(e) for e in db.all(
-            "SELECT * FROM style_elements WHERE manuscript_id = ? AND guide_id = ? "
+            "SELECT * FROM style_laws WHERE manuscript_id = ? AND guide_id = ? "
             "AND status = 'active' ORDER BY created_at",
             (manuscript_id, guide["id"]),
         )])

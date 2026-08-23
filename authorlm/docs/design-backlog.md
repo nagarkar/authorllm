@@ -378,3 +378,26 @@ verification. Obsidian needs no machinery: the manuscript folder IS
 the vault (export-obsidian's design), so relative embeds render as-is.
 Future, deliberately deferred: pick/reject verdicts as evidence
 seeding figure-style policies, same loop as prose.
+
+## Proposal learning loop — remaining queues
+The loop shipped 2026-08-20 for `note_update`, `alias`, and illustrations
+(docs/design-record.md). These queues have no acute pain and register a
+`LoopSpec` when they do — no loop changes needed, just a registry entry with
+a `render`, a `dedupe_render`, an aspect and a source:
+`vanished` (54 open), `revival` (21), `edge_reproposal` (11),
+`variant_of_retired` (5), `incongruence`, `belief_revival`; critique items,
+critique staged edits, improvements, and concept/edge triage.
+
+Also deferred, per the author: recursion beyond level 1 — distilling beliefs
+ABOUT beliefs. It is a fixed point rather than a regress (the belief store
+conforms to the same queue interface), so depth is chosen purely by which
+distillers are wired; level 1 today means no distiller attached to the belief
+queue. Author, verbatim: "I can keep going, 'I am that I am that I am… and so
+on recursively' and so far we don't need that sort of infinite
+self-referential recursion, but we do need the ability to have that recursion
+and build new levels of recursion in the future."
+
+Also cut, with a standing reason: a VOLUME-ADAPTIVE promotion threshold.
+Measurement (below) showed belief count already grows logarithmically once
+matching works, and an adaptive bar would mask a matching regression —
+lowering the bar exactly when volume rose is how that bug becomes permanent.

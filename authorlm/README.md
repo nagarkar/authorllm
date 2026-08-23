@@ -381,6 +381,7 @@ and the test suites report totals the same way.
 ```bash
 python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
 python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
+python3 tests/test_loop.py      # proposal learning loop, hermetic (scripted LLM)
 python3 tests/test_live_llm.py  # real LLM path, with record/replay
 ```
 

@@ -30,7 +30,7 @@ mcp = FastMCP(
     instructions=(
         "AuthorLM is an editorial collaborator for philosophy writing: it "
         "observes manuscript revisions, maintains a Concept Graph, learns "
-        "the author's editorial policies from evidence, and offers explained "
+        "the author's editorial beliefs from evidence, and offers explained "
         "guidance. Use these tools whenever the author discusses their "
         "manuscript: declaring what they want to write (declare_intent), "
         "asking what to write or why (get_guidance, get_briefing), reacting "
@@ -48,7 +48,7 @@ mcp = FastMCP(
         "the graph is too large to list whole). The notes are the "
         "author's ratified definitions — use their words, keep claims "
         "consistent with the graph, never endorse a refuted position. "
-        "Check the validated policies from list_policies or the briefing. "
+        "Check the validated beliefs from list_beliefs or the briefing. "
         "Offer the draft for the author to place or reject. For "
         "naturally-plural curation ('retire these two and their edges') "
         "use curate_concepts with an operations array; suggestion "
@@ -121,7 +121,7 @@ def resolve_file(path: str) -> dict:
 @mcp.tool()
 def get_status(manuscript: str | None = None) -> dict:
     """Current state of a manuscript: active session, and counts of
-    versions, concepts, policies, proposals, evidence."""
+    versions, concepts, beliefs, proposals, evidence."""
     def run():
         db = _db()
         return api.status(db, _manuscript(db, manuscript))
@@ -201,7 +201,7 @@ def complete_intent(intent_id: str, outcome: str | None = None,
                     manuscript: str | None = None) -> dict:
     """Mark a writing objective achieved. Triggers episode analysis: the
     LLM infers the editorial decisions the author's edits show and seeds
-    candidate policies from recurring patterns. Relay the analysis back."""
+    candidate beliefs from recurring patterns. Relay the analysis back."""
     def run():
         db = _db()
         return api.complete_intent(db, _manuscript(db, manuscript), intent_id,
@@ -429,7 +429,7 @@ def triage_critique_edits(essay: str, operations: list[dict],
 
 
 @mcp.tool()
-def move_style_element(element_id: str, guide: str | None = None,
+def move_style_law(element_id: str, guide: str | None = None,
                        file: str | None = None,
                        manuscript: str | None = None) -> dict:
     """Re-scope a style element to another guide (by name) or to one file
@@ -438,14 +438,14 @@ def move_style_element(element_id: str, guide: str | None = None,
     element's id, status, provenance, and history."""
     def run():
         db = _db()
-        return api.move_style_element(db, _manuscript(db, manuscript),
+        return api.move_style_law(db, _manuscript(db, manuscript),
                                       element_id, guide_name=guide, file=file)
     return _guard(run)
 
 
 def _critique_by_prefix(db, mid: str, prefix: str):
     for kind, table in (("intent", "declared_intents"),
-                        ("element", "style_elements")):
+                        ("element", "style_laws")):
         rows = db.all(
             f"SELECT * FROM {table} WHERE manuscript_id = ? "
             "AND status = 'proposed' AND id LIKE ?",
@@ -611,7 +611,7 @@ def get_guidance(manuscript: str | None = None) -> dict:
     """Generate explained editorial suggestions for the active intents:
     concept introductions (with drafted bridge text and precedents from the
     author's own past episodes), prerequisite gaps, unanswered objections,
-    policy reminders. May abstain — abstention is a valid answer."""
+    belief reminders. May abstain — abstention is a valid answer."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
@@ -629,7 +629,7 @@ def review_suggestion(index: int, decision: str,
     guidance batch. decision: accepted | rejected | modified | deferred.
     ALWAYS pass the author's own reasoning as `explanation` when they give
     any — explained decisions are the highest-value evidence and can seed
-    editorial policies."""
+    editorial beliefs."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
@@ -641,7 +641,7 @@ def review_suggestion(index: int, decision: str,
 @mcp.tool()
 def get_briefing(manuscript: str | None = None,
                  verbose: bool = False) -> dict:
-    """The session-opening learning briefing: policies strengthened or
+    """The session-opening learning briefing: beliefs strengthened or
     weakened, newly realized concepts, unconfirmed extractions, open
     proposals, inferred relationships awaiting confirmation, contradictions,
     outstanding questions, suggested focus areas, learning velocity.
@@ -778,7 +778,7 @@ def attach_style(file: str, guide: str, manuscript: str | None = None) -> dict:
 
 
 @mcp.tool()
-def add_style_element(aspect: str, statement: str, guide: str | None = None,
+def add_style_law(aspect: str, statement: str, guide: str | None = None,
                       file: str | None = None, notes: str | None = None,
                       overrides: str | None = None,
                       manuscript: str | None = None) -> dict:
@@ -789,19 +789,19 @@ def add_style_element(aspect: str, statement: str, guide: str | None = None,
     of an inherited element this one displaces."""
     def run():
         db = _db()
-        return api.add_style_element(
+        return api.add_style_law(
             db, _manuscript(db, manuscript), aspect, statement,
             guide_name=guide, file=file, notes=notes, overrides=overrides)
     return _guard(run)
 
 
 @mcp.tool()
-def retire_style_element(element_id: str, manuscript: str | None = None) -> dict:
+def retire_style_law(element_id: str, manuscript: str | None = None) -> dict:
     """Retire a style element by id (prefix) — it leaves every composition
     but stays historically accessible."""
     def run():
         db = _db()
-        return api.retire_style_element(db, _manuscript(db, manuscript),
+        return api.retire_style_law(db, _manuscript(db, manuscript),
                                         element_id)
     return _guard(run)
 
@@ -881,13 +881,58 @@ def reject_edge(edge_id: str, manuscript: str | None = None) -> dict:
 
 
 @mcp.tool()
-def list_proposals(manuscript: str | None = None) -> dict:
+def list_proposals(kind: str | None = None, proposal_id: str | None = None,
+                   belief: str | None = None, limit: int | None = 40,
+                   verbose: bool = False,
+                   manuscript: str | None = None) -> dict:
     """Open proposals against settled knowledge: reframed definitions,
     retired concepts recurring, rejected relationships argued again,
-    near-duplicate names of retired concepts. Surface these to the author."""
+    near-duplicate names of retired concepts.
+
+    Compact by default (id + kind + summary), newest filters first:
+    `kind` narrows to one proposal kind, `proposal_id` (an id prefix)
+    inspects one in full, `limit` caps the list. `folded` in the reply
+    summarises, one line per belief, what the screen cut before the author
+    saw it — expand a fold with `belief=<id>` to see those proposals, and
+    adopting one there is what tells the system the belief is wrong.
+    `verbose=True` returns full payloads (large — narrow it first)."""
     def run():
         db = _db()
-        return api.list_proposals(db, _manuscript(db, manuscript))
+        return api.list_proposals(db, _manuscript(db, manuscript), kind=kind,
+                                  proposal_id=proposal_id, belief=belief,
+                                  limit=limit, verbose=verbose)
+    return _guard(run)
+
+
+@mcp.tool()
+def reconcile_proposals(dry_run: bool = False,
+                        manuscript: str | None = None) -> dict:
+    """Settle proposals the world has already answered and re-base the ones
+    it moved under — deterministic, no LLM, no judgment. `satisfied`: what
+    it asks for has already happened (the note already says exactly this;
+    the concept is already retired). `orphan`: what it refers to is gone.
+    `stale`: its stated 'current' text is out of date — these are RE-BASED,
+    never dismissed, because a stale proposal can be a regression that only
+    reads as an improvement against the old base it carries. Run before
+    screening or triaging; `dry_run=True` reports without changing anything."""
+    def run():
+        db = _db()
+        return api.reconcile_proposals(db, _manuscript(db, manuscript),
+                                       apply=not dry_run)
+    return _guard(run)
+
+
+@mcp.tool()
+def screen_proposals(manuscript: str | None = None) -> dict:
+    """Run the learned screen over the open proposal queues: proposals that
+    plainly violate the author's active law (validated beliefs + ratified
+    rules for that aspect) are cut before the author sees them, each
+    attributed to the law that cut it. Inert until beliefs have been earned.
+    Cuts are recoverable — `list_proposals` reports them folded by belief,
+    and adopting one is what tells the system a belief is wrong."""
+    def run():
+        db = _db()
+        return api.screen_proposals(db, _manuscript(db, manuscript), _llm())
     return _guard(run)
 
 
@@ -901,7 +946,7 @@ def resolve_proposal(proposal_id: str, action: str, reason: str | None = None,
     def run():
         db = _db()
         return api.resolve_proposal(db, _manuscript(db, manuscript),
-                                    proposal_id, action, reason)
+                                    proposal_id, action, reason, llm=_llm())
     return _guard(run)
 
 
@@ -950,20 +995,20 @@ def diff_versions(older: int | None = None, newer: int | None = None,
 
 
 @mcp.tool()
-def list_policies(manuscript: str | None = None, status: str | None = None,
+def list_beliefs(manuscript: str | None = None, status: str | None = None,
                   verbose: bool = False) -> dict:
-    """Learned editorial policies. Compact by default (statement, status,
+    """Learned editorial beliefs. Compact by default (statement, status,
     confidence, support counts); status='validated' (or 'candidate',
     'retired') filters; verbose=True returns full rows including
     outstanding questions and provenance."""
     def run():
         db = _db()
-        rows = api.list_policies(db, _manuscript(db, manuscript))
+        rows = api.list_beliefs(db, _manuscript(db, manuscript))
         if status:
             rows = [p for p in rows if p.get("status") == status]
         if verbose:
-            return {"policies": rows}
-        return {"policy_count": len(rows), "policies": [
+            return {"beliefs": rows}
+        return {"belief_count": len(rows), "beliefs": [
             {"id": p["id"], "statement": p["statement"],
              "status": p["status"], "confidence": p["confidence"],
              "supporting": p["supporting"],
@@ -973,47 +1018,47 @@ def list_policies(manuscript: str | None = None, status: str | None = None,
 
 
 @mcp.tool()
-def retire_policy(prefix: str, reason: str, manuscript: str | None = None) -> dict:
-    """Retire an editorial policy the author rejects (author-initiated
+def retire_belief(prefix: str, reason: str, manuscript: str | None = None) -> dict:
+    """Retire an editorial belief the author rejects (author-initiated
     curation). Kept for history; the statement is banned from re-seeding —
     fresh supporting evidence files a revival proposal instead. Record the
     author's reason verbatim."""
     def run():
         db = _db()
-        return api.retire_policy(db, _manuscript(db, manuscript), prefix, reason)
+        return api.retire_belief(db, _manuscript(db, manuscript), prefix, reason)
     return _guard(run)
 
 
 @mcp.tool()
-def merge_policies(duplicate: str, canonical: str,
+def merge_beliefs(duplicate: str, canonical: str,
                    reason: str | None = None,
                    manuscript: str | None = None) -> dict:
-    """Fold a duplicate policy's belief record (support counts, questions)
-    into the canonical policy and retire the duplicate. Use when two
-    learned policies state the same rule in different words."""
+    """Fold a duplicate belief's evidence record (support counts, questions)
+    into the canonical belief and retire the duplicate. Use when two
+    learned beliefs state the same rule in different words."""
     def run():
         db = _db()
-        return api.merge_policies(db, _manuscript(db, manuscript),
+        return api.merge_beliefs(db, _manuscript(db, manuscript),
                                   duplicate, canonical, reason)
     return _guard(run)
 
 
 @mcp.tool()
-def convert_policy_to_style(prefix: str, aspect: str,
+def convert_belief_to_law(prefix: str, aspect: str,
                             statement: str | None = None,
                             guide: str | None = None,
                             file: str | None = None,
                             notes: str | None = None,
                             reason: str | None = None,
                             manuscript: str | None = None) -> dict:
-    """Convert a learned policy into a ratified style element: creates the
+    """Convert a learned belief into a ratified style element: creates the
     element (in `guide`, or file-local via `file`; statement defaults to
-    the policy's) and retires the policy with a recorded linkage. Use when
-    a policy is really a timeless how-prose-reads rule, not a revision
+    the belief's) and retires the belief with a recorded linkage. Use when
+    a belief is really a timeless how-prose-reads rule, not a revision
     decision."""
     def run():
         db = _db()
-        return api.convert_policy(db, _manuscript(db, manuscript), prefix,
+        return api.convert_belief(db, _manuscript(db, manuscript), prefix,
                                   aspect, statement=statement, guide=guide,
                                   file=file, notes=notes, reason=reason)
     return _guard(run)

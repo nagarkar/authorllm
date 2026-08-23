@@ -93,7 +93,7 @@ def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
         evidence_type="concept_triage",
         signal=signal,
         target=target,
-        supports_policy=None,
+        supports_belief=None,
         weight="high",  # a deliberate author decision is declared evidence
     )
     db.insert("evidence", row)
@@ -151,8 +151,15 @@ def triage_feedback(db: Database, manuscript_id: str) -> str:
         )
     ]
 
-    if not (rejected or retypes or confirmed or rejected_edges or relation_corrections):
-        return ""
+    from . import loop
+
+    learned = "".join(
+        loop.generator_feedback(db, manuscript_id, spec)
+        for spec in loop.REGISTRY.values()
+        if spec.table == "knowledge_proposals")
+    if not (rejected or retypes or confirmed or rejected_edges
+            or relation_corrections):
+        return learned
     sections = ["\n\nAuthor feedback from previous extractions (authoritative):"]
     if rejected:
         sections.append(
@@ -181,7 +188,12 @@ def triage_feedback(db: Database, manuscript_id: str) -> str:
             "follow these precedents when choosing relations: "
             + "; ".join(relation_corrections)
         )
-    return "\n".join(sections)
+    # The lists above are fixed recency windows (LIMIT 40/20/30/20/15) and
+    # silently forget: 538 author decisions on record, 75 reaching the
+    # model. `learned` is the compacted, non-forgetting half — a handful of
+    # beliefs distilled from the same verdicts, which is why it is appended
+    # rather than competing for room inside those caps.
+    return "\n".join(sections) + learned
 
 
 def _manuscript_text(

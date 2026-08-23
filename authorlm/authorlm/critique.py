@@ -98,7 +98,7 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
     """
     src = manifest["source"]
     source_id = db.source("critic", src["name"], src.get("detail"))
-    imported = {"intents": 0, "style_elements": 0, "skipped": 0}
+    imported = {"intents": 0, "style_laws": 0, "skipped": 0}
     errors: list[str] = []
     for item in manifest["items"]:
         unit, ordinal = item["unit"], item["ordinal"]
@@ -114,7 +114,7 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
             db.update("declared_intents", row["id"], {"metadata": meta})
             imported["intents"] += 1
         elif item["kind"] == "style_element":
-            if _existing(db, manuscript_id, "style_elements", source_id,
+            if _existing(db, manuscript_id, "style_laws", source_id,
                          unit, ordinal):
                 imported["skipped"] += 1
                 continue
@@ -132,8 +132,8 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
                 db, manuscript_id, item["aspect"], item["text"],
                 guide=guide, file=item.get("file"), notes=item.get("notes"),
                 status="proposed", source_id=source_id)
-            db.update("style_elements", row["id"], {"metadata": meta})
-            imported["style_elements"] += 1
+            db.update("style_laws", row["id"], {"metadata": meta})
+            imported["style_laws"] += 1
         else:
             errors.append(f"unknown kind '{item['kind']}' ({unit} #{ordinal})")
     return {**imported, "source_id": source_id, "errors": errors}
@@ -174,7 +174,7 @@ def pending(db: Database, manuscript_id: str,
         "SELECT * FROM declared_intents WHERE manuscript_id = ? "
         f"AND status = 'proposed'{scope_sql} ORDER BY created_at, id", tuple(args))
     elements = db.all(
-        "SELECT * FROM style_elements WHERE manuscript_id = ? "
+        "SELECT * FROM style_laws WHERE manuscript_id = ? "
         "AND status = 'proposed' ORDER BY created_at, id", (manuscript_id,))
     return {"intents": [dict(r) for r in intents],
             "elements": [dict(r) for r in elements]}
@@ -196,7 +196,7 @@ def _triage_evidence(db: Database, manuscript_id: str, signal: str,
     ev = ko_fields("ev")
     ev.update(manuscript_id=manuscript_id, episode_id=None,
               evidence_type="critique_triage", signal=signal,
-              target=target[:200], supports_policy=None, weight="high")
+              target=target[:200], supports_belief=None, weight="high")
     db.insert("evidence", ev)
 
 
@@ -241,7 +241,7 @@ def revise_intent(db: Database, manuscript_id: str, intent: dict,
 
 def revise_element(db: Database, manuscript_id: str, element: dict,
                    new_text: str) -> None:
-    db.update("style_elements", element["id"], {
+    db.update("style_laws", element["id"], {
         "status": "active", "statement": new_text,
         "source_id": db.source("author"), "metadata": _lineage(element)})
     _triage_evidence(db, manuscript_id, "modified",
@@ -249,7 +249,7 @@ def revise_element(db: Database, manuscript_id: str, element: dict,
 
 
 def accept_element(db: Database, manuscript_id: str, element: dict) -> None:
-    db.update("style_elements", element["id"], {"status": "active"})
+    db.update("style_laws", element["id"], {"status": "active"})
     _triage_evidence(db, manuscript_id, "accepted", element["statement"])
 
 
@@ -257,7 +257,7 @@ def reject_element(db: Database, manuscript_id: str, element: dict,
                    reason: str) -> None:
     meta = loads(element["metadata"], {})
     meta["rejection_reason"] = reason
-    db.update("style_elements", element["id"],
+    db.update("style_laws", element["id"],
               {"status": "rejected", "metadata": json.dumps(meta)})
     _triage_evidence(db, manuscript_id, "rejected",
                      f"{element['statement']} — {reason}")
@@ -279,7 +279,7 @@ def status(db: Database, manuscript_id: str) -> list[dict]:
             """SELECT SUM(CASE WHEN status = 'proposed' THEN 1 ELSE 0 END) AS proposed,
                       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS accepted,
                       SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
-               FROM style_elements WHERE manuscript_id = ? AND source_id = ?""",
+               FROM style_laws WHERE manuscript_id = ? AND source_id = ?""",
             (manuscript_id, r["source_id"]))
         result.append({
             "source_id": r["source_id"], "name": r["name"],

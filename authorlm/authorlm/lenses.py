@@ -14,7 +14,7 @@ Two ways findings arrive, one store, one review loop:
   produces the findings and submits them here.
 Both paths pass the same hygiene gate (verbatim quote in the file) and
 store findings as guidance_history rows (kind='lens', own batch), so
-verdicts flow through record_review — evidence and policy learning
+verdicts flow through record_review — evidence and belief learning
 unchanged. Review: `authorlm lens review <n> --accept|--reject|--modify`.
 """
 

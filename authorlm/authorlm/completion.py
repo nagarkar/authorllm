@@ -25,7 +25,7 @@ def _sub_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
 # with (served by the hidden `authorlm _ids <kind>` helper).
 DYNAMIC_POSITIONALS: dict[str, dict[str, str]] = {
     "intent": {"complete": "intents", "abandon": "intents", "retire": "intents"},
-    "policy": {"answer": "policies"},
+    "belief": {"answer": "beliefs"},
     "concept": {"retire": "concepts", "edit": "concepts", "show": "concepts",
                 "confirm": "confirmables", "unconfirm": "edges",
                 "reject-edge": "edges"},

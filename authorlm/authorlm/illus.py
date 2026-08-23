@@ -387,7 +387,7 @@ def illustration_law(db, manuscript_id: str, file: str) -> str:
     """The effective illustration-aspect style law for a file, as the
     exact text prepended to every render prompt. The stylehash hashes
     THIS — 'hash what the model sees' — so a reworded ratified rule
-    changes it and a candidate policy cannot. Only the 'illustration'
+    changes it and a candidate belief cannot. Only the 'illustration'
     aspect: 'figure' is figurative-language PROSE law and must never
     reach an image prompt (it-3e79bce24f73)."""
     from .styles import effective_style
