@@ -891,7 +891,13 @@ def main_test() -> None:
               and report["pulled"] == []
               and any(e["file"] == "01-choice.md" for e in report["errors"]),
               str(report))
+        # Restore the Doc/local body later margin-thread checks expect —
+        # the missing-tab push left "Safe prose…" which cannot attribute
+        # a quote of "Doc went another way".
         essay_tab["title"] = "01-choice.md"
+        restored = "# Title\n\nDoc went another way.\n"
+        stub.set_tab("01-choice.md", restored)
+        (ms / "01-choice.md").write_text(restored)
 
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
