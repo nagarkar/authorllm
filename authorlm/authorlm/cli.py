@@ -616,6 +616,8 @@ def cmd_intent(args):
             print("note: no active session — the intent is recorded but no episode was opened.")
     elif args.action == "complete":
         intent = _find_by_prefix(db, "declared_intents", args.id, manuscript["id"])
+        if intent["status"] != "active":
+            sys.exit(f"error: intent is already {intent['status']}.")
         ses.complete_intent(db, intent, args.outcome)
         print(f"Intent completed: {intent['statement']}")
         if args.outcome:
@@ -881,7 +883,7 @@ def _render_edit(n: int, t: dict, total: int) -> None:
     state = {"proposed": ui.dim, "accepted": ui.green,
              "rejected": ui.yellow}.get(t["state"], str)(t["state"])
     where = (f"after ¶{anchor}" if kind == "insert" else f"¶{anchor}")
-    print(f"{ui.cyan(f'{n}.')} {ui.dim(f'[{t['id'][:8]}]')} {ui.bold(where)} "
+    print(f"{ui.cyan(f'{n}.')} {ui.dim('[' + t['id'][:8] + ']')} {ui.bold(where)} "
           f"{ui.dim(kind)}  {state}"
           + (ui.dim(f"  → {meta['intent_id'][:11]}") if meta.get("intent_id")
              else ""))
@@ -1074,7 +1076,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
-    final, forms = passes.final_text_from_marked(marked)
+    final, forms = passes.final_text_from_marked(marked, written=written)
     # Apply locally: the author's post-edits win.
     path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)

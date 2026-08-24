@@ -265,6 +265,8 @@ def _find_intent(db: Database, manuscript: dict, prefix: str) -> dict:
 def complete_intent(db: Database, manuscript: dict, prefix: str,
                     outcome: str | None, llm: LLMClient | None = None) -> dict:
     intent = _find_intent(db, manuscript, prefix)
+    if intent["status"] != "active":
+        raise ValueError(f"intent is already {intent['status']}")
     ses.complete_intent(db, intent, outcome)
     analysis = analyze_pending(db, manuscript, llm) if llm and llm.enabled else []
     return {"intent": intent, "analysis": analysis}
@@ -992,15 +994,14 @@ def list_concepts(db: Database, manuscript: dict, include_all: bool = False) -> 
     nodes = [dict(n) for n in db.all(
         f"SELECT * FROM concept_nodes WHERE manuscript_id = ?{node_filter}", (mid,)
     )]
-    edge_filter = "" if include_all else " AND status NOT IN ('rejected', 'retired')"
-    edges = [
-        {**dict(e),
-         "from_name": cg.node_name(db, e["from_node"]),
-         "to_name": cg.node_name(db, e["to_node"])}
-        for e in db.all(
-            f"SELECT * FROM concept_edges WHERE manuscript_id = ?{edge_filter}", (mid,)
-        )
-    ]
+    edge_filter = "" if include_all else " AND ce.status NOT IN ('rejected', 'retired')"
+    edges = [dict(e) for e in db.all(
+        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
+        "FROM concept_edges ce "
+        "JOIN concept_nodes fn ON fn.id = ce.from_node "
+        "JOIN concept_nodes tn ON tn.id = ce.to_node "
+        f"WHERE ce.manuscript_id = ?{edge_filter}", (mid,)
+    )]
     return {"nodes": nodes, "edges": edges}
 
 
@@ -1008,17 +1009,16 @@ def show_concept(db: Database, manuscript: dict, name: str) -> dict:
     node = cg.get_concept(db, manuscript["id"], name)
     if not node:
         raise LookupError(f"no concept named '{name}'")
-    edges = [
-        {**dict(e),
-         "from_name": cg.node_name(db, e["from_node"]),
-         "to_name": cg.node_name(db, e["to_node"])}
-        for e in db.all(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? "
-            "AND status NOT IN ('rejected', 'retired') "
-            "AND (from_node = ? OR to_node = ?)",
-            (manuscript["id"], node["id"], node["id"]),
-        )
-    ]
+    edges = [dict(e) for e in db.all(
+        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
+        "FROM concept_edges ce "
+        "JOIN concept_nodes fn ON fn.id = ce.from_node "
+        "JOIN concept_nodes tn ON tn.id = ce.to_node "
+        "WHERE ce.manuscript_id = ? "
+        "AND ce.status NOT IN ('rejected', 'retired') "
+        "AND (ce.from_node = ? OR ce.to_node = ?)",
+        (manuscript["id"], node["id"], node["id"]),
+    )]
     return {"node": dict(node), "edges": edges}
 
 
@@ -1046,9 +1046,13 @@ def style_overview(db: Database, manuscript: dict) -> dict:
     guides = [dict(g) for g in db.all(
         "SELECT * FROM style_guides WHERE manuscript_id = ? ORDER BY created_at", (mid,))]
     names = {g["id"]: g["name"] for g in guides}
-    counts = {g["id"]: db.one(
-        "SELECT COUNT(*) AS n FROM style_laws WHERE guide_id = ? AND status = 'active'",
-        (g["id"],))["n"] for g in guides}
+    counts = {g["id"]: 0 for g in guides}
+    counts.update({row["guide_id"]: row["n"] for row in db.all(
+        "SELECT guide_id, COUNT(*) AS n FROM style_laws "
+        "WHERE manuscript_id = ? AND status = 'active' AND guide_id IS NOT NULL "
+        "GROUP BY guide_id",
+        (mid,),
+    )})
     attachments = [dict(a) for a in db.all(
         "SELECT * FROM style_attachments WHERE manuscript_id = ?", (mid,))]
     return {
@@ -1101,6 +1105,23 @@ def attach_style(db: Database, manuscript: dict, file: str, guide_name: str) -> 
     return {"file": file, "guide": guide["name"]}
 
 
+def _find_style_law(db: Database, manuscript: dict, prefix: str,
+                        status_clause: str, label: str) -> dict:
+    """Prefix lookup with the same ambiguity guard as _find_intent/_find_edge/
+    _policy_by_prefix: a prefix matching more than one row must never let
+    the caller silently act on whichever row SQLite returns first."""
+    rows = db.all(
+        f"SELECT * FROM style_laws WHERE manuscript_id = ? AND id LIKE ? "
+        f"AND {status_clause}",
+        (manuscript["id"], f"%{prefix}%"),
+    )
+    if not rows:
+        raise LookupError(f"no {label} style element matching '{prefix}'")
+    if len(rows) > 1:
+        raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} style laws)")
+    return dict(rows[0])
+
+
 def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
                       guide_name: str | None = None, file: str | None = None,
                       notes: str | None = None,
@@ -1116,14 +1137,8 @@ def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
         _validate_file(db, manuscript, file)
     resolved = None
     if overrides:
-        row = db.one(
-            "SELECT * FROM style_laws WHERE manuscript_id = ? AND id LIKE ? "
-            "AND status = 'active'",
-            (manuscript["id"], f"%{overrides}%"),
-        )
-        if not row:
-            raise LookupError(f"no active style element matching '{overrides}'")
-        resolved = row["id"]
+        resolved = _find_style_law(
+            db, manuscript, overrides, "status = 'active'", "active")["id"]
     return dict(st.add_element(
         db, manuscript["id"], aspect, statement,
         guide=dict(guide) if guide else None, file=file, notes=notes,
@@ -1134,14 +1149,8 @@ def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
 def retire_style_law(db: Database, manuscript: dict, prefix: str) -> dict:
     from . import styles as st
 
-    row = db.one(
-        "SELECT * FROM style_laws WHERE manuscript_id = ? AND id LIKE ? "
-        "AND status = 'active'",
-        (manuscript["id"], f"%{prefix}%"),
-    )
-    if not row:
-        raise LookupError(f"no active style element matching '{prefix}'")
-    st.retire_element(db, dict(row))
+    row = _find_style_law(db, manuscript, prefix, "status = 'active'", "active")
+    st.retire_element(db, row)
     return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
@@ -1152,11 +1161,7 @@ def move_style_law(db: Database, manuscript: dict, prefix: str,
     one). The element keeps its id, status, provenance, and history."""
     if bool(guide_name) == bool(file):
         raise ValueError("move needs exactly one of guide_name / file")
-    row = db.one(
-        "SELECT * FROM style_laws WHERE manuscript_id = ? AND id LIKE ? "
-        "AND status != 'retired'", (manuscript["id"], f"%{prefix}%"))
-    if not row:
-        raise LookupError(f"no live style element matching '{prefix}'")
+    row = _find_style_law(db, manuscript, prefix, "status != 'retired'", "live")
     if guide_name:
         guide = db.one("SELECT * FROM style_guides WHERE manuscript_id = ? "
                        "AND name = ?", (manuscript["id"], guide_name))

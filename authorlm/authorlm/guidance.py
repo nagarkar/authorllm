@@ -292,16 +292,19 @@ def generate_guidance(
             "belief_ids": [],
         })
 
-    # 3. Unanswered objections.
+    # 3. Unanswered objections. One query for every 'answers' edge in the
+    # manuscript, not one per objection node.
+    answered_nodes = {
+        row["to_node"] for row in db.all(
+            "SELECT to_node FROM concept_edges WHERE manuscript_id = ? "
+            "AND relation = 'answers' AND status NOT IN ('rejected', 'retired')",
+            (mid,),
+        )
+    }
     for node in nodes.values():
         if node["kind"] != "objection":
             continue
-        answered = db.one(
-            "SELECT id FROM concept_edges WHERE manuscript_id = ? AND to_node = ? "
-            "AND relation = 'answers' AND status NOT IN ('rejected', 'retired')",
-            (mid, node["id"]),
-        )
-        if not answered:
+        if node["id"] not in answered_nodes:
             candidates.append({
                 "kind": "objection",
                 "key": f"objection:{node['id']}",
@@ -317,20 +320,20 @@ def generate_guidance(
 
     # Never re-propose something the author already ruled on. Matching is by
     # stable dedupe key (kind + target), not by suggestion text, which changes
-    # as beliefs strengthen. Rejected/accepted/modified suppress forever;
-    # deferred suppresses within this session only. This runs BEFORE belief
-    # reminders so a suppressed suggestion doesn't consume its belief slot.
-    def already_reviewed(key: str) -> bool:
-        row = db.one(
-            "SELECT id FROM guidance_history WHERE manuscript_id = ? "
-            "AND metadata LIKE ? "
+    # as policies strengthen. Rejected/accepted/modified suppress forever;
+    # deferred suppresses within this session only. This runs BEFORE policy
+    # reminders so a suppressed suggestion doesn't consume its policy slot.
+    # One query for every past ruling, not one LIKE scan per candidate.
+    reviewed_keys = {
+        loads(row["metadata"], {}).get("dedupe_key")
+        for row in db.all(
+            "SELECT metadata FROM guidance_history WHERE manuscript_id = ? "
             "AND (state IN ('accepted','rejected','modified') "
             "     OR (state = 'deferred' AND session_id = ?))",
-            (mid, f'%"dedupe_key": "{key}"%', session["id"]),
+            (mid, session["id"]),
         )
-        return row is not None
-
-    candidates = [c for c in candidates if not already_reviewed(c["key"])]
+    }
+    candidates = [c for c in candidates if c["key"] not in reviewed_keys]
 
     # 4. Reminders for learned beliefs (validated first, then candidates —
     #    reviewing a candidate reminder is what promotes or retires it).

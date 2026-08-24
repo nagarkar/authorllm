@@ -276,12 +276,72 @@ def main_test() -> None:
               loads(latest["files"], {})["safety.md"] == big_text
               and "tiny.md" not in loads(latest["files"], {}))
 
+        try:
+            api.diff_versions(md_db, md_manuscript, older=1, newer=99)
+            check("diff_versions rejects an unknown version number", False)
+        except LookupError as err:
+            check("diff_versions rejects an unknown version number",
+                  "v99" in str(err))
+
+        forward = api.diff_versions(md_db, md_manuscript, older=1, newer=3)
+        backward = api.diff_versions(md_db, md_manuscript, older=3, newer=1)
+        check("diff_versions normalizes reversed (newer, older) arguments",
+              backward["old"] == forward["old"] == "v1"
+              and backward["new"] == forward["new"] == "v3"
+              and backward["files"] == forward["files"])
+
         declared = api.declare_intent(db, manuscript, "Expand on gravity")
         check("declare_intent returns intent + preview",
               declared["intent"]["statement"] == "Expand on gravity"
               and declared["preview"]["matched"][0]["name"] == "Gravity")
         typo = api.intent_preview(db, manuscript, "Discuss gravety maybe")
         check("preview fuzzy-suggests on typos", "Gravity" in typo["suggestions"])
+
+        # --- intent complete/abandon: active-state + lookup errors ---
+        life = api.declare_intent(db, manuscript, "Lifecycle probe intent")
+        life_id = life["intent"]["id"]
+        finished = api.complete_intent(db, manuscript, life_id[:8], "wrapped up")
+        check("complete_intent marks an active intent completed with outcome",
+              finished["intent"]["id"] == life_id
+              and db.one("SELECT status, outcome FROM declared_intents WHERE id = ?",
+                         (life_id,))["status"] == "completed"
+              and db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                         (life_id,))["outcome"] == "wrapped up")
+        try:
+            api.complete_intent(db, manuscript, life_id[:8], "again")
+            check("complete_intent rejects an already-completed intent", False)
+        except ValueError as err:
+            check("complete_intent rejects an already-completed intent",
+                  "already completed" in str(err))
+        check("rejected re-complete leaves the original outcome intact",
+              db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                     (life_id,))["outcome"] == "wrapped up")
+
+        drop = api.declare_intent(db, manuscript, "Abandon-then-complete probe")
+        drop_id = drop["intent"]["id"]
+        api.abandon_intent(db, manuscript, drop_id[:8], "changed mind")
+        try:
+            api.complete_intent(db, manuscript, drop_id[:8], "should fail")
+            check("complete_intent rejects an abandoned intent", False)
+        except ValueError as err:
+            check("complete_intent rejects an abandoned intent",
+                  "already abandoned" in str(err))
+        check("rejected complete-after-abandon preserves abandonment reason",
+              db.one("SELECT status, outcome FROM declared_intents WHERE id = ?",
+                     (drop_id,))["status"] == "abandoned"
+              and db.one("SELECT outcome FROM declared_intents WHERE id = ?",
+                         (drop_id,))["outcome"] == "changed mind")
+        try:
+            api.abandon_intent(db, manuscript, drop_id[:8], "again")
+            check("abandon_intent rejects a non-active intent", False)
+        except ValueError as err:
+            check("abandon_intent rejects a non-active intent",
+                  "already abandoned" in str(err))
+        try:
+            api.complete_intent(db, manuscript, "zzzzzzzz", None)
+            check("complete_intent rejects an unknown prefix", False)
+        except LookupError:
+            check("complete_intent rejects an unknown prefix", True)
 
         guidance = api.guide(db, manuscript, session)
         check("guide returns structured suggestions",
@@ -421,6 +481,30 @@ def main_test() -> None:
         check("dismissed proposal no longer appears in list_proposals",
               not any(p["id"] == open_proposal["id"]
                       for p in api.list_proposals(db, manuscript)["open"]))
+
+        # --- briefing: focus areas and TOC completeness (§21.6, §20.3) ---
+        api.link_concepts(db, manuscript, "Choice", "motivates", "Freedom")
+        (ms / "02-extra.md").write_text("# Extra\n\nSome unrelated prose.\n")
+        # toc.toml, not toc.md: the TOC became structural TOML after this
+        # test was written, and a stray toc.md is simply not a TOC — the
+        # assertion below then reads an empty unlisted set and passes
+        # vacuously in the wrong direction.
+        (ms / "toc.toml").write_text('[[chapter]]\nfile = "01-choice.md"\n')
+        api.collect(db, manuscript, {})
+        briefing2 = api.get_briefing(db, manuscript)
+        check("briefing surfaces an unrealized concept's dependents as a focus area",
+              any(area["node"]["name"] == "Freedom"
+                  and any(r["name"] == "Choice" for r in area["related"])
+                  for area in briefing2["focus_areas"]),
+              briefing2["focus_areas"])
+        check("briefing flags a manuscript file missing from toc.toml",
+              briefing2["toc_unlisted"] == ["02-extra.md"], briefing2["toc_unlisted"])
+        # Restore the fixture: this block borrows the shared manuscript, and
+        # the Doc tests below assert exact tab sets and tab ORDER, so an
+        # extra content file left behind cascades into unrelated failures.
+        (ms / "02-extra.md").unlink()
+        (ms / "toc.toml").unlink()
+        api.collect(db, manuscript, {})
 
         closed = api.close_session(db, manuscript)
         check("close_session ends the active session",
@@ -619,6 +703,38 @@ def main_test() -> None:
                   f"choice-as-a-forking-{h}-0000-03.png"])
               and (ms / "_illustrations" / r3["written"][0]).exists(),
               str(removed))
+
+        # --- capture_embeds/reembed: the pick survives a Doc round trip ---
+        embed_root = root / "illus-embed-scratch"
+        (embed_root / "_illustrations").mkdir(parents=True)
+        (embed_root / "ch.md").write_text(
+            "# C\n\n[Illustration: a lone tracker]\n")
+        eh = illus_mod.desc_hash("a lone tracker")
+        cand1 = f"a-lone-tracker-{eh}-0000-01.png"
+        cand2 = f"a-lone-tracker-{eh}-0000-02.png"
+        (embed_root / "_illustrations" / cand1).write_bytes(b"")
+        (embed_root / "_illustrations" / cand2).write_bytes(b"")
+        bare = (embed_root / "ch.md").read_text()
+
+        never_picked = illus_mod.reembed(bare, embed_root)
+        check("a never-picked slot falls back to the newest candidate",
+              illus_mod.embed_target(never_picked, eh) == cand2, never_picked)
+
+        pick = {eh: cand1}
+        embedded = illus_mod.reembed(bare, embed_root, prior=pick)
+        check("a prior pick wins over the newest candidate",
+              illus_mod.embed_target(embedded, eh) == cand1, embedded)
+        check("capture_embeds recovers the exact picked candidate",
+              illus_mod.capture_embeds(embedded) == pick,
+              illus_mod.capture_embeds(embedded))
+        check("reembed on already-embedded text never doubles the line",
+              illus_mod.reembed(embedded, embed_root, prior=pick) == embedded,
+              illus_mod.reembed(embedded, embed_root, prior=pick))
+
+        (embed_root / "_illustrations" / cand1).unlink()
+        fallback = illus_mod.reembed(bare, embed_root, prior=pick)
+        check("a pick whose file is gone falls back to the newest candidate",
+              illus_mod.embed_target(fallback, eh) == cand2, fallback)
 
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
@@ -884,6 +1000,81 @@ def main_test() -> None:
               and stub.state["folders"] == ["doc-1"]
               and list(stub.state["docs"]) == ["doc-2"])
 
+        # --- sync_tab_structure: push-direction TOC↔tab orchestration ---
+        from authorlm.gdocs import _mapping, _save_mapping, sync_tab_structure
+
+        manuscript = api.get_manuscript(db)
+        no_toc = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure skips when toc.toml is absent",
+              no_toc == {"skipped": "no toc.toml"}, str(no_toc))
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n')
+        synced = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure records insync when TOC matches Doc tabs",
+              synced == {"insync": True}, str(synced))
+        meta = _mapping(db, manuscript)
+        check("insync sync persists _tab_structure as the agreed base",
+              meta["gdocs"].get("_tab_structure")
+              == [["01-choice.md", None]],
+              str(meta["gdocs"].get("_tab_structure")))
+
+        (ms / "02-fork.md").write_text("# Fork\n\nAnother essay.\n")
+        push_doc(db, manuscript, "02-fork.md",
+                 service=stub, docs_service=stub)
+        manuscript = api.get_manuscript(db)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "02-fork.md"\n')
+        base_sync = sync_tab_structure(db, manuscript, stub)
+        check("sync after adding a linked chapter lands insync (or moves)",
+              base_sync.get("insync") is True
+              or isinstance(base_sync.get("moved"), int),
+              str(base_sync))
+        # Force a conflict: Doc order and TOC both diverge from the base.
+        meta = _mapping(db, manuscript)
+        meta["gdocs"]["_tab_structure"] = [
+            ["01-choice.md", None], ["02-fork.md", None]]
+        _save_mapping(db, manuscript, meta)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "02-fork.md"\n\n'
+            '[[chapter]]\nfile = "01-choice.md"\n')
+        tabs = stub.state["docs"]["doc-2"]
+        # Put 02-fork before 01-choice among root-level md tabs by
+        # rebuilding flat order while leaving container/manifest alone.
+        md_tabs = [t for t in tabs if t["title"].endswith(".md")]
+        others = [t for t in tabs if not t["title"].endswith(".md")]
+        # Doc side: 02 then 01 (matches neither base nor the swapped TOC
+        # wait — TOC is also 02 then 01. Use a third ordering via parent
+        # so Doc ≠ TOC ≠ base.
+        by_title = {t["title"]: t for t in md_tabs}
+        by_title["02-fork.md"]["parent"] = by_title["01-choice.md"]["id"]
+        stub.state["docs"]["doc-2"] = others + [
+            by_title["01-choice.md"], by_title["02-fork.md"]]
+        conflicted = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure refuses when Doc and TOC both moved",
+              conflicted.get("skipped", "").startswith(
+                  "Doc tab order also changed"),
+              str(conflicted))
+
+        # No master: skip before any Docs call.
+        meta = _mapping(db, manuscript)
+        master = meta["gdocs"].pop("_master_id")
+        _save_mapping(db, manuscript, meta)
+        no_master = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure skips when there is no master Doc",
+              no_master == {"skipped": "no master doc"}, str(no_master))
+        meta["gdocs"]["_master_id"] = master
+        # Drop the second chapter so later single-file reconcile/export
+        # assertions stay focused on 01-choice.md.
+        meta["gdocs"].pop("02-fork.md", None)
+        meta["gdocs"]["_tab_structure"] = [["01-choice.md", None]]
+        _save_mapping(db, manuscript, meta)
+        stub.state["docs"]["doc-2"] = [
+            t for t in stub.state["docs"]["doc-2"]
+            if t["title"] != "02-fork.md"]
+        (ms / "02-fork.md").unlink(missing_ok=True)
+        (ms / "toc.toml").unlink(missing_ok=True)
+
         # Two-sided edit: local changed since push AND the tab differs
         # from what was pushed → conflict, skipped unless forced.
         (ms / "01-choice.md").write_text("# Title\n\nLocal divergence.\n")
@@ -971,6 +1162,29 @@ def main_test() -> None:
               and "Both sides now differ" in (ms / "01-choice.md").read_text(),
               str(report))
 
+        # Missing tab ≠ empty Doc: a renamed/deleted export section must
+        # never auto-pull "" over a local file that still matches the base.
+        safe = "# Title\n\nSafe prose that must survive a missing tab.\n"
+        (ms / "01-choice.md").write_text(safe)
+        push_doc(db, manuscript, "01-choice.md",
+                 service=stub, docs_service=stub)
+        essay_tab = next(t for t in stub.state["docs"]["doc-2"]
+                         if t["title"] == "01-choice.md")
+        essay_tab["title"] = "01-choice.md.ORPHAN"
+        report = reconcile(db, manuscript, stub)
+        check("reconcile: missing Doc tab never wipes local",
+              (ms / "01-choice.md").read_text() == safe
+              and report["pulled"] == []
+              and any(e["file"] == "01-choice.md" for e in report["errors"]),
+              str(report))
+        # Restore the Doc/local body later margin-thread checks expect —
+        # the missing-tab push left "Safe prose…" which cannot attribute
+        # a quote of "Doc went another way".
+        essay_tab["title"] = "01-choice.md"
+        restored = "# Title\n\nDoc went another way.\n"
+        stub.set_tab("01-choice.md", restored)
+        (ms / "01-choice.md").write_text(restored)
+
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
@@ -986,6 +1200,44 @@ def main_test() -> None:
               == "conversation"
               and th.is_ours("AuthorLM: proposed — x")
               and not th.is_ours("looks wrong to me"))
+
+        # Resolve helpers the critique/margin paths share: empty-old
+        # insertions, strikethrough wrappers, and form enumeration that
+        # must not double-count the {{new}} half of a replace.
+        check("render_pending with empty old is the insertion form",
+              th.render_pending("", "bridge") == "{{bridge}}"
+              and th.render_insertion("bridge") == "{{bridge}}")
+        wrapped = "Lead.\n\n~~<<old span>>~~{{new span}}\n\nTail.\n"
+        check("approved_text keeps {{new}} halves (incl. ~~-wrapped replaces)",
+              th.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
+              th.approved_text(wrapped))
+        check("strip_pending on ~~-wrapped replaces still yields OLD",
+              th.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
+              th.strip_pending(wrapped))
+        with_insert = ("Para one.\n\n{{inserted paragraph}}\n\n"
+                       "<<swap me>>{{swapped}}\n\nPara three.\n")
+        stripped_ins, _ = th.strip_pending(with_insert)
+        check("strip_pending drops paragraph insertions byte-clean",
+              stripped_ins == "Para one.\n\nswap me\n\nPara three.\n",
+              stripped_ins)
+        check("approved_text keeps paragraph insertions and replace news",
+              th.approved_text(with_insert)
+              == ("Para one.\n\ninserted paragraph\n\n"
+                  "swapped\n\nPara three.\n"),
+              th.approved_text(with_insert))
+        forms = th.pending_forms(with_insert)
+        check("pending_forms lists replace + insert once each, doc order",
+              [(f["kind"], f["old"], f["new"]) for f in forms]
+              == [("insert", "", "inserted paragraph"),
+                  ("replace", "swap me", "swapped")],
+              str(forms))
+        nested = "<<keep {{this}} literal>>{{replacement}}"
+        check("pending_forms does not treat replace's {{new}} as an insert",
+              th.pending_forms(nested)
+              == [{"kind": "replace", "old": "keep {{this}} literal",
+                   "new": "replacement", "start": 0,
+                   "end": len(nested)}],
+              str(th.pending_forms(nested)))
 
         pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
         stub.add_comment("c-1", "Doc went another way",
@@ -1043,6 +1295,23 @@ def main_test() -> None:
               and "<<Doc went another way.>>" in tab_after
               and not stub.state["comments"]["c-1"]["resolved"], tab_after)
 
+        # Local-only edit after surgical push must be local_ahead — not a
+        # false CONFLICT. diff_push once hashed join(paras) without the
+        # trailing newline normalize_markdown adds; three_way then saw
+        # both sides off the base and invited --force data loss.
+        pre_local = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").write_text(
+            pre_local + "\nLocal after surgical push.\n")
+        after_surg = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("local-only edit after surgical push is local_ahead, "
+              "not conflict",
+              "01-choice.md" in after_surg.get("local_ahead", [])
+              and "01-choice.md" not in after_surg.get("conflicts", [])
+              and "Local after surgical push."
+              in (ms / "01-choice.md").read_text(),
+              str(after_surg))
+        (ms / "01-choice.md").write_text(pre_local)
+
         original_local = (ms / "01-choice.md").read_text()
         (ms / "01-choice.md").write_text(original_local.replace(
             "Doc went another way.", "Doc went a third way."))
@@ -1074,6 +1343,22 @@ def main_test() -> None:
         stripped_exp = th.strip_pending(normalize_markdown(exported))
         check("export-escaped pending spans strip to canonical old",
               stripped_exp == ("the old way.\n", []), str(stripped_exp))
+
+        # Nested braces in proposal text would truncate at the first }} —
+        # refuse before any Doc write.
+        try:
+            th.assert_no_pending_markers("safe old", "f(x)={{a}}")
+            check("propose refuses delimiter-bearing new text", False)
+        except ValueError as err:
+            check("propose refuses delimiter-bearing new text",
+                  "pending-change grammar" in str(err)
+                  and ("{{" in str(err) or "}}" in str(err)), str(err))
+        try:
+            th.render_pending("<<already marked>>", "new")
+            check("render_pending refuses delimiter-bearing old text", False)
+        except ValueError as err:
+            check("render_pending refuses delimiter-bearing old text",
+                  "<<" in str(err), str(err))
 
         # Approve with the author's in-place edit: modified acceptance.
         stub.author_reply("c-1", "AuthorLM: proposed — courtesy")
@@ -1177,6 +1462,105 @@ def main_test() -> None:
                   "SELECT COUNT(*) AS n FROM editorial_beliefs "
                   "WHERE manuscript_id = ? AND source = 'margin-thread'",
                   (manuscript["id"],))["n"] == 0, str(decided))
+
+        # --- critique_diff_write: accepted forms → Doc; failure isolation ---
+        from authorlm.gdocs import critique_diff_write
+
+        critique_body = (
+            "# Critique Target\n\n"
+            "First body paragraph for replace.\n\n"
+            "Second body paragraph stays.\n\n"
+            "Third body paragraph for insert after.\n"
+        )
+        (ms / "07-critique-write.md").write_text(critique_body)
+        push_doc(db, manuscript, "07-critique-write.md",
+                 service=stub, docs_service=stub)
+        local_before = (ms / "07-critique-write.md").read_text()
+
+        def _crit_thread(old, new, anchor, kind, state="accepted"):
+            row = ko_fields("dt")
+            row.update(
+                manuscript_id=manuscript["id"], origin_type="critique",
+                origin_id=f"crit-write:{row['id'][:8]}",
+                file="07-critique-write.md", anchor_quote=None,
+                proposed_old=old, proposed_new=new, note="why",
+                state=state, our_reply_ids="[]",
+                last_author_reply_id=None, scope_kind="file",
+                scope_ref="07-critique-write.md",
+                metadata=_mjson.dumps({
+                    "kind": kind, "anchor_paragraph": anchor,
+                    "intent_id": "i1", "original_new": new}))
+            db.insert("doc_threads", row)
+            return dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                               (row["id"],)))
+
+        t_rep = _crit_thread(
+            "First body paragraph for replace.",
+            "First body paragraph, carefully revised.",
+            2, "replace")
+        t_ins = _crit_thread(
+            "", "A bridging paragraph, newly inserted.",
+            4, "insert")
+        t_bad = _crit_thread(
+            "This text is nowhere in the essay.",
+            "Should fail loudly.",
+            2, "replace")
+        t_rej = _crit_thread(
+            "Second body paragraph stays.",
+            "Should never appear.",
+            3, "replace", state="rejected")
+
+        result = critique_diff_write(
+            db, manuscript, "07-critique-write.md",
+            [t_rep, t_ins, t_bad, t_rej], stub, stub)
+        tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                      if t["title"] == "07-critique-write.md")
+        written_ids = {t["id"] for t in result["written"]}
+        failed_ids = {t["id"] for t, _ in result["failed"]}
+        check("critique_diff_write marks accepted replace+insert; "
+              "isolates missing-span failure; skips rejected",
+              t_rep["id"] in written_ids and t_ins["id"] in written_ids
+              and t_bad["id"] in failed_ids
+              and t_rej["id"] not in written_ids
+              and t_rej["id"] not in failed_ids
+              and ("<<First body paragraph for replace.>>"
+                   "{{First body paragraph, carefully revised.}}") in tab_cw
+              and "{{A bridging paragraph, newly inserted.}}" in tab_cw
+              and "Should never appear" not in tab_cw
+              and "Should fail loudly" not in tab_cw,
+              f"written={written_ids} failed={result['failed']!r} "
+              f"tab={tab_cw!r}")
+        check("critique_diff_write leaves local file as OLD (pristine)",
+              (ms / "07-critique-write.md").read_text() == local_before)
+        check("critique_diff_write reports a Doc tab URL",
+              "doc-2" in (result.get("url") or "")
+              and "tab=" in (result.get("url") or ""),
+              str(result.get("url")))
+
+        # Out-of-range insert: write always push-rebuilds from local first,
+        # so a second call starts clean; the bad thread fails alone.
+        t_oor = _crit_thread(
+            "", "orphan insert", 99, "insert")
+        result2 = critique_diff_write(
+            db, manuscript, "07-critique-write.md", [t_oor], stub, stub)
+        tab_after_fail = next(
+            t["text"] for t in stub.state["docs"]["doc-2"]
+            if t["title"] == "07-critique-write.md")
+        check("out-of-range insert anchor fails in isolation",
+              not result2["written"]
+              and result2["failed"]
+              and "out of range" in result2["failed"][0][1],
+              str(result2["failed"]))
+        check("a failed-only write push-rebuilds the tab to local OLD",
+              "First body paragraph for replace." in tab_after_fail
+              and "{{" not in tab_after_fail
+              and "orphan insert" not in tab_after_fail,
+              tab_after_fail)
+        check("local stays pristine after a failed-only write",
+              (ms / "07-critique-write.md").read_text() == local_before)
+        # Drop the fixture before later toc/export asserts that expect
+        # only the chapters they declare.
+        (ms / "07-critique-write.md").unlink()
 
         # --- single-manuscript export (doc create-manuscript) ---
         from authorlm.export import combined_markdown, export_manuscript
@@ -1386,6 +1770,28 @@ def main_test() -> None:
         check("cross-file recurrence passes the bar",
               ok and stats["files"] == 2, str(stats))
 
+        # --- policy belief lifecycle (Laplace confidence + promote/demote) ---
+        from authorlm import beliefs as pol
+
+        check("Laplace confidence is (s+1)/(s+c+2)",
+              pol._confidence(0, 0) == 0.5
+              and pol._confidence(3, 0) == 0.8
+              and pol._confidence(0, 3) == 0.2)
+        check("retired status is sticky under further evidence",
+              pol._lifecycle_status("retired", 10, 0, 0.9) == "retired")
+        check("low confidence with enough observations retires a candidate",
+              pol._lifecycle_status("candidate", 0, 4,
+                                    pol._confidence(0, 4)) == "retired")
+        check("validated demotes when confidence falls below demote bar",
+              pol._lifecycle_status("validated", 2, 2,
+                                    pol._confidence(2, 2)) == "candidate")
+        check("candidate promotes only with support AND confidence bars",
+              pol._lifecycle_status("candidate", 3, 0,
+                                    pol._confidence(3, 0)) == "validated"
+              and pol._lifecycle_status("candidate", 2, 0,
+                                        pol._confidence(2, 0))
+              == "candidate")
+
         # The sweep reports unconfirmed gated nodes that fail the bar —
         # mentioned (not ungrounded) but single-context.
         motif = api.add_concept(db, manuscript, "Fleeting Motif",
@@ -1453,6 +1859,127 @@ def main_test() -> None:
 
             def stats_line(self):
                 return None
+
+        # --- episode analysis: learn editorial judgment from observed edits ---
+        from authorlm.analysis import MAX_DECISIONS, analyze_pending
+
+        an_root = root / "analyze-ws"
+        an_ms = an_root / "manuscript"
+        an_ms.mkdir(parents=True)
+        opening = ("# Opening\n\nChoice is the hinge of becoming.\n")
+        (an_ms / "01-choice.md").write_text(opening)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(an_root), "init", "--name", "analyze",
+                      "--path", str(an_ms)])
+        an_db = api.open_db(str(an_root))
+        an_mscript = api.get_manuscript(an_db)
+        api.collect(an_db, an_mscript, {})  # baseline version
+        an_session, _ = api.ensure_session(an_db, an_mscript)
+        an_declared = api.declare_intent(
+            an_db, an_mscript, "Develop the notion of Becoming")
+        an_intent_id = an_declared["intent"]["id"]
+        sailor = ("Like a sailor tacking, becoming threads through what "
+                  "choice has opened.")
+        (an_ms / "01-choice.md").write_text(opening + f"\n\n{sailor}\n")
+        (an_ms / "02-new.md").write_text(
+            f"# New chapter\n\n{sailor} The fresh prose must reach the analyzer.\n")
+        api.collect(an_db, an_mscript, {})
+
+        progress_calls = []
+        analysis_llm = FakeLLM({
+            "decisions": (
+                [{"action": "opened the section with a sailing metaphor",
+                  "pattern": "Open concept introductions with a lived metaphor"}]
+                + [{"action": f"local move {i}", "pattern": None}
+                   for i in range(1, MAX_DECISIONS)]
+                + [{"action": "ninth decision must be truncated",
+                    "pattern": "Should not seed"}]
+                + [{"action": "", "pattern": "empty action skipped"},
+                   "not-a-dict"]
+            ),
+            "outcome": "Developed the opening metaphor",
+        })
+        completed = api.complete_intent(
+            an_db, an_mscript, an_intent_id[:8], "done", llm=analysis_llm)
+        summaries = completed["analysis"]
+        check("complete_intent runs episode analysis over observed edits",
+              len(summaries) == 1
+              and summaries[0]["intent"] == "Develop the notion of Becoming"
+              and summaries[0]["outcome"] == "Developed the opening metaphor"
+              and len(summaries[0]["decisions"]) == MAX_DECISIONS
+              and summaries[0]["decisions"][0]["pattern"]
+              == "Open concept introductions with a lived metaphor",
+              str(summaries))
+        check("analysis prompt carries declared intent and file_added prose",
+              "DECLARED INTENT: Develop the notion of Becoming"
+              in analysis_llm.user
+              and "NEW TEXT:" in analysis_llm.user
+              and "fresh prose must reach the analyzer" in analysis_llm.user,
+              analysis_llm.user[:800])
+        seeded = an_db.one(
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
+            "AND statement = ?",
+            (an_mscript["id"],
+             "Open concept introductions with a lived metaphor"))
+        check("pattern seeds a medium-weight episode_analysis candidate",
+              seeded is not None and seeded["status"] == "candidate"
+              and seeded["source"] == "episode-analysis"
+              and an_db.one(
+                  "SELECT weight, evidence_type FROM evidence "
+                  "WHERE supports_belief = ?", (seeded["id"],)
+              )["weight"] == "medium"
+              and an_db.one(
+                  "SELECT evidence_type FROM evidence "
+                  "WHERE supports_belief = ?", (seeded["id"],)
+              )["evidence_type"] == "episode_analysis")
+        check("analysis is idempotent once the episode is marked analyzed",
+              api.analyze(an_db, an_mscript, analysis_llm) == [])
+
+        # Malformed decisions must not crash; episode stays pending for retry.
+        an2 = api.declare_intent(an_db, an_mscript, "Second episode for retry")
+        (an_ms / "01-choice.md").write_text(
+            (an_ms / "01-choice.md").read_text()
+            + "\n\nA second observed edit for the retry path.\n")
+        api.collect(an_db, an_mscript, {})
+        api.complete_intent(an_db, an_mscript, an2["intent"]["id"][:8],
+                            "closed without llm")
+        bad_llm = FakeLLM({"decisions": None, "outcome": "should not land"})
+        # Force a pending episode: strip analysis metadata if complete wrote none
+        # (no llm on complete above → episode closed but unanalyzed).
+        pending_before = analyze_pending(an_db, an_mscript, bad_llm)
+        check("null decisions do not crash and leave a completed analysis "
+              "with no decisions",
+              len(pending_before) == 1
+              and pending_before[0]["decisions"] == []
+              and pending_before[0]["outcome"] == "should not land",
+              str(pending_before))
+
+        an3 = api.declare_intent(an_db, an_mscript, "Third episode unavailable LLM")
+        (an_ms / "01-choice.md").write_text(
+            (an_ms / "01-choice.md").read_text()
+            + "\n\nA third edit awaiting a usable LLM reply.\n")
+        api.collect(an_db, an_mscript, {})
+        api.complete_intent(an_db, an_mscript, an3["intent"]["id"][:8], None)
+        none_llm = FakeLLM(None)
+        progress_calls.clear()
+
+        def _progress(index, total, statement):
+            progress_calls.append((index, total, statement))
+
+        stuck = analyze_pending(an_db, an_mscript, none_llm, progress=_progress)
+        ep3 = an_db.one(
+            "SELECT metadata FROM editorial_episodes WHERE intent_id = ?",
+            (an3["intent"]["id"],))
+        check("non-dict LLM reply leaves the episode pending for retry",
+              stuck == []
+              and not loads(ep3["metadata"], {}).get("analysis")
+              and progress_calls
+              and progress_calls[0][2] == "Third episode unavailable LLM",
+              str({"stuck": stuck, "meta": ep3["metadata"],
+                   "progress": progress_calls}))
+        check("disabled LLM is a no-op over pending episodes",
+              analyze_pending(an_db, an_mscript,
+                              type("Off", (), {"enabled": False})()) == [])
 
         api.add_concept(db, manuscript, "Tremor",
                         notes="The Tremor is never caused; it causes.")
@@ -1892,6 +2419,48 @@ def main_test() -> None:
         check("a settled margin restores the rebuild path",
               "mode" not in cleared, str(cleared))
 
+        # Critique pending forms are invisible to open_threads (author_comment
+        # only). A rebuild push during the pause would wipe <<old>>{{new}} /
+        # {{insert}} forms — including the author's Doc post-edits — and
+        # session-start reconcile auto-push takes the same path.
+        from authorlm.db import ko_fields as _ko_dt
+
+        pending_tab = (
+            "# Orrery\n"
+            "<<Brass planets on brass rails, polished.>>"
+            "{{Brass planets, post-edited in Docs.}}\n\n"
+            "{{A bridging insert the author refined.}}\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        stub.set_tab("06-orrery.md", pending_tab)
+        crit = _ko_dt("dt")
+        crit.update(
+            manuscript_id=manuscript["id"], origin_type="critique",
+            origin_id="pass:06-orrery.md:1", file="06-orrery.md",
+            proposed_old="Brass planets on brass rails, polished.",
+            proposed_new="Brass planets, post-edited in Docs.",
+            note="critique", state="written", our_reply_ids="[]",
+            metadata='{"kind":"replace","anchor_paragraph":1}')
+        db.insert("doc_threads", crit)
+        tab_before = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "06-orrery.md")
+        raised = None
+        try:
+            push_doc(db, manuscript, "06-orrery.md", service=stub,
+                     docs_service=stub)
+        except LookupError as err:
+            raised = str(err)
+        tab_after = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                         if t["title"] == "06-orrery.md")
+        check("push refuses while critique forms are written (no wipe)",
+              raised is not None
+              and "critique pending forms" in raised
+              and "critique resolve" in raised
+              and tab_after == tab_before
+              and "post-edited in Docs" in tab_after
+              and "{{A bridging insert the author refined.}}" in tab_after,
+              str({"raised": raised, "tab": tab_after[:120]}))
+        db.update("doc_threads", crit["id"], {"state": "cleaned"})
+
         # --- session start is no longer blind to the margin ---
         stub.add_comment("c-fresh", "distinctive orrery sentence",
                          "Is brass the right metal?")
@@ -2003,6 +2572,86 @@ def main_test() -> None:
                          "evidence_type = 'illus_triage'")["n"] == ev_before,
               str(arb))
 
+        # Revision acceptance must treat the new description as literal text
+        # — a string-template re.sub interprets \1/\U as group refs/escapes.
+        from authorlm.db import ko_fields as _ko
+
+        (ms / "06-revise.md").write_text(
+            "# **Revise**\n\nAn emblem stands at the gate.\n\n"
+            "[Illustration: old emblem at the gate]\n")
+        rev_row = _ko("ip")
+        rev_row.update(
+            manuscript_id=manuscript["id"], file="06-revise.md",
+            anchor="An emblem stands at the gate.",
+            description=r"emblem under C:\Users\author\figs with \1 mark",
+            criterion="2", rationale="clearer",
+            revises="old emblem at the gate", state="proposed")
+        db.insert("illus_proposals", rev_row)
+        rev_result = placement.decide(db, manuscript, rev_row["id"], "accept")
+        rev_text = (ms / "06-revise.md").read_text()
+        check("revision accept writes backslash-rich descriptions literally",
+              rev_result["state"] == "accepted"
+              and r"C:\Users\author\figs with \1 mark" in rev_text
+              and "[Illustration: old emblem at the gate]" not in rev_text,
+              rev_text)
+
+        # Multi-pass extraction must not advance the watermark when a later
+        # pass returns None — otherwise the missed payload is skipped forever.
+        from authorlm.extraction import extract_concepts
+
+        class FlakyLLM:
+            enabled = True
+            extraction_max_chars = 80
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, system, user, thinking_budget=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"concepts": [
+                        {"name": "AlphaConcept", "kind": "definition",
+                         "notes": "first payload"}],
+                            "links": [], "aliases": []}
+                return None  # second payload fails
+
+            def stats_line(self):
+                return None
+
+        # Two distinct contexts, not one paragraph repeated: the recurrence
+        # bar admits a concept only when it appears in separate contexts,
+        # and eight repeats in a single paragraph is one context — the
+        # rule landed after this test was written.
+        (ms / "07-alpha.md").write_text(
+            "# Alpha\n\n" + ("AlphaConcept appears here. " * 4) + "\n\n"
+            "## Later\n\n" + ("AlphaConcept returns here. " * 4) + "\n")
+        (ms / "08-beta.md").write_text(
+            "# Beta\n\n" + ("BetaConcept appears here. " * 8) + "\n")
+        api.collect(db, manuscript, {})
+        latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        before_meta = _json.loads(manuscript["metadata"] or "{}")
+        flaky = FlakyLLM()
+        multi = extract_concepts(
+            db, manuscript, flaky, files=["07-alpha.md", "08-beta.md"])
+        after_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("multi-pass LLM miss leaves watermark unadvanced",
+              multi is not None
+              and multi.get("incomplete") is True
+              and after_meta.get("last_extracted_version")
+              == before_meta.get("last_extracted_version")
+              and after_meta.get("last_extracted_version") != latest["id"],
+              str({"multi": multi, "before": before_meta, "after": after_meta,
+                   "latest": latest["id"], "calls": flaky.calls}))
+        check("first multi-pass payload still commits its concepts",
+              db.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+                     "AND name = ?",
+                     (manuscript["id"], "AlphaConcept")) is not None,
+              str(multi))
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.
@@ -2111,6 +2760,747 @@ def main_test() -> None:
               == "intended behavior")
         check("improvement tasks never leak into briefings",
               "improvement" not in str(api.get_briefing(db, manuscript)).lower())
+
+        # --- render / shell / triage resilience (live incidents 2026-08-10) ---
+        import base64
+        import contextlib
+        import io
+        import json as _rjson
+        import sys
+        import types
+        import urllib.error
+        from unittest import mock
+
+        from authorlm import gdocs as gdocs_mod
+        from authorlm import llm as llm_mod
+        from authorlm import shell as shell_mod
+        from authorlm.structure import matter_map, reading_order
+
+        class _ImageResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                png_b64 = base64.b64encode(b"PNGDATA").decode("ascii")
+                return _rjson.dumps({
+                    "candidates": [{"content": {"parts": [
+                        {"inlineData": {"data": png_b64}}]}}]
+                }).encode()
+
+        retry_calls = {"n": 0}
+
+        def urlopen_timeout_then_ok(request, timeout=None):
+            retry_calls["n"] += 1
+            retry_calls["timeout"] = timeout
+            if retry_calls["n"] == 1:
+                raise TimeoutError("stalled read")
+            return _ImageResp()
+
+        with mock.patch("urllib.request.urlopen", urlopen_timeout_then_ok):
+            png = llm_mod._gemini_image("gemini-img", "a ladder", None,
+                                        "fake-key", 17)
+        check("gemini image call retries once after TimeoutError",
+              png == b"PNGDATA" and retry_calls["n"] == 2
+              and retry_calls["timeout"] == 17, str(retry_calls))
+
+        http_calls = {"n": 0}
+
+        def urlopen_http_error(request, timeout=None):
+            http_calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://example.test", 500, "boom", hdrs=None,
+                fp=io.BytesIO(b'{"error":"no"}'))
+
+        try:
+            with mock.patch("urllib.request.urlopen", urlopen_http_error):
+                llm_mod._gemini_image("gemini-img", "prompt", None,
+                                      "fake-key", 17)
+            check("gemini HTTPError is not retried as a transient stall",
+                  False)
+        except RuntimeError as err:
+            check("gemini HTTPError is not retried as a transient stall",
+                  http_calls["n"] == 1 and "500" in str(err), str(err))
+
+        def boom_main(argv):
+            raise RuntimeError("network down")
+
+        out = io.StringIO()
+        with mock.patch("authorlm.cli.main", boom_main), \
+                contextlib.redirect_stdout(out):
+            shell_mod._dispatch(["--workspace", str(ws)], ["status"])
+        check("shell dispatch returns to the prompt after a command crash",
+              "error (RuntimeError): network down" in out.getvalue(),
+              out.getvalue())
+
+        class DistillLLM:
+            enabled = True
+
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, system, user):
+                self.calls.append((system, user))
+                return ('SCOPE: manuscript\n'
+                        'STATEMENT: "Prefer concrete metaphors over '
+                        'decorative ones."\n')
+
+        distill_llm = DistillLLM()
+        before_policies = db.one(
+            "SELECT COUNT(*) AS n FROM editorial_beliefs "
+            "WHERE manuscript_id = ?", (manuscript["id"],))["n"]
+        check("distill_batch no-ops without items or an enabled LLM",
+              placement.distill_batch(db, manuscript, [], distill_llm) is None
+              and placement.distill_batch(
+                  db, manuscript, [("01-choice.md", "rejected: x")],
+                  types.SimpleNamespace(enabled=False)) is None)
+        candidate = placement.distill_batch(
+            db, manuscript,
+            [("01-choice.md", "rejected: too decorative"),
+             ("04-road.md", "description revised: «a» became «b»")],
+            distill_llm)
+        check("distill_batch makes one combined distiller call for the sitting",
+              candidate is not None
+              and len(distill_llm.calls) == 1
+              and "too decorative" in distill_llm.calls[0][1]
+              and "became «b»" in distill_llm.calls[0][1]
+              and "at least two" in distill_llm.calls[0][1]
+              and db.one(
+                  "SELECT COUNT(*) AS n FROM editorial_beliefs "
+                  "WHERE manuscript_id = ?",
+                  (manuscript["id"],))["n"] == before_policies + 1,
+              str(candidate))
+
+        check("Google API socket timeout constant is 60s",
+              gdocs_mod.HTTP_TIMEOUT_SECONDS == 60)
+        fake_auth = types.ModuleType("google_auth_httplib2")
+        seen_http = {}
+
+        class _AuthorizedHttp:
+            def __init__(self, creds, http=None):
+                seen_http["creds"] = creds
+                seen_http["http"] = http
+
+        fake_auth.AuthorizedHttp = _AuthorizedHttp
+        sys.modules["google_auth_httplib2"] = fake_auth
+        try:
+            with mock.patch.object(gdocs_mod, "get_credentials",
+                                   return_value=object()):
+                gdocs_mod._authorized_http({}, None, False)
+            check("authorized Google HTTP client carries the socket timeout",
+                  getattr(seen_http.get("http"), "timeout", None)
+                  == gdocs_mod.HTTP_TIMEOUT_SECONDS,
+                  str(seen_http))
+        finally:
+            sys.modules.pop("google_auth_httplib2", None)
+
+        # toc.toml matter attributes + liberal parse (never raise)
+        matter_files = {
+            "toc.toml": (
+                '[[chapter]]\nfile = "front.md"\nmatter = "front"\n\n'
+                '[[chapter]]\nfile = "body.md"\n\n'
+                '[[chapter]]\nfile = "app.md"\nmatter = "back"\n\n'
+                '[[chapter]]\nfile = "weird.md"\nmatter = "sideways"\n'),
+            "front.md": "f", "body.md": "b", "app.md": "a", "weird.md": "w",
+            "orphan.md": "o",
+        }
+        check("matter_map reads front/main/back and defaults unknown/orphan",
+              matter_map(matter_files) == {
+                  "front.md": "front", "body.md": "main", "app.md": "back",
+                  "weird.md": "main", "orphan.md": "main"},
+              str(matter_map(matter_files)))
+        broken = {"toc.toml": "[[chapter]\nnot toml", "z.md": "z", "a.md": "a"}
+        ordered, missing = reading_order(broken)
+        check("broken toc.toml degrades to alphabetical order, never raises",
+              ordered == ["a.md", "z.md"] and missing == [],
+              f"{ordered=} {missing=}")
+
+        # --- belief curation: convert_belief happy path + error guards ---
+        from authorlm import beliefs as pol
+
+        api.define_style_guide(db, manuscript, "Curation guide")
+        seeded = pol.seed_candidate_belief(
+            db, manuscript["id"], "Prefer short paragraphs in dialogue.",
+            source="test")
+        converted = api.convert_belief(
+            db, manuscript, seeded["id"], "formatting",
+            guide="Curation guide", reason="now enforced as style law")
+        check("convert_belief retires the belief and links a style law",
+              converted["status"] == "retired" and converted["style_element"])
+        row = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                     (seeded["id"],))
+        curation = loads(row["metadata"], {}).get("curation", {})
+        check("converted policy's metadata records the linkage and reason",
+              row["status"] == "retired"
+              and curation.get("action") == "converted"
+              and curation.get("style_element") == converted["style_element"]
+              and curation.get("reason") == "now enforced as style law")
+        evidence = db.one(
+            "SELECT * FROM evidence WHERE supports_belief = ? "
+            "AND evidence_type = 'belief_curation'",
+            (seeded["id"],))
+        check("conversion writes a belief_curation evidence row",
+              evidence is not None and evidence["signal"] == "converted")
+        try:
+            api.convert_belief(db, manuscript, seeded["id"], "formatting")
+            check("converting an already-retired policy is refused", False)
+        except LookupError:
+            check("converting an already-retired policy is refused", True)
+        try:
+            api.convert_belief(db, manuscript, "no-such-prefix", "formatting")
+            check("converting an unknown policy prefix is refused", False)
+        except LookupError:
+            check("converting an unknown policy prefix is refused", True)
+
+        # --- style-element prefix ambiguity guard: add/retire/move must
+        #     never silently act on whichever row SQLite returns first
+        #     when a prefix matches more than one active element ---
+        api.define_style_guide(db, manuscript, "Ambiguity guide")
+        amb1 = api.add_style_law(db, manuscript, "tone", "Amb element one.",
+                                     guide_name="Ambiguity guide")
+        amb2 = api.add_style_law(db, manuscript, "tone", "Amb element two.",
+                                     guide_name="Ambiguity guide")
+        check("style element ids share the common 'se-' literal prefix",
+              amb1["id"].startswith("se-") and amb2["id"].startswith("se-"))
+        try:
+            api.retire_style_law(db, manuscript, "se")
+            check("retire refuses an ambiguous prefix", False)
+        except LookupError as err:
+            check("retire refuses an ambiguous prefix", "ambiguous" in str(err))
+        check("neither element was retired by the ambiguous attempt",
+              db.one("SELECT status FROM style_laws WHERE id = ?",
+                     (amb1["id"],))["status"] == "active"
+              and db.one("SELECT status FROM style_laws WHERE id = ?",
+                         (amb2["id"],))["status"] == "active")
+        try:
+            api.move_style_law(db, manuscript, "se", file="01-choice.md")
+            check("move refuses an ambiguous prefix", False)
+        except LookupError as err:
+            check("move refuses an ambiguous prefix", "ambiguous" in str(err))
+        try:
+            api.add_style_law(db, manuscript, "tone", "New with bad override",
+                                  guide_name="Ambiguity guide", overrides="se")
+            check("add_style_element refuses an ambiguous override prefix", False)
+        except LookupError as err:
+            check("add_style_element refuses an ambiguous override prefix",
+                  "ambiguous" in str(err))
+        retired_amb = api.retire_style_law(db, manuscript, amb1["id"])
+        check("a full unique id still resolves and retires",
+              retired_amb["id"] == amb1["id"] and retired_amb["status"] == "retired")
+
+        # --- docs.py: list_docs batches its per-file concept lookup + doc
+        #     lifecycle error paths (ambiguous query, retired-name collision,
+        #     revive collision) ---
+        from authorlm import docs as docs_mod
+
+        (ms / "60-alphadoc.md").write_text("# Alpha\n\nAlphaTopic appears here.\n")
+        (ms / "61-betadoc.md").write_text("# Beta\n\nBetaTopic appears here.\n")
+        api.add_concept(db, manuscript, "AlphaTopic", notes="x")
+        api.add_concept(db, manuscript, "BetaTopic", notes="y")
+        api.collect(db, manuscript, {})
+        listing = docs_mod.list_docs(db, manuscript)
+        by_file = {d["file"]: d["concepts"] for d in listing["active"]}
+        check("list_docs attributes each concept to its introducing file only",
+              by_file.get("60-alphadoc.md") == ["AlphaTopic"]
+              and by_file.get("61-betadoc.md") == ["BetaTopic"],
+              by_file)
+
+        (ms / "62-zzzprefixtest-one.md").write_text("# One\n\n")
+        (ms / "63-zzzprefixtest-two.md").write_text("# Two\n\n")
+        try:
+            docs_mod.retire_doc(manuscript, "zzzprefixtest")
+            check("retire_doc refuses an ambiguous query", False)
+        except LookupError as err:
+            check("retire_doc refuses an ambiguous query", "ambiguous" in str(err))
+        (ms / "62-zzzprefixtest-one.md").unlink()
+        (ms / "63-zzzprefixtest-two.md").unlink()
+
+        docs_mod.retire_doc(manuscript, "60-alphadoc.md")
+        try:
+            docs_mod.add_doc(manuscript, "60-alphadoc")
+            check("add_doc refuses a name retired but not revived", False)
+        except FileExistsError as err:
+            check("add_doc refuses a name retired but not revived",
+                  "revive it instead" in str(err))
+        (ms / "60-alphadoc.md").write_text("# Reborn\n\n")
+        try:
+            docs_mod.revive_doc(manuscript, "60-alphadoc")
+            check("revive_doc refuses when the manuscript already has that file",
+                  False)
+        except FileExistsError as err:
+            check("revive_doc refuses when the manuscript already has that file",
+                  "already exists in the manuscript" in str(err))
+        (ms / "60-alphadoc.md").unlink()
+        docs_mod.revive_doc(manuscript, "60-alphadoc")
+        check("revive_doc restores the file once the collision clears",
+              (ms / "60-alphadoc.md").exists())
+
+        # --- MCP payload caps (diff_versions / list_policies) ---
+        # Extracted helpers: chat context blew up to 185 KB / 52 KB on
+        # mature manuscripts before f3264e8; regressions reintroduce
+        # token blowups or silent stubbing mistakes.
+        from authorlm.mcp_server import cap_diff_files, compact_belief_rows
+
+        long_file = [f"line-{i}" for i in range(10)]
+        capped = cap_diff_files({"a.md": list(long_file)}, max_lines=4)
+        check("diff cap truncates a long file and names the escape hatch",
+              len(capped["a.md"]) == 5
+              and capped["a.md"][:4] == long_file[:4]
+              and "(+6 more lines" in capped["a.md"][-1]
+              and "file='a.md'" in capped["a.md"][-1],
+              str(capped["a.md"][-1]))
+
+        budgeted = cap_diff_files({
+            "a.md": ["1", "2"],
+            "b.md": ["1", "2"],
+            "c.md": ["1", "2"],
+            "d.md": ["1", "2"],  # spent reaches budget (max_lines*4 == 8)
+            "late.md": [f"l{i}" for i in range(20)],
+        }, max_lines=2)
+        check("diff cap stubs later files once the whole-answer budget is spent",
+              budgeted["d.md"] == ["1", "2"]
+              and len(budgeted["late.md"]) == 1
+              and "20 changed line(s)" in budgeted["late.md"][0]
+              and "file='late.md'" in budgeted["late.md"][0],
+              str(budgeted))
+
+        untouched = {"x.md": ["only", "two"]}
+        check("diff cap with max_lines<=0 leaves the payload untouched",
+              cap_diff_files(dict(untouched), max_lines=0) == untouched)
+
+        policy_rows = [
+            {"id": "pol-a", "statement": "Prefer short definitions",
+             "status": "candidate", "confidence": 0.4,
+             "supporting": 1, "contradicting": 0,
+             "questions": ["when?"], "source": "review-explanation"},
+            {"id": "pol-b", "statement": "Keep metaphors sparse",
+             "status": "validated", "confidence": 0.8,
+             "supporting": 5, "contradicting": 0,
+             "questions": [], "source": "episode_analysis"},
+        ]
+        compact = compact_belief_rows(policy_rows)
+        check("list_policies compact drops questions/provenance fields",
+              compact["belief_count"] == 2
+              and set(compact["beliefs"][0]) == {
+                  "id", "statement", "status", "confidence",
+                  "supporting", "contradicting"}
+              and "questions" not in compact["beliefs"][0],
+              str(compact))
+        filtered = compact_belief_rows(policy_rows, status="validated")
+        check("list_policies status= filter keeps only matching rows",
+              filtered["belief_count"] == 1
+              and filtered["beliefs"][0]["id"] == "pol-b",
+              str(filtered))
+        verbose = compact_belief_rows(policy_rows, verbose=True)
+        check("list_policies verbose=True returns full rows",
+              "belief_count" not in verbose
+              and verbose["beliefs"][0]["questions"] == ["when?"]
+              and verbose["beliefs"][0]["source"] == "review-explanation",
+              str(verbose))
+
+        # --- Critique Doc mark requests (pure; feed critique_diff_write) ---
+        from authorlm.gdocs import (_mark_insert_requests,
+                                    _mark_replace_requests, _utf16_len)
+
+        replace_reqs = _mark_replace_requests("tab-1", 10, 14, "old", "new")
+        check("replace mark inserts wrappers then styles strike + green",
+              replace_reqs[0]["insertText"]["text"] == ">>{{new}}"
+              and replace_reqs[0]["insertText"]["location"]["index"] == 14
+              and replace_reqs[1]["insertText"]["text"] == "<<"
+              and replace_reqs[1]["insertText"]["location"]["index"] == 10
+              and replace_reqs[2]["updateTextStyle"]["textStyle"]
+              .get("strikethrough") is True
+              and replace_reqs[2]["updateTextStyle"]["range"]["endIndex"]
+              == 10 + 4 + _utf16_len("old")
+              and "foregroundColor" in replace_reqs[3]["updateTextStyle"]
+              ["textStyle"],
+              str(replace_reqs))
+        # Non-BMP characters occupy two UTF-16 code units in the Docs API.
+        emoji_old, emoji_new = "old😀", "new🎉"
+        emoji_reqs = _mark_replace_requests("tab-1", 0, _utf16_len(emoji_old),
+                                            emoji_old, emoji_new)
+        strike_end = emoji_reqs[2]["updateTextStyle"]["range"]["endIndex"]
+        green_end = emoji_reqs[3]["updateTextStyle"]["range"]["endIndex"]
+        check("replace mark indexes use UTF-16 lengths for non-BMP text",
+              strike_end == 4 + _utf16_len(emoji_old)
+              and green_end == strike_end + 4 + _utf16_len(emoji_new)
+              and _utf16_len(emoji_old) == len(emoji_old) + 1,
+              f"strike_end={strike_end} green_end={green_end}")
+
+        insert_reqs = _mark_insert_requests("tab-1", 5, "added")
+        check("insert mark writes a green {{new}} paragraph at the boundary",
+              insert_reqs[0]["insertText"]["text"] == "\n{{added}}"
+              and insert_reqs[0]["insertText"]["location"]["index"] == 5
+              and insert_reqs[1]["updateTextStyle"]["range"]["startIndex"]
+              == 6
+              and "foregroundColor" in insert_reqs[1]["updateTextStyle"]
+              ["textStyle"],
+              str(insert_reqs))
+
+        # --- Editorial verbs lazy-open a session (CLI helper) ---
+        from authorlm import sessions as ses
+        from authorlm.cli import _ensure_session
+
+        active = ses.active_session(db, manuscript["id"])
+        if active is not None:
+            ses.end_session(db, manuscript["id"])
+        check("no active session before lazy-open",
+              ses.active_session(db, manuscript["id"]) is None)
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            _ensure_session(db, manuscript)
+        opened = ses.active_session(db, manuscript["id"])
+        check("editorial _ensure_session opens a session when none is active",
+              opened is not None and "opened session" in buf.getvalue(),
+              buf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as buf2:
+            _ensure_session(db, manuscript)
+        check("editorial _ensure_session reuses an already-active session",
+              ses.active_session(db, manuscript["id"])["id"] == opened["id"]
+              and buf2.getvalue() == "",
+              buf2.getvalue())
+
+        # --- Doc tab↔TOC sync helpers (pure; no Google) ---
+        # These gate push/pull hierarchy safety: wrong classification
+        # rewrites toc.toml, adopts scratch tabs as essays, or treats a
+        # conflict as a safe pull.
+        import hashlib as _hashlib
+
+        from authorlm.gdocs import (
+            ILLUS_TAB_TITLE,
+            MANIFEST_TITLE,
+            _match_prompt,
+            classify_structure,
+            classify_tabs,
+            illus_subtree,
+            next_tab_move,
+            plan_prompt_sync,
+            prompt_links,
+            rewrite_toc_from_doc,
+            three_way,
+            walk_tabs,
+        )
+
+        check("next_tab_move is a no-op when order already matches",
+              next_tab_move(["a", "b", "c"], ["a", "b", "c"]) is None)
+        step = next_tab_move(["b", "a", "c"], ["a", "b", "c"])
+        check("next_tab_move proposes one index swap toward desired order",
+              step == {"updateDocumentTabProperties": {
+                  "tabProperties": {"tabId": "a", "index": 0},
+                  "fields": "index"}}, str(step))
+        # Ids absent from desired stay at the end and do not drive moves.
+        keep_tail = next_tab_move(["x", "a", "b"], ["b", "a"])
+        check("next_tab_move ignores extras not in desired",
+              keep_tail["updateDocumentTabProperties"]["tabProperties"]
+              ["tabId"] == "b", str(keep_tail))
+
+        local_h = _hashlib.sha256(b"local").hexdigest()[:16]
+        tab_h = _hashlib.sha256(b"tab").hexdigest()[:16]
+        check("three_way: identical sides are unchanged",
+              three_way("same", "same", "deadbeef") == "unchanged")
+        check("three_way: no base + drift → Doc wins (changed)",
+              three_way("tab", "local", None) == "changed")
+        check("three_way: only tab moved off base → safe pull",
+              three_way("tab", "local", local_h) == "changed")
+        check("three_way: only local moved → keep local (local_ahead)",
+              three_way("tab", "local", tab_h) == "local_ahead")
+        check("three_way: both moved → conflict",
+              three_way("tab", "local", "deadbeefcafebabe") == "conflict")
+
+        tabs_cls = [
+            ("t1", "01-choice.md"),
+            ("t2", "renamed-title.md"),
+            ("t3", "brand-new.md"),
+            ("t4", "04-road.md"),
+            ("t5", MANIFEST_TITLE),
+            ("t6", "scratch-notes"),
+            ("t7", "dup.md"),
+            ("t8", "dup.md"),
+            ("t9", "live.md"),
+        ]
+        links_cls = {
+            "01-choice.md": {"tab_id": "t1"},
+            "04-road.md": {"tab_id": "t-old"},  # known file, unknown tab id
+            "was.md": {"tab_id": "t2"},         # title drifted off filename
+            "live.md": {"tab_id": "t-live"},    # live mapped tab still in Doc
+        }
+        # Inject the live mapped tab so ambiguous duplicate detection fires.
+        tabs_cls.append(("t-live", "live.md"))
+        classed = classify_tabs(tabs_cls, links_cls, {"04-road.md"})
+        check("classify_tabs: rename when mapped id's title drifted",
+              classed["renamed"] == [("was.md", "renamed-title.md")],
+              str(classed))
+        check("classify_tabs: adopt unknown .md with no local/link",
+              classed["adopted"] == [("brand-new.md", "t3")], str(classed))
+        check("classify_tabs: readopt when title matches existing file",
+              classed["readopted"] == [("04-road.md", "t4")], str(classed))
+        check("classify_tabs: ignore manifest and non-.md titles",
+              MANIFEST_TITLE in classed["ignored"]
+              and "scratch-notes" in classed["ignored"], str(classed))
+        check("classify_tabs: duplicate unknown titles and live dupes "
+              "are ambiguous",
+              classed["ambiguous"].count("dup.md") == 2
+              and "live.md" in classed["ambiguous"], str(classed))
+
+        pairs_a = [("a.md", None), ("b.md", "a.md")]
+        pairs_b = [("b.md", None), ("a.md", None)]
+        check("classify_structure: identical pairs are insync",
+              classify_structure(pairs_a, pairs_a, None) == "insync")
+        check("classify_structure: local matches base → doc_moved",
+              classify_structure(pairs_b, pairs_a, pairs_a) == "doc_moved")
+        check("classify_structure: doc matches base → local_moved",
+              classify_structure(pairs_a, pairs_b, pairs_a) == "local_moved")
+        both = classify_structure(
+            [("x.md", None)], [("y.md", None)], pairs_a)
+        check("classify_structure: both sides off base → conflict",
+              both == "conflict", both)
+        # No base: pure Doc additions sharing the local spine → doc_moved.
+        local_spine = [("a.md", None)]
+        doc_with_add = [("a.md", None), ("new.md", None)]
+        check("classify_structure: no base + Doc-only additions → doc_moved",
+              classify_structure(doc_with_add, local_spine, None)
+              == "doc_moved")
+        check("classify_structure: no base + disagreeing common spine "
+              "→ unsynced",
+              classify_structure([("b.md", None)], local_spine, None)
+              == "unsynced")
+
+        tab_props: list = []
+        doc_pairs: list = []
+        walk_tabs([
+            {"tabProperties": {"tabId": "r1", "title": "part"},
+             "childTabs": [
+                 {"tabProperties": {"tabId": "c1", "title": "01.md"},
+                  "childTabs": []},
+                 {"tabProperties": {"tabId": "c2", "title": "notes"},
+                  "childTabs": [
+                      {"tabProperties": {"tabId": "c3", "title": "02.md"},
+                       "childTabs": []},
+                  ]},
+             ]},
+        ], tab_props, doc_pairs)
+        check("walk_tabs lists every tab id/title",
+              tab_props == [("r1", "part"), ("c1", "01.md"),
+                            ("c2", "notes"), ("c3", "02.md")],
+              str(tab_props))
+        # Non-md 'part'/'notes' are transparent: both essays sit at root
+        # because neither has an md ancestor.
+        check("walk_tabs: non-.md tabs are transparent to parent chain",
+              doc_pairs == [("01.md", None), ("02.md", None)],
+              str(doc_pairs))
+        nested_props: list = []
+        nested_pairs: list = []
+        walk_tabs([{
+            "tabProperties": {"tabId": "p", "title": "01.md"},
+            "childTabs": [{
+                "tabProperties": {"tabId": "s", "title": "scratch"},
+                "childTabs": [{
+                    "tabProperties": {"tabId": "c", "title": "02.md"},
+                    "childTabs": [],
+                }],
+            }],
+        }], nested_props, nested_pairs)
+        check("walk_tabs: md parent passes through a scratch nest",
+              nested_pairs == [("01.md", None), ("02.md", "01.md")],
+              str(nested_pairs))
+
+        toc_ws = root / "toc-rewrite"
+        toc_ws.mkdir()
+        (toc_ws / "toc.toml").write_text(
+            '[[chapter]]\nfile = "a.md"\nmatter = "front"\n\n'
+            '[[chapter]]\nfile = "local-only.md"\nmatter = "back"\n\n'
+            '[[chapter]]\nfile = "b.md"\n')
+        new_tree = rewrite_toc_from_doc(
+            {"path": str(toc_ws)},
+            [("b.md", None), ("a.md", None)],
+            [("a.md", 0), ("local-only.md", 0), ("b.md", 0)])
+        rewritten = (toc_ws / "toc.toml").read_text()
+        check("rewrite_toc_from_doc follows Doc order and keeps "
+              "never-pushed locals after their predecessor",
+              [n for n, _ in new_tree]
+              == ["b.md", "a.md", "local-only.md"], str(new_tree))
+        check("rewrite_toc_from_doc preserves matter attributes",
+              'matter = "front"' in rewritten
+              and 'matter = "back"' in rewritten, rewritten)
+
+        # Illustration prompt Doc mirror planning.
+        check("prompt_links strips the reserved mapping prefix",
+              prompt_links({
+                  "_illusprompt/slot.md": {"tab_id": "p1"},
+                  "01.md": {"tab_id": "e1"},
+                  "_illusprompt/bad": "not-a-dict",
+              }) == {"slot.md": {"tab_id": "p1"}})
+        root_id, children, ids = illus_subtree([
+            {"tabProperties": {"tabId": "essay", "title": "01.md"},
+             "childTabs": []},
+            {"tabProperties": {"tabId": "ill", "title": ILLUS_TAB_TITLE},
+             "childTabs": [
+                 {"tabProperties": {"tabId": "p1", "title": "slot.md"},
+                  "childTabs": [
+                      {"tabProperties": {"tabId": "nested",
+                                         "title": "extra"},
+                       "childTabs": []},
+                  ]},
+             ]},
+        ], {})
+        check("illus_subtree finds the reserved root by title",
+              root_id == "ill"
+              and children == [("p1", "slot.md")]
+              and ids == {"ill", "p1", "nested"},
+              f"{root_id=} {children=} {ids=}")
+        # Remembered id wins over title when both exist.
+        root_by_id, _, _ = illus_subtree([
+            {"tabProperties": {"tabId": "remembered",
+                               "title": "not-the-title"},
+             "childTabs": []},
+            {"tabProperties": {"tabId": "other", "title": ILLUS_TAB_TITLE},
+             "childTabs": []},
+        ], {"_illustrations_tab": "remembered"})
+        check("illus_subtree prefers the remembered illustrations tab id",
+              root_by_id == "remembered", root_by_id)
+
+        text_a = "description one"
+        hash_a = _hashlib.sha256(text_a.encode()).hexdigest()[:16]
+        plan = plan_prompt_sync(
+            {"slot.md": text_a, "new.md": "fresh"},
+            {"slot.md": {"tab_id": "p1", "pushed_hash": "stalehash0000000"},
+             "gone.md": {"tab_id": "p-gone"}},
+            [("p1", "renamed.md"), ("p-hand", "handmade.md"),
+             ("p-gone", "gone.md")],
+        )
+        check("plan_prompt_sync: rewrite on hash mismatch + rename detect",
+              plan["rewrite"] == ["slot.md"]
+              and plan["renamed"] == [("slot.md", "renamed.md")],
+              str(plan))
+        check("plan_prompt_sync: create for local-only and vanished tabs",
+              plan["create"] == ["new.md"], str(plan))
+        check("plan_prompt_sync: prune mapped-but-deleted locals; "
+              "unknown leaves hand-made tabs",
+              plan["prune"] == [("gone.md", "p-gone")]
+              and plan["unknown"] == ["handmade.md"], str(plan))
+        # Unchanged hash → no rewrite.
+        plan_ok = plan_prompt_sync(
+            {"slot.md": text_a},
+            {"slot.md": {"tab_id": "p1", "pushed_hash": hash_a}},
+            [("p1", "slot.md")])
+        check("plan_prompt_sync: matching hash skips rewrite",
+              plan_ok == {"create": [], "rewrite": [], "prune": [],
+                          "unknown": [], "renamed": []},
+              str(plan_ok))
+
+        names = ["alpha-slot.md", "beta-other.md"]
+        check("_match_prompt resolves exact, display-prefix, and unique "
+              "substring",
+              _match_prompt(names, "alpha-slot.md") == "alpha-slot.md"
+              and _match_prompt(
+                  names, "_illustrations/prompts/beta-other.md")
+              == "beta-other.md"
+              and _match_prompt(names, "alpha") == "alpha-slot.md"
+              and _match_prompt(names, "a") is None)  # ambiguous
+
+        # --- virgin session start: no baseline → skip opening collect ---
+        virgin_ws = root / "virgin-ws"
+        virgin_ms = virgin_ws / "manuscript"
+        virgin_ms.mkdir(parents=True)
+        (virgin_ms / "start.md").write_text("# Start\n\nFresh prose.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(virgin_ws), "init",
+                      "--name", "virgin", "--path", str(virgin_ms),
+                      "--no-extract"])
+        virgin_db = api.open_db(str(virgin_ws))
+        virgin_m = api.get_manuscript(virgin_db)
+        check("init --no-extract leaves a virgin manuscript (no baseline)",
+              virgin_db.one(
+                  "SELECT id FROM manuscript_versions "
+                  "WHERE manuscript_id = ? LIMIT 1",
+                  (virgin_m["id"],)) is None)
+        (virgin_ms / "start.md").write_text(
+            "# Start\n\nFresh prose, already edited.\n")
+        out_start = io.StringIO()
+        with contextlib.redirect_stdout(out_start):
+            cli_main(["--workspace", str(virgin_ws), "session", "start"])
+        start_txt = out_start.getvalue()
+        check("virgin session start skips opening collect "
+              "(no version created)",
+              "Collected" not in start_txt
+              and "file_added" not in start_txt
+              and virgin_db.one(
+                  "SELECT id FROM manuscript_versions "
+                  "WHERE manuscript_id = ? LIMIT 1",
+                  (virgin_m["id"],)) is None,
+              start_txt)
+        # After a real collect, session start must acknowledge changes.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(virgin_ws), "session", "end"])
+            cli_main(["--workspace", str(virgin_ws), "collect"])
+        (virgin_ms / "extra.md").write_text("# Extra\n\nNew chapter.\n")
+        out_start2 = io.StringIO()
+        with contextlib.redirect_stdout(out_start2):
+            cli_main(["--workspace", str(virgin_ws), "session", "start"])
+        start2 = out_start2.getvalue()
+        check("session start with a baseline collects and reports "
+              "new chapters",
+              "file_added" in start2 or "extra.md" in start2, start2)
+        # --- style_show: effective law composition (guide inheritance,
+        #     override displacement, unattached-file fallback) ---
+        # Its own manuscript: this block asserts what an UNATTACHED file
+        # inherits from THE root guide, which only means anything where
+        # this block's guide is the only root. The shared manuscript has
+        # collected several root guides from earlier blocks by now.
+        style_ws = root / "style-ws"
+        style_root = style_ws / "manuscript"
+        style_root.mkdir(parents=True)
+        (style_root / "97-styled.md").write_text("# Styled\n\nProse.\n")
+        (style_root / "98-child.md").write_text("# Child\n\nMore prose.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(style_ws), "init",
+                      "--name", "styled", "--path", str(style_root),
+                      "--no-extract"])
+        sdb = api.open_db(str(style_ws))
+        sm = api.get_manuscript(sdb)
+        bare = api.style_show(sdb, sm, "97-styled.md")
+        # Earlier blocks in this suite define guides of their own, so a
+        # fresh file is not lawless by the time this runs. Assert what the
+        # check is actually about — the house rule added below is absent
+        # beforehand — instead of depending on fixture order.
+        check("style_show on a fresh file carries none of the house law",
+              not any("second person" in e["statement"]
+                      for e in bare["elements"]), str(bare["elements"]))
+
+        api.define_style_guide(sdb, sm, "house")
+        api.add_style_law(sdb, sm, "register",
+                              "Address the reader in second person.",
+                              guide_name="house")
+        unattached = api.style_show(sdb, sm, "97-styled.md")
+        check("an unattached file inherits the root guide's law",
+              "Address the reader in second person."
+              in [e["statement"] for e in unattached["elements"]]
+              and "STYLE GUIDE for 97-styled.md" in unattached["rendered"]
+              and "[register] Address the reader in second person."
+              in unattached["rendered"])
+
+        api.define_style_guide(sdb, sm, "dialogue", parent="house")
+        api.attach_style(sdb, sm, "98-child.md", "dialogue")
+        guide_el = api.add_style_law(sdb, sm, "tone",
+                                         "Keep dialogue clipped.",
+                                         guide_name="dialogue")
+        attached = api.style_show(sdb, sm, "98-child.md")
+        check("an attached file inherits its guide's law plus its ancestors'",
+              {"Keep dialogue clipped.",
+               "Address the reader in second person."}
+              <= {e["statement"] for e in attached["elements"]})
+
+        api.add_style_law(sdb, sm, "tone",
+                              "Prefer terse fragments.", file="98-child.md",
+                              overrides=guide_el["id"])
+        overridden = api.style_show(sdb, sm, "98-child.md")
+        check("a file-local override displaces the guide element it names",
+              {e["statement"] for e in overridden["elements"]}
+              == {"Prefer terse fragments.",
+                  "Address the reader in second person."})
 
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp

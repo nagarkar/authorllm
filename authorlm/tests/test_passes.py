@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api, critique, passes, summaries as sums  # noqa: E402
+from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import loads  # noqa: E402
@@ -334,17 +334,45 @@ def main_test() -> None:
         check("strip_pending on the marked text gives back the pristine essay",
               th.strip_pending(marked)[0].strip() == ESSAY.strip())
 
+        print("critique write order (same-anchor insert before replace):")
+        # A replace of paragraph n wraps it as <<old>>{{new}}. Writing the
+        # replace first makes the subsequent insert locate `old` inside that
+        # wrapped form and plant {{insert}} between old and >>, corrupting
+        # the Doc. Inserts at the same anchor must precede replaces.
+        order = gdocs.critique_write_order([
+            {"id": "rep6", "proposed_old": "p6", "metadata":
+             json.dumps({"anchor_paragraph": 6})},
+            {"id": "ins5", "proposed_old": "", "metadata":
+             json.dumps({"anchor_paragraph": 5})},
+            {"id": "rep5", "proposed_old": "p5", "metadata":
+             json.dumps({"anchor_paragraph": 5})},
+            {"id": "ins4", "proposed_old": "", "metadata":
+             json.dumps({"anchor_paragraph": 4})},
+        ])
+        check("higher anchors first; inserts before replaces at same anchor",
+              [t["id"] for t in order] == ["rep6", "ins5", "rep5", "ins4"],
+              str([t["id"] for t in order]))
+
         print("resolution (author post-edits win):")
         for t in threads:
             if t["state"] == "accepted":
                 db.update("doc_threads", t["id"], {"state": "written"})
+        written = passes.staged_threads(db, mid, "alpha.md",
+                                        states=("written",))
         # The author edits the insertion's {{new}} half in the Doc.
         edited = marked.replace("{{A bridging paragraph, new.}}",
                                 "{{A bridging paragraph, in my voice.}}")
-        final, forms = passes.final_text_from_marked(edited)
-        check("final text = every form's current {{new}}",
+        # A foreign margin-thread form on the same tab must NOT be approved.
+        polluted = edited.replace(
+            "Third paragraph closes the essay.",
+            "<<Third paragraph closes the essay.>>{{Foreign margin rewrite.}}")
+        final, forms = passes.final_text_from_marked(polluted, written=written)
+        check("final text = critique forms' current {{new}}; foreign forms "
+              "stay OLD",
               "stated with care." in final
               and "A bridging paragraph, in my voice." in final
+              and "Third paragraph closes the essay." in final
+              and "Foreign margin rewrite" not in final
               and "<<" not in final and "{{" not in final)
         diffs = passes.record_resolution(db, mid, "alpha.md", forms)
         check("modified acceptance recorded as a proposal→final diff",
@@ -375,6 +403,32 @@ def main_test() -> None:
               "with old/new/why rendered",
               "decisively" in listing and "why: the ending should land" in listing
               and "stated with care" not in listing)
+
+        print("staging re-run replaces cleanly (no UNIQUE crash):")
+        again = passes.stage(db, manuscript, p, "alpha.md", result)
+        check("re-run stages without IntegrityError and resets to proposed",
+              len(again["staged"]) == 3
+              and all(t["state"] == "proposed" for t in again["staged"]))
+
+        # #24 x #26: #26 made stage() replace in place; #24 gates push_doc
+        # on threads still 'written'. A re-run that reset 'written' to
+        # 'proposed' would quietly lift that gate while the Doc still
+        # carries the form — the two fixes are individually right and
+        # leave this hole between them.
+        pending = passes.staged_threads(db, mid, "alpha.md")[0]
+        db.update("doc_threads", pending["id"], {"state": "written"})
+        try:
+            passes.stage(db, manuscript, p, "alpha.md", result)
+            refused = False
+        except ValueError as err:
+            refused = "already written" in str(err)
+        after = db.one("SELECT state FROM doc_threads WHERE id = ?",
+                       (pending["id"],))["state"]
+        check("re-staging over a form already written to the Doc is "
+              "refused, and the form stays written so the push gate holds",
+              refused and after == "written", f"refused={refused} state={after}")
+        db.update("doc_threads", pending["id"], {"state": "proposed"})
+
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli_main(["--workspace", str(ws), "critique", "show", "--query",

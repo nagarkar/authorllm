@@ -310,17 +310,15 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
     author's comment VERBATIM (clamp the quote, never the comment)."""
     from .db import ko_fields
 
+    seen = {r["comment_id"] for r in db.all(
+        "SELECT comment_id FROM doc_comments WHERE manuscript_id = ?",
+        (manuscript["id"],))}
     out = []
     for c in comments:
         quoted = (c.get("quotedFileContent") or {}).get("value") or ""
         relpath, heading = locate_quote(files, quoted)
         location = f"{relpath}#{heading}" if relpath and heading else relpath
-        existing = db.one(
-            "SELECT id FROM doc_comments "
-            "WHERE manuscript_id = ? AND comment_id = ?",
-            (manuscript["id"], c["id"]),
-        )
-        if existing is None:
+        if c["id"] not in seen:
             row = ko_fields("dc")
             row.update(
                 manuscript_id=manuscript["id"], comment_id=c["id"],
@@ -333,6 +331,7 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
                 state="ingested",
             )
             db.insert("doc_comments", row)
+            seen.add(c["id"])
         out.append({
             "comment_id": c["id"],
             "location": location or "(unattributed)",
@@ -929,6 +928,19 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
             documentId=master_id, body={"requests": requests}).execute()
 
 
+def critique_forms_pending(db: Database, manuscript_id: str,
+                           relpath: str) -> bool:
+    """True when the essay still has critique pending forms in the Doc
+    (threads in state 'written'). open_threads deliberately excludes
+    these — critique resolve owns them — so push must check separately."""
+    return db.one(
+        "SELECT id FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = 'critique' AND file = ? AND state = 'written' "
+        "LIMIT 1",
+        (manuscript_id, relpath),
+    ) is not None
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None) -> dict:
@@ -939,6 +951,16 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    # Critique pause: Doc holds <<old>>{{new}} / {{insert}} forms the
+    # author may have post-edited; local still has OLD. open_threads
+    # only sees author_comment rows, so without this gate a rebuild
+    # (or a surgical push that only guards '<<') would wipe the forms
+    # — including via session-start reconcile auto-push.
+    if critique_forms_pending(db, manuscript["id"], relpath):
+        raise LookupError(
+            f"'{relpath}' has critique pending forms in the Doc — "
+            f"run 'critique resolve {relpath}' before pushing "
+            "(a rebuild would wipe the author's post-edits)")
     if (threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
@@ -1583,7 +1605,19 @@ def reconcile(db: Database, manuscript: dict, service,
     for relpath in mapped:
         entry = links[relpath]
         try:
-            doc_text = normalize_markdown(sections.get(relpath, ""))
+            # Missing from the export ≠ empty tab. `sections.get(..., "")`
+            # treated a deleted/renamed tab as Doc-cleared content, so a
+            # local file still matching pushed_hash was auto-pulled to
+            # empty — session-start data loss (pull_doc already guards
+            # with membership; prompts below do too).
+            if relpath not in sections:
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab missing from the Doc export — local "
+                             "file left untouched; the next 'doc push' "
+                             "recreates the tab"})
+                continue
+            doc_text = normalize_markdown(sections[relpath])
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = threads_mod.strip_pending(doc_text)
@@ -1963,7 +1997,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
     insertions only), style it like track-changes, post the prefixed
     reply, and record the thread. The prose itself was drafted in chat;
     this is the state machine's write."""
-    from .threads import PREFIX, create_thread, get_thread, render_pending
+    from .threads import (PREFIX, create_thread, get_thread,
+                          render_pending)
 
     bridge = bridge or manuscript_bridge(manuscript)
     mid = manuscript["id"]
@@ -1975,6 +2010,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         raise LookupError(f"no ingested comment '{comment_id}' — pull first")
     if get_thread(db, mid, comment_id):
         raise ValueError("this comment already has a thread")
+    # Refuse delimiter-bearing prose before any Doc edit: {{…}} closes at
+    # the first `}}`, so nested braces would truncate and corrupt.
     relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
     if not relpath:
         raise LookupError("the comment's file could not be attributed — "
@@ -2056,6 +2093,25 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     ]
 
 
+def critique_write_order(threads: list[dict]) -> list[dict]:
+    """Surgical-write order for accepted critique threads: higher
+    anchors first (so earlier indices stay valid); at the same
+    anchor, inserts BEFORE replaces.
+
+    Replacing paragraph n wraps it as <<old>>{{new}}. An insert after
+    n then locates the pristine paragraph text via substring search —
+    which matches inside the wrapped form and plants {{insert}} between
+    `old` and `>>`, corrupting the pending grammar. Inserts must land
+    first while the anchor text is still verbatim."""
+    def anchor_of(t):
+        return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
+
+    return sorted(
+        threads,
+        key=lambda t: (-anchor_of(t), 0 if t["proposed_old"] == "" else 1),
+    )
+
+
 def critique_diff_write(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
@@ -2078,20 +2134,11 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = [t for t in threads if t["state"] == "accepted"]
-
-    def anchor_of(t):
-        return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
-
-    # Last-to-first, inserts before replaces at the same anchor (an insert
-    # after paragraph n lands after n's tail; marking n's own span first
-    # would shift that tail).
-    accepted.sort(key=lambda t: (anchor_of(t),
-                                 0 if t["proposed_old"] == "" else 1),
-                  reverse=True)
+    accepted = critique_write_order(
+        [t for t in threads if t["state"] == "accepted"])
     written, failed = [], []
     for t in accepted:
-        n = anchor_of(t)
+        n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
                 span = _locate_in_tab(docs_service, master_id, tab_id,
@@ -2131,10 +2178,46 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
             "url": tab_url(master_id, tab_id)}
 
 
+def _tab_paragraph_texts(docs_service, master_id: str,
+                         tab_id: str) -> list[str]:
+    """Non-empty paragraph strings from a tab, Docs trailing newlines
+    stripped. Blank separator paragraphs (transplant skips them on push)
+    are omitted — callers that need markdown structure must rejoin with
+    `\\n\\n`."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    out: list[str] = []
+
+    def walk(tabs):
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    paragraph = item.get("paragraph")
+                    if not paragraph:
+                        continue
+                    text = "".join(
+                        el.get("textRun", {}).get("content", "")
+                        for el in paragraph.get("elements", [])
+                        if "textRun" in el)
+                    text = text.rstrip("\n")
+                    if text.strip():
+                        out.append(text)
+            walk(tab.get("childTabs", []))
+    walk(doc.get("tabs", []))
+    return out
+
+
 def critique_tab_text(db: Database, manuscript: dict, file: str,
                       docs_service, bridge: DocBridge | None = None) -> str:
-    """The tab's current text, verbatim (the resolve verb reads the
-    author's post-edits from the pending forms here)."""
+    """The tab's current text as markdown paragraphs (the resolve verb
+    reads the author's post-edits from the pending forms here).
+
+    Docs API runs end each paragraph with a single `\\n` and push skips
+    blank separator paragraphs (to avoid double Doc spacing). Joining
+    runs raw would collapse every essay into one `_paragraphs` blob on
+    resolve — rejoin non-empty paragraphs with `\\n\\n` so structure
+    survives the round trip (markdown export does the same on pull)."""
     bridge = bridge or manuscript_bridge(manuscript)
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
@@ -2142,7 +2225,8 @@ def critique_tab_text(db: Database, manuscript: dict, file: str,
     tab_id = (links.get(file) or {}).get("tab_id")
     if not (master_id and tab_id):
         raise LookupError(f"'{file}' has no tab in the master Doc")
-    return "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
+    paras = _tab_paragraph_texts(docs_service, master_id, tab_id)
+    return "\n\n".join(paras) + ("\n" if paras else "")
 
 
 def _replace_pending(db: Database, manuscript: dict, thread: dict,
@@ -2504,8 +2588,12 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
         if canonical == local_paras:
+            # Same canonical bytes as push_doc / three_way / reconcile
+            # (normalize_markdown's trailing newline). Hashing the
+            # join(paras) form made only-local edits look like both
+            # sides moved → false CONFLICT → --force data loss.
             entry["pushed_hash"] = _hashlib.sha256(
-                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+                local_md.encode()).hexdigest()[:16]
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
@@ -2526,7 +2614,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             if tag == "equal":
                 continue
             ops += 1
-            if any("<<" in tab_paras[i] for i in range(i1, i2)):
+            # Replaces use <<old>>{{new}}; critique insertions are
+            # {{new}} alone — both must block overlapping surgical edits.
+            if any(("<<" in tab_paras[i] or "{{" in tab_paras[i])
+                   for i in range(i1, i2)):
                 raise LookupError(
                     "diff push: the edit overlaps a pending margin "
                     "thread — settle the thread first "
@@ -2587,7 +2678,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 apply_tab_spacing(docs_service, master_id, tab_id,
                                   doc_spacing(manuscript))
             entry["pushed_hash"] = _hashlib.sha256(
-                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+                local_md.encode()).hexdigest()[:16]
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)

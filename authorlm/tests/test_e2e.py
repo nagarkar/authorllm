@@ -273,6 +273,9 @@ def scenario_editorial_loop(root: Path) -> None:
         _cdb, _cmid, "Trim throat-clearing openers.", source="test")
     canon = _cbel.seed_candidate_belief(
         _cdb, _cmid, "Cut redundant opening phrases.", source="test")
+    out = run(ws, "belief", "merge", canon["id"], canon["id"], expect_exit=True)
+    check("merging a belief into itself is rejected",
+          "same belief" in out, out)
     out = run(ws, "belief", "merge", dup["id"], canon["id"])
     check("belief merge folds duplicate into canonical",
           'Merged "Trim throat-clearing openers."' in out and "2+ / 0-" in out,
@@ -1062,6 +1065,25 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(wg, "collect")
         check("_drafts is invisible to observation", "No changes" in out, out)
 
+        # Prerequisite ordering between two UNREALIZED concepts — the plan's
+        # core "what to write first" promise. The one existing plan scenario
+        # above only links a realized concept to an unrealized one, which
+        # never populates write_first (realized nodes are filtered out
+        # before prerequisites_of runs).
+        run(wg, "concept", "add", "Epsilon")
+        run(wg, "concept", "add", "Zeta")
+        run(wg, "concept", "link", "Epsilon", "leads_to", "Zeta")
+        out = run(wg, "plan")
+        check("dependent concept names its unrealized prerequisite",
+              "write first: Epsilon" in out, out)
+        lines = out.splitlines()
+        epsilon_at = next(i for i, l in enumerate(lines)
+                          if "Introduce 'Epsilon'" in l)
+        zeta_at = next(i for i, l in enumerate(lines)
+                       if "Introduce 'Zeta'" in l)
+        check("the prerequisite is listed ahead of its dependent",
+              epsilon_at < zeta_at, out)
+
         # --- hierarchical extraction under a small cap ---
         write(wg / ".authorlm" / "config.toml",
               stub_config + "extraction_max_chars = 60\n")
@@ -1137,6 +1159,14 @@ def scenario_write_loop(root: Path) -> None:
         intent_id = out.split("[")[1].split("]")[0]
 
         # --- gates -------------------------------------------------------
+        out = run(ws, "intent", "declare", "Abandoned side-quest")
+        abandoned_id = out.split("[")[1].split("]")[0]
+        run(ws, "intent", "abandon", abandoned_id, "--outcome", "changed plans")
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", abandoned_id, expect_exit=True)
+        check("start blocked on an intent that is not active",
+              "not active" in out, out)
+
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id, expect_exit=True)
         check("start blocked without a style attachment",
@@ -1176,6 +1206,12 @@ def scenario_write_loop(root: Path) -> None:
               "no ratified beat plan" in out, out)
         out = run_stdin(ws, BEAT_PLAN, "write", "plan")
         check("plan ratified with three beats", "3 beat(s) ahead" in out, out)
+        out = run_stdin(ws, "[]", "write", "plan", "--replace", expect_exit=True)
+        check("empty beat list rejected",
+              "non-empty JSON array" in out, out)
+        out = run_stdin(ws, "[1, 2]", "write", "plan", "--replace", expect_exit=True)
+        check("non-object beat spec rejected",
+              "must be a JSON object" in out, out)
         out = run_stdin(ws, BEAT_PLAN, "write", "plan", expect_exit=True)
         check("re-planning without --replace blocked",
               "pass --replace" in out, out)
@@ -1675,6 +1711,14 @@ def scenario_alias_and_syllogism(root: Path) -> None:
     check("merged name is an alias of the canonical",
           "aliases: The Becoming" in out, out)
     check("duplicate's edges now live on the canonical", "Stasis" in out, out)
+    out = run(ws, "concept", "merge", "No Such Canonical", "The Becoming",
+              expect_exit=True)
+    check("merge refuses an unknown canonical name",
+          "no concept named 'No Such Canonical'" in out, out)
+    out = run(ws, "concept", "merge", "Becoming", "No Such Duplicate",
+              expect_exit=True)
+    check("merge refuses an unknown duplicate name",
+          "no concept named 'No Such Duplicate'" in out, out)
 
     # The [a] key in edge triage: an inferred edge between two names the
     # author declares identical merges them and settles the edge.
@@ -1804,6 +1848,20 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     out = run(ws, "export-obsidian")
     check("re-export drops retired concepts",
           not (ms / "_concepts" / "Trajectory.md").exists(), out)
+
+    # Two names that sanitize to the same note filename must not silently
+    # overwrite each other's exported note.
+    run(ws, "concept", "add", "Choice/Freedom")
+    run(ws, "concept", "add", "Choice:Freedom")
+    out = run(ws, "export-obsidian")
+    stub_files = sorted(p.name for p in (ms / "_concepts").glob("Choice-Freedom*.md"))
+    check("colliding note names produce two distinct files",
+          len(stub_files) == 2, stub_files)
+    contents = {(ms / "_concepts" / f).read_text() for f in stub_files}
+    check("both colliding notes keep their own concept name",
+          any("# Choice/Freedom" in c for c in contents)
+          and any("# Choice:Freedom" in c for c in contents),
+          contents)
 
     # --- concept edit updates notes/kind ---
     out = run(ws, "concept", "edit", "Field", "--notes", "the horizon of possible moves")
@@ -2064,6 +2122,12 @@ def scenario_style(root: Path) -> None:
     out = run(ws, "style", "show", "01-sermon.md")
     check("retired element leaves every composition",
           "Challenging" not in out, out)
+    out = run(ws, "style", "retire", tone_id, expect_exit=True)
+    check("retiring an already-retired element fails loudly",
+          "no active style element matching" in out, out)
+    out = run(ws, "style", "retire", "notaprefix", expect_exit=True)
+    check("retiring an unknown prefix fails loudly",
+          "no active style element matching" in out, out)
 
     # Aliases are reversible: --remove withdraws one without touching others.
     run(ws, "concept", "add", "Field of Choice")
