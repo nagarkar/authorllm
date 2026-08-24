@@ -32,6 +32,10 @@ no evidence, it abstains.
   `authorlm/publication/` Pandoc profiles (shared structure filter, LaTeX PDF
   typography, and EPUB CSS), while manuscript export values remain in
   `_exports/settings.toml`.
+  Author and copyright owner are canonical manuscript metadata, set with
+  `authorlm manuscript set`. PDF export is a confidential review copy by
+  default (notice page, footer, and watermark); `--print-ready` explicitly
+  produces the clean production PDF.
 
 ## Install / build
 
@@ -73,7 +77,8 @@ Register your manuscript once, then work in the interactive shell with your
 editor (e.g. Obsidian, opened on the manuscript folder) alongside:
 
 ```bash
-authorlm init --name my-book --path manuscripts/my-book
+authorlm init --name my-book --path manuscripts/my-book \
+  --author "Your Byline" --copyright-owner "Your Legal Name"
 authorlm shell
 ```
 
@@ -153,7 +158,9 @@ outstanding questions.
 | `shell` | Interactive authoring session: briefing, prefix-free commands, auto-collect watcher (`--no-watch`, `--debounce N`) |
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
-| `init --name N --path DIR` | Register a manuscript directory (`.md`/`.txt`); with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
+| `init --name N --path DIR [--author A --copyright-owner O]` | Register a manuscript directory (`.md`/`.txt`); with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
+| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`); the CLI, MCP tools, and exporters share this record |
+| `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
 | `extract [file…] [--full] [--edges-only]` | LLM-extract concepts and relationships — incremental by default (only files changed since last extraction); `--edges-only` re-mines relationships among existing concepts without touching the concept inventory |
 | `session start` / `session end` | Authoring session; opens with the learning briefing, closes with learning velocity |

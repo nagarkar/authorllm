@@ -12,6 +12,7 @@ freely; the next export recreates it.
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 from .db import Database
@@ -106,7 +107,6 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
 SETTINGS_KEYS = {
     "title": "book title (metadata + output filename); default: the "
              "manuscript name",
-    "author": "author byline (docx/epub metadata)",
     "variant": "illustration handling: images (embed picked candidates) | "
                "slots (keep [Illustration: …] tags as production notes) | "
                "stripped (remove tags — audio-clean)",
@@ -119,7 +119,7 @@ SETTINGS_KEYS = {
     "pdf_font": "main font for pdf export (a wide-coverage face such as "
                 "'STIX Two Text'); empty = pandoc/LaTeX default",
 }
-_SETTINGS_DEFAULTS = {"title": "", "author": "", "variant": "images",
+_SETTINGS_DEFAULTS = {"title": "", "variant": "images",
                       "language": "en", "reference_docx": "",
                       "cover_image": "", "pdf_engine": "xelatex",
                       "pdf_font": ""}
@@ -238,7 +238,8 @@ def selection_slug(order: list[str]) -> str:
 
 def export_published(db: Database, manuscript: dict, fmt: str,
                      variant: str | None = None,
-                     only: list[str] | None = None) -> dict:
+                     only: list[str] | None = None,
+                     print_ready: bool = False) -> dict:
     """Publishing export: write the publishable markdown to _exports/
     and, for docx/epub/pdf, convert it locally with pandoc — images
     embed from _illustrations/, no Doc or Drive involved.
@@ -251,6 +252,16 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     settings = load_settings(manuscript)
     variant = variant or settings["variant"] or "images"
     title = settings["title"] or manuscript["name"]
+    review_copy = fmt == "pdf" and not print_ready
+    author = manuscript.get("author", "").strip()
+    copyright_owner = manuscript.get("copyright_owner", "").strip()
+    if review_copy and (not author or not copyright_owner):
+        missing = [name for name, value in (
+            ("author", author), ("copyright_owner", copyright_owner)
+        ) if not value]
+        raise RuntimeError(
+            "review PDF needs manuscript metadata: " + ", ".join(missing)
+            + " — set it with 'authorlm manuscript set'")
     text, order, warnings = publish_markdown(
         manuscript, variant, only,
         semantic_sections=(fmt in ("pdf", "epub")),
@@ -266,6 +277,8 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     md_path.write_text(text, encoding="utf-8")
     result = {"markdown": str(md_path), "variant": variant,
               "files": order, "warnings": warnings}
+    if fmt == "pdf":
+        result["mode"] = "review" if review_copy else "print"
     if fmt == "md":
         return result
 
@@ -300,11 +313,16 @@ def export_published(db: Database, manuscript: dict, fmt: str,
             command += ["--pdf-engine", settings["pdf_engine"]]
         if settings["pdf_font"]:
             command += ["-V", f"mainfont={settings['pdf_font']}"]
+        if review_copy:
+            command += ["--metadata", "authorlm-review-copy=true",
+                        "--metadata", f"author={author}",
+                        "--metadata", f"copyright-owner={copyright_owner}",
+                        "--metadata", f"copyright-year={date.today().year}"]
     if fmt == "epub":
         command += ["--metadata", f"title={title}",
                     "--metadata", f"lang={settings['language'] or 'en'}"]
-        if settings["author"]:
-            command += ["--metadata", f"author={settings['author']}"]
+        if author:
+            command += ["--metadata", f"author={author}"]
         if settings["cover_image"]:
             cover = Path(settings["cover_image"])
             if not cover.is_absolute():

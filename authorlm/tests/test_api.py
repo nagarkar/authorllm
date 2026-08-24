@@ -136,12 +136,32 @@ def main_test() -> None:
         import io
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms)])
+                      "--path", str(ms), "--author", "Ada Author",
+                      "--copyright-owner", "Ada Author LLC"])
 
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         check("get_manuscript resolves the single manuscript",
               manuscript["name"] == "book")
+        check("init records publication identity on the manuscript",
+              manuscript["author"] == "Ada Author"
+              and manuscript["copyright_owner"] == "Ada Author LLC")
+        updated_identity = api.update_manuscript_metadata(
+            db, manuscript, author="A. Author",
+            copyright_owner="Author House LLC")
+        check("publication identity updates through the application API",
+              updated_identity["author"] == "A. Author"
+              and updated_identity["copyright_owner"] == "Author House LLC"
+              and api.list_manuscripts(db)[0]["author"] == "A. Author")
+        identity_out = io.StringIO()
+        with contextlib.redirect_stdout(identity_out):
+            cli_main(["--workspace", str(ws), "manuscript", "set",
+                      "--author", "Author Penname"])
+        manuscript = api.get_manuscript(db)
+        check("manuscript identity is editable through the CLI",
+              manuscript["author"] == "Author Penname"
+              and manuscript["copyright_owner"] == "Author House LLC"
+              and "Author Penname" in identity_out.getvalue())
 
         # --- export settings: quotes/backslashes round-trip through TOML ---
         from authorlm.export import load_settings, set_setting
@@ -1678,12 +1698,17 @@ def main_test() -> None:
               "[Illustration: a winding path | caption: The path]"
               in slots_text)
 
-        set_setting(manuscript, "author", "Chitta Darshana")
         set_setting(manuscript, "variant", "slots")
         check("export settings persist in _exports/settings.toml",
-              load_settings(manuscript)["author"] == "Chitta Darshana"
-              and load_settings(manuscript)["variant"] == "slots"
+              load_settings(manuscript)["variant"] == "slots"
               and (ms / "_exports" / "settings.toml").exists())
+        try:
+            set_setting(manuscript, "author", "Legacy Byline")
+            legacy_author_refused = False
+        except LookupError:
+            legacy_author_refused = True
+        check("author identity cannot drift into export settings",
+              legacy_author_refused)
         try:
             set_setting(manuscript, "nope", "x")
             refused = False
@@ -1710,6 +1735,17 @@ def main_test() -> None:
                 db, manuscript, fmt="pdf", variant="images")
         pdf_command = pandoc_run.call_args.args[0]
         pdf_markdown = Path(pdf_result["markdown"]).read_text()
+        pdf_metadata = [pdf_command[i + 1]
+                        for i, arg in enumerate(pdf_command[:-1])
+                        if arg == "--metadata"]
+        check("PDF export defaults to a confidential review copy",
+              pdf_result["mode"] == "review"
+              and "authorlm-review-copy=true" in pdf_metadata
+              and "author=Author Penname" in pdf_metadata
+              and "copyright-owner=Author House LLC" in pdf_metadata
+              and any(item.startswith("copyright-year=")
+                      for item in pdf_metadata),
+              str(pdf_command))
         check("PDF export starts the whole essay before its epigraph",
               "::: {.authorlm-file .authorlm-essay}\n"
               "An opening epigraph.\n\n# Intro"
@@ -1728,8 +1764,46 @@ def main_test() -> None:
               [Path(path).name for path in defaults]
               == ["common.yaml", "pdf.yaml"], str(pdf_command))
 
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as print_run):
+            print_result = export_published(
+                db, manuscript, fmt="pdf", variant="images",
+                print_ready=True)
+        print_command = print_run.call_args.args[0]
+        print_metadata = [print_command[i + 1]
+                          for i, arg in enumerate(print_command[:-1])
+                          if arg == "--metadata"]
+        check("print-ready PDF suppresses every review-copy instruction",
+              print_result["mode"] == "print"
+              and not any(item.startswith("authorlm-review-copy=")
+                          for item in print_metadata), str(print_command))
+        from authorlm.cli import build_parser as _build_parser
+        print_args = _build_parser().parse_args(
+            ["export", "pdf", "--print-ready"])
+        check("CLI exposes the explicit print-ready escape hatch",
+              print_args.print_ready is True)
+
         import shutil as _shutil
         if _shutil.which("pandoc"):
+            import subprocess as _subprocess
+            review_filter = (Path(__file__).resolve().parent.parent
+                             / "authorlm" / "publication" / "review.lua")
+            filtered = _subprocess.run(
+                ["pandoc", pdf_result["markdown"], "--from",
+                 "markdown+smart+footnotes+fenced_divs", "--lua-filter",
+                 str(review_filter), "--metadata",
+                 "authorlm-review-copy=true", "--metadata",
+                 "author=Author Penname", "--metadata",
+                 "copyright-owner=Author House LLC", "-t", "plain"],
+                capture_output=True, text=True)
+            check("review filter inserts the legal notice ahead of the title",
+                  filtered.returncode == 0
+                  and filtered.stdout.index(
+                      "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT")
+                  < filtered.stdout.index("The Book")
+                  and "Author House LLC" in filtered.stdout,
+                  filtered.stderr or filtered.stdout[:1000])
             published = export_published(db, manuscript, fmt="docx",
                                          variant="images")
             docx = Path(published["docx"])
@@ -3599,7 +3673,9 @@ def main_test() -> None:
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
         expected = {
-            "list_manuscripts", "resolve_file", "get_status", "declare_intent",
+            "list_manuscripts", "get_manuscript_metadata",
+            "set_manuscript_metadata", "resolve_file", "get_status",
+            "declare_intent",
             "list_intents", "complete_intent", "abandon_intent",
             "collect_revision", "get_guidance", "review_suggestion",
             "get_briefing", "get_concepts", "add_concept", "link_concepts",

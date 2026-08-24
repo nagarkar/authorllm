@@ -7,3 +7,5 @@ variables:
   papersize: letter
 include-in-header:
   - pdf-header.tex
+filters:
+  - review.lua

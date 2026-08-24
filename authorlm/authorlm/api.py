@@ -40,7 +40,8 @@ from .revisions import (
 
 __all__ = [
     "open_db", "load_config", "make_llm",
-    "list_manuscripts", "get_manuscript", "resolve_file",
+    "list_manuscripts", "get_manuscript", "manuscript_metadata",
+    "update_manuscript_metadata", "resolve_file",
     "status", "ensure_session", "close_session", "expire_idle_session",
     "declare_intent", "intent_preview", "complete_intent", "abandon_intent",
     "list_intents", "collect", "guide", "review", "get_briefing",
@@ -84,7 +85,7 @@ def make_llm(workspace: str | None = None) -> LLMClient:
 
 def list_manuscripts(db: Database) -> list[dict]:
     return [
-        {"id": r["id"], "name": r["name"], "path": r["path"]}
+        manuscript_metadata(dict(r))
         for r in db.all("SELECT * FROM manuscripts ORDER BY name")
     ]
 
@@ -102,6 +103,33 @@ def get_manuscript(db: Database, name: str | None = None) -> dict:
         names = ", ".join(r["name"] for r in rows)
         raise LookupError(f"multiple manuscripts ({names}) — specify one")
     return dict(rows[0])
+
+
+def manuscript_metadata(manuscript: dict) -> dict:
+    """The manuscript identity shared by publication and every surface."""
+    return {
+        "id": manuscript["id"],
+        "name": manuscript["name"],
+        "path": manuscript["path"],
+        "author": manuscript.get("author", ""),
+        "copyright_owner": manuscript.get("copyright_owner", ""),
+    }
+
+
+def update_manuscript_metadata(db: Database, manuscript: dict,
+                               author: str | None = None,
+                               copyright_owner: str | None = None) -> dict:
+    """Update publication identity without exposing the internal KO metadata."""
+    changes = {}
+    if author is not None:
+        changes["author"] = author.strip()
+    if copyright_owner is not None:
+        changes["copyright_owner"] = copyright_owner.strip()
+    if not changes:
+        raise ValueError("provide author and/or copyright_owner")
+    db.update("manuscripts", manuscript["id"], changes)
+    manuscript.update(changes)
+    return manuscript_metadata(manuscript)
 
 
 def resolve_file(db: Database, path: str) -> dict | None:
@@ -139,7 +167,7 @@ def status(db: Database, manuscript: dict) -> dict:
         )
     }
     return {
-        "manuscript": {"name": manuscript["name"], "path": manuscript["path"]},
+        "manuscript": manuscript_metadata(manuscript),
         "session": dict(session) if session else None,
         "counts": counts,
     }

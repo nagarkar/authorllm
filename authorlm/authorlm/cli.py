@@ -171,13 +171,35 @@ def cmd_init(args):
     if existing:
         sys.exit(f"error: manuscript '{args.name}' already registered.")
     row = ko_fields("ms")
-    row.update(name=args.name, path=str(path))
+    row.update(name=args.name, path=str(path),
+               author=args.author.strip(),
+               copyright_owner=args.copyright_owner.strip())
     db.insert("manuscripts", row)
     print(f"Registered manuscript '{args.name}' at {path}")
     llm = LLMClient(_load_config(args))
     if llm.enabled and not args.no_extract:
         _run_extraction(db, row, llm)
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
+
+
+def cmd_manuscript(args):
+    """Show or update the publication identity of a manuscript."""
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    if args.action == "set":
+        try:
+            identity = api.update_manuscript_metadata(
+                db, manuscript, author=args.author,
+                copyright_owner=args.copyright_owner)
+        except ValueError as err:
+            raise SystemExit(f"error: {err}")
+    else:
+        identity = api.manuscript_metadata(manuscript)
+    print(f"Manuscript: {identity['name']}")
+    print(f"  path: {identity['path']}")
+    print(f"  author: {identity['author'] or '(not set)'}")
+    print("  copyright_owner: "
+          f"{identity['copyright_owner'] or '(not set)'}")
 
 
 # Every table that carries manuscript-scoped rows, children first.
@@ -2792,6 +2814,9 @@ def cmd_export(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
 
+    if args.print_ready and args.action != "pdf":
+        raise SystemExit("error: --print-ready is only valid for PDF exports")
+
     if args.action == "show":
         settings = ex.load_settings(manuscript)
         print(f"Export settings ({ex._settings_path(manuscript)}):")
@@ -2813,10 +2838,13 @@ def cmd_export(args):
                     for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
                                      variant=args.variant,
-                                     only=chapters or None)
+                                     only=chapters or None,
+                                     print_ready=args.print_ready)
     except (RuntimeError, LookupError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
+    if args.action == "pdf":
+        print(ui.dim(f"  mode: {result['mode']}"))
     if chapters:
         print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
@@ -4510,9 +4538,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("init", help="register a manuscript directory")
     p.add_argument("--name", required=True)
     p.add_argument("--path", required=True)
+    p.add_argument("--author", default="",
+                   help="author or pen name used for publication")
+    p.add_argument("--copyright-owner", default="",
+                   help="legal or organizational copyright owner")
     p.add_argument("--no-extract", action="store_true",
                    help="skip automatic LLM concept extraction")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser(
+        "manuscript", help="show or set manuscript publication metadata")
+    p.add_argument("action", choices=["show", "set"])
+    p.add_argument("--author", default=None,
+                   help="author or pen name used for publication")
+    p.add_argument("--copyright-owner", default=None,
+                   help="legal or organizational copyright owner")
+    p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")
     p.add_argument("name", nargs="?", help="manuscript name to remove (or use -m)")
@@ -4739,6 +4780,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chapters", action="append", metavar="FILE,FILE",
                    help="build only these chapters and everything filed "
                         "under them in the TOC (repeatable; .md optional)")
+    p.add_argument("--print-ready", action="store_true",
+                   help="PDF only: omit the default confidential-review "
+                        "notice page, footer, and watermark")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(

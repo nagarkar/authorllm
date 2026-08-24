@@ -248,6 +248,21 @@ Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
+## Publication identity and review PDFs
+Author and copyright owner are canonical manuscript metadata, never export
+settings or inferred editorial beliefs. Inspect them with
+`get_manuscript_metadata` (or `authorlm manuscript show`) and change them
+only from the author's explicit words with `set_manuscript_metadata` (or
+`authorlm manuscript set --author "…" --copyright-owner "…"`). Never guess a
+legal owner from a pen name, Git identity, or manuscript prose.
+
+`authorlm export pdf` is a confidential review artifact by default: it gets a
+notice page before the title, a small footer, and a watermark on every page.
+Use `authorlm export pdf --print-ready` only when the author explicitly says
+the PDF is for print or production; that switch removes all three review
+markers. EPUB and DOCX retain publication identity metadata but do not use
+page-dependent PDF review decoration.
+
 ## Google Docs bridge (CLI, not MCP — by design)
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can
 open a browser). When the author asks to edit in / sync with Google Docs,

@@ -101,9 +101,33 @@ def _guard(fn) -> dict[str, Any]:
 
 @mcp.tool()
 def list_manuscripts() -> dict:
-    """List every registered manuscript (name and directory). Use this to
-    discover what exists or to resolve ambiguity before other calls."""
+    """List every registered manuscript with its publication identity and
+    directory. Use this to discover what exists or resolve ambiguity."""
     return _guard(lambda: api.list_manuscripts(_db()))
+
+
+@mcp.tool()
+def get_manuscript_metadata(manuscript: str | None = None) -> dict:
+    """Get the canonical author and copyright-owner metadata used by
+    publication exports for the selected manuscript."""
+    def run():
+        db = _db()
+        return api.manuscript_metadata(_manuscript(db, manuscript))
+    return _guard(run)
+
+
+@mcp.tool()
+def set_manuscript_metadata(author: str | None = None,
+                            copyright_owner: str | None = None,
+                            manuscript: str | None = None) -> dict:
+    """Set the canonical publication author and/or copyright owner. Values
+    are stored on the manuscript record and shared by every surface."""
+    def run():
+        db = _db()
+        selected = _manuscript(db, manuscript)
+        return api.update_manuscript_metadata(
+            db, selected, author=author, copyright_owner=copyright_owner)
+    return _guard(run)
 
 
 @mcp.tool()
