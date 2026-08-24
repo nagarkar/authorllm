@@ -66,15 +66,36 @@ def is_ours(content: str) -> bool:
     return content.lstrip().startswith(PREFIX)
 
 
+_RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
+
+
+def assert_no_pending_markers(old: str, new: str) -> None:
+    """Reject proposal text that would break the <<old>>{{new}} grammar.
+    Non-greedy parsers and find('}}') close at the first delimiter, so a
+    new half containing `}}` (e.g. nested braces) truncates the span and
+    corrupts both pull-strip and approve."""
+    for label, part in (("old", old), ("new", new)):
+        for marker in _RESERVED_MARKERS:
+            if marker in part:
+                raise ValueError(
+                    f"proposal {label} text cannot contain {marker!r} "
+                    "(reserved by the pending-change grammar)")
+
+
 def render_pending(old: str, new: str) -> str:
     """The pending form for a span. An empty `old` renders the insertion
     form ({{new}} only) — the critique pass's new-paragraph proposals."""
+    assert_no_pending_markers(old, new)
     if old == "":
         return render_insertion(new)
     return f"<<{old}>>{{{{{new}}}}}"
 
 
 def render_insertion(new: str) -> str:
+    # The insertion form is the same reserved grammar, and the critique
+    # pass reaches it directly — guarding only render_pending would leave
+    # the new-paragraph path unchecked.
+    assert_no_pending_markers("", new)
     return f"{{{{{new}}}}}"
 
 

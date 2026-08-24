@@ -1200,6 +1200,23 @@ def main_test() -> None:
               and "<<Doc went another way.>>" in tab_after
               and not stub.state["comments"]["c-1"]["resolved"], tab_after)
 
+        # Local-only edit after surgical push must be local_ahead — not a
+        # false CONFLICT. diff_push once hashed join(paras) without the
+        # trailing newline normalize_markdown adds; three_way then saw
+        # both sides off the base and invited --force data loss.
+        pre_local = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").write_text(
+            pre_local + "\nLocal after surgical push.\n")
+        after_surg = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        check("local-only edit after surgical push is local_ahead, "
+              "not conflict",
+              "01-choice.md" in after_surg.get("local_ahead", [])
+              and "01-choice.md" not in after_surg.get("conflicts", [])
+              and "Local after surgical push."
+              in (ms / "01-choice.md").read_text(),
+              str(after_surg))
+        (ms / "01-choice.md").write_text(pre_local)
+
         original_local = (ms / "01-choice.md").read_text()
         (ms / "01-choice.md").write_text(original_local.replace(
             "Doc went another way.", "Doc went a third way."))
@@ -1231,6 +1248,22 @@ def main_test() -> None:
         stripped_exp = th.strip_pending(normalize_markdown(exported))
         check("export-escaped pending spans strip to canonical old",
               stripped_exp == ("the old way.\n", []), str(stripped_exp))
+
+        # Nested braces in proposal text would truncate at the first }} —
+        # refuse before any Doc write.
+        try:
+            th.assert_no_pending_markers("safe old", "f(x)={{a}}")
+            check("propose refuses delimiter-bearing new text", False)
+        except ValueError as err:
+            check("propose refuses delimiter-bearing new text",
+                  "pending-change grammar" in str(err)
+                  and ("{{" in str(err) or "}}" in str(err)), str(err))
+        try:
+            th.render_pending("<<already marked>>", "new")
+            check("render_pending refuses delimiter-bearing old text", False)
+        except ValueError as err:
+            check("render_pending refuses delimiter-bearing old text",
+                  "<<" in str(err), str(err))
 
         # Approve with the author's in-place edit: modified acceptance.
         stub.author_reply("c-1", "AuthorLM: proposed — courtesy")

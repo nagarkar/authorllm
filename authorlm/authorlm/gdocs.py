@@ -1979,7 +1979,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
     insertions only), style it like track-changes, post the prefixed
     reply, and record the thread. The prose itself was drafted in chat;
     this is the state machine's write."""
-    from .threads import PREFIX, create_thread, get_thread, render_pending
+    from .threads import (PREFIX, create_thread, get_thread,
+                          render_pending)
 
     bridge = bridge or manuscript_bridge(manuscript)
     mid = manuscript["id"]
@@ -1991,6 +1992,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         raise LookupError(f"no ingested comment '{comment_id}' — pull first")
     if get_thread(db, mid, comment_id):
         raise ValueError("this comment already has a thread")
+    # Refuse delimiter-bearing prose before any Doc edit: {{…}} closes at
+    # the first `}}`, so nested braces would truncate and corrupt.
     relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
     if not relpath:
         raise LookupError("the comment's file could not be attributed — "
@@ -2567,8 +2570,12 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
         if canonical == local_paras:
+            # Same canonical bytes as push_doc / three_way / reconcile
+            # (normalize_markdown's trailing newline). Hashing the
+            # join(paras) form made only-local edits look like both
+            # sides moved → false CONFLICT → --force data loss.
             entry["pushed_hash"] = _hashlib.sha256(
-                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+                local_md.encode()).hexdigest()[:16]
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
@@ -2653,7 +2660,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 apply_tab_spacing(docs_service, master_id, tab_id,
                                   doc_spacing(manuscript))
             entry["pushed_hash"] = _hashlib.sha256(
-                "\n\n".join(local_paras).encode()).hexdigest()[:16]
+                local_md.encode()).hexdigest()[:16]
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
