@@ -28,7 +28,10 @@ no evidence, it abstains.
   `pdflatex` default cannot set the manuscript's unicode.
   `--chapters ascending,indic` builds just those chapters and everything
   filed under them in the TOC, into their own files alongside the
-  whole-book export.
+  whole-book export. PDF and EPUB presentation is declared in the packaged
+  `authorlm/publication/` Pandoc profiles (shared structure filter, LaTeX PDF
+  typography, and EPUB CSS), while manuscript export values remain in
+  `_exports/settings.toml`.
 
 ## Install / build
 

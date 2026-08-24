@@ -35,6 +35,7 @@ packages = ["authorlm"]
 [tool.setuptools.package-data]
 authorlm = [
     "prompts/*.md",
+    "publication/*",
     "triage_profiles/*.json",
     "triage_dist/*.html",
 ]

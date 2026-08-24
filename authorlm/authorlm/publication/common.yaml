@@ -1,0 +1,5 @@
+# Shared Pandoc reader and semantic transformation profile.
+from: markdown+smart+footnotes+fenced_divs
+standalone: true
+filters:
+  - structure.lua

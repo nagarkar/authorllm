@@ -22,6 +22,7 @@ from .structure import reading_order, select_chapters
 
 EXPORT_DIR = "_exports"
 EXPORT_KEY = "_export"  # metadata.gdocs key; '_' keeps reconcile/pull away
+PUBLICATION_DIR = Path(__file__).with_name("publication")
 _UNSAFE = re.compile(r'[\\/:*?"<>|#]')
 
 
@@ -100,7 +101,7 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
     return result
 
 
-# ------------------------------------------------ publishing (docx / epub)
+# ------------------------------------------------ publishing (docx / epub / pdf)
 
 SETTINGS_KEYS = {
     "title": "book title (metadata + output filename); default: the "
@@ -168,10 +169,12 @@ def set_setting(manuscript: dict, key: str, value: str) -> dict:
 
 
 def publish_markdown(manuscript: dict, variant: str,
-                     only: list[str] | None = None
+                     only: list[str] | None = None,
+                     semantic_sections: bool = False,
                      ) -> tuple[str, list[str], list[str]]:
-    """The publishable single-file markdown: the machinery-free
-    concatenation with illustration slots resolved per the variant.
+    """The publishable single-file markdown with illustration slots
+    resolved per the variant. `semantic_sections` wraps each source file
+    with format-neutral Pandoc roles; plain Markdown exports remain wrapper-free.
     `only` narrows it to the named chapters and their TOC descendants —
     a part of the book, built exactly like the whole.
     Returns (text, order, warnings)."""
@@ -216,6 +219,10 @@ def publish_markdown(manuscript: dict, variant: str,
                     lines.append(f"![{caption}]({ILLUS_DIR}/{target})")
             text = normalize_markdown("\n".join(lines)).rstrip("\n")
         if text:
+            if semantic_sections:
+                role = ("authorlm-title-page" if name == "title.md"
+                        else "authorlm-essay")
+                text = f"::: {{.authorlm-file .{role}}}\n{text}\n:::"
             parts.append(text)
     combined = "\n\n".join(parts)
     return (combined + "\n" if combined else ""), order, warnings
@@ -244,7 +251,10 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     settings = load_settings(manuscript)
     variant = variant or settings["variant"] or "images"
     title = settings["title"] or manuscript["name"]
-    text, order, warnings = publish_markdown(manuscript, variant, only)
+    text, order, warnings = publish_markdown(
+        manuscript, variant, only,
+        semantic_sections=(fmt in ("pdf", "epub")),
+    )
     if not order:
         raise LookupError("the manuscript has no content files to combine")
     if only:
@@ -264,17 +274,30 @@ def export_published(db: Database, manuscript: dict, fmt: str,
             "pandoc is required for docx/epub/pdf export — "
             "brew install pandoc")
     out_path = md_path.with_suffix(f".{fmt}")
-    command = ["pandoc", str(md_path), "-o", str(out_path),
-               "--from", "markdown+smart", "--standalone"]
+    pandoc_cwd = root
+    if fmt in ("pdf", "epub"):
+        command = [
+            "pandoc", str(md_path), "-o", str(out_path),
+            "--defaults", str(PUBLICATION_DIR / "common.yaml"),
+            "--defaults", str(PUBLICATION_DIR / f"{fmt}.yaml"),
+            "--resource-path", str(root),
+        ]
+        # Pandoc resolves paths declared inside defaults files relative to
+        # its working directory. Running at the packaged profile directory
+        # keeps the profiles relocatable; resource-path keeps manuscript
+        # images relative to the manuscript root.
+        pandoc_cwd = PUBLICATION_DIR
+    else:
+        command = ["pandoc", str(md_path), "-o", str(out_path),
+                   "--from", "markdown+smart", "--standalone"]
     if fmt == "docx":
         # No metadata title block: title.md leads as front matter (the
         # ratified export shape) and pandoc would render a duplicate.
         if settings["reference_docx"]:
             command += ["--reference-doc", settings["reference_docx"]]
     if fmt == "pdf":
-        # xelatex, not the pdflatex default: the prose carries arrows,
-        # diacritics, and Greek that 8-bit TeX cannot set.
-        command += ["--pdf-engine", settings["pdf_engine"] or "xelatex"]
+        if settings["pdf_engine"]:
+            command += ["--pdf-engine", settings["pdf_engine"]]
         if settings["pdf_font"]:
             command += ["-V", f"mainfont={settings['pdf_font']}"]
     if fmt == "epub":
@@ -283,8 +306,12 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         if settings["author"]:
             command += ["--metadata", f"author={settings['author']}"]
         if settings["cover_image"]:
-            command += ["--epub-cover-image", settings["cover_image"]]
-    proc = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            cover = Path(settings["cover_image"])
+            if not cover.is_absolute():
+                cover = root / cover
+            command += ["--epub-cover-image", str(cover)]
+    proc = subprocess.run(command, cwd=pandoc_cwd,
+                          capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"pandoc failed: {proc.stderr.strip()[:400]}")
     result[fmt] = str(out_path)

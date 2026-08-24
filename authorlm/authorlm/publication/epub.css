@@ -1,0 +1,9 @@
+.authorlm-title-page .authorlm-book-title {
+  font-size: 2.5em;
+  line-height: 1.1;
+}
+
+.authorlm-file + .authorlm-file {
+  break-before: page;
+  page-break-before: always;
+}

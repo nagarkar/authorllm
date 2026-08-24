@@ -1,0 +1,6 @@
+# Reflowable EPUB presentation. File wrappers, rather than H1 headings,
+# define essay boundaries, so heading grammar remains purely hierarchical.
+to: epub3
+split-level: 0
+css:
+  - epub.css

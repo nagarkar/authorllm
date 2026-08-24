@@ -295,6 +295,14 @@ lands beside the whole-book artifacts and never overwrites them. An
 unknown chapter name raises rather than exporting an empty book. `pdf`
 joins md/docx/epub, engine `xelatex` (settings: pdf_engine, pdf_font) —
 pdflatex dies on the manuscript's arrows and diacritics.
+DECIDED (author 2026-08-23; declarative-profile refactor 2026-08-24):
+PDF and EPUB boundaries come from manuscript files, not H1 headings. The
+transient Pandoc input wraps each TOC-ordered file in a semantic div, so an
+essay's pre-heading epigraph moves with the essay. Packaged Pandoc profiles
+under `authorlm/publication/` own presentation: shared Lua maps semantic
+roles, LaTeX sets PDF title size and page breaks, and CSS sets EPUB title size
+and reflowable breaks. H1/H2/H3 remain hierarchy only; no writer-specific
+markup is injected by Python.
 
 ## Illustration pipeline (LLM-generated images: disk, Obsidian, export)
 Grilled 2026-08-05. Motivating failure: images pasted in the Doc are

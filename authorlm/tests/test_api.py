@@ -1618,7 +1618,7 @@ def main_test() -> None:
                                      publish_markdown, set_setting)
 
         (ms / "00-intro.md").write_text(
-            "# Intro\n\nWelcome.\n\n"
+            "An opening epigraph.\n\n# Intro\n\nWelcome.\n\n"
             "[Illustration: a winding path | caption: The path]\n\n"
             "[Illustration: an unrendered idea]\n")
         path_hash = illus_mod.desc_hash("a winding path")
@@ -1652,6 +1652,43 @@ def main_test() -> None:
             refused = True
         check("unknown export settings are refused", refused)
 
+        # A PDF essay begins at its FILE boundary, including any epigraph or
+        # other pre-heading matter. Heading levels control scale only: an H1
+        # inside a file must not define the essay boundary.
+        (ms / "title.md").write_text("# **The Book**\n\nA subtitle.\n")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "title.md"\nmatter = "front"\n\n'
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n')
+        manuscript = api.get_manuscript(db)
+        from types import SimpleNamespace as _SimpleNamespace
+        from unittest.mock import patch as _patch
+
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as pandoc_run):
+            pdf_result = export_published(
+                db, manuscript, fmt="pdf", variant="images")
+        pdf_command = pandoc_run.call_args.args[0]
+        pdf_markdown = Path(pdf_result["markdown"]).read_text()
+        check("PDF export starts the whole essay before its epigraph",
+              "::: {.authorlm-file .authorlm-essay}\n"
+              "An opening epigraph.\n\n# Intro"
+              in pdf_markdown, pdf_markdown)
+        check("Pandoc input carries semantics, never writer markup",
+              "::: {.authorlm-file .authorlm-title-page}" in pdf_markdown
+              and "# **The Book**" in pdf_markdown
+              and "# Intro" in pdf_markdown
+              and "\\Huge" not in pdf_markdown
+              and "\\newpage" not in pdf_markdown,
+              pdf_markdown)
+        defaults = [pdf_command[i + 1]
+                    for i, arg in enumerate(pdf_command[:-1])
+                    if arg == "--defaults"]
+        check("PDF formatting is selected through Pandoc defaults",
+              [Path(path).name for path in defaults]
+              == ["common.yaml", "pdf.yaml"], str(pdf_command))
+
         import shutil as _shutil
         if _shutil.which("pandoc"):
             published = export_published(db, manuscript, fmt="docx",
@@ -1663,6 +1700,7 @@ def main_test() -> None:
         else:
             print("  note: pandoc not on PATH — docx conversion untested "
                   "in this run")
+        (ms / "title.md").unlink()
 
         # --- chapter-scoped publishing: a part of the book, same build ---
         (ms / "toc.toml").write_text(
@@ -1691,11 +1729,24 @@ def main_test() -> None:
             scoped = export_published(db, manuscript, fmt="epub",
                                       variant="images", only=["00-intro"])
             epub = Path(scoped["epub"])
+            import zipfile as _zipfile
+            with _zipfile.ZipFile(epub) as book:
+                css = "\n".join(
+                    book.read(name).decode()
+                    for name in book.namelist() if name.endswith(".css"))
+                xhtml = "\n".join(
+                    book.read(name).decode()
+                    for name in book.namelist() if name.endswith(".xhtml"))
             check("a chapter epub lands beside the whole-book export "
                   "without overwriting it",
                   epub.exists() and epub.stat().st_size > 1000
                   and scoped["markdown"] != whole["markdown"]
                   and Path(whole["markdown"]).exists(), str(scoped))
+            check("EPUB uses semantic file breaks and declarative CSS",
+                  "authorlm-file + .authorlm-file" in css
+                  and 'class="authorlm-file authorlm-essay"' in xhtml
+                  and xhtml.index("An opening epigraph.")
+                  < xhtml.index("Intro"), xhtml[:1000])
 
         # --- hygiene: deterministic filters + retroactive sweep ---
         import json as _json

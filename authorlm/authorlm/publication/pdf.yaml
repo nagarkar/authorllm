@@ -1,0 +1,9 @@
+# Fixed-layout PDF presentation. Manuscript settings may override the engine
+# and main font without changing these structural typography rules.
+pdf-engine: xelatex
+top-level-division: section
+variables:
+  documentclass: article
+  papersize: letter
+include-in-header:
+  - pdf-header.tex
