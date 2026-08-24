@@ -177,6 +177,9 @@ def ontology(db: Database, manuscript: dict, llm,
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
         "AND status != 'retired'", (mid,))]
     nodes_by_id = {n["id"]: n for n in nodes}
+    # Each node's claims are fixed for the sweep — compute once per node
+    # instead of once per (paragraph, matched node) pair.
+    claims_by_node = {n["id"]: _claims_for(db, mid, n, nodes_by_id) for n in nodes}
 
     # Deterministic narrowing: (paragraph, settled claims) pairs.
     pairs: list[dict] = []
@@ -189,7 +192,7 @@ def ontology(db: Database, manuscript: dict, llm,
             for node in nodes:
                 if any(concept_pattern(nm).search(paragraph)
                        for nm in node_names(node)):
-                    claims.extend(_claims_for(db, mid, node, nodes_by_id))
+                    claims.extend(claims_by_node[node["id"]])
             if claims:
                 pairs.append({"file": fname, "paragraph": paragraph,
                               "claims": sorted(set(claims))})
