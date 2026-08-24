@@ -321,13 +321,22 @@ def main_test() -> None:
         for t in threads:
             if t["state"] == "accepted":
                 db.update("doc_threads", t["id"], {"state": "written"})
+        written = passes.staged_threads(db, mid, "alpha.md",
+                                        states=("written",))
         # The author edits the insertion's {{new}} half in the Doc.
         edited = marked.replace("{{A bridging paragraph, new.}}",
                                 "{{A bridging paragraph, in my voice.}}")
-        final, forms = passes.final_text_from_marked(edited)
-        check("final text = every form's current {{new}}",
+        # A foreign margin-thread form on the same tab must NOT be approved.
+        polluted = edited.replace(
+            "Third paragraph closes the essay.",
+            "<<Third paragraph closes the essay.>>{{Foreign margin rewrite.}}")
+        final, forms = passes.final_text_from_marked(polluted, written=written)
+        check("final text = critique forms' current {{new}}; foreign forms "
+              "stay OLD",
               "stated with care." in final
               and "A bridging paragraph, in my voice." in final
+              and "Third paragraph closes the essay." in final
+              and "Foreign margin rewrite" not in final
               and "<<" not in final and "{{" not in final)
         diffs = passes.record_resolution(db, mid, "alpha.md", forms)
         check("modified acceptance recorded as a proposal→final diff",
@@ -358,6 +367,13 @@ def main_test() -> None:
               "with old/new/why rendered",
               "decisively" in listing and "why: the ending should land" in listing
               and "stated with care" not in listing)
+
+        print("staging re-run replaces cleanly (no UNIQUE crash):")
+        again = passes.stage(db, manuscript, p, "alpha.md", result)
+        check("re-run stages without IntegrityError and resets to proposed",
+              len(again["staged"]) == 3
+              and all(t["state"] == "proposed" for t in again["staged"]))
+
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli_main(["--workspace", str(ws), "critique", "show", "--query",

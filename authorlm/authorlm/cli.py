@@ -1030,7 +1030,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
-    final, forms = passes.final_text_from_marked(marked)
+    final, forms = passes.final_text_from_marked(marked, written=written)
     # Apply locally: the author's post-edits win.
     path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)

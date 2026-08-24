@@ -1587,7 +1587,19 @@ def reconcile(db: Database, manuscript: dict, service,
     for relpath in mapped:
         entry = links[relpath]
         try:
-            doc_text = normalize_markdown(sections.get(relpath, ""))
+            # Missing from the export ≠ empty tab. `sections.get(..., "")`
+            # treated a deleted/renamed tab as Doc-cleared content, so a
+            # local file still matching pushed_hash was auto-pulled to
+            # empty — session-start data loss (pull_doc already guards
+            # with membership; prompts below do too).
+            if relpath not in sections:
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab missing from the Doc export — local "
+                             "file left untouched; the next 'doc push' "
+                             "recreates the tab"})
+                continue
+            doc_text = normalize_markdown(sections[relpath])
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = threads_mod.strip_pending(doc_text)
@@ -2145,10 +2157,46 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
             "url": tab_url(master_id, tab_id)}
 
 
+def _tab_paragraph_texts(docs_service, master_id: str,
+                         tab_id: str) -> list[str]:
+    """Non-empty paragraph strings from a tab, Docs trailing newlines
+    stripped. Blank separator paragraphs (transplant skips them on push)
+    are omitted — callers that need markdown structure must rejoin with
+    `\\n\\n`."""
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    out: list[str] = []
+
+    def walk(tabs):
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    paragraph = item.get("paragraph")
+                    if not paragraph:
+                        continue
+                    text = "".join(
+                        el.get("textRun", {}).get("content", "")
+                        for el in paragraph.get("elements", [])
+                        if "textRun" in el)
+                    text = text.rstrip("\n")
+                    if text.strip():
+                        out.append(text)
+            walk(tab.get("childTabs", []))
+    walk(doc.get("tabs", []))
+    return out
+
+
 def critique_tab_text(db: Database, manuscript: dict, file: str,
                       docs_service, bridge: DocBridge | None = None) -> str:
-    """The tab's current text, verbatim (the resolve verb reads the
-    author's post-edits from the pending forms here)."""
+    """The tab's current text as markdown paragraphs (the resolve verb
+    reads the author's post-edits from the pending forms here).
+
+    Docs API runs end each paragraph with a single `\\n` and push skips
+    blank separator paragraphs (to avoid double Doc spacing). Joining
+    runs raw would collapse every essay into one `_paragraphs` blob on
+    resolve — rejoin non-empty paragraphs with `\\n\\n` so structure
+    survives the round trip (markdown export does the same on pull)."""
     bridge = bridge or manuscript_bridge(manuscript)
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
@@ -2156,7 +2204,8 @@ def critique_tab_text(db: Database, manuscript: dict, file: str,
     tab_id = (links.get(file) or {}).get("tab_id")
     if not (master_id and tab_id):
         raise LookupError(f"'{file}' has no tab in the master Doc")
-    return "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
+    paras = _tab_paragraph_texts(docs_service, master_id, tab_id)
+    return "\n\n".join(paras) + ("\n" if paras else "")
 
 
 def _replace_pending(db: Database, manuscript: dict, thread: dict,

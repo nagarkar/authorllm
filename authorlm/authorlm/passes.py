@@ -391,32 +391,50 @@ def stage(db: Database, manuscript: dict, pass_row: dict, file: str,
     (origin_type critique, ordinal-keyed so re-runs replace cleanly);
     suggestions as PROPOSED system-sourced intents with lineage."""
     mid = manuscript["id"]
-    # A re-run withdraws the previous proposals for this essay first.
-    for r in db.all("SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
-                    "origin_type = 'critique' AND file = ? AND state IN "
-                    "('proposed', 'accepted', 'rejected')", (mid, file)):
-        db.update("doc_threads", r["id"], {"state": "withdrawn"})
+    prefix = f"{pass_row['id']}:{file}:"
+    existing = {
+        r["origin_id"]: dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'critique' AND file = ? AND origin_id LIKE ?",
+            (mid, file, prefix + "%"))
+    }
     staged = []
     ordinal = 0
     seq = [(e["n"], 0, e) for e in result["edits"]] + \
           [(i["after"], 1, i) for i in result["insertions"]]
     seq.sort(key=lambda t: (t[0], t[1]))
+    used: set[str] = set()
     for anchor, kind, item in seq:
         ordinal += 1
-        row = ko_fields("dt")
-        origin_id = f"{pass_row['id']}:{file}:{ordinal}"
+        origin_id = f"{prefix}{ordinal}"
+        used.add(origin_id)
         meta = {"kind": "insert" if kind else "replace",
                 "anchor_paragraph": anchor, "intent_id": item["intent_id"],
                 "original_new": item["new"]}
-        row.update(
-            manuscript_id=mid, origin_type="critique", origin_id=origin_id,
-            file=file, anchor_quote=None,
-            proposed_old="" if kind else item["old"], proposed_new=item["new"],
-            note=item["why"], state="proposed", our_reply_ids="[]",
-            last_author_reply_id=None, scope_kind="file", scope_ref=file,
-            metadata=json.dumps(meta))
-        db.insert("doc_threads", row)
+        fields = {
+            "proposed_old": "" if kind else item["old"],
+            "proposed_new": item["new"],
+            "note": item["why"], "state": "proposed",
+            "our_reply_ids": "[]", "last_author_reply_id": None,
+            "scope_kind": "file", "scope_ref": file,
+            "metadata": json.dumps(meta),
+        }
+        # Re-runs must replace in place: origin_id is UNIQUE, so a soft
+        # withdraw + insert collides with the withdrawn (or written) row.
+        if origin_id in existing:
+            db.update("doc_threads", existing[origin_id]["id"], fields)
+            row = {**existing[origin_id], **fields}
+        else:
+            row = ko_fields("dt")
+            row.update(
+                manuscript_id=mid, origin_type="critique",
+                origin_id=origin_id, file=file, anchor_quote=None, **fields)
+            db.insert("doc_threads", row)
         staged.append(row)
+    for oid, row in existing.items():
+        if oid not in used and row["state"] in ("proposed", "accepted",
+                                                  "rejected"):
+            db.update("doc_threads", row["id"], {"state": "withdrawn"})
     suggestions = []
     system_src = db.source("system")
     for s in result["suggestions"]:
@@ -537,11 +555,40 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     return "\n\n".join(head + out) + "\n"
 
 
-def final_text_from_marked(marked: str) -> tuple[str, list[dict]]:
-    """Resolve: every pending form's CURRENT {{new}} half becomes final
-    (the author's post-edits win). Returns (final_text, forms)."""
+def final_text_from_marked(marked: str,
+                           written: list[dict] | None = None
+                           ) -> tuple[str, list[dict]]:
+    """Resolve: critique-written forms keep their CURRENT {{new}} half
+    (author post-edits win); any other pending form on the tab (e.g. an
+    open margin-thread proposal) collapses to OLD so resolve never
+    silently approves foreign grammar. Returns (final_text, critique_forms)."""
     forms = th.pending_forms(marked)
-    return th.approved_text(marked), forms
+    if not written:
+        # No written threads: keep old for every form (nothing to approve).
+        return th.strip_pending(marked)[0], []
+    unmatched = list(written)
+    insert_queue = [t for t in written if t["proposed_old"] == ""]
+    critique_forms = []
+    keep_new: set[tuple[int, int]] = set()
+    for form in forms:
+        match = None
+        if form["kind"] == "replace":
+            match = next((t for t in unmatched
+                          if t["proposed_old"] == form["old"]), None)
+        elif insert_queue:
+            match = insert_queue.pop(0)
+        if match is None or match not in unmatched:
+            continue
+        unmatched.remove(match)
+        critique_forms.append(form)
+        keep_new.add((form["start"], form["end"]))
+    # Rebuild from the end so indices stay valid: matched → new, else → old.
+    text = marked
+    for form in sorted(forms, key=lambda f: f["start"], reverse=True):
+        span = (form["start"], form["end"])
+        replacement = (form["new"] if span in keep_new else form["old"])
+        text = text[: form["start"]] + replacement + text[form["end"]:]
+    return text, critique_forms
 
 
 def record_resolution(db: Database, manuscript_id: str, file: str,

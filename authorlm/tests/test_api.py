@@ -1043,6 +1043,29 @@ def main_test() -> None:
               and "Both sides now differ" in (ms / "01-choice.md").read_text(),
               str(report))
 
+        # Missing tab ≠ empty Doc: a renamed/deleted export section must
+        # never auto-pull "" over a local file that still matches the base.
+        safe = "# Title\n\nSafe prose that must survive a missing tab.\n"
+        (ms / "01-choice.md").write_text(safe)
+        push_doc(db, manuscript, "01-choice.md",
+                 service=stub, docs_service=stub)
+        essay_tab = next(t for t in stub.state["docs"]["doc-2"]
+                         if t["title"] == "01-choice.md")
+        essay_tab["title"] = "01-choice.md.ORPHAN"
+        report = reconcile(db, manuscript, stub)
+        check("reconcile: missing Doc tab never wipes local",
+              (ms / "01-choice.md").read_text() == safe
+              and report["pulled"] == []
+              and any(e["file"] == "01-choice.md" for e in report["errors"]),
+              str(report))
+        # Restore the Doc/local body later margin-thread checks expect —
+        # the missing-tab push left "Safe prose…" which cannot attribute
+        # a quote of "Doc went another way".
+        essay_tab["title"] = "01-choice.md"
+        restored = "# Title\n\nDoc went another way.\n"
+        stub.set_tab("01-choice.md", restored)
+        (ms / "01-choice.md").write_text(restored)
+
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
