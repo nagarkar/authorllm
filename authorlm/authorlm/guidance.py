@@ -320,17 +320,17 @@ def generate_guidance(
     # as policies strengthen. Rejected/accepted/modified suppress forever;
     # deferred suppresses within this session only. This runs BEFORE policy
     # reminders so a suppressed suggestion doesn't consume its policy slot.
-    def already_reviewed(key: str) -> bool:
-        row = db.one(
-            "SELECT id FROM guidance_history WHERE manuscript_id = ? "
-            "AND metadata LIKE ? "
+    # One query for every past ruling, not one LIKE scan per candidate.
+    reviewed_keys = {
+        loads(row["metadata"], {}).get("dedupe_key")
+        for row in db.all(
+            "SELECT metadata FROM guidance_history WHERE manuscript_id = ? "
             "AND (state IN ('accepted','rejected','modified') "
             "     OR (state = 'deferred' AND session_id = ?))",
-            (mid, f'%"dedupe_key": "{key}"%', session["id"]),
+            (mid, session["id"]),
         )
-        return row is not None
-
-    candidates = [c for c in candidates if not already_reviewed(c["key"])]
+    }
+    candidates = [c for c in candidates if c["key"] not in reviewed_keys]
 
     # 4. Reminders for learned policies (validated first, then candidates —
     #    reviewing a candidate reminder is what promotes or retires it).

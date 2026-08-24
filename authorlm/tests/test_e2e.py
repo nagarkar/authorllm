@@ -218,6 +218,9 @@ def scenario_editorial_loop(root: Path) -> None:
         _cdb, _cmid, "Trim throat-clearing openers.", source="test")
     canon = _cpol.seed_candidate_policy(
         _cdb, _cmid, "Cut redundant opening phrases.", source="test")
+    out = run(ws, "policy", "merge", canon["id"], canon["id"], expect_exit=True)
+    check("merging a policy into itself is rejected",
+          "same policy" in out, out)
     out = run(ws, "policy", "merge", dup["id"], canon["id"])
     check("policy merge folds duplicate into canonical",
           'Merged "Trim throat-clearing openers."' in out and "2+ / 0-" in out,
@@ -1062,6 +1065,14 @@ def scenario_write_loop(root: Path) -> None:
         intent_id = out.split("[")[1].split("]")[0]
 
         # --- gates -------------------------------------------------------
+        out = run(ws, "intent", "declare", "Abandoned side-quest")
+        abandoned_id = out.split("[")[1].split("]")[0]
+        run(ws, "intent", "abandon", abandoned_id, "--outcome", "changed plans")
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", abandoned_id, expect_exit=True)
+        check("start blocked on an intent that is not active",
+              "not active" in out, out)
+
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id, expect_exit=True)
         check("start blocked without a style attachment",

@@ -182,6 +182,20 @@ def main_test() -> None:
               loads(latest["files"], {})["safety.md"] == big_text
               and "tiny.md" not in loads(latest["files"], {}))
 
+        try:
+            api.diff_versions(md_db, md_manuscript, older=1, newer=99)
+            check("diff_versions rejects an unknown version number", False)
+        except LookupError as err:
+            check("diff_versions rejects an unknown version number",
+                  "v99" in str(err))
+
+        forward = api.diff_versions(md_db, md_manuscript, older=1, newer=3)
+        backward = api.diff_versions(md_db, md_manuscript, older=3, newer=1)
+        check("diff_versions normalizes reversed (newer, older) arguments",
+              backward["old"] == forward["old"] == "v1"
+              and backward["new"] == forward["new"] == "v3"
+              and backward["files"] == forward["files"])
+
         declared = api.declare_intent(db, manuscript, "Expand on gravity")
         check("declare_intent returns intent + preview",
               declared["intent"]["statement"] == "Expand on gravity"
