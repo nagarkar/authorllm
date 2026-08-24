@@ -46,8 +46,10 @@ The AuthorLM RFC prescribes its own MVP boundary:
 
 ## Tech stack (per RFC §23.2)
 
-Python 3 (stdlib only), SQLite, Markdown manuscripts, JSON config; optional
-local LLM via OpenAI-compatible HTTP API (off by default, graceful fallback).
+Python 3.11+ (stdlib core), SQLite, Markdown manuscripts, TOML project
+config (`config.toml`) with secrets in `.env`; optional LLM via LiteLLM
+or an OpenAI-compatible HTTP API (off / unreachable → graceful
+deterministic fallback).
 
 ## Deliberately deferred
 

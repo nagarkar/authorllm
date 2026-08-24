@@ -6,6 +6,11 @@ outlive the build. Implementation status of the co-writing loop
 lives in autoregressive-writing-design.md §11.
 
 ## Tab hierarchy and reordering from toc.md (gdocs)
+**Status (2026-08):** Built against `toc.toml` (`structure.py` —
+`[[chapter]]` + `parent` tree; `gdocs.sync_tab_structure`). The prose
+below is the original design note and still says `toc.md`; read every
+`toc.md` here as `toc.toml`.
+
 `reading_order` (structure.py) parses toc.md as a flat filename list —
 indentation never enters the parse — and `ensure_master` (gdocs.py) sends
 `addDocumentTab` with only a title, never `parentTabId`. Consequences:

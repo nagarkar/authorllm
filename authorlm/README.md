@@ -19,16 +19,17 @@ no evidence, it abstains.
 - **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
 - **Google Docs bridge** (`doc push/pull`, reconciliation):
   `pip install google-api-python-client google-auth-httplib2
-  google-auth-oauthlib`, plus an OAuth client secret in
-  `~/.authorlm/config.toml` under `[gdocs]` (one-time `authorlm doc auth`
-  opens the consent browser).
+  google-auth-oauthlib`, plus an OAuth client-secret path in the
+  project's `config.toml` under `[gdocs]` (one-time `authorlm doc auth`
+  opens the consent browser). The OAuth *token cache* stays under
+  `~/.authorlm/` (or `-w`).
 - **Publishing exports** (docx/epub/pdf with embedded illustrations):
   `pandoc` — `brew install pandoc` on macOS. PDF additionally needs a
   TeX distribution with `xelatex` (MacTeX / TeX Live); the 8-bit
   `pdflatex` default cannot set the manuscript's unicode.
-  `--chapters ascending,indic` builds just those chapters and everything
-  filed under them in the TOC, into their own files alongside the
-  whole-book export.
+  `authorlm export <fmt> --chapters ascending,indic` builds just those
+  chapters and everything filed under them in `toc.toml`, into
+  separately named files alongside the whole-book export.
 
 ## Install / build
 
@@ -46,12 +47,17 @@ npm run build` from `web/triage-app/`. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
-AuthorLM keeps **one global database in `~/.authorlm/`** (the database and
-`config.toml`), so `authorlm` works from any directory and manuscripts can
-live anywhere — register them with relative or absolute paths (they're
-stored absolute). `-w/--workspace <dir>` overrides the data location, which
-is mainly how the hermetic tests isolate themselves. `python3 main.py …`
-still works identically.
+AuthorLM separates three homes (see `authorlm/paths.py`):
+
+| Kind | Where | What |
+| :--- | :--- | :--- |
+| **Project config** | `authorlm/config.toml`, `illustration-craft.md` beside the package | Versioned decisions (model, craft rules, gdocs client-secret *path*) |
+| **Secrets** | `authorlm/.env` (gitignored; copy from `.env.example`) | API keys — never in TOML |
+| **Workspace state** | `~/.authorlm/` (or `-w/--workspace`) | SQLite DB, OAuth token cache, backups, logs |
+
+Manuscripts can live anywhere — register them with relative or absolute
+paths (stored absolute). `-w` overrides the data location (how hermetic
+tests isolate themselves). `python3 main.py …` still works identically.
 
 For bash tab completion (commands, actions, flags, `--kind` values, and
 manuscript names after `-m`), add to `~/.bash_profile`:
@@ -173,8 +179,11 @@ outstanding questions.
 | `diff [vN [vM]] [file]` | Colored unified diff between collected versions (default: the last two) |
 | `plan [--draft]` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents; `--draft` writes opening stubs to `_drafts/` |
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
-| `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
-| `doc create-manuscript` | Combine every chapter (reading order per `toc.md`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in the project `config.toml`; `doc auth` runs the one-time browser consent. Local files remain the system of record |
+| `doc create-manuscript` | Combine every chapter (reading order per `toc.toml`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `export show/set/md/docx/epub/pdf` | Local publishing build (pandoc for docx/epub/pdf). Settings in `_exports/settings.toml`. `--variant images\|slots\|stripped`; `--chapters a,b` selects named chapters plus TOC descendants into separately named artifacts (never overwrites the whole-book files). PDF defaults to `xelatex` (`pdf_engine` / `pdf_font` settings) |
+| `critique import/triage/run/…` | External critique intake → author triage → essay edit pass (run → triage `--edits` → write → resolve). Design: `docs/critique-pass-design.md` |
+| `summarize status/show/rebuild` | Essay summaries — working memory of the book in reading order (`docs/critique-pass-design.md` §4) |
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
@@ -258,32 +267,86 @@ Design: docs/margin-threads-design.md.
 
 ## Configuration (optional LLM)
 
-The default provider is **LiteLLM** (in-process SDK), which routes to any
-model LiteLLM supports. For Gemini:
+Three file kinds, deliberately not mixed (`authorlm/paths.py`):
 
-```bash
-pip install litellm
-export GEMINI_API_KEY=...        # add to your shell profile to persist
+1. **`authorlm/config.toml`** — project decisions, versioned with the
+   code. Override path with `AUTHORLM_CONFIG`.
+2. **`authorlm/.env`** — secrets only (gitignored). Copy `.env.example`.
+   A real shell export always wins over `.env`. Override path with
+   `AUTHORLM_ENV`.
+3. **`~/.authorlm/`** (or `-w`) — mutable workspace state (DB, OAuth
+   token, logs). Not where you put model settings for the CLI.
+
+**Choosing a model chooses a vendor.** The vendor is the model string's
+prefix; LiteLLM (and AuthorLM) read that vendor's standard env var — there
+is no separate `vendor` field:
+
+```text
+gemini/…     → GEMINI_API_KEY
+openai/…     → OPENAI_API_KEY
+anthropic/…  → ANTHROPIC_API_KEY
 ```
 
-Create `.authorlm/config.toml` in your workspace (TOML — comments with `#`
-are native):
+Setup:
+
+```bash
+cd authorlm
+cp .env.example .env   # then fill GEMINI_API_KEY=… (and/or OPENAI_API_KEY=…)
+pip install litellm
+```
+
+Example `config.toml` (already in the repo; edit in place):
 
 ```toml
-# AuthorLM configuration
+# AuthorLM configuration — decisions, versioned with the code.
+# API keys live in .env beside this file, never here.
 [llm]
 enabled = true
 model = "gemini/gemini-2.5-flash"
+image_model = "openai/gpt-image-2"   # illustration render; own vendor key
+image_size = "1536x1024"             # ratified 3:2; OpenAI defaults to square
+extraction_max_chars = 24000
+
+[gdocs]
+# Path to the OAuth installed-app client JSON (not the key itself).
+client_secret = "/path/to/client_secret.json"
+# reconcile_on_start = false   # optional: skip session-start Doc reconcile
 ```
 
+**CLI vs MCP config surfaces.** The CLI loads project `config.toml` and
+`.env` via `paths.py`. The MCP server and `authorlm.api.load_config`
+still read `<workspace>/.authorlm/config.toml` and do **not** auto-load
+`.env` — export keys into the environment that launches `authorlm-mcp`,
+and keep a workspace config there if MCP tools need LLM/gdocs settings.
+Hermetic tests pin `AUTHORLM_CONFIG` / `AUTHORLM_ENV` away from the real
+files so an enabled checkout cannot bill during offline suites.
 
-**Reading order & the TOC.** A `toc.md` in the manuscript root is
-structural, not prose: its ordered file references (e.g. `1. preface.md`)
-define the authoritative reading order used by prerequisite checks,
-definition precedence (a concept's primary location is its first
-reading-order appearance; if that text is deleted, the location re-points
-and you're told), plan placement, and hierarchical extraction. Files not
-listed fall back to alphabetical order and are flagged in the briefing.
+
+**Reading order & the TOC.** A `toc.toml` in the manuscript root is
+structural, not prose. Ordered `[[chapter]]` tables define the
+authoritative reading order used by prerequisite checks, definition
+precedence (a concept's primary location is its first reading-order
+appearance; if that text is deleted, the location re-points and you're
+told), plan placement, hierarchical extraction, and chapter-scoped
+exports:
+
+```toml
+[[chapter]]
+file = "title.md"
+matter = "front"          # front | main (default) | back
+
+[[chapter]]
+file = "preface.md"
+parent = "title.md"       # depth via parent chain
+matter = "front"
+```
+
+`matter` drives deterministic filters (front matter is a window for
+prerequisite scanning; back matter is reference). Files not listed fall
+back to alphabetical order and are flagged in the briefing. A broken TOC
+degrades to alphabetical order and never raises. `toc.toml` is versioned
+like any file but excluded from concept scanning.
+
 Concepts whose text vanishes entirely become proposals: adopt retires
 them, dismiss keeps them as declared placeholders. Full extractions larger
 than `extraction_max_chars` run hierarchically — one bounded pass per file
@@ -309,10 +372,10 @@ also degrades on very long inputs). Incremental extraction usually keeps
 payloads far below the cap; when a payload does exceed it you get an
 explicit truncation warning suggesting per-file extraction.
 
-Any LiteLLM model string works (`gpt-4o-mini`, `claude-sonnet-5`,
-`ollama/llama3`, …) with the matching key exported. Alternatively, point at
-any OpenAI-compatible HTTP endpoint (LiteLLM proxy, Ollama, LM Studio) with
-zero Python dependencies:
+Any LiteLLM model string works (`openai/gpt-4o-mini`, `anthropic/claude-sonnet-5`,
+`ollama/llama3`, …) with the matching key in `.env` (or the shell).
+Alternatively, point at any OpenAI-compatible HTTP endpoint (LiteLLM
+proxy, Ollama, LM Studio) with zero Python dependencies:
 
 ```toml
 [llm]
@@ -375,6 +438,54 @@ evidence-only behavior. The LLM enriches guidance; it is never load-bearing.
 Every step that consults the LLM ends with a brief usage line, e.g.
 `LLM: 1 live call(s) (702 in / 1,203 out tokens) — 2 replayed from cache`,
 and the test suites report totals the same way.
+
+## Publishing exports
+
+Local builds only — no Drive round-trip. Pipeline:
+
+1. Concatenate content files in `toc.toml` reading order.
+2. Resolve `[Illustration: …]` slots per variant (`images` embeds the
+   picked candidate from `_illustrations/`; `slots` keeps tags;
+   `stripped` removes them).
+3. Write `_exports/<title>.md`; for `docx` / `epub` / `pdf`, run pandoc
+   from the manuscript root so relative image paths resolve.
+
+```bash
+authorlm export show                         # _exports/settings.toml
+authorlm export set title "On Becoming"
+authorlm export set author "…"
+authorlm export docx                         # whole book
+authorlm export pdf --chapters ascending     # part + TOC descendants
+authorlm export epub --chapters a.md,b.md --variant stripped
+```
+
+Constraints (verified in `export.py` / `structure.select_chapters`):
+
+- Naming a parent names the part it heads (`--chapters ascending` includes
+  every chapter filed under it).
+- Part-builds get a selection slug in the filename so they land *beside*
+  whole-book artifacts instead of overwriting them.
+- An unknown chapter name raises with the valid names (never an empty book).
+- PDF uses `pdf_engine` (default `xelatex`) and optional `pdf_font`;
+  `pdflatex` cannot set the manuscript's unicode.
+- `doc create-manuscript` is the separate Drive-mirrored markdown combine;
+  it is not a substitute for `export docx|epub|pdf`.
+
+## Common pitfalls
+
+- **Wrong config home.** Editing `~/.authorlm/config.toml` does not change
+  CLI LLM/image settings — those live in the project `config.toml`.
+  Conversely, MCP/`api.load_config` does *not* read the project file.
+- **Keys in TOML.** Config must never hold API keys; put them in `.env` or
+  the environment. Image renders use the *image* model's vendor key, not
+  the text model's.
+- **Stale `toc.md`.** Reading order is `toc.toml`. A leftover `toc.md` is
+  ordinary prose (or ignored as a TOC) and will not drive exports/plan.
+- **Offline tests + real `.env`.** Suites assert isolation via
+  `AUTHORLM_CONFIG` / `AUTHORLM_ENV`; do not unset those pins when running
+  tests against a checkout that has live keys.
+- **PDF without xelatex.** Install a TeX distribution that provides
+  `xelatex`, or exports fail at pandoc time.
 
 ## Testing
 
