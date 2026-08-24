@@ -2333,6 +2333,43 @@ def main_test() -> None:
               ordered == ["a.md", "z.md"] and missing == [],
               f"{ordered=} {missing=}")
 
+        # --- policy curation: convert_policy happy path + error guards ---
+        from authorlm import policies as pol
+
+        api.define_style_guide(db, manuscript, "Curation guide")
+        seeded = pol.seed_candidate_policy(
+            db, manuscript["id"], "Prefer short paragraphs in dialogue.",
+            source="test")
+        converted = api.convert_policy(
+            db, manuscript, seeded["id"], "formatting",
+            guide="Curation guide", reason="now enforced as style law")
+        check("convert_policy retires the policy and links a style element",
+              converted["status"] == "retired" and converted["style_element"])
+        row = db.one("SELECT * FROM editorial_policies WHERE id = ?",
+                     (seeded["id"],))
+        curation = loads(row["metadata"], {}).get("curation", {})
+        check("converted policy's metadata records the linkage and reason",
+              row["status"] == "retired"
+              and curation.get("action") == "converted"
+              and curation.get("style_element") == converted["style_element"]
+              and curation.get("reason") == "now enforced as style law")
+        evidence = db.one(
+            "SELECT * FROM evidence WHERE supports_policy = ? "
+            "AND evidence_type = 'policy_curation'",
+            (seeded["id"],))
+        check("conversion writes a policy_curation evidence row",
+              evidence is not None and evidence["signal"] == "converted")
+        try:
+            api.convert_policy(db, manuscript, seeded["id"], "formatting")
+            check("converting an already-retired policy is refused", False)
+        except LookupError:
+            check("converting an already-retired policy is refused", True)
+        try:
+            api.convert_policy(db, manuscript, "no-such-prefix", "formatting")
+            check("converting an unknown policy prefix is refused", False)
+        except LookupError:
+            check("converting an unknown policy prefix is refused", True)
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
