@@ -881,6 +881,81 @@ def main_test() -> None:
               and stub.state["folders"] == ["doc-1"]
               and list(stub.state["docs"]) == ["doc-2"])
 
+        # --- sync_tab_structure: push-direction TOC↔tab orchestration ---
+        from authorlm.gdocs import _mapping, _save_mapping, sync_tab_structure
+
+        manuscript = api.get_manuscript(db)
+        no_toc = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure skips when toc.toml is absent",
+              no_toc == {"skipped": "no toc.toml"}, str(no_toc))
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n')
+        synced = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure records insync when TOC matches Doc tabs",
+              synced == {"insync": True}, str(synced))
+        meta = _mapping(db, manuscript)
+        check("insync sync persists _tab_structure as the agreed base",
+              meta["gdocs"].get("_tab_structure")
+              == [["01-choice.md", None]],
+              str(meta["gdocs"].get("_tab_structure")))
+
+        (ms / "02-fork.md").write_text("# Fork\n\nAnother essay.\n")
+        push_doc(db, manuscript, "02-fork.md",
+                 service=stub, docs_service=stub)
+        manuscript = api.get_manuscript(db)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "02-fork.md"\n')
+        base_sync = sync_tab_structure(db, manuscript, stub)
+        check("sync after adding a linked chapter lands insync (or moves)",
+              base_sync.get("insync") is True
+              or isinstance(base_sync.get("moved"), int),
+              str(base_sync))
+        # Force a conflict: Doc order and TOC both diverge from the base.
+        meta = _mapping(db, manuscript)
+        meta["gdocs"]["_tab_structure"] = [
+            ["01-choice.md", None], ["02-fork.md", None]]
+        _save_mapping(db, manuscript, meta)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "02-fork.md"\n\n'
+            '[[chapter]]\nfile = "01-choice.md"\n')
+        tabs = stub.state["docs"]["doc-2"]
+        # Put 02-fork before 01-choice among root-level md tabs by
+        # rebuilding flat order while leaving container/manifest alone.
+        md_tabs = [t for t in tabs if t["title"].endswith(".md")]
+        others = [t for t in tabs if not t["title"].endswith(".md")]
+        # Doc side: 02 then 01 (matches neither base nor the swapped TOC
+        # wait — TOC is also 02 then 01. Use a third ordering via parent
+        # so Doc ≠ TOC ≠ base.
+        by_title = {t["title"]: t for t in md_tabs}
+        by_title["02-fork.md"]["parent"] = by_title["01-choice.md"]["id"]
+        stub.state["docs"]["doc-2"] = others + [
+            by_title["01-choice.md"], by_title["02-fork.md"]]
+        conflicted = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure refuses when Doc and TOC both moved",
+              conflicted.get("skipped", "").startswith(
+                  "Doc tab order also changed"),
+              str(conflicted))
+
+        # No master: skip before any Docs call.
+        meta = _mapping(db, manuscript)
+        master = meta["gdocs"].pop("_master_id")
+        _save_mapping(db, manuscript, meta)
+        no_master = sync_tab_structure(db, manuscript, stub)
+        check("sync_tab_structure skips when there is no master Doc",
+              no_master == {"skipped": "no master doc"}, str(no_master))
+        meta["gdocs"]["_master_id"] = master
+        # Drop the second chapter so later single-file reconcile/export
+        # assertions stay focused on 01-choice.md.
+        meta["gdocs"].pop("02-fork.md", None)
+        meta["gdocs"]["_tab_structure"] = [["01-choice.md", None]]
+        _save_mapping(db, manuscript, meta)
+        stub.state["docs"]["doc-2"] = [
+            t for t in stub.state["docs"]["doc-2"]
+            if t["title"] != "02-fork.md"]
+        (ms / "02-fork.md").unlink(missing_ok=True)
+        (ms / "toc.toml").unlink(missing_ok=True)
+
         # Two-sided edit: local changed since push AND the tab differs
         # from what was pushed → conflict, skipped unless forced.
         (ms / "01-choice.md").write_text("# Title\n\nLocal divergence.\n")
@@ -983,6 +1058,44 @@ def main_test() -> None:
               == "conversation"
               and th.is_ours("AuthorLM: proposed — x")
               and not th.is_ours("looks wrong to me"))
+
+        # Resolve helpers the critique/margin paths share: empty-old
+        # insertions, strikethrough wrappers, and form enumeration that
+        # must not double-count the {{new}} half of a replace.
+        check("render_pending with empty old is the insertion form",
+              th.render_pending("", "bridge") == "{{bridge}}"
+              and th.render_insertion("bridge") == "{{bridge}}")
+        wrapped = "Lead.\n\n~~<<old span>>~~{{new span}}\n\nTail.\n"
+        check("approved_text keeps {{new}} halves (incl. ~~-wrapped replaces)",
+              th.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
+              th.approved_text(wrapped))
+        check("strip_pending on ~~-wrapped replaces still yields OLD",
+              th.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
+              th.strip_pending(wrapped))
+        with_insert = ("Para one.\n\n{{inserted paragraph}}\n\n"
+                       "<<swap me>>{{swapped}}\n\nPara three.\n")
+        stripped_ins, _ = th.strip_pending(with_insert)
+        check("strip_pending drops paragraph insertions byte-clean",
+              stripped_ins == "Para one.\n\nswap me\n\nPara three.\n",
+              stripped_ins)
+        check("approved_text keeps paragraph insertions and replace news",
+              th.approved_text(with_insert)
+              == ("Para one.\n\ninserted paragraph\n\n"
+                  "swapped\n\nPara three.\n"),
+              th.approved_text(with_insert))
+        forms = th.pending_forms(with_insert)
+        check("pending_forms lists replace + insert once each, doc order",
+              [(f["kind"], f["old"], f["new"]) for f in forms]
+              == [("insert", "", "inserted paragraph"),
+                  ("replace", "swap me", "swapped")],
+              str(forms))
+        nested = "<<keep {{this}} literal>>{{replacement}}"
+        check("pending_forms does not treat replace's {{new}} as an insert",
+              th.pending_forms(nested)
+              == [{"kind": "replace", "old": "keep {{this}} literal",
+                   "new": "replacement", "start": 0,
+                   "end": len(nested)}],
+              str(th.pending_forms(nested)))
 
         pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
         stub.add_comment("c-1", "Doc went another way",
