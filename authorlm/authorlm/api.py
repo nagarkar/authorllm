@@ -1045,9 +1045,13 @@ def style_overview(db: Database, manuscript: dict) -> dict:
     guides = [dict(g) for g in db.all(
         "SELECT * FROM style_guides WHERE manuscript_id = ? ORDER BY created_at", (mid,))]
     names = {g["id"]: g["name"] for g in guides}
-    counts = {g["id"]: db.one(
-        "SELECT COUNT(*) AS n FROM style_elements WHERE guide_id = ? AND status = 'active'",
-        (g["id"],))["n"] for g in guides}
+    counts = {g["id"]: 0 for g in guides}
+    counts.update({row["guide_id"]: row["n"] for row in db.all(
+        "SELECT guide_id, COUNT(*) AS n FROM style_elements "
+        "WHERE manuscript_id = ? AND status = 'active' AND guide_id IS NOT NULL "
+        "GROUP BY guide_id",
+        (mid,),
+    )})
     attachments = [dict(a) for a in db.all(
         "SELECT * FROM style_attachments WHERE manuscript_id = ?", (mid,))]
     return {
