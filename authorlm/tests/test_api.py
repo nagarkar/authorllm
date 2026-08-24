@@ -3263,6 +3263,63 @@ def main_test() -> None:
         check("session start with a baseline collects and reports "
               "new chapters",
               "file_added" in start2 or "extra.md" in start2, start2)
+        # --- style_show: effective law composition (guide inheritance,
+        #     override displacement, unattached-file fallback) ---
+        # Its own manuscript: this block asserts what an UNATTACHED file
+        # inherits from THE root guide, which only means anything where
+        # this block's guide is the only root. The shared manuscript has
+        # collected several root guides from earlier blocks by now.
+        style_ws = root / "style-ws"
+        style_root = style_ws / "manuscript"
+        style_root.mkdir(parents=True)
+        (style_root / "97-styled.md").write_text("# Styled\n\nProse.\n")
+        (style_root / "98-child.md").write_text("# Child\n\nMore prose.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(style_ws), "init",
+                      "--name", "styled", "--path", str(style_root),
+                      "--no-extract"])
+        sdb = api.open_db(str(style_ws))
+        sm = api.get_manuscript(sdb)
+        bare = api.style_show(sdb, sm, "97-styled.md")
+        # Earlier blocks in this suite define guides of their own, so a
+        # fresh file is not lawless by the time this runs. Assert what the
+        # check is actually about — the house rule added below is absent
+        # beforehand — instead of depending on fixture order.
+        check("style_show on a fresh file carries none of the house law",
+              not any("second person" in e["statement"]
+                      for e in bare["elements"]), str(bare["elements"]))
+
+        api.define_style_guide(sdb, sm, "house")
+        api.add_style_element(sdb, sm, "register",
+                              "Address the reader in second person.",
+                              guide_name="house")
+        unattached = api.style_show(sdb, sm, "97-styled.md")
+        check("an unattached file inherits the root guide's law",
+              "Address the reader in second person."
+              in [e["statement"] for e in unattached["elements"]]
+              and "STYLE GUIDE for 97-styled.md" in unattached["rendered"]
+              and "[register] Address the reader in second person."
+              in unattached["rendered"])
+
+        api.define_style_guide(sdb, sm, "dialogue", parent="house")
+        api.attach_style(sdb, sm, "98-child.md", "dialogue")
+        guide_el = api.add_style_element(sdb, sm, "tone",
+                                         "Keep dialogue clipped.",
+                                         guide_name="dialogue")
+        attached = api.style_show(sdb, sm, "98-child.md")
+        check("an attached file inherits its guide's law plus its ancestors'",
+              {"Keep dialogue clipped.",
+               "Address the reader in second person."}
+              <= {e["statement"] for e in attached["elements"]})
+
+        api.add_style_element(sdb, sm, "tone",
+                              "Prefer terse fragments.", file="98-child.md",
+                              overrides=guide_el["id"])
+        overridden = api.style_show(sdb, sm, "98-child.md")
+        check("a file-local override displaces the guide element it names",
+              {e["statement"] for e in overridden["elements"]}
+              == {"Prefer terse fragments.",
+                  "Address the reader in second person."})
 
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
