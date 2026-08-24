@@ -1106,6 +1106,23 @@ def attach_style(db: Database, manuscript: dict, file: str, guide_name: str) -> 
     return {"file": file, "guide": guide["name"]}
 
 
+def _find_style_element(db: Database, manuscript: dict, prefix: str,
+                        status_clause: str, label: str) -> dict:
+    """Prefix lookup with the same ambiguity guard as _find_intent/_find_edge/
+    _policy_by_prefix: a prefix matching more than one row must never let
+    the caller silently act on whichever row SQLite returns first."""
+    rows = db.all(
+        f"SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
+        f"AND {status_clause}",
+        (manuscript["id"], f"%{prefix}%"),
+    )
+    if not rows:
+        raise LookupError(f"no {label} style element matching '{prefix}'")
+    if len(rows) > 1:
+        raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} style elements)")
+    return dict(rows[0])
+
+
 def add_style_element(db: Database, manuscript: dict, aspect: str, statement: str,
                       guide_name: str | None = None, file: str | None = None,
                       notes: str | None = None,
@@ -1121,14 +1138,8 @@ def add_style_element(db: Database, manuscript: dict, aspect: str, statement: st
         _validate_file(db, manuscript, file)
     resolved = None
     if overrides:
-        row = db.one(
-            "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
-            "AND status = 'active'",
-            (manuscript["id"], f"%{overrides}%"),
-        )
-        if not row:
-            raise LookupError(f"no active style element matching '{overrides}'")
-        resolved = row["id"]
+        resolved = _find_style_element(
+            db, manuscript, overrides, "status = 'active'", "active")["id"]
     return dict(st.add_element(
         db, manuscript["id"], aspect, statement,
         guide=dict(guide) if guide else None, file=file, notes=notes,
@@ -1139,14 +1150,8 @@ def add_style_element(db: Database, manuscript: dict, aspect: str, statement: st
 def retire_style_element(db: Database, manuscript: dict, prefix: str) -> dict:
     from . import styles as st
 
-    row = db.one(
-        "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
-        "AND status = 'active'",
-        (manuscript["id"], f"%{prefix}%"),
-    )
-    if not row:
-        raise LookupError(f"no active style element matching '{prefix}'")
-    st.retire_element(db, dict(row))
+    row = _find_style_element(db, manuscript, prefix, "status = 'active'", "active")
+    st.retire_element(db, row)
     return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
@@ -1157,11 +1162,7 @@ def move_style_element(db: Database, manuscript: dict, prefix: str,
     one). The element keeps its id, status, provenance, and history."""
     if bool(guide_name) == bool(file):
         raise ValueError("move needs exactly one of guide_name / file")
-    row = db.one(
-        "SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
-        "AND status != 'retired'", (manuscript["id"], f"%{prefix}%"))
-    if not row:
-        raise LookupError(f"no live style element matching '{prefix}'")
+    row = _find_style_element(db, manuscript, prefix, "status != 'retired'", "live")
     if guide_name:
         guide = db.one("SELECT * FROM style_guides WHERE manuscript_id = ? "
                        "AND name = ?", (manuscript["id"], guide_name))
