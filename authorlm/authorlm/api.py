@@ -264,6 +264,8 @@ def _find_intent(db: Database, manuscript: dict, prefix: str) -> dict:
 def complete_intent(db: Database, manuscript: dict, prefix: str,
                     outcome: str | None, llm: LLMClient | None = None) -> dict:
     intent = _find_intent(db, manuscript, prefix)
+    if intent["status"] != "active":
+        raise ValueError(f"intent is already {intent['status']}")
     ses.complete_intent(db, intent, outcome)
     analysis = analyze_pending(db, manuscript, llm) if llm and llm.enabled else []
     return {"intent": intent, "analysis": analysis}
