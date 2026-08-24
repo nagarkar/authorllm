@@ -2579,6 +2579,288 @@ def main_test() -> None:
               and buf2.getvalue() == "",
               buf2.getvalue())
 
+        # --- Doc tab↔TOC sync helpers (pure; no Google) ---
+        # These gate push/pull hierarchy safety: wrong classification
+        # rewrites toc.toml, adopts scratch tabs as essays, or treats a
+        # conflict as a safe pull.
+        import hashlib as _hashlib
+
+        from authorlm.gdocs import (
+            ILLUS_TAB_TITLE,
+            MANIFEST_TITLE,
+            _match_prompt,
+            classify_structure,
+            classify_tabs,
+            illus_subtree,
+            next_tab_move,
+            plan_prompt_sync,
+            prompt_links,
+            rewrite_toc_from_doc,
+            three_way,
+            walk_tabs,
+        )
+
+        check("next_tab_move is a no-op when order already matches",
+              next_tab_move(["a", "b", "c"], ["a", "b", "c"]) is None)
+        step = next_tab_move(["b", "a", "c"], ["a", "b", "c"])
+        check("next_tab_move proposes one index swap toward desired order",
+              step == {"updateDocumentTabProperties": {
+                  "tabProperties": {"tabId": "a", "index": 0},
+                  "fields": "index"}}, str(step))
+        # Ids absent from desired stay at the end and do not drive moves.
+        keep_tail = next_tab_move(["x", "a", "b"], ["b", "a"])
+        check("next_tab_move ignores extras not in desired",
+              keep_tail["updateDocumentTabProperties"]["tabProperties"]
+              ["tabId"] == "b", str(keep_tail))
+
+        local_h = _hashlib.sha256(b"local").hexdigest()[:16]
+        tab_h = _hashlib.sha256(b"tab").hexdigest()[:16]
+        check("three_way: identical sides are unchanged",
+              three_way("same", "same", "deadbeef") == "unchanged")
+        check("three_way: no base + drift → Doc wins (changed)",
+              three_way("tab", "local", None) == "changed")
+        check("three_way: only tab moved off base → safe pull",
+              three_way("tab", "local", local_h) == "changed")
+        check("three_way: only local moved → keep local (local_ahead)",
+              three_way("tab", "local", tab_h) == "local_ahead")
+        check("three_way: both moved → conflict",
+              three_way("tab", "local", "deadbeefcafebabe") == "conflict")
+
+        tabs_cls = [
+            ("t1", "01-choice.md"),
+            ("t2", "renamed-title.md"),
+            ("t3", "brand-new.md"),
+            ("t4", "04-road.md"),
+            ("t5", MANIFEST_TITLE),
+            ("t6", "scratch-notes"),
+            ("t7", "dup.md"),
+            ("t8", "dup.md"),
+            ("t9", "live.md"),
+        ]
+        links_cls = {
+            "01-choice.md": {"tab_id": "t1"},
+            "04-road.md": {"tab_id": "t-old"},  # known file, unknown tab id
+            "was.md": {"tab_id": "t2"},         # title drifted off filename
+            "live.md": {"tab_id": "t-live"},    # live mapped tab still in Doc
+        }
+        # Inject the live mapped tab so ambiguous duplicate detection fires.
+        tabs_cls.append(("t-live", "live.md"))
+        classed = classify_tabs(tabs_cls, links_cls, {"04-road.md"})
+        check("classify_tabs: rename when mapped id's title drifted",
+              classed["renamed"] == [("was.md", "renamed-title.md")],
+              str(classed))
+        check("classify_tabs: adopt unknown .md with no local/link",
+              classed["adopted"] == [("brand-new.md", "t3")], str(classed))
+        check("classify_tabs: readopt when title matches existing file",
+              classed["readopted"] == [("04-road.md", "t4")], str(classed))
+        check("classify_tabs: ignore manifest and non-.md titles",
+              MANIFEST_TITLE in classed["ignored"]
+              and "scratch-notes" in classed["ignored"], str(classed))
+        check("classify_tabs: duplicate unknown titles and live dupes "
+              "are ambiguous",
+              classed["ambiguous"].count("dup.md") == 2
+              and "live.md" in classed["ambiguous"], str(classed))
+
+        pairs_a = [("a.md", None), ("b.md", "a.md")]
+        pairs_b = [("b.md", None), ("a.md", None)]
+        check("classify_structure: identical pairs are insync",
+              classify_structure(pairs_a, pairs_a, None) == "insync")
+        check("classify_structure: local matches base → doc_moved",
+              classify_structure(pairs_b, pairs_a, pairs_a) == "doc_moved")
+        check("classify_structure: doc matches base → local_moved",
+              classify_structure(pairs_a, pairs_b, pairs_a) == "local_moved")
+        both = classify_structure(
+            [("x.md", None)], [("y.md", None)], pairs_a)
+        check("classify_structure: both sides off base → conflict",
+              both == "conflict", both)
+        # No base: pure Doc additions sharing the local spine → doc_moved.
+        local_spine = [("a.md", None)]
+        doc_with_add = [("a.md", None), ("new.md", None)]
+        check("classify_structure: no base + Doc-only additions → doc_moved",
+              classify_structure(doc_with_add, local_spine, None)
+              == "doc_moved")
+        check("classify_structure: no base + disagreeing common spine "
+              "→ unsynced",
+              classify_structure([("b.md", None)], local_spine, None)
+              == "unsynced")
+
+        tab_props: list = []
+        doc_pairs: list = []
+        walk_tabs([
+            {"tabProperties": {"tabId": "r1", "title": "part"},
+             "childTabs": [
+                 {"tabProperties": {"tabId": "c1", "title": "01.md"},
+                  "childTabs": []},
+                 {"tabProperties": {"tabId": "c2", "title": "notes"},
+                  "childTabs": [
+                      {"tabProperties": {"tabId": "c3", "title": "02.md"},
+                       "childTabs": []},
+                  ]},
+             ]},
+        ], tab_props, doc_pairs)
+        check("walk_tabs lists every tab id/title",
+              tab_props == [("r1", "part"), ("c1", "01.md"),
+                            ("c2", "notes"), ("c3", "02.md")],
+              str(tab_props))
+        # Non-md 'part'/'notes' are transparent: both essays sit at root
+        # because neither has an md ancestor.
+        check("walk_tabs: non-.md tabs are transparent to parent chain",
+              doc_pairs == [("01.md", None), ("02.md", None)],
+              str(doc_pairs))
+        nested_props: list = []
+        nested_pairs: list = []
+        walk_tabs([{
+            "tabProperties": {"tabId": "p", "title": "01.md"},
+            "childTabs": [{
+                "tabProperties": {"tabId": "s", "title": "scratch"},
+                "childTabs": [{
+                    "tabProperties": {"tabId": "c", "title": "02.md"},
+                    "childTabs": [],
+                }],
+            }],
+        }], nested_props, nested_pairs)
+        check("walk_tabs: md parent passes through a scratch nest",
+              nested_pairs == [("01.md", None), ("02.md", "01.md")],
+              str(nested_pairs))
+
+        toc_ws = root / "toc-rewrite"
+        toc_ws.mkdir()
+        (toc_ws / "toc.toml").write_text(
+            '[[chapter]]\nfile = "a.md"\nmatter = "front"\n\n'
+            '[[chapter]]\nfile = "local-only.md"\nmatter = "back"\n\n'
+            '[[chapter]]\nfile = "b.md"\n')
+        new_tree = rewrite_toc_from_doc(
+            {"path": str(toc_ws)},
+            [("b.md", None), ("a.md", None)],
+            [("a.md", 0), ("local-only.md", 0), ("b.md", 0)])
+        rewritten = (toc_ws / "toc.toml").read_text()
+        check("rewrite_toc_from_doc follows Doc order and keeps "
+              "never-pushed locals after their predecessor",
+              [n for n, _ in new_tree]
+              == ["b.md", "a.md", "local-only.md"], str(new_tree))
+        check("rewrite_toc_from_doc preserves matter attributes",
+              'matter = "front"' in rewritten
+              and 'matter = "back"' in rewritten, rewritten)
+
+        # Illustration prompt Doc mirror planning.
+        check("prompt_links strips the reserved mapping prefix",
+              prompt_links({
+                  "_illusprompt/slot.md": {"tab_id": "p1"},
+                  "01.md": {"tab_id": "e1"},
+                  "_illusprompt/bad": "not-a-dict",
+              }) == {"slot.md": {"tab_id": "p1"}})
+        root_id, children, ids = illus_subtree([
+            {"tabProperties": {"tabId": "essay", "title": "01.md"},
+             "childTabs": []},
+            {"tabProperties": {"tabId": "ill", "title": ILLUS_TAB_TITLE},
+             "childTabs": [
+                 {"tabProperties": {"tabId": "p1", "title": "slot.md"},
+                  "childTabs": [
+                      {"tabProperties": {"tabId": "nested",
+                                         "title": "extra"},
+                       "childTabs": []},
+                  ]},
+             ]},
+        ], {})
+        check("illus_subtree finds the reserved root by title",
+              root_id == "ill"
+              and children == [("p1", "slot.md")]
+              and ids == {"ill", "p1", "nested"},
+              f"{root_id=} {children=} {ids=}")
+        # Remembered id wins over title when both exist.
+        root_by_id, _, _ = illus_subtree([
+            {"tabProperties": {"tabId": "remembered",
+                               "title": "not-the-title"},
+             "childTabs": []},
+            {"tabProperties": {"tabId": "other", "title": ILLUS_TAB_TITLE},
+             "childTabs": []},
+        ], {"_illustrations_tab": "remembered"})
+        check("illus_subtree prefers the remembered illustrations tab id",
+              root_by_id == "remembered", root_by_id)
+
+        text_a = "description one"
+        hash_a = _hashlib.sha256(text_a.encode()).hexdigest()[:16]
+        plan = plan_prompt_sync(
+            {"slot.md": text_a, "new.md": "fresh"},
+            {"slot.md": {"tab_id": "p1", "pushed_hash": "stalehash0000000"},
+             "gone.md": {"tab_id": "p-gone"}},
+            [("p1", "renamed.md"), ("p-hand", "handmade.md"),
+             ("p-gone", "gone.md")],
+        )
+        check("plan_prompt_sync: rewrite on hash mismatch + rename detect",
+              plan["rewrite"] == ["slot.md"]
+              and plan["renamed"] == [("slot.md", "renamed.md")],
+              str(plan))
+        check("plan_prompt_sync: create for local-only and vanished tabs",
+              plan["create"] == ["new.md"], str(plan))
+        check("plan_prompt_sync: prune mapped-but-deleted locals; "
+              "unknown leaves hand-made tabs",
+              plan["prune"] == [("gone.md", "p-gone")]
+              and plan["unknown"] == ["handmade.md"], str(plan))
+        # Unchanged hash → no rewrite.
+        plan_ok = plan_prompt_sync(
+            {"slot.md": text_a},
+            {"slot.md": {"tab_id": "p1", "pushed_hash": hash_a}},
+            [("p1", "slot.md")])
+        check("plan_prompt_sync: matching hash skips rewrite",
+              plan_ok == {"create": [], "rewrite": [], "prune": [],
+                          "unknown": [], "renamed": []},
+              str(plan_ok))
+
+        names = ["alpha-slot.md", "beta-other.md"]
+        check("_match_prompt resolves exact, display-prefix, and unique "
+              "substring",
+              _match_prompt(names, "alpha-slot.md") == "alpha-slot.md"
+              and _match_prompt(
+                  names, "_illustrations/prompts/beta-other.md")
+              == "beta-other.md"
+              and _match_prompt(names, "alpha") == "alpha-slot.md"
+              and _match_prompt(names, "a") is None)  # ambiguous
+
+        # --- virgin session start: no baseline → skip opening collect ---
+        virgin_ws = root / "virgin-ws"
+        virgin_ms = virgin_ws / "manuscript"
+        virgin_ms.mkdir(parents=True)
+        (virgin_ms / "start.md").write_text("# Start\n\nFresh prose.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(virgin_ws), "init",
+                      "--name", "virgin", "--path", str(virgin_ms),
+                      "--no-extract"])
+        virgin_db = api.open_db(str(virgin_ws))
+        virgin_m = api.get_manuscript(virgin_db)
+        check("init --no-extract leaves a virgin manuscript (no baseline)",
+              virgin_db.one(
+                  "SELECT id FROM manuscript_versions "
+                  "WHERE manuscript_id = ? LIMIT 1",
+                  (virgin_m["id"],)) is None)
+        (virgin_ms / "start.md").write_text(
+            "# Start\n\nFresh prose, already edited.\n")
+        out_start = io.StringIO()
+        with contextlib.redirect_stdout(out_start):
+            cli_main(["--workspace", str(virgin_ws), "session", "start"])
+        start_txt = out_start.getvalue()
+        check("virgin session start skips opening collect "
+              "(no version created)",
+              "Collected" not in start_txt
+              and "file_added" not in start_txt
+              and virgin_db.one(
+                  "SELECT id FROM manuscript_versions "
+                  "WHERE manuscript_id = ? LIMIT 1",
+                  (virgin_m["id"],)) is None,
+              start_txt)
+        # After a real collect, session start must acknowledge changes.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(virgin_ws), "session", "end"])
+            cli_main(["--workspace", str(virgin_ws), "collect"])
+        (virgin_ms / "extra.md").write_text("# Extra\n\nNew chapter.\n")
+        out_start2 = io.StringIO()
+        with contextlib.redirect_stdout(out_start2):
+            cli_main(["--workspace", str(virgin_ws), "session", "start"])
+        start2 = out_start2.getvalue()
+        check("session start with a baseline collects and reports "
+              "new chapters",
+              "file_added" in start2 or "extra.md" in start2, start2)
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
