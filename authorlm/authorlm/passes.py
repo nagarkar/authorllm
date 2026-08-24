@@ -422,8 +422,20 @@ def stage(db: Database, manuscript: dict, pass_row: dict, file: str,
         # Re-runs must replace in place: origin_id is UNIQUE, so a soft
         # withdraw + insert collides with the withdrawn (or written) row.
         if origin_id in existing:
-            db.update("doc_threads", existing[origin_id]["id"], fields)
-            row = {**existing[origin_id], **fields}
+            prior = existing[origin_id]
+            # A row still WRITTEN is a form the author is reading in the
+            # Doc right now. Resetting it to 'proposed' would un-pend it
+            # silently AND lift push_doc's critique gate on an essay whose
+            # Doc still carries <<old>>{{new}} spans — the pause exists
+            # precisely so a push cannot land there. 'cleaned' is a
+            # finished pass and re-stages freely.
+            if prior["state"] == "written":
+                raise ValueError(
+                    f"{file}: a critique edit at this anchor is already "
+                    f"{prior['state']} in the Doc — resolve or roll back "
+                    "the pass before re-staging it")
+            db.update("doc_threads", prior["id"], fields)
+            row = {**prior, **fields}
         else:
             row = ko_fields("dt")
             row.update(

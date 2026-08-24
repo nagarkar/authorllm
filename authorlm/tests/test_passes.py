@@ -374,6 +374,25 @@ def main_test() -> None:
               len(again["staged"]) == 3
               and all(t["state"] == "proposed" for t in again["staged"]))
 
+        # #24 x #26: #26 made stage() replace in place; #24 gates push_doc
+        # on threads still 'written'. A re-run that reset 'written' to
+        # 'proposed' would quietly lift that gate while the Doc still
+        # carries the form — the two fixes are individually right and
+        # leave this hole between them.
+        pending = passes.staged_threads(db, mid, "alpha.md")[0]
+        db.update("doc_threads", pending["id"], {"state": "written"})
+        try:
+            passes.stage(db, manuscript, p, "alpha.md", result)
+            refused = False
+        except ValueError as err:
+            refused = "already written" in str(err)
+        after = db.one("SELECT state FROM doc_threads WHERE id = ?",
+                       (pending["id"],))["state"]
+        check("re-staging over a form already written to the Doc is "
+              "refused, and the form stays written so the push gate holds",
+              refused and after == "written", f"refused={refused} state={after}")
+        db.update("doc_threads", pending["id"], {"state": "proposed"})
+
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli_main(["--workspace", str(ws), "critique", "show", "--query",
