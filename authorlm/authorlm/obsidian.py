@@ -47,6 +47,17 @@ def export_obsidian(db: Database, manuscript: dict, out_dir: str | None = None) 
         (manuscript["id"],),
     )
     by_id = {n["id"]: n for n in nodes}
+    # Two distinctly-named concepts can sanitize to the same note_name
+    # (e.g. "Choice/Freedom" and "Choice:Freedom" both become
+    # "Choice-Freedom") — disambiguate with the node id so the second
+    # concept's note never silently overwrites the first's.
+    filenames: dict[str, str] = {}
+    claimed: set[str] = set()
+    for node in nodes:
+        base = note_name(node["name"])
+        name = base if base not in claimed else f"{base}-{node['id'][:6]}"
+        claimed.add(name)
+        filenames[node["id"]] = name
     outgoing = defaultdict(list)
     incoming = defaultdict(list)
     link_count = 0
@@ -75,7 +86,7 @@ def export_obsidian(db: Database, manuscript: dict, out_dir: str | None = None) 
         if outgoing[node["id"]]:
             lines.append("## Relationships")
             for edge in outgoing[node["id"]]:
-                target = note_name(by_id[edge["to_node"]]["name"])
+                target = filenames[edge["to_node"]]
                 inferred = " *(inferred)*" if edge["status"] == "inferred" else ""
                 lines.append(f"- {edge['relation']} [[{target}]]{inferred}")
             lines.append("")
@@ -87,7 +98,7 @@ def export_obsidian(db: Database, manuscript: dict, out_dir: str | None = None) 
                 source = by_id[edge["from_node"]]["name"]
                 lines.append(f"- {source} — {edge['relation']} → this")
             lines.append("")
-        (out / f"{note_name(node['name'])}.md").write_text(
+        (out / f"{filenames[node['id']]}.md").write_text(
             "\n".join(lines), encoding="utf-8"
         )
 
