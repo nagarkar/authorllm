@@ -1288,6 +1288,105 @@ def main_test() -> None:
                   "WHERE manuscript_id = ? AND source = 'margin-thread'",
                   (manuscript["id"],))["n"] == 0, str(decided))
 
+        # --- critique_diff_write: accepted forms → Doc; failure isolation ---
+        from authorlm.gdocs import critique_diff_write
+
+        critique_body = (
+            "# Critique Target\n\n"
+            "First body paragraph for replace.\n\n"
+            "Second body paragraph stays.\n\n"
+            "Third body paragraph for insert after.\n"
+        )
+        (ms / "07-critique-write.md").write_text(critique_body)
+        push_doc(db, manuscript, "07-critique-write.md",
+                 service=stub, docs_service=stub)
+        local_before = (ms / "07-critique-write.md").read_text()
+
+        def _crit_thread(old, new, anchor, kind, state="accepted"):
+            row = ko_fields("dt")
+            row.update(
+                manuscript_id=manuscript["id"], origin_type="critique",
+                origin_id=f"crit-write:{row['id'][:8]}",
+                file="07-critique-write.md", anchor_quote=None,
+                proposed_old=old, proposed_new=new, note="why",
+                state=state, our_reply_ids="[]",
+                last_author_reply_id=None, scope_kind="file",
+                scope_ref="07-critique-write.md",
+                metadata=_mjson.dumps({
+                    "kind": kind, "anchor_paragraph": anchor,
+                    "intent_id": "i1", "original_new": new}))
+            db.insert("doc_threads", row)
+            return dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                               (row["id"],)))
+
+        t_rep = _crit_thread(
+            "First body paragraph for replace.",
+            "First body paragraph, carefully revised.",
+            2, "replace")
+        t_ins = _crit_thread(
+            "", "A bridging paragraph, newly inserted.",
+            4, "insert")
+        t_bad = _crit_thread(
+            "This text is nowhere in the essay.",
+            "Should fail loudly.",
+            2, "replace")
+        t_rej = _crit_thread(
+            "Second body paragraph stays.",
+            "Should never appear.",
+            3, "replace", state="rejected")
+
+        result = critique_diff_write(
+            db, manuscript, "07-critique-write.md",
+            [t_rep, t_ins, t_bad, t_rej], stub, stub)
+        tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                      if t["title"] == "07-critique-write.md")
+        written_ids = {t["id"] for t in result["written"]}
+        failed_ids = {t["id"] for t, _ in result["failed"]}
+        check("critique_diff_write marks accepted replace+insert; "
+              "isolates missing-span failure; skips rejected",
+              t_rep["id"] in written_ids and t_ins["id"] in written_ids
+              and t_bad["id"] in failed_ids
+              and t_rej["id"] not in written_ids
+              and t_rej["id"] not in failed_ids
+              and ("<<First body paragraph for replace.>>"
+                   "{{First body paragraph, carefully revised.}}") in tab_cw
+              and "{{A bridging paragraph, newly inserted.}}" in tab_cw
+              and "Should never appear" not in tab_cw
+              and "Should fail loudly" not in tab_cw,
+              f"written={written_ids} failed={result['failed']!r} "
+              f"tab={tab_cw!r}")
+        check("critique_diff_write leaves local file as OLD (pristine)",
+              (ms / "07-critique-write.md").read_text() == local_before)
+        check("critique_diff_write reports a Doc tab URL",
+              "doc-2" in (result.get("url") or "")
+              and "tab=" in (result.get("url") or ""),
+              str(result.get("url")))
+
+        # Out-of-range insert: write always push-rebuilds from local first,
+        # so a second call starts clean; the bad thread fails alone.
+        t_oor = _crit_thread(
+            "", "orphan insert", 99, "insert")
+        result2 = critique_diff_write(
+            db, manuscript, "07-critique-write.md", [t_oor], stub, stub)
+        tab_after_fail = next(
+            t["text"] for t in stub.state["docs"]["doc-2"]
+            if t["title"] == "07-critique-write.md")
+        check("out-of-range insert anchor fails in isolation",
+              not result2["written"]
+              and result2["failed"]
+              and "out of range" in result2["failed"][0][1],
+              str(result2["failed"]))
+        check("a failed-only write push-rebuilds the tab to local OLD",
+              "First body paragraph for replace." in tab_after_fail
+              and "{{" not in tab_after_fail
+              and "orphan insert" not in tab_after_fail,
+              tab_after_fail)
+        check("local stays pristine after a failed-only write",
+              (ms / "07-critique-write.md").read_text() == local_before)
+        # Drop the fixture before later toc/export asserts that expect
+        # only the chapters they declare.
+        (ms / "07-critique-write.md").unlink()
+
         # --- single-manuscript export (doc create-manuscript) ---
         from authorlm.export import combined_markdown, export_manuscript
 
@@ -1462,6 +1561,28 @@ def main_test() -> None:
         ok, stats = hygiene.passes_recurrence_bar(bar_files, ["Undertow"])
         check("cross-file recurrence passes the bar",
               ok and stats["files"] == 2, str(stats))
+
+        # --- policy belief lifecycle (Laplace confidence + promote/demote) ---
+        from authorlm import policies as pol
+
+        check("Laplace confidence is (s+1)/(s+c+2)",
+              pol._confidence(0, 0) == 0.5
+              and pol._confidence(3, 0) == 0.8
+              and pol._confidence(0, 3) == 0.2)
+        check("retired status is sticky under further evidence",
+              pol._lifecycle_status("retired", 10, 0, 0.9) == "retired")
+        check("low confidence with enough observations retires a candidate",
+              pol._lifecycle_status("candidate", 0, 4,
+                                    pol._confidence(0, 4)) == "retired")
+        check("validated demotes when confidence falls below demote bar",
+              pol._lifecycle_status("validated", 2, 2,
+                                    pol._confidence(2, 2)) == "candidate")
+        check("candidate promotes only with support AND confidence bars",
+              pol._lifecycle_status("candidate", 3, 0,
+                                    pol._confidence(3, 0)) == "validated"
+              and pol._lifecycle_status("candidate", 2, 0,
+                                        pol._confidence(2, 0))
+              == "candidate")
 
         # The sweep reports unconfirmed gated nodes that fail the bar —
         # mentioned (not ungrounded) but single-context.
