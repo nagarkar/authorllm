@@ -539,6 +539,38 @@ def main_test() -> None:
               and (ms / "_illustrations" / r3["written"][0]).exists(),
               str(removed))
 
+        # --- capture_embeds/reembed: the pick survives a Doc round trip ---
+        embed_root = root / "illus-embed-scratch"
+        (embed_root / "_illustrations").mkdir(parents=True)
+        (embed_root / "ch.md").write_text(
+            "# C\n\n[Illustration: a lone tracker]\n")
+        eh = illus_mod.desc_hash("a lone tracker")
+        cand1 = f"a-lone-tracker-{eh}-0000-01.png"
+        cand2 = f"a-lone-tracker-{eh}-0000-02.png"
+        (embed_root / "_illustrations" / cand1).write_bytes(b"")
+        (embed_root / "_illustrations" / cand2).write_bytes(b"")
+        bare = (embed_root / "ch.md").read_text()
+
+        never_picked = illus_mod.reembed(bare, embed_root)
+        check("a never-picked slot falls back to the newest candidate",
+              illus_mod.embed_target(never_picked, eh) == cand2, never_picked)
+
+        pick = {eh: cand1}
+        embedded = illus_mod.reembed(bare, embed_root, prior=pick)
+        check("a prior pick wins over the newest candidate",
+              illus_mod.embed_target(embedded, eh) == cand1, embedded)
+        check("capture_embeds recovers the exact picked candidate",
+              illus_mod.capture_embeds(embedded) == pick,
+              illus_mod.capture_embeds(embedded))
+        check("reembed on already-embedded text never doubles the line",
+              illus_mod.reembed(embedded, embed_root, prior=pick) == embedded,
+              illus_mod.reembed(embedded, embed_root, prior=pick))
+
+        (embed_root / "_illustrations" / cand1).unlink()
+        fallback = illus_mod.reembed(bare, embed_root, prior=pick)
+        check("a pick whose file is gone falls back to the newest candidate",
+              illus_mod.embed_target(fallback, eh) == cand2, fallback)
+
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
         # Doc state is tabs of literal markdown; the temp-import Doc is
