@@ -25,6 +25,8 @@ function Div(div)
   seen_file = true
 
   if has_class(div, "authorlm-title-page") then
+    table.insert(div.content, 1,
+      pandoc.RawBlock("latex", "\\thispagestyle{empty}"))
     for index, block in ipairs(div.content) do
       if block.t == "Header" and block.level == 1 then
         table.insert(block.classes, "authorlm-book-title")

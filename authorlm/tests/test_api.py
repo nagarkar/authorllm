@@ -1817,6 +1817,22 @@ def main_test() -> None:
                   < filtered.stdout.index("The Book")
                   and "Author House LLC" in filtered.stdout,
                   filtered.stderr or filtered.stdout[:1000])
+            structured_latex = _subprocess.run(
+                ["pandoc", pdf_result["markdown"], "--from",
+                 "markdown+smart+footnotes+fenced_divs", "--lua-filter",
+                 str(review_filter.parent / "structure.lua"),
+                 "--lua-filter", str(review_filter), "--metadata",
+                 "authorlm-review-copy=true", "--metadata",
+                 "author=Author Penname", "--metadata",
+                 "copyright-owner=Author House LLC", "-t", "latex"],
+                capture_output=True, text=True)
+            check("title page suppresses native numbering before its heading",
+                  structured_latex.returncode == 0
+                  and structured_latex.stdout.index(
+                      "\\thispagestyle{empty}")
+                  < structured_latex.stdout.index(
+                      "\\AuthorLMBookTitle{}"),
+                  structured_latex.stderr or structured_latex.stdout[:1000])
             published = export_published(db, manuscript, fmt="docx",
                                          variant="images")
             docx = Path(published["docx"])
