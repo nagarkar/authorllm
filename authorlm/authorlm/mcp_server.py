@@ -119,14 +119,18 @@ def get_manuscript_metadata(manuscript: str | None = None) -> dict:
 @mcp.tool()
 def set_manuscript_metadata(author: str | None = None,
                             copyright_owner: str | None = None,
+                            paperback_isbn: str | None = None,
+                            hardcover_isbn: str | None = None,
                             manuscript: str | None = None) -> dict:
-    """Set the canonical publication author and/or copyright owner. Values
-    are stored on the manuscript record and shared by every surface."""
+    """Set canonical publication identity: author, copyright owner, and/or
+    format-specific print ISBN-13 values. ISBNs are validated and normalized."""
     def run():
         db = _db()
         selected = _manuscript(db, manuscript)
         return api.update_manuscript_metadata(
-            db, selected, author=author, copyright_owner=copyright_owner)
+            db, selected, author=author, copyright_owner=copyright_owner,
+            paperback_isbn=paperback_isbn,
+            hardcover_isbn=hardcover_isbn)
     return _guard(run)
 
 

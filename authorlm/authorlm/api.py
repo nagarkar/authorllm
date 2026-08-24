@@ -108,7 +108,9 @@ def get_manuscript(db: Database, name: str | None = None) -> dict:
 
 def register_manuscript(db: Database, name: str, path: str,
                         author: str = "",
-                        copyright_owner: str = "") -> dict:
+                        copyright_owner: str = "",
+                        paperback_isbn: str = "",
+                        hardcover_isbn: str = "") -> dict:
     """Register one manuscript and its canonical publication identity."""
     root = Path(path).resolve()
     if not root.is_dir():
@@ -116,8 +118,11 @@ def register_manuscript(db: Database, name: str, path: str,
     if db.one("SELECT id FROM manuscripts WHERE name = ?", (name,)):
         raise ValueError(f"manuscript '{name}' is already registered")
     row = ko_fields("ms")
-    row.update(name=name, path=str(root), author=author.strip(),
-               copyright_owner=copyright_owner.strip())
+    row.update(
+        name=name, path=str(root), author=author.strip(),
+        copyright_owner=copyright_owner.strip(),
+        paperback_isbn=_normalize_isbn13(paperback_isbn),
+        hardcover_isbn=_normalize_isbn13(hardcover_isbn))
     db.insert("manuscripts", row)
     return dict(row)
 
@@ -130,20 +135,47 @@ def manuscript_metadata(manuscript: dict) -> dict:
         "path": manuscript["path"],
         "author": manuscript.get("author", ""),
         "copyright_owner": manuscript.get("copyright_owner", ""),
+        "paperback_isbn": manuscript.get("paperback_isbn", ""),
+        "hardcover_isbn": manuscript.get("hardcover_isbn", ""),
     }
+
+
+def _normalize_isbn13(value: str) -> str:
+    """Canonical ISBN-13 digits, with syntax and checksum validation."""
+    value = value.strip()
+    if not value:
+        return ""
+    if not re.fullmatch(r"[0-9 -]+", value):
+        raise ValueError("ISBN must contain only digits, spaces, or hyphens")
+    digits = re.sub(r"[ -]", "", value)
+    if len(digits) != 13:
+        raise ValueError("ISBN must contain exactly 13 digits")
+    total = sum(int(digit) * (1 if index % 2 == 0 else 3)
+                for index, digit in enumerate(digits[:12]))
+    if (10 - total % 10) % 10 != int(digits[-1]):
+        raise ValueError("ISBN-13 checksum is invalid")
+    return digits
 
 
 def update_manuscript_metadata(db: Database, manuscript: dict,
                                author: str | None = None,
-                               copyright_owner: str | None = None) -> dict:
+                               copyright_owner: str | None = None,
+                               paperback_isbn: str | None = None,
+                               hardcover_isbn: str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata."""
     changes = {}
     if author is not None:
         changes["author"] = author.strip()
     if copyright_owner is not None:
         changes["copyright_owner"] = copyright_owner.strip()
+    if paperback_isbn is not None:
+        changes["paperback_isbn"] = _normalize_isbn13(paperback_isbn)
+    if hardcover_isbn is not None:
+        changes["hardcover_isbn"] = _normalize_isbn13(hardcover_isbn)
     if not changes:
-        raise ValueError("provide --author and/or --copyright-owner")
+        raise ValueError(
+            "provide --author, --copyright-owner, --paperback-isbn, "
+            "and/or --hardcover-isbn")
     db.update("manuscripts", manuscript["id"], changes)
     manuscript.update(changes)
     return manuscript_metadata(manuscript)

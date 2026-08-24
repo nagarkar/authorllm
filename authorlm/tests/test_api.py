@@ -137,7 +137,9 @@ def main_test() -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
                       "--path", str(ms), "--author", "Ada Author",
-                      "--copyright-owner", "Ada Author LLC"])
+                      "--copyright-owner", "Ada Author LLC",
+                      "--paperback-isbn", "979-8-90452-354-1",
+                      "--hardcover-isbn", "979-8-90452-351-0"])
 
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
@@ -145,7 +147,9 @@ def main_test() -> None:
               manuscript["name"] == "book")
         check("init records publication identity on the manuscript",
               manuscript["author"] == "Ada Author"
-              and manuscript["copyright_owner"] == "Ada Author LLC")
+              and manuscript["copyright_owner"] == "Ada Author LLC"
+              and manuscript["paperback_isbn"] == "9798904523541"
+              and manuscript["hardcover_isbn"] == "9798904523510")
         try:
             api.register_manuscript(
                 db, "book", str(ms), author="Duplicate Author")
@@ -169,6 +173,16 @@ def main_test() -> None:
               updated_identity["author"] == "A. Author"
               and updated_identity["copyright_owner"] == "Author House LLC"
               and api.list_manuscripts(db)[0]["author"] == "A. Author")
+        try:
+            api.update_manuscript_metadata(
+                db, manuscript, paperback_isbn="979-8-90452-354-2")
+            invalid_isbn_refused = False
+        except ValueError:
+            invalid_isbn_refused = True
+        check("publication identity refuses an invalid ISBN-13 checksum",
+              invalid_isbn_refused
+              and api.get_manuscript(db)["paperback_isbn"]
+              == "9798904523541")
         identity_out = io.StringIO()
         with contextlib.redirect_stdout(identity_out):
             cli_main(["--workspace", str(ws), "manuscript", "set",

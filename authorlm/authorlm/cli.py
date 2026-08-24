@@ -168,7 +168,9 @@ def cmd_init(args):
     try:
         row = api.register_manuscript(
             db, args.name, str(path), author=args.author,
-            copyright_owner=args.copyright_owner)
+            copyright_owner=args.copyright_owner,
+            paperback_isbn=args.paperback_isbn,
+            hardcover_isbn=args.hardcover_isbn)
     except ValueError as err:
         sys.exit(f"error: {err}.")
     print(f"Registered manuscript '{args.name}' at {path}")
@@ -186,7 +188,9 @@ def cmd_manuscript(args):
         try:
             identity = api.update_manuscript_metadata(
                 db, manuscript, author=args.author,
-                copyright_owner=args.copyright_owner)
+                copyright_owner=args.copyright_owner,
+                paperback_isbn=args.paperback_isbn,
+                hardcover_isbn=args.hardcover_isbn)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -196,6 +200,10 @@ def cmd_manuscript(args):
     print(f"  author: {identity['author'] or '(not set)'}")
     print("  copyright_owner: "
           f"{identity['copyright_owner'] or '(not set)'}")
+    print("  paperback_isbn: "
+          f"{identity['paperback_isbn'] or '(not set)'}")
+    print("  hardcover_isbn: "
+          f"{identity['hardcover_isbn'] or '(not set)'}")
 
 
 # Every table that carries manuscript-scoped rows, children first.
@@ -4535,6 +4543,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="author or pen name used for publication")
     p.add_argument("--copyright-owner", default="",
                    help="legal or organizational copyright owner")
+    p.add_argument("--paperback-isbn", default="",
+                   help="ISBN-13 assigned to the paperback edition")
+    p.add_argument("--hardcover-isbn", default="",
+                   help="ISBN-13 assigned to the hardcover edition")
     p.add_argument("--no-extract", action="store_true",
                    help="skip automatic LLM concept extraction")
     p.set_defaults(func=cmd_init)
@@ -4546,6 +4558,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="author or pen name used for publication")
     p.add_argument("--copyright-owner", default=None,
                    help="legal or organizational copyright owner")
+    p.add_argument("--paperback-isbn", default=None,
+                   help="ISBN-13 assigned to the paperback edition")
+    p.add_argument("--hardcover-isbn", default=None,
+                   help="ISBN-13 assigned to the hardcover edition")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")

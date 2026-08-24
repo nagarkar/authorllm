@@ -32,8 +32,9 @@ no evidence, it abstains.
   `authorlm/publication/` Pandoc profiles (shared structure filter, LaTeX PDF
   typography, and EPUB CSS), while manuscript export values remain in
   `_exports/settings.toml`.
-  Author and copyright owner are canonical manuscript metadata, set with
-  `authorlm manuscript set`. PDF export is a confidential review copy by
+  Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
+  manuscript metadata, set with `authorlm manuscript set`. ISBN-13 values are
+  validated and stored as digits. PDF export is a confidential review copy by
   default (notice page, footer, and watermark); `--print-ready` explicitly
   produces the clean production PDF.
 
@@ -158,8 +159,8 @@ outstanding questions.
 | `shell` | Interactive authoring session: briefing, prefix-free commands, auto-collect watcher (`--no-watch`, `--debounce N`) |
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
-| `init --name N --path DIR [--author A --copyright-owner O]` | Register a manuscript directory (`.md`/`.txt`); with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`); the CLI, MCP tools, and exporters share this record |
+| `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
+| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
 | `extract [file…] [--full] [--edges-only]` | LLM-extract concepts and relationships — incremental by default (only files changed since last extraction); `--edges-only` re-mines relationships among existing concepts without touching the concept inventory |

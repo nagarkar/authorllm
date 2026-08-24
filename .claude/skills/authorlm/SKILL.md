@@ -249,12 +249,16 @@ incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
 ## Publication identity and review PDFs
-Author and copyright owner are canonical manuscript metadata, never export
-settings or inferred editorial beliefs. Inspect them with
+Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
+manuscript metadata, never export settings or inferred editorial beliefs.
+Inspect them with
 `get_manuscript_metadata` (or `authorlm manuscript show`) and change them
 only from the author's explicit words with `set_manuscript_metadata` (or
-`authorlm manuscript set --author "…" --copyright-owner "…"`). Never guess a
-legal owner from a pen name, Git identity, or manuscript prose.
+`authorlm manuscript set --author "…" --copyright-owner "…"
+--paperback-isbn … --hardcover-isbn …`). ISBNs are format-specific, validated
+as ISBN-13, and stored without spaces or hyphens. Never guess a legal owner or
+assign one format's ISBN to another from a pen name, Git identity, manuscript
+prose, or filename.
 
 `authorlm export pdf` is a confidential review artifact by default: it gets a
 notice page before the title, a small footer, and a watermark on every page.

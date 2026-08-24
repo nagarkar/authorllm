@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS manuscripts (
     name TEXT NOT NULL UNIQUE,
     path TEXT NOT NULL,
     author TEXT NOT NULL DEFAULT '',
-    copyright_owner TEXT NOT NULL DEFAULT ''
+    copyright_owner TEXT NOT NULL DEFAULT '',
+    paperback_isbn TEXT NOT NULL DEFAULT '',
+    hardcover_isbn TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS manuscript_versions (
@@ -441,6 +443,14 @@ class Database:
         if "copyright_owner" not in manuscript_columns:
             self.conn.execute(
                 "ALTER TABLE manuscripts ADD COLUMN copyright_owner TEXT NOT NULL DEFAULT ''"
+            )
+        if "paperback_isbn" not in manuscript_columns:
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN paperback_isbn TEXT NOT NULL DEFAULT ''"
+            )
+        if "hardcover_isbn" not in manuscript_columns:
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN hardcover_isbn TEXT NOT NULL DEFAULT ''"
             )
         if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(
