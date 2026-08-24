@@ -2437,8 +2437,13 @@ def main_test() -> None:
             def stats_line(self):
                 return None
 
+        # Two distinct contexts, not one paragraph repeated: the recurrence
+        # bar admits a concept only when it appears in separate contexts,
+        # and eight repeats in a single paragraph is one context — the
+        # rule landed after this test was written.
         (ms / "07-alpha.md").write_text(
-            "# Alpha\n\n" + ("AlphaConcept appears here. " * 8) + "\n")
+            "# Alpha\n\n" + ("AlphaConcept appears here. " * 4) + "\n\n"
+            "## Later\n\n" + ("AlphaConcept returns here. " * 4) + "\n")
         (ms / "08-beta.md").write_text(
             "# Beta\n\n" + ("BetaConcept appears here. " * 8) + "\n")
         api.collect(db, manuscript, {})
