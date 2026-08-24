@@ -1336,6 +1336,45 @@ def main_test() -> None:
               str(fetched.get("c-ent")))
         stub.state["comments"]["c-ent"]["resolved"] = True
 
+        # A comment the author resolves BY HAND in the Doc UI (not through
+        # 'doc decide' or a written-thread receipt) must not stay marked
+        # 'ingested' forever (it-ce3f6078b674). harvest_comments has to
+        # reconcile its own stale rows against Drive's current open set,
+        # not just add to them — and it must do this even when the open
+        # set comes back EMPTY, which is exactly what an author resolving
+        # everything by hand produces.
+        from authorlm.gdocs import harvest_comments, manuscript_bridge
+
+        # docs_service=None throughout: this block only exercises ingest +
+        # reconcile. The master Doc carries other open threads (c-1) mid
+        # verdict elsewhere in this suite — passing a live docs_service
+        # would also run advance_threads doc-wide and apply THEIR pending
+        # verdicts as a side effect of this unrelated harvest call.
+        stub.add_comment("c-hand", "a phrase", "resolve me by hand")
+        harvest_report = {}
+        harvest_comments(db, manuscript, "doc-2", stub, None,
+                         manuscript_bridge(manuscript), harvest_report)
+        row = db.one("SELECT state FROM doc_comments WHERE manuscript_id = ? "
+                     "AND comment_id = ?", (manuscript["id"], "c-hand"))
+        check("a fresh comment is ingested as open",
+              row is not None and row["state"] == "ingested", str(row))
+        replies_before = len(stub.state["comments"]["c-hand"]["replies"])
+        stub.state["comments"]["c-hand"]["resolved"] = True  # author, in the Doc
+        harvest_report2 = {}
+        harvest_comments(db, manuscript, "doc-2", stub, None,
+                         manuscript_bridge(manuscript), harvest_report2)
+        row2 = db.one("SELECT state FROM doc_comments WHERE manuscript_id = ? "
+                      "AND comment_id = ?", (manuscript["id"], "c-hand"))
+        check("harvest reconciles a hand-resolved comment to 'resolved'",
+              row2 is not None and row2["state"] == "resolved", str(row2))
+        check("reconciliation is reported to the caller",
+              "c-hand" in harvest_report2.get("comments_reconciled", []),
+              str(harvest_report2))
+        check("reconciling a hand-resolved comment posts no reply — the "
+              "author already closed it in the Doc",
+              len(stub.state["comments"]["c-hand"]["replies"])
+              == replies_before)
+
         # Export escaping survives the strip (markers arrive as \<\<
         # with ~~ strikethrough in the markdown export).
         exported = ("~~\\<\\<the old way.\\>\\>~~"
@@ -2224,16 +2263,19 @@ def main_test() -> None:
               "excerpt follows",
               moved["desc_hash"] != h_before
               and moved["excerpt"].startswith("a silver orrery"))
+        # Note: craft_text ignores `workspace` — the craft file moved from
+        # <workspace>/.authorlm/ to the project root with the rest of the
+        # editorial config (authorlm/paths.py); every caller reads the
+        # one repo-shared file now. `workspace=str(root)` is kept below
+        # only because craft_text still accepts (and ignores) the param.
         check("craft file seeds and serves the active model's carveout",
               "bound attributes" in il.craft_text(
-                  {"llm": {"image_model":
-                           "gemini/gemini-3-pro-image-preview"}},
+                  {"llm": {"image_model": "gpt-image-2"}},
                   workspace=str(root))
-              and "Garbles lettering" in il.craft_text(
-                  {"llm": {"image_model":
-                           "gemini/gemini-3-pro-image-preview"}},
+              and "Renders lettering reliably" in il.craft_text(
+                  {"llm": {"image_model": "gpt-image-2"}},
                   workspace=str(root))
-              and "Garbles lettering" not in il.craft_text(
+              and "Renders lettering reliably" not in il.craft_text(
                   {"llm": {"image_model": "other/model"}},
                   workspace=str(root)))
         api.collect(db, manuscript, {})

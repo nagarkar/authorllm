@@ -1494,18 +1494,38 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 def harvest_comments(db: Database, manuscript: dict, master_id: str,
                      service, docs_service, bridge: DocBridge,
                      report: dict) -> None:
-    """Fetch every open Doc comment, ingest the fresh ones, surface
-    thread replies, and run the verdict machine — the comment half of a
-    pull, shared with session-start reconcile (it-d469ecbf3999: the
-    margin is a working conversation; a session must not open blind to
-    it). Failures land in report['comments_error'], never raise."""
+    """Fetch every open Doc comment, ingest the fresh ones, reconcile
+    stale rows against ones the author resolved by hand in the Doc, and
+    run the verdict machine — the comment half of a pull, shared with
+    session-start reconcile (it-d469ecbf3999: the margin is a working
+    conversation; a session must not open blind to it). Failures land in
+    report['comments_error'], never raise."""
     from .revisions import read_manuscript_files
 
     try:
         open_comments = fetch_open_comments(service, master_id)
     except Exception as err:  # harvest failure must never break a pull
         report["comments_error"] = str(err)
-        open_comments = []
+        return
+
+    # Reconcile first, on every harvest — including an empty open set,
+    # which is exactly the case an author resolving everything by hand
+    # produces (it-ce3f6078b674: a comment resolved in the Doc UI, not
+    # through 'doc decide' or a written-thread receipt, otherwise stays
+    # 'ingested' forever). No reply is posted here — the author already
+    # closed it in the Doc; only the local record needs to catch up.
+    open_ids = {c["id"] for c in open_comments}
+    stale = db.all(
+        "SELECT id, comment_id FROM doc_comments WHERE manuscript_id = ? "
+        "AND state = 'ingested'", (manuscript["id"],))
+    reconciled = [row["comment_id"] for row in stale
+                 if row["comment_id"] not in open_ids]
+    for row in stale:
+        if row["comment_id"] not in open_ids:
+            db.update("doc_comments", row["id"], {"state": "resolved"})
+    if reconciled:
+        report["comments_reconciled"] = reconciled
+
     if open_comments:
         files = {bridge.display_prefix + rel: text
                  for rel, text in

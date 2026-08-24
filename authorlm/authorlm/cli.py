@@ -246,6 +246,10 @@ def _print_comment_harvest(result: dict) -> None:
     if board:
         print(ui.dim("Margin threads: " + ", ".join(
             f"{n} {s}" for s, n in sorted(board.items()))))
+    reconciled = result.get("comments_reconciled") or []
+    if reconciled:
+        print(ui.dim(f"{len(reconciled)} comment(s) resolved in the Doc "
+                     "since the last pull — local record caught up."))
     comments = result.get("comments") or []
     if comments:
         print(ui.bold(f"Comments to address ({len(comments)}):"))
