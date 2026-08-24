@@ -390,7 +390,11 @@ def main_test() -> None:
         # --- briefing: focus areas and TOC completeness (§21.6, §20.3) ---
         api.link_concepts(db, manuscript, "Choice", "motivates", "Freedom")
         (ms / "02-extra.md").write_text("# Extra\n\nSome unrelated prose.\n")
-        (ms / "toc.md").write_text("- 01-choice.md\n")
+        # toc.toml, not toc.md: the TOC became structural TOML after this
+        # test was written, and a stray toc.md is simply not a TOC — the
+        # assertion below then reads an empty unlisted set and passes
+        # vacuously in the wrong direction.
+        (ms / "toc.toml").write_text('[[chapter]]\nfile = "01-choice.md"\n')
         api.collect(db, manuscript, {})
         briefing2 = api.get_briefing(db, manuscript)
         check("briefing surfaces an unrealized concept's dependents as a focus area",
@@ -398,8 +402,14 @@ def main_test() -> None:
                   and any(r["name"] == "Choice" for r in area["related"])
                   for area in briefing2["focus_areas"]),
               briefing2["focus_areas"])
-        check("briefing flags a manuscript file missing from toc.md",
+        check("briefing flags a manuscript file missing from toc.toml",
               briefing2["toc_unlisted"] == ["02-extra.md"], briefing2["toc_unlisted"])
+        # Restore the fixture: this block borrows the shared manuscript, and
+        # the Doc tests below assert exact tab sets and tab ORDER, so an
+        # extra content file left behind cascades into unrelated failures.
+        (ms / "02-extra.md").unlink()
+        (ms / "toc.toml").unlink()
+        api.collect(db, manuscript, {})
 
         closed = api.close_session(db, manuscript)
         check("close_session ends the active session",
