@@ -1,5 +1,5 @@
 % Presentation for semantic roles assigned by structure.lua.
-\usepackage{draftwatermark}
+\usepackage[nostamp]{draftwatermark}
 \usepackage{eso-pic}
 
 \providecommand{\AuthorLMBookTitle}{\Huge}
@@ -7,7 +7,8 @@
 \providecommand{\AuthorLMReviewNoticeBreak}{\clearpage}
 
 \makeatletter
-\providecommand{\AuthorLMSuppressNativePageStyles}{%
+\providecommand{\AuthorLMEnableReviewPageStyle}{%
+  \draftwatermark@stamptrue
   \let\ps@plain\ps@empty
   \pagestyle{empty}%
 }
@@ -20,7 +21,7 @@
   \SetWatermarkAngle{45}%
   \SetWatermarkScale{0.75}%
   \SetWatermarkLightness{0.92}%
-  \AuthorLMSuppressNativePageStyles{}
+  \AuthorLMEnableReviewPageStyle{}
   \AddToShipoutPictureFG{%
     \AtPageLowerLeft{%
       \raisebox{0.3in}{%

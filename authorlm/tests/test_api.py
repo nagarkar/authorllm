@@ -154,6 +154,14 @@ def main_test() -> None:
             duplicate_registration_refused = True
         check("application API owns manuscript registration invariants",
               duplicate_registration_refused)
+        try:
+            api.register_manuscript(
+                db, "missing-book", str(ws / "does-not-exist"))
+            invalid_path_refused = False
+        except ValueError:
+            invalid_path_refused = True
+        check("application API refuses a nonexistent manuscript directory",
+              invalid_path_refused)
         updated_identity = api.update_manuscript_metadata(
             db, manuscript, author="A. Author",
             copyright_owner="Author House LLC")
@@ -1796,6 +1804,15 @@ def main_test() -> None:
             ["export", "pdf", "--print-ready"])
         check("CLI exposes the explicit print-ready escape hatch",
               print_args.print_ready is True)
+        try:
+            export_published(
+                db, manuscript, fmt="epub", variant="images",
+                print_ready=True)
+            non_pdf_print_ready_refused = False
+        except ValueError:
+            non_pdf_print_ready_refused = True
+        check("publication interface restricts print-ready mode to PDF",
+              non_pdf_print_ready_refused)
 
         import shutil as _shutil
         if _shutil.which("pandoc"):

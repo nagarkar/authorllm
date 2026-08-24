@@ -249,6 +249,8 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     import shutil
     import subprocess
 
+    if print_ready and fmt != "pdf":
+        raise ValueError("--print-ready is only valid for PDF exports")
     settings = load_settings(manuscript)
     variant = variant or settings["variant"] or "images"
     title = settings["title"] or manuscript["name"]

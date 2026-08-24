@@ -165,8 +165,6 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
 def cmd_init(args):
     db = _open_db(args)
     path = Path(args.path).resolve()
-    if not path.is_dir():
-        sys.exit(f"error: {path} is not a directory.")
     try:
         row = api.register_manuscript(
             db, args.name, str(path), author=args.author,
@@ -2812,9 +2810,6 @@ def cmd_export(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
 
-    if args.print_ready and args.action != "pdf":
-        raise SystemExit("error: --print-ready is only valid for PDF exports")
-
     if args.action == "show":
         settings = ex.load_settings(manuscript)
         print(f"Export settings ({ex._settings_path(manuscript)}):")
@@ -2838,7 +2833,7 @@ def cmd_export(args):
                                      variant=args.variant,
                                      only=chapters or None,
                                      print_ready=args.print_ready)
-    except (RuntimeError, LookupError) as err:
+    except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
     if args.action == "pdf":

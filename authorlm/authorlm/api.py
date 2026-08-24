@@ -110,10 +110,13 @@ def register_manuscript(db: Database, name: str, path: str,
                         author: str = "",
                         copyright_owner: str = "") -> dict:
     """Register one manuscript and its canonical publication identity."""
+    root = Path(path).resolve()
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
     if db.one("SELECT id FROM manuscripts WHERE name = ?", (name,)):
         raise ValueError(f"manuscript '{name}' is already registered")
     row = ko_fields("ms")
-    row.update(name=name, path=path, author=author.strip(),
+    row.update(name=name, path=str(root), author=author.strip(),
                copyright_owner=copyright_owner.strip())
     db.insert("manuscripts", row)
     return dict(row)
