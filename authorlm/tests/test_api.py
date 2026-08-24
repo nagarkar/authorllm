@@ -1697,6 +1697,43 @@ def main_test() -> None:
                   and scoped["markdown"] != whole["markdown"]
                   and Path(whole["markdown"]).exists(), str(scoped))
 
+        # Pure helpers behind part-builds: filename safety and TOC selection.
+        from authorlm.export import export_filename, selection_slug
+        from authorlm.structure import select_chapters
+
+        check("export_filename strips filesystem-hostile characters",
+              export_filename('Book: Part 1/A?') == "Book- Part 1-A-.md")
+        try:
+            export_filename("  ")
+            empty_name_refused = False
+        except ValueError:
+            empty_name_refused = True
+        check("export_filename refuses an empty manuscript name",
+              empty_name_refused)
+        check("selection_slug joins up to three stems then +more",
+              selection_slug(["a.md", "b.md", "c.md", "d.md"])
+              == "a+b+c+more")
+        check("selection_slug truncates long joined stems to 60 chars",
+              len(selection_slug([
+                  "very-long-stem-name-that-will-truncate-when-"
+                  "joined-with-others.md", "x.md", "y.md"])) == 60)
+        toc_files = {
+            "toc.toml": (
+                '[[chapter]]\nfile = "01-choice.md"\n\n'
+                '[[chapter]]\nfile = "00-intro.md"\n\n'
+                '[[chapter]]\nfile = "02-aside.md"\n'
+                'parent = "00-intro.md"\n'),
+            "01-choice.md": "# Choice\n",
+            "00-intro.md": "# Intro\n",
+            "02-aside.md": "# Aside\n",
+        }
+        check("select_chapters accepts a stem without .md",
+              select_chapters(toc_files, ["00-intro"])
+              == ["00-intro.md", "02-aside.md"])
+        check("select_chapters unions multiple named chapters in reading order",
+              select_chapters(toc_files, ["01-choice", "02-aside.md"])
+              == ["01-choice.md", "02-aside.md"])
+
         # --- hygiene: deterministic filters + retroactive sweep ---
         import json as _json
 
@@ -1791,6 +1828,27 @@ def main_test() -> None:
               and pol._lifecycle_status("candidate", 2, 0,
                                         pol._confidence(2, 0))
               == "candidate")
+
+        # Distiller reply parsing: decline is the default posture.
+        check("parse_distiller treats empty/NONE/unknown MATCH as decline",
+              pol.parse_distiller(None, {"bel-1"}) == ("none", None, None)
+              and pol.parse_distiller("NONE", {"bel-1"})
+              == ("none", None, None)
+              and pol.parse_distiller("MATCH: bel-missing", {"bel-1"})
+              == ("none", None, None))
+        check("parse_distiller matches a known belief id",
+              pol.parse_distiller("MATCH: bel-1", {"bel-1"})
+              == ("match", "bel-1", None))
+        check("parse_distiller refuses NEW without EXAMPLE (platitude guard)",
+              pol.parse_distiller('NEW: "Be clearer."', {"bel-1"})
+              == ("none", None, None))
+        check("parse_distiller accepts NEW with EXAMPLE",
+              pol.parse_distiller(
+                  'NEW: "Prefer concrete metaphors."\n'
+                  'EXAMPLE: "decorative fog over the ladder"',
+                  {"bel-1"})
+              == ("new", "Prefer concrete metaphors.",
+                  "decorative fog over the ladder"))
 
         # The sweep reports unconfirmed gated nodes that fail the bar —
         # mentioned (not ungrounded) but single-context.
@@ -2823,6 +2881,100 @@ def main_test() -> None:
         except RuntimeError as err:
             check("gemini HTTPError is not retried as a transient stall",
                   http_calls["n"] == 1 and "500" in str(err), str(err))
+
+        # Vendor is the model-string prefix; image keys must not follow text.
+        check("vendor_of reads the litellm prefix and yields '' when absent",
+              llm_mod.vendor_of("openai/gpt-4o") == "openai"
+              and llm_mod.vendor_of("gemini/flash") == "gemini"
+              and llm_mod.vendor_of("gpt-4o") == "")
+        _saved_keys = {
+            name: os.environ.pop(name, None)
+            for name in ("OPENAI_API_KEY", "GEMINI_API_KEY",
+                         "AUTHORLM_LLM_KEY", "ANTHROPIC_API_KEY")
+        }
+        try:
+            os.environ["OPENAI_API_KEY"] = "openai-secret"
+            os.environ["GEMINI_API_KEY"] = "gemini-secret"
+            check("vendor_key follows the image/text model's own prefix",
+                  llm_mod.vendor_key("openai/gpt-image-1", {})
+                  == "openai-secret"
+                  and llm_mod.vendor_key("gemini/flash-image", {})
+                  == "gemini-secret"
+                  and llm_mod.vendor_key("anthropic/claude", {}) == "")
+            os.environ["AUTHORLM_LLM_KEY"] = "proxy-token"
+            check("vendor_key api_key_env override wins over vendor prefix",
+                  llm_mod.vendor_key("openai/gpt-4o",
+                                     {"api_key_env": "AUTHORLM_LLM_KEY"})
+                  == "proxy-token")
+
+            # generate_image must resolve the IMAGE model's key and forward
+            # image_size — the square-default regression for 3:2 law.
+            captured = {}
+
+            class _FakeLiteLLM:
+                suppress_debug_info = False
+
+                @staticmethod
+                def image_generation(**kwargs):
+                    captured.update(kwargs)
+                    return {"data": [{"b64_json": base64.b64encode(
+                        b"FAKEPNG").decode("ascii")}]}
+
+            with mock.patch.dict(sys.modules, {"litellm": _FakeLiteLLM()}):
+                png = llm_mod.generate_image(
+                    {"llm": {"image_model": "openai/gpt-image-1",
+                             "image_size": "1536x1024",
+                             "timeout_seconds": 9}},
+                    "a ladder against fog")
+            check("generate_image uses the image model's vendor and size",
+                  png == b"FAKEPNG"
+                  and captured.get("model") == "openai/gpt-image-1"
+                  and captured.get("size") == "1536x1024"
+                  and captured.get("timeout") == 9, str(captured))
+        finally:
+            for name, prior in _saved_keys.items():
+                if prior is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = prior
+
+        # .env parsing: export prefix, quotes, comments; shell wins.
+        from authorlm import paths as paths_mod
+
+        env_dir = Path(tempfile.mkdtemp())
+        try:
+            env_file = env_dir / ".env"
+            env_file.write_text(
+                "# comment\n"
+                'export TEST_LOAD_FOO="quoted value"\n'
+                "TEST_LOAD_BAR=plain\n"
+                "TEST_LOAD_KEEP=from-file\n"
+                "NO_EQUALS_LINE\n",
+                encoding="utf-8")
+            prior_env_pin = os.environ.get("AUTHORLM_ENV")
+            os.environ["AUTHORLM_ENV"] = str(env_file)
+            os.environ["TEST_LOAD_KEEP"] = "from-shell"
+            for name in ("TEST_LOAD_FOO", "TEST_LOAD_BAR"):
+                os.environ.pop(name, None)
+            try:
+                loaded = paths_mod.load_env()
+                check("load_env sets quoted export= lines and skips junk",
+                      sorted(loaded) == ["TEST_LOAD_BAR", "TEST_LOAD_FOO"]
+                      and os.environ.get("TEST_LOAD_FOO") == "quoted value"
+                      and os.environ.get("TEST_LOAD_BAR") == "plain")
+                check("load_env never overrides an already-exported variable",
+                      os.environ.get("TEST_LOAD_KEEP") == "from-shell"
+                      and "TEST_LOAD_KEEP" not in loaded)
+            finally:
+                for name in ("TEST_LOAD_FOO", "TEST_LOAD_BAR",
+                             "TEST_LOAD_KEEP"):
+                    os.environ.pop(name, None)
+                if prior_env_pin is None:
+                    os.environ.pop("AUTHORLM_ENV", None)
+                else:
+                    os.environ["AUTHORLM_ENV"] = prior_env_pin
+        finally:
+            shutil.rmtree(env_dir, ignore_errors=True)
 
         def boom_main(argv):
             raise RuntimeError("network down")
