@@ -364,7 +364,12 @@ def decide(db: Database, manuscript: dict, proposal_id: str, verdict: str,
         pattern = re.compile(
             r"(?m)^(\[Illustration:\s*)" + re.escape(row["revises"])
             + r"(\s*(\|[^\]]*)?\])")
-        new_text, n = pattern.subn(r"\g<1>" + final + r"\g<2>", text, count=1)
+        # Replacement must be a function: a string template treats
+        # backslashes in the new description as group refs / escapes
+        # (crash on \U… paths; silent corruption on \1).
+        new_text, n = pattern.subn(
+            lambda m, desc=final: m.group(1) + desc + m.group(2),
+            text, count=1)
         if n != 1:
             db.update("illus_proposals", row["id"], {"state": "stale"})
             raise LookupError("the existing tag changed — stale")
