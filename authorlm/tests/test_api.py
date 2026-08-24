@@ -2070,6 +2070,48 @@ def main_test() -> None:
         check("a settled margin restores the rebuild path",
               "mode" not in cleared, str(cleared))
 
+        # Critique pending forms are invisible to open_threads (author_comment
+        # only). A rebuild push during the pause would wipe <<old>>{{new}} /
+        # {{insert}} forms — including the author's Doc post-edits — and
+        # session-start reconcile auto-push takes the same path.
+        from authorlm.db import ko_fields as _ko_dt
+
+        pending_tab = (
+            "# Orrery\n"
+            "<<Brass planets on brass rails, polished.>>"
+            "{{Brass planets, post-edited in Docs.}}\n\n"
+            "{{A bridging insert the author refined.}}\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        stub.set_tab("06-orrery.md", pending_tab)
+        crit = _ko_dt("dt")
+        crit.update(
+            manuscript_id=manuscript["id"], origin_type="critique",
+            origin_id="pass:06-orrery.md:1", file="06-orrery.md",
+            proposed_old="Brass planets on brass rails, polished.",
+            proposed_new="Brass planets, post-edited in Docs.",
+            note="critique", state="written", our_reply_ids="[]",
+            metadata='{"kind":"replace","anchor_paragraph":1}')
+        db.insert("doc_threads", crit)
+        tab_before = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "06-orrery.md")
+        raised = None
+        try:
+            push_doc(db, manuscript, "06-orrery.md", service=stub,
+                     docs_service=stub)
+        except LookupError as err:
+            raised = str(err)
+        tab_after = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                         if t["title"] == "06-orrery.md")
+        check("push refuses while critique forms are written (no wipe)",
+              raised is not None
+              and "critique pending forms" in raised
+              and "critique resolve" in raised
+              and tab_after == tab_before
+              and "post-edited in Docs" in tab_after
+              and "{{A bridging insert the author refined.}}" in tab_after,
+              str({"raised": raised, "tab": tab_after[:120]}))
+        db.update("doc_threads", crit["id"], {"state": "cleaned"})
+
         # --- session start is no longer blind to the margin ---
         stub.add_comment("c-fresh", "distinctive orrery sentence",
                          "Is brass the right metal?")
