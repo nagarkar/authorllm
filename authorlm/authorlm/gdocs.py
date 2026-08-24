@@ -2037,6 +2037,25 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     ]
 
 
+def critique_write_order(threads: list[dict]) -> list[dict]:
+    """Surgical-write order for accepted critique threads: higher
+    anchors first (so earlier indices stay valid); at the same
+    anchor, inserts BEFORE replaces.
+
+    Replacing paragraph n wraps it as <<old>>{{new}}. An insert after
+    n then locates the pristine paragraph text via substring search —
+    which matches inside the wrapped form and plants {{insert}} between
+    `old` and `>>`, corrupting the pending grammar. Inserts must land
+    first while the anchor text is still verbatim."""
+    def anchor_of(t):
+        return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
+
+    return sorted(
+        threads,
+        key=lambda t: (-anchor_of(t), 0 if t["proposed_old"] == "" else 1),
+    )
+
+
 def critique_diff_write(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
@@ -2059,20 +2078,11 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = [t for t in threads if t["state"] == "accepted"]
-
-    def anchor_of(t):
-        return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
-
-    # Last-to-first, inserts before replaces at the same anchor (an insert
-    # after paragraph n lands after n's tail; marking n's own span first
-    # would shift that tail).
-    accepted.sort(key=lambda t: (anchor_of(t),
-                                 0 if t["proposed_old"] == "" else 1),
-                  reverse=True)
+    accepted = critique_write_order(
+        [t for t in threads if t["state"] == "accepted"])
     written, failed = [], []
     for t in accepted:
-        n = anchor_of(t)
+        n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
                 span = _locate_in_tab(docs_service, master_id, tab_id,
