@@ -915,6 +915,51 @@ def analyze_episodes(manuscript: str | None = None) -> dict:
     return _guard(run)
 
 
+def cap_diff_files(files: dict, max_lines: int = 300) -> dict:
+    """Per-file and whole-answer caps for MCP `diff_versions` payloads.
+
+    Each file's diff is truncated at `max_lines` with a notice naming how
+    to fetch more; once the whole-answer budget (`max_lines * 4`) is
+    spent, remaining files collapse to a one-line stub. Mutates and
+    returns `files`. `max_lines <= 0` leaves the payload untouched."""
+    if not isinstance(files, dict) or max_lines <= 0:
+        return files
+    budget = max_lines * 4
+    spent = 0
+    for name, lines in files.items():
+        if not isinstance(lines, list):
+            continue
+        if spent >= budget:
+            files[name] = [f"… {len(lines)} changed line(s) — "
+                           f"call with file='{name}' to see them"]
+            continue
+        if len(lines) > max_lines:
+            dropped = len(lines) - max_lines
+            lines = lines[:max_lines] + [
+                f"… (+{dropped} more lines — narrow the span or "
+                f"pass file='{name}' with a higher max_lines)"]
+            files[name] = lines
+        spent += len(lines)
+    return files
+
+
+def compact_policy_rows(rows: list[dict], status: str | None = None,
+                        verbose: bool = False) -> dict:
+    """MCP `list_policies` shaping: optional status filter; compact by
+    default (statement/status/confidence/counts); verbose keeps full
+    rows including outstanding questions and provenance."""
+    if status:
+        rows = [p for p in rows if p.get("status") == status]
+    if verbose:
+        return {"policies": rows}
+    return {"policy_count": len(rows), "policies": [
+        {"id": p["id"], "statement": p["statement"],
+         "status": p["status"], "confidence": p["confidence"],
+         "supporting": p["supporting"],
+         "contradicting": p["contradicting"]}
+        for p in rows]}
+
+
 @mcp.tool()
 def diff_versions(older: int | None = None, newer: int | None = None,
                   file: str | None = None, manuscript: str | None = None,
@@ -928,23 +973,8 @@ def diff_versions(older: int | None = None, newer: int | None = None,
         result = api.diff_versions(db, _manuscript(db, manuscript),
                                    older, newer, file)
         files = result.get("files")
-        if isinstance(files, dict) and max_lines > 0:
-            budget = max_lines * 4  # whole-answer cap across files
-            spent = 0
-            for name, lines in files.items():
-                if not isinstance(lines, list):
-                    continue
-                if spent >= budget:
-                    files[name] = [f"… {len(lines)} changed line(s) — "
-                                   f"call with file='{name}' to see them"]
-                    continue
-                if len(lines) > max_lines:
-                    dropped = len(lines) - max_lines
-                    lines = lines[:max_lines] + [
-                        f"… (+{dropped} more lines — narrow the span or "
-                        f"pass file='{name}' with a higher max_lines)"]
-                    files[name] = lines
-                spent += len(lines)
+        if isinstance(files, dict):
+            cap_diff_files(files, max_lines)
         return result
     return _guard(run)
 
@@ -959,16 +989,7 @@ def list_policies(manuscript: str | None = None, status: str | None = None,
     def run():
         db = _db()
         rows = api.list_policies(db, _manuscript(db, manuscript))
-        if status:
-            rows = [p for p in rows if p.get("status") == status]
-        if verbose:
-            return {"policies": rows}
-        return {"policy_count": len(rows), "policies": [
-            {"id": p["id"], "statement": p["statement"],
-             "status": p["status"], "confidence": p["confidence"],
-             "supporting": p["supporting"],
-             "contradicting": p["contradicting"]}
-            for p in rows]}
+        return compact_policy_rows(rows, status=status, verbose=verbose)
     return _guard(run)
 
 

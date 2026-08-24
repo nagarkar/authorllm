@@ -2453,6 +2453,132 @@ def main_test() -> None:
         check("revive_doc restores the file once the collision clears",
               (ms / "60-alphadoc.md").exists())
 
+        # --- MCP payload caps (diff_versions / list_policies) ---
+        # Extracted helpers: chat context blew up to 185 KB / 52 KB on
+        # mature manuscripts before f3264e8; regressions reintroduce
+        # token blowups or silent stubbing mistakes.
+        from authorlm.mcp_server import cap_diff_files, compact_policy_rows
+
+        long_file = [f"line-{i}" for i in range(10)]
+        capped = cap_diff_files({"a.md": list(long_file)}, max_lines=4)
+        check("diff cap truncates a long file and names the escape hatch",
+              len(capped["a.md"]) == 5
+              and capped["a.md"][:4] == long_file[:4]
+              and "(+6 more lines" in capped["a.md"][-1]
+              and "file='a.md'" in capped["a.md"][-1],
+              str(capped["a.md"][-1]))
+
+        budgeted = cap_diff_files({
+            "a.md": ["1", "2"],
+            "b.md": ["1", "2"],
+            "c.md": ["1", "2"],
+            "d.md": ["1", "2"],  # spent reaches budget (max_lines*4 == 8)
+            "late.md": [f"l{i}" for i in range(20)],
+        }, max_lines=2)
+        check("diff cap stubs later files once the whole-answer budget is spent",
+              budgeted["d.md"] == ["1", "2"]
+              and len(budgeted["late.md"]) == 1
+              and "20 changed line(s)" in budgeted["late.md"][0]
+              and "file='late.md'" in budgeted["late.md"][0],
+              str(budgeted))
+
+        untouched = {"x.md": ["only", "two"]}
+        check("diff cap with max_lines<=0 leaves the payload untouched",
+              cap_diff_files(dict(untouched), max_lines=0) == untouched)
+
+        policy_rows = [
+            {"id": "pol-a", "statement": "Prefer short definitions",
+             "status": "candidate", "confidence": 0.4,
+             "supporting": 1, "contradicting": 0,
+             "questions": ["when?"], "source": "review-explanation"},
+            {"id": "pol-b", "statement": "Keep metaphors sparse",
+             "status": "validated", "confidence": 0.8,
+             "supporting": 5, "contradicting": 0,
+             "questions": [], "source": "episode_analysis"},
+        ]
+        compact = compact_policy_rows(policy_rows)
+        check("list_policies compact drops questions/provenance fields",
+              compact["policy_count"] == 2
+              and set(compact["policies"][0]) == {
+                  "id", "statement", "status", "confidence",
+                  "supporting", "contradicting"}
+              and "questions" not in compact["policies"][0],
+              str(compact))
+        filtered = compact_policy_rows(policy_rows, status="validated")
+        check("list_policies status= filter keeps only matching rows",
+              filtered["policy_count"] == 1
+              and filtered["policies"][0]["id"] == "pol-b",
+              str(filtered))
+        verbose = compact_policy_rows(policy_rows, verbose=True)
+        check("list_policies verbose=True returns full rows",
+              "policy_count" not in verbose
+              and verbose["policies"][0]["questions"] == ["when?"]
+              and verbose["policies"][0]["source"] == "review-explanation",
+              str(verbose))
+
+        # --- Critique Doc mark requests (pure; feed critique_diff_write) ---
+        from authorlm.gdocs import (_mark_insert_requests,
+                                    _mark_replace_requests, _utf16_len)
+
+        replace_reqs = _mark_replace_requests("tab-1", 10, 14, "old", "new")
+        check("replace mark inserts wrappers then styles strike + green",
+              replace_reqs[0]["insertText"]["text"] == ">>{{new}}"
+              and replace_reqs[0]["insertText"]["location"]["index"] == 14
+              and replace_reqs[1]["insertText"]["text"] == "<<"
+              and replace_reqs[1]["insertText"]["location"]["index"] == 10
+              and replace_reqs[2]["updateTextStyle"]["textStyle"]
+              .get("strikethrough") is True
+              and replace_reqs[2]["updateTextStyle"]["range"]["endIndex"]
+              == 10 + 4 + _utf16_len("old")
+              and "foregroundColor" in replace_reqs[3]["updateTextStyle"]
+              ["textStyle"],
+              str(replace_reqs))
+        # Non-BMP characters occupy two UTF-16 code units in the Docs API.
+        emoji_old, emoji_new = "old😀", "new🎉"
+        emoji_reqs = _mark_replace_requests("tab-1", 0, _utf16_len(emoji_old),
+                                            emoji_old, emoji_new)
+        strike_end = emoji_reqs[2]["updateTextStyle"]["range"]["endIndex"]
+        green_end = emoji_reqs[3]["updateTextStyle"]["range"]["endIndex"]
+        check("replace mark indexes use UTF-16 lengths for non-BMP text",
+              strike_end == 4 + _utf16_len(emoji_old)
+              and green_end == strike_end + 4 + _utf16_len(emoji_new)
+              and _utf16_len(emoji_old) == len(emoji_old) + 1,
+              f"strike_end={strike_end} green_end={green_end}")
+
+        insert_reqs = _mark_insert_requests("tab-1", 5, "added")
+        check("insert mark writes a green {{new}} paragraph at the boundary",
+              insert_reqs[0]["insertText"]["text"] == "\n{{added}}"
+              and insert_reqs[0]["insertText"]["location"]["index"] == 5
+              and insert_reqs[1]["updateTextStyle"]["range"]["startIndex"]
+              == 6
+              and "foregroundColor" in insert_reqs[1]["updateTextStyle"]
+              ["textStyle"],
+              str(insert_reqs))
+
+        # --- Editorial verbs lazy-open a session (CLI helper) ---
+        from authorlm import sessions as ses
+        from authorlm.cli import _ensure_session
+
+        active = ses.active_session(db, manuscript["id"])
+        if active is not None:
+            ses.end_session(db, manuscript["id"])
+        check("no active session before lazy-open",
+              ses.active_session(db, manuscript["id"]) is None)
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            _ensure_session(db, manuscript)
+        opened = ses.active_session(db, manuscript["id"])
+        check("editorial _ensure_session opens a session when none is active",
+              opened is not None and "opened session" in buf.getvalue(),
+              buf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as buf2:
+            _ensure_session(db, manuscript)
+        check("editorial _ensure_session reuses an already-active session",
+              ses.active_session(db, manuscript["id"])["id"] == opened["id"]
+              and buf2.getvalue() == "",
+              buf2.getvalue())
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
