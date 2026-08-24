@@ -269,15 +269,17 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
     from .structure import ordered_items
 
     files: dict[str, str] = loads(version["files"], {})
+    # Reading order (TOC-authoritative): the first location in reading order
+    # is the concept's primary location — definition precedence. Invariant
+    # across nodes, so it's computed once rather than per declared concept.
+    items = ordered_items(files)
     realized = []
     for node in db.all(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status = 'declared'",
         (manuscript_id,),
     ):
         patterns = [_word_pattern(n) for n in node_names(node)]
-        # Reading order (TOC-authoritative): the first location in reading
-        # order is the concept's primary location — definition precedence.
-        for fname, text in ordered_items(files):
+        for fname, text in items:
             if any(p.search(text) for p in patterns):
                 meta = loads(node["metadata"], {})
                 meta.update(realized_at=version["created_at"], realized_version=version["id"])

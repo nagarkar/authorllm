@@ -387,6 +387,20 @@ def main_test() -> None:
         check("dismissed proposal no longer appears in list_proposals",
               not any(p["id"] == open_proposal["id"] for p in api.list_proposals(db, manuscript)))
 
+        # --- briefing: focus areas and TOC completeness (§21.6, §20.3) ---
+        api.link_concepts(db, manuscript, "Choice", "motivates", "Freedom")
+        (ms / "02-extra.md").write_text("# Extra\n\nSome unrelated prose.\n")
+        (ms / "toc.md").write_text("- 01-choice.md\n")
+        api.collect(db, manuscript, {})
+        briefing2 = api.get_briefing(db, manuscript)
+        check("briefing surfaces an unrealized concept's dependents as a focus area",
+              any(area["node"]["name"] == "Freedom"
+                  and any(r["name"] == "Choice" for r in area["related"])
+                  for area in briefing2["focus_areas"]),
+              briefing2["focus_areas"])
+        check("briefing flags a manuscript file missing from toc.md",
+              briefing2["toc_unlisted"] == ["02-extra.md"], briefing2["toc_unlisted"])
+
         closed = api.close_session(db, manuscript)
         check("close_session ends the active session",
               api.status(db, manuscript)["session"] is None
