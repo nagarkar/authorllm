@@ -40,7 +40,8 @@ from .revisions import (
 
 __all__ = [
     "open_db", "load_config", "make_llm",
-    "list_manuscripts", "get_manuscript", "manuscript_metadata",
+    "list_manuscripts", "get_manuscript", "register_manuscript",
+    "manuscript_metadata",
     "update_manuscript_metadata", "resolve_file",
     "status", "ensure_session", "close_session", "expire_idle_session",
     "declare_intent", "intent_preview", "complete_intent", "abandon_intent",
@@ -105,6 +106,19 @@ def get_manuscript(db: Database, name: str | None = None) -> dict:
     return dict(rows[0])
 
 
+def register_manuscript(db: Database, name: str, path: str,
+                        author: str = "",
+                        copyright_owner: str = "") -> dict:
+    """Register one manuscript and its canonical publication identity."""
+    if db.one("SELECT id FROM manuscripts WHERE name = ?", (name,)):
+        raise ValueError(f"manuscript '{name}' is already registered")
+    row = ko_fields("ms")
+    row.update(name=name, path=path, author=author.strip(),
+               copyright_owner=copyright_owner.strip())
+    db.insert("manuscripts", row)
+    return dict(row)
+
+
 def manuscript_metadata(manuscript: dict) -> dict:
     """The manuscript identity shared by publication and every surface."""
     return {
@@ -126,7 +140,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
     if copyright_owner is not None:
         changes["copyright_owner"] = copyright_owner.strip()
     if not changes:
-        raise ValueError("provide author and/or copyright_owner")
+        raise ValueError("provide --author and/or --copyright-owner")
     db.update("manuscripts", manuscript["id"], changes)
     manuscript.update(changes)
     return manuscript_metadata(manuscript)

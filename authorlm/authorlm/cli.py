@@ -167,14 +167,12 @@ def cmd_init(args):
     path = Path(args.path).resolve()
     if not path.is_dir():
         sys.exit(f"error: {path} is not a directory.")
-    existing = db.one("SELECT * FROM manuscripts WHERE name = ?", (args.name,))
-    if existing:
-        sys.exit(f"error: manuscript '{args.name}' already registered.")
-    row = ko_fields("ms")
-    row.update(name=args.name, path=str(path),
-               author=args.author.strip(),
-               copyright_owner=args.copyright_owner.strip())
-    db.insert("manuscripts", row)
+    try:
+        row = api.register_manuscript(
+            db, args.name, str(path), author=args.author,
+            copyright_owner=args.copyright_owner)
+    except ValueError as err:
+        sys.exit(f"error: {err}.")
     print(f"Registered manuscript '{args.name}' at {path}")
     llm = LLMClient(_load_config(args))
     if llm.enabled and not args.no_extract:

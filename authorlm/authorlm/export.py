@@ -303,6 +303,12 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     else:
         command = ["pandoc", str(md_path), "-o", str(out_path),
                    "--from", "markdown+smart", "--standalone"]
+    copyright_line = (f"Copyright © {date.today().year} {copyright_owner}"
+                      if copyright_owner else "")
+    if author:
+        command += ["--metadata", f"author={author}"]
+    if copyright_line and fmt in ("docx", "pdf"):
+        command += ["--metadata", f"subject={copyright_line}"]
     if fmt == "docx":
         # No metadata title block: title.md leads as front matter (the
         # ratified export shape) and pandoc would render a duplicate.
@@ -315,14 +321,13 @@ def export_published(db: Database, manuscript: dict, fmt: str,
             command += ["-V", f"mainfont={settings['pdf_font']}"]
         if review_copy:
             command += ["--metadata", "authorlm-review-copy=true",
-                        "--metadata", f"author={author}",
                         "--metadata", f"copyright-owner={copyright_owner}",
                         "--metadata", f"copyright-year={date.today().year}"]
     if fmt == "epub":
         command += ["--metadata", f"title={title}",
                     "--metadata", f"lang={settings['language'] or 'en'}"]
-        if author:
-            command += ["--metadata", f"author={author}"]
+        if copyright_line:
+            command += ["--metadata", f"rights={copyright_line}"]
         if settings["cover_image"]:
             cover = Path(settings["cover_image"])
             if not cover.is_absolute():

@@ -146,6 +146,14 @@ def main_test() -> None:
         check("init records publication identity on the manuscript",
               manuscript["author"] == "Ada Author"
               and manuscript["copyright_owner"] == "Ada Author LLC")
+        try:
+            api.register_manuscript(
+                db, "book", str(ms), author="Duplicate Author")
+            duplicate_registration_refused = False
+        except ValueError:
+            duplicate_registration_refused = True
+        check("application API owns manuscript registration invariants",
+              duplicate_registration_refused)
         updated_identity = api.update_manuscript_metadata(
             db, manuscript, author="A. Author",
             copyright_owner="Author House LLC")
@@ -1743,6 +1751,8 @@ def main_test() -> None:
               and "authorlm-review-copy=true" in pdf_metadata
               and "author=Author Penname" in pdf_metadata
               and "copyright-owner=Author House LLC" in pdf_metadata
+              and any(item.startswith("subject=Copyright © ")
+                      for item in pdf_metadata)
               and any(item.startswith("copyright-year=")
                       for item in pdf_metadata),
               str(pdf_command))
@@ -1777,7 +1787,10 @@ def main_test() -> None:
         check("print-ready PDF suppresses every review-copy instruction",
               print_result["mode"] == "print"
               and not any(item.startswith("authorlm-review-copy=")
-                          for item in print_metadata), str(print_command))
+                          for item in print_metadata)
+              and "author=Author Penname" in print_metadata
+              and any(item.startswith("subject=Copyright © ")
+                      for item in print_metadata), str(print_command))
         from authorlm.cli import build_parser as _build_parser
         print_args = _build_parser().parse_args(
             ["export", "pdf", "--print-ready"])
@@ -1807,9 +1820,17 @@ def main_test() -> None:
             published = export_published(db, manuscript, fmt="docx",
                                          variant="images")
             docx = Path(published["docx"])
-            check("pandoc docx export lands in _exports/ with images",
+            import zipfile as _zipfile
+            with _zipfile.ZipFile(docx) as word:
+                core_properties = word.read(
+                    "docProps/core.xml").decode("utf-8")
+            check("pandoc docx export carries canonical identity",
                   docx.exists() and docx.stat().st_size > 1000,
                   str(published))
+            check("DOCX properties carry canonical publication identity",
+                  "Author Penname" in core_properties
+                  and "Author House LLC" in core_properties,
+                  core_properties)
         else:
             print("  note: pandoc not on PATH — docx conversion untested "
                   "in this run")
@@ -1842,7 +1863,6 @@ def main_test() -> None:
             scoped = export_published(db, manuscript, fmt="epub",
                                       variant="images", only=["00-intro"])
             epub = Path(scoped["epub"])
-            import zipfile as _zipfile
             with _zipfile.ZipFile(epub) as book:
                 css = "\n".join(
                     book.read(name).decode()
@@ -1850,6 +1870,9 @@ def main_test() -> None:
                 xhtml = "\n".join(
                     book.read(name).decode()
                     for name in book.namelist() if name.endswith(".xhtml"))
+                package = "\n".join(
+                    book.read(name).decode()
+                    for name in book.namelist() if name.endswith(".opf"))
             check("a chapter epub lands beside the whole-book export "
                   "without overwriting it",
                   epub.exists() and epub.stat().st_size > 1000
@@ -1860,6 +1883,9 @@ def main_test() -> None:
                   and 'class="authorlm-file authorlm-essay"' in xhtml
                   and xhtml.index("An opening epigraph.")
                   < xhtml.index("Intro"), xhtml[:1000])
+            check("EPUB metadata carries canonical publication identity",
+                  "Author Penname" in package
+                  and "Author House LLC" in package, package[:1000])
 
         # --- hygiene: deterministic filters + retroactive sweep ---
         import json as _json
