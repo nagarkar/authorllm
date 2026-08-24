@@ -292,16 +292,19 @@ def generate_guidance(
             "policy_ids": [],
         })
 
-    # 3. Unanswered objections.
+    # 3. Unanswered objections. One query for every 'answers' edge in the
+    # manuscript, not one per objection node.
+    answered_nodes = {
+        row["to_node"] for row in db.all(
+            "SELECT to_node FROM concept_edges WHERE manuscript_id = ? "
+            "AND relation = 'answers' AND status NOT IN ('rejected', 'retired')",
+            (mid,),
+        )
+    }
     for node in nodes.values():
         if node["kind"] != "objection":
             continue
-        answered = db.one(
-            "SELECT id FROM concept_edges WHERE manuscript_id = ? AND to_node = ? "
-            "AND relation = 'answers' AND status NOT IN ('rejected', 'retired')",
-            (mid, node["id"]),
-        )
-        if not answered:
+        if node["id"] not in answered_nodes:
             candidates.append({
                 "kind": "objection",
                 "key": f"objection:{node['id']}",

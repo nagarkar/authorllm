@@ -1112,6 +1112,12 @@ def scenario_write_loop(root: Path) -> None:
               "no ratified beat plan" in out, out)
         out = run_stdin(ws, BEAT_PLAN, "write", "plan")
         check("plan ratified with three beats", "3 beat(s) ahead" in out, out)
+        out = run_stdin(ws, "[]", "write", "plan", "--replace", expect_exit=True)
+        check("empty beat list rejected",
+              "non-empty JSON array" in out, out)
+        out = run_stdin(ws, "[1, 2]", "write", "plan", "--replace", expect_exit=True)
+        check("non-object beat spec rejected",
+              "must be a JSON object" in out, out)
         out = run_stdin(ws, BEAT_PLAN, "write", "plan", expect_exit=True)
         check("re-planning without --replace blocked",
               "pass --replace" in out, out)
