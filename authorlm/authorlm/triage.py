@@ -43,6 +43,18 @@ def _optional_reason(placeholder: str) -> dict[str, Any]:
     }
 
 
+PROPOSAL_TRIAGE_HELP = (
+    "Proposals are conflicts with knowledge you have already settled: a "
+    "reframed definition, a retired concept recurring, a rejected "
+    "relationship argued again. Unlike concept and edge triage — which "
+    "curate machine HYPOTHESES that were never settled — accepting here "
+    "overwrites a decision you already made, so the settled version wins by "
+    "default. Rows are grouped by concept because proposals against one "
+    "concept are competing rewrites of a single note: pick at most one. "
+    "Dismissal reasons are the highest-value evidence in the system — they "
+    "are what the distiller turns into beliefs."
+)
+
 TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
     "concepts": {
         "id": "concepts",
@@ -98,6 +110,39 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
             {"id": "alias", "label": "Alias merge", "help": "Merge one endpoint into the other canonical concept.",
              "parameter": {"id": "canonical_id", "label": "Canonical endpoint", "source": "edge_endpoints"},
              "reason": _optional_reason("Why are these endpoints the same concept?")},
+        ],
+    },
+    "proposals": {
+        "id": "proposals",
+        "label": "Proposals",
+        "singular": "proposal",
+        "help": PROPOSAL_TRIAGE_HELP,
+        "default_profile": None,
+        # Grouped by concept: within one concept the proposals are competing
+        # rewrites of the SAME note, not independent questions. 617 open rows
+        # were 280 concepts; judged per row that is 617 decisions, judged per
+        # concept it is 280, most of them one keystroke.
+        "group_by": {"id": "target_name", "label": "Concept"},
+        "columns": [
+            {"id": "target_name", "label": "Concept", "kind": "text", "width": 190},
+            {"id": "kind", "label": "Kind", "kind": "enum", "width": 130},
+            {"id": "summary", "label": "Proposes", "kind": "text", "width": 300},
+            {"id": "current_note", "label": "Current", "kind": "long_text", "width": 300},
+            {"id": "proposed_note", "label": "Proposed", "kind": "long_text", "width": 300},
+            {"id": "rebased", "label": "Re-based", "kind": "text", "width": 90},
+            {"id": "raised", "label": "Raised", "kind": "text", "width": 105},
+            {"id": "version", "label": "Row v", "kind": "number", "width": 70},
+        ],
+        "actions": [
+            {"id": "accept", "label": "Accept",
+             "help": "Apply the proposal to the settled object."},
+            {"id": "dismiss", "label": "Dismiss",
+             "help": "Keep the settled version. The reason is the evidence the "
+                     "system learns from — give it verbatim.",
+             "reason": _optional_reason("Why is the settled version right?")},
+            {"id": "edge", "label": "Kind, not identity",
+             "help": "Alias proposals only: record 'canonical generalizes "
+                     "alias' instead of merging the two concepts."},
         ],
     },
 }
@@ -213,11 +258,46 @@ def _edge_rows(db: Database, manuscript_id: str) -> list[dict[str, Any]]:
     return result
 
 
+def _proposal_rows(db: Database, manuscript_id: str) -> list[dict[str, Any]]:
+    """Open proposals, flattened for the grid. `summary` reuses
+    proposals.describe so the wording matches every other surface."""
+    from . import proposals as prop
+
+    result = []
+    for raw in db.all(
+        "SELECT p.*, n.name AS concept_name FROM knowledge_proposals p "
+        "LEFT JOIN concept_nodes n ON n.id = p.target "
+        "WHERE p.manuscript_id = ? AND p.state = 'open' "
+        "ORDER BY lower(coalesce(n.name, p.target)), p.created_at",
+        (manuscript_id,)
+    ):
+        row = dict(raw)
+        payload = loads(row["payload"], {})
+        meta = loads(row["metadata"], {})
+        row["summary"] = prop.describe(row)[0]
+        row["target_name"] = (row.pop("concept_name", None)
+                              or payload.get("name")
+                              or payload.get("alias") or row["target"])
+        row["current_note"] = payload.get("current_note") or ""
+        row["proposed_note"] = (payload.get("proposed_note")
+                                or payload.get("notes") or "")
+        # A re-based row had its 'current' corrected after the note moved on;
+        # the author should know they are not reading the original framing.
+        row["rebased"] = "yes" if meta.get("rebased") else ""
+        row["raised"] = (row["created_at"] or "")[:10]
+        row["pending"] = True
+        row["lifecycle"] = "pending"
+        result.append(row)
+    return result
+
+
 def list_rows(db: Database, manuscript: dict, triage_type: str) -> list[dict[str, Any]]:
     if triage_type == "concepts":
         return _concept_rows(db, manuscript["id"])
     if triage_type == "edges":
         return _edge_rows(db, manuscript["id"])
+    if triage_type == "proposals":
+        return _proposal_rows(db, manuscript["id"])
     raise ValueError(f"unknown triage type '{triage_type}'")
 
 
@@ -231,7 +311,13 @@ def _latest_manuscript_version(db: Database, manuscript_id: str) -> dict | None:
 def snapshot(db: Database, manuscript: dict, triage_type: str,
              profile_id: str | None = None,
              profile_version: str | None = None) -> dict[str, Any]:
-    profile = resolve_profile(manuscript, triage_type, profile_id, profile_version)
+    # Proposals have no analyzer profile and want none: a proposal is already
+    # the machine's opinion, so scoring it with a second model would be the
+    # system grading its own homework. The grid renders the same either way —
+    # analysis columns simply stay empty.
+    profile = (resolve_profile(manuscript, triage_type, profile_id,
+                               profile_version)
+               if TRIAGE_SCHEMAS[triage_type].get("default_profile") else None)
     rows = list_rows(db, manuscript, triage_type)
     by_id = {row["id"]: row for row in rows}
     current_version = _latest_manuscript_version(db, manuscript["id"])
@@ -251,7 +337,7 @@ def snapshot(db: Database, manuscript: dict, triage_type: str,
         "WHERE a.manuscript_id = ? AND a.triage_type = ? AND r.profile_id = ? "
         "AND r.profile_version = ? ORDER BY r.created_at DESC",
         (manuscript["id"], triage_type, profile["id"], str(profile["version"])),
-    )
+    ) if profile else []
     seen: set[str] = set()
     for raw in assessments:
         item = dict(raw)
@@ -312,7 +398,8 @@ def snapshot(db: Database, manuscript: dict, triage_type: str,
 
 
 def _table(triage_type: str) -> str:
-    return {"concepts": "concept_nodes", "edges": "concept_edges"}.get(triage_type) \
+    return {"concepts": "concept_nodes", "edges": "concept_edges",
+            "proposals": "knowledge_proposals"}.get(triage_type) \
         or _raise_unknown(triage_type)
 
 
@@ -410,7 +497,7 @@ def _record_edge_triage(db: Database, manuscript_id: str,
     ev.update(manuscript_id=manuscript_id, episode_id=None,
               evidence_type="edge_triage", signal=signal,
               target=target,
-              supports_policy=None, weight="high")
+              supports_belief=None, weight="high")
     db.insert("evidence", ev)
 
 
@@ -421,6 +508,28 @@ def apply_action(db: Database, manuscript: dict, triage_type: str, row: dict,
     parameters = parameters or {}
     _validate_action(db, manuscript, triage_type, row, action, parameters)
     mid = manuscript["id"]
+    if triage_type == "proposals":
+        # Routed through proposals.py, never reimplemented here: adopt() has
+        # eight kind-specific effects (merging concepts, restoring edges,
+        # retiring, re-declaring) and dismiss() has declared semantics for
+        # `vanished`. Duplicating any of that would be the two-code-paths bug
+        # this loop was built to end.
+        from . import proposals as prop
+
+        if action == "accept":
+            message = prop.adopt(db, mid, row)
+        elif action == "edge":
+            message = prop.demote_to_edge(db, mid, row)
+        elif action == "dismiss":
+            if not reason:
+                raise ValueError(
+                    "a dismissal needs the author's reason, verbatim — it is "
+                    "the evidence the system learns from")
+            message = prop.dismiss(db, mid, row, reason=reason)
+        else:
+            raise ValueError(f"'{action}' is not a proposal triage action")
+        return {"id": row["id"], "action": action, "message": message}
+
     if triage_type == "concepts":
         if action in {"keep", "retype"}:
             meta = loads(row["metadata"], {})
@@ -521,7 +630,7 @@ def _record_deterministic_decision(db: Database, manuscript_id: str,
         evidence_type="deterministic_triage",
         signal=decision["action"],
         target=f"{decision['object_label']} - {decision['reason']}",
-        supports_policy=None,
+        supports_belief=None,
         weight="low",
     )
     db.insert("evidence", event)

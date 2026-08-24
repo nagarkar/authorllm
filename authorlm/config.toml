@@ -1,0 +1,25 @@
+# AuthorLM configuration — decisions, versioned with the code.
+# API keys live in .env beside this file, never here. The vendor is
+# the model string's prefix ("openai/", "gemini/", "anthropic/") and
+# LiteLLM reads that vendor's standard environment variable.
+[llm]
+enabled = true
+model = "gemini/gemini-2.5-flash"
+# Illustration rendering (authorlm illus render); text model above is unchanged.
+image_model = "openai/gpt-image-2"
+# Landscape 3:2 — the manuscript's ratified illustration shape. OpenAI's
+# image API defaults to a square without it.
+image_size = "1536x1024"
+
+# extraction_max_chars caps the manuscript text sent per extraction call.
+# Why it exists: cost control is half of it. The other half is extraction
+# quality — asked for "10-20 load-bearing concepts" over a very long input,
+# models tend to sample shallowly from everywhere rather than reading
+# anything deeply, so bounded payloads genuinely extract better.
+# It is not a model limit (Gemini 2.5 Flash accepts ~1M tokens).
+# Default: 24000 (characters, ~6k tokens).
+extraction_max_chars = 24000
+
+[gdocs]
+# OAuth installed-app client for the Google Docs bridge (doc push/pull).
+client_secret = "/Users/nagarkar/workspace/repos/authorllm/authorlm/client_secret_936657761738-gbalhjavi216muq9ruikmtvu1mtudrpn.apps.googleusercontent.com.json"

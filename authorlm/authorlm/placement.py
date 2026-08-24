@@ -286,17 +286,18 @@ def _record_evidence(db: Database, manuscript: dict, row: dict,
     ev = ko_fields("ev")
     ev.update(manuscript_id=manuscript["id"], episode_id=None,
               evidence_type="illus_triage", signal=signal, target=target,
-              supports_policy=None, weight="high")
+              supports_belief=None, weight="high")
     if explanation:
-        ev["metadata"] = json.dumps({"explanation": explanation})
+        ev["metadata"] = json.dumps({"explanation": explanation,
+                                     "file": row["file"]})
     db.insert("evidence", ev)
     if explanation and llm is not None:
-        from .policies import seed_margin_candidate
-        from .styles import guide_chain
+        # Never seed per verdict — that bypassed the ">= 2" guardrail and
+        # produced one near-duplicate belief per rejection. The batch rule
+        # now lives in loop.distil_pending, which holds on every surface.
+        from . import loop
 
-        seed_margin_candidate(db, manuscript["id"], explanation,
-                              row["file"], guide_chain(db, manuscript["id"],
-                                                       row["file"]), llm)
+        loop.distil_pending(db, manuscript, loop.spec_for("illustrations"), llm)
 
 
 def distill_batch(db: Database, manuscript: dict,
@@ -310,7 +311,7 @@ def distill_batch(db: Database, manuscript: dict,
         return None
     from collections import Counter
 
-    from .policies import seed_margin_candidate
+    from .beliefs import seed_margin_candidate
     from .styles import guide_chain
 
     combined = ("Illustration-triage verdicts from one sitting "

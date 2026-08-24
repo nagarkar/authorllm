@@ -68,6 +68,17 @@ function shortLabel(row: TriageRow): string {
   return row.name || `${row.from_name} -${row.relation}-> ${row.to_name}`;
 }
 
+function cardKicker(type: TriageType, row: any): string {
+  if (type === "edges") return textValue(row.relation);
+  return textValue(row.kind);
+}
+
+function cardTitle(type: TriageType, row: any): string {
+  if (type === "concepts") return textValue(row.name);
+  if (type === "proposals") return textValue(row.target_name);
+  return `${textValue(row.from_name)} -> ${textValue(row.to_name)}`;
+}
+
 export function TriageApp({transport, manuscript}: {transport: Transport; manuscript?: string}) {
   const [triageType, setTriageType] = useState<TriageType>("concepts");
   const [profileId, setProfileId] = useState<string>();
@@ -763,7 +774,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       </header>
 
       <nav className="tab-rail" aria-label="Triage type">
-        {(["concepts", "edges"] as TriageType[]).map((tab) => (
+        {(["concepts", "edges", "proposals"] as TriageType[]).map((tab, i) => (
           <button key={tab} className={triageType === tab ? "active" : ""}
                   disabled={!!analysis}
                   onClick={() => {
@@ -771,7 +782,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
                     setView("pending"); setReviewState("any"); setRecommendations({});
                     setFieldFilters({}); setMobileFiltersOpen(false);
                   }}>
-            <span>{tab === "concepts" ? "01" : "02"}</span>{tab}
+            <span>{String(i + 1).padStart(2, "0")}</span>{tab}
           </button>
         ))}
         <div className="tab-rule" />
@@ -916,7 +927,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
               if (next.has(row.id)) next.delete(row.id); else next.add(row.id);
               changeSelection(next);
             }} /><span /></label>
-            <div className="card-heading"><small>{triageType === "concepts" ? textValue(row.kind) : textValue(row.relation)}</small><h2>{triageType === "concepts" ? row.name : `${row.from_name} -> ${row.to_name}`}</h2></div>
+            <div className="card-heading"><small>{cardKicker(triageType, row)}</small><h2>{cardTitle(triageType, row)}</h2></div>
             <div className={`card-score ${scoreTone(row.analysis?.score)}`}><strong>{row.analysis?.score ?? "--"}</strong><span>keepability</span>{row.analysis?.state === "outdated" && <em>outdated</em>}</div>
             <p className="card-why">{row.analysis?.why || "Not analyzed yet."}</p>
             {row.analysis && <button className="evidence-link" onClick={() => setDrawer({row, field: "analysis"})}>

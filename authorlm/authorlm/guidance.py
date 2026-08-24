@@ -1,7 +1,7 @@
 """Guidance Generator (RFC AuthorLM §17.10, Chapter 14).
 
 Proposes, never executes. Every suggestion carries an explanation tracing
-it to evidence: the Concept Graph, prior episodes, and learned policies
+it to evidence: the Concept Graph, prior episodes, and learned beliefs
 (§11.6). When no evidence justifies a suggestion, the generator abstains —
 a valid output, not a failure (§11.5).
 """
@@ -25,7 +25,7 @@ BRIDGE_DRAFT_SYSTEM = (
     "equations in $$...$$."
 )
 
-INTENT_KINDS = {"bridge", "policy_reminder"}       # generated from your intent
+INTENT_KINDS = {"bridge", "belief_reminder"}       # generated from your intent
 STRUCTURAL_KINDS = {"prerequisite", "objection"}   # standing manuscript findings
 
 # Every kind generate_guidance() itself produces. guidance_history also holds
@@ -33,7 +33,7 @@ STRUCTURAL_KINDS = {"prerequisite", "objection"}   # standing manuscript finding
 # the review pathway but have their own lifecycle — queries that manage
 # guidance batches must filter to this allowlist, never to "everything".
 GUIDANCE_KINDS = frozenset(
-    {"bridge", "prerequisite", "definition", "objection", "policy_reminder",
+    {"bridge", "prerequisite", "definition", "objection", "belief_reminder",
      "focus", "abstention"}
 )
 _GUIDANCE_KINDS_SQL = ", ".join("?" for _ in GUIDANCE_KINDS)
@@ -96,7 +96,7 @@ def compute_prerequisite_gaps(db: Database, mid: str, files: dict[str, str]) -> 
         (mid,),
     )}
     names = {nid: node_names(n) for nid, n in nodes.items()}
-    # Front matter is a window (ratified policy): it may preview any
+    # Front matter is a window (ratified belief): it may preview any
     # concept, so its mentions neither create gaps nor satisfy
     # prerequisites. Scan main and back matter only.
     from .structure import matter_map
@@ -185,14 +185,14 @@ def generate_guidance(
         (mid,),
     )}
     validated = db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND status = 'validated' "
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND status = 'validated' "
         "ORDER BY confidence DESC",
         (mid,),
     )
     # Candidates surface as reminders too — reviewing them is how they earn
     # (or lose) the evidence that promotes or retires them (§8.2–§8.3).
-    reminder_policies = db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+    reminder_beliefs = db.all(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
         "AND status IN ('validated', 'candidate') "
         "ORDER BY CASE status WHEN 'validated' THEN 0 ELSE 1 END, confidence DESC",
         (mid,),
@@ -229,7 +229,7 @@ def generate_guidance(
                 f"Serves your declared intent: \"{intent['statement']}\".",
                 f"'{node['name']}' exists in the Concept Graph as a declared placeholder (§21.6).",
             ]
-            policy_ids = []
+            belief_ids = []
             if anchors:
                 explanation_parts.append(
                     "Anchor it to already-realized neighbors: " + "; ".join(sorted(set(anchors))) + "."
@@ -251,20 +251,20 @@ def generate_guidance(
                 explanation_parts.append(line)
             if validated:
                 top = validated[0]
-                suggestion += f" Follow your validated policy: \"{top['statement']}\""
+                suggestion += f" Follow your validated belief: \"{top['statement']}\""
                 explanation_parts.append(
-                    f"Policy \"{top['statement']}\" is validated "
+                    f"Belief \"{top['statement']}\" is validated "
                     f"(confidence {top['confidence']}, {top['supporting']} supporting / "
                     f"{top['contradicting']} contradicting reviews)."
                 )
-                policy_ids.append(top["id"])
+                belief_ids.append(top["id"])
             candidates.append({
                 "kind": "bridge",
                 "key": f"bridge:{node['id']}",
                 "intent_id": intent["id"],
                 "suggestion": suggestion,
                 "explanation": " ".join(explanation_parts),
-                "policy_ids": policy_ids,
+                "belief_ids": belief_ids,
             })
 
     # 2. Prerequisite gaps: a concept appears in text before its prerequisite.
@@ -289,7 +289,7 @@ def generate_guidance(
                 f"concepts should be realized first (§21.2 prerequisite detection)."
                 + settle
             ),
-            "policy_ids": [],
+            "belief_ids": [],
         })
 
     # 3. Unanswered objections. One query for every 'answers' edge in the
@@ -315,7 +315,7 @@ def generate_guidance(
                     f"'answers' relationship. Unanswered objections are a standing editorial "
                     f"question (§21.3)." + (f" Note: {node['notes']}" if node["notes"] else "")
                 ),
-                "policy_ids": [],
+                "belief_ids": [],
             })
 
     # Never re-propose something the author already ruled on. Matching is by
@@ -335,41 +335,41 @@ def generate_guidance(
     }
     candidates = [c for c in candidates if c["key"] not in reviewed_keys]
 
-    # 4. Reminders for learned policies (validated first, then candidates —
+    # 4. Reminders for learned beliefs (validated first, then candidates —
     #    reviewing a candidate reminder is what promotes or retires it).
     if intents:
-        used = {pid for c in candidates for pid in c["policy_ids"]}
-        # A policy is only reviewable once per session: supporting evidence
+        used = {pid for c in candidates for pid in c["belief_ids"]}
+        # A belief is only reviewable once per session: supporting evidence
         # must come from independent sessions/episodes (§11.2).
         reviewed_this_session: set[str] = set()
         for row in db.all(
             "SELECT metadata FROM guidance_history WHERE session_id = ? "
-            "AND kind = 'policy_reminder' "
+            "AND kind = 'belief_reminder' "
             "AND state IN ('accepted','rejected','modified','deferred')",
             (session["id"],),
         ):
-            reviewed_this_session.update(loads(row["metadata"], {}).get("policy_ids", []))
+            reviewed_this_session.update(loads(row["metadata"], {}).get("belief_ids", []))
         added = 0
-        for policy in reminder_policies:
-            if policy["id"] in used or policy["id"] in reviewed_this_session or added >= 3:
+        for belief in reminder_beliefs:
+            if belief["id"] in used or belief["id"] in reviewed_this_session or added >= 3:
                 continue
-            if policy["status"] == "validated":
-                label = "apply your policy"
-                basis = "Validated policy"
+            if belief["status"] == "validated":
+                label = "apply your belief"
+                basis = "Validated belief"
             else:
-                label = "does this candidate policy apply?"
-                basis = "Candidate policy — accepting strengthens it, rejecting weakens it"
+                label = "does this candidate belief apply?"
+                basis = "Candidate belief — accepting strengthens it, rejecting weakens it"
             candidates.append({
-                "kind": "policy_reminder",
-                "key": f"policy_reminder:{policy['id']}",
+                "kind": "belief_reminder",
+                "key": f"belief_reminder:{belief['id']}",
                 "intent_id": intents[0]["id"],
-                "suggestion": f"While pursuing this intent, {label}: \"{policy['statement']}\"",
+                "suggestion": f"While pursuing this intent, {label}: \"{belief['statement']}\"",
                 "explanation": (
-                    f"{basis} (confidence {policy['confidence']}, "
-                    f"{policy['supporting']} supporting / {policy['contradicting']} "
-                    f"contradicting reviews; source: {policy['source']})."
+                    f"{basis} (confidence {belief['confidence']}, "
+                    f"{belief['supporting']} supporting / {belief['contradicting']} "
+                    f"contradicting reviews; source: {belief['source']})."
                 ),
-                "policy_ids": [policy["id"]],
+                "belief_ids": [belief["id"]],
             })
             added += 1
 
@@ -410,7 +410,7 @@ def generate_guidance(
             explanation=(
                 "Insufficient evidence for an editorially justified recommendation: "
                 "no unrealized declared concepts match the active intent, no prerequisite "
-                "gaps or unanswered objections were found, and no validated policies apply. "
+                "gaps or unanswered objections were found, and no validated beliefs apply. "
                 "Abstention preserves trust better than an unfounded suggestion (§11.5)."
             ),
             state="proposed",
@@ -427,7 +427,7 @@ def generate_guidance(
             state="proposed",
         )
         row["metadata"] = json.dumps(
-            {"policy_ids": cand["policy_ids"], "dedupe_key": cand["key"]}
+            {"belief_ids": cand["belief_ids"], "dedupe_key": cand["key"]}
         )
         db.insert("guidance_history", row)
         rows.append(row)

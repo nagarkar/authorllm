@@ -22,8 +22,13 @@ no evidence, it abstains.
   google-auth-oauthlib`, plus an OAuth client secret in
   `~/.authorlm/config.toml` under `[gdocs]` (one-time `authorlm doc auth`
   opens the consent browser).
-- **Publishing exports** (docx/epub with embedded illustrations):
-  `pandoc` — `brew install pandoc` on macOS.
+- **Publishing exports** (docx/epub/pdf with embedded illustrations):
+  `pandoc` — `brew install pandoc` on macOS. PDF additionally needs a
+  TeX distribution with `xelatex` (MacTeX / TeX Live); the 8-bit
+  `pdflatex` default cannot set the manuscript's unicode.
+  `--chapters ascending,indic` builds just those chapters and everything
+  filed under them in the TOC, into their own files alongside the
+  whole-book export.
 
 ## Install / build
 
@@ -376,6 +381,7 @@ and the test suites report totals the same way.
 ```bash
 python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
 python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
+python3 tests/test_loop.py      # proposal learning loop, hermetic (scripted LLM)
 python3 tests/test_live_llm.py  # real LLM path, with record/replay
 ```
 

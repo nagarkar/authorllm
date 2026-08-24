@@ -1,19 +1,33 @@
 """Optional reasoning backend (RFC AuthorLM §23.2).
 
-Two providers, selected in <workspace>/.authorlm/config.toml:
+Configured in the project's config.toml (authorlm/paths.py); keys never
+appear there — they live in .env and reach this module as environment
+variables.
+
+**Choosing a model is choosing a vendor.** LiteLLM's convention is that
+the vendor is the model string's prefix, and each vendor reads its own
+standard environment variable — so there is no separate `vendor` field to
+keep in sync, and switching vendors is a one-line config change:
+
+      model = "gemini/gemini-2.5-flash"    → GEMINI_API_KEY
+      model = "openai/gpt-4o-mini"         → OPENAI_API_KEY
+      model = "anthropic/claude-sonnet-5"  → ANTHROPIC_API_KEY
+
+Two transports, selected by `provider`:
 
 - "litellm" (default): routes through the LiteLLM SDK in-process, so any
-  model LiteLLM supports works — e.g. Gemini with GEMINI_API_KEY exported,
-  or with the key carried in the config itself (for shells that lack the
-  provider env vars, e.g. sandboxed skill sessions):
+  model LiteLLM supports works. Authentication is LiteLLM's job — it
+  reads the vendor's env var itself, which also covers vendors whose auth
+  is not a bare key (Vertex/Bedrock credentials).
 
       [llm]
       enabled = true
       model = "gemini/gemini-2.5-flash"
-      api_key = "..."   # optional; the named env var wins when set
 
 - "openai": any OpenAI-compatible HTTP endpoint (LiteLLM proxy, Ollama,
-  LM Studio) via the standard library — no dependencies:
+  LM Studio) via the standard library — no dependencies. Here the bearer
+  token is ours to send, and `api_key_env` names the variable holding it
+  (such endpoints use arbitrary tokens, so it cannot be derived):
 
       [llm]
       enabled = true
@@ -42,6 +56,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_MODEL = "gemini/gemini-2.5-flash"
+
+# LiteLLM's model-string prefixes and the environment variable each
+# vendor reads. Extend as vendors are adopted; a prefix that is absent
+# here simply means "let litellm resolve it", which is the correct
+# behavior for credential-file vendors (vertex_ai, bedrock).
+VENDOR_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "xai": "XAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
+
+
+def vendor_of(model: str) -> str:
+    """The vendor a litellm model string names, '' when unprefixed."""
+    return model.split("/", 1)[0] if "/" in model else ""
+
+
+def vendor_key(model: str, llm: dict) -> str:
+    """The API key for a model, from the environment only.
+
+    `api_key_env` wins when set — an OpenAI-compatible proxy uses an
+    arbitrary token that no convention can derive. Otherwise the vendor
+    prefix picks the standard variable."""
+    named = llm.get("api_key_env", "")
+    if named:
+        return os.environ.get(named, "")
+    return os.environ.get(VENDOR_KEY_ENV.get(vendor_of(model), ""), "")
 TEMPERATURE = 0.2
 RETRIES = 2  # transient-failure retries with exponential backoff (1s, 2s)
 
@@ -54,14 +99,11 @@ class LLMClient:
         self.provider = llm.get("provider", "litellm")
         self.model = llm.get("model", DEFAULT_MODEL)
         self.base_url = llm.get("base_url", "http://localhost:4000/v1").rstrip("/")
-        # Key resolution: the named env var wins; an `api_key` field in
-        # config.toml is the fallback. The config path exists because callers
-        # like the Claude Code skill run the CLI from shells without the
-        # provider env vars — a key in ~/.authorlm/config.toml makes the CLI
-        # fully capable everywhere (chmod 600 applies). For litellm the key
-        # is passed per-call; for openai it is the bearer header.
-        self.api_key = (os.environ.get(llm.get("api_key_env", "AUTHORLM_LLM_KEY"), "")
-                        or llm.get("api_key", ""))
+        # Keys come from the environment (.env loaded at config load),
+        # never from config.toml. On the litellm path this is only a
+        # courtesy override — litellm resolves the vendor's credentials
+        # itself; on the raw-HTTP path it is the bearer token.
+        self.api_key = vendor_key(self.model, llm)
         self.timeout = llm.get("timeout_seconds", 120)
         # Cap on manuscript text sent per extraction call — cost control and
         # extraction quality (concept selection degrades on very long inputs).
@@ -267,17 +309,20 @@ def generate_image(config: dict, prompt: str,
     routes through litellm.image_generation. Unlike completions there is
     no silent degradation: rendering is an explicit act, so failures
     raise RuntimeError with a readable message."""
+    from . import paths
+
     llm = config.get("llm", {}) or {}
     model = llm.get("image_model", DEFAULT_IMAGE_MODEL)
-    key = (os.environ.get(llm.get("api_key_env", "AUTHORLM_LLM_KEY"), "")
-           or llm.get("api_key", "")
-           or os.environ.get("GEMINI_API_KEY", ""))
+    # The image model is chosen independently of the text model, so its
+    # key is resolved from ITS OWN vendor prefix — the text model's key
+    # is the wrong key the moment the two vendors differ.
+    key = vendor_key(model, {})
     timeout = llm.get("timeout_seconds", 120)
     if model.startswith("gemini/"):
         if not key:
             raise RuntimeError(
-                "no API key for image generation — set GEMINI_API_KEY or "
-                "[llm] api_key in config.toml")
+                "no API key for image generation — set GEMINI_API_KEY in "
+                f"{paths.env_path()}")
         return _gemini_image(model.split("/", 1)[1], prompt, input_png,
                              key, timeout)
     if input_png is not None:
@@ -292,9 +337,20 @@ def generate_image(config: dict, prompt: str,
             "provider 'litellm' needed for non-gemini image models "
             "(pip install litellm)") from err
     litellm.suppress_debug_info = True
-    response = litellm.image_generation(
-        model=model, prompt=prompt, timeout=timeout,
-        **({"api_key": key} if key else {}))
+    # Aspect ratio is ratified style law, not a per-render choice; the
+    # OpenAI image API defaults to a square, so [llm] image_size carries
+    # the manuscript's shape (gpt-image-* landscape 3:2 = 1536x1024).
+    size = llm.get("image_size", "")
+    try:
+        response = litellm.image_generation(
+            model=model, prompt=prompt, timeout=timeout,
+            **({"size": size} if size else {}))
+    except Exception as err:
+        # Same contract as the gemini path: rendering is an explicit act,
+        # so it fails with a sentence, not a provider traceback.
+        raise RuntimeError(
+            f"image model '{model}' failed: {str(err).strip()[:300]}"
+        ) from err
     data = (response["data"] if isinstance(response, dict)
             else response.data)[0]
     b64 = data["b64_json"] if isinstance(data, dict) else data.b64_json

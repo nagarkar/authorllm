@@ -144,7 +144,7 @@ def _collect_via_watcher(base_argv: list[str], lock: threading.Lock, prompt: str
 
 def shell_candidates(db, manuscript: dict, buffer: str) -> list[str]:
     """Completion candidates for the shell line so far: commands, actions,
-    flags, option values, and live ids/names (intents, policies, concepts,
+    flags, option values, and live ids/names (intents, beliefs, concepts,
     edges, docs)."""
     from .cli import list_ids
     from .completion import DYNAMIC_POSITIONALS, SIMPLE_POSITIONALS, collect_words

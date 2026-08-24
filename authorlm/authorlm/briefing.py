@@ -29,34 +29,34 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
     if since is None:
         since = _briefing_cutoff(db, manuscript_id)
 
-    # Policy deltas: evidence recorded since the last session, per policy.
-    policy_changes = []
+    # Belief deltas: evidence recorded since the last session, per belief.
+    belief_changes = []
     for row in db.all(
-        "SELECT supports_policy, "
+        "SELECT supports_belief, "
         "  SUM(CASE WHEN signal IN ('accepted','modified') THEN 1 ELSE 0 END) AS plus, "
         "  SUM(CASE WHEN signal = 'rejected' THEN 1 ELSE 0 END) AS minus "
         "FROM evidence WHERE manuscript_id = ? AND created_at > ? "
-        "  AND supports_policy IS NOT NULL "
-        "GROUP BY supports_policy",
+        "  AND supports_belief IS NOT NULL "
+        "GROUP BY supports_belief",
         (manuscript_id, since),
     ):
-        policy = db.one(
-            "SELECT * FROM editorial_policies WHERE id = ?", (row["supports_policy"],)
+        belief = db.one(
+            "SELECT * FROM editorial_beliefs WHERE id = ?", (row["supports_belief"],)
         )
-        if policy:
-            policy_changes.append({
-                "statement": policy["statement"],
-                "status": policy["status"],
-                "confidence": policy["confidence"],
-                "supporting": policy["supporting"],
-                "contradicting": policy["contradicting"],
+        if belief:
+            belief_changes.append({
+                "statement": belief["statement"],
+                "status": belief["status"],
+                "confidence": belief["confidence"],
+                "supporting": belief["supporting"],
+                "contradicting": belief["contradicting"],
                 "delta_supporting": row["plus"],
                 "delta_contradicting": row["minus"],
             })
 
-    new_policies = [
+    new_beliefs = [
         dict(p) for p in db.all(
-            "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND created_at > ?",
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND created_at > ?",
             (manuscript_id, since),
         )
     ]
@@ -105,13 +105,13 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
     ]
 
     outstanding_questions = []
-    for policy in db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? AND status != 'retired'",
+    for belief in db.all(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND status != 'retired'",
         (manuscript_id,),
     ):
-        for question in loads(policy["outstanding_questions"], []):
+        for question in loads(belief["outstanding_questions"], []):
             outstanding_questions.append(
-                {"policy_id": policy["id"], "statement": policy["statement"], "question": question}
+                {"belief_id": belief["id"], "statement": belief["statement"], "question": question}
             )
 
     active_intents = [
@@ -174,8 +174,8 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         "since": since,
         "critique_pending": critique_pending,
         "profiles": profiles,
-        "policy_changes": policy_changes,
-        "new_policies": new_policies,
+        "belief_changes": belief_changes,
+        "new_beliefs": new_beliefs,
         "realized_concepts": realized_concepts,
         "unconfirmed_concepts": unconfirmed_concepts,
         "proposals": proposals,
@@ -188,8 +188,8 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         # Learning velocity (§24.4): understanding gained, not words written.
         "learning_velocity": {
             "new_evidence": evidence_count,
-            "policies_changed": len(policy_changes),
-            "policies_seeded": len(new_policies),
+            "beliefs_changed": len(belief_changes),
+            "beliefs_seeded": len(new_beliefs),
             "concepts_realized": len(realized_concepts),
             # Displayed edges include everything still awaiting confirmation;
             # velocity counts only edges inferred during this period.

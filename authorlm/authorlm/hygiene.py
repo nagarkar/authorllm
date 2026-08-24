@@ -4,7 +4,7 @@ framework").
 Gates at the LLM→store boundaries plus a retroactive sweep — all pure
 string/DB operations, zero tokens. Purpose: protect the author's triage
 attention and the purity of the evidence stream (an ungrounded suggestion
-the author rejects teaches the policy learner something false).
+the author rejects teaches the belief learner something false).
 
 Division of judgment, deliberately: extracted CONCEPTS are never gated at
 admission — an unmentioned concept stays a *declared* hypothesis for

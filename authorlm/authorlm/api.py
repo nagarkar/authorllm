@@ -7,7 +7,7 @@ to JSON; errors are raised as ValueError/LookupError with author-readable
 messages for the surface to present.
 
 Anything not yet routed through here still lives in the module layer
-(concepts, policies, proposals, sessions, docs, extraction, analysis) —
+(concepts, beliefs, proposals, sessions, docs, extraction, analysis) —
 this facade composes those; it never duplicates them.
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import concepts as cg
-from . import policies as pol
+from . import beliefs as bel
 from . import proposals as prop
 from . import sessions as ses
 from .analysis import analyze_pending, find_precedents
@@ -47,8 +47,9 @@ __all__ = [
     "analyze", "diff_versions", "get_version", "restore_version",
     "list_concepts", "show_concept",
     "add_concept", "link_concepts", "confirm_concept", "retire_concept",
-    "confirm_edge", "reject_edge", "list_proposals", "resolve_proposal",
-    "list_policies", "run_extraction", "get_plan", "get_doc_links",
+    "confirm_edge", "reject_edge", "list_proposals", "reconcile_proposals", "screen_proposals",
+    "resolve_proposal",
+    "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
     "write_start", "write_plan", "write_status", "write_propose",
     "write_accept", "write_reject", "write_learn", "write_complete",
     "write_abandon", "get_profile",
@@ -133,7 +134,7 @@ def status(db: Database, manuscript: dict) -> dict:
         for table in (
             "manuscript_versions", "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
-            "editorial_policies", "guidance_history", "editorial_reviews",
+            "editorial_beliefs", "guidance_history", "editorial_reviews",
             "evidence", "knowledge_proposals",
         )
     }
@@ -400,7 +401,7 @@ def collect(db: Database, manuscript: dict, config: dict,
     # Hygiene: suggestions this revision made moot (the author wrote the
     # concept a bridge suggestion proposed; a prerequisite gap closed) are
     # marked stale so review never offers a no-op — a no-op the author
-    # rejects would poison the policy evidence.
+    # rejects would poison the belief evidence.
     staled = hygiene.stale_suggestions(
         db, mid,
         realized_ids={n["id"] for n in realized},
@@ -510,7 +511,7 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
         "ORDER BY created_at DESC LIMIT 1",
         (session["id"],),
     )
-    result = pol.record_review(
+    result = bel.record_review(
         db, manuscript["id"], dict(guidance), decision, explanation,
         episode["id"] if episode else None, llm=llm,
     )
@@ -524,7 +525,7 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 # deterministic state machine and evidence channel: beat proposals are
 # guidance_history rows (kind='beat', batch_id=writeup id, batch_index=the
 # beat's stable n) so verdicts flow through record_review — evidence,
-# policy reinforcement, and explanation-seeding — unchanged.
+# belief reinforcement, and explanation-seeding — unchanged.
 
 BEAT_KIND = "beat"
 
@@ -783,7 +784,7 @@ def write_accept(db: Database, manuscript: dict, config: dict,
         db.update("guidance_history", proposal["id"],
                   {"metadata": json.dumps(meta)})
     episode = ses.current_episode(db, manuscript["id"], session)
-    review_result = pol.record_review(
+    review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), decision, reason,
         episode["id"], llm=llm,
     )
@@ -814,7 +815,7 @@ def write_reject(db: Database, manuscript: dict, reason: str,
                           "write propose first")
     session, _ = ensure_session(db, manuscript)
     episode = ses.current_episode(db, manuscript["id"], session)
-    review_result = pol.record_review(
+    review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), "rejected", reason.strip(),
         episode["id"], llm=llm,
     )
@@ -1047,7 +1048,7 @@ def style_overview(db: Database, manuscript: dict) -> dict:
     names = {g["id"]: g["name"] for g in guides}
     counts = {g["id"]: 0 for g in guides}
     counts.update({row["guide_id"]: row["n"] for row in db.all(
-        "SELECT guide_id, COUNT(*) AS n FROM style_elements "
+        "SELECT guide_id, COUNT(*) AS n FROM style_laws "
         "WHERE manuscript_id = ? AND status = 'active' AND guide_id IS NOT NULL "
         "GROUP BY guide_id",
         (mid,),
@@ -1104,24 +1105,24 @@ def attach_style(db: Database, manuscript: dict, file: str, guide_name: str) -> 
     return {"file": file, "guide": guide["name"]}
 
 
-def _find_style_element(db: Database, manuscript: dict, prefix: str,
+def _find_style_law(db: Database, manuscript: dict, prefix: str,
                         status_clause: str, label: str) -> dict:
     """Prefix lookup with the same ambiguity guard as _find_intent/_find_edge/
     _policy_by_prefix: a prefix matching more than one row must never let
     the caller silently act on whichever row SQLite returns first."""
     rows = db.all(
-        f"SELECT * FROM style_elements WHERE manuscript_id = ? AND id LIKE ? "
+        f"SELECT * FROM style_laws WHERE manuscript_id = ? AND id LIKE ? "
         f"AND {status_clause}",
         (manuscript["id"], f"%{prefix}%"),
     )
     if not rows:
         raise LookupError(f"no {label} style element matching '{prefix}'")
     if len(rows) > 1:
-        raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} style elements)")
+        raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} style laws)")
     return dict(rows[0])
 
 
-def add_style_element(db: Database, manuscript: dict, aspect: str, statement: str,
+def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
                       guide_name: str | None = None, file: str | None = None,
                       notes: str | None = None,
                       overrides: str | None = None) -> dict:
@@ -1136,7 +1137,7 @@ def add_style_element(db: Database, manuscript: dict, aspect: str, statement: st
         _validate_file(db, manuscript, file)
     resolved = None
     if overrides:
-        resolved = _find_style_element(
+        resolved = _find_style_law(
             db, manuscript, overrides, "status = 'active'", "active")["id"]
     return dict(st.add_element(
         db, manuscript["id"], aspect, statement,
@@ -1145,32 +1146,32 @@ def add_style_element(db: Database, manuscript: dict, aspect: str, statement: st
     ))
 
 
-def retire_style_element(db: Database, manuscript: dict, prefix: str) -> dict:
+def retire_style_law(db: Database, manuscript: dict, prefix: str) -> dict:
     from . import styles as st
 
-    row = _find_style_element(db, manuscript, prefix, "status = 'active'", "active")
+    row = _find_style_law(db, manuscript, prefix, "status = 'active'", "active")
     st.retire_element(db, row)
     return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
-def move_style_element(db: Database, manuscript: dict, prefix: str,
+def move_style_law(db: Database, manuscript: dict, prefix: str,
                        guide_name: str | None = None,
                        file: str | None = None) -> dict:
     """Re-scope a style element to another guide or to a file (exactly
     one). The element keeps its id, status, provenance, and history."""
     if bool(guide_name) == bool(file):
         raise ValueError("move needs exactly one of guide_name / file")
-    row = _find_style_element(db, manuscript, prefix, "status != 'retired'", "live")
+    row = _find_style_law(db, manuscript, prefix, "status != 'retired'", "live")
     if guide_name:
         guide = db.one("SELECT * FROM style_guides WHERE manuscript_id = ? "
                        "AND name = ?", (manuscript["id"], guide_name))
         if not guide:
             raise LookupError(f"no style guide named '{guide_name}'")
-        db.update("style_elements", row["id"],
+        db.update("style_laws", row["id"],
                   {"guide_id": guide["id"], "file": None})
         return {"id": row["id"], "statement": row["statement"],
                 "guide": guide["name"], "file": None}
-    db.update("style_elements", row["id"], {"guide_id": None, "file": file})
+    db.update("style_laws", row["id"], {"guide_id": None, "file": file})
     return {"id": row["id"], "statement": row["statement"], "guide": None,
             "file": file}
 
@@ -1258,15 +1259,135 @@ def reject_edge(db: Database, manuscript: dict, edge_prefix: str) -> dict:
 
 # --------------------------------------------------------------- proposals
 
-def list_proposals(db: Database, manuscript: dict) -> list[dict]:
-    rows = prop.open_proposals(db, manuscript["id"])
-    return [{**row, "summary": prop.describe(row)[0],
-             "details": prop.describe(row)[1]} for row in rows]
+def list_proposals(db: Database, manuscript: dict, kind: str | None = None,
+                   proposal_id: str | None = None, belief: str | None = None,
+                   limit: int | None = None,
+                   verbose: bool = False) -> dict:
+    """Open proposals plus a one-line-per-belief summary of what the screen
+    folded away.
+
+    Compact by default because the full queue is not survivable: 762 open
+    proposals with full payloads serialise to ~580KB (~145K tokens), so the
+    unfiltered verbose form was a tool no conversation could call. `belief`
+    expands one fold — the only way contradicting evidence ever reaches a
+    belief that is actively cutting (see loop.py, invariant 2)."""
+    from . import loop
+
+    mid = manuscript["id"]
+    if belief:
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND state = 'dismissed' "
+            "AND json_extract(metadata, '$.law') = ?", (mid, belief))]
+        return {"expanded": belief,
+                "proposals": [_proposal_row(r, verbose=True) for r in rows],
+                "count": len(rows)}
+
+    rows = prop.open_proposals(db, mid)
+    if proposal_id:
+        rows = [r for r in rows if proposal_id in r["id"]]
+        verbose = True
+    if kind:
+        rows = [r for r in rows if r["kind"] == kind]
+    by_kind: dict[str, int] = {}
+    for r in rows:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    shown = rows if limit is None else rows[:limit]
+    folds = []
+    for spec in loop.REGISTRY.values():
+        if spec.table == "knowledge_proposals":
+            folds.extend(loop.folded(db, mid, spec))
+    return {
+        "open": [_proposal_row(r, verbose) for r in shown],
+        "counts": {"open": len(rows), "shown": len(shown), "by_kind": by_kind},
+        "truncated": len(shown) < len(rows),
+        "folded": folds,
+    }
+
+
+def reconcile_proposals(db: Database, manuscript: dict,
+                        apply: bool = True) -> dict:
+    """Settle proposals the world has already answered, and re-base the ones
+    it has moved under. Deterministic — no LLM, no author judgment. Run this
+    before anything else in the queue: it shrinks the input to every later
+    stage and, more importantly, stops the survivors misreporting their own
+    'current' text."""
+    from . import loop
+
+    mid = manuscript["id"]
+    report = {"satisfied": [], "orphan": [], "stale": [], "live": 0,
+              "by_kind": {}}
+    open_rows = prop.open_proposals(db, mid)
+    for spec in loop.REGISTRY.values():
+        if spec.table != "knowledge_proposals":
+            continue
+        kind = spec.key.split("/", 1)[1]
+        rows = [r for r in open_rows if r["kind"] == kind]
+        if not rows:
+            continue
+        out = loop.reconcile_queue(db, mid, spec, rows, apply=apply)
+        report["by_kind"][kind] = {
+            "considered": len(rows), "satisfied": len(out["satisfied"]),
+            "orphan": len(out["orphan"]), "stale": len(out["stale"]),
+            "live": out["live"]}
+        for key in ("satisfied", "orphan", "stale"):
+            report[key].extend(out[key])
+        report["live"] += out["live"]
+    report["applied"] = apply
+    report["still_open"] = len(prop.open_proposals(db, mid))
+    return report
+
+
+def screen_proposals(db: Database, manuscript: dict, llm=None,
+                     on_batch=None) -> dict:
+    """Run the screen over every open proposal queue, cutting what violates
+    the author's active law. Nothing is cut when there is no law yet, so
+    this is inert until beliefs have been earned."""
+    from . import loop
+
+    mid = manuscript["id"]
+    report: dict = {"cut": [], "by_queue": {}}
+    for spec in loop.REGISTRY.values():
+        if spec.table != "knowledge_proposals":
+            continue
+        kind = spec.key.split("/", 1)[1]
+        rows = [r for r in prop.open_proposals(db, mid) if r["kind"] == kind]
+        cuts = loop.screen(db, mid, spec, rows, llm, on_batch=on_batch)
+        report["by_queue"][spec.key] = {"considered": len(rows),
+                                        "cut": len(cuts)}
+        report["cut"].extend(cuts)
+    report["still_open"] = len(prop.open_proposals(db, mid))
+    return report
+
+
+def _proposal_row(row: dict, verbose: bool = False) -> dict:
+    """Compact rows keep the detail LINES but preview each one: for a
+    note_update the details carry the whole current and proposed note, so an
+    untruncated 'compact' listing is the full payload wearing a disguise —
+    762 open proposals still serialised to 287KB with them intact."""
+    summary, details = prop.describe(row)
+    if verbose:
+        return {**row, "summary": summary, "details": details}
+    return {"id": row["id"], "kind": row["kind"], "summary": summary,
+            "details": [_preview(d) for d in details]}
 
 
 def resolve_proposal(db: Database, manuscript: dict, prefix: str,
-                     action: str, reason: str | None = None) -> dict:
+                     action: str, reason: str | None = None,
+                     llm=None) -> dict:
     rows = [r for r in prop.open_proposals(db, manuscript["id"]) if prefix in r["id"]]
+    folded_hit = False
+    if not rows:
+        # A screen-folded proposal is still actionable: acting on one is the
+        # ONLY event that can contradict a belief which is actively cutting,
+        # so it must be reachable by id or auto-promotion is irreversible in
+        # practice while looking reversible in the schema (loop.py §2).
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND state = 'dismissed' "
+            "AND json_extract(metadata, '$.by') = 'screen'",
+            (manuscript["id"],)) if prefix in r["id"]]
+        folded_hit = bool(rows)
     if not rows:
         raise LookupError(f"no open proposal matching '{prefix}'")
     if len(rows) > 1:
@@ -1280,7 +1401,40 @@ def resolve_proposal(db: Database, manuscript: dict, prefix: str,
         message = prop.dismiss(db, manuscript["id"], row, reason=reason)
     else:
         raise ValueError(f"unknown action '{action}' (accept|edge|dismiss)")
-    return {"message": message, "proposal_id": row["id"]}
+    result = {"message": message, "proposal_id": row["id"]}
+    if llm is not None and reason:
+        from . import loop
+
+        key = f"proposals/{row['kind']}"
+        if key in loop.REGISTRY:
+            seeded = loop.distil_pending(db, manuscript, loop.REGISTRY[key], llm)
+            if seeded and seeded.get("statement"):
+                result["belief"] = {
+                    "statement": seeded["statement"],
+                    "status": seeded.get("status"),
+                    "confidence": seeded.get("confidence")}
+    if folded_hit:
+        result.update(_contradict_folding_belief(db, row, action))
+    return result
+
+
+def _contradict_folding_belief(db: Database, row: dict, action: str) -> dict:
+    """The author reached past the screen. Adopting what a belief cut is
+    direct evidence against that belief; dismissing it agrees with the cut
+    but is NOT counted as support, because the belief already acted — a
+    belief that scored its own firings would ratchet its own confidence."""
+    from . import beliefs as bel
+
+    law_id = (loads(row.get("metadata"), {}) or {}).get("law")
+    if not law_id or action == "dismiss":
+        return {"folded": True}
+    updated = bel.reinforce_belief(db, law_id, "rejected")
+    if not updated:
+        return {"folded": True}
+    return {"folded": True, "contradicted": {
+        "belief": law_id, "statement": updated.get("statement"),
+        "confidence": updated.get("confidence"),
+        "status": updated.get("status")}}
 
 
 # ----------------------------------------------------------------- others
@@ -1338,10 +1492,10 @@ def get_doc_links(db: Database, manuscript: dict) -> dict:
             "checked_out": [r for r, e in links.items() if e["checked_out"]]}
 
 
-def list_policies(db: Database, manuscript: dict) -> list[dict]:
+def list_beliefs(db: Database, manuscript: dict) -> list[dict]:
     rows = []
     for row in db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
         "AND status != 'retired' ORDER BY confidence DESC",
         (manuscript["id"],),
     ):
@@ -1349,49 +1503,49 @@ def list_policies(db: Database, manuscript: dict) -> list[dict]:
     return rows
 
 
-def _policy_by_prefix(db: Database, manuscript: dict, prefix: str) -> dict:
+def _belief_by_prefix(db: Database, manuscript: dict, prefix: str) -> dict:
     rows = db.all(
-        "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
         "AND status != 'retired' AND id LIKE ?",
         (manuscript["id"], f"%{prefix}%"),
     )
     if not rows:
-        raise LookupError(f"no live policy matching '{prefix}'")
+        raise LookupError(f"no live belief matching '{prefix}'")
     if len(rows) > 1:
         raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} matches)")
     return dict(rows[0])
 
 
-def retire_policy(db: Database, manuscript: dict, prefix: str,
+def retire_belief(db: Database, manuscript: dict, prefix: str,
                   reason: str) -> dict:
-    from . import policies as pol
+    from . import beliefs as bel
 
-    policy = _policy_by_prefix(db, manuscript, prefix)
-    return pol.retire_policy(db, manuscript["id"], policy, reason)
+    belief = _belief_by_prefix(db, manuscript, prefix)
+    return bel.retire_belief(db, manuscript["id"], belief, reason)
 
 
-def merge_policies(db: Database, manuscript: dict, duplicate: str,
+def merge_beliefs(db: Database, manuscript: dict, duplicate: str,
                    canonical: str, reason: str | None = None) -> dict:
-    from . import policies as pol
+    from . import beliefs as bel
 
-    dup = _policy_by_prefix(db, manuscript, duplicate)
-    canon = _policy_by_prefix(db, manuscript, canonical)
+    dup = _belief_by_prefix(db, manuscript, duplicate)
+    canon = _belief_by_prefix(db, manuscript, canonical)
     if dup["id"] == canon["id"]:
-        raise LookupError("duplicate and canonical are the same policy")
-    return pol.merge_policies(db, manuscript["id"], dup, canon, reason)
+        raise LookupError("duplicate and canonical are the same belief")
+    return bel.merge_beliefs(db, manuscript["id"], dup, canon, reason)
 
 
-def convert_policy(db: Database, manuscript: dict, prefix: str, aspect: str,
+def convert_belief(db: Database, manuscript: dict, prefix: str, aspect: str,
                    statement: str | None = None, guide: str | None = None,
                    file: str | None = None, notes: str | None = None,
                    reason: str | None = None) -> dict:
-    from . import policies as pol
+    from . import beliefs as bel
 
-    policy = _policy_by_prefix(db, manuscript, prefix)
-    element = add_style_element(
-        db, manuscript, aspect, statement or policy["statement"],
+    belief = _belief_by_prefix(db, manuscript, prefix)
+    element = add_style_law(
+        db, manuscript, aspect, statement or belief["statement"],
         guide_name=guide, file=file, notes=notes)
-    return pol.convert_policy(db, manuscript["id"], policy, element, reason)
+    return bel.convert_belief(db, manuscript["id"], belief, element, reason)
 
 
 # ---------------------------------------- compact projections (MCP surface)
@@ -1435,10 +1589,10 @@ def _compact_gap(gap: dict) -> dict:
             "status": gap["status"]}
 
 
-def _compact_policy(policy: dict) -> dict:
-    return {"id": policy["id"], "statement": policy["statement"],
-            "status": policy["status"], "confidence": policy["confidence"],
-            "support": f"{policy['supporting']}+/{policy['contradicting']}-"}
+def _compact_belief(belief: dict) -> dict:
+    return {"id": belief["id"], "statement": belief["statement"],
+            "status": belief["status"], "confidence": belief["confidence"],
+            "support": f"{belief['supporting']}+/{belief['contradicting']}-"}
 
 
 def compact_collect(report: dict) -> dict:
@@ -1491,8 +1645,8 @@ def compact_briefing(briefing: dict) -> dict:
         out["caught_up"] = briefing["caught_up"]
     if briefing.get("profiles"):
         out["profiles"] = briefing["profiles"]
-    out["policy_changes"] = briefing["policy_changes"]  # built compact
-    out["new_policies"] = [_compact_policy(p) for p in briefing["new_policies"]]
+    out["belief_changes"] = briefing["belief_changes"]  # built compact
+    out["new_beliefs"] = [_compact_belief(p) for p in briefing["new_beliefs"]]
     out["realized_concepts"] = {
         "count": len(briefing["realized_concepts"]),
         "names": [n["name"] for n in briefing["realized_concepts"]],

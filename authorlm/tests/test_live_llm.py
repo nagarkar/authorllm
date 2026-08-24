@@ -154,23 +154,23 @@ def main_test() -> None:
               "Introduce 'History'" in out, out)
         check("LLM drafted bridge text included", "Draft to consider" in out, out)
 
-        # --- Policy distillation (live or replayed) ---
+        # --- Belief distillation (live or replayed) ---
         out = run(ws, "review", "1", "--reject", "--explain",
                   "Always ground an abstract definition in a lived example "
                   "before formalizing it")
-        check("explanation distilled into a candidate policy",
-              "seeded a candidate policy" in out, out)
-        distilled = out.split('seeded a candidate policy: "')[1].split('"')[0]
+        check("explanation distilled into a candidate belief",
+              "seeded a candidate belief" in out, out)
+        distilled = out.split('seeded a candidate belief: "')[1].split('"')[0]
         print(f"  (distilled statement: {distilled!r})")
 
-        # --- NONE path: a one-off remark should not become policy ---
+        # --- NONE path: a one-off remark should not become belief ---
         out = run(ws, "guide")
-        if "policy_reminder" in out:
+        if "belief_reminder" in out:
             out = run(ws, "review", "1", "--reject", "--explain",
                       "This was a one-off exception for this particular "
                       "chapter only, not a general practice of mine")
-            check("one-off explanation not generalized into policy",
-                  "seeded a candidate policy" not in out, out)
+            check("one-off explanation not generalized into belief",
+                  "seeded a candidate belief" not in out, out)
 
         # --- Episode analysis (live or replayed): learn from actual edits ---
         (ms / "03-histories.md").write_text(
@@ -194,7 +194,7 @@ def main_test() -> None:
               "Analyzed episode" in out, out)
         print("  (analysis output)")
         for line in out.splitlines():
-            if line.strip().startswith(("•", "↳", "policy", "outcome")):
+            if line.strip().startswith(("•", "↳", "belief", "outcome")):
                 print(f"   {line}")
 
         run(ws, "session", "end")

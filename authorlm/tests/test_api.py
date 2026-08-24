@@ -8,6 +8,43 @@ Run: python3 tests/test_api.py
 
 from __future__ import annotations
 
+import os
+
+# Offline suite: pin the project-config and .env lookups away from the
+# real ones. Without this a checkout's config.toml (llm enabled, keys in
+# .env) is picked up by every test process and the suite makes live,
+# billed model calls — and asserts against whatever they return.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+def _assert_offline() -> None:
+    """Fail loudly if the real project config or .env leaks into a test.
+
+    Before config moved into the repo, a test workspace simply had no
+    config.toml, so the LLM was off and no suite could make a billed
+    call. Now a checkout always HAS an enabled config, and that safety
+    came from nothing but the pins above — so it is asserted, not
+    assumed."""
+    import os as _os
+
+    from authorlm import paths as _paths
+
+    assert not _paths.config_path().exists(), (
+        f"test isolation broken: reading the real config at "
+        f"{_paths.config_path()}")
+    assert _paths.load_env() == [], "test isolation broken: .env was loaded"
+    leaked = [v for v in _paths_vendor_vars() if _os.environ.get(v)]
+    assert not leaked, f"test isolation broken: vendor keys in env: {leaked}"
+
+
+def _paths_vendor_vars() -> list:
+    from authorlm.llm import VENDOR_KEY_ENV
+
+    return sorted(VENDOR_KEY_ENV.values())
+
+
+
+import contextlib
 import shutil
 import sys
 import tempfile
@@ -29,7 +66,64 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+def check_show_verbs() -> None:
+    """Every entity verb exposes `show`, spelled the same way.
+
+    Four separate sessions hit a missing `show` on a different noun before
+    this was made uniform, so the check is on the parser rather than on
+    memory."""
+    from authorlm.cli import build_parser
+
+    commands = build_parser()._subparsers._group_actions[0].choices
+    for verb in ("concept", "intent", "improve", "style", "belief",
+                 "proposal", "critique", "lens", "illus", "doc"):
+        actions = [a for a in commands[verb]._actions if a.dest == "action"]
+        choices = list(actions[0].choices) if actions else []
+        check(f"`{verb}` exposes a 'show' action",
+              "show" in choices, f"{verb} actions: {choices}")
+
+
+def check_broken_pipe() -> None:
+    """`authorlm <listing> | head` must exit quietly.
+
+    Python raises BrokenPipeError when the reader closes early, and raises a
+    SECOND time flushing stdout at interpreter shutdown — which is what
+    prints 'Exception ignored in: <_io.TextIOWrapper>' after the traceback.
+    Both have to be swallowed, and the handler must survive a captured
+    stdout that has no fileno()."""
+    import io as _io
+
+    from authorlm.cli import main as _main
+
+    class ExplodesOnWrite(_io.StringIO):
+        def write(self, text):  # noqa: D102
+            raise BrokenPipeError(32, "Broken pipe")
+
+    class ExplodesOnFlush(_io.StringIO):
+        """Short output stays buffered, so the pipe only breaks when the
+        interpreter flushes at shutdown — the case a try/except around the
+        command misses entirely."""
+
+        def flush(self):  # noqa: D102
+            raise BrokenPipeError(32, "Broken pipe")
+
+    for label, stream in (("while writing", ExplodesOnWrite),
+                          ("at the shutdown flush", ExplodesOnFlush)):
+        try:
+            with contextlib.redirect_stdout(stream()):
+                _main(["--help"])
+            check(f"a pipe closed {label} exits without raising", True)
+        except SystemExit as err:
+            check(f"a pipe closed {label} exits 0, not a traceback",
+                  err.code in (0, None), f"exit code {err.code}")
+        except BrokenPipeError:
+            check(f"a pipe closed {label} exits 0, not a traceback", False,
+                  "BrokenPipeError escaped main()")
+
+
 def main_test() -> None:
+    check_broken_pipe()
+    check_show_verbs()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
@@ -366,7 +460,7 @@ def main_test() -> None:
 
         open_proposal = prop.create(db, manuscript["id"], "revival", "Scratch",
                                     {"name": "Scratch"})
-        listed = api.list_proposals(db, manuscript)
+        listed = api.list_proposals(db, manuscript)["open"]
         check("list_proposals surfaces an open proposal with summary/details",
               any(p["id"] == open_proposal["id"] and "revive retired concept" in p["summary"]
                   for p in listed))
@@ -385,7 +479,8 @@ def main_test() -> None:
         check("resolve_proposal dismisses and returns a message",
               resolved["proposal_id"] == open_proposal["id"] and resolved["message"])
         check("dismissed proposal no longer appears in list_proposals",
-              not any(p["id"] == open_proposal["id"] for p in api.list_proposals(db, manuscript)))
+              not any(p["id"] == open_proposal["id"]
+                      for p in api.list_proposals(db, manuscript)["open"]))
 
         # --- briefing: focus areas and TOC completeness (§21.6, §20.3) ---
         api.link_concepts(db, manuscript, "Choice", "motivates", "Freedom")
@@ -571,7 +666,7 @@ def main_test() -> None:
               and illus_mod.embed_target(
                   (ms / "01-choice.md").read_text(), h) == first, str(r2))
 
-        api.add_style_element(db, manuscript, "illustration",
+        api.add_style_law(db, manuscript, "illustration",
                               "woodcut, high-contrast linework",
                               file="01-choice.md")
         law = illus_mod.illustration_law(db, manuscript["id"], "01-choice.md")
@@ -1364,7 +1459,7 @@ def main_test() -> None:
               == "Copper is the wrong register here"
               and stub.state["comments"]["c-5"]["resolved"]
               and db.one(
-                  "SELECT COUNT(*) AS n FROM editorial_policies "
+                  "SELECT COUNT(*) AS n FROM editorial_beliefs "
                   "WHERE manuscript_id = ? AND source = 'margin-thread'",
                   (manuscript["id"],))["n"] == 0, str(decided))
 
@@ -1569,6 +1664,39 @@ def main_test() -> None:
             print("  note: pandoc not on PATH — docx conversion untested "
                   "in this run")
 
+        # --- chapter-scoped publishing: a part of the book, same build ---
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "02-aside.md"\nparent = "00-intro.md"\n')
+        (ms / "02-aside.md").write_text("# Aside\n\nA filed thought.\n")
+        manuscript = api.get_manuscript(db)
+        part, part_order, _ = publish_markdown(manuscript, "images",
+                                               ["00-intro"])
+        check("naming a parent builds it with its TOC descendants, "
+              "and nothing else",
+              part_order == ["00-intro.md", "02-aside.md"]
+              and "A filed thought." in part
+              and "firmer road" not in part, str(part_order))
+        try:
+            publish_markdown(manuscript, "images", ["no-such"])
+            refused = False
+        except LookupError:
+            refused = True
+        check("an unknown chapter name is refused, not silently empty",
+              refused)
+        if _shutil.which("pandoc"):
+            whole = export_published(db, manuscript, fmt="md",
+                                     variant="images")
+            scoped = export_published(db, manuscript, fmt="epub",
+                                      variant="images", only=["00-intro"])
+            epub = Path(scoped["epub"])
+            check("a chapter epub lands beside the whole-book export "
+                  "without overwriting it",
+                  epub.exists() and epub.stat().st_size > 1000
+                  and scoped["markdown"] != whole["markdown"]
+                  and Path(whole["markdown"]).exists(), str(scoped))
+
         # --- hygiene: deterministic filters + retroactive sweep ---
         import json as _json
 
@@ -1643,7 +1771,7 @@ def main_test() -> None:
               ok and stats["files"] == 2, str(stats))
 
         # --- policy belief lifecycle (Laplace confidence + promote/demote) ---
-        from authorlm import policies as pol
+        from authorlm import beliefs as pol
 
         check("Laplace confidence is (s+1)/(s+c+2)",
               pol._confidence(0, 0) == 0.5
@@ -1789,7 +1917,7 @@ def main_test() -> None:
               and "fresh prose must reach the analyzer" in analysis_llm.user,
               analysis_llm.user[:800])
         seeded = an_db.one(
-            "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
             "AND statement = ?",
             (an_mscript["id"],
              "Open concept introductions with a lived metaphor"))
@@ -1798,11 +1926,11 @@ def main_test() -> None:
               and seeded["source"] == "episode-analysis"
               and an_db.one(
                   "SELECT weight, evidence_type FROM evidence "
-                  "WHERE supports_policy = ?", (seeded["id"],)
+                  "WHERE supports_belief = ?", (seeded["id"],)
               )["weight"] == "medium"
               and an_db.one(
                   "SELECT evidence_type FROM evidence "
-                  "WHERE supports_policy = ?", (seeded["id"],)
+                  "WHERE supports_belief = ?", (seeded["id"],)
               )["evidence_type"] == "episode_analysis")
         check("analysis is idempotent once the episode is marked analyzed",
               api.analyze(an_db, an_mscript, analysis_llm) == [])
@@ -1931,7 +2059,7 @@ def main_test() -> None:
         (ms / "04-road.md").write_text(
             f"# **The Road**\n\n{filler}\n\n{anchor_para}\n")
         api.collect(db, manuscript, {})
-        api.add_style_element(db, manuscript, "illustration-placement",
+        api.add_style_law(db, manuscript, "illustration-placement",
                               "Concretize a recurring metaphor once, at "
                               "its strongest occurrence.",
                               file="04-road.md")
@@ -2195,6 +2323,26 @@ def main_test() -> None:
                            docs_service=stub)
         check("prompt tabs settle in sync at session start",
               display in report["in_sync"], str(report))
+
+        # A hand-made tab is not a manuscript file, but it IS a split
+        # boundary: without that, its heading and body are swallowed by
+        # whichever tab precedes it in the export and then auto-pulled
+        # over that file as if the author had written them
+        # (it-307dc1279a7e — a real 'Tab 31' after the last prompt tab).
+        settled = prompt_path.read_text()
+        stub.state["docs"]["doc-2"].append(
+            {"id": "tab-handmade", "title": "Tab 31",
+             "text": "notes to self\nnot part of any chapter",
+             "parent": None})
+        report = reconcile(db, api.get_manuscript(db), stub,
+                           docs_service=stub)
+        check("a hand-made tab is a split boundary — the preceding file "
+              "keeps its own text and the tab is reported, not merged",
+              prompt_path.read_text() == settled
+              and "Tab 31" not in prompt_path.read_text()
+              and display in report["in_sync"]
+              and "Tab 31" in report.get("ignored_tabs", []), str(report))
+        stub.state["docs"]["doc-2"].pop()
         il.maintain_excerpts(ms)
 
         # --- prompt preview embeds: ![](../…) derived machinery ---
@@ -2701,7 +2849,7 @@ def main_test() -> None:
 
         distill_llm = DistillLLM()
         before_policies = db.one(
-            "SELECT COUNT(*) AS n FROM editorial_policies "
+            "SELECT COUNT(*) AS n FROM editorial_beliefs "
             "WHERE manuscript_id = ?", (manuscript["id"],))["n"]
         check("distill_batch no-ops without items or an enabled LLM",
               placement.distill_batch(db, manuscript, [], distill_llm) is None
@@ -2720,7 +2868,7 @@ def main_test() -> None:
               and "became «b»" in distill_llm.calls[0][1]
               and "at least two" in distill_llm.calls[0][1]
               and db.one(
-                  "SELECT COUNT(*) AS n FROM editorial_policies "
+                  "SELECT COUNT(*) AS n FROM editorial_beliefs "
                   "WHERE manuscript_id = ?",
                   (manuscript["id"],))["n"] == before_policies + 1,
               str(candidate))
@@ -2769,19 +2917,19 @@ def main_test() -> None:
               ordered == ["a.md", "z.md"] and missing == [],
               f"{ordered=} {missing=}")
 
-        # --- policy curation: convert_policy happy path + error guards ---
-        from authorlm import policies as pol
+        # --- belief curation: convert_belief happy path + error guards ---
+        from authorlm import beliefs as pol
 
         api.define_style_guide(db, manuscript, "Curation guide")
-        seeded = pol.seed_candidate_policy(
+        seeded = pol.seed_candidate_belief(
             db, manuscript["id"], "Prefer short paragraphs in dialogue.",
             source="test")
-        converted = api.convert_policy(
+        converted = api.convert_belief(
             db, manuscript, seeded["id"], "formatting",
             guide="Curation guide", reason="now enforced as style law")
-        check("convert_policy retires the policy and links a style element",
+        check("convert_belief retires the belief and links a style law",
               converted["status"] == "retired" and converted["style_element"])
-        row = db.one("SELECT * FROM editorial_policies WHERE id = ?",
+        row = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
                      (seeded["id"],))
         curation = loads(row["metadata"], {}).get("curation", {})
         check("converted policy's metadata records the linkage and reason",
@@ -2790,18 +2938,18 @@ def main_test() -> None:
               and curation.get("style_element") == converted["style_element"]
               and curation.get("reason") == "now enforced as style law")
         evidence = db.one(
-            "SELECT * FROM evidence WHERE supports_policy = ? "
-            "AND evidence_type = 'policy_curation'",
+            "SELECT * FROM evidence WHERE supports_belief = ? "
+            "AND evidence_type = 'belief_curation'",
             (seeded["id"],))
-        check("conversion writes a policy_curation evidence row",
+        check("conversion writes a belief_curation evidence row",
               evidence is not None and evidence["signal"] == "converted")
         try:
-            api.convert_policy(db, manuscript, seeded["id"], "formatting")
+            api.convert_belief(db, manuscript, seeded["id"], "formatting")
             check("converting an already-retired policy is refused", False)
         except LookupError:
             check("converting an already-retired policy is refused", True)
         try:
-            api.convert_policy(db, manuscript, "no-such-prefix", "formatting")
+            api.convert_belief(db, manuscript, "no-such-prefix", "formatting")
             check("converting an unknown policy prefix is refused", False)
         except LookupError:
             check("converting an unknown policy prefix is refused", True)
@@ -2810,35 +2958,35 @@ def main_test() -> None:
         #     never silently act on whichever row SQLite returns first
         #     when a prefix matches more than one active element ---
         api.define_style_guide(db, manuscript, "Ambiguity guide")
-        amb1 = api.add_style_element(db, manuscript, "tone", "Amb element one.",
+        amb1 = api.add_style_law(db, manuscript, "tone", "Amb element one.",
                                      guide_name="Ambiguity guide")
-        amb2 = api.add_style_element(db, manuscript, "tone", "Amb element two.",
+        amb2 = api.add_style_law(db, manuscript, "tone", "Amb element two.",
                                      guide_name="Ambiguity guide")
         check("style element ids share the common 'se-' literal prefix",
               amb1["id"].startswith("se-") and amb2["id"].startswith("se-"))
         try:
-            api.retire_style_element(db, manuscript, "se")
+            api.retire_style_law(db, manuscript, "se")
             check("retire refuses an ambiguous prefix", False)
         except LookupError as err:
             check("retire refuses an ambiguous prefix", "ambiguous" in str(err))
         check("neither element was retired by the ambiguous attempt",
-              db.one("SELECT status FROM style_elements WHERE id = ?",
+              db.one("SELECT status FROM style_laws WHERE id = ?",
                      (amb1["id"],))["status"] == "active"
-              and db.one("SELECT status FROM style_elements WHERE id = ?",
+              and db.one("SELECT status FROM style_laws WHERE id = ?",
                          (amb2["id"],))["status"] == "active")
         try:
-            api.move_style_element(db, manuscript, "se", file="01-choice.md")
+            api.move_style_law(db, manuscript, "se", file="01-choice.md")
             check("move refuses an ambiguous prefix", False)
         except LookupError as err:
             check("move refuses an ambiguous prefix", "ambiguous" in str(err))
         try:
-            api.add_style_element(db, manuscript, "tone", "New with bad override",
+            api.add_style_law(db, manuscript, "tone", "New with bad override",
                                   guide_name="Ambiguity guide", overrides="se")
             check("add_style_element refuses an ambiguous override prefix", False)
         except LookupError as err:
             check("add_style_element refuses an ambiguous override prefix",
                   "ambiguous" in str(err))
-        retired_amb = api.retire_style_element(db, manuscript, amb1["id"])
+        retired_amb = api.retire_style_law(db, manuscript, amb1["id"])
         check("a full unique id still resolves and retires",
               retired_amb["id"] == amb1["id"] and retired_amb["status"] == "retired")
 
@@ -2893,7 +3041,7 @@ def main_test() -> None:
         # Extracted helpers: chat context blew up to 185 KB / 52 KB on
         # mature manuscripts before f3264e8; regressions reintroduce
         # token blowups or silent stubbing mistakes.
-        from authorlm.mcp_server import cap_diff_files, compact_policy_rows
+        from authorlm.mcp_server import cap_diff_files, compact_belief_rows
 
         long_file = [f"line-{i}" for i in range(10)]
         capped = cap_diff_files({"a.md": list(long_file)}, max_lines=4)
@@ -2932,24 +3080,24 @@ def main_test() -> None:
              "supporting": 5, "contradicting": 0,
              "questions": [], "source": "episode_analysis"},
         ]
-        compact = compact_policy_rows(policy_rows)
+        compact = compact_belief_rows(policy_rows)
         check("list_policies compact drops questions/provenance fields",
-              compact["policy_count"] == 2
-              and set(compact["policies"][0]) == {
+              compact["belief_count"] == 2
+              and set(compact["beliefs"][0]) == {
                   "id", "statement", "status", "confidence",
                   "supporting", "contradicting"}
-              and "questions" not in compact["policies"][0],
+              and "questions" not in compact["beliefs"][0],
               str(compact))
-        filtered = compact_policy_rows(policy_rows, status="validated")
+        filtered = compact_belief_rows(policy_rows, status="validated")
         check("list_policies status= filter keeps only matching rows",
-              filtered["policy_count"] == 1
-              and filtered["policies"][0]["id"] == "pol-b",
+              filtered["belief_count"] == 1
+              and filtered["beliefs"][0]["id"] == "pol-b",
               str(filtered))
-        verbose = compact_policy_rows(policy_rows, verbose=True)
+        verbose = compact_belief_rows(policy_rows, verbose=True)
         check("list_policies verbose=True returns full rows",
-              "policy_count" not in verbose
-              and verbose["policies"][0]["questions"] == ["when?"]
-              and verbose["policies"][0]["source"] == "review-explanation",
+              "belief_count" not in verbose
+              and verbose["beliefs"][0]["questions"] == ["when?"]
+              and verbose["beliefs"][0]["source"] == "review-explanation",
               str(verbose))
 
         # --- Critique Doc mark requests (pure; feed critique_diff_write) ---
@@ -3323,7 +3471,7 @@ def main_test() -> None:
                       for e in bare["elements"]), str(bare["elements"]))
 
         api.define_style_guide(sdb, sm, "house")
-        api.add_style_element(sdb, sm, "register",
+        api.add_style_law(sdb, sm, "register",
                               "Address the reader in second person.",
                               guide_name="house")
         unattached = api.style_show(sdb, sm, "97-styled.md")
@@ -3336,7 +3484,7 @@ def main_test() -> None:
 
         api.define_style_guide(sdb, sm, "dialogue", parent="house")
         api.attach_style(sdb, sm, "98-child.md", "dialogue")
-        guide_el = api.add_style_element(sdb, sm, "tone",
+        guide_el = api.add_style_law(sdb, sm, "tone",
                                          "Keep dialogue clipped.",
                                          guide_name="dialogue")
         attached = api.style_show(sdb, sm, "98-child.md")
@@ -3345,7 +3493,7 @@ def main_test() -> None:
                "Address the reader in second person."}
               <= {e["statement"] for e in attached["elements"]})
 
-        api.add_style_element(sdb, sm, "tone",
+        api.add_style_law(sdb, sm, "tone",
                               "Prefer terse fragments.", file="98-child.md",
                               overrides=guide_el["id"])
         overridden = api.style_show(sdb, sm, "98-child.md")
@@ -3364,19 +3512,21 @@ def main_test() -> None:
             "get_briefing", "get_concepts", "add_concept", "link_concepts",
             "confirm_concept", "retire_concept", "curate_concepts",
             "confirm_edge", "reject_edge",
-            "list_proposals", "resolve_proposal", "analyze_episodes",
-            "diff_versions", "list_policies", "close_session",
+            "list_proposals", "reconcile_proposals", "screen_proposals",
+            "resolve_proposal",
+            "analyze_episodes",
+            "diff_versions", "list_beliefs", "close_session",
             "extract_concepts", "get_plan", "get_doc_links",
             "file_improvement", "list_improvements", "improvement_bundle",
             "resolve_improvement", "alias_concept", "merge_concepts",
-            "retire_policy", "merge_policies", "convert_policy_to_style",
-            "define_style_guide", "add_style_element", "retire_style_element",
+            "retire_belief", "merge_beliefs", "convert_belief_to_law",
+            "define_style_guide", "add_style_law", "retire_style_law",
             "attach_style", "get_style", "get_profile", "run_sweep",
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
             "import_critique", "critique_status", "list_critique_items",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
-            "move_style_element", "open_triage_app", "triage_app_request",
+            "move_style_law", "open_triage_app", "triage_app_request",
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,
@@ -3391,4 +3541,5 @@ def main_test() -> None:
 
 
 if __name__ == "__main__":
+    _assert_offline()
     main_test()

@@ -1580,9 +1580,27 @@ def reconcile(db: Database, manuscript: dict, service,
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
     pmapped = prompt_links(links)
-    sections = split_tabbed_export(
-        whole, set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
-        | set(pmapped))
+    # Every tab title is a split boundary, mapped or not — the same rule
+    # pull_doc follows. A hand-made tab that is NOT a boundary has its
+    # heading and body swallowed into whichever tab precedes it in the
+    # export, and the three-way check then reads that as a Doc-side edit
+    # and writes it over the local file (it-307dc1279a7e).
+    tab_props: list[tuple[str, str]] = []
+    if docs_service is not None:
+        try:
+            tab_doc = docs_service.documents().get(
+                documentId=master_id, includeTabsContent=True).execute()
+            walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+        except Exception as err:  # never block a writing session
+            report["errors"].append({"file": "(tab listing)",
+                                     "error": str(err)})
+    known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
+    titles = {t for _, t in tab_props if t}
+    sections = split_tabbed_export(whole, known | titles)
+    ignored = sorted(t for t in titles - known
+                     if t != manuscript["name"])
+    if ignored:
+        report["ignored_tabs"] = ignored
     dirty = False
     for relpath in mapped:
         entry = links[relpath]

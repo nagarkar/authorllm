@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AuthorLM proposal triage loop</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header class="hero">
+    <p class="eyebrow">Quick reference</p>
+    <h1>Proposal triage loop</h1>
+    <p class="lede">Use this when new manuscript material conflicts with settled conceptual knowledge and AuthorLM opens a proposal against the graph.</p>
+  </header>
+
+  <section>
+    <h2>The operator loop</h2>
+    <div class="flow" aria-label="Proposal review loop">
+      <span>List the queue</span><i>→</i><span>Inspect settled note</span><i>→</i><span>Inspect manuscript evidence</span><i>→</i><span>Judge definition vs role</span><i>→</i><span>Dismiss or adopt</span><i>→</i><span>Reason becomes evidence</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>CLI spine</h2>
+    <table>
+      <thead><tr><th>Need</th><th>Command</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>See open conflicts</td><td><code>authorlm proposal list -m SMSTTD</code></td><td>Find the id prefix and proposal kind.</td></tr>
+        <tr><td>See the settled concept</td><td><code>authorlm concept show "Nothing" -m SMSTTD</code></td><td>The live graph note is the source of truth.</td></tr>
+        <tr><td>See manuscript evidence</td><td><code>rg -n "Nothing is" authorlm/manuscripts/SMSTTD</code></td><td>Check whether the proposal matches what the book actually says.</td></tr>
+        <tr><td>Record a rejection</td><td><code>authorlm proposal dismiss pr-58e88 -m SMSTTD --why "..."</code></td><td>The reason is recorded as evidence.</td></tr>
+        <tr><td>Record an adoption</td><td><code>authorlm proposal accept pr-58e88 -m SMSTTD</code></td><td>Use only when the new note is genuinely better law.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="callout">
+    <h2>The critical distinction</h2>
+    <p><strong>A concept note should define what the concept is, not merely narrate what the concept does in the book.</strong> “Nothing is the clasp of paradoxes” is a definition. “Nothing is the starting point of the book's metaphysics” is a role description.</p>
+  </section>
+
+  <section>
+    <h2>Current limitation</h2>
+    <p>The present CLI exposes queue review interactively and verdicts by id prefix, but it does not yet expose a clean non-interactive <code>proposal show &lt;id&gt;</code> read path. Operator discipline still holds: prefer the public CLI, and if the surface is missing, treat that as a product gap rather than silently normalizing direct database reads.</p>
+  </section>
+
+  <section>
+    <h2>What the learning loop already does</h2>
+    <p>When you dismiss a proposal, AuthorLM records evidence and suppresses an exact verbatim repeat of the same payload. It does <em>not</em> yet auto-decline semantically similar paraphrases based on your prior reasons.</p>
+  </section>
+</main>
+</body>
+</html>

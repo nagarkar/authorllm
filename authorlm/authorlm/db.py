@@ -3,7 +3,7 @@
 Every canonical persistent object derives from the KnowledgeObject base
 (RFC AuthorLM §18.3): id, version, created_at, created_by, schema_version,
 metadata. Historical objects (versions, transitions, intents, reviews,
-evidence) are immutable; only beliefs/policies/graph statuses evolve, and
+evidence) are immutable; only beliefs/beliefs/graph statuses evolve, and
 they evolve by bumping `version` in place while history stays in the
 `evidence` and `editorial_reviews` tables (RFC Common Core §6.5).
 """
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS style_attachments (
     UNIQUE (manuscript_id, file)            -- one guide per file
 );
 
-CREATE TABLE IF NOT EXISTS style_elements (
+CREATE TABLE IF NOT EXISTS style_laws (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     guide_id TEXT,        -- owning guide | NULL when file-local
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS style_elements (
     notes TEXT,
     status TEXT NOT NULL DEFAULT 'active',  -- active | retired | proposed
                                             -- | rejected (critique intake)
-    overrides TEXT,       -- style_elements.id displaced by this element
+    overrides TEXT,       -- style_laws.id displaced by this element
     source_id TEXT,
     CHECK ((guide_id IS NULL) != (file IS NULL))
 );
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS concept_edges (
     source_id TEXT
 );
 
-CREATE TABLE IF NOT EXISTS editorial_policies (
+CREATE TABLE IF NOT EXISTS editorial_beliefs (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     statement TEXT NOT NULL,
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS guidance_history (
     intent_id TEXT,
     batch_id TEXT NOT NULL,
     batch_index INTEGER NOT NULL,           -- 0 for abstention record
-    kind TEXT NOT NULL,                     -- bridge | prerequisite | definition | policy_reminder | focus | abstention
+    kind TEXT NOT NULL,                     -- bridge | prerequisite | definition | belief_reminder | focus | abstention
     suggestion TEXT NOT NULL,
     explanation TEXT NOT NULL,              -- why: evidence this traces to (§11.6)
     state TEXT NOT NULL DEFAULT 'proposed'  -- proposed | accepted | rejected | modified | deferred | superseded
@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS editorial_reviews (
 CREATE TABLE IF NOT EXISTS knowledge_proposals (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
-    kind TEXT NOT NULL,           -- note_update | revival | edge_reproposal | policy_revival
+    kind TEXT NOT NULL,           -- note_update | revival | edge_reproposal | belief_revival
     target TEXT NOT NULL,         -- id of the settled object the proposal is against
     payload TEXT NOT NULL,        -- JSON: current vs proposed
     content_hash TEXT NOT NULL,   -- dedupe: a dismissed proposal never returns verbatim
@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     evidence_type TEXT NOT NULL,            -- author_review | briefing_answer | observation
     signal TEXT NOT NULL,                   -- accepted | rejected | modified | deferred | declared
     target TEXT NOT NULL,
-    supports_policy TEXT,                   -- editorial_policies.id
+    supports_belief TEXT,                   -- editorial_beliefs.id
     weight TEXT NOT NULL DEFAULT 'medium',
     source_id TEXT
 );
@@ -403,7 +403,7 @@ def ko_fields(prefix: str) -> dict[str, Any]:
 # Tables whose rows originate from someone's judgment and carry provenance.
 PROVENANCE_TABLES = (
     "declared_intents", "concept_nodes", "concept_edges",
-    "style_elements", "editorial_policies", "evidence",
+    "style_laws", "editorial_beliefs", "evidence",
 )
 
 # Evidence provenance is fully determined by evidence_type. Most types record
@@ -429,6 +429,8 @@ class Database:
         return {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
 
     def _migrate(self) -> None:
+        # Must run first: everything below addresses tables by their new names.
+        self._migrate_beliefs_and_laws()
         if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(
                 "ALTER TABLE concept_nodes ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'"
@@ -444,6 +446,46 @@ class Database:
             self._backfill_provenance()
         if "comment_id" in self._columns("doc_threads"):
             self._migrate_thread_origins()
+
+    def _tables(self) -> set[str]:
+        return {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    def _migrate_beliefs_and_laws(self) -> None:
+        """2026-08-20 rename (docs/domain-vocabulary.md): the two rule tables
+        were named for the opposite of what they hold. `editorial_policies`
+        is 100% machine-inferred with confidence counters — beliefs;
+        `style_elements` is author-ratified and binding — law. SCHEMA has
+        already created the new tables empty by the time this runs, so each
+        empty shell is dropped and the populated original renamed over it.
+        No back-compat: nothing reads the old names after this."""
+        tables = self._tables()
+        for old, new in (("editorial_policies", "editorial_beliefs"),
+                         ("style_elements", "style_laws")):
+            if old not in tables:
+                continue
+            if new in tables:
+                if self.conn.execute(
+                        f"SELECT 1 FROM {new} LIMIT 1").fetchone() is not None:
+                    raise RuntimeError(
+                        f"cannot rename {old} → {new}: {new} already holds "
+                        "rows; resolve by hand")
+                self.conn.execute(f"DROP TABLE {new}")
+            self.conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
+        if "supports_policy" in self._columns("evidence"):
+            self.conn.execute("ALTER TABLE evidence "
+                              "RENAME COLUMN supports_policy TO supports_belief")
+        # Persisted enum values carrying the old word.
+        for table, column, old, new in (
+                ("evidence", "evidence_type", "policy_curation",
+                 "belief_curation"),
+                ("knowledge_proposals", "kind", "policy_revival",
+                 "belief_revival"),
+                ("guidance_history", "kind", "policy_reminder",
+                 "belief_reminder")):
+            self.conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                (new, old))
 
     def _migrate_thread_origins(self) -> None:
         """doc_threads: comment_id → (origin_type, origin_id). Every

@@ -315,9 +315,14 @@ the active image model's section is used).
 def craft_text(config: dict, workspace: str | None = None) -> str:
     """The description-craft guidelines: general rules plus the active
     image model's carveout section. Seeded on first read; the file is
-    the single source both the spot-finder and chat critique use."""
-    base = Path(workspace).resolve() if workspace else Path.home()
-    path = base / ".authorlm" / CRAFT_FILENAME
+    the single source both the spot-finder and chat critique use.
+
+    It lives with the project config, not in the workspace: craft rules
+    are versioned decisions, not machine state. `workspace` is accepted
+    and ignored so callers need not care."""
+    from . import paths
+
+    path = paths.craft_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_CRAFT, encoding="utf-8")
@@ -382,7 +387,7 @@ def illustration_law(db, manuscript_id: str, file: str) -> str:
     """The effective illustration-aspect style law for a file, as the
     exact text prepended to every render prompt. The stylehash hashes
     THIS — 'hash what the model sees' — so a reworded ratified rule
-    changes it and a candidate policy cannot. Only the 'illustration'
+    changes it and a candidate belief cannot. Only the 'illustration'
     aspect: 'figure' is figurative-language PROSE law and must never
     reach an image prompt (it-3e79bce24f73)."""
     from .styles import effective_style

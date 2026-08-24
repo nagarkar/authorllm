@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -20,11 +21,12 @@ from pathlib import Path
 from . import api
 from . import concepts as cg
 from . import critique as crit
-from . import policies as pol
+from . import beliefs as bel
 from . import sessions as ses
 from . import triage as triage_service
 from . import ui
 from .briefing import build_briefing
+from . import beliefs as bel_mod
 from .db import Database, ko_fields, loads
 from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
@@ -43,8 +45,14 @@ def _open_db(args) -> Database:
 
 
 def _load_config(args) -> dict:
-    """Load .authorlm/config.toml (native # comments, stdlib tomllib)."""
-    toml_path = _workspace(args) / ".authorlm" / "config.toml"
+    """Load the project's config.toml (native # comments, stdlib tomllib)
+    and populate the environment from .env first, so every key lookup
+    downstream sees the same environment. Config holds decisions; .env
+    holds secrets (authorlm/paths.py)."""
+    from . import paths
+
+    paths.load_env()
+    toml_path = paths.config_path()
     if toml_path.exists():
         import tomllib
         try:
@@ -175,10 +183,10 @@ def cmd_init(args):
 # Every table that carries manuscript-scoped rows, children first.
 MANUSCRIPT_TABLES = [
     "triage_assessments", "triage_runs", "triage_drafts",
-    "evidence", "editorial_reviews", "guidance_history", "editorial_policies",
+    "evidence", "editorial_reviews", "guidance_history", "editorial_beliefs",
     "concept_edges", "concept_nodes", "editorial_episodes", "inferred_intents",
     "declared_intents", "sessions", "editorial_transitions",
-    "style_elements", "style_attachments", "style_guides",
+    "style_laws", "style_attachments", "style_guides",
     "manuscript_versions", "manuscripts",
 ]
 
@@ -320,6 +328,9 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
             f"— untouched. Reconcile by hand (doc open {relpath} + local "
             f"editor), or 'doc pull {relpath} --force' to take the Doc's side."
         ))
+    if report.get("ignored_tabs"):
+        print(ui.dim("Ignoring non-manuscript tab(s): "
+                     + ", ".join(report["ignored_tabs"])))
     for item in report["errors"]:
         print(ui.dim(f"warning: could not reconcile {item['file']} "
                      f"({item['error'][:80]})"))
@@ -379,8 +390,8 @@ def cmd_session(args):
         briefing = build_briefing(db, manuscript["id"], since=session["started_at"])
         velocity = briefing["learning_velocity"]
         print(
-            "Learning this session — evidence: {new_evidence}, policies changed: "
-            "{policies_changed}, seeded: {policies_seeded}, concepts realized: "
+            "Learning this session — evidence: {new_evidence}, beliefs changed: "
+            "{beliefs_changed}, seeded: {beliefs_seeded}, concepts realized: "
             "{concepts_realized}, edges inferred: {edges_inferred}".format(**velocity)
         )
 
@@ -390,7 +401,7 @@ def _print_briefing(db: Database, manuscript: dict):
     print(ui.header("═══ Session-Opening Learning Briefing ═══"))
     fresh = briefing["since"] == "1970-01-01T00:00:00Z"
     empty = not any([
-        briefing["policy_changes"], briefing["new_policies"],
+        briefing["belief_changes"], briefing["new_beliefs"],
         briefing["realized_concepts"], briefing["unconfirmed_concepts"],
         briefing["inferred_edges"], briefing["outstanding_questions"],
         briefing["focus_areas"], briefing["active_intents"],
@@ -402,20 +413,20 @@ def _print_briefing(db: Database, manuscript: dict):
     else:
         print(ui.dim(f"Since your last session ({briefing['since'][:16].replace('T', ' ')} UTC)."))
 
-    if briefing["policy_changes"]:
-        print(ui.bold("\nPolicies strengthened/weakened:"))
-        for change in briefing["policy_changes"]:
+    if briefing["belief_changes"]:
+        print(ui.bold("\nBeliefs strengthened/weakened:"))
+        for change in briefing["belief_changes"]:
             print(
                 f"  • \"{ui.bold(change['statement'])}\" [{change['status']}] "
                 f"confidence {change['confidence']} "
                 + ui.dim(f"(+{change['delta_supporting']}/-{change['delta_contradicting']} this period; "
                          f"{change['supporting']}+ / {change['contradicting']}- total)")
             )
-    if briefing["new_policies"]:
-        print(ui.bold("\nNewly seeded candidate policies (from your explanations):"))
-        for policy in briefing["new_policies"]:
-            print(f"  • \"{policy['statement']}\" "
-                  + ui.dim(f"[{policy['status']}, confidence {policy['confidence']}]"))
+    if briefing["new_beliefs"]:
+        print(ui.bold("\nNewly seeded candidate beliefs (from your explanations):"))
+        for belief in briefing["new_beliefs"]:
+            print(f"  • \"{belief['statement']}\" "
+                  + ui.dim(f"[{belief['status']}, confidence {belief['confidence']}]"))
 
     if briefing["realized_concepts"]:
         nodes = briefing["realized_concepts"]
@@ -472,10 +483,10 @@ def _print_briefing(db: Database, manuscript: dict):
         print(ui.bold("\nOutstanding questions:"))
         for q in briefing["outstanding_questions"]:
             print(
-                f"  {ui.dim('[' + q['policy_id'][:8] + ']')} "
+                f"  {ui.dim('[' + q['belief_id'][:8] + ']')} "
                 f"On \"{ui.shorten(q['statement'], 50)}\": {q['question']}"
             )
-        print(ui.dim("  → answer: policy answer <id> \"...\""))
+        print(ui.dim("  → answer: belief answer <id> \"...\""))
 
     if briefing["active_intents"]:
         print(ui.bold("\nActive intents (carried over):"))
@@ -562,6 +573,41 @@ def _intent_preview(db: Database, manuscript: dict, statement: str) -> None:
 def cmd_intent(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
+    if args.action == "show":
+        if not args.statement:
+            sys.exit("usage: authorlm intent show <id-prefix>")
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM declared_intents WHERE manuscript_id = ?",
+            (manuscript["id"],)) if args.statement in r["id"]]
+        if not rows:
+            sys.exit(f"error: no intent matching '{args.statement}'.")
+        for row in rows:
+            print(ui.bold(f"[{row['id']}] {row['statement']}"))
+            print(ui.dim(f"  {row['status']}"
+                         + (f" · scope {row['scope']}" if row["scope"] else "")
+                         + f" · declared {row['created_at'][:19]}"))
+            if row["outcome"]:
+                print(f"  outcome: {row['outcome']}")
+            meta = loads(row.get("metadata"), {}) or {}
+            crit = meta.get("critique") or {}
+            if crit:
+                print(ui.dim(f"  from critique: {crit.get('unit', '?')} "
+                             f"#{crit.get('ordinal', '?')}"))
+            threads = db.all(
+                "SELECT * FROM doc_threads WHERE manuscript_id = ? "
+                "AND json_extract(metadata, '$.intent_id') = ? LIMIT 6",
+                (manuscript["id"], row["id"]))
+            if threads:
+                print(f"  {len(threads)} staged edit(s) serve this intent")
+            ev = db.all(
+                "SELECT * FROM evidence WHERE manuscript_id = ? "
+                "AND target LIKE ? ORDER BY created_at DESC LIMIT 5",
+                (manuscript["id"], f"%{row['statement'][:40]}%"))
+            for e in ev:
+                print(ui.dim(f"    [{e['evidence_type']}/{e['signal']}] "
+                             f"{e['target'][:100]}"))
+        return
+
     if args.action == "declare":
         row = ses.declare_intent(db, manuscript["id"], args.statement)
         print(f"Declared intent [{row['id'][:8]}]: {args.statement}")
@@ -606,11 +652,11 @@ def cmd_critique(args):
         manifest = json.loads(Path(args.target).read_text())
         result = crit.import_manifest(db, mid, manifest)
         print(f"Imported {result['intents']} intent(s) and "
-              f"{result['style_elements']} style element(s) as proposed "
+              f"{result['style_laws']} style element(s) as proposed "
               f"({result['skipped']} already present, skipped).")
         for err in result["errors"]:
             print(ui.yellow(f"warning: {err}"))
-        if result["intents"] or result["style_elements"]:
+        if result["intents"] or result["style_laws"]:
             print(ui.dim("Nothing is law yet — triage with 'critique triage' "
                          "(the global sitting first, then per-essay)."))
     elif args.action == "status":
@@ -664,7 +710,7 @@ def cmd_critique(args):
 def _critique_settled(db: Database, mid: str, token: str) -> tuple[str, dict]:
     """Any critique item, settled or not, by id prefix."""
     for kind, table in (("intent", "declared_intents"),
-                        ("element", "style_elements")):
+                        ("element", "style_laws")):
         rows = db.all(
             f"SELECT * FROM {table} WHERE manuscript_id = ? AND id LIKE ? "
             "AND source_id IS NOT NULL", (mid, f"%{token}%"))
@@ -684,7 +730,7 @@ def _critique_show(db: Database, mid: str, args) -> None:
         q = args.query.lower()
         rows = []
         for table, kind in (("declared_intents", "intent"),
-                            ("style_elements", "element")):
+                            ("style_laws", "element")):
             for r in db.all(f"SELECT * FROM {table} WHERE manuscript_id = ? "
                             "AND source_id IS NOT NULL", (mid,)):
                 if q in r["statement"].lower():
@@ -731,13 +777,13 @@ def _critique_reason(db: Database, mid: str, args) -> None:
     else:
         meta = loads(item["metadata"], {})
         meta["rejection_reason"] = args.text
-        db.update("style_elements", item["id"],
+        db.update("style_laws", item["id"],
                   {"metadata": json.dumps(meta)})
     ev = ko_fields("ev")
     ev.update(manuscript_id=mid, episode_id=None,
               evidence_type="critique_triage", signal="reason_amended",
               target=f"{item['statement'][:120]} — {args.text}"[:200],
-              supports_policy=None, weight="high")
+              supports_belief=None, weight="high")
     db.insert("evidence", ev)
     print(ui.green("reason amended") + f" [{item['id'][:8]}]")
 
@@ -747,7 +793,7 @@ def _critique_reopen(db: Database, mid: str, args) -> None:
     if not args.target:
         sys.exit("usage: critique reopen <id-prefix>")
     kind, item = _critique_settled(db, mid, args.target)
-    table = "declared_intents" if kind == "intent" else "style_elements"
+    table = "declared_intents" if kind == "intent" else "style_laws"
     db.update(table, item["id"], {"status": "proposed"})
     print(ui.cyan("reopened") + f" [{item['id'][:8]}] — proposed again")
 
@@ -804,7 +850,7 @@ def _critique_run(db: Database, manuscript: dict, args) -> None:
         sys.exit("error: the LLM is disabled ([llm] enabled = false).")
     print(ui.dim(f"editor model: {llm.model} — {len(ctx['paragraphs'])} "
                  f"paragraphs, {len(ctx['intents'])} intent(s), "
-                 f"{len(ctx['policies'])} polic(ies), "
+                 f"{len(ctx['beliefs'])} belief(s), "
                  f"{len(ctx['before'])} before / {len(ctx['after'])} after "
                  "summaries"))
     try:
@@ -1149,7 +1195,7 @@ def _critique_item_line(kind: str, item: dict) -> str:
 
 def _critique_resolve(db: Database, mid: str, prefix: str) -> tuple[str, dict]:
     for kind, table in (("intent", "declared_intents"),
-                        ("element", "style_elements")):
+                        ("element", "style_laws")):
         rows = db.all(
             f"SELECT * FROM {table} WHERE manuscript_id = ? "
             "AND status = 'proposed' AND id LIKE ?",
@@ -2352,6 +2398,27 @@ def cmd_illus(args):
         print(assembled["composed"])
         return
 
+    if args.action == "show":
+        if not args.name:
+            raise SystemExit("usage: authorlm illus show <prompt-fragment>")
+        rows = [r for r in illus.slot_status(db, manuscript)
+                if args.name.lower() in (r.get("prompt") or "").lower()
+                or args.name in f"{r['file']}:{r['line']}"]
+        if not rows:
+            raise SystemExit(f"error: no illustration slot matches "
+                             f"'{args.name}' ('illus list' shows them).")
+        for r in rows:
+            print(ui.bold(f"{r['file']}:{r['line']}  [{r['state']}]"))
+            print(f"  prompt: {r.get('prompt', '')}")
+            if r.get("caption"):
+                print(f"  caption: {r['caption']}")
+            for key in ("candidates", "embedded", "desc_hash", "style_hash"):
+                if r.get(key):
+                    print(ui.dim(f"  {key}: {r[key]}"))
+            print(ui.dim("\n  → 'illus prompt <fragment>' for the exact "
+                         "composed prompt a render would send."))
+        return
+
     if args.action == "list":
         rows = illus.slot_status(db, manuscript)
         if not rows:
@@ -2503,7 +2570,7 @@ def cmd_illus(args):
                   target=(f"{slot['file']}: «{slot['prompt'][:80]}» — "
                           f"picked {target['name']} over "
                           f"{max(len(cands) - 1, 0)} other candidate(s)"),
-                  supports_policy=None, weight="medium")
+                  supports_belief=None, weight="medium")
         db.insert("evidence", ev)
         print(f"Picked candidate {args.candidate:02d} — embed now "
               f"{target['name']}. Picks are pinned: renders never move them.")
@@ -2634,6 +2701,17 @@ def cmd_lens(args):
         print(f"Lens '{args.name}' ratified → {path}")
         return
 
+    if args.action == "show":
+        if not args.name:
+            raise SystemExit("usage: authorlm lens show <name>")
+        path = lenses._lens_path(manuscript, args.name)
+        if not path.is_file():
+            raise SystemExit(f"error: no lens '{args.name}' "
+                             "('lens list' shows them).")
+        print(ui.bold(f"Lens '{args.name}' — {path}"))
+        print(path.read_text(encoding="utf-8").rstrip())
+        return
+
     if args.action == "list":
         rows = lenses.list_lenses(manuscript)
         if not rows:
@@ -2659,9 +2737,9 @@ def cmd_lens(args):
                             kinds=(lenses.LENS_KIND,))
         print(f"Recorded: [{args.name}] {decisions[0]}"
               + (f" — “{args.explain}”" if args.explain else ""))
-        if result.get("seeded_policy"):
-            print(ui.dim("Your explanation seeded a candidate policy: "
-                         f"\"{result['seeded_policy']['statement']}\""))
+        if result.get("seeded_belief"):
+            print(ui.dim("Your explanation seeded a candidate belief: "
+                         f"\"{result['seeded_belief']['statement']}\""))
         return
 
     if not args.name or not args.file:
@@ -2727,11 +2805,16 @@ def cmd_export(args):
         return
 
     try:
+        chapters = [c for part in (args.chapters or [])
+                    for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
-                                     variant=args.variant)
+                                     variant=args.variant,
+                                     only=chapters or None)
     except (RuntimeError, LookupError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
+    if chapters:
+        print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
         print(f"Wrote {result[args.action]}.")
     for warning in result["warnings"]:
@@ -2856,9 +2939,9 @@ def cmd_write(args):
                                       prefix=prefix, llm=llm)
             print(f"Beat n={result['beat']['n']} rejected — reason recorded "
                   "verbatim. Redraft with the reason in context.")
-            if result["review"].get("seeded_policy"):
-                print(ui.dim("Seeded candidate policy: "
-                             f"{result['review']['seeded_policy']['statement']}"))
+            if result["review"].get("seeded_belief"):
+                print(ui.dim("Seeded candidate belief: "
+                             f"{result['review']['seeded_belief']['statement']}"))
         elif args.action == "learn":
             # stdin only, like propose/accept/plan: a positional lesson after
             # -m trips argparse's greedy-empty nargs='*' and dies unrecognized.
@@ -3058,40 +3141,108 @@ def cmd_review(args):
     except (LookupError, ValueError) as err:
         sys.exit(f"error: {err}.")
     print(f"Recorded: [{args.index}] {decision}.")
-    for policy in result["policies"]:
+    for belief in result["beliefs"]:
         print(
-            f"Policy \"{policy['statement']}\" → confidence {policy['confidence']} "
-            f"[{policy['status']}] ({policy['supporting']}+ / {policy['contradicting']}-)"
+            f"Belief \"{belief['statement']}\" → confidence {belief['confidence']} "
+            f"[{belief['status']}] ({belief['supporting']}+ / {belief['contradicting']}-)"
         )
-    if result["seeded_policy"]:
-        seeded = result["seeded_policy"]
+    if result["seeded_belief"]:
+        seeded = result["seeded_belief"]
         if seeded.get("kind") == "revival_proposal":
             print(
-                f"Your explanation supports the retired policy "
+                f"Your explanation supports the retired belief "
                 f"\"{seeded['statement']}\" — a revival proposal was filed "
                 f"(see 'proposal list')."
             )
         else:
             print(
-                f"Your explanation seeded a candidate policy: \"{seeded['statement']}\" "
+                f"Your explanation seeded a candidate belief: \"{seeded['statement']}\" "
                 f"(confidence {seeded['confidence']})"
             )
-    if args.explain and not result["seeded_policy"]:
+    if args.explain and not result["seeded_belief"]:
         print("Explanation recorded as high-weight evidence.")
     _report_llm(llm)
 
 
-def cmd_policy(args):
+def cmd_belief(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
+    if args.action == "show":
+        if not args.id:
+            sys.exit("usage: authorlm belief show <id-prefix>")
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ?",
+            (manuscript["id"],)) if r["id"].startswith(args.id)
+            or args.id in r["id"]]
+        if not rows:
+            sys.exit(f"error: no belief matching '{args.id}'.")
+        for row in rows:
+            meta = loads(row.get("metadata"), {}) or {}
+            bar = f"{row['supporting']}+ / {row['contradicting']}-"
+            print(ui.bold(f"[{row['id']}] \"{row['statement']}\""))
+            promotes = bel_mod.validate_min_support(row["source"])
+            print(ui.dim(
+                f"  {row['status']} · confidence {row['confidence']} · {bar}"
+                f" · source {row['source']} · raised {row['created_at'][:19]}"))
+            if row["status"] == "candidate":
+                need = max(0, promotes - row["supporting"])
+                print(ui.dim(f"  needs {need} more supporting observation(s) "
+                             f"to act (bar for {row['source']}: {promotes})"))
+            elif row["status"] == "validated":
+                # Only sources a LoopSpec claims are consulted by the screen;
+                # every other validated belief surfaces as guidance instead.
+                from . import loop as _loop
+
+                queues = [sp.key for sp in _loop.REGISTRY.values()
+                          if sp.source == row["source"]]
+                if queues:
+                    print(ui.yellow(
+                        "  ACTING: screens new proposals in "
+                        + ", ".join(queues) + ". Not ratified by you — "
+                        f"'belief convert {row['id'][:8]} --aspect <aspect>' "
+                        "makes it law."))
+                else:
+                    print(ui.dim(
+                        "  validated: surfaces as a reminder in guidance. It "
+                        f"does not screen proposals — no queue reads "
+                        f"'{row['source']}' beliefs."))
+            if meta.get("scope_kind"):
+                print(ui.dim(f"  scope: {meta['scope_kind']} "
+                             f"{meta.get('scope_ref', '')}"))
+            if meta.get("example"):
+                print(f"  e.g. {meta['example'][:300]}")
+            if meta.get("original_explanation"):
+                print("  distilled from your words:")
+                print(ui.dim(f"    “{meta['original_explanation'][:600]}”"))
+            for number, question in enumerate(
+                    loads(row["outstanding_questions"], []), start=1):
+                print(ui.dim(f"  Q{number}: {question}"))
+            ev = db.all(
+                "SELECT * FROM evidence WHERE supports_belief = ? "
+                "ORDER BY created_at DESC LIMIT 8", (row["id"],))
+            if ev:
+                print("  evidence on record:")
+                for e in ev:
+                    print(ui.dim(f"    [{e['signal']}] {e['target'][:110]}"))
+            folded = db.one(
+                "SELECT COUNT(*) AS n FROM knowledge_proposals "
+                "WHERE manuscript_id = ? AND state = 'dismissed' "
+                "AND json_extract(metadata, '$.law') = ?",
+                (manuscript["id"], row["id"]))["n"]
+            if folded:
+                print(ui.yellow(f"  has folded {folded} proposal(s) — "
+                                f"'proposal list --belief {row['id'][:8]}' "
+                                "to check its work"))
+        return
+
     if args.action == "list":
         rows = db.all(
-            "SELECT * FROM editorial_policies WHERE manuscript_id = ? "
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
             "AND status != 'retired' ORDER BY confidence DESC",
             (manuscript["id"],),
         )
         if not rows:
-            print("No editorial policies learned yet. They emerge from your reviews.")
+            print("No editorial beliefs learned yet. They emerge from your reviews.")
         any_questions = False
         for row in rows:
             questions = loads(row["outstanding_questions"], [])
@@ -3103,18 +3254,18 @@ def cmd_policy(args):
                 any_questions = True
                 print(ui.dim(f"    Q{number}: {question}"))
         if any_questions:
-            print(ui.dim('  → answer: policy answer <id> "your answer" '
+            print(ui.dim('  → answer: belief answer <id> "your answer" '
                          "[--index N]  (N = the Q number, default 1)"))
     elif args.action == "retire":
         try:
-            result = api.retire_policy(db, manuscript, args.id, args.reason)
+            result = api.retire_belief(db, manuscript, args.id, args.reason)
         except (LookupError, ValueError) as err:
             sys.exit(str(err))
-        print(f"Policy retired: \"{result['statement']}\" "
+        print(f"Belief retired: \"{result['statement']}\" "
               "(statement stays banned from re-seeding).")
     elif args.action == "merge":
         try:
-            result = api.merge_policies(db, manuscript, args.id, args.answer,
+            result = api.merge_beliefs(db, manuscript, args.id, args.answer,
                                         reason=args.reason)
         except (LookupError, ValueError) as err:
             sys.exit(str(err))
@@ -3123,25 +3274,25 @@ def cmd_policy(args):
               f"[{result['status']}, confidence {result['confidence']}].")
     elif args.action == "convert":
         try:
-            result = api.convert_policy(
+            result = api.convert_belief(
                 db, manuscript, args.id, args.aspect,
                 statement=args.statement, guide=args.guide, file=args.file,
                 notes=args.notes, reason=args.reason)
         except (LookupError, ValueError) as err:
             sys.exit(str(err))
-        print(f"Policy \"{result['statement']}\" converted to style element "
-              f"[{result['style_element'][:8]}] (policy retired).")
+        print(f"Belief \"{result['statement']}\" converted to style element "
+              f"[{result['style_element'][:8]}] (belief retired).")
     else:  # answer
-        policy = _find_by_prefix(db, "editorial_policies", args.id, manuscript["id"])
-        questions = loads(policy["outstanding_questions"], [])
+        belief = _find_by_prefix(db, "editorial_beliefs", args.id, manuscript["id"])
+        questions = loads(belief["outstanding_questions"], [])
         if not questions:
-            sys.exit("error: that policy has no outstanding questions.")
+            sys.exit("error: that belief has no outstanding questions.")
         index = args.index - 1
         if not 0 <= index < len(questions):
             sys.exit(f"error: question index out of range (1..{len(questions)}).")
         answered = questions.pop(index)
         db.update(
-            "editorial_policies", policy["id"],
+            "editorial_beliefs", belief["id"],
             {"outstanding_questions": json.dumps(questions)},
         )
         ev = ko_fields("ev")
@@ -3149,7 +3300,7 @@ def cmd_policy(args):
             manuscript_id=manuscript["id"], episode_id=None,
             evidence_type="briefing_answer", signal="declared",
             target=f"Q: {answered} — A: {args.answer}",
-            supports_policy=policy["id"], weight="high",
+            supports_belief=belief["id"], weight="high",
         )
         db.insert("evidence", ev)
         print("Answer recorded as declared evidence. Question closed.")
@@ -3294,6 +3445,36 @@ def cmd_doc(args):
 
         webbrowser.open(url)
         print(f"Opening {relpath} in your browser: {url}")
+        return
+
+    if args.action == "show":
+        from .gdocs import doc_status, tab_url
+
+        if not args.name:
+            raise SystemExit("usage: authorlm doc show <file>")
+        status = doc_status(db, manuscript)
+        master = status.get("_master_id")
+        hits = {k: v for k, v in status.items()
+                if not k.startswith("_") and isinstance(v, dict)
+                and args.name.lower() in k.lower()}
+        if not hits:
+            raise SystemExit(f"error: no file matching '{args.name}' "
+                             "('doc list' shows them).")
+        for rel, entry in sorted(hits.items()):
+            print(ui.bold(rel))
+            checked_out = bool(entry.get("checked_out"))
+            state = ("CHECKED OUT — the Doc is the working copy" if checked_out
+                     else "local file is the working copy")
+            print(ui.dim(f"  {state}"))
+            if entry.get("tab_id") and master:
+                print(f"  url: {tab_url(master, entry['tab_id'])}")
+            elif entry.get("doc_id"):
+                print("  url: https://docs.google.com/document/d/"
+                      f"{entry['doc_id']}/edit")
+            else:
+                print(ui.dim("  not linked to a Doc yet — 'doc push' links it"))
+            if entry.get("pushed_hash"):
+                print(ui.dim(f"  pushed_hash: {entry['pushed_hash']}"))
         return
 
     if args.action in ("push", "pull"):
@@ -3542,8 +3723,8 @@ def _print_analysis(summaries: list[dict]) -> None:
             print(f"  • {decision['action']}")
             if decision["pattern"]:
                 print(ui.dim(f"    ↳ pattern: \"{decision['pattern']}\""))
-        for statement, note in summary["policies"]:
-            print(f"  {ui.cyan('policy')} \"{ui.shorten(statement, 70)}\" — {note}")
+        for statement, note in summary["beliefs"]:
+            print(f"  {ui.cyan('belief')} \"{ui.shorten(statement, 70)}\" — {note}")
         if summary["outcome"]:
             print(ui.dim(f"  outcome: {summary['outcome']}"))
 
@@ -3678,9 +3859,9 @@ def list_ids(db: Database, manuscript: dict, kind: str) -> list[str]:
         return [r["id"] for r in db.all(
             "SELECT id FROM declared_intents WHERE manuscript_id = ? AND status = 'active'",
             (mid,))]
-    if kind == "policies":
+    if kind == "beliefs":
         return [r["id"] for r in db.all(
-            "SELECT id FROM editorial_policies WHERE manuscript_id = ? "
+            "SELECT id FROM editorial_beliefs WHERE manuscript_id = ? "
             "AND status != 'retired'", (mid,))]
     if kind in ("concepts", "confirmables"):
         names = [r["name"] for r in db.all(
@@ -3768,8 +3949,145 @@ def cmd_proposal(args):
     manuscript = _manuscript(db, args)
     mid = manuscript["id"]
 
-    if args.action == "list":
+    if args.action == "show":
+        if not args.id:
+            sys.exit("usage: authorlm proposal show <id-prefix>")
+        found = api.list_proposals(db, manuscript, proposal_id=args.id)["open"]
+        if not found:
+            sys.exit(f"error: no open proposal matching '{args.id}'.")
+        for row in found:
+            summary, details = prop.describe(row)
+            print(ui.bold(f"[{row['id']}] ({row['kind']}) {summary}"))
+            print(ui.dim(f"  target: {row['target']}  ·  state: {row['state']}"
+                         f"  ·  raised: {row['created_at'][:19]}"
+                         f"  ·  source: {row['source']}"))
+            for line in details:
+                print(f"  {line}")
+            print(ui.dim("\n  → proposal accept|dismiss "
+                         f"{row['id'][:8]} [--why \"...\"]"))
+        return
+
+    if args.action == "dedupe":
+        from . import loop as _loop
+        from collections import defaultdict
+
         rows = prop.open_proposals(db, mid)
+        groups = defaultdict(list)
+        for r in rows:
+            groups[(r["kind"], r["target"])].append(r)
+        folded_now, shown = 0, 0
+        for (kind, _t), items in groups.items():
+            spec = _loop.REGISTRY.get(f"proposals/{kind}")
+            if spec is None:
+                continue
+            kept = []
+            for r in items:
+                text = spec.dedupe_text(r)
+                hit = _loop.near_duplicate(text, kept)
+                if not hit:
+                    kept.append((r["id"], text))
+                    continue
+                folded_now += 1
+                if shown < 12:
+                    prior = next(x for i, x in kept if i == hit[0])
+                    print(f"  [{hit[1]:.2f}] keep [{hit[0][:8]}] "
+                          f"{prior[:88]}")
+                    print(ui.dim(f"         fold [{r['id'][:8]}] {text[:88]}"))
+                    shown += 1
+                if args.apply:
+                    meta = loads(r.get("metadata"), {}) or {}
+                    meta.update(by="firewall", law=None,
+                                reason=f"restates {hit[0]} ({hit[1]:.2f})")
+                    db.update("knowledge_proposals", r["id"],
+                              {"state": "dismissed",
+                               "metadata": json.dumps(meta)})
+        if folded_now > shown:
+            print(ui.dim(f"  … and {folded_now - shown} more"))
+        verb = "folded" if args.apply else "would fold"
+        print(f"\n{verb} {folded_now} of {len(rows)} open proposal(s) as "
+              f"restatements (threshold {_loop.NEAR_DUPLICATE}).")
+        if not args.apply and folded_now:
+            print(ui.dim("  → 'proposal dedupe --apply' to fold them. This is "
+                         "the firewall applied to the EXISTING backlog; new "
+                         "proposals are screened at creation."))
+        return
+
+    if args.action == "reconcile":
+        report = api.reconcile_proposals(db, manuscript,
+                                         apply=not args.dry_run)
+        head = f"{'would settle' if args.dry_run else 'settled'}"
+        for kind, st in sorted(report["by_kind"].items()):
+            print(f"  {kind:<20} considered {st['considered']:>4}  "
+                  f"satisfied {st['satisfied']:>4}  orphan {st['orphan']:>3}  "
+                  f"re-based {st['stale']:>4}  live {st['live']:>4}")
+        n = len(report["satisfied"]) + len(report["orphan"])
+        print(f"\n{head} {n} proposal(s) the world had already answered; "
+              f"re-based {len(report['stale'])} against the note as it now "
+              f"stands.")
+        if report["stale"]:
+            print(ui.dim("  re-based proposals are NOT dismissed — some are "
+                         "regressions that only look like improvements "
+                         "against the base they carried."))
+        print(f"still open: {report['still_open']}")
+        return
+
+    if args.action == "screen":
+        llm = LLMClient(_load_config(args))
+        def _progress(done, total, cuts):
+            print(ui.dim(f"    …{done}/{total} screened, {cuts} cut"),
+                  flush=True)
+
+        report = api.screen_proposals(db, manuscript, llm,
+                                      on_batch=_progress)
+        for key, stat in report["by_queue"].items():
+            print(f"  {key}: considered {stat['considered']}, "
+                  f"cut {stat['cut']}")
+        if not report["cut"]:
+            print(ui.dim("Nothing cut — the screen only acts on law it can "
+                         "name, and none applies yet. Beliefs reach "
+                         "'validated' after two supporting explanations "
+                         "('belief list')."))
+        else:
+            print(ui.yellow(f"\n{len(report['cut'])} proposal(s) folded away. "
+                            "'proposal list' shows them grouped by the belief "
+                            "that cut them; accepting one there tells the "
+                            "system that belief is wrong."))
+        print(f"still open: {report['still_open']}")
+        _report_llm(llm)
+        return
+
+    if args.action == "list":
+        if getattr(args, "belief", None):
+            expanded = api.list_proposals(db, manuscript, belief=args.belief)
+            if not expanded["proposals"]:
+                print(f"No proposals folded by '{args.belief}'.")
+                return
+            print(ui.bold(f"{expanded['count']} proposal(s) folded by "
+                          f"{args.belief}:"))
+            for row in expanded["proposals"]:
+                summary, details = prop.describe(row)
+                print(f"  [{row['id'][:8]}] {summary}")
+                for line in details:
+                    print(ui.dim(f"      {line[:150]}"))
+            print(ui.dim("\n  → 'proposal accept <id>' if the screen was "
+                         "wrong; that is what retracts the belief."))
+            return
+        rows = prop.open_proposals(db, mid)
+        folds = []
+        from . import loop as _loop
+
+        for spec in _loop.REGISTRY.values():
+            if spec.table == "knowledge_proposals":
+                folds.extend(_loop.folded(db, mid, spec))
+        if folds:
+            print(ui.bold("Folded by the screen (not shown above):"))
+            for f in folds:
+                blessed = "ratified" if f["accepted"] else "unblessed belief"
+                print(ui.dim(f"  [{f['law'][:8]}] {f['count']:>3} × "
+                             f"\"{f['statement'][:70]}\" ({blessed})"))
+            print(ui.dim("  → 'proposal list --belief <id>' to expand · "
+                         "accepting one contradicts that belief"))
+            print()
         if not rows:
             print("No open proposals. They arise when new material conflicts "
                   "with settled knowledge (edited definitions, retired concepts "
@@ -3872,7 +4190,7 @@ def cmd_style(args):
             result = api.attach_style(db, manuscript, args.params[0], args.params[1])
             print(f"{result['file']} now follows '{result['guide']}'.")
         elif args.action == "add":
-            row = api.add_style_element(
+            row = api.add_style_law(
                 db, manuscript, args.params[0], args.params[1],
                 guide_name=args.guide, file=args.file,
                 notes=args.notes, overrides=args.overrides,
@@ -3899,14 +4217,14 @@ def cmd_style(args):
                 if element["notes"]:
                     print(ui.dim(f"      {element['notes']}"))
         elif args.action == "retire":
-            result = api.retire_style_element(db, manuscript, args.params[0])
+            result = api.retire_style_law(db, manuscript, args.params[0])
             print(f"Retired style element: {result['statement']}")
         elif args.action == "move":
             # Re-scope an element to another guide (or a file). Elements
             # imported at house scope routinely belong to one part.
             if not (args.guide or args.file):
                 sys.exit("usage: style move <id> --guide NAME | --file FILE")
-            result = api.move_style_element(
+            result = api.move_style_law(
                 db, manuscript, args.params[0], guide_name=args.guide,
                 file=args.file)
             print(ui.green("moved") + f" [{result['id'][:8]}] → "
@@ -3926,7 +4244,7 @@ def cmd_status(args):
         for table in (
             "manuscript_versions", "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
-            "editorial_policies", "guidance_history", "editorial_reviews", "evidence",
+            "editorial_beliefs", "guidance_history", "editorial_reviews", "evidence",
         )
     }
     print(f"Manuscript: {manuscript['name']} ({manuscript['path']})")
@@ -3939,7 +4257,7 @@ def cmd_status(args):
     )
     print(
         f"Concepts: {counts['concept_nodes']} | Edges: {counts['concept_edges']} | "
-        f"Policies: {counts['editorial_policies']}"
+        f"Beliefs: {counts['editorial_beliefs']}"
     )
     print(
         f"Guidance: {counts['guidance_history']} | Reviews: {counts['editorial_reviews']} | "
@@ -4173,7 +4491,7 @@ def build_parser() -> argparse.ArgumentParser:
     from .prompt_registry import HELP_NOTE
     LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
                  "analyze", "lens", "sweep", "illus", "summarize", "doc",
-                 "policy", "critique", "triage-app"}
+                 "belief", "critique", "triage-app"}
 
     def add_parser(name, *a, **kw):
         kw.setdefault("parents", [common])
@@ -4217,9 +4535,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_triage_app)
 
     p = sub.add_parser("intent", help="declare/complete/abandon/list writing intents")
-    p.add_argument("action", choices=["declare", "complete", "abandon", "retire", "list"])
+    p.add_argument("action", choices=["declare", "show", "complete",
+                                      "abandon", "retire", "list"])
     p.add_argument("statement", nargs="?",
-                   help="intent statement (declare) or id prefix (complete/abandon)")
+                   help="intent statement (declare) or id prefix "
+                        "(show/complete/abandon)")
     p.add_argument("--outcome", help="outcome note (complete) or reason (abandon)")
     p.set_defaults(func=cmd_intent)
 
@@ -4345,7 +4665,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doc", help="manage chapter files: list, add, retire, revive, "
                                    "push/pull (Google Docs), create-manuscript, auth")
     p.add_argument("action", choices=["list", "add", "retire", "revive",
-                                      "push", "pull", "open", "auth",
+                                      "show", "push", "pull", "open", "auth",
                                       "create-manuscript", "threads",
                                       "propose", "decide"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
@@ -4387,7 +4707,8 @@ def build_parser() -> argparse.ArgumentParser:
              "run <name> <file>, register (external findings on stdin), "
              "review <n>")
     p.add_argument("action",
-                   choices=["add", "list", "run", "register", "review"])
+                   choices=["add", "list", "show", "run", "register",
+                            "review"])
     p.add_argument("name", nargs="?",
                    help="lens name (add/run/register) or finding index "
                         "(review)")
@@ -4402,13 +4723,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "export",
-        help="publishing exports: md/docx/epub built locally (pandoc) with "
-             "picked illustrations embedded; settings in _exports/settings.toml")
-    p.add_argument("action", choices=["show", "set", "md", "docx", "epub"])
+        help="publishing exports: md/docx/epub/pdf built locally (pandoc) "
+             "with picked illustrations embedded; settings in "
+             "_exports/settings.toml")
+    p.add_argument("action",
+                   choices=["show", "set", "md", "docx", "epub", "pdf"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
                    help="override the illustration variant for this export")
+    p.add_argument("--chapters", action="append", metavar="FILE,FILE",
+                   help="build only these chapters and everything filed "
+                        "under them in the TOC (repeatable; .md optional)")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(
@@ -4441,8 +4767,9 @@ def build_parser() -> argparse.ArgumentParser:
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
                "--reason \"…\"   bulk verdicts")
     p.add_argument("action",
-                   choices=["list", "render", "rerender", "pick", "prune",
-                            "prompt", "scan", "triage", "externalize"])
+                   choices=["list", "show", "render", "rerender", "pick",
+                            "prune", "prompt", "scan", "triage",
+                            "externalize"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
@@ -4512,38 +4839,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser(
-        "policy", help="list / answer questions / curate (retire, merge, convert)",
+        "belief", help="list / answer questions / curate (retire, merge, convert)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="example:\n"
-               "  policy list                     shows each policy's [id] and its\n"
+               "  belief list                     shows each belief's [id] and its\n"
                "                                  numbered open questions (Q1, Q2, …)\n"
-               '  policy answer pol-d970 "Only inside worked examples" --index 2\n'
-               "                                  closes Q2 of policy pol-d970; the\n"
+               '  belief answer pol-d970 "Only inside worked examples" --index 2\n'
+               "                                  closes Q2 of belief pol-d970; the\n"
                "                                  answer becomes declared evidence\n"
-               '  policy retire pol-4c5d --reason "garbled inference"\n'
-               "  policy merge pol-8e69 pol-2c85  fold the duplicate (first) into\n"
+               '  belief retire pol-4c5d --reason "garbled inference"\n'
+               "  belief merge pol-8e69 pol-2c85  fold the duplicate (first) into\n"
                "                                  the canonical (second)\n"
-               '  policy convert pol-3b85 --aspect formatting --guide "Essays"\n'
-               "                                  policy becomes a ratified style\n"
-               "                                  element; the policy is retired",
+               '  belief convert pol-3b85 --aspect formatting --guide "Essays"\n'
+               "                                  belief becomes a ratified style\n"
+               "                                  element; the belief is retired",
     )
-    p.add_argument("action", choices=["list", "answer", "retire", "merge",
-                                      "convert"])
+    p.add_argument("action", choices=["list", "show", "answer", "retire",
+                                      "merge", "convert"])
     p.add_argument("id", nargs="?",
-                   help="policy id prefix, from 'policy list'")
+                   help="belief id prefix, from 'belief list'")
     p.add_argument("answer", nargs="?",
-                   help="answer text (answer) / canonical policy id (merge)")
+                   help="answer text (answer) / canonical belief id (merge)")
     p.add_argument("--index", type=int, default=1,
                    help="which open question to answer — the Q number shown by "
-                        "'policy list' (default 1)")
+                        "'belief list' (default 1)")
     p.add_argument("--reason", help="why (retire: required)")
     p.add_argument("--aspect", help="convert: style aspect for the new element")
     p.add_argument("--statement", help="convert: reworded statement "
-                                       "(default: the policy statement)")
+                                       "(default: the belief statement)")
     p.add_argument("--guide", help="convert: owning style guide name")
     p.add_argument("--file", help="convert: file for a file-local element")
     p.add_argument("--notes", help="convert: free-text notes (inspect/avoid hints)")
-    p.set_defaults(func=cmd_policy)
+    p.set_defaults(func=cmd_belief)
 
     p = sub.add_parser(
         "improve", help="self-improvement tasks: confirmed tool defects with repro",
@@ -4600,7 +4927,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_manuscripts)
 
     p = sub.add_parser("_ids")  # hidden: completion helper
-    p.add_argument("kind", choices=["intents", "policies", "concepts",
+    p.add_argument("kind", choices=["intents", "beliefs", "concepts",
                                     "confirmables", "edges", "docs", "docs-retired",
                                     "proposals"])
     p.set_defaults(func=cmd_ids)
@@ -4619,8 +4946,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("proposal",
                        help="review conflicts between new material and settled knowledge")
-    p.add_argument("action", choices=["list", "review", "accept", "edge", "dismiss"])
+    p.add_argument("action",
+                   choices=["list", "show", "review", "reconcile", "screen",
+                            "dedupe", "accept", "edge", "dismiss"])
     p.add_argument("id", nargs="?", help="proposal id prefix (accept/edge/dismiss)")
+    p.add_argument("--belief", help="list: expand the fold this belief cut — "
+                                    "accepting one of them contradicts it")
+    p.add_argument("--apply", action="store_true",
+                   help="dedupe: actually fold the restatements (default is "
+                        "a dry run that changes nothing)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="reconcile: report without changing anything")
     p.add_argument("--why", help="reason when dismissing (recorded as evidence)")
     p.set_defaults(func=cmd_proposal)
 
@@ -4654,7 +4990,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def _dispatch(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     # Global home database: unless -w is given, data lives in ~/.authorlm so
     # every command works from any directory and manuscripts can live anywhere.
@@ -4710,14 +5046,14 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"usage: intent {args.action} <statement-or-id>")
     if args.command == "intent" and args.action in ("complete", "abandon"):
         args.id = args.statement
-    if args.command == "policy" and args.action == "answer" and not (args.id and args.answer):
-        sys.exit("usage: policy answer <id-prefix> \"answer text\"")
-    if args.command == "policy" and args.action == "retire" and not (args.id and args.reason):
-        sys.exit('usage: policy retire <id-prefix> --reason "why"')
-    if args.command == "policy" and args.action == "merge" and not (args.id and args.answer):
-        sys.exit("usage: policy merge <duplicate-id-prefix> <canonical-id-prefix>")
-    if args.command == "policy" and args.action == "convert" and not (args.id and args.aspect):
-        sys.exit("usage: policy convert <id-prefix> --aspect ASPECT "
+    if args.command == "belief" and args.action == "answer" and not (args.id and args.answer):
+        sys.exit("usage: belief answer <id-prefix> \"answer text\"")
+    if args.command == "belief" and args.action == "retire" and not (args.id and args.reason):
+        sys.exit('usage: belief retire <id-prefix> --reason "why"')
+    if args.command == "belief" and args.action == "merge" and not (args.id and args.answer):
+        sys.exit("usage: belief merge <duplicate-id-prefix> <canonical-id-prefix>")
+    if args.command == "belief" and args.action == "convert" and not (args.id and args.aspect):
+        sys.exit("usage: belief convert <id-prefix> --aspect ASPECT "
                  "[--guide NAME | --file FILE]")
     import time as _time
 
@@ -4735,12 +5071,48 @@ def main(argv: list[str] | None = None) -> None:
     t0 = _time.monotonic()
     try:
         args.func(args)
+    except BrokenPipeError:
+        # A downstream reader closed the pipe — `| head`, or quitting `less`
+        # early. Ordinary use of a listing command, not an error.
+        _trace(True)
+        raise
     except BaseException as err:
         clean_exit = isinstance(err, SystemExit) and not err.code
         _trace(clean_exit, None if clean_exit
                else f"{type(err).__name__}: {err}")
         raise
     _trace(True)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Entry point. Wraps dispatch so a closed downstream pipe (`| head`,
+    quitting `less`) exits quietly.
+
+    BrokenPipeError has to be handled in TWO places, which is why the naive
+    try/except around the command is not enough: it can surface while the
+    command writes, but for short output it stays buffered and only surfaces
+    when the interpreter flushes stdout at shutdown — printing "Exception
+    ignored in: <_io.TextIOWrapper>" with no traceback and no way to catch
+    it. Flushing here, inside our own guard, gives that flush nothing left
+    to fail on; pointing the fd at devnull covers anything written later."""
+    try:
+        _dispatch(argv)
+    except BrokenPipeError:
+        _silence_stdout()
+        sys.exit(0)
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_stdout()
+        sys.exit(0)
+
+
+def _silence_stdout() -> None:
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except Exception:  # noqa: BLE001 - a captured stdout has no fileno()
+        pass
 
 
 if __name__ == "__main__":

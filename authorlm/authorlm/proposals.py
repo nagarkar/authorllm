@@ -4,7 +4,7 @@ The hard guards make confirmed/authored knowledge machine-unwritable; this
 module keeps it from fossilizing. When fresh inference conflicts with a
 settled judgment — a materially different definition for an existing
 concept, a retired concept recurring with new meaning, a rejected edge
-argued again, a retired policy re-seeded — the conflict is recorded as an
+argued again, a retired belief re-seeded — the conflict is recorded as an
 open proposal for the author to adopt or dismiss, instead of being silently
 discarded (Common Core §8.9: contradictions are valuable, preserve them).
 
@@ -43,6 +43,8 @@ def create(
     )
     if existing:
         return None
+    if _suppressed_as_near_duplicate(db, manuscript_id, kind, target, payload):
+        return None
     row = ko_fields("pr")
     row.update(
         manuscript_id=manuscript_id, kind=kind, target=target,
@@ -51,6 +53,38 @@ def create(
     )
     db.insert("knowledge_proposals", row)
     return row
+
+
+def _suppressed_as_near_duplicate(db: Database, manuscript_id: str, kind: str,
+                                  target: str, payload: dict) -> bool:
+    """The deterministic firewall: a proposal that says what an existing one
+    already says — in different words or punctuation — never reaches the
+    queue.
+
+    `_content_hash` above catches only verbatim repeats, which is why 18
+    open note_update proposals for `Nothing` accumulated, four of them the
+    same sentence differing by an em-dash. This costs no model call, learns
+    nothing, and settles nothing: it exists purely so the author is not
+    asked the same question twice. Prior rows in ANY settled state count —
+    re-asking a question they already answered is the whole failure."""
+    from . import loop
+
+    spec = loop.REGISTRY.get(f"proposals/{kind}")
+    if spec is None:
+        return False
+    prior = [
+        (r["id"], spec.dedupe_text(dict(r)))
+        for r in db.all(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND kind = ? AND target = ? "
+            "AND state IN ('open', 'dismissed', 'demoted', 'adopted')",
+            (manuscript_id, kind, target))
+    ]
+    if not prior:
+        return False
+    candidate = spec.dedupe_text({"kind": kind, "target": target,
+                                  "payload": json.dumps(payload)})
+    return loop.near_duplicate(candidate, prior) is not None
 
 
 def open_proposals(db: Database, manuscript_id: str) -> list[dict]:
@@ -95,8 +129,8 @@ def describe(row: dict) -> tuple[str, list[str]]:
                    f"(was introduced in {payload.get('was_in', '?')})")
         details = ["adopt = retire it · dismiss = keep as a declared placeholder "
                    "for future writing"]
-    elif kind == "policy_revival":
-        summary = f"revive retired policy: \"{payload['statement']}\""
+    elif kind == "belief_revival":
+        summary = f"revive retired belief: \"{payload['statement']}\""
         details = [f"new supporting explanation: {payload.get('new_explanation', '')}"]
     elif kind == "alias":
         summary = (f"the text identifies '{payload['alias']}' with "
@@ -174,12 +208,12 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         edges = retire_concept(db, manuscript_id, dict(node)) if node else 0
         message = (f"Retired '{payload['name']}' ({edges} edge(s) with it) — "
                    "its text is gone and the author let it go.")
-    elif kind == "policy_revival":
-        from .policies import reinforce_policy
+    elif kind == "belief_revival":
+        from .beliefs import reinforce_belief
 
-        db.update("editorial_policies", row["target"], {"status": "candidate"})
-        reinforce_policy(db, row["target"], "accepted")
-        message = f"Policy revived as candidate: \"{payload['statement']}\""
+        db.update("editorial_beliefs", row["target"], {"status": "candidate"})
+        reinforce_belief(db, row["target"], "accepted")
+        message = f"Belief revived as candidate: \"{payload['statement']}\""
     elif kind == "alias":
         from .concepts import get_concept, merge_concepts
 
@@ -254,13 +288,24 @@ def dismiss(db: Database, manuscript_id: str, row: dict, reason: str | None = No
 
 def _record_evidence(db: Database, manuscript_id: str, row: dict, signal: str,
                      reason: str | None = None) -> None:
+    """The author's verbatim reason is the highest-value evidence there is,
+    so it is stored WHOLE in metadata.explanation — `target` stays a short
+    display line and is still clipped. Clipping the reason (it used to be
+    appended to `target` and cut at 200 chars, losing the end of every
+    explanation longer than a sentence) starved the distiller of the only
+    input that makes it worth running."""
     summary, _ = describe(row)
     ev = ko_fields("ev")
     ev.update(
         manuscript_id=manuscript_id, episode_id=None,
         evidence_type="proposal_review", signal=signal,
         target=(summary + (f" — {reason}" if reason else ""))[:200],
-        supports_policy=row["target"] if row["kind"] == "policy_revival" else None,
+        supports_belief=row["target"] if row["kind"] == "belief_revival" else None,
         weight="high",
     )
+    if reason:
+        ev["metadata"] = json.dumps({
+            "explanation": reason, "kind": row["kind"],
+            "proposal_id": row["id"], "summary": summary,
+        })
     db.insert("evidence", ev)
