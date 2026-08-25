@@ -441,6 +441,50 @@ def main_test() -> None:
               loads(latest["files"], {})["safety.md"] == big_text
               and "tiny.md" not in loads(latest["files"], {}))
 
+        # --- BUG-2 / A1 regression: restore_version must snapshot the
+        # current on-disk state into history BEFORE unlinking/overwriting
+        # it, so any work the author had on disk but never collected is
+        # still recoverable afterward (a self-contained fixture, so it
+        # cannot be confused with the version-numbering narrative above) ---
+        rv_root = root / "rv-ws"
+        rv_ms = rv_root / "manuscript"
+        rv_ms.mkdir(parents=True)
+        (rv_ms / "only.md").write_text("Original collected content.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(rv_root), "init", "--name", "rv",
+                      "--path", str(rv_ms)])
+        rv_db = api.open_db(str(rv_root))
+        rv_manuscript = api.get_manuscript(rv_db)
+        api.collect(rv_db, rv_manuscript, {})  # v1
+
+        # The author edits the tracked file AND starts a brand-new file —
+        # neither ever collected. This is the exact state a live session
+        # sits in between autosaves; restore_version must not be the thing
+        # that erases it.
+        (rv_ms / "only.md").write_text("EDITED BUT NEVER COLLECTED.\n")
+        (rv_ms / "new-uncollected.md").write_text(
+            "A NEW FILE, NEVER COLLECTED.\n")
+
+        api.restore_version(rv_db, rv_manuscript, 1, {})
+        check("restore_version still restores the target version's content",
+              (rv_ms / "only.md").read_text()
+              == "Original collected content.\n"
+              and not (rv_ms / "new-uncollected.md").exists())
+
+        rv_versions = rv_db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (rv_manuscript["id"],))
+        recovered = any(
+            loads(v["files"], {}).get("only.md")
+            == "EDITED BUT NEVER COLLECTED.\n"
+            and loads(v["files"], {}).get("new-uncollected.md")
+            == "A NEW FILE, NEVER COLLECTED.\n"
+            for v in rv_versions)
+        check("restore_version snapshots the pre-destruction disk state "
+              "into history before overwriting/deleting it (BUG-2 / A1)",
+              recovered,
+              [sorted(loads(v["files"], {})) for v in rv_versions])
+
         try:
             api.diff_versions(md_db, md_manuscript, older=1, newer=99)
             check("diff_versions rejects an unknown version number", False)

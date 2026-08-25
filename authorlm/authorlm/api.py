@@ -959,6 +959,11 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
                   prefix: str | None = None) -> dict:
     """Abandon the writeup and restore the file from the pinned source
     version — a truncated file with a dead writeup is the worst end state."""
+    # Snapshot whatever the author has on disk right now — even a
+    # half-typed, never-collected draft — before it gets overwritten by
+    # the restored source text below (BUG-2 / A1: a destructive write
+    # must never be the first thing that observes the current state).
+    collect(db, manuscript, config, source="pre-write-abandon")
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
@@ -1066,6 +1071,11 @@ def restore_version(db: Database, manuscript: dict, version_no: int, config: dic
     """Write a past version's files to disk and collect them as a new
     revision (MVP.md 'Deliberately deferred': history is never rewound,
     only advanced — restoration persists forward as a new snapshot)."""
+    # Snapshot the current disk state FIRST: the loop below unlinks and
+    # overwrites files unconditionally, and any uncollected work sitting
+    # on disk would otherwise be destroyed with no recovery point
+    # (BUG-2 / A1). A no-op when there is nothing uncollected.
+    collect(db, manuscript, config, source=f"pre-restore:v{version_no}")
     version = get_version(db, manuscript, version_no)
     files = loads(version["files"], {})
     root = Path(manuscript["path"])
