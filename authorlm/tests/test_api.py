@@ -3773,6 +3773,50 @@ def main_test() -> None:
               == {"Prefer terse fragments.",
                   "Address the reader in second person."})
 
+        # --- MCP tool envelope (T4, risk-register §3): _guard's real
+        # contract at the @mcp.tool() seam — (LookupError, ValueError,
+        # RuntimeError) become an {"ok": False, "error": ...} dict every
+        # other exception type propagates instead of being swallowed. ---
+        from authorlm import mcp_server
+
+        # _guard's tracelog write defaults to ~/.authorlm when _WORKSPACE
+        # is None (its untouched default here) — pin it to a throwaway
+        # workspace first so this test can never write into the author's
+        # real trace log.
+        guard_ws = root / "mcp-guard-ws"
+        guard_ws.mkdir()
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(guard_ws)
+        try:
+            for exc_cls, message in (
+                (LookupError, "no such manuscript"),
+                (ValueError, "bad argument"),
+                (RuntimeError, "operation failed"),
+            ):
+                def boom(exc_cls=exc_cls, message=message):
+                    raise exc_cls(message)
+                result = mcp_server._guard(boom)
+                check(f"_guard maps a bare {exc_cls.__name__} to an "
+                      "{ok: False, error} envelope",
+                      result == {"ok": False, "error": message}, str(result))
+
+            def crash():
+                raise TypeError("not one of the guarded error types")
+            try:
+                mcp_server._guard(crash)
+                propagated = False
+            except TypeError as err:
+                propagated = str(err) == "not one of the guarded error types"
+            check("_guard re-raises exception types outside its guarded "
+                  "set instead of swallowing them into an ok:false envelope",
+                  propagated)
+
+            ok_result = mcp_server._guard(lambda: {"value": 42})
+            check("_guard wraps a successful call as {ok: True, result}",
+                  ok_result == {"ok": True, "result": {"value": 42}})
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
