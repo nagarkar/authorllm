@@ -121,9 +121,66 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_config_parity() -> None:
+    """ORCH-3: api.load_config and cli._load_config must resolve the
+    same config.
+
+    Before the fix, api.load_config(workspace) read
+    <workspace-or-home>/.authorlm/config.toml while cli._load_config
+    already read paths.config_path() (AUTHORLM_CONFIG override, else the
+    project's config.toml) plus paths.load_env(). The two diverged: the
+    CLI had the LLM on and the MCP server (which calls api.load_config)
+    had it silently off. Pin AUTHORLM_CONFIG at a throwaway config with
+    the LLM enabled and prove api.load_config sees it regardless of the
+    `workspace` argument passed in — that's what proves it no longer
+    keys off workspace/home."""
+    import argparse
+
+    from authorlm import cli as cli_module
+
+    prev_config = os.environ.get("AUTHORLM_CONFIG")
+    prev_env = os.environ.get("AUTHORLM_ENV")
+    cfg_root = Path(tempfile.mkdtemp(prefix="authorlm-config-parity-"))
+    try:
+        pinned_config = cfg_root / "config.toml"
+        pinned_config.write_text(
+            '[llm]\nenabled = true\nmodel = "gemini/gemini-2.5-flash"\n'
+        )
+        pinned_env = cfg_root / ".env"
+        pinned_env.write_text("")
+        os.environ["AUTHORLM_CONFIG"] = str(pinned_config)
+        os.environ["AUTHORLM_ENV"] = str(pinned_env)
+
+        # An unrelated workspace, far from the pinned config directory —
+        # neither this workspace nor $HOME holds a config.toml.
+        unrelated_ws = cfg_root / "unrelated-workspace"
+        unrelated_ws.mkdir()
+        args = argparse.Namespace(workspace=str(unrelated_ws))
+
+        from_api = api.load_config(str(unrelated_ws))
+        from_cli = cli_module._load_config(args)
+
+        check("api.load_config and cli._load_config resolve the same config",
+              from_api == from_cli, f"api={from_api!r} cli={from_cli!r}")
+        check("api.load_config picks up the AUTHORLM_CONFIG pin, not "
+              "workspace/home",
+              from_api.get("llm", {}).get("enabled") is True, str(from_api))
+    finally:
+        if prev_config is None:
+            os.environ.pop("AUTHORLM_CONFIG", None)
+        else:
+            os.environ["AUTHORLM_CONFIG"] = prev_config
+        if prev_env is None:
+            os.environ.pop("AUTHORLM_ENV", None)
+        else:
+            os.environ["AUTHORLM_ENV"] = prev_env
+        shutil.rmtree(cfg_root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_config_parity()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

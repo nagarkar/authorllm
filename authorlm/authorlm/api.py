@@ -68,8 +68,21 @@ def open_db(workspace: str | None = None) -> Database:
 
 
 def load_config(workspace: str | None = None) -> dict:
-    base = Path(workspace).resolve() if workspace else Path.home()
-    toml_path = base / ".authorlm" / "config.toml"
+    """Load the project's config.toml, matching cli._load_config exactly.
+
+    `workspace` is accepted for signature compatibility with callers that
+    also pass it to `open_db` (workspace state and project config are two
+    different homes — see authorlm/paths.py) but is otherwise unused:
+    config resolution goes through `paths.config_path()` (the
+    AUTHORLM_CONFIG override, else the project's config.toml) after
+    `paths.load_env()` populates the environment from .env. This used to
+    diverge from cli._load_config, which read this project config all
+    along — the divergence silently left the LLM off on the MCP server
+    and the triage app while the CLI had it on (ORCH-3)."""
+    from . import paths
+
+    paths.load_env()
+    toml_path = paths.config_path()
     if toml_path.exists():
         import tomllib
         try:
