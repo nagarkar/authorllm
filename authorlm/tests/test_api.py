@@ -3261,6 +3261,58 @@ def main_test() -> None:
         finally:
             sys.modules.pop("google_auth_httplib2", None)
 
+        # --- SEC-3: cached Google OAuth tokens must be written 0600, not
+        # world-readable, at both write sites (post-refresh and initial
+        # consent) -- a long-lived refresh token readable by any other
+        # local account grants full read/write of every manuscript Doc. ---
+        import stat
+
+        class _FakeGoogleCreds:
+            def __init__(self, expired, refresh_token, valid_after_refresh=True):
+                self.expired = expired
+                self.refresh_token = refresh_token
+                self.valid = not expired
+                self._valid_after_refresh = valid_after_refresh
+
+            def refresh(self, request):
+                self.valid = self._valid_after_refresh
+                self.expired = False
+
+            def to_json(self):
+                return _rjson.dumps({"token": "secret-refresh-token"})
+
+        gdocs_sec3_ws = root / "gdocs-sec3-ws"
+        gdocs_sec3_ws.mkdir()
+        token_path = gdocs_sec3_ws / ".authorlm" / "gdocs_token.json"
+        token_path.parent.mkdir(parents=True)
+        token_path.write_text('{"token": "stale"}')
+
+        with mock.patch(
+            "google.oauth2.credentials.Credentials.from_authorized_user_file",
+            return_value=_FakeGoogleCreds(expired=True, refresh_token="rt")):
+            gdocs_mod.get_credentials({}, workspace=str(gdocs_sec3_ws))
+        refreshed_mode = stat.S_IMODE(token_path.stat().st_mode)
+        check("SEC-3: a refreshed Google token is written 0600, not "
+              "world-readable",
+              refreshed_mode == 0o600, oct(refreshed_mode))
+
+        token_path.unlink()
+        secret_path = gdocs_sec3_ws / "client_secret_fake.json"
+        secret_path.write_text("{}")
+        fake_flow = types.SimpleNamespace(
+            run_local_server=lambda port=0: _FakeGoogleCreds(
+                expired=False, refresh_token=None))
+        with mock.patch(
+            "google_auth_oauthlib.flow.InstalledAppFlow"
+            ".from_client_secrets_file",
+            return_value=fake_flow):
+            gdocs_mod.get_credentials(
+                {"gdocs": {"client_secret": str(secret_path)}},
+                workspace=str(gdocs_sec3_ws))
+        consented_mode = stat.S_IMODE(token_path.stat().st_mode)
+        check("SEC-3: a freshly-consented Google token is written 0600 too",
+              consented_mode == 0o600, oct(consented_mode))
+
         # toc.toml matter attributes + liberal parse (never raise)
         matter_files = {
             "toc.toml": (
