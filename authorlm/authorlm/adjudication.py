@@ -145,6 +145,20 @@ def _quote_for(name: str, sentences: list[tuple[str | None, str]]) -> str | None
         quote = " ".join(s for _h, s in sentences[lo:hi])
         label = f"[{heading}] " if heading else ""
         return f'{label}"{quote}"'
+    # Not named in any sentence — but measurement showed a term of art is
+    # sometimes named only in its own section heading (e.g. a candidate
+    # drawn straight from "# **The Metaphysic**"), so check headings before
+    # giving up. The heading is real, located text; it should not read as
+    # unlocatable just because it isn't inside a sentence.
+    seen: set[str] = set()
+    for heading, _first in sentences:
+        if not heading or heading in seen:
+            continue
+        seen.add(heading)
+        if pattern.search(heading):
+            first = next((s for h, s in sentences if h == heading), None)
+            body = f"{heading} — {first}" if first else heading
+            return f'[{heading}] "{body}"'
     return None
 
 
