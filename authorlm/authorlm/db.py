@@ -412,7 +412,8 @@ PROVENANCE_TABLES = (
 
 # Evidence provenance is fully determined by evidence_type. Most types record
 # an author verdict or act; these are decisions made by AuthorLM itself.
-SYSTEM_EVIDENCE_TYPES = {"episode_analysis", "deterministic_triage"}
+SYSTEM_EVIDENCE_TYPES = {"episode_analysis", "deterministic_triage",
+                         "extraction_adjudication"}
 
 
 class Database:

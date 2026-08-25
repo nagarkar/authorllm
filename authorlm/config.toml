@@ -20,6 +20,23 @@ image_size = "1536x1024"
 # Default: 24000 (characters, ~6k tokens).
 extraction_max_chars = 24000
 
+[extraction]
+# Two-step extraction (opt-in, default OFF — the single-step path above is
+# untouched while this is false).
+#
+# Step one is the existing extraction call: candidates from the changed
+# sections. Step two adds ONE more call per extraction pass: each candidate
+# is shown alongside the nearest existing concepts (found deterministically,
+# no tokens) and the author's own past rejections, and the model rules
+# new | improves | subsumed | drop. Only "new" reaches the triage queue;
+# "improves" becomes a note_update proposal against the existing concept;
+# "subsumed" and "drop" are logged as evidence and never queued.
+#
+# Cost: exactly doubles the number of extraction calls (the adjudication
+# payload is candidates + neighbours + the same text, so roughly 1.3-1.6x
+# the tokens of a single-step extraction). Buys back author triage time.
+adjudicate = false
+
 [gdocs]
 # OAuth installed-app client for the Google Docs bridge (doc push/pull).
 client_secret = "/Users/nagarkar/workspace/repos/authorllm/authorlm/client_secret_936657761738-gbalhjavi216muq9ruikmtvu1mtudrpn.apps.googleusercontent.com.json"

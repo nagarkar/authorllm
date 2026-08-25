@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import proposals
+from . import adjudication, proposals
 from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -384,7 +384,8 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0, "truncated": False, "scope": scope_label,
+            "proposed": 0, "screened": 0, "truncated": False,
+            "scope": scope_label,
         }
         failed = False
         for payload in payloads:
@@ -401,7 +402,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
@@ -471,7 +472,7 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0,
+            "proposed": 0, "screened": 0,
             "truncated": False,
         }
         failed = False
@@ -491,7 +492,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
         aggregate["scope"] = (
@@ -551,6 +552,18 @@ def extract_concepts(
     if not isinstance(result, dict):
         return None
 
+    # Step two, opt-in ([extraction] adjudicate): the candidates above are a
+    # first pass, not a verdict. Adjudication asks — once, for the whole
+    # batch — whether each one is a new concept, an improvement to an
+    # existing definition, already subsumed, or not a concept at all. Only
+    # survivors continue below, so every gate that follows still applies.
+    # With the flag off, `enabled` is False and nothing here runs.
+    screened = improved = 0
+    if adjudication.enabled(llm) and not aliases_only:
+        result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
+        if verdicts:
+            screened, improved = verdicts["screened"], verdicts["improves"]
+
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
     # retired name living on as a live concept's alias is not banned —
@@ -570,7 +583,7 @@ def extract_concepts(
         for alias in json.loads(row["aliases"] or "[]")
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
-    proposed = 0
+    proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
     disk_files: dict[str, str] | None = None
@@ -798,6 +811,7 @@ def extract_concepts(
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
         "proposed": proposed,
+        "screened": screened,
         "scope": scope,
         "truncated": truncated,
     }
