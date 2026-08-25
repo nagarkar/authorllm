@@ -2677,6 +2677,26 @@ def main_test() -> None:
                            docs_service=stub)
         check("a push on a comment-bearing tab goes surgical",
               guarded.get("mode") == "diff", str(guarded))
+        # Trailing non-mapped tabs must still be split boundaries during
+        # surgical push — the same it-307dc1279a7e hazard reconcile
+        # fixed. Without them, their export bodies pollute tab_markdown
+        # and paragraph counts disagree with the live tab.
+        stub.state["docs"]["doc-2"].append(
+            {"id": "tab-trail", "title": "Tab 31",
+             "text": "scratch notes\nnot an essay", "parent": None})
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, polished again.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        trailed = push_doc(db, manuscript, "06-orrery.md", service=stub,
+                           docs_service=stub)
+        tab_trailed = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                           if t["title"] == "06-orrery.md")
+        check("surgical push survives a trailing hand-made tab as a "
+              "boundary",
+              trailed.get("mode") == "diff"
+              and "polished again" in tab_trailed
+              and "Tab 31" not in tab_trailed, str(trailed))
+        stub.state["docs"]["doc-2"].pop()
         stub.add_comment("c-nowhere", "a quote matching no file at all",
                          "Where does this belong?")
         check("an unattributable anchor makes every mapped tab bearing",

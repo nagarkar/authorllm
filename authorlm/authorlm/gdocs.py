@@ -2595,9 +2595,28 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         data = service.files().export(
             fileId=master_id, mimeType=MARKDOWN_MIME).execute()
         whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
-        boundaries = {f for f, e in links.items()
-                      if not f.startswith("_") and isinstance(e, dict)
-                      and e.get("tab_id")} | {MANIFEST_TITLE}
+        # Same boundary rule as pull_doc / reconcile (it-307dc1279a7e):
+        # every live tab title is a split boundary. Mapped-essay +
+        # manifest alone missed the illustrations tree and hand-made
+        # tabs, so their export bodies were swallowed into the
+        # preceding essay — surgical push then saw export vs live-tab
+        # paragraph counts disagree and refused the edit.
+        mapped = {f for f, e in links.items()
+                  if not f.startswith("_") and isinstance(e, dict)
+                  and e.get("tab_id")}
+        pmapped = (prompt_links(links) if bridge.meta_key == "gdocs"
+                   else {})
+        tab_props: list[tuple[str, str]] = []
+        if docs_service is not None:
+            try:
+                tab_doc = docs_service.documents().get(
+                    documentId=master_id,
+                    includeTabsContent=True).execute()
+                walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+            except Exception:
+                pass  # known set still covers reserved titles
+        boundaries = (mapped | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
+                      | set(pmapped) | {t for _, t in tab_props if t})
         return normalize_markdown(
             split_tabbed_export(whole, boundaries).get(relpath, ""))
 
