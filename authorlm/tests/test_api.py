@@ -1384,6 +1384,44 @@ def main_test() -> None:
               "a.md" not in report["changed"]
               and "Original a content" in (t2_ms / "a.md").read_text())
 
+        # --- gdocs failure path: documents().get() outage during reconcile
+        # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
+        # in a bare try/except (gdocs.py reconcile, ~line 1610-1616); this
+        # pins that it actually behaves as documented: the session survives
+        # (no exception escapes), the failure surfaces as a per-file error
+        # instead of being silently swallowed, and an in-sync local file is
+        # left untouched rather than being mistaken for a change. ---
+        class FailingDocsService:
+            def documents(self):
+                class _Boom:
+                    def get(self, **kwargs):
+                        raise RuntimeError("simulated Docs API outage")
+                return _Boom()
+
+        manuscript = api.get_manuscript(db)
+        before_text = (ms / "01-choice.md").read_text()
+        try:
+            report = reconcile(db, manuscript, stub,
+                               docs_service=FailingDocsService())
+            reconcile_survived = True
+        except Exception:
+            reconcile_survived = False
+        check("reconcile survives a documents().get() failure during tab "
+              "listing instead of raising and killing the session",
+              reconcile_survived)
+        check("the failure surfaces as a per-file error, not silently "
+              "swallowed",
+              any(e.get("file") == "(tab listing)"
+                  and "simulated Docs API outage" in e.get("error", "")
+                  for e in report["errors"]), str(report))
+        check("the local file is untouched — reconcile wrote nothing "
+              "despite the tab-listing failure",
+              (ms / "01-choice.md").read_text() == before_text)
+        check("a file that was actually in sync is still reported in_sync "
+              "despite the tab-listing failure (resolved via the plain "
+              "export, independent of the failed tab walk)",
+              "01-choice.md" in report["in_sync"], str(report))
+
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
