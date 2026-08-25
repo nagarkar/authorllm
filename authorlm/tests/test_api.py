@@ -3008,6 +3008,40 @@ def main_test() -> None:
                      "manuscript_id = ? AND lower(name) = lower(?)",
                      (manuscript["id"], "AliasSecondary"))["n"] == 0)
 
+        # --- BUG-21: a model-shaped-but-malformed reply (a list where a
+        # string kind is expected, null where an empty list is expected)
+        # must not abort the extraction pass with a TypeError. ---
+        (ms / "11-coerce.md").write_text(
+            "# Coerce\n\nCoerceTarget needs a name here.\n\n"
+            "## Elsewhere\n\nCoerceTarget appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+
+        class MalformedLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "CoerceTarget", "kind": ["concept"]}],
+                        "links": None, "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        coerce_error = None
+        try:
+            extract_concepts(db, manuscript, MalformedLLM(),
+                             files=["11-coerce.md"])
+        except TypeError as err:
+            coerce_error = err
+        check("a malformed 'kind' (list, not str) does not abort extraction",
+              coerce_error is None, str(coerce_error))
+        coerced_node = concepts.get_concept(db, manuscript["id"], "CoerceTarget")
+        check("the malformed kind coerces to the 'concept' default",
+              coerced_node is not None and coerced_node["kind"] == "concept",
+              str(coerced_node))
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.

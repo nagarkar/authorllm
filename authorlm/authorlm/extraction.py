@@ -575,13 +575,16 @@ def extract_concepts(
     below_bar: list[str] = []
     disk_files: dict[str, str] | None = None
 
-    for item in [] if edges_only or aliases_only else result.get("concepts", []):
+    for item in [] if edges_only or aliases_only else (result.get("concepts") or []):
         if not isinstance(item, dict) or not str(item.get("name", "")).strip():
             skipped += 1
             continue
         name = str(item["name"]).strip()[:80]
         kind = item.get("kind", "concept")
-        if kind not in NODE_KINDS:
+        # `kind` may come back model-shaped-but-malformed (a list, a dict) —
+        # `in` against the NODE_KINDS frozenset raises TypeError on an
+        # unhashable value instead of just failing the membership test.
+        if not (isinstance(kind, str) and kind in NODE_KINDS):
             kind = "concept"
         notes = (str(item["notes"]).strip()[:300] or None) if item.get("notes") else None
         if name.lower() in banned:
@@ -696,7 +699,7 @@ def extract_concepts(
         node = known_nodes.get(name.lower())
         names = node_names(node) if node else [name]
         return any(concept_pattern(nm).search(text) for nm in names if nm)
-    for item in [] if aliases_only else result.get("links", []):
+    for item in [] if aliases_only else (result.get("links") or []):
         if not isinstance(item, dict):
             skipped += 1
             continue
