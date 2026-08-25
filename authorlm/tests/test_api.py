@@ -332,6 +332,54 @@ def main_test() -> None:
         check("files under min_chars are exempt from the deletion safety net",
               "staged" not in report)
 
+        # --- FAIL-3: read_manuscript_files tolerates a non-UTF-8 file
+        # instead of raising and taking down collect() — the recovery path
+        # must not die on the failure it is meant to recover from. Every
+        # file present on disk must still appear in the result: a dropped
+        # entry reads to massive_deletions() as a 100%-shrunk file (via
+        # disk.get(name, "")) and would misfire the mass-deletion guard.
+        # Exercised at the revisions.py layer directly (collect_revision /
+        # massive_deletions) to isolate this from the unrelated, separately
+        # scoped decode call in illus.maintain_excerpts (also invoked by
+        # api.collect(), not part of this finding). ---
+        from authorlm.revisions import (collect_revision as collect_rev_bad_utf8,
+                                        massive_deletions as massive_del_bad_utf8,
+                                        read_manuscript_files as read_files_bad_utf8)
+
+        bad_root = root / "badbytes-ws"
+        bad_ms = bad_root / "manuscript"
+        bad_ms.mkdir(parents=True)
+        (bad_ms / "01-good.md").write_text("Good paragraph. " * 40)  # >min_chars
+        (bad_ms / "02-bad.md").write_bytes(b"# Heading\n\xff\xfe not valid utf-8\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(bad_root), "init", "--name", "badbytes",
+                      "--path", str(bad_ms)])
+        bad_db = api.open_db(str(bad_root))
+        bad_manuscript = api.get_manuscript(bad_db)
+
+        files = read_files_bad_utf8(bad_ms)
+        check("read_manuscript_files does not drop a file it cannot decode",
+              set(files) == {"01-good.md", "02-bad.md"}, str(sorted(files)))
+        check("the unreadable file's content is a replacement, not empty "
+              "(an empty string would read as a full deletion)",
+              "�" in files["02-bad.md"] and files["02-bad.md"] != "",
+              repr(files["02-bad.md"]))
+
+        v1 = collect_rev_bad_utf8(bad_db, bad_manuscript, None)
+        check("collect_revision() completes through a mixed-encoding "
+              "manuscript instead of raising",
+              v1 is not None and v1["version_no"] == 1, str(v1))
+        stored_files = loads(v1["files"], {})
+        check("the unreadable file is still present in the persisted "
+              "snapshot, not silently dropped as a phantom deletion",
+              "02-bad.md" in stored_files, str(sorted(stored_files)))
+
+        # Re-collecting unchanged content must not look like a deletion.
+        flagged = massive_del_bad_utf8(bad_db, bad_manuscript)
+        check("massive_deletions does not flag an unreadable-but-unchanged "
+              "file as a mass deletion",
+              flagged == [], str(flagged))
+
         # --- history show/restore (MVP.md 'Deliberately deferred': version
         # access & restoration — implementable at any time, no schema change) ---
         try:
