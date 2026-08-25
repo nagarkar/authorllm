@@ -2088,6 +2088,115 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     check("shell exits cleanly", result.returncode == 0, result.stderr)
 
 
+def scenario_watcher_guard(root: Path) -> None:
+    """OPS-3: watcher.poll() failure must be visible, not swallowed.
+
+    Both watch loops (the shell's background thread and the standalone
+    `authorlm watch` command) called `watcher.poll()` unguarded. An
+    OSError out of the unguarded `rglob` in
+    `revisions.iter_manuscript_paths` (e.g. a transient FS error on a
+    synced/unmounted folder) silently killed the watcher while the
+    "Watching…" banner kept claiming to observe — the author keeps
+    writing, believing revisions are recorded, while nothing is. The fix
+    catches the failure and prints a visible warning; it does not change
+    what happens to the loop otherwise (both still stop, as they did
+    before — the finding is about silence, not about stopping)."""
+    print("Scenario J — a dying watcher reports itself instead of vanishing")
+    import argparse
+    import subprocess
+    import textwrap
+    import time as time_mod
+
+    from authorlm import shell as _shell
+
+    ws = root / "j"
+    ms = ws / "manuscript"
+    write(ms / "01-choice.md", CH1)
+    run(ws, "init", "--name", "book", "--path", str(ms))
+
+    class ExplodingWatcher:
+        """Stands in for shell.Watcher — poll() always raises, exactly
+        the shape an unguarded rglob failure takes."""
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def poll(self):
+            raise OSError("simulated watcher failure")
+
+    # --- run_watch: the standalone `authorlm watch` loop ---
+    prev_watcher = _shell.Watcher
+    _shell.Watcher = ExplodingWatcher
+    try:
+        watch_args = argparse.Namespace(workspace=str(ws), debounce=0.0, interval=0.01)
+        buf = io.StringIO()
+        exit_code = None
+        try:
+            with contextlib.redirect_stdout(buf):
+                _shell.run_watch(watch_args, {"name": "book", "path": str(ms)})
+        except SystemExit as err:
+            exit_code = err.code
+        output = buf.getvalue()
+        check("run_watch exits cleanly (not an unhandled traceback) when "
+              "watcher.poll() raises",
+              exit_code == 1, output)
+        check("run_watch prints a visible 'watcher stopped' warning instead "
+              "of dying silently",
+              "watcher stopped" in output and "simulated watcher failure" in output,
+              output)
+    finally:
+        _shell.Watcher = prev_watcher
+
+    # --- the interactive shell's background watch_loop thread ---
+    pkg_root = Path(__file__).resolve().parent.parent
+    driver = ws.parent / "watcher_guard_driver.py"
+    driver.write_text(textwrap.dedent(f'''\
+        import sys
+        sys.path.insert(0, {str(pkg_root)!r})
+        from authorlm import shell as _shell
+
+        class ExplodingWatcher:
+            def __init__(self, *_a, **_kw):
+                pass
+            def poll(self):
+                raise OSError("simulated shell watcher failure")
+
+        _shell.Watcher = ExplodingWatcher
+
+        from authorlm.cli import main
+        main(["--workspace", {str(ws)!r}, "--manuscript", "book", "shell"])
+    '''))
+    proc = subprocess.Popen(
+        [sys.executable, str(driver)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, cwd=str(pkg_root),
+    )
+    try:
+        # The shell's watch_loop polls on a fixed 1s cadence
+        # (`stop.wait(1.0)`); give it margin to tick at least once and
+        # hit the monkeypatched poll() before driving the REPL.
+        time_mod.sleep(2.0)
+        proc.stdin.write("status\n")
+        proc.stdin.flush()
+        proc.stdin.write("exit\n")
+        proc.stdin.close()
+        shell_output = proc.stdout.read()
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    check("the shell's background watcher thread reports its failure "
+          "instead of dying silently behind the 'Watching…' banner",
+          "watcher stopped: simulated shell watcher failure" in shell_output
+          and "restart the shell to resume automatic collection" in shell_output,
+          shell_output)
+    check("the shell REPL itself survives a dead watcher thread and keeps "
+          "answering commands afterward",
+          "Manuscript: book" in shell_output and proc.returncode == 0,
+          shell_output)
+
+
 def scenario_style(root: Path) -> None:
     print("Scenario S — style guides: composition, inheritance, overrides")
     ws = root / "style"
@@ -2328,6 +2437,7 @@ def main_test() -> None:
         scenario_write_loop(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
+        scenario_watcher_guard(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
