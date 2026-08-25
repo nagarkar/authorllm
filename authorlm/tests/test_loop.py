@@ -237,6 +237,51 @@ def test_distil_batching(db, ms):
                               ScriptedLLM("NEW: y\nEXAMPLE: z")) is None)
 
 
+# ----------------------------------------------- INV-2a analysis dedupe
+
+def test_analysis_pattern_dedupe(db, ms):
+    """INV-2a: two decisions in ONE analysis reply that carry the identical
+    'pattern' string must not double-count as two independent pieces of
+    supporting evidence — one episode is one observation, regardless of how
+    many decisions within it happen to generalize to the same rule."""
+    from authorlm import analysis
+
+    transition = ko_fields("tr")
+    transition.update(
+        manuscript_id=ms["id"], version_before=None, version_after="mv-fake",
+        kind="rewrite", location="a.md#Intro", summary="reworded the opening",
+        detail=json.dumps({"old_text": "Before text.", "new_text": "After text."}))
+    db.insert("editorial_transitions", transition)
+
+    episode = ko_fields("ep")
+    episode.update(
+        manuscript_id=ms["id"], session_id="se-fake", intent_id=None,
+        transition_ids=json.dumps([transition["id"]]), outcome=None,
+        status="closed")
+    db.insert("editorial_episodes", episode)
+
+    reply = json.dumps({
+        "decisions": [
+            {"action": "opened with an anecdote before the definition",
+             "pattern": "Open with a concrete example."},
+            {"action": "reordered the objection ahead of the reply",
+             "pattern": "Open with a concrete example."},
+        ],
+        "outcome": "reworked the opening",
+    })
+    summaries = analysis.analyze_pending(db, ms, ScriptedLLM(reply))
+    check("both decisions are still recorded on the episode",
+          len(summaries) == 1 and len(summaries[0]["decisions"]) == 2,
+          str(summaries))
+    belief = db.one(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
+        "AND lower(statement) = lower(?)",
+        (ms["id"], "Open with a concrete example."))
+    check("a pattern repeated within one reply seeds/reinforces only once",
+          belief is not None and belief["supporting"] == 1,
+          str(dict(belief) if belief else None))
+
+
 # ------------------------------------------------------------- reconcile
 
 def test_reconcile(db, ms, target):
@@ -473,6 +518,8 @@ def main_test():
     test_retired_belief_returns_as_proposal(db, ms)
     print("batch distillation")
     test_distil_batching(db, ms)
+    print("analysis pattern dedupe")
+    test_analysis_pattern_dedupe(db, ms)
     print("reconcile")
     test_reconcile(db, ms, target)
     test_reconcile_other_kinds(db, ms, target)
