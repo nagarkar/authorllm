@@ -20,6 +20,7 @@ sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def get_credentials(config: dict, workspace: str | None = None,
         try:
             creds.refresh(Request())
             token_path.write_text(creds.to_json())
+            os.chmod(token_path, 0o600)
         except RefreshError:
             # Token expired or revoked upstream: fall through to the clean
             # non-interactive error, or to the consent flow under 'doc auth'
@@ -115,6 +117,7 @@ def get_credentials(config: dict, workspace: str | None = None,
         creds = flow.run_local_server(port=0)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(creds.to_json())
+        os.chmod(token_path, 0o600)
     return creds
 
 
