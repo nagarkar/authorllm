@@ -1332,10 +1332,29 @@ def scenario_write_loop(root: Path) -> None:
                   "--intent", intent_id)
         check("second writeup truncated its file",
               (ms / "01-choice.md").read_text() == "", "")
+
+        # BUG-2 / A1 regression: the author may type fresh draft text into
+        # the truncated file before it is ever collected — write_abandon
+        # must not destroy that draft without a recovery point.
+        UNCOLLECTED_DRAFT = ("Draft text typed after truncation, "
+                             "never collected.")
+        (ms / "01-choice.md").write_text(UNCOLLECTED_DRAFT)
+
         out = run_stdin(ws, "", "write", "abandon")
         check("abandon restores the file", "file restored" in out, out)
         check("restored content matches the pinned version",
               (ms / "01-choice.md").read_text() == CH1, "")
+
+        from authorlm.db import loads as _loads
+        versions = _db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (_row["id"],))
+        recovered = any(
+            _loads(v["files"], {}).get("01-choice.md") == UNCOLLECTED_DRAFT
+            for v in versions)
+        check("abandon snapshots the uncollected draft into history "
+              "before overwriting it with the restored content "
+              "(BUG-2 / A1)", recovered)
 
         # --- profiles: declared context, observation-invisible ------------
         run(ws, "collect")  # settle any pending changes first

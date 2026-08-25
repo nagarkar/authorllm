@@ -1107,6 +1107,11 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         sys.exit(f"error: {err}")
     marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
     final, forms = passes.final_text_from_marked(marked, written=written)
+    # Snapshot whatever is on disk right now — including any local edit
+    # made outside this Doc/critique flow — before it's overwritten below
+    # (BUG-2 / A1).
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="pre-critique-resolve")
     # Apply locally: the author's post-edits win.
     path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)
@@ -1188,12 +1193,18 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     files = loads(row["files"], {})
     if file not in files:
         sys.exit(f"error: pinned version has no {file}.")
+    # Snapshot the current disk state before it's overwritten below — an
+    # uncollected local edit made since the pin must not be silently
+    # destroyed by the rollback (BUG-2 / A1). Config is loaded here,
+    # above the write, so the pre-collect can run.
+    config = _load_config(args)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="pre-critique-rollback")
     (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
     for t in passes.staged_threads(db, mid, file,
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
         db.update("doc_threads", t["id"], {"state": "withdrawn"})
-    config = _load_config(args)
     try:
         service = gdocs.get_service(config, args.workspace, interactive=True)
         docs_service = gdocs.get_docs_service(config, args.workspace,

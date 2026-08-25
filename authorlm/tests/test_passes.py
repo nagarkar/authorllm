@@ -515,6 +515,138 @@ def main_test() -> None:
         check("editor prompt registered as a file prompt",
               pr.by_name("editor").file == "editor.md"
               and "echo" in pr.by_name("editor").text())
+
+        print("recovery: critique rollback snapshots uncollected edits "
+              "(BUG-2 / A1):")
+        # Self-contained fixture — a fresh manuscript, independent of the
+        # alpha/beta/part narrative above, so the destructive write under
+        # test can't be confused with anything already staged on 'book'.
+        import argparse
+        from authorlm.cli import _critique_rollback
+
+        rb_ws = root / "rollback-ws"
+        rb_ms = rb_ws / "book"
+        rb_ms.mkdir(parents=True)
+        (rb_ms / "solo.md").write_text("# Solo\n\nOriginal pinned content.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(rb_ws), "init", "--name", "book",
+                      "--path", str(rb_ms)])
+        rb_db = api.open_db(str(rb_ws))
+        rb_manuscript = api.get_manuscript(rb_db)
+        rb_mid = rb_manuscript["id"]
+        api.collect(rb_db, rb_manuscript, {})  # v1: the version to pin
+        rb_p = passes.ensure_pass(rb_db, rb_mid, rb_db.source("system"))
+        v1_row = rb_db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "AND version_no = 1", (rb_mid,))
+        passes.pin_version(rb_db, rb_p, "solo.md", v1_row["id"])
+
+        # The author edits the file after the pin but never collects — the
+        # exact state 'critique rollback' must not silently destroy.
+        UNCOLLECTED_ROLLBACK = ("# Solo\n\nUNCOLLECTED AUTHOR EDIT, "
+                                "NEVER COLLECTED.\n")
+        (rb_ms / "solo.md").write_text(UNCOLLECTED_ROLLBACK)
+
+        rb_args = argparse.Namespace(target="solo.md", workspace=str(rb_ws))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _critique_rollback(rb_db, rb_manuscript, rb_args)
+        check("rollback restores the pinned content",
+              (rb_ms / "solo.md").read_text()
+              == "# Solo\n\nOriginal pinned content.\n")
+        rb_versions = rb_db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (rb_mid,))
+        recovered = any(
+            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_ROLLBACK
+            for v in rb_versions)
+        check("critique rollback snapshots the uncollected edit into "
+              "history before overwriting it (BUG-2 / A1)", recovered)
+
+        print("recovery: critique resolve snapshots uncollected edits "
+              "(BUG-2 / A1):")
+        import json as _json
+
+        import authorlm.gdocs as _gdocs_mod
+        from authorlm.cli import _critique_resolve_essay
+        from authorlm.db import ko_fields as _ko
+
+        res_ws = root / "resolve-ws"
+        res_ms = res_ws / "book"
+        res_ms.mkdir(parents=True)
+        (res_ms / "solo.md").write_text("# Solo\n\nOriginal paragraph text.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(res_ws), "init", "--name", "book",
+                      "--path", str(res_ms)])
+        res_db = api.open_db(str(res_ws))
+        res_manuscript = api.get_manuscript(res_db)
+        res_mid = res_manuscript["id"]
+        api.collect(res_db, res_manuscript, {})  # v1
+        passes.ensure_pass(res_db, res_mid, res_db.source("system"))
+
+        # A 'written' critique thread: the diff-write/pause step already
+        # ran, the Doc carries this pending form, and the author is
+        # resolving it now.
+        written_row = _ko("dt")
+        written_row.update(
+            manuscript_id=res_mid, origin_type="critique", origin_id="cp1",
+            file="solo.md", anchor_quote=None,
+            proposed_old="Original paragraph text.",
+            proposed_new="RESOLVED PARAGRAPH TEXT.",
+            note="test", state="written", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md",
+            metadata=_json.dumps({"kind": "replace", "anchor_paragraph": 1,
+                                  "intent_id": None,
+                                  "original_new": "RESOLVED PARAGRAPH TEXT."}))
+        res_db.insert("doc_threads", written_row)
+
+        # The author separately edited the file locally (outside the
+        # critique/Doc flow) and never collected it — the exact state
+        # 'critique resolve' must not silently destroy when it applies
+        # the Doc-side resolution.
+        UNCOLLECTED_RESOLVE = ("# Solo\n\nOriginal paragraph text.\n\n"
+                               "UNCOLLECTED PARAGRAPH ADDED LOCALLY, "
+                               "NEVER SENT TO THE DOC.\n")
+        (res_ms / "solo.md").write_text(UNCOLLECTED_RESOLVE)
+
+        # Stub Drive/Docs entirely: this test is about local write
+        # ordering, not the Google integration (untested elsewhere too —
+        # test-gaps #5 / SEC-4 R8).
+        def _fake_service(config, workspace=None, interactive=True):
+            return object()
+
+        def _fake_critique_tab_text(db, manuscript, file, docs_service):
+            return th.render_pending("Original paragraph text.",
+                                     "RESOLVED PARAGRAPH TEXT.")
+
+        def _fake_push_doc(db, manuscript, file, service=None,
+                           docs_service=None):
+            return {}
+
+        _orig = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+                _gdocs_mod.critique_tab_text, _gdocs_mod.push_doc)
+        _gdocs_mod.get_service = _fake_service
+        _gdocs_mod.get_docs_service = _fake_service
+        _gdocs_mod.critique_tab_text = _fake_critique_tab_text
+        _gdocs_mod.push_doc = _fake_push_doc
+        try:
+            res_args = argparse.Namespace(target="solo.md",
+                                          workspace=str(res_ws))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(res_db, res_manuscript, res_args)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.critique_tab_text, _gdocs_mod.push_doc) = _orig
+        check("resolve overwrote the file with the resolved content",
+              "RESOLVED PARAGRAPH TEXT." in (res_ms / "solo.md").read_text())
+        res_versions = res_db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (res_mid,))
+        recovered = any(
+            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_RESOLVE
+            for v in res_versions)
+        check("critique resolve snapshots the uncollected local edit into "
+              "history before overwriting the file (BUG-2 / A1)", recovered)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)
