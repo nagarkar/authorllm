@@ -26,7 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api, beliefs as bel, loop, proposals as prop  # noqa: E402
+from authorlm import (  # noqa: E402
+    analysis, api, beliefs as bel, loop, proposals as prop,
+)
 from authorlm.db import Database, ko_fields, loads  # noqa: E402
 
 PASSED = 0
@@ -162,6 +164,63 @@ def test_semantic_matching(db, ms):
     check("an unreachable model is not read as a refusal", seeded is not None,
           "empty reply must fall back to raw seeding, not silently decline")
     return first
+
+
+def test_episode_analysis_validates_from_pure_machine_inference(db, ms):
+    """T1 (risk-register INV-2 repro, "the repro the Sponsor needs to rule
+    on in the morning"): three independently closed episodes, each machine-
+    analyzed into the SAME inferred pattern, promote a belief straight to
+    'validated' with zero author input anywhere in the chain — no
+    review_suggestion call, no explanation, nothing typed by a human. This
+    characterizes what analyze_pending + seed_candidate_belief do today; it
+    does not endorse the outcome as correct (Gate-1 flags exactly this as
+    a product-semantics question, not a bug to silently fix)."""
+    pattern = "Open every abstract definition with a lived example first."
+    episode_ids = []
+    for i in range(3):
+        tr = ko_fields("tr")
+        tr.update(manuscript_id=ms["id"], version_before=None,
+                   version_after=f"mv-fake-{i}",
+                   kind="rewrite", location=f"episode-{i}.md#Heading",
+                   summary=f"Rewrote paragraph {i}",
+                   detail=json.dumps({"old_text": f"Old text {i}.",
+                                      "new_text": f"New text {i}."}))
+        db.insert("editorial_transitions", tr)
+        ep = ko_fields("ep")
+        ep.update(manuscript_id=ms["id"], session_id=f"sess-{i}",
+                  intent_id=None, transition_ids=json.dumps([tr["id"]]),
+                  outcome=None, status="closed")
+        db.insert("editorial_episodes", ep)
+        episode_ids.append(ep["id"])
+
+    llm = ScriptedLLM(*[
+        json.dumps({"decisions": [{"action": f"decision {i}",
+                                   "pattern": pattern}],
+                    "outcome": None})
+        for i in range(3)
+    ])
+    summaries = analysis.analyze_pending(db, ms, llm)
+    check("all three pending episodes were analyzed in one pass",
+          {s["episode_id"] for s in summaries} == set(episode_ids),
+          str(summaries))
+    check("zero author-explanation evidence was recorded for this belief — "
+          "every bit of support is machine-inferred",
+          db.one(
+              "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+              "AND evidence_type = 'episode_analysis' AND target = ?",
+              (ms["id"], pattern[:200]))["n"] == 3)
+
+    belief = db.one(
+        "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
+        "AND lower(statement) = lower(?)", (ms["id"], pattern))
+    check("the belief exists, sourced as episode-analysis, with support "
+          "from all three episodes and no author explanation",
+          belief is not None and belief["source"] == "episode-analysis"
+          and belief["supporting"] == 3, str(dict(belief) if belief else None))
+    check("it reached 'validated' status with zero author input — the "
+          "exact scenario Gate-1 flagged for a Sponsor ruling",
+          belief["status"] == "validated", str(dict(belief)))
+    return belief
 
 
 def test_platitude_guard(db, ms):
@@ -514,6 +573,8 @@ def main_test():
     test_thresholds()
     print("semantic matching")
     test_semantic_matching(db, ms)
+    print("episode analysis (pure machine inference)")
+    test_episode_analysis_validates_from_pure_machine_inference(db, ms)
     test_platitude_guard(db, ms)
     test_retired_belief_returns_as_proposal(db, ms)
     print("batch distillation")

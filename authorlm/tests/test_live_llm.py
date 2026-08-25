@@ -19,10 +19,25 @@ Run: python3 tests/test_live_llm.py
 
 from __future__ import annotations
 
+import os
+
+# Pin the project-config and .env lookups away from the real ones by
+# default, matching every other suite (test_api.py:14-18) — a bare import
+# of this module must not accidentally read the repo's config.toml or
+# .env before main_test() re-points AUTHORLM_CONFIG at this run's own
+# workspace config below. AUTHORLM_ENV stays pinned here for the whole
+# run: the suite's only documented way to supply a live key is an
+# exported GEMINI_API_KEY (see the module docstring), never an ambient
+# authorlm/.env. Without this pin, `cli.main` silently loaded a real key
+# from .env on the very first `run()` call below — after `key_available`
+# had already been computed and printed as absent — so the suite made
+# live billed calls while its own banner denied it.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
 import contextlib
 import io
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -32,6 +47,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from authorlm.cli import main  # noqa: E402
+from authorlm import paths as _paths  # noqa: E402
 
 CACHE_DIR = REPO / "tests" / "llm_cache"
 MODEL = "gemini/gemini-2.5-flash"
@@ -103,6 +119,12 @@ def cache_usage() -> tuple[int, int, int]:
 
 
 def main_test() -> None:
+    # Load .env (a no-op today — AUTHORLM_ENV is pinned to /nonexistent
+    # above) before reading GEMINI_API_KEY, so the banner below reflects
+    # the same environment the LLM call itself will see. Computing
+    # key_available before any env loading is what let the suite print
+    # "absent" and then make a live call moments later.
+    _paths.load_env()
     key_available = bool(os.environ.get("GEMINI_API_KEY"))
     cached_before, in_before, out_before = cache_usage()
     print(
@@ -126,6 +148,11 @@ def main_test() -> None:
             f'model = "{MODEL}"\n'
             f'cache_dir = "{CACHE_DIR}"\n'
         )
+        # AUTHORLM_CONFIG defaults to /nonexistent (see the module-level
+        # pin above); repoint it at this run's own workspace config so
+        # `cli.main` reads the `[llm]`/`cache_dir` settings just written,
+        # not the repo's config.toml.
+        os.environ["AUTHORLM_CONFIG"] = str(ws / ".authorlm" / "config.toml")
 
         # --- Extraction (live or replayed) ---
         out = run(ws, "init", "--name", "sample", "--path", str(ms))

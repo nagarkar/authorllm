@@ -415,6 +415,81 @@ def main_test() -> None:
         check("the file with invalid UTF-8 is snapshotted by api.collect(), "
               "not silently dropped as a phantom deletion",
               "02-bad.md" in stored_files, str(sorted(stored_files)))
+        # --- detect_transitions in isolation (T5, risk-register §3): no
+        # existing test calls the diff/opcode logic directly, only through
+        # the full collect() pipeline. Isolated manuscript, own history. ---
+        from authorlm.revisions import collect_revision, detect_transitions
+
+        dt_root = root / "dt-ws"
+        dt_ms = dt_root / "manuscript"
+        dt_ms.mkdir(parents=True)
+        dt_db = api.open_db(str(dt_root))
+
+        # Paragraph reorder: difflib has no "moved" concept, so swapping two
+        # adjacent paragraphs is reported as the moved paragraph's text
+        # being inserted at its new position and deleted from its old one —
+        # not a single "reorder" transition. Characterizing, not endorsing.
+        dt_ms1 = dt_root / "reorder"
+        dt_ms1.mkdir()
+        row_reorder = api.register_manuscript(dt_db, "reorder", str(dt_ms1))
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP1 text here.\n\nP2 text here.\n\nP3 text here.\n")
+        v1 = collect_revision(dt_db, row_reorder, None, source="test")
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP2 text here.\n\nP1 text here.\n\nP3 text here.\n")
+        v2 = collect_revision(dt_db, row_reorder, None, source="test")
+        reorder_trans = detect_transitions(dt_db, row_reorder["id"], dict(v1), v2)
+        check("paragraph reorder is an insert of the moved text at its new "
+              "position plus a delete at its old one, not a single move",
+              [(t["kind"], t["location"]) for t in reorder_trans]
+              == [("insert", "a.md#Heading"), ("delete", "a.md#Heading")],
+              str([(t["kind"], t["location"], t["summary"])
+                   for t in reorder_trans]))
+        check("the reorder's insert/delete pair both carry the moved "
+              "paragraph's own text, not the paragraph it displaced",
+              "P2 text here." in reorder_trans[0]["summary"]
+              and "P2 text here." in reorder_trans[1]["summary"])
+
+        # Two non-adjacent hunks in one file: each rewritten paragraph is
+        # its own transition, not merged into a single spanning edit.
+        dt_ms2 = dt_root / "hunks"
+        dt_ms2.mkdir()
+        row_hunks = api.register_manuscript(dt_db, "hunks", str(dt_ms2))
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 original.\n\nP3 unchanged.\n\n"
+            "P4 original.\n\nP5 unchanged.\n")
+        h1 = collect_revision(dt_db, row_hunks, None, source="test")
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 REWRITTEN.\n\nP3 unchanged.\n\n"
+            "P4 REWRITTEN.\n\nP5 unchanged.\n")
+        h2 = collect_revision(dt_db, row_hunks, None, source="test")
+        hunk_trans = detect_transitions(dt_db, row_hunks["id"], dict(h1), h2)
+        check("two non-adjacent hunks in one file produce two separate "
+              "rewrite transitions, not one spanning edit",
+              len(hunk_trans) == 2
+              and all(t["kind"] == "rewrite" for t in hunk_trans)
+              and "P2 REWRITTEN" in hunk_trans[0]["summary"]
+              and "P4 REWRITTEN" in hunk_trans[1]["summary"],
+              str([(t["kind"], t["summary"]) for t in hunk_trans]))
+
+        # Heading-less file: location falls back to the bare filename, no
+        # '#heading' suffix, since _nearest_heading finds nothing to anchor to.
+        dt_ms3 = dt_root / "noheading"
+        dt_ms3.mkdir()
+        row_noheading = api.register_manuscript(dt_db, "noheading", str(dt_ms3))
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph.\n")
+        n1 = collect_revision(dt_db, row_noheading, None, source="test")
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph, edited.\n")
+        n2 = collect_revision(dt_db, row_noheading, None, source="test")
+        noheading_trans = detect_transitions(
+            dt_db, row_noheading["id"], dict(n1), n2)
+        check("a heading-less file's transition location is the bare "
+              "filename, with no '#heading' suffix",
+              len(noheading_trans) == 1
+              and noheading_trans[0]["location"] == "b.md",
+              str([(t["kind"], t["location"]) for t in noheading_trans]))
 
         # --- history show/restore (MVP.md 'Deliberately deferred': version
         # access & restoration — implementable at any time, no schema change) ---
@@ -1413,6 +1488,86 @@ def main_test() -> None:
         restored = "# Title\n\nDoc went another way.\n"
         stub.set_tab("01-choice.md", restored)
         (ms / "01-choice.md").write_text(restored)
+
+        # --- doc pull truncation on a base-less mapped file (T2,
+        # risk-register BUG-1 repro): ensure_master gives every file in
+        # reading order a tab, but only the pushed file gets a
+        # pushed_hash. A pull of "everything mapped" then sees the
+        # never-pushed file's empty tab as "changed" with no recorded
+        # base and overwrites the local file with nothing. Own
+        # workspace, own FakeGoogle instance — isolated from the shared
+        # fixture above. CHARACTERIZATION repro (risk-register §3, T2):
+        # this stays green as today's behavior, not a specification,
+        # until the Sponsor authorizes the three_way base-less guard.
+        t2_root = root / "t2-ws"
+        t2_ms = t2_root / "manuscript"
+        t2_ms.mkdir(parents=True)
+        (t2_ms / "a.md").write_text("# A\n\nOriginal a content.\n")
+        (t2_ms / "b.md").write_text(
+            "# B\n\nOriginal b content, never individually pushed.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(t2_root), "init", "--name", "t2book",
+                      "--path", str(t2_ms), "--no-extract"])
+        t2_db = api.open_db(str(t2_root))
+        t2_manuscript = api.get_manuscript(t2_db)
+        t2_stub = FakeGoogle()
+        pushed_a = push_doc(t2_db, t2_manuscript, "a.md",
+                            service=t2_stub, docs_service=t2_stub)
+        master_tabs = t2_stub.state["docs"][pushed_a["doc_id"]]
+        b_tab = next(t for t in master_tabs if t["title"] == "b.md")
+        check("ensure_master gave the never-pushed file b.md its own tab "
+              "too — empty, since only a.md was actually pushed",
+              b_tab["text"] == "", str(master_tabs))
+        t2_manuscript = api.get_manuscript(t2_db)  # refresh metadata
+        report = pull_doc(t2_db, t2_manuscript,
+                          service=t2_stub, docs_service=t2_stub)
+        check("a pull of everything mapped treats the base-less empty tab "
+              "as 'changed' (no pushed_hash to compare against) and "
+              "overwrites the never-pushed local file with nothing",
+              "b.md" in report["changed"]
+              and (t2_ms / "b.md").read_text() == "",
+              str(report))
+        check("meanwhile the actually-pushed file is untouched",
+              "a.md" not in report["changed"]
+              and "Original a content" in (t2_ms / "a.md").read_text())
+
+        # --- gdocs failure path: documents().get() outage during reconcile
+        # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
+        # in a bare try/except (gdocs.py reconcile, ~line 1610-1616); this
+        # pins that it actually behaves as documented: the session survives
+        # (no exception escapes), the failure surfaces as a per-file error
+        # instead of being silently swallowed, and an in-sync local file is
+        # left untouched rather than being mistaken for a change. ---
+        class FailingDocsService:
+            def documents(self):
+                class _Boom:
+                    def get(self, **kwargs):
+                        raise RuntimeError("simulated Docs API outage")
+                return _Boom()
+
+        manuscript = api.get_manuscript(db)
+        before_text = (ms / "01-choice.md").read_text()
+        try:
+            report = reconcile(db, manuscript, stub,
+                               docs_service=FailingDocsService())
+            reconcile_survived = True
+        except Exception:
+            reconcile_survived = False
+        check("reconcile survives a documents().get() failure during tab "
+              "listing instead of raising and killing the session",
+              reconcile_survived)
+        check("the failure surfaces as a per-file error, not silently "
+              "swallowed",
+              any(e.get("file") == "(tab listing)"
+                  and "simulated Docs API outage" in e.get("error", "")
+                  for e in report["errors"]), str(report))
+        check("the local file is untouched — reconcile wrote nothing "
+              "despite the tab-listing failure",
+              (ms / "01-choice.md").read_text() == before_text)
+        check("a file that was actually in sync is still reported in_sync "
+              "despite the tab-listing failure (resolved via the plain "
+              "export, independent of the failed tab walk)",
+              "01-choice.md" in report["in_sync"], str(report))
 
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
@@ -4197,6 +4352,50 @@ def main_test() -> None:
               {e["statement"] for e in overridden["elements"]}
               == {"Prefer terse fragments.",
                   "Address the reader in second person."})
+
+        # --- MCP tool envelope (T4, risk-register §3): _guard's real
+        # contract at the @mcp.tool() seam — (LookupError, ValueError,
+        # RuntimeError) become an {"ok": False, "error": ...} dict every
+        # other exception type propagates instead of being swallowed. ---
+        from authorlm import mcp_server
+
+        # _guard's tracelog write defaults to ~/.authorlm when _WORKSPACE
+        # is None (its untouched default here) — pin it to a throwaway
+        # workspace first so this test can never write into the author's
+        # real trace log.
+        guard_ws = root / "mcp-guard-ws"
+        guard_ws.mkdir()
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(guard_ws)
+        try:
+            for exc_cls, message in (
+                (LookupError, "no such manuscript"),
+                (ValueError, "bad argument"),
+                (RuntimeError, "operation failed"),
+            ):
+                def boom(exc_cls=exc_cls, message=message):
+                    raise exc_cls(message)
+                result = mcp_server._guard(boom)
+                check(f"_guard maps a bare {exc_cls.__name__} to an "
+                      "{ok: False, error} envelope",
+                      result == {"ok": False, "error": message}, str(result))
+
+            def crash():
+                raise TypeError("not one of the guarded error types")
+            try:
+                mcp_server._guard(crash)
+                propagated = False
+            except TypeError as err:
+                propagated = str(err) == "not one of the guarded error types"
+            check("_guard re-raises exception types outside its guarded "
+                  "set instead of swallowing them into an ok:false envelope",
+                  propagated)
+
+            ok_result = mcp_server._guard(lambda: {"value": 42})
+            check("_guard wraps a successful call as {ok: True, result}",
+                  ok_result == {"ok": True, "result": {"value": 42}})
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
 
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
