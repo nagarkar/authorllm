@@ -2964,6 +2964,50 @@ def main_test() -> None:
               note_proposals_after == note_proposals_before + 1,
               f"before={note_proposals_before} after={note_proposals_after}")
 
+        # --- BUG-8: a hit on a concept's ALIAS (not its primary name) must
+        # not be treated as a brand-new concept — that discards a confirmed
+        # concept's metadata (including 'confirmed': True) and reopens it to
+        # silent auto-retirement. ---
+        (ms / "10-alias.md").write_text(
+            "# Alias\n\nAliasSecondary shows up in the prose here.\n\n"
+            "## Elsewhere\n\nAliasSecondary appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+        api.add_concept(db, manuscript, "AliasPrimary", kind="concept",
+                        notes="primary notes")
+        api.confirm_concept(db, manuscript, "AliasPrimary")
+        api.alias_concept(db, manuscript, "AliasPrimary", ["AliasSecondary"])
+        primary_meta_before = _json.loads(
+            concepts.get_concept(db, manuscript["id"], "AliasPrimary")["metadata"]
+            or "{}")
+        check("fixture concept starts confirmed",
+              primary_meta_before.get("confirmed") is True,
+              str(primary_meta_before))
+
+        class AliasHitLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "AliasSecondary", "kind": "concept",
+                     "notes": "some notes about the alias"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, AliasHitLLM(), files=["10-alias.md"])
+        primary_after = concepts.get_concept(db, manuscript["id"], "AliasPrimary")
+        primary_meta_after = _json.loads(primary_after["metadata"] or "{}")
+        check("an alias hit does not reset the primary concept's 'confirmed' flag",
+              primary_meta_after.get("confirmed") is True,
+              f"metadata became: {primary_meta_after}")
+        check("an alias hit does not fork a duplicate concept node",
+              db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                     "manuscript_id = ? AND lower(name) = lower(?)",
+                     (manuscript["id"], "AliasSecondary"))["n"] == 0)
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.

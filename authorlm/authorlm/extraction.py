@@ -602,10 +602,11 @@ def extract_concepts(
                     continue
             suppressed += 1
             continue
-        before = db.one(
-            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?)",
-            (mid, name),
-        )
+        # Alias-aware: a hit on an alias is a hit on the concept it belongs
+        # to, not a new concept — a name-only lookup here would send an
+        # alias hit down the `before is None` branch below, discarding the
+        # existing concept's metadata (including a confirmed 'True').
+        before = get_concept(db, mid, name)
         if before is None and banned:
             # A near-miss of a retired name is called out interactively, not
             # silently admitted as a "new" concept (nor silently banned).
