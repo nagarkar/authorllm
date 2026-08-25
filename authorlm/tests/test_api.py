@@ -166,6 +166,18 @@ def main_test() -> None:
             invalid_path_refused = True
         check("application API refuses a nonexistent manuscript directory",
               invalid_path_refused)
+        same_isbn_ms = ws / "same-isbn-book"
+        same_isbn_ms.mkdir()
+        try:
+            api.register_manuscript(
+                db, "same-isbn-book", str(same_isbn_ms),
+                paperback_isbn="979-8-90452-354-1",
+                hardcover_isbn="979-8-90452-354-1")
+            same_registration_isbn_refused = False
+        except ValueError:
+            same_registration_isbn_refused = True
+        check("registration requires distinct physical-format ISBNs",
+              same_registration_isbn_refused)
         updated_identity = api.update_manuscript_metadata(
             db, manuscript, author="A. Author",
             copyright_owner="Author House LLC")
@@ -191,6 +203,17 @@ def main_test() -> None:
             non_isbn_ean_refused = True
         check("publication identity requires the ISBN-13 book prefix",
               non_isbn_ean_refused)
+        try:
+            cli_main(["--workspace", str(ws), "manuscript", "set",
+                      "--hardcover-isbn", "979-8-90452-354-1"])
+            same_cli_isbn_refused = False
+        except SystemExit as err:
+            same_cli_isbn_refused = (
+                "paperback and hardcover ISBNs must be different" in str(err))
+        check("CLI requires distinct physical-format ISBNs",
+              same_cli_isbn_refused
+              and api.get_manuscript(db)["hardcover_isbn"]
+              == "9798904523510")
         identity_out = io.StringIO()
         with contextlib.redirect_stdout(identity_out):
             cli_main(["--workspace", str(ws), "manuscript", "set",

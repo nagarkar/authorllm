@@ -117,12 +117,15 @@ def register_manuscript(db: Database, name: str, path: str,
         raise ValueError(f"{root} is not a directory")
     if db.one("SELECT id FROM manuscripts WHERE name = ?", (name,)):
         raise ValueError(f"manuscript '{name}' is already registered")
+    paperback_isbn = _normalize_isbn13(paperback_isbn)
+    hardcover_isbn = _normalize_isbn13(hardcover_isbn)
+    _validate_format_isbns(paperback_isbn, hardcover_isbn)
     row = ko_fields("ms")
     row.update(
         name=name, path=str(root), author=author.strip(),
         copyright_owner=copyright_owner.strip(),
-        paperback_isbn=_normalize_isbn13(paperback_isbn),
-        hardcover_isbn=_normalize_isbn13(hardcover_isbn))
+        paperback_isbn=paperback_isbn,
+        hardcover_isbn=hardcover_isbn)
     db.insert("manuscripts", row)
     return dict(row)
 
@@ -159,6 +162,13 @@ def _normalize_isbn13(value: str) -> str:
     return digits
 
 
+def _validate_format_isbns(paperback_isbn: str,
+                           hardcover_isbn: str) -> None:
+    """Each physical format must have its own ISBN when both are present."""
+    if paperback_isbn and paperback_isbn == hardcover_isbn:
+        raise ValueError("paperback and hardcover ISBNs must be different")
+
+
 def update_manuscript_metadata(db: Database, manuscript: dict,
                                author: str | None = None,
                                copyright_owner: str | None = None,
@@ -178,6 +188,9 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
             "and/or --hardcover-isbn")
+    _validate_format_isbns(
+        changes.get("paperback_isbn", manuscript.get("paperback_isbn", "")),
+        changes.get("hardcover_isbn", manuscript.get("hardcover_isbn", "")))
     db.update("manuscripts", manuscript["id"], changes)
     manuscript.update(changes)
     return manuscript_metadata(manuscript)
