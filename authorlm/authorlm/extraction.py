@@ -322,6 +322,29 @@ def _section_payloads(units: list[tuple[str, str]], cap: int) -> list[str]:
     return ["\n\n".join(p) for p in payloads]
 
 
+def _inventory_names(db: Database, mid: str, limit: int) -> list[str]:
+    return [
+        row["name"] for row in db.all(
+            "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired' ORDER BY name LIMIT ?",
+            (mid, limit),
+        )
+    ]
+
+
+def _fit_inventory(names: list[str], max_chars: int, body_len: int) -> str:
+    """'; '-joined `names`, dropping from the end until the KNOWN CONCEPTS
+    prefix — attached ahead of a payload of `body_len` chars — counts
+    against `max_chars` instead of riding free on top of it (TrackA/2:
+    measured pushing payloads up to 26,865 chars against a 24,000 cap). The
+    manuscript text is what extraction must never truncate, so when the two
+    don't both fit, the inventory is what gives way, never the text."""
+    budget = max_chars - body_len - len("KNOWN CONCEPTS: \n\n")
+    while names and len("; ".join(names)) > max(0, budget):
+        names = names[:-1]
+    return "; ".join(names)
+
+
 def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
@@ -520,26 +543,16 @@ def extract_concepts(
         return any(concept_pattern(n).search(attention) for n in names if n)
     if edges_only or aliases_only:
         scope += ", edges only" if edges_only else ", aliases only"
-        inventory = "; ".join(
-            row["name"] for row in db.all(
-                "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                "AND status != 'retired' ORDER BY name LIMIT 120",
-                (mid,),
-            )
-        )
+        inventory = _fit_inventory(_inventory_names(db, mid, 120),
+                                   max_chars, len(text))
         system = (EDGES_ONLY_SYSTEM if edges_only else ALIASES_ONLY_SYSTEM) \
             + triage_feedback(db, mid)
         text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
     else:
         system = extraction_system() + triage_feedback(db, mid)
         if _inventory:
-            inventory = "; ".join(
-                row["name"] for row in db.all(
-                    "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                    "AND status != 'retired' ORDER BY name LIMIT 200",
-                    (mid,),
-                )
-            )
+            inventory = _fit_inventory(_inventory_names(db, mid, 200),
+                                       max_chars, len(text))
             if inventory:
                 system += (
                     " Concepts listed under KNOWN CONCEPTS are already in the "
