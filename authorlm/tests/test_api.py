@@ -263,11 +263,272 @@ def check_extraction_failure_traced() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_backup_and_restore() -> None:
+    """OPS-4: the knowledge store has no backup, no integrity check, no
+    verified copy today. This proves the fix actually works, not just
+    that it runs:
+
+    - A backup taken via the SQLite backup API genuinely RESTORES: after
+      the original `.db`/`-wal`/`-shm` files are deleted outright, the
+      restored file is queryable through the application layer and holds
+      the exact row written before the backup.
+    - Skip-if-unchanged: a second backup with no intervening write is
+      skipped, not duplicated.
+    - Rotation: the 8th distinct backup evicts the 1st; only the 7 most
+      recent ever remain on disk.
+    - Failure path: an unwritable backups directory fails loudly
+      (ok=False, a stderr warning) but never blocks session start.
+    - Latency against a realistic (~56 MB) database is measured and
+      printed, not just asserted under some threshold blindly.
+    - A corrupted store is caught by the new readiness "database sound"
+      item instead of crashing the sweep."""
+    import contextlib as _ctx
+    import io as _io
+    import time as _time
+
+    from authorlm import backup, sessions as bses
+    from authorlm.db import ko_fields as _ko_fields
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-backup-"))
+    try:
+        # --- setup: a real manuscript + one row of real data ---
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-draft.md").write_text("# Draft\n\nSome text.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        concept = _ko_fields("cn")
+        concept.update(manuscript_id=manuscript["id"], name="Gravity",
+                       kind="concept", status="declared", introduced_in=None,
+                       notes="The pull of consequence.", aliases="[]")
+        db.insert("concept_nodes", concept)
+
+        # --- session start triggers exactly one backup, via the SQLite
+        # backup API against the live connection (WAL-safe) ---
+        session = bses.start_session(db, manuscript["id"])
+        check("starting a session performs a backup (not skipped: it's "
+              "the first one)",
+              session["backup"]["ok"] and not session["backup"]["skipped"],
+              session["backup"])
+        bdir = backup.backup_dir(db.path)
+        made = sorted(bdir.glob("authorlm-*.db"))
+        check("exactly one backup file exists in <workspace>/.authorlm/"
+              "backups/ after session start", len(made) == 1, made)
+        backup_path = made[0]
+
+        # --- RESTORE_PROOF: destroy the original (.db + WAL + SHM), then
+        # prove the backup alone reconstitutes a working, queryable store ---
+        db.conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(db.path) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+        check("the original .db/-wal/-shm are gone (real loss, not a "
+              "copy-elsewhere)", not db.path.exists())
+
+        shutil.copy2(backup_path, db.path)
+        restored = api.open_db(str(ws))
+        integrity = restored.all("PRAGMA integrity_check")
+        check("the restored file is a sound SQLite database "
+              "(PRAGMA integrity_check)",
+              len(integrity) == 1 and integrity[0][0] == "ok", integrity)
+        restored_manuscript = api.get_manuscript(restored, "book")
+        check("the restored store is queryable through the application "
+              "layer (api.get_manuscript)",
+              restored_manuscript["name"] == "book")
+        restored_row = restored.one(
+            "SELECT name, notes FROM concept_nodes WHERE manuscript_id = ? "
+            "AND name = 'Gravity'", (restored_manuscript["id"],))
+        check("the exact row written before the backup survives restore "
+              "verbatim",
+              restored_row is not None
+              and restored_row["notes"] == "The pull of consequence.",
+              dict(restored_row) if restored_row else None)
+        restored.update("concept_nodes", concept["id"],
+                        {"notes": "revised after restore"})
+        reread = restored.one("SELECT notes FROM concept_nodes WHERE id = ?",
+                              (concept["id"],))
+        check("the restored database accepts new writes — it's a live "
+              "store, not an inert blob",
+              reread["notes"] == "revised after restore")
+        restored.conn.close()
+
+        # --- skip-if-unchanged: a second backup with no write between is
+        # skipped, not duplicated ---
+        skip_ws = root / "ws-skip"
+        skip_ms = skip_ws / "manuscript"
+        skip_ms.mkdir(parents=True)
+        (skip_ms / "01.md").write_text("# hi\n")
+        skip_db = api.open_db(str(skip_ws))
+        api.register_manuscript(skip_db, "book", str(skip_ms))
+        first = backup.perform_backup(skip_db)
+        check("the first-ever backup is never skipped",
+              first["ok"] and not first["skipped"], first)
+        second = backup.perform_backup(skip_db)
+        check("a second backup with no intervening write is skipped, so "
+              "identical snapshots don't evict useful history",
+              second["ok"] and second["skipped"], second)
+        skip_bdir = backup.backup_dir(skip_db.path)
+        check("the skipped backup left exactly one file behind",
+              len(list(skip_bdir.glob("authorlm-*.db"))) == 1)
+        skip_node = _ko_fields("cn")
+        skip_node.update(manuscript_id="does-not-matter", name="Mutation",
+                         kind="concept", status="declared",
+                         introduced_in=None, notes="", aliases="[]")
+        skip_db.insert("concept_nodes", skip_node)
+        third = backup.perform_backup(skip_db)
+        check("a real change since the last backup is never skipped",
+              third["ok"] and not third["skipped"], third)
+        check("the changed-content backup produced a second file",
+              len(list(skip_bdir.glob("authorlm-*.db"))) == 2)
+
+        # --- rotation: the 8th distinct backup evicts the 1st; only the
+        # 7 most recent are ever kept, and nothing is deleted before the
+        # new backup is safely in place ---
+        rot_ws = root / "ws-rotate"
+        rot_ms = rot_ws / "manuscript"
+        rot_ms.mkdir(parents=True)
+        (rot_ms / "01.md").write_text("# hi\n")
+        rot_db = api.open_db(str(rot_ws))
+        api.register_manuscript(rot_db, "book", str(rot_ms))
+        made_paths = []
+        for i in range(9):
+            node = _ko_fields("cn")
+            node.update(manuscript_id="rotate", name=f"Concept {i}",
+                       kind="concept", status="declared", introduced_in=None,
+                       notes=f"distinct payload {i}", aliases="[]")
+            rot_db.insert("concept_nodes", node)
+            result = backup.perform_backup(rot_db)
+            check(f"rotation backup #{i + 1} succeeds and is not skipped "
+                  "(content changed each time)",
+                  result["ok"] and not result["skipped"], result)
+            made_paths.append(Path(result["path"]))
+            if i == 6:  # 7 kept so far — 1st is still present, none evicted
+                check("before the 8th backup, all 7 made so far are still "
+                      "kept (retention isn't over-eager)",
+                      made_paths[0].exists(), [p.name for p in made_paths])
+            if i == 7:  # the 8th backup just landed
+                check("the 8th backup evicts exactly the 1st (oldest)",
+                      not made_paths[0].exists()
+                      and all(p.exists() for p in made_paths[1:8]),
+                      [p.name for p in made_paths])
+            _time.sleep(0.002)  # keep the microsecond-resolution names distinct
+        rot_bdir = backup.backup_dir(rot_db.path)
+        remaining = sorted(rot_bdir.glob("authorlm-*.db"))
+        check("rotation keeps exactly the 7 most recent backups",
+              len(remaining) == backup.KEEP, remaining)
+        check("the 8th backup evicted the 1st (oldest two of nine gone: "
+              "8 made it past #7's retention, so #1 and #2 are evicted)",
+              not made_paths[0].exists() and not made_paths[1].exists()
+              and all(p.exists() for p in made_paths[2:]),
+              [p.name for p in made_paths])
+
+        # --- failure path: an unwritable backups directory fails loudly
+        # but never blocks the session ---
+        fail_ws = root / "ws-fail"
+        fail_ms = fail_ws / "manuscript"
+        fail_ms.mkdir(parents=True)
+        (fail_ms / "01.md").write_text("# hi\n")
+        fail_db = api.open_db(str(fail_ws))
+        fail_manuscript = api.register_manuscript(fail_db, "book", str(fail_ms))
+        data_dir = fail_db.path.parent  # <workspace>/.authorlm
+        os.chmod(data_dir, 0o500)  # read+execute only: mkdir("backups") fails
+        try:
+            stderr_capture = _io.StringIO()
+            with _ctx.redirect_stderr(stderr_capture):
+                fail_result = backup.run(fail_db)
+            check("a backup into an unwritable directory reports failure, "
+                  "not success", fail_result["ok"] is False, fail_result)
+            check("the failure is printed loudly to stderr — never "
+                  "swallowed silently",
+                  "AUTHORLM BACKUP FAILED" in stderr_capture.getvalue(),
+                  stderr_capture.getvalue())
+            fail_session = bses.start_session(fail_db, fail_manuscript["id"])
+            check("a failed backup never blocks the author's session from "
+                  "starting",
+                  fail_session["status"] == "active"
+                  and fail_session["backup"]["ok"] is False,
+                  fail_session)
+        finally:
+            os.chmod(data_dir, 0o700)  # restore so cleanup can rmtree it
+
+        # --- latency against a realistic (~56 MB) database ---
+        lat_ws = root / "ws-latency"
+        lat_ms = lat_ws / "manuscript"
+        lat_ms.mkdir(parents=True)
+        (lat_ms / "01.md").write_text("# hi\n")
+        lat_db = api.open_db(str(lat_ws))
+        lat_manuscript = api.register_manuscript(lat_db, "book", str(lat_ms))
+        # ~56 MB, matching ~/.authorlm/authorlm.db's real size (RFC OPS-4):
+        # 60 rows of ~1 MB of text in manuscript_versions.files.
+        blob = "x" * (1024 * 1024)
+        with lat_db.transaction():
+            for i in range(60):
+                version = _ko_fields("mv")
+                version.update(manuscript_id=lat_manuscript["id"],
+                               version_no=i, checksum=f"c{i}",
+                               files=blob, source="synthetic", session_id=None)
+                lat_db.insert("manuscript_versions", version)
+        lat_db.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        db_size_mb = lat_db.path.stat().st_size / (1024 * 1024)
+        started = _time.monotonic()
+        lat_result = backup.perform_backup(lat_db)
+        measured_s = _time.monotonic() - started
+        check(f"backing up a {db_size_mb:.1f} MB database succeeds",
+              lat_result["ok"] and not lat_result["skipped"], lat_result)
+        check("backing up a realistic-size database completes fast enough "
+              "not to make the shell feel broken (< 10s, generous bound)",
+              measured_s < 10, measured_s)
+        print(f"  ok: measured backup latency for {db_size_mb:.1f} MB db "
+              f"= {measured_s:.3f}s (internal timer: "
+              f"{lat_result['elapsed_s']}s)")
+
+        # --- corruption is caught by readiness's new "database sound"
+        # item instead of crashing the sweep ---
+        from authorlm import sweeps
+
+        corrupt_ws = root / "ws-corrupt"
+        corrupt_ms = corrupt_ws / "manuscript"
+        corrupt_ms.mkdir(parents=True)
+        (corrupt_ms / "01.md").write_text("# hi\n")
+        corrupt_db = api.open_db(str(corrupt_ws))
+        corrupt_manuscript = api.register_manuscript(
+            corrupt_db, "book", str(corrupt_ms))
+        for i in range(3000):
+            node = _ko_fields("cn")
+            node.update(manuscript_id=corrupt_manuscript["id"],
+                       name=f"Concept {i}", kind="concept",
+                       status="declared", introduced_in=None,
+                       notes="x" * 300, aliases="[]")
+            corrupt_db.insert("concept_nodes", node)
+        corrupt_db.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        corrupt_db.conn.close()
+        size = corrupt_db.path.stat().st_size
+        with open(corrupt_db.path, "r+b") as handle:
+            handle.seek(int(size * 0.7))
+            chunk = handle.read(4096)
+            handle.seek(int(size * 0.7))
+            handle.write(bytes(b ^ 0xFF for b in chunk))
+        reopened = api.open_db(str(corrupt_ws))
+        report = sweeps.readiness(reopened, corrupt_manuscript)
+        corrupt_item = next(i for i in report["items"]
+                            if i["check"] == "database sound")
+        check("readiness catches a corrupted store via 'database sound' "
+              "instead of crashing the sweep",
+              corrupt_item["ok"] is False
+              and "database sound" in report["blocking"],
+              corrupt_item)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
     check_extraction_failure_traced()
+    check_backup_and_restore()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
@@ -2560,6 +2821,10 @@ def main_test() -> None:
         check("readiness flags the unrendered slot as a blocker",
               not ready["ready"]
               and "illustrations rendered" in ready["blocking"], str(ready))
+        sound_item = next(i for i in ready["items"] if i["check"] == "database sound")
+        check("readiness runs PRAGMA integrity_check against the live store "
+              "and reports a healthy database as sound (OPS-4)",
+              sound_item["ok"] and sound_item["detail"] == "ok", str(sound_item))
 
         class FakeLLM:
             enabled = True

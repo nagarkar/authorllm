@@ -41,12 +41,29 @@ def readiness(db: Database, manuscript: dict) -> dict:
 
     mid = manuscript["id"]
     root = Path(manuscript["path"])
-    files = read_manuscript_files(root)
     items: list[dict] = []
 
     def item(check: str, ok: bool, detail: str) -> None:
         items.append({"check": check, "ok": ok, "detail": detail})
 
+    # Checked first, before anything else touches `db`: every other item
+    # below queries the store, and on a corrupted database those queries
+    # fail unpredictably (which table's pages are damaged is arbitrary) —
+    # OPS-4. Once the store itself is unsound none of the other findings
+    # would be trustworthy anyway, so report just this and stop.
+    try:
+        integrity_rows = db.all("PRAGMA integrity_check")
+        integrity_ok = (len(integrity_rows) == 1
+                         and str(integrity_rows[0][0]).lower() == "ok")
+        integrity_detail = ("ok" if integrity_ok else
+                             "; ".join(str(r[0]) for r in integrity_rows[:5]))
+    except Exception as err:  # a store too corrupt to even run the check
+        integrity_ok, integrity_detail = False, f"{type(err).__name__}: {err}"
+    item("database sound", integrity_ok, integrity_detail)
+    if not integrity_ok:
+        return {"ready": False, "items": items, "blocking": ["database sound"]}
+
+    files = read_manuscript_files(root)
     slots = slot_report(root)
     item("illustrations rendered", not slots["unrendered"],
          f"{len(slots['unrendered'])} unrendered slot(s)"

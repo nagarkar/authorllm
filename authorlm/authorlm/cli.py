@@ -410,6 +410,11 @@ def cmd_session(args):
         except ValueError as err:
             sys.exit(f"error: {err}")
         print(f"Session {session['id']} started for '{manuscript['name']}'.\n")
+        backup_result = session.get("backup") or {}
+        if not backup_result.get("ok", True):
+            print(ui.yellow(f"warning: knowledge-store backup failed "
+                             f"({backup_result.get('error')}) — no fresh "
+                             "backup was taken this session."))
         _print_briefing(db, manuscript)
         print("\nDeclare your objective: intent declare \"...\"")
     else:  # end

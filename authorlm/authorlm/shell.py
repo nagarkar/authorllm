@@ -268,6 +268,12 @@ def run_shell(args, db, manuscript: dict) -> None:
     else:
         session = ses.start_session(db, manuscript["id"])
         print(f"Session {session['id']} started for '{manuscript['name']}'.\n")
+        backup_result = session.get("backup") or {}
+        if not backup_result.get("ok", True):
+            from . import ui
+            print(ui.yellow(f"warning: knowledge-store backup failed "
+                             f"({backup_result.get('error')}) — no fresh "
+                             "backup was taken this session."))
         _print_briefing(db, manuscript)
 
     # Catch up on edits made while the shell was closed, then watch.

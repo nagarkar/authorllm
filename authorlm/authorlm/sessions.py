@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+from . import backup
 from .db import Database, ko_fields, loads, now_iso
 
 
@@ -30,6 +31,10 @@ def start_session(db: Database, manuscript_id: str) -> dict:
         manuscript_id=manuscript_id, started_at=now_iso(), ended_at=None, status="active"
     )
     db.insert("sessions", row)
+    # Session start, not every CLI invocation: sessions stay open for a
+    # working day, so this fires roughly once daily rather than on every
+    # command (OPS-4). Never blocks — see backup.run.
+    row["backup"] = backup.run(db)
     return row
 
 
