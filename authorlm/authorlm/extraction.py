@@ -329,10 +329,18 @@ def _normalize(text: str | None) -> str:
 def _set_extraction_watermark(db: Database, manuscript: dict,
                               latest_id: str | None) -> None:
     """Advance the incremental-extract watermark and keep the in-memory
-    manuscript dict in sync (multi-pass aggregators re-read it)."""
+    manuscript dict in sync (multi-pass aggregators re-read it).
+
+    Extraction can run for minutes; `manuscript["metadata"]` was captured
+    before that call started and may be stale by the time this runs (e.g. a
+    Google Docs mapping update landed in the meantime). Re-reading from the
+    DB immediately before merging narrows that lost-update window from
+    minutes to microseconds — it does not make the write atomic."""
     if not latest_id:
         return
-    meta = json.loads(manuscript["metadata"] or "{}")
+    current = db.one(
+        "SELECT metadata FROM manuscripts WHERE id = ?", (manuscript["id"],))
+    meta = json.loads((current["metadata"] if current else None) or "{}")
     meta["last_extracted_version"] = latest_id
     encoded = json.dumps(meta)
     db.update("manuscripts", manuscript["id"], {"metadata": encoded})

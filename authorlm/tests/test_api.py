@@ -3042,6 +3042,31 @@ def main_test() -> None:
               coerced_node is not None and coerced_node["kind"] == "concept",
               str(coerced_node))
 
+        # --- BUG-5: the watermark write must re-read metadata from the DB
+        # immediately before writing, not merge into an in-memory dict
+        # captured before a multi-minute LLM call — otherwise a concurrent
+        # write (e.g. a Google Docs mapping update) is clobbered wholesale. ---
+        from authorlm.extraction import _set_extraction_watermark
+        from authorlm.gdocs import _save_mapping
+
+        stale_manuscript = dict(manuscript)  # snapshot "before the LLM call"
+        _save_mapping(db, manuscript, {"gdocs": {"_master_id": "doc-survives"}})
+        watermark_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        _set_extraction_watermark(db, stale_manuscript, watermark_latest["id"])
+        watermark_final_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("the watermark write re-reads fresh metadata instead of "
+              "clobbering a concurrent write with a stale in-memory copy",
+              watermark_final_meta.get("gdocs", {}).get("_master_id")
+              == "doc-survives"
+              and watermark_final_meta.get("last_extracted_version")
+              == watermark_latest["id"],
+              str(watermark_final_meta))
+        manuscript = api.get_manuscript(db)  # refresh metadata
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.
