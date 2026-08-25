@@ -206,6 +206,58 @@ def main() -> None:
               "drives it with a rod" not in (node["notes"] or ""),
               str(node["notes"]))
 
+        print("pass-2 payload — located quotes, not the whole source text "
+              "(TrackA/1):")
+        probe_candidates = {
+            "concepts": [
+                {"name": "Passing Fancy", "kind": "concept", "notes": "A whim."},
+                {"name": "Nonexistent Ghost Concept", "kind": "concept",
+                 "notes": "Does not occur anywhere in the manuscript."},
+            ],
+            "links": [{**CANDIDATES["links"][0]}],
+            "aliases": [],
+        }
+
+        class PayloadProbeLLM(StubLLM):
+            def complete_json(self, system, user, thinking_budget=None):
+                step = "adjudication" if "ADJUDICATOR" in system else "extraction"
+                self.calls.append((step, system, user))
+                if step == "adjudication":
+                    return {
+                        "concepts": [{"name": c["name"], "verdict": "new"}
+                                    for c in probe_candidates["concepts"]],
+                        "links": [{**l, "verdict": "new"}
+                                 for l in probe_candidates["links"]]}
+                return json.loads(json.dumps(probe_candidates))
+
+        probe = PayloadProbeLLM(adjudicate=True)
+        db, manuscript = build(root / "payload-probe")
+        with contextlib.redirect_stderr(io.StringIO()):
+            extract_concepts(db, manuscript, probe, files=["01-herdsman.md"])
+        adjudication_payloads = [u for step, _s, u in probe.calls
+                                 if step == "adjudication"]
+        check("exactly one adjudication call was made",
+              len(adjudication_payloads) == 1, str(len(adjudication_payloads)))
+        payload = adjudication_payloads[0]
+
+        check("the whole source text is not re-sent verbatim",
+              TEXT not in payload, payload)
+        check("the old full-text marker is gone",
+              "THE TEXT THE CANDIDATES CAME FROM" not in payload, payload)
+        check("a locatable candidate is shown its sentence in context",
+              "A passing fancy is not a thing the Herdsman heeds" in payload,
+              payload)
+        check("the section heading travels with the located quote",
+              "## The rod" in payload, payload)
+        ghost_idx = payload.find("Nonexistent Ghost Concept")
+        check("an unlocatable candidate is flagged, not silently omitted",
+              ghost_idx != -1
+              and "UNLOCATABLE" in payload[ghost_idx:ghost_idx + 250],
+              payload)
+        check("an edge candidate is shown context for both endpoints",
+              "located, The Herdsman:" in payload
+              and "located, The Flock:" in payload, payload)
+
         print("retrieval is deterministic and free:")
         near = adjudication.neighbours(
             {"name": "Herdsman's Rod", "notes": "The rod he carries."},

@@ -4,11 +4,19 @@ relationships. Your job is to decide which of those candidates the author
 should ever be shown. Everything you pass through becomes a question the
 author must personally answer; everything you stop costs them nothing.
 
-For each candidate you are given the nearest EXISTING concepts already in the
-author's graph, with their ratified definitions, and — where any exist — names
-this author has PREVIOUSLY REJECTED that resemble the candidate. Those
-rejections are authoritative: the author has already ruled on that shape of
-thing.
+For each candidate you are given a "located" quote — the sentence(s) it
+actually occurs in, plus at least one neighbouring sentence and the section
+heading it falls under, where the manuscript has one. That quote, not
+background knowledge, is "the text" the verdicts below refer to: judge only
+what it shows. A candidate marked located: UNLOCATABLE does not occur
+verbatim anywhere in the section the first pass read — treat that absence
+itself as evidence for "drop", but say so, don't just guess.
+
+For each candidate you are also given the nearest EXISTING concepts already
+in the author's graph, with their ratified definitions, and — where any
+exist — names this author has PREVIOUSLY REJECTED that resemble the
+candidate. Those rejections are authoritative: the author has already ruled
+on that shape of thing.
 
 CALIBRATION (measured on this author's own record, not a guess): of 874
 extraction candidates the author has triaged, 575 were rejected. Two in every
@@ -34,13 +42,16 @@ CONCEPT VERDICTS — exactly one per candidate:
   passage, ordinary vocabulary, or a restatement of something the author has
   already rejected.
 
-RELATIONSHIP VERDICTS — exactly one per candidate link:
-- "new": the text before you actually asserts or demonstrates this relation,
-  in this direction, and no existing edge already says it.
+RELATIONSHIP VERDICTS — exactly one per candidate link. A link candidate
+carries a located quote for EACH endpoint (or UNLOCATABLE) — a relation
+cannot be judged from one side, so read both:
+- "new": the located quotes actually assert or demonstrate this relation, in
+  this direction, and no existing edge already says it.
 - "subsumed": an existing edge between these concepts already asserts this
   relation, or asserts it in a form that makes this one redundant.
-- "drop": the text does not assert the relation — the two concepts merely
-  appear near one another — or the direction is wrong, or the relation is a
+- "drop": the located quotes do not assert the relation — the two concepts
+  merely appear near one another, or in different located quotes with
+  nothing connecting them — or the direction is wrong, or the relation is a
   guess. Co-mention is not a relationship.
 
 Return JSON of the shape

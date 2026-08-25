@@ -39,9 +39,11 @@ exactly as before.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import proposals
+from .concepts import concept_pattern
 from .db import Database, ko_fields, loads
 from .loop import similarity
 
@@ -59,10 +61,95 @@ MAX_PRECEDENTS = 3
 RETRIEVAL_FLOOR = 0.30
 CONCEPT_VERDICTS = {"new", "improves", "subsumed", "drop"}
 EDGE_VERDICTS = {"new", "subsumed", "drop"}
+UNLOCATABLE = "UNLOCATABLE — does not appear verbatim in the source text"
 
 
 def adjudication_system() -> str:
     return ADJUDICATION_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------- located quotes (TrackA/1)
+#
+# Pass 2 used to re-send the whole pass-1 payload verbatim so the adjudicator
+# had context to judge each candidate — on measurement, 81% of that payload
+# was the source text repeated byte-for-byte, and on multi-file passes it was
+# the majority of what pushed calls past extraction_max_chars. What the
+# adjudicator actually needs is not the whole text: it is, per candidate, the
+# sentence it occurs in plus at least one neighbour — enough to tell "the
+# text asserts this" from "this is a passing mention" or "these two concepts
+# merely co-occur" without re-reading the chapter.
+
+_HEADING_LINE = re.compile(r"^#{1,6}[ \t].+$")
+_FILE_LABEL = re.compile(r"^=== .+ ===$")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def _strip_known_concepts(text: str) -> str:
+    """The KNOWN CONCEPTS inventory line (extraction.py) is an index, not
+    source prose — it must never be mistaken for a place a candidate was
+    said, so it is dropped before locating quotes."""
+    if text.startswith("KNOWN CONCEPTS:"):
+        _, _, rest = text.partition("\n\n")
+        return rest
+    return text
+
+
+def _sentences(text: str) -> list[tuple[str | None, str]]:
+    """(heading, sentence) pairs in reading order. `heading` is the nearest
+    preceding markdown heading — kept with each sentence because measurement
+    showed the heading is what signals a phrase is a term of art rather than
+    a passing mention."""
+    heading = None
+    out: list[tuple[str | None, str]] = []
+    for block in re.split(r"\n\s*\n", text):
+        lines = [ln.strip() for ln in block.strip("\n").split("\n") if ln.strip()]
+        if not lines:
+            continue
+        if _FILE_LABEL.match(lines[0]):
+            lines = lines[1:]
+        if lines and _HEADING_LINE.match(lines[0]):
+            heading = lines[0]
+            lines = lines[1:]
+        collapsed = " ".join(lines)
+        for sentence in _SENTENCE_END.split(collapsed):
+            sentence = sentence.strip()
+            if sentence:
+                out.append((heading, sentence))
+    return out
+
+
+def _quote_for(name: str, sentences: list[tuple[str | None, str]]) -> str | None:
+    """The candidate's sentence plus at least one neighbour, labelled with
+    its section heading. Neighbours prefer to stay inside the candidate's
+    own section (not to bleed context from an unrelated passage) but a
+    section of one sentence still gets a neighbour from next door — a
+    candidate is never shown alone. None when the name does not occur
+    verbatim anywhere in the text."""
+    if not name.strip() or not sentences:
+        return None
+    pattern = concept_pattern(name)
+    for i, (heading, sentence) in enumerate(sentences):
+        if not pattern.search(sentence):
+            continue
+        idxs = [i]
+        if i > 0 and sentences[i - 1][0] == heading:
+            idxs.insert(0, i - 1)
+        if i + 1 < len(sentences) and sentences[i + 1][0] == heading:
+            idxs.append(i + 1)
+        if len(idxs) == 1:
+            if i > 0:
+                idxs.insert(0, i - 1)
+            elif i + 1 < len(sentences):
+                idxs.append(i + 1)
+        lo, hi = idxs[0], idxs[-1] + 1
+        quote = " ".join(s for _h, s in sentences[lo:hi])
+        label = f"[{heading}] " if heading else ""
+        return f'{label}"{quote}"'
+    return None
+
+
+def _located(name: str, sentences: list[tuple[str | None, str]]) -> str:
+    return _quote_for(name, sentences) or UNLOCATABLE
 
 
 def enabled(llm) -> bool:
@@ -140,7 +227,8 @@ def _existing_edges(db: Database, mid: str) -> list[str]:
 
 def _render_candidates(concepts: list[dict], links: list[dict],
                        live: list[dict], rejected: list[str],
-                       edges: list[str]) -> str:
+                       edges: list[str],
+                       sentences: list[tuple[str | None, str]]) -> str:
     lines: list[str] = []
     if concepts:
         lines.append("CANDIDATE CONCEPTS")
@@ -148,6 +236,7 @@ def _render_candidates(concepts: list[dict], links: list[dict],
             name = str(item.get("name", ""))
             lines.append(f"\n- candidate: {name} ({item.get('kind', 'concept')})")
             lines.append(f"  definition: {item.get('notes') or '(none given)'}")
+            lines.append(f"  located: {_located(name, sentences)}")
             near = neighbours(item, live)
             if near:
                 lines.append("  nearest existing concepts:")
@@ -164,9 +253,15 @@ def _render_candidates(concepts: list[dict], links: list[dict],
     if links:
         lines.append("\nCANDIDATE RELATIONSHIPS")
         for item in links:
-            rendered = (f"{item.get('from', '')} —{item.get('relation', '')}→ "
-                        f"{item.get('to', '')}")
+            src, dst = str(item.get("from", "")), str(item.get("to", ""))
+            rendered = f"{src} —{item.get('relation', '')}→ {dst}"
             lines.append(f"\n- candidate: {rendered}")
+            src_q, dst_q = _located(src, sentences), _located(dst, sentences)
+            lines.append(f"  located, {src}: {src_q}")
+            if dst_q == src_q and src_q != UNLOCATABLE:
+                lines.append(f"  located, {dst}: (same passage as {src} above)")
+            else:
+                lines.append(f"  located, {dst}: {dst_q}")
             near = _rank(rendered, [(e, e) for e in edges], MAX_NEIGHBOURS)
             if near:
                 lines.append("  existing edges between these concepts: "
@@ -234,12 +329,10 @@ def adjudicate(db: Database, mid: str, llm, result: dict,
 
     live, rejected = _pool(db, mid)
     edges = _existing_edges(db, mid) if links else []
-    rendered = _render_candidates(concepts, links, live, rejected, edges)
-    reply = llm.complete_json(
-        adjudication_system(),
-        f"{rendered}\n\nTHE TEXT THE CANDIDATES CAME FROM\n\n{text}",
-        thinking_budget=0,
-    )
+    sentences = _sentences(_strip_known_concepts(text))
+    rendered = _render_candidates(concepts, links, live, rejected, edges,
+                                  sentences)
+    reply = llm.complete_json(adjudication_system(), rendered, thinking_budget=0)
     if not isinstance(reply, dict):
         return result, None
 
