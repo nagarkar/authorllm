@@ -251,14 +251,19 @@ def main_test() -> None:
               pr.by_name("summarizer").file == "summarizer.md")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cli_main(["prompts"])
+            # --workspace matters here even though "prompts" touches no
+            # DB: cli.py's dispatch traces every command via
+            # tracelog.record(workspace=args.workspace), which defaults to
+            # the real home directory when unset — an unpinned call here
+            # would write into the author's actual ~/.authorlm trace log.
+            cli_main(["--workspace", str(ws), "prompts"])
         listing = buf.getvalue()
         check("'authorlm prompts' lists every prompt with its location",
               all(p.name in listing and p.location in listing
                   for p in pr.REGISTRY))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cli_main(["prompts", "show", "summarizer"])
+            cli_main(["--workspace", str(ws), "prompts", "show", "summarizer"])
         check("'prompts show' prints the prompt text",
               "MOVES:" in buf.getvalue())
         for verb in ("summarize", "extract", "guide", "illus", "critique"):
