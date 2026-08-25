@@ -440,6 +440,26 @@ def main_test() -> None:
         briefing = api.get_briefing(db, manuscript)
         check("briefing is a serializable dict",
               "learning_velocity" in briefing)
+
+        # --- INV-15: a belief retired inside the briefing window must not
+        # reappear under "newly seeded candidate beliefs" — that is the
+        # author's explicit "no" shown back as a fresh finding. ---
+        retired_belief_row = ko_fields("pol")
+        retired_belief_row.update(
+            manuscript_id=manuscript["id"],
+            statement="INV-15 regression: a belief the author retires.",
+            status="candidate", confidence=0.5, supporting=1,
+            contradicting=0, outstanding_questions="[]",
+            source="review-explanation", source_id=db.source("author"))
+        db.insert("editorial_beliefs", retired_belief_row)
+        api.retire_belief(db, manuscript, retired_belief_row["id"][:8],
+                          "author said no")
+        briefing_after_retire = api.get_briefing(db, manuscript)
+        check("INV-15: a belief retired within the window is absent from "
+              "the briefing's newly-seeded list",
+              retired_belief_row["id"] not in
+              {b["id"] for b in briefing_after_retire["new_beliefs"]},
+              str(briefing_after_retire["new_beliefs"]))
         diff = api.diff_versions(db, manuscript)
         check("diff_versions returns per-file line lists",
               diff["new"] == "v1" and "01-choice.md" in diff["files"])
