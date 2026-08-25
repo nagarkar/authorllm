@@ -17,3 +17,7 @@ authorlm/client_secret_*.json
 
 # The author's personal manuscripts are not part of the tool
 authorlm/manuscripts/
+
+# Scratch build output — rendered PDFs/epubs, ad-hoc pandoc-profile tests
+output/
+tmp/

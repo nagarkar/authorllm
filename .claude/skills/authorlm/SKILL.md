@@ -334,7 +334,7 @@ that and ASK before rendering — rendering is always an explicit,
 consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
 **Prompt-critique duty (unprompted, before any render)**: when a pull
 or collect surfaces NEW or CHANGED illustration descriptions, critique
-them on the spot against `~/.authorlm/illustration-craft.md` — the
+them on the spot against `authorlm/illustration-craft.md` (repo) — the
 single source of description-craft law (general rules + per-model
 carveouts; the spot-finder reads the same file). Propose improved
 wording conversationally for the author's approval; never rewrite a

@@ -19,10 +19,14 @@ the active image model's section is used).
   the source image) and frame the prompt as an edit that preserves the
   line geometry exactly (lesson of 2026-08-10, the Ladder of Sermon 7).
 
+## Model: gpt-image-2
+
+- Default model (config `image_model`). Renders lettering reliably:
+  short inscriptions and labels may be specified when the metaphor
+  calls for them.
+
 ## Model: gemini/gemini-3-pro-image-preview
 
-- Garbles lettering: keep every surface unlettered; ask for "worn
-  illegible marks" rather than "faint script" when texture is wanted.
 - Strong period pull from style vocabulary ("engraving", "woodcut"):
   when the scene is contemporary, name the era and specific garments
   explicitly in the description.
