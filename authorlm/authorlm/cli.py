@@ -386,10 +386,11 @@ def cmd_session(args):
     manuscript = _manuscript(db, args)
     if args.action == "start":
         _expire_idle_session(db, manuscript, args)
-        _reconcile_gdocs(db, manuscript, args)
         # Session start must never open blind to work done between
-        # sessions — collect first, with the full report (new chapters,
-        # transitions, realizations) so nothing arrives unacknowledged.
+        # sessions — collect BEFORE any Doc reconcile below, so an
+        # uncollected local edit can never be destroyed by a base-less
+        # Doc pull (BUG-1 / A2). Full report (new chapters, transitions,
+        # realizations) so nothing arrives unacknowledged.
         # Virgin manuscripts (no baseline version) keep the classic flow:
         # first collect runs after the author declares their concepts.
         has_baseline = db.one(
@@ -403,6 +404,7 @@ def cmd_session(args):
                     _print_collect_report(opening)
             except Exception as err:
                 print(ui.dim(f"note: opening collect skipped ({err})"))
+        _reconcile_gdocs(db, manuscript, args)
         try:
             session = ses.start_session(db, manuscript["id"])
         except ValueError as err:
@@ -3082,6 +3084,11 @@ def cmd_profile(args):
                 print(ui.yellow("Checked out to the workspace Doc — edit "
                                 "there, then 'profile pull'."))
             else:
+                # Snapshot before the pull can overwrite anything
+                # (BUG-1 / A2): a base-less mapped file's pull is
+                # destructive, and this is the recovery point.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    api.collect(db, manuscript, config, source="pre-doc-pull")
                 result = gdocs.pull_doc(db, manuscript, filename,
                                         service=service,
                                         docs_service=docs_service,
@@ -3607,6 +3614,11 @@ def cmd_doc(args):
 
                     webbrowser.open(gdocs.tab_url(result["doc_id"]))
             else:
+                # Snapshot before the pull can overwrite anything
+                # (BUG-1 / A2): a base-less mapped file's pull is
+                # destructive, and this is the recovery point.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    api.collect(db, manuscript, config, source="pre-doc-pull")
                 result = gdocs.pull_doc(db, manuscript, args.name or None,
                                         service=service, force=args.force,
                                         with_comments=not args.no_comments,

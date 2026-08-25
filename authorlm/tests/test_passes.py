@@ -647,6 +647,65 @@ def main_test() -> None:
             for v in res_versions)
         check("critique resolve snapshots the uncollected local edit into "
               "history before overwriting the file (BUG-2 / A1)", recovered)
+
+        print("recovery: doc pull snapshots uncollected edits before "
+              "overwriting (BUG-1 / A2):")
+        # three_way() unconditionally prefers the Doc's tab over local
+        # content whenever the file has no recorded base_hash (a
+        # base-less mapped pull) — that mechanism is stubbed directly
+        # here rather than through a fake tabbed export, since whether a
+        # real Google export triggers it is a separate, unresolved
+        # question (register C7) that A2's snapshot-first fix does not
+        # depend on either way.
+        dp_ws = root / "docpull-ws"
+        dp_ms = dp_ws / "book"
+        dp_ms.mkdir(parents=True)
+        (dp_ms / "solo.md").write_text("Original collected content.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(dp_ws), "init", "--name", "book",
+                      "--path", str(dp_ms)])
+        dp_db = api.open_db(str(dp_ws))
+        dp_manuscript = api.get_manuscript(dp_db)
+        api.collect(dp_db, dp_manuscript, {})  # v1
+
+        UNCOLLECTED_PULL = ("UNCOLLECTED PARAGRAPH, NEVER COLLECTED, ABOUT "
+                            "TO BE PULLED OVER.\n")
+        (dp_ms / "solo.md").write_text(UNCOLLECTED_PULL)
+
+        def _fake_service2(config, workspace=None, interactive=False):
+            return object()
+
+        def _fake_pull_doc(db, manuscript, query=None, service=None,
+                           force=False, with_comments=True,
+                           docs_service=None, bridge=None):
+            (Path(manuscript["path"]) / "solo.md").write_text(
+                "PULLED FROM DOC.\n")
+            return {"changed": ["solo.md"], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": [], "doc_id": "doc-1"}
+
+        _orig2 = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+                 _gdocs_mod.pull_doc)
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _fake_pull_doc
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull",
+                          "solo.md"])
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+
+        check("pull overwrote the file with the Doc's content",
+              (dp_ms / "solo.md").read_text() == "PULLED FROM DOC.\n")
+        dp_versions = dp_db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (dp_manuscript["id"],))
+        recovered = any(
+            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_PULL
+            for v in dp_versions)
+        check("doc pull snapshots the uncollected local edit into history "
+              "before the Doc overwrites it (BUG-1 / A2)", recovered)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

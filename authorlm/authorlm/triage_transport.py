@@ -38,6 +38,11 @@ def _reconcile(db: Database, manuscript: dict, workspace: str | None) -> dict[st
     except ValueError as err:
         raise RuntimeError(
             "Google Docs are not authorized here; run 'authorlm doc auth' explicitly") from err
+    # Snapshot before the reconcile can overwrite anything (BUG-1 / A2):
+    # a base-less mapped file's pull is destructive, and this is the
+    # recovery point. The post-reconcile collect below is conditional on
+    # something having been pulled; this one is not.
+    api.collect(db, manuscript, config, analyze=False)
     report = gdocs.reconcile(db, manuscript, service, docs_service=docs_service)
     if report["pulled"]:
         report["collection"] = api.collect(db, manuscript, config, analyze=False)
