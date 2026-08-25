@@ -332,6 +332,82 @@ def main_test() -> None:
         check("files under min_chars are exempt from the deletion safety net",
               "staged" not in report)
 
+        # --- detect_transitions in isolation (T5, risk-register §3): no
+        # existing test calls the diff/opcode logic directly, only through
+        # the full collect() pipeline. Isolated manuscript, own history. ---
+        from authorlm.revisions import collect_revision, detect_transitions
+
+        dt_root = root / "dt-ws"
+        dt_ms = dt_root / "manuscript"
+        dt_ms.mkdir(parents=True)
+        dt_db = api.open_db(str(dt_root))
+
+        # Paragraph reorder: difflib has no "moved" concept, so swapping two
+        # adjacent paragraphs is reported as the moved paragraph's text
+        # being inserted at its new position and deleted from its old one —
+        # not a single "reorder" transition. Characterizing, not endorsing.
+        dt_ms1 = dt_root / "reorder"
+        dt_ms1.mkdir()
+        row_reorder = api.register_manuscript(dt_db, "reorder", str(dt_ms1))
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP1 text here.\n\nP2 text here.\n\nP3 text here.\n")
+        v1 = collect_revision(dt_db, row_reorder, None, source="test")
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP2 text here.\n\nP1 text here.\n\nP3 text here.\n")
+        v2 = collect_revision(dt_db, row_reorder, None, source="test")
+        reorder_trans = detect_transitions(dt_db, row_reorder["id"], dict(v1), v2)
+        check("paragraph reorder is an insert of the moved text at its new "
+              "position plus a delete at its old one, not a single move",
+              [(t["kind"], t["location"]) for t in reorder_trans]
+              == [("insert", "a.md#Heading"), ("delete", "a.md#Heading")],
+              str([(t["kind"], t["location"], t["summary"])
+                   for t in reorder_trans]))
+        check("the reorder's insert/delete pair both carry the moved "
+              "paragraph's own text, not the paragraph it displaced",
+              "P2 text here." in reorder_trans[0]["summary"]
+              and "P2 text here." in reorder_trans[1]["summary"])
+
+        # Two non-adjacent hunks in one file: each rewritten paragraph is
+        # its own transition, not merged into a single spanning edit.
+        dt_ms2 = dt_root / "hunks"
+        dt_ms2.mkdir()
+        row_hunks = api.register_manuscript(dt_db, "hunks", str(dt_ms2))
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 original.\n\nP3 unchanged.\n\n"
+            "P4 original.\n\nP5 unchanged.\n")
+        h1 = collect_revision(dt_db, row_hunks, None, source="test")
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 REWRITTEN.\n\nP3 unchanged.\n\n"
+            "P4 REWRITTEN.\n\nP5 unchanged.\n")
+        h2 = collect_revision(dt_db, row_hunks, None, source="test")
+        hunk_trans = detect_transitions(dt_db, row_hunks["id"], dict(h1), h2)
+        check("two non-adjacent hunks in one file produce two separate "
+              "rewrite transitions, not one spanning edit",
+              len(hunk_trans) == 2
+              and all(t["kind"] == "rewrite" for t in hunk_trans)
+              and "P2 REWRITTEN" in hunk_trans[0]["summary"]
+              and "P4 REWRITTEN" in hunk_trans[1]["summary"],
+              str([(t["kind"], t["summary"]) for t in hunk_trans]))
+
+        # Heading-less file: location falls back to the bare filename, no
+        # '#heading' suffix, since _nearest_heading finds nothing to anchor to.
+        dt_ms3 = dt_root / "noheading"
+        dt_ms3.mkdir()
+        row_noheading = api.register_manuscript(dt_db, "noheading", str(dt_ms3))
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph.\n")
+        n1 = collect_revision(dt_db, row_noheading, None, source="test")
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph, edited.\n")
+        n2 = collect_revision(dt_db, row_noheading, None, source="test")
+        noheading_trans = detect_transitions(
+            dt_db, row_noheading["id"], dict(n1), n2)
+        check("a heading-less file's transition location is the bare "
+              "filename, with no '#heading' suffix",
+              len(noheading_trans) == 1
+              and noheading_trans[0]["location"] == "b.md",
+              str([(t["kind"], t["location"]) for t in noheading_trans]))
+
         # --- history show/restore (MVP.md 'Deliberately deferred': version
         # access & restoration — implementable at any time, no schema change) ---
         try:
