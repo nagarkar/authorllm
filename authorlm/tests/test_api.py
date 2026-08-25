@@ -177,10 +177,97 @@ def check_config_parity() -> None:
         shutil.rmtree(cfg_root, ignore_errors=True)
 
 
+def check_extraction_failure_traced() -> None:
+    """OPS-2: a raising run_extraction must leave a trace, not just a
+    silently-empty result.
+
+    `collect(..., analyze=True)` and `write_complete` both swallow
+    run_extraction's exceptions with a bare `except Exception:` — by
+    design, extraction failure must never block observation — but before
+    this fix nothing recorded that it happened: `collect`/`write_complete`
+    returned the same shape as a genuinely empty extraction pass, so a
+    silently-broken LLM pipeline was indistinguishable from a quiet day.
+    This does not change control flow (still swallowed, still returns
+    `{}`/`None`) — it only asserts a `trace.jsonl` record now exists."""
+    import io
+    import json as _tjson
+
+    from authorlm import api as _api
+    from authorlm import tracelog
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-ops2-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-draft.md").write_text("# Draft\n\nOriginal text.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = _api.open_db(str(ws))
+        manuscript = _api.get_manuscript(db)
+        config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
+        trace_path = tracelog.log_dir(str(ws)) / "trace.jsonl"
+
+        def boom(*a, **kw):
+            raise RuntimeError("stub extraction failure")
+
+        # --- collect(..., analyze=True): api.py's first swallow site ---
+        prev_run_extraction = _api.run_extraction
+        _api.run_extraction = boom
+        try:
+            (ms / "01-draft.md").write_text("# Draft\n\nChanged text.\n")
+            report = _api.collect(db, manuscript, config, analyze=True)
+        finally:
+            _api.run_extraction = prev_run_extraction
+        check("collect() with a raising run_extraction still returns "
+              "(swallow behaviour unchanged)",
+              "auto_analysis" not in report, report)
+        entries = [_tjson.loads(line)
+                  for line in trace_path.read_text().splitlines()]
+        collect_entry = entries[-1]
+        check("collect()'s swallowed extraction failure is traced",
+              collect_entry["verb"] == "extraction"
+              and collect_entry["surface"] == "api"
+              and collect_entry["manuscript"] == "book"
+              and collect_entry["ok"] is False
+              and "stub extraction failure" in collect_entry["error"],
+              collect_entry)
+
+        # --- write_complete: api.py's second swallow site ---
+        _api.define_style_guide(db, manuscript, "house")
+        _api.attach_style(db, manuscript, "01-draft.md", "house")
+        declared = _api.declare_intent(db, manuscript, "Finish the draft")
+        intent_id = declared["intent"]["id"]
+        _api.write_start(db, manuscript, config, "01-draft.md", intent_id[:8])
+
+        _api.run_extraction = boom
+        try:
+            result = _api.write_complete(db, manuscript, config)
+        finally:
+            _api.run_extraction = prev_run_extraction
+        check("write_complete() with a raising run_extraction still "
+              "returns (swallow behaviour unchanged)",
+              result["extraction"] is None, result)
+        entries = [_tjson.loads(line)
+                  for line in trace_path.read_text().splitlines()]
+        complete_entry = entries[-1]
+        check("write_complete()'s swallowed extraction failure is traced",
+              complete_entry["verb"] == "extraction"
+              and complete_entry["surface"] == "api"
+              and complete_entry["manuscript"] == "book"
+              and complete_entry["ok"] is False
+              and "stub extraction failure" in complete_entry["error"],
+              complete_entry)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
+    check_extraction_failure_traced()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

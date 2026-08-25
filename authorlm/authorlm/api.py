@@ -546,8 +546,15 @@ def collect(db: Database, manuscript: dict, config: dict,
         if llm.enabled:
             try:
                 summary = run_extraction(db, manuscript, llm) or {}
-            except Exception:
+            except Exception as err:
                 summary = {}
+                from . import tracelog
+
+                tracelog.record(
+                    "extraction", surface="api",
+                    workspace=str(db.path.parent.parent),
+                    manuscript=manuscript.get("name"),
+                    ok=False, error=f"{type(err).__name__}: {err}")
             if summary and not summary.get("up_to_date"):
                 report["auto_analysis"] = {
                     "new_concepts": len(summary.get("nodes", [])),
@@ -956,8 +963,15 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     if llm.enabled:
         try:
             extraction = run_extraction(db, manuscript, llm)
-        except Exception:
+        except Exception as err:
             extraction = None
+            from . import tracelog
+
+            tracelog.record(
+                "extraction", surface="api",
+                workspace=str(db.path.parent.parent),
+                manuscript=manuscript.get("name"),
+                ok=False, error=f"{type(err).__name__}: {err}")
     plan = loads(writeup["plan"], [])
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
