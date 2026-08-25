@@ -488,6 +488,26 @@ def main_test() -> None:
         briefing = api.get_briefing(db, manuscript)
         check("briefing is a serializable dict",
               "learning_velocity" in briefing)
+
+        # --- INV-15: a belief retired inside the briefing window must not
+        # reappear under "newly seeded candidate beliefs" — that is the
+        # author's explicit "no" shown back as a fresh finding. ---
+        retired_belief_row = ko_fields("pol")
+        retired_belief_row.update(
+            manuscript_id=manuscript["id"],
+            statement="INV-15 regression: a belief the author retires.",
+            status="candidate", confidence=0.5, supporting=1,
+            contradicting=0, outstanding_questions="[]",
+            source="review-explanation", source_id=db.source("author"))
+        db.insert("editorial_beliefs", retired_belief_row)
+        api.retire_belief(db, manuscript, retired_belief_row["id"][:8],
+                          "author said no")
+        briefing_after_retire = api.get_briefing(db, manuscript)
+        check("INV-15: a belief retired within the window is absent from "
+              "the briefing's newly-seeded list",
+              retired_belief_row["id"] not in
+              {b["id"] for b in briefing_after_retire["new_beliefs"]},
+              str(briefing_after_retire["new_beliefs"]))
         diff = api.diff_versions(db, manuscript)
         check("diff_versions returns per-file line lists",
               diff["new"] == "v1" and "01-choice.md" in diff["files"])
@@ -2329,6 +2349,32 @@ def main_test() -> None:
               and "Tremor" in props.describe(incongruence[0])[0]
               and "Acknowledged" in props.adopt(db, manuscript["id"],
                                                 incongruence[0]))
+
+        # --- BUG-20: an `item` index of 0 (or negative) must be rejected,
+        # not silently wrapped by Python's negative-index behaviour onto a
+        # DIFFERENT paragraph. `pairs[int(f.get("item",0)) - 1]` with
+        # item=0 computes index -1, which Python resolves to the last pair
+        # instead of raising IndexError, so the bounds guard never fires. ---
+        zero_item_llm = FakeLLM({"findings": [
+            {"item": 0, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "The Tremor is never caused; it causes.",
+             "why": "an out-of-range item must not bind to any paragraph"},
+        ]})
+        onto_zero = sweeps.ontology(db, manuscript, zero_item_llm,
+                                    file="01-choice.md")
+        check("BUG-20: item=0 is dropped instead of wrapping onto the "
+              "last pair via negative indexing",
+              onto_zero["findings"] == 0
+              and onto_zero["dropped_ungrounded"] == 1, str(onto_zero))
+        neg_item_llm = FakeLLM({"findings": [
+            {"item": -1, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "x", "why": "a negative item must not bind either"},
+        ]})
+        onto_neg = sweeps.ontology(db, manuscript, neg_item_llm,
+                                   file="01-choice.md")
+        check("BUG-20: a negative item is dropped, not indexed from the end",
+              onto_neg["findings"] == 0
+              and onto_neg["dropped_ungrounded"] == 1, str(onto_neg))
 
         lenses.add_lens(manuscript, "clarity",
                         "Flag sentences that assert a claim without "
