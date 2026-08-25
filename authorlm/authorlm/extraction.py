@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import proposals
+from . import adjudication, proposals
 from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -322,6 +322,29 @@ def _section_payloads(units: list[tuple[str, str]], cap: int) -> list[str]:
     return ["\n\n".join(p) for p in payloads]
 
 
+def _inventory_names(db: Database, mid: str, limit: int) -> list[str]:
+    return [
+        row["name"] for row in db.all(
+            "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired' ORDER BY name LIMIT ?",
+            (mid, limit),
+        )
+    ]
+
+
+def _fit_inventory(names: list[str], max_chars: int, body_len: int) -> str:
+    """'; '-joined `names`, dropping from the end until the KNOWN CONCEPTS
+    prefix — attached ahead of a payload of `body_len` chars — counts
+    against `max_chars` instead of riding free on top of it (TrackA/2:
+    measured pushing payloads up to 26,865 chars against a 24,000 cap). The
+    manuscript text is what extraction must never truncate, so when the two
+    don't both fit, the inventory is what gives way, never the text."""
+    budget = max_chars - body_len - len("KNOWN CONCEPTS: \n\n")
+    while names and len("; ".join(names)) > max(0, budget):
+        names = names[:-1]
+    return "; ".join(names)
+
+
 def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
@@ -392,7 +415,8 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0, "truncated": False, "scope": scope_label,
+            "proposed": 0, "screened": 0, "truncated": False,
+            "scope": scope_label,
         }
         failed = False
         for payload in payloads:
@@ -409,7 +433,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
@@ -479,7 +503,7 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0,
+            "proposed": 0, "screened": 0,
             "truncated": False,
         }
         failed = False
@@ -499,7 +523,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
         aggregate["scope"] = (
@@ -527,26 +551,16 @@ def extract_concepts(
         return any(concept_pattern(n).search(attention) for n in names if n)
     if edges_only or aliases_only:
         scope += ", edges only" if edges_only else ", aliases only"
-        inventory = "; ".join(
-            row["name"] for row in db.all(
-                "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                "AND status != 'retired' ORDER BY name LIMIT 120",
-                (mid,),
-            )
-        )
+        inventory = _fit_inventory(_inventory_names(db, mid, 120),
+                                   max_chars, len(text))
         system = (EDGES_ONLY_SYSTEM if edges_only else ALIASES_ONLY_SYSTEM) \
             + triage_feedback(db, mid)
         text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
     else:
         system = extraction_system() + triage_feedback(db, mid)
         if _inventory:
-            inventory = "; ".join(
-                row["name"] for row in db.all(
-                    "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                    "AND status != 'retired' ORDER BY name LIMIT 200",
-                    (mid,),
-                )
-            )
+            inventory = _fit_inventory(_inventory_names(db, mid, 200),
+                                       max_chars, len(text))
             if inventory:
                 system += (
                     " Concepts listed under KNOWN CONCEPTS are already in the "
@@ -569,6 +583,18 @@ def extract_concepts(
         # section eligible for retry.
         return None
 
+    # Step two, opt-in ([extraction] adjudicate): the candidates above are a
+    # first pass, not a verdict. Adjudication asks — once, for the whole
+    # batch — whether each one is a new concept, an improvement to an
+    # existing definition, already subsumed, or not a concept at all. Only
+    # survivors continue below, so every gate that follows still applies.
+    # With the flag off, `enabled` is False and nothing here runs.
+    screened = improved = 0
+    if adjudication.enabled(llm) and not aliases_only:
+        result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
+        if verdicts:
+            screened, improved = verdicts["screened"], verdicts["improves"]
+
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
     # retired name living on as a live concept's alias is not banned —
@@ -588,7 +614,7 @@ def extract_concepts(
         for alias in json.loads(row["aliases"] or "[]")
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
-    proposed = 0
+    proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
     disk_files: dict[str, str] | None = None
@@ -826,6 +852,7 @@ def extract_concepts(
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
         "proposed": proposed,
+        "screened": screened,
         "scope": scope,
         "truncated": truncated,
     }

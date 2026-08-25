@@ -142,6 +142,8 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            if summary.get("ungrounded_links") else "")
         + (f"; {len(summary['below_bar'])} below the recurrence bar"
            if summary.get("below_bar") else "")
+        + (f"; adjudication screened out {summary['screened']} candidate(s) "
+           "before triage" if summary.get("screened") else "")
         + "."
     )
     if summary.get("below_bar"):

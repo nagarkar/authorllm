@@ -91,6 +91,11 @@ REGISTRY: list[Prompt] = [
     Prompt("extraction", "extract; init; collect (auto)",
            "mine concepts, relations, and aliases from manuscript text",
            file="extraction.md", module="extraction.py:extraction_system"),
+    Prompt("adjudication", "extract; collect (auto) — only when "
+           "[extraction] adjudicate = true",
+           "step two: rule each extraction candidate new | improves | "
+           "subsumed | drop before it can reach the author's triage queue",
+           file="adjudication.md", module="adjudication.py:adjudication_system"),
     Prompt("extraction-edges", "extract --edges",
            "relations only, among known concepts",
            file=None, module="extraction.py:EDGES_ONLY_SYSTEM"),
