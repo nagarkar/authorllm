@@ -261,6 +261,7 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
 
         decisions = []
         belief_notes = []
+        seen_patterns: set[str] = set()
         for item in raw_decisions[:MAX_DECISIONS]:
             if not isinstance(item, dict) or not str(item.get("action", "")).strip():
                 continue
@@ -270,6 +271,14 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
             decisions.append({"action": action, "pattern": pattern})
             if not pattern:
                 continue
+            # One episode is one observation: two decisions in this same
+            # reply generalizing to the identical pattern must not seed or
+            # reinforce a belief twice (INV-2a). Scoped to this reply only —
+            # cross-episode reinforcement is unaffected.
+            normalized_pattern = " ".join(pattern.lower().split())
+            if normalized_pattern in seen_patterns:
+                continue
+            seen_patterns.add(normalized_pattern)
             seeded = bel.seed_candidate_belief(
                 db, mid, pattern, source="episode-analysis", llm=None
             )

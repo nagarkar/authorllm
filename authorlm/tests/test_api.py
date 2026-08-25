@@ -3097,6 +3097,205 @@ def main_test() -> None:
                      (manuscript["id"], "AlphaConcept")) is not None,
               str(multi))
 
+        # --- BUG-7: extraction must never overwrite the author's ratified
+        # concept notes, even when a materially different paraphrase comes
+        # back for text the author actually changed. ---
+        (ms / "09-ratified.md").write_text(
+            "# Ratified\n\nRatifiedTerm is discussed at length here.\n"
+        )
+        api.add_concept(db, manuscript, "RatifiedTerm", kind="concept",
+                        notes="AUTHOR RATIFIED TEXT")
+        note_proposals_before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+
+        class NoteOverwriteLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "RatifiedTerm", "kind": "concept",
+                     "notes": "machine paraphrase of the definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, NoteOverwriteLLM(),
+                         files=["09-ratified.md"])
+        ratified_after = concepts.get_concept(db, manuscript["id"], "RatifiedTerm")
+        note_proposals_after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+        check("extraction never overwrites the author's ratified concept notes",
+              ratified_after["notes"] == "AUTHOR RATIFIED TEXT",
+              f"notes became: {ratified_after['notes']!r}")
+        check("a materially different extraction files a note_update "
+              "proposal instead of applying itself",
+              note_proposals_after == note_proposals_before + 1,
+              f"before={note_proposals_before} after={note_proposals_after}")
+
+        # --- BUG-8: a hit on a concept's ALIAS (not its primary name) must
+        # not be treated as a brand-new concept — that discards a confirmed
+        # concept's metadata (including 'confirmed': True) and reopens it to
+        # silent auto-retirement. ---
+        (ms / "10-alias.md").write_text(
+            "# Alias\n\nAliasSecondary shows up in the prose here.\n\n"
+            "## Elsewhere\n\nAliasSecondary appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+        api.add_concept(db, manuscript, "AliasPrimary", kind="concept",
+                        notes="primary notes")
+        api.confirm_concept(db, manuscript, "AliasPrimary")
+        api.alias_concept(db, manuscript, "AliasPrimary", ["AliasSecondary"])
+        primary_meta_before = _json.loads(
+            concepts.get_concept(db, manuscript["id"], "AliasPrimary")["metadata"]
+            or "{}")
+        check("fixture concept starts confirmed",
+              primary_meta_before.get("confirmed") is True,
+              str(primary_meta_before))
+
+        class AliasHitLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "AliasSecondary", "kind": "concept",
+                     "notes": "some notes about the alias"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, AliasHitLLM(), files=["10-alias.md"])
+        primary_after = concepts.get_concept(db, manuscript["id"], "AliasPrimary")
+        primary_meta_after = _json.loads(primary_after["metadata"] or "{}")
+        check("an alias hit does not reset the primary concept's 'confirmed' flag",
+              primary_meta_after.get("confirmed") is True,
+              f"metadata became: {primary_meta_after}")
+        check("an alias hit does not fork a duplicate concept node",
+              db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                     "manuscript_id = ? AND lower(name) = lower(?)",
+                     (manuscript["id"], "AliasSecondary"))["n"] == 0)
+
+        # --- BUG-21: a model-shaped-but-malformed reply (a list where a
+        # string kind is expected, null where an empty list is expected)
+        # must not abort the extraction pass with a TypeError. ---
+        (ms / "11-coerce.md").write_text(
+            "# Coerce\n\nCoerceTarget needs a name here.\n\n"
+            "## Elsewhere\n\nCoerceTarget appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+
+        class MalformedLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "CoerceTarget", "kind": ["concept"]}],
+                        "links": None, "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        coerce_error = None
+        try:
+            extract_concepts(db, manuscript, MalformedLLM(),
+                             files=["11-coerce.md"])
+        except TypeError as err:
+            coerce_error = err
+        check("a malformed 'kind' (list, not str) does not abort extraction",
+              coerce_error is None, str(coerce_error))
+        coerced_node = concepts.get_concept(db, manuscript["id"], "CoerceTarget")
+        check("the malformed kind coerces to the 'concept' default",
+              coerced_node is not None and coerced_node["kind"] == "concept",
+              str(coerced_node))
+
+        # --- BUG-21 follow-up: a null 'concepts' payload (as opposed to a
+        # malformed item inside a present list) must be treated as a FAILED
+        # pass, not a clean "nothing found" pass. Coercing null to []
+        # (the original BUG-21 fix) let the watermark advance on a broken
+        # reply, permanently skipping the section on every future
+        # incremental run — a silent, unrecoverable content skip. ---
+        (ms / "12-nullconcepts.md").write_text(
+            "# NullConcepts\n\nNullConceptsTarget needs a name here.\n\n"
+            "## Elsewhere\n\nNullConceptsTarget appears again in a "
+            "different section, clearing the recurrence bar.\n"
+        )
+
+        class NullConceptsLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": None, "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        api.collect(db, manuscript, {})
+        nullconcepts_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        # Query the DB directly rather than trusting the long-lived in-memory
+        # `manuscript` dict: several extractions upstream in this same test
+        # (FlakyLLM's first payload, NoteOverwriteLLM, AliasHitLLM,
+        # MalformedLLM/BUG-21) have already advanced the real watermark in
+        # the DB since `manuscript` was first bound.
+        nullconcepts_before_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        nullconcepts_result = extract_concepts(
+            db, manuscript, NullConceptsLLM(), files=["12-nullconcepts.md"])
+        nullconcepts_after_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("a null 'concepts' payload is reported as a failed pass, "
+              "not a clean miss",
+              nullconcepts_result is None, str(nullconcepts_result))
+        check("a null 'concepts' payload does not advance the watermark "
+              "(the section stays eligible for re-mining)",
+              nullconcepts_after_meta.get("last_extracted_version")
+              == nullconcepts_before_meta.get("last_extracted_version")
+              and nullconcepts_after_meta.get("last_extracted_version")
+              != nullconcepts_latest["id"],
+              str({"before": nullconcepts_before_meta,
+                   "after": nullconcepts_after_meta,
+                   "latest": nullconcepts_latest["id"]}))
+        check("a null 'concepts' payload creates no concept node",
+              concepts.get_concept(db, manuscript["id"], "NullConceptsTarget")
+              is None)
+
+        # --- BUG-5: the watermark write must re-read metadata from the DB
+        # immediately before writing, not merge into an in-memory dict
+        # captured before a multi-minute LLM call — otherwise a concurrent
+        # write (e.g. a Google Docs mapping update) is clobbered wholesale. ---
+        from authorlm.extraction import _set_extraction_watermark
+        from authorlm.gdocs import _save_mapping
+
+        stale_manuscript = dict(manuscript)  # snapshot "before the LLM call"
+        _save_mapping(db, manuscript, {"gdocs": {"_master_id": "doc-survives"}})
+        watermark_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        _set_extraction_watermark(db, stale_manuscript, watermark_latest["id"])
+        watermark_final_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("the watermark write re-reads fresh metadata instead of "
+              "clobbering a concurrent write with a stale in-memory copy",
+              watermark_final_meta.get("gdocs", {}).get("_master_id")
+              == "doc-survives"
+              and watermark_final_meta.get("last_extracted_version")
+              == watermark_latest["id"],
+              str(watermark_final_meta))
+        manuscript = api.get_manuscript(db)  # refresh metadata
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.
