@@ -121,9 +121,383 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_vendor_keys_and_image() -> None:
+    """Vendor key resolution + image-model key isolation (#27).
+
+    Choosing a model chooses a vendor via the string prefix. The image
+    model is independent of the text model — using the text key when the
+    image vendor differs is the exact billing/auth bug #27 closed."""
+    import base64
+    import types
+    from unittest.mock import patch
+
+    from authorlm.llm import generate_image, vendor_key, vendor_of
+
+    check("vendor_of reads the litellm prefix",
+          vendor_of("openai/gpt-4o-mini") == "openai"
+          and vendor_of("gemini/gemini-2.5-flash") == "gemini"
+          and vendor_of("unprefixed-model") == "")
+
+    saved = {k: os.environ.pop(k, None) for k in _paths_vendor_vars()}
+    saved["CUSTOM_PROXY_KEY"] = os.environ.pop("CUSTOM_PROXY_KEY", None)
+    try:
+        os.environ["OPENAI_API_KEY"] = "sk-openai"
+        os.environ["GEMINI_API_KEY"] = "sk-gemini"
+        os.environ["CUSTOM_PROXY_KEY"] = "sk-proxy"
+        check("vendor_key maps prefix to the vendor env var",
+              vendor_key("openai/gpt-4o-mini", {}) == "sk-openai"
+              and vendor_key("gemini/gemini-2.5-flash", {}) == "sk-gemini"
+              and vendor_key("unknown/model", {}) == "")
+        check("api_key_env override wins over the vendor convention",
+              vendor_key("openai/gpt-4o-mini",
+                         {"api_key_env": "CUSTOM_PROXY_KEY"}) == "sk-proxy")
+
+        calls: list[dict] = []
+
+        class _FakeLiteLLM:
+            suppress_debug_info = False
+
+            @staticmethod
+            def image_generation(**kwargs):
+                calls.append(kwargs)
+                return {"data": [{"b64_json": base64.b64encode(b"PNG").decode()}]}
+
+        fake = types.ModuleType("litellm")
+        fake.suppress_debug_info = False
+        fake.image_generation = _FakeLiteLLM.image_generation
+        with patch.dict(sys.modules, {"litellm": fake}):
+            png = generate_image(
+                {"llm": {"image_model": "openai/gpt-image-1",
+                         "image_size": "1536x1024"}},
+                "a brass orrery")
+        check("generate_image uses the image model's vendor key, not text's",
+              png == b"PNG"
+              and calls
+              and calls[0]["model"] == "openai/gpt-image-1"
+              and calls[0].get("size") == "1536x1024")
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def check_load_env_parsing() -> None:
+    """.env is a fallback for shells that were not exported into — never
+    an override. Parsing covers export-prefix, quotes, and junk lines."""
+    from authorlm import paths as _paths
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-env-"))
+    env_file = root / ".env"
+    env_file.write_text(
+        "\n".join([
+            "# comment",
+            "export QUOTED='single-quoted'",
+            'DOUBLE="double-quoted"',
+            "BARE=bare-value",
+            "not-a-binding",
+            "ALREADY=from-file",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    previous = os.environ.get("AUTHORLM_ENV")
+    saved_already = os.environ.get("ALREADY")
+    for name in ("QUOTED", "DOUBLE", "BARE", "ALREADY"):
+        os.environ.pop(name, None)
+    os.environ["ALREADY"] = "from-shell"
+    os.environ["AUTHORLM_ENV"] = str(env_file)
+    try:
+        loaded = _paths.load_env()
+        check("load_env sets export/quoted/bare and skips junk",
+              set(loaded) == {"QUOTED", "DOUBLE", "BARE"}
+              and os.environ["QUOTED"] == "single-quoted"
+              and os.environ["DOUBLE"] == "double-quoted"
+              and os.environ["BARE"] == "bare-value")
+        check("load_env never overwrites an already-exported shell var",
+              "ALREADY" not in loaded
+              and os.environ["ALREADY"] == "from-shell")
+    finally:
+        for name in ("QUOTED", "DOUBLE", "BARE"):
+            os.environ.pop(name, None)
+        if saved_already is None:
+            os.environ.pop("ALREADY", None)
+        else:
+            os.environ["ALREADY"] = saved_already
+        if previous is None:
+            os.environ.pop("AUTHORLM_ENV", None)
+        else:
+            os.environ["AUTHORLM_ENV"] = previous
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_part_build_helpers() -> None:
+    """Part-build naming and TOC selection — wrong chapter or a clobbering
+    filename silently ships the wrong artifact."""
+    from authorlm.export import export_filename, selection_slug
+    from authorlm.structure import select_chapters
+
+    check("export_filename strips filesystem-hostile chars",
+          export_filename('Book: "One"/Two|Three') == "Book- -One--Two-Three.md")
+    try:
+        export_filename("   ")
+        empty_refused = False
+    except ValueError:
+        empty_refused = True
+    check("export_filename refuses an empty name", empty_refused)
+
+    check("selection_slug joins stems, caps at 3, truncates to 60",
+          selection_slug(["a.md", "b.md"]) == "a+b"
+          and selection_slug(["a.md", "b.md", "c.md", "d.md"]) == "a+b+c+more"
+          and len(selection_slug(["x" * 40 + ".md", "y" * 40 + ".md"])) <= 60)
+
+    files = {
+        "toc.toml": (
+            '[[chapter]]\nfile = "part.md"\n'
+            '[[chapter]]\nfile = "child.md"\nparent = "part.md"\n'
+            '[[chapter]]\nfile = "other.md"\n'
+        ),
+        "part.md": "Part\n",
+        "child.md": "Child\n",
+        "other.md": "Other\n",
+    }
+    check("select_chapters accepts stem without .md and keeps reading order",
+          select_chapters(files, ["part"]) == ["part.md", "child.md"]
+          and select_chapters(files, ["other.md", "part.md"])
+          == ["part.md", "child.md", "other.md"])
+    try:
+        select_chapters(files, ["missing"])
+        missing_refused = False
+    except LookupError:
+        missing_refused = True
+    check("select_chapters raises on an unknown chapter", missing_refused)
+
+
+def check_parse_distiller() -> None:
+    """Distiller decline-by-default + platitude guard (NEW without EXAMPLE)."""
+    from authorlm.beliefs import parse_distiller
+
+    valid = {"bel-aaa", "bel-bbb"}
+    check("parse_distiller declines empty/NONE/unknown MATCH",
+          parse_distiller(None, valid) == ("none", None, None)
+          and parse_distiller("NONE", valid) == ("none", None, None)
+          and parse_distiller("MATCH: bel-zzz", valid) == ("none", None, None))
+    check("parse_distiller accepts a known MATCH id",
+          parse_distiller("MATCH: bel-aaa", valid) == ("match", "bel-aaa", None))
+    check("parse_distiller refuses NEW without EXAMPLE (platitude guard)",
+          parse_distiller("NEW: Prefer short sentences.", valid)
+          == ("none", None, None))
+    check("parse_distiller accepts NEW with EXAMPLE",
+          parse_distiller(
+              'NEW: Prefer short sentences.\nEXAMPLE: "Gravity pulls."',
+              valid)
+          == ("new", "Prefer short sentences.", "Gravity pulls."))
+
+
+def check_migrate_beliefs_and_laws() -> None:
+    """2026-08-20 rename: editorial_policies→beliefs, style_elements→laws.
+
+    A legacy sqlite must rename tables, remap enum tokens, and rename
+    evidence.supports_policy — otherwise every belief/law query misses."""
+    import getpass
+    import sqlite3
+
+    from authorlm import SCHEMA_VERSION
+    from authorlm.db import Database, KNOWLEDGE_OBJECT_COLUMNS
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-migrate-"))
+    try:
+        path = root / "legacy.db"
+        conn = sqlite3.connect(str(path))
+        user = getpass.getuser()
+        stamp = "2026-08-01T00:00:00.000000Z"
+        conn.executescript(f"""
+            CREATE TABLE editorial_policies (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                confidence REAL NOT NULL DEFAULT 0.3,
+                supporting INTEGER NOT NULL DEFAULT 0,
+                contradicting INTEGER NOT NULL DEFAULT 0,
+                outstanding_questions TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'review-explanation',
+                source_id TEXT
+            );
+            CREATE TABLE style_elements (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                guide_id TEXT,
+                file TEXT,
+                aspect TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                notes TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                overrides TEXT,
+                source_id TEXT,
+                CHECK ((guide_id IS NULL) != (file IS NULL))
+            );
+            CREATE TABLE evidence (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                episode_id TEXT,
+                evidence_type TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                target TEXT NOT NULL,
+                supports_policy TEXT,
+                weight TEXT NOT NULL DEFAULT 'medium',
+                source_id TEXT
+            );
+            CREATE TABLE knowledge_proposals (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                target TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'extraction',
+                state TEXT NOT NULL DEFAULT 'open'
+            );
+            CREATE TABLE guidance_history (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                intent_id TEXT,
+                batch_id TEXT NOT NULL,
+                batch_index INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                suggestion TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'proposed'
+            );
+        """)
+        conn.execute(
+            "INSERT INTO editorial_policies "
+            "(id, version, created_at, created_by, schema_version, "
+            " manuscript_id, statement) "
+            "VALUES ('bel-legacy', 1, ?, ?, ?, 'ms-1', 'Prefer short sentences.')",
+            (stamp, user, SCHEMA_VERSION))
+        conn.execute(
+            "INSERT INTO style_elements "
+            "(id, version, created_at, created_by, schema_version, "
+            " manuscript_id, file, aspect, statement) "
+            "VALUES ('law-legacy', 1, ?, ?, ?, 'ms-1', '01.md', 'tone', "
+            " 'Keep dialogue clipped.')",
+            (stamp, user, SCHEMA_VERSION))
+        conn.execute(
+            "INSERT INTO evidence "
+            "(id, version, created_at, created_by, schema_version, "
+            " manuscript_id, evidence_type, signal, target, supports_policy) "
+            "VALUES ('ev-1', 1, ?, ?, ?, 'ms-1', 'policy_curation', "
+            " 'accepted', 'bel-legacy', 'bel-legacy')",
+            (stamp, user, SCHEMA_VERSION))
+        conn.execute(
+            "INSERT INTO knowledge_proposals "
+            "(id, version, created_at, created_by, schema_version, "
+            " manuscript_id, kind, target, payload, content_hash) "
+            "VALUES ('kp-1', 1, ?, ?, ?, 'ms-1', 'policy_revival', "
+            " 'bel-legacy', '{{}}', 'h1')",
+            (stamp, user, SCHEMA_VERSION))
+        conn.execute(
+            "INSERT INTO guidance_history "
+            "(id, version, created_at, created_by, schema_version, "
+            " manuscript_id, session_id, batch_id, batch_index, kind, "
+            " suggestion, explanation) "
+            "VALUES ('gh-1', 1, ?, ?, ?, 'ms-1', 'sess-1', 'b1', 1, "
+            " 'policy_reminder', 's', 'e')",
+            (stamp, user, SCHEMA_VERSION))
+        conn.commit()
+        conn.close()
+
+        db = Database(path)
+        tables = db._tables()
+        check("migration renames editorial_policies → editorial_beliefs",
+              "editorial_beliefs" in tables
+              and "editorial_policies" not in tables
+              and db.one("SELECT statement FROM editorial_beliefs "
+                         "WHERE id = 'bel-legacy'")["statement"]
+              == "Prefer short sentences.")
+        check("migration renames style_elements → style_laws",
+              "style_laws" in tables
+              and "style_elements" not in tables
+              and db.one("SELECT statement FROM style_laws "
+                         "WHERE id = 'law-legacy'")["statement"]
+              == "Keep dialogue clipped.")
+        cols = db._columns("evidence")
+        ev = db.one("SELECT evidence_type, supports_belief FROM evidence "
+                    "WHERE id = 'ev-1'")
+        check("migration renames supports_policy and remaps evidence_type",
+              "supports_belief" in cols
+              and "supports_policy" not in cols
+              and ev["evidence_type"] == "belief_curation"
+              and ev["supports_belief"] == "bel-legacy")
+        check("migration remaps proposal and guidance enum tokens",
+              db.one("SELECT kind FROM knowledge_proposals WHERE id = 'kp-1'")
+              ["kind"] == "belief_revival"
+              and db.one("SELECT kind FROM guidance_history WHERE id = 'gh-1'")
+              ["kind"] == "belief_reminder")
+        db.conn.close()
+
+        # Conflict: both old and new hold rows — must refuse, not drop data.
+        conflict = root / "conflict.db"
+        cconn = sqlite3.connect(str(conflict))
+        cconn.executescript(f"""
+            CREATE TABLE editorial_policies (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                confidence REAL NOT NULL DEFAULT 0.3,
+                supporting INTEGER NOT NULL DEFAULT 0,
+                contradicting INTEGER NOT NULL DEFAULT 0,
+                outstanding_questions TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'review-explanation',
+                source_id TEXT
+            );
+            CREATE TABLE editorial_beliefs (
+                {KNOWLEDGE_OBJECT_COLUMNS},
+                manuscript_id TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                confidence REAL NOT NULL DEFAULT 0.3,
+                supporting INTEGER NOT NULL DEFAULT 0,
+                contradicting INTEGER NOT NULL DEFAULT 0,
+                outstanding_questions TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'review-explanation',
+                source_id TEXT
+            );
+        """)
+        for table, bid, stmt in (
+                ("editorial_policies", "bel-old", "old"),
+                ("editorial_beliefs", "bel-new", "new")):
+            cconn.execute(
+                f"INSERT INTO {table} "
+                "(id, version, created_at, created_by, schema_version, "
+                " manuscript_id, statement) "
+                "VALUES (?, 1, ?, ?, ?, 'ms-1', ?)",
+                (bid, stamp, user, SCHEMA_VERSION, stmt))
+        cconn.commit()
+        cconn.close()
+        try:
+            Database(conflict)
+            conflict_refused = False
+        except RuntimeError as err:
+            conflict_refused = "already holds rows" in str(err)
+        check("migration refuses when the new table already holds rows",
+              conflict_refused)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_vendor_keys_and_image()
+    check_load_env_parsing()
+    check_part_build_helpers()
+    check_parse_distiller()
+    check_migrate_beliefs_and_laws()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
