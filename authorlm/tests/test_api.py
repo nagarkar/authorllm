@@ -3042,6 +3042,61 @@ def main_test() -> None:
               coerced_node is not None and coerced_node["kind"] == "concept",
               str(coerced_node))
 
+        # --- BUG-21 follow-up: a null 'concepts' payload (as opposed to a
+        # malformed item inside a present list) must be treated as a FAILED
+        # pass, not a clean "nothing found" pass. Coercing null to []
+        # (the original BUG-21 fix) let the watermark advance on a broken
+        # reply, permanently skipping the section on every future
+        # incremental run — a silent, unrecoverable content skip. ---
+        (ms / "12-nullconcepts.md").write_text(
+            "# NullConcepts\n\nNullConceptsTarget needs a name here.\n\n"
+            "## Elsewhere\n\nNullConceptsTarget appears again in a "
+            "different section, clearing the recurrence bar.\n"
+        )
+
+        class NullConceptsLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": None, "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        api.collect(db, manuscript, {})
+        nullconcepts_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        # Query the DB directly rather than trusting the long-lived in-memory
+        # `manuscript` dict: several extractions upstream in this same test
+        # (FlakyLLM's first payload, NoteOverwriteLLM, AliasHitLLM,
+        # MalformedLLM/BUG-21) have already advanced the real watermark in
+        # the DB since `manuscript` was first bound.
+        nullconcepts_before_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        nullconcepts_result = extract_concepts(
+            db, manuscript, NullConceptsLLM(), files=["12-nullconcepts.md"])
+        nullconcepts_after_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("a null 'concepts' payload is reported as a failed pass, "
+              "not a clean miss",
+              nullconcepts_result is None, str(nullconcepts_result))
+        check("a null 'concepts' payload does not advance the watermark "
+              "(the section stays eligible for re-mining)",
+              nullconcepts_after_meta.get("last_extracted_version")
+              == nullconcepts_before_meta.get("last_extracted_version")
+              and nullconcepts_after_meta.get("last_extracted_version")
+              != nullconcepts_latest["id"],
+              str({"before": nullconcepts_before_meta,
+                   "after": nullconcepts_after_meta,
+                   "latest": nullconcepts_latest["id"]}))
+        check("a null 'concepts' payload creates no concept node",
+              concepts.get_concept(db, manuscript["id"], "NullConceptsTarget")
+              is None)
+
         # --- BUG-5: the watermark write must re-read metadata from the DB
         # immediately before writing, not merge into an in-memory dict
         # captured before a multi-minute LLM call — otherwise a concurrent

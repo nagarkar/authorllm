@@ -558,6 +558,16 @@ def extract_concepts(
     result = llm.complete_json(system, text, thinking_budget=0)
     if not isinstance(result, dict):
         return None
+    if not (edges_only or aliases_only) and not isinstance(result.get("concepts"), list):
+        # A null (or otherwise non-list) 'concepts' payload is exactly as
+        # malformed as a non-dict result above. Coercing it to [] here would
+        # make a bad-shaped reply look like a clean "no concepts found" pass:
+        # `_set_extraction_watermark` would then advance and the section
+        # would never be re-mined. Returning None instead reuses the same
+        # "incomplete" signal the caller already checks (`sub is None` /
+        # `sub.get("incomplete")`) to hold the watermark back and keep the
+        # section eligible for retry.
+        return None
 
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
@@ -583,7 +593,7 @@ def extract_concepts(
     below_bar: list[str] = []
     disk_files: dict[str, str] | None = None
 
-    for item in [] if edges_only or aliases_only else (result.get("concepts") or []):
+    for item in [] if edges_only or aliases_only else result.get("concepts", []):
         if not isinstance(item, dict) or not str(item.get("name", "")).strip():
             skipped += 1
             continue
