@@ -183,6 +183,14 @@ def main_test() -> None:
               invalid_isbn_refused
               and api.get_manuscript(db)["paperback_isbn"]
               == "9798904523541")
+        try:
+            api.update_manuscript_metadata(
+                db, manuscript, hardcover_isbn="4006381333931")
+            non_isbn_ean_refused = False
+        except ValueError:
+            non_isbn_ean_refused = True
+        check("publication identity requires the ISBN-13 book prefix",
+              non_isbn_ean_refused)
         identity_out = io.StringIO()
         with contextlib.redirect_stdout(identity_out):
             cli_main(["--workspace", str(ws), "manuscript", "set",

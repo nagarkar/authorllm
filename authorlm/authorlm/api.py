@@ -150,6 +150,8 @@ def _normalize_isbn13(value: str) -> str:
     digits = re.sub(r"[ -]", "", value)
     if len(digits) != 13:
         raise ValueError("ISBN must contain exactly 13 digits")
+    if not digits.startswith(("978", "979")):
+        raise ValueError("ISBN-13 must begin with 978 or 979")
     total = sum(int(digit) * (1 if index % 2 == 0 else 3)
                 for index, digit in enumerate(digits[:12]))
     if (10 - total % 10) % 10 != int(digits[-1]):

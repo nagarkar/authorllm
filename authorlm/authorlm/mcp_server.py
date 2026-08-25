@@ -108,8 +108,8 @@ def list_manuscripts() -> dict:
 
 @mcp.tool()
 def get_manuscript_metadata(manuscript: str | None = None) -> dict:
-    """Get the canonical author and copyright-owner metadata used by
-    publication exports for the selected manuscript."""
+    """Get canonical author, copyright owner, paperback ISBN, and hardcover
+    ISBN metadata for the selected manuscript."""
     def run():
         db = _db()
         return api.manuscript_metadata(_manuscript(db, manuscript))

@@ -1,6 +1,7 @@
 % Presentation for semantic roles assigned by structure.lua.
-\usepackage[nostamp]{draftwatermark}
 \usepackage{eso-pic}
+\usepackage{graphicx}
+\usepackage{xcolor}
 
 \providecommand{\AuthorLMBookTitle}{\Huge}
 \providecommand{\AuthorLMEssayBreak}{\newpage}
@@ -8,7 +9,6 @@
 
 \makeatletter
 \providecommand{\AuthorLMEnableReviewPageStyle}{%
-  \draftwatermark@stamptrue
   \let\ps@plain\ps@empty
   \pagestyle{empty}%
 }
@@ -17,11 +17,19 @@
 % The review filter invokes this only for the default PDF profile. A
 % --print-ready export never emits the invocation, leaving a clean PDF.
 \providecommand{\AuthorLMReviewMode}[2]{%
-  \SetWatermarkText{CONFIDENTIAL\\REVIEW}%
-  \SetWatermarkAngle{45}%
-  \SetWatermarkScale{0.55}%
-  \SetWatermarkLightness{0.92}%
   \AuthorLMEnableReviewPageStyle{}
+  \AddToShipoutPictureBG{%
+    \AtPageCenter{%
+      \makebox[0pt][c]{%
+        \rotatebox{45}{%
+          \parbox{0.72\paperwidth}{%
+            \centering\fontsize{64}{66}\selectfont\color[gray]{0.92}%
+            Confidential\\Review%
+          }%
+        }%
+      }%
+    }%
+  }%
   \AddToShipoutPictureFG{%
     \AtPageLowerLeft{%
       \raisebox{0.3in}{%
