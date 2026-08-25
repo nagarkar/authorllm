@@ -2923,6 +2923,47 @@ def main_test() -> None:
                      (manuscript["id"], "AlphaConcept")) is not None,
               str(multi))
 
+        # --- BUG-7: extraction must never overwrite the author's ratified
+        # concept notes, even when a materially different paraphrase comes
+        # back for text the author actually changed. ---
+        (ms / "09-ratified.md").write_text(
+            "# Ratified\n\nRatifiedTerm is discussed at length here.\n"
+        )
+        api.add_concept(db, manuscript, "RatifiedTerm", kind="concept",
+                        notes="AUTHOR RATIFIED TEXT")
+        note_proposals_before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+
+        class NoteOverwriteLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "RatifiedTerm", "kind": "concept",
+                     "notes": "machine paraphrase of the definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, NoteOverwriteLLM(),
+                         files=["09-ratified.md"])
+        ratified_after = concepts.get_concept(db, manuscript["id"], "RatifiedTerm")
+        note_proposals_after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+        check("extraction never overwrites the author's ratified concept notes",
+              ratified_after["notes"] == "AUTHOR RATIFIED TEXT",
+              f"notes became: {ratified_after['notes']!r}")
+        check("a materially different extraction files a note_update "
+              "proposal instead of applying itself",
+              note_proposals_after == note_proposals_before + 1,
+              f"before={note_proposals_before} after={note_proposals_after}")
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.

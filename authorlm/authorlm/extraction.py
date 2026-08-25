@@ -639,7 +639,13 @@ def extract_concepts(
             if not admitted:
                 below_bar.append(name)
                 continue
-        node = add_concept(db, mid, name, kind=kind, notes=notes,
+        # Existing knowledge is machine-unwritable (see the note_update branch
+        # below): `add_concept` applies `notes` unconditionally when the
+        # concept already exists, so an existing concept's notes must never
+        # be passed through — only a brand-new concept may be seeded with
+        # extracted notes.
+        node = add_concept(db, mid, name, kind=kind,
+                           notes=notes if before is None else None,
                            source_id=db.source("system"))
         if before is None:
             # Machine-extracted nodes are hypotheses awaiting the author's
