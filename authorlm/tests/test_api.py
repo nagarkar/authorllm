@@ -2282,6 +2282,32 @@ def main_test() -> None:
               and "Acknowledged" in props.adopt(db, manuscript["id"],
                                                 incongruence[0]))
 
+        # --- BUG-20: an `item` index of 0 (or negative) must be rejected,
+        # not silently wrapped by Python's negative-index behaviour onto a
+        # DIFFERENT paragraph. `pairs[int(f.get("item",0)) - 1]` with
+        # item=0 computes index -1, which Python resolves to the last pair
+        # instead of raising IndexError, so the bounds guard never fires. ---
+        zero_item_llm = FakeLLM({"findings": [
+            {"item": 0, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "The Tremor is never caused; it causes.",
+             "why": "an out-of-range item must not bind to any paragraph"},
+        ]})
+        onto_zero = sweeps.ontology(db, manuscript, zero_item_llm,
+                                    file="01-choice.md")
+        check("BUG-20: item=0 is dropped instead of wrapping onto the "
+              "last pair via negative indexing",
+              onto_zero["findings"] == 0
+              and onto_zero["dropped_ungrounded"] == 1, str(onto_zero))
+        neg_item_llm = FakeLLM({"findings": [
+            {"item": -1, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "x", "why": "a negative item must not bind either"},
+        ]})
+        onto_neg = sweeps.ontology(db, manuscript, neg_item_llm,
+                                   file="01-choice.md")
+        check("BUG-20: a negative item is dropped, not indexed from the end",
+              onto_neg["findings"] == 0
+              and onto_neg["dropped_ungrounded"] == 1, str(onto_neg))
+
         lenses.add_lens(manuscript, "clarity",
                         "Flag sentences that assert a claim without "
                         "argument or example.")

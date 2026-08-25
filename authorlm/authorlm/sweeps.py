@@ -214,10 +214,18 @@ def ontology(db: Database, manuscript: dict, llm,
             dropped += 1
             continue
         try:
-            pair = pairs[int(f.get("item", 0)) - 1]
-        except (ValueError, IndexError):
+            item = int(f.get("item", 0))
+        except (TypeError, ValueError):
             dropped += 1
             continue
+        # Python wraps negative indices, so `item=0` (-> index -1) or any
+        # other non-positive value would silently bind to the WRONG
+        # paragraph instead of tripping an IndexError. Bounds-check
+        # explicitly rather than relying on indexing to raise.
+        if not (1 <= item <= len(pairs)):
+            dropped += 1
+            continue
+        pair = pairs[item - 1]
         quote = " ".join(str(f.get("quote", "")).split())
         # Hygiene gate: the quote must be verbatim in the paragraph.
         if not quote or quote.lower() not in \
