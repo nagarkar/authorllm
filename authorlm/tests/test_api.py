@@ -1342,6 +1342,48 @@ def main_test() -> None:
         stub.set_tab("01-choice.md", restored)
         (ms / "01-choice.md").write_text(restored)
 
+        # --- doc pull truncation on a base-less mapped file (T2,
+        # risk-register BUG-1 repro): ensure_master gives every file in
+        # reading order a tab, but only the pushed file gets a
+        # pushed_hash. A pull of "everything mapped" then sees the
+        # never-pushed file's empty tab as "changed" with no recorded
+        # base and overwrites the local file with nothing. Own
+        # workspace, own FakeGoogle instance — isolated from the shared
+        # fixture above. CHARACTERIZATION repro (risk-register §3, T2):
+        # this stays green as today's behavior, not a specification,
+        # until the Sponsor authorizes the three_way base-less guard.
+        t2_root = root / "t2-ws"
+        t2_ms = t2_root / "manuscript"
+        t2_ms.mkdir(parents=True)
+        (t2_ms / "a.md").write_text("# A\n\nOriginal a content.\n")
+        (t2_ms / "b.md").write_text(
+            "# B\n\nOriginal b content, never individually pushed.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(t2_root), "init", "--name", "t2book",
+                      "--path", str(t2_ms), "--no-extract"])
+        t2_db = api.open_db(str(t2_root))
+        t2_manuscript = api.get_manuscript(t2_db)
+        t2_stub = FakeGoogle()
+        pushed_a = push_doc(t2_db, t2_manuscript, "a.md",
+                            service=t2_stub, docs_service=t2_stub)
+        master_tabs = t2_stub.state["docs"][pushed_a["doc_id"]]
+        b_tab = next(t for t in master_tabs if t["title"] == "b.md")
+        check("ensure_master gave the never-pushed file b.md its own tab "
+              "too — empty, since only a.md was actually pushed",
+              b_tab["text"] == "", str(master_tabs))
+        t2_manuscript = api.get_manuscript(t2_db)  # refresh metadata
+        report = pull_doc(t2_db, t2_manuscript,
+                          service=t2_stub, docs_service=t2_stub)
+        check("a pull of everything mapped treats the base-less empty tab "
+              "as 'changed' (no pushed_hash to compare against) and "
+              "overwrites the never-pushed local file with nothing",
+              "b.md" in report["changed"]
+              and (t2_ms / "b.md").read_text() == "",
+              str(report))
+        check("meanwhile the actually-pushed file is untouched",
+              "a.md" not in report["changed"]
+              and "Original a content" in (t2_ms / "a.md").read_text())
+
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
