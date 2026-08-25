@@ -380,6 +380,42 @@ def main_test() -> None:
               "file as a mass deletion",
               flagged == [], str(flagged))
 
+        # --- FAIL-3 (end-to-end): the checks above exercise
+        # read_manuscript_files directly, which is exactly how this gap
+        # survived — api.collect() runs illus.maintain_excerpts BEFORE
+        # read_manuscript_files, and maintain_excerpts had its own bare
+        # `path.read_text(encoding="utf-8")` with no error handling.
+        # api.collect() wraps that call in `except OSError` only, and
+        # UnicodeDecodeError is a ValueError, not an OSError, so it was
+        # not caught: a single bad byte in any manuscript file crashed
+        # api.collect() end-to-end — the recovery path itself. This test
+        # goes through api.collect() to prove that path survives, using a
+        # fresh workspace so it is not coupled to the direct-layer
+        # assertions above. ---
+        e2e_root = root / "e2e-badbytes-ws"
+        e2e_ms = e2e_root / "manuscript"
+        e2e_ms.mkdir(parents=True)
+        (e2e_ms / "01-good.md").write_text("Good paragraph. " * 40)
+        (e2e_ms / "02-bad.md").write_bytes(b"# Heading\n\xff\xfe not valid utf-8\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(e2e_root), "init", "--name", "e2ebadbytes",
+                      "--path", str(e2e_ms)])
+        e2e_db = api.open_db(str(e2e_root))
+        e2e_manuscript = api.get_manuscript(e2e_db)
+
+        report = api.collect(e2e_db, e2e_manuscript, {})
+        check("api.collect() completes end-to-end through a manuscript "
+              "containing invalid UTF-8, instead of raising",
+              "staged" not in report, str(report))
+        v1 = e2e_db.one(
+            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1",
+            (e2e_manuscript["id"],))
+        stored_files = loads(v1["files"], {}) if v1 else {}
+        check("the file with invalid UTF-8 is snapshotted by api.collect(), "
+              "not silently dropped as a phantom deletion",
+              "02-bad.md" in stored_files, str(sorted(stored_files)))
+
         # --- history show/restore (MVP.md 'Deliberately deferred': version
         # access & restoration — implementable at any time, no schema change) ---
         try:
