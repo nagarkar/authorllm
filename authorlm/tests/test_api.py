@@ -121,9 +121,202 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_isbn_normalization() -> None:
+    """ISBN-13 syntax/checksum and per-format uniqueness (#27 follow-ons).
+
+    Wrong digits on a print run are irreversible; the gate must refuse
+    non-ISBN EANs, bad checksums, and reusing one ISBN across formats."""
+    from authorlm.api import _normalize_isbn13, _validate_format_isbns
+
+    check("empty ISBN normalizes to empty (optional field)",
+          _normalize_isbn13("") == "" and _normalize_isbn13("  ") == "")
+    check("hyphenated/spaced ISBN-13 collapses to digits",
+          _normalize_isbn13("979-8-90452-354-1") == "9798904523541"
+          and _normalize_isbn13("979 890452 3541") == "9798904523541")
+    for label, value in (
+            ("letters", "979-8-90452-ABCD"),
+            ("wrong length", "979890452354"),
+            ("non-book EAN prefix", "4006381333931"),
+            ("bad checksum", "9798904523542"),
+    ):
+        try:
+            _normalize_isbn13(value)
+            refused = False
+        except ValueError:
+            refused = True
+        check(f"ISBN refuses {label}", refused)
+    try:
+        _validate_format_isbns("9798904523541", "9798904523541")
+        same_refused = False
+    except ValueError:
+        same_refused = True
+    check("format ISBN guard allows one-sided or both-empty",
+          _validate_format_isbns("", "") is None
+          and _validate_format_isbns("9798904523541", "") is None
+          and _validate_format_isbns("", "9798904523510") is None)
+    check("format ISBN guard refuses identical paperback/hardcover",
+          same_refused)
+
+
+def check_review_pdf_identity_gate() -> None:
+    """Review PDFs require author + copyright owner; print-ready does not.
+
+    The confidential review profile stamps those names into the legal
+    notice — shipping without them produces a review PDF with blank
+    ownership lines (d0ae339 / ab022e5)."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from authorlm.export import export_published, set_setting
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-review-gate-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "01-essay.md").write_text("# Essay\n\nBody.\n", encoding="utf-8")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-essay.md"\n', encoding="utf-8")
+        bare = {"id": "ms-bare", "name": "bare", "path": str(ms),
+                "author": "", "copyright_owner": ""}
+        partial = dict(bare, author="Ada")
+        complete = dict(bare, author="Ada", copyright_owner="Ada LLC")
+        set_setting(complete, "variant", "stripped")
+
+        try:
+            export_published(None, bare, fmt="pdf")
+            missing_both = False
+        except RuntimeError as err:
+            missing_both = ("author" in str(err)
+                            and "copyright_owner" in str(err))
+        check("review PDF refuses when author and copyright owner are unset",
+              missing_both)
+
+        try:
+            export_published(None, partial, fmt="pdf")
+            missing_owner = False
+            owner_msg = ""
+        except RuntimeError as err:
+            owner_msg = str(err)
+            # The missing-field list is between "metadata:" and the em dash.
+            listed = owner_msg.split("metadata:", 1)[-1].split("—", 1)[0]
+            missing_owner = ("copyright_owner" in listed
+                             and "author" not in listed)
+        check("review PDF names the missing copyright_owner specifically",
+              missing_owner, owner_msg)
+
+        with (patch("shutil.which", return_value="/usr/bin/pandoc"),
+              patch("subprocess.run", return_value=SimpleNamespace(
+                  returncode=0, stderr="")) as run):
+            result = export_published(None, complete, fmt="pdf")
+        check("review PDF proceeds once both identity fields are set",
+              result["mode"] == "review"
+              and any("authorlm-review-copy=true" in str(a)
+                      for a in run.call_args.args[0]))
+
+        # Print-ready must not demand the review notice fields — a print
+        # run can still carry author metadata without the legal banner.
+        no_identity = dict(bare)
+        with (patch("shutil.which", return_value="/usr/bin/pandoc"),
+              patch("subprocess.run", return_value=SimpleNamespace(
+                  returncode=0, stderr="")) as print_run):
+            printed = export_published(None, no_identity, fmt="pdf",
+                                       print_ready=True)
+        print_meta = [print_run.call_args.args[0][i + 1]
+                      for i, arg in enumerate(print_run.call_args.args[0][:-1])
+                      if arg == "--metadata"]
+        check("print-ready PDF skips the review identity gate",
+              printed["mode"] == "print"
+              and not any(m.startswith("authorlm-review-copy=")
+                          for m in print_meta))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_export_setting_guards() -> None:
+    """Unknown keys and illegal variants must not corrupt settings.toml."""
+    from authorlm.export import load_settings, set_setting
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-settings-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        manuscript = {"name": "book", "path": str(ms)}
+        try:
+            set_setting(manuscript, "variant", "gallery")
+            bad_variant = False
+        except ValueError as err:
+            bad_variant = "images | slots | stripped" in str(err)
+        check("export settings refuse an illegal illustration variant",
+              bad_variant)
+        check("refused variant leaves defaults untouched",
+              load_settings(manuscript)["variant"] == "images"
+              and not (ms / "_exports" / "settings.toml").exists())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_split_trailing_tab_boundary() -> None:
+    """Trailing live-tab titles must be split boundaries (it-307dc1279a7e).
+
+    Surgical push uses the same rule as pull/reconcile: if a hand-made
+    tab after an essay is omitted from the boundary set, its body is
+    swallowed into the essay section and paragraph counts disagree."""
+    from authorlm.gdocs import split_tabbed_export
+
+    export = "\n".join([
+        "# **06-orrery.md**", "",
+        "Brass planets on brass rails.", "",
+        "# **Tab 31**", "",
+        "scratch notes",
+        "not an essay",
+    ])
+    polluted = split_tabbed_export(export, {"06-orrery.md"})
+    clean = split_tabbed_export(export, {"06-orrery.md", "Tab 31"})
+    check("omitting a trailing tab title swallows its body into the essay",
+          "scratch notes" in polluted["06-orrery.md"]
+          and "Tab 31" not in polluted, str(polluted))
+    check("including the trailing tab title keeps the essay section clean",
+          clean["06-orrery.md"].strip() == "Brass planets on brass rails."
+          and clean["Tab 31"].strip() == "scratch notes\nnot an essay",
+          str(clean))
+
+
+def check_harvest_fetch_failure_isolation() -> None:
+    """A Drive comments fetch failure must not raise out of harvest.
+
+    Session-start reconcile shares this path; a comments outage must
+    surface as comments_error and leave the Doc reconcile half free."""
+    from authorlm.gdocs import harvest_comments
+
+    class _Boom:
+        def comments(self):
+            raise RuntimeError("drive comments unavailable")
+
+    report: dict = {}
+    harvest_comments(
+        db=None,  # unused when fetch fails before any query
+        manuscript={"id": "ms-x"},
+        master_id="doc-x",
+        service=_Boom(),
+        docs_service=None,
+        bridge=None,
+        report=report,
+    )
+    check("harvest records comments_error instead of raising",
+          report.get("comments_error") == "drive comments unavailable"
+          and "comments" not in report
+          and "comments_reconciled" not in report,
+          str(report))
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_isbn_normalization()
+    check_review_pdf_identity_gate()
+    check_export_setting_guards()
+    check_split_trailing_tab_boundary()
+    check_harvest_fetch_failure_isolation()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
