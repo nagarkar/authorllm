@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .db import Database, ko_fields, loads
+from .db import Database, SYSTEM_EVIDENCE_TYPES, ko_fields, loads
 from .llm import LLMClient
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -156,12 +156,130 @@ def _lifecycle_status(status: str, supporting: int, contradicting: int,
     return status
 
 
+# Evidence signals that represent genuine endorsement (an accepted or
+# modified suggestion, an explanation that matched/created a belief).
+# 'rejected' contradicts; 'deferred' and everything else (declared,
+# adopted, retired, merged, converted, pattern, ...) neither supports nor
+# contradicts and is left out of both counts, exactly as before.
+SUPPORT_SIGNALS = ("accepted", "modified")
+
+
+def _support_evidence_type(source: str | None) -> str:
+    """Maps a belief `source` to the evidence_type this module writes on
+    its behalf when it creates or reinforces a belief. 'episode-analysis'
+    is the one source whose own events must stay machine-flagged so
+    SYSTEM_EVIDENCE_TYPES excludes them from `_derive_supporting` (INV-2);
+    every other source is author-originated and logged as author_review."""
+    return "episode_analysis" if source == "episode-analysis" else "author_review"
+
+
+def _record_support(db: Database, manuscript_id: str, belief_id: str,
+                    source: str | None, target: str,
+                    episode_id: str | None = None) -> None:
+    """The evidence row backing one belief creation or reinforcement event.
+    `_derive_supporting` counts only evidence rows, so every call site that
+    used to bump the stored `supporting` counter in place now writes one of
+    these FIRST — machine-sourced calls land tagged 'episode_analysis' and
+    are excluded on the very next read, non-machine calls land tagged
+    'author_review' and count."""
+    ev = ko_fields("ev")
+    ev.update(
+        manuscript_id=manuscript_id, episode_id=episode_id,
+        evidence_type=_support_evidence_type(source), signal="accepted",
+        target=target[:200], supports_belief=belief_id, weight="medium",
+    )
+    db.insert("evidence", ev)
+
+
+def _merged_into(db: Database, manuscript_id: str, belief_id: str) -> list[str]:
+    """Ids of beliefs (transitively) folded into `belief_id` by merge_beliefs
+    — found by walking metadata.curation, never by repointing evidence rows
+    (existing evidence is never rewritten). Lets a merged duplicate's
+    evidence keep counting toward the canonical belief without touching a
+    single historical row."""
+    rows = db.all(
+        "SELECT id, metadata FROM editorial_beliefs "
+        "WHERE manuscript_id = ? AND status = 'retired'",
+        (manuscript_id,),
+    )
+    children_of: dict[str, list[str]] = {}
+    for r in rows:
+        curation = (loads(r["metadata"], {}) or {}).get("curation", {})
+        if curation.get("action") == "merged" and curation.get("into"):
+            children_of.setdefault(curation["into"], []).append(r["id"])
+    found: list[str] = []
+    frontier = [belief_id]
+    while frontier:
+        children = children_of.get(frontier.pop(), [])
+        found.extend(children)
+        frontier.extend(children)
+    return found
+
+
+def _derive_supporting(db: Database, manuscript_id: str, belief_id: str) -> int:
+    """Supporting count derived from distinct-session evidence, excluding
+    machine-inferred sources (INV-2 — Sponsor-ratified 2026-08-25: "INV-2
+    is correct"). An episode-analysis conjecture may SEED a candidate
+    belief but can never by itself validate one — SYSTEM_EVIDENCE_TYPES
+    (db.py) is excluded here, regardless of session, which is what makes
+    this the actual fix rather than a session-counting refinement.
+
+    Within one session, two evidence rows count once ONLY when they are
+    the same observation replayed (same episode/session AND the same
+    logged `target`) — this is the "makes replay idempotent" half of the
+    ruling: re-running the same machine analysis, or the author repeating
+    the identical typed explanation twice in one sitting, must not look
+    like two independent observations. Two rows from the same session
+    that record two DIFFERENT things — e.g. the explanation that seeded a
+    candidate belief, and a later, separate acceptance of that belief's
+    own reminder suggestion (guidance.py's own review-once-per-session
+    gate already stops that reminder itself from being farmed) — are two
+    genuinely distinct author acts and both count, even same-session.
+    Evidence with no episode (e.g. a briefing answer or a proposal
+    adoption, recorded outside any episode) has no session to correlate
+    against, so each such row is its own group by construction (grouped
+    with its own evidence id, which is unique)."""
+    ids = [belief_id] + _merged_into(db, manuscript_id, belief_id)
+    id_ph = ", ".join("?" for _ in ids)
+    sys_ph = ", ".join("?" for _ in SYSTEM_EVIDENCE_TYPES)
+    sig_ph = ", ".join("?" for _ in SUPPORT_SIGNALS)
+    rows = db.all(
+        f"SELECT e.id AS eid, e.target AS target, "
+        f"ep.session_id AS session_id FROM evidence e "
+        f"LEFT JOIN editorial_episodes ep ON ep.id = e.episode_id "
+        f"WHERE e.supports_belief IN ({id_ph}) "
+        f"AND e.evidence_type NOT IN ({sys_ph}) "
+        f"AND e.signal IN ({sig_ph})",
+        (*ids, *SYSTEM_EVIDENCE_TYPES, *SUPPORT_SIGNALS),
+    )
+    groups = {(r["session_id"] or r["eid"], r["target"]) for r in rows}
+    return len(groups)
+
+
+def _validated_floor(belief: dict) -> int:
+    """The one exception to pure derivation: a belief that is validated
+    TODAY must not be retroactively demoted by this change. 8 of 12
+    validated beliefs on the live database carry stored `supporting` of
+    2-11 with zero linked evidence rows (evidence linkage predates them) —
+    deriving naively would collapse all of them to 0 on next touch, and
+    their fate is a separate decision the Sponsor has not ruled on. So: a
+    validated belief's supporting floors at whatever is already on record;
+    a candidate (or retired) belief gets no floor — pure derivation governs
+    all FUTURE promotion, which is the whole point of INV-2."""
+    return belief["supporting"] if belief["status"] == "validated" else 0
+
+
 def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | None = None) -> dict:
-    """Apply one piece of review evidence to a belief's evidence record."""
+    """Recompute one belief's evidence record. Callers must persist the
+    evidence row for THIS event (supports_belief = belief_id) before
+    calling — supporting is derived from the evidence table, not
+    incremented in place, so there is nothing to derive from until the row
+    exists."""
     belief = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (belief_id,))
     if belief is None:
         return {}
-    supporting = belief["supporting"] + (1 if signal in ("accepted", "modified") else 0)
+    supporting = max(_derive_supporting(db, belief["manuscript_id"], belief_id),
+                     _validated_floor(belief))
     contradicting = belief["contradicting"] + (1 if signal == "rejected" else 0)
     conf = _confidence(supporting, contradicting)
     status = _lifecycle_status(belief["status"], supporting, contradicting,
@@ -182,7 +300,7 @@ def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | 
 
 def seed_candidate_belief(
     db: Database, manuscript_id: str, statement: str, source: str,
-    llm: LLMClient | None = None,
+    llm: LLMClient | None = None, episode_id: str | None = None,
 ) -> dict | None:
     """An explained review outcome seeds (or reinforces) a candidate belief.
     With an LLM available, the raw explanation is distilled into a normative
@@ -205,7 +323,8 @@ def seed_candidate_belief(
             if verdict == "none":
                 return None
             if verdict == "match":
-                return _reinforce_or_revive(db, manuscript_id, payload, original)
+                return _reinforce_or_revive(db, manuscript_id, payload, original,
+                                            source=source, episode_id=episode_id)
             statement = payload
     # Exact match is now only a safety net (and the whole story with no LLM):
     # semantic matching happens in the distiller above, because paraphrase is
@@ -226,6 +345,7 @@ def seed_candidate_belief(
                 source="review-explanation",
             )
             return {"kind": "revival_proposal", "statement": existing["statement"]}
+        _record_support(db, manuscript_id, existing["id"], source, original, episode_id)
         return reinforce_belief(db, existing["id"], "accepted")
     row = ko_fields("pol")
     if statement != original:
@@ -247,11 +367,13 @@ def seed_candidate_belief(
         source_id=db.source("system"),
     )
     db.insert("editorial_beliefs", row)
+    _record_support(db, manuscript_id, row["id"], source, original, episode_id)
     return row
 
 
 def _reinforce_or_revive(db: Database, manuscript_id: str, belief_id: str,
-                         original: str) -> dict | None:
+                         original: str, source: str | None = None,
+                         episode_id: str | None = None) -> dict | None:
     """Fresh evidence for an existing belief. A retired belief stays retired
     — the evidence files a revival proposal so the author decides, rather
     than the machine quietly re-adopting something they turned down."""
@@ -267,6 +389,7 @@ def _reinforce_or_revive(db: Database, manuscript_id: str, belief_id: str,
             source="review-explanation",
         )
         return {"kind": "revival_proposal", "statement": belief["statement"]}
+    _record_support(db, manuscript_id, belief["id"], source, original, episode_id)
     return reinforce_belief(db, belief["id"], "accepted")
 
 
@@ -300,8 +423,24 @@ def merge_beliefs(db: Database, manuscript_id: str, duplicate: dict,
                    canonical: dict, reason: str | None = None) -> dict:
     """Fold a duplicate belief's evidence record into the canonical one and
     retire the duplicate. The duplicate's statement stays in the table
-    (retired), so it remains banned from re-seeding."""
-    supporting = canonical["supporting"] + duplicate["supporting"]
+    (retired), so it remains banned from re-seeding.
+
+    The duplicate is retired FIRST so `_derive_supporting` can see the
+    fold (via `_merged_into`'s metadata walk) when it recomputes canonical's
+    count — no evidence row is repointed, existing evidence is never
+    rewritten. This replaces the old `canonical["supporting"] +
+    duplicate["supporting"]` counter arithmetic, which summed whatever
+    numbers happened to be stored (possibly machine-inflated) instead of
+    counting real evidence."""
+    meta = loads(duplicate["metadata"], {})
+    meta["curation"] = {"action": "merged", "into": canonical["id"]}
+    if reason:
+        meta["curation"]["reason"] = reason
+    db.update("editorial_beliefs", duplicate["id"],
+              {"status": "retired", "metadata": json.dumps(meta)})
+
+    supporting = max(_derive_supporting(db, manuscript_id, canonical["id"]),
+                     _validated_floor(canonical))
     contradicting = canonical["contradicting"] + duplicate["contradicting"]
     conf = _confidence(supporting, contradicting)
     status = _lifecycle_status(canonical["status"], supporting,
@@ -316,12 +455,6 @@ def merge_beliefs(db: Database, manuscript_id: str, duplicate: dict,
         "outstanding_questions": json.dumps(questions),
     }
     db.update("editorial_beliefs", canonical["id"], changes)
-    meta = loads(duplicate["metadata"], {})
-    meta["curation"] = {"action": "merged", "into": canonical["id"]}
-    if reason:
-        meta["curation"]["reason"] = reason
-    db.update("editorial_beliefs", duplicate["id"],
-              {"status": "retired", "metadata": json.dumps(meta)})
     _curation_evidence(
         db, manuscript_id, "merged",
         f"{duplicate['statement']} ⇒ {canonical['statement']}",
@@ -377,10 +510,10 @@ def record_review(
         question = None
         if decision in ("rejected", "modified") and explanation:
             question = f"Review of '{guidance['suggestion'][:60]}': {explanation}"
-        updated = reinforce_belief(db, belief_id, decision, question)
-        if updated:
-            updated_beliefs.append(updated)
 
+        # Evidence is written BEFORE reinforcement: supporting is derived
+        # from the evidence table (INV-2), so this event has to exist
+        # there before reinforce_belief can see it.
         ev = ko_fields("ev")
         ev.update(
             manuscript_id=manuscript_id,
@@ -393,6 +526,10 @@ def record_review(
             weight="high" if explanation else "medium",
         )
         db.insert("evidence", ev)
+
+        updated = reinforce_belief(db, belief_id, decision, question)
+        if updated:
+            updated_beliefs.append(updated)
 
     if not belief_ids:
         ev = ko_fields("ev")
@@ -410,7 +547,8 @@ def record_review(
     seeded = None
     if decision in ("rejected", "modified") and explanation:
         seeded = seed_candidate_belief(
-            db, manuscript_id, explanation, source="review-explanation", llm=llm
+            db, manuscript_id, explanation, source="review-explanation", llm=llm,
+            episode_id=episode_id,
         )
 
     return {"review": review, "beliefs": updated_beliefs, "seeded_belief": seeded}
@@ -438,7 +576,8 @@ def seed_margin_candidate(db: Database, manuscript_id: str,
         if line.strip().upper().startswith("MATCH:"):
             bid = line.split(":", 1)[1].strip()
             if bid in {r["id"] for r in rows}:
-                return _reinforce_or_revive(db, manuscript_id, bid, explanation)
+                return _reinforce_or_revive(db, manuscript_id, bid, explanation,
+                                            source="margin-thread")
             return None
     scope_kind, statement, example = None, None, None
     for line in reply.strip().splitlines():

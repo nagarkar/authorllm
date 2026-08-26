@@ -167,14 +167,20 @@ def test_semantic_matching(db, ms):
 
 
 def test_episode_analysis_validates_from_pure_machine_inference(db, ms):
-    """T1 (risk-register INV-2 repro, "the repro the Sponsor needs to rule
-    on in the morning"): three independently closed episodes, each machine-
-    analyzed into the SAME inferred pattern, promote a belief straight to
-    'validated' with zero author input anywhere in the chain — no
-    review_suggestion call, no explanation, nothing typed by a human. This
-    characterizes what analyze_pending + seed_candidate_belief do today; it
-    does not endorse the outcome as correct (Gate-1 flags exactly this as
-    a product-semantics question, not a bug to silently fix)."""
+    """T1 (risk-register INV-2, Sponsor-ratified 2026-08-25: "INV-2 is
+    correct"): three independently closed episodes, each machine-analyzed
+    into the SAME inferred pattern, must NOT promote a belief to
+    'validated' on zero author input anywhere in the chain — no
+    review_suggestion call, no explanation, nothing typed by a human.
+
+    Originally this test PINNED the opposite (buggy) outcome — three
+    machine-only episodes reaching 'validated' — as a characterization of
+    what analyze_pending + seed_candidate_belief did before the ruling.
+    The Sponsor has since ruled that outcome incorrect, which is this
+    campaign's one sanctioned reason to flip a characterization test's
+    expectation: machine-inferred evidence (episode-analysis, and every
+    other SYSTEM_EVIDENCE_TYPES source) may SEED a candidate belief but
+    must never by itself validate one."""
     pattern = "Open every abstract definition with a lived example first."
     episode_ids = []
     for i in range(3):
@@ -203,24 +209,147 @@ def test_episode_analysis_validates_from_pure_machine_inference(db, ms):
     check("all three pending episodes were analyzed in one pass",
           {s["episode_id"] for s in summaries} == set(episode_ids),
           str(summaries))
-    check("zero author-explanation evidence was recorded for this belief — "
-          "every bit of support is machine-inferred",
+    # Every episode now leaves TWO episode_analysis-tagged evidence rows
+    # for this pattern: the analyzer's own log (analysis.py, unchanged)
+    # and the belief-support event beliefs.py records for the same
+    # machine-attributed reinforcement (_record_support, new). Both are
+    # tagged 'episode_analysis' and both are excluded from
+    # _derive_supporting — this assertion is just an accurate count, the
+    # exclusion is what the checks below are really about.
+    check("every machine touch of this belief is still logged as evidence — "
+          "nothing became invisible, it became excluded",
           db.one(
               "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
               "AND evidence_type = 'episode_analysis' AND target = ?",
-              (ms["id"], pattern[:200]))["n"] == 3)
+              (ms["id"], pattern[:200]))["n"] == 6)
 
     belief = db.one(
         "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
         "AND lower(statement) = lower(?)", (ms["id"], pattern))
-    check("the belief exists, sourced as episode-analysis, with support "
-          "from all three episodes and no author explanation",
+    check("the belief exists, sourced as episode-analysis, but its derived "
+          "supporting count is zero — every evidence row backing it is "
+          "machine-inferred and INV-2 excludes all of them",
           belief is not None and belief["source"] == "episode-analysis"
-          and belief["supporting"] == 3, str(dict(belief) if belief else None))
-    check("it reached 'validated' status with zero author input — the "
-          "exact scenario Gate-1 flagged for a Sponsor ruling",
-          belief["status"] == "validated", str(dict(belief)))
+          and belief["supporting"] == 0, str(dict(belief) if belief else None))
+    check("it stays 'candidate' — three machine-only episodes are exactly "
+          "the scenario the Sponsor ruled must never validate on their own",
+          belief["status"] == "candidate", str(dict(belief)))
     return belief
+
+
+def _guidance_row(ms_id: str, session_id: str, belief_ids: list[str],
+                  batch_id: str, suggestion: str = "A guidance suggestion.") -> dict:
+    g = ko_fields("gd")
+    g.update(manuscript_id=ms_id, session_id=session_id, intent_id=None,
+             batch_id=batch_id, batch_index=1, kind="bridge",
+             suggestion=suggestion, explanation="why", state="proposed",
+             metadata=json.dumps({"belief_ids": belief_ids}))
+    return g
+
+
+def _closed_episode(db, ms_id: str, session_id: str) -> dict:
+    ep = ko_fields("ep")
+    ep.update(manuscript_id=ms_id, session_id=session_id, intent_id=None,
+              transition_ids="[]", outcome=None, status="closed")
+    db.insert("editorial_episodes", ep)
+    return ep
+
+
+def test_inv2_cross_session_author_evidence_validates(db, ms):
+    """INV-2 regression (b): genuine author evidence, from two DISTINCT
+    sessions, DOES validate a candidate belief. The fix must not throw out
+    legitimate cross-session support along with the machine-only kind —
+    this is the guidance.py:343-344 cross-session clause, now true for
+    promotion as well as for what guidance displays."""
+    belief = bel.seed_candidate_belief(
+        db, ms["id"], "Keep footnotes off the main line of argument.",
+        source="review-explanation", llm=None)
+    check("a fresh explanation seeds a candidate", belief is not None
+          and belief["status"] == "candidate", str(belief))
+
+    for i in range(2):
+        ep = _closed_episode(db, ms["id"], f"inv2b-sess-{i}")
+        g = _guidance_row(ms["id"], f"inv2b-sess-{i}", [belief["id"]],
+                          f"inv2b-batch-{i}")
+        db.insert("guidance_history", g)
+        bel.record_review(db, ms["id"], g, "accepted", None, ep["id"], llm=None)
+
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                   (belief["id"],))
+    check("two accepts from two distinct sessions validate it "
+          "(review-explanation needs 2 distinct sessions)",
+          after["status"] == "validated" and after["supporting"] == 3,
+          str(dict(after)))
+
+
+def test_inv2_same_session_dedup(db, ms):
+    """INV-2 regression (c): the SAME observation, replayed within one
+    session, counts once — "makes replay idempotent" from the ruling.
+    Three same-session accepts of the identically-worded suggestion must
+    not look like three independent pieces of evidence; they collapse
+    into the one unit creation already contributed, so the belief crosses
+    the review-explanation bar of 2 (not 4, which is what three ADDITIONAL
+    uncollapsed units would wrongly give it). Two DIFFERENT same-session
+    observations are a different matter — see
+    test_inv2_cross_session_author_evidence_validates's sibling scenario
+    in test_e2e.py, where an explanation that seeds a belief and a later,
+    separate acceptance of that belief's own reminder both count even
+    though both land in one session, because they record different
+    things."""
+    belief = bel.seed_candidate_belief(
+        db, ms["id"], "Never end a chapter on a subordinate clause.",
+        source="review-explanation", llm=None)
+
+    ep = _closed_episode(db, ms["id"], "inv2c-sess")
+    same_suggestion = "The same suggestion, reviewed three times in one sitting."
+    for i in range(3):
+        g = _guidance_row(ms["id"], "inv2c-sess", [belief["id"]],
+                          f"inv2c-batch-{i}", same_suggestion)
+        db.insert("guidance_history", g)
+        bel.record_review(db, ms["id"], g, "accepted", None, ep["id"], llm=None)
+
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                   (belief["id"],))
+    check("three same-session, identically-worded accepts collapse into "
+          "ONE additional unit of support, not three — supporting is 2 "
+          "(creation + one replay-deduped unit), never 4",
+          after["supporting"] == 2, str(dict(after)))
+    check("2 real units meets the review-explanation bar of 2",
+          after["status"] == "validated", str(dict(after)))
+
+
+def test_inv2_no_retroactive_demotion(db, ms):
+    """INV-2 regression (d) — the constraint that matters most: a belief
+    validated TODAY, with its stored `supporting` predating evidence
+    linkage (the real shape on the live database: 8 of 12 validated
+    beliefs have zero linked evidence rows yet carry supporting of 2-11),
+    must NOT be demoted by switching supporting from a stored counter to
+    one derived from the evidence table. The derived count floors at
+    whatever was already on record for a validated belief — it governs
+    only FUTURE promotion."""
+    row = ko_fields("pol")
+    row.update(manuscript_id=ms["id"],
+              statement="Ghost-validated: predates evidence linkage.",
+              status="validated", confidence=bel._confidence(6, 0),
+              supporting=6, contradicting=0, outstanding_questions="[]",
+              source="review-explanation", source_id=db.source("author"))
+    db.insert("editorial_beliefs", row)
+    check("this validated belief starts with zero linked evidence rows — "
+          "exactly the shape found on the live database",
+          db.one("SELECT COUNT(*) AS n FROM evidence WHERE supports_belief = ?",
+                 (row["id"],))["n"] == 0)
+
+    # A later, unrelated touch — one more accepted suggestion tied to it.
+    g = _guidance_row(ms["id"], "inv2d-sess", [row["id"]], "inv2d-batch")
+    db.insert("guidance_history", g)
+    bel.record_review(db, ms["id"], g, "accepted", None, None, llm=None)
+
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (row["id"],))
+    check("the belief survives at 'validated' — the pre-existing "
+          "supporting count is a floor, not overwritten by the (much "
+          "smaller) freshly-derived one",
+          after["status"] == "validated" and after["supporting"] == 6,
+          str(dict(after)))
 
 
 def test_platitude_guard(db, ms):
@@ -573,8 +702,14 @@ def main_test():
     test_thresholds()
     print("semantic matching")
     test_semantic_matching(db, ms)
-    print("episode analysis (pure machine inference)")
+    print("episode analysis (pure machine inference) — INV-2 (a)")
     test_episode_analysis_validates_from_pure_machine_inference(db, ms)
+    print("INV-2 (b) cross-session author evidence validates")
+    test_inv2_cross_session_author_evidence_validates(db, ms)
+    print("INV-2 (c) same-session evidence dedupes")
+    test_inv2_same_session_dedup(db, ms)
+    print("INV-2 (d) no retroactive demotion")
+    test_inv2_no_retroactive_demotion(db, ms)
     test_platitude_guard(db, ms)
     test_retired_belief_returns_as_proposal(db, ms)
     print("batch distillation")

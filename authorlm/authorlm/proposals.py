@@ -209,9 +209,17 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         message = (f"Retired '{payload['name']}' ({edges} edge(s) with it) — "
                    "its text is gone and the author let it go.")
     elif kind == "belief_revival":
-        from .beliefs import reinforce_belief
+        from .beliefs import _record_support, reinforce_belief
 
         db.update("editorial_beliefs", row["target"], {"status": "candidate"})
+        # Adopting the proposal IS the author's evidence for this event;
+        # write it before reinforcing so the derived count (INV-2) can see
+        # it — this is also what stops revival inheriting the belief's
+        # pre-retirement counter (beliefs.py's `reinforce_belief` now
+        # derives fresh from evidence rather than reading the stale stored
+        # value).
+        _record_support(db, manuscript_id, row["target"], None,
+                        payload.get("new_explanation") or payload["statement"])
         reinforce_belief(db, row["target"], "accepted")
         message = f"Belief revived as candidate: \"{payload['statement']}\""
     elif kind == "alias":
