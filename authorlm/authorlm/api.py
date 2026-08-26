@@ -1366,8 +1366,7 @@ def confirm_edge(db: Database, manuscript: dict, edge_prefix: str,
     action = "retype" if relation and relation != edge["relation"] else "keep"
     triage_service.apply_one(
         db, manuscript, "edges", edge, action,
-        {"relation": relation} if action == "retype" else {},
-        record_evidence=False)
+        {"relation": relation} if action == "retype" else {})
     return {
         "from_name": cg.node_name(db, edge["from_node"]),
         "relation": relation or edge["relation"],
@@ -1377,8 +1376,7 @@ def confirm_edge(db: Database, manuscript: dict, edge_prefix: str,
 
 def reject_edge(db: Database, manuscript: dict, edge_prefix: str) -> dict:
     edge = _find_edge(db, manuscript, edge_prefix)
-    triage_service.apply_one(
-        db, manuscript, "edges", edge, "reject", record_evidence=False)
+    triage_service.apply_one(db, manuscript, "edges", edge, "reject")
     return {
         "from_name": cg.node_name(db, edge["from_node"]),
         "relation": edge["relation"],

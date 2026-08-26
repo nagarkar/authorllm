@@ -526,15 +526,24 @@ class TriageAppTest(unittest.TestCase):
             evidence["target"],
             "Choice —permits→ Field ⇒ Field —depends_on→ Choice")
 
-    def test_legacy_one_shot_edge_commands_do_not_add_triage_evidence(self):
+    def test_legacy_one_shot_edge_commands_add_triage_evidence(self):
+        """D4: confirm_edge/reject_edge are an author's individual verdict on
+        a relationship, exactly like confirm_concept/retire_concept are for
+        a concept — so, like their concept-side siblings, they now record
+        evidence rather than silently mutating the graph."""
         db, manuscript, *_, edge = self.fixture()
         api.confirm_edge(db, manuscript, edge["id"][:8], "depends_on")
         api.reject_edge(db, manuscript, edge["id"][:8])
         self.assertEqual(
             db.one("SELECT status FROM concept_edges WHERE id = ?", (edge["id"],))["status"],
             "rejected")
+        evidence = db.all(
+            "SELECT e.evidence_type, e.signal, s.kind AS source_kind "
+            "FROM evidence e JOIN sources s ON s.id = e.source_id "
+            "ORDER BY e.created_at")
         self.assertEqual(
-            db.one("SELECT COUNT(*) AS n FROM evidence")["n"], 0)
+            [(row["evidence_type"], row["signal"], row["source_kind"]) for row in evidence],
+            [("edge_triage", "retyped", "author"), ("edge_triage", "rejected", "author")])
 
     def test_changed_row_prevents_the_whole_batch(self):
         db, manuscript, choice, field, _ = self.fixture()

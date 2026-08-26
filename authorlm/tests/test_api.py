@@ -1584,11 +1584,39 @@ def main_test() -> None:
               confirmed == {"from_name": "Gravity", "relation": "supports", "to_name": "Freedom"})
         check("confirm_edge persisted the status change",
               api.show_concept(db, manuscript, "Freedom")["edges"][0]["status"] == "declared")
+        # D4: an individual author verdict on an edge must record evidence,
+        # exactly like confirm_concept/retire_concept already do — and the
+        # row must be attributed to the author (edge_triage is not in
+        # SYSTEM_EVIDENCE_TYPES), never to the system.
+        confirm_edge_evidence = db.one(
+            "SELECT e.evidence_type, e.signal, e.supports_belief, s.kind "
+            "AS source_kind FROM evidence e JOIN sources s ON s.id = e.source_id "
+            "WHERE e.manuscript_id = ? AND e.evidence_type = 'edge_triage' "
+            "ORDER BY e.created_at DESC LIMIT 1", (manuscript["id"],))
+        check("confirm_edge records edge_triage evidence",
+              confirm_edge_evidence is not None, str(confirm_edge_evidence))
+        check("confirm_edge evidence carries signal 'confirmed'",
+              confirm_edge_evidence["signal"] == "confirmed", str(confirm_edge_evidence))
+        check("confirm_edge evidence is attributed to the author",
+              confirm_edge_evidence["source_kind"] == "author", str(confirm_edge_evidence))
+        check("confirm_edge evidence does not target a belief",
+              confirm_edge_evidence["supports_belief"] is None, str(confirm_edge_evidence))
         inferred2 = cg.link_concepts(db, manuscript["id"], "Freedom", "supports", "Choice",
                                      status="inferred")
         rejected = api.reject_edge(db, manuscript, inferred2["id"][:8])
         check("reject_edge rejects an inferred edge",
               rejected == {"from_name": "Freedom", "relation": "supports", "to_name": "Choice"})
+        reject_edge_evidence = db.one(
+            "SELECT e.evidence_type, e.signal, e.supports_belief, s.kind "
+            "AS source_kind FROM evidence e JOIN sources s ON s.id = e.source_id "
+            "WHERE e.manuscript_id = ? AND e.evidence_type = 'edge_triage' "
+            "ORDER BY e.created_at DESC LIMIT 1", (manuscript["id"],))
+        check("reject_edge records edge_triage evidence",
+              reject_edge_evidence is not None, str(reject_edge_evidence))
+        check("reject_edge evidence carries signal 'rejected'",
+              reject_edge_evidence["signal"] == "rejected", str(reject_edge_evidence))
+        check("reject_edge evidence is attributed to the author",
+              reject_edge_evidence["source_kind"] == "author", str(reject_edge_evidence))
         try:
             api.confirm_edge(db, manuscript, "zzzzzzzz")
             check("confirming an unknown edge prefix raises", False)
