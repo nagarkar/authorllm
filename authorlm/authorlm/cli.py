@@ -134,7 +134,12 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
     print(
         f"Extracted {len(summary['nodes'])} new concept(s) and "
         f"{len(summary['edges'])} inferred relationship(s)"
-        + (f"; skipped {summary['skipped']} malformed item(s)" if summary["skipped"] else "")
+        + (f"; skipped {summary['skipped_malformed']} malformed item(s)"
+           if summary.get("skipped_malformed") else "")
+        + (f"; {summary['skipped_unknown_relation']} relationship(s) named an "
+           "unrecognized relation" if summary.get("skipped_unknown_relation") else "")
+        + (f"; {summary['skipped_unknown_endpoint']} relationship(s) named an "
+           "unknown concept" if summary.get("skipped_unknown_endpoint") else "")
         + (f"; suppressed {summary['suppressed']} previously-rejected concept(s)"
            if summary.get("suppressed") else "")
         + (f"; dropped {summary['ungrounded_links']} ungrounded link(s) "
@@ -148,6 +153,10 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
     )
     if summary.get("prompt_files"):
         print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
+    if summary.get("adjudication_empty"):
+        print(ui.yellow(
+            "note: adjudication ran but the model returned nothing usable "
+            "— worth checking authorlm/prompts/adjudication.md"))
     if summary.get("below_bar"):
         print(ui.dim(
             "Below the recurrence bar (single-context phrases, not "

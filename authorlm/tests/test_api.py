@@ -268,9 +268,10 @@ def check_extraction_prompt_provenance() -> None:
     say which prompt files shaped it, so they can go read them. The list
     must be derived from prompt_registry.REGISTRY (never a hardcoded
     filename), must reflect the run that actually happened — adjudication
-    appears only when it was opted in AND had candidates to judge — and
-    CLI and MCP must report the identical set, since both surfaces just
-    forward the same `prompt_files` field returned by
+    appears whenever the call was actually made (opted in, not an
+    aliases-only pass), including a call that ran but came back with
+    nothing usable — and CLI and MCP must report the identical set, since
+    both surfaces just forward the same `prompt_files` field returned by
     `extraction.extract_concepts`."""
     import io
 
@@ -422,6 +423,81 @@ def check_extraction_prompt_provenance() -> None:
               == {extraction_loc, adjudication_loc},
               str(mcp_on))
 
+        # --- CORRECTION (it-b6fd1a7e5ea0 follow-up): adjudication that
+        # RAN but came back with nothing usable (malformed reply here;
+        # zero candidates or a model failure hit the same `verdicts is
+        # None` path inside adjudication.adjudicate()) must still report
+        # adjudication.md. The Sponsor's own trade: "as long as the
+        # adjudicator prompts are visible every time it runs, I'll be
+        # able to figure out if there is something wrong with the
+        # prompt" — every time it RUNS, not every time it succeeds. ---
+        class AdjudicatingButEmptyLLM:
+            """Opts into adjudication; the adjudication call itself
+            returns a non-dict reply, so adjudication.adjudicate() comes
+            back with verdicts=None — exercising the 'ran but empty'
+            path, distinct from 'never ran'."""
+            enabled = True
+            extraction_max_chars = 24000
+
+            def __init__(self, concept_name: str):
+                self.config = {"extraction": {"adjudicate": True}}
+                self.concept_name = concept_name
+
+            def complete_json(self, system, user, thinking_budget=None):
+                if user.startswith("CANDIDATE"):
+                    return "not a dict"  # malformed adjudication reply
+                return {"concepts": [
+                    {"name": self.concept_name, "kind": "concept",
+                     "notes": "a definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        (ms / "07-empty.md").write_text(two_context_paragraphs("EmptyAdjConcept"))
+        empty_result = extraction.extract_concepts(
+            db, manuscript, AdjudicatingButEmptyLLM("EmptyAdjConcept"),
+            files=["07-empty.md"])
+        check("adjudication.md is reported even when the adjudication "
+              "call ran but returned nothing usable",
+              empty_result is not None
+              and adjudication_loc in empty_result["prompt_files"],
+              str(empty_result))
+        check("a run where adjudication ran but yielded nothing is "
+              "distinctly flagged (adjudication_empty), not silently "
+              "indistinguishable from a clean pass",
+              empty_result.get("adjudication_empty") is True,
+              str(empty_result))
+
+        (ms / "08-flag-off.md").write_text(two_context_paragraphs("FlagOffConcept"))
+        flag_off_result = extraction.extract_concepts(
+            db, manuscript, ExtractOnlyLLM("FlagOffConcept"),
+            files=["08-flag-off.md"])
+        check("adjudication_empty stays False when adjudication never "
+              "ran at all (flag off) — 'never ran' and 'ran but empty' "
+              "must stay distinguishable",
+              flag_off_result is not None
+              and flag_off_result.get("adjudication_empty") is False
+              and adjudication_loc not in flag_off_result["prompt_files"],
+              str(flag_off_result))
+
+        # --- same 'ran but empty' scenario via the CLI surface: the
+        # prompt still appears on the Prompts line, plus a distinct note. ---
+        (ms / "09-cli-empty.md").write_text(two_context_paragraphs("CliEmptyConcept"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_module._run_extraction(
+                db, manuscript, AdjudicatingButEmptyLLM("CliEmptyConcept"),
+                files=["09-cli-empty.md"])
+        cli_empty_out = buf.getvalue()
+        check("CLI still lists adjudication.md when the call ran but "
+              "returned nothing usable",
+              adjudication_loc in cli_empty_out, cli_empty_out)
+        check("CLI surfaces a distinct note for 'ran but empty', so it "
+              "reads differently from a clean adjudicated pass",
+              "adjudication ran but the model returned nothing usable"
+              in cli_empty_out, cli_empty_out)
+
         # --- edges-only and aliases-only runs report THEIR prompt, not
         # the base 'extraction' one — the flags change which prompt the
         # run actually used. ---
@@ -475,6 +551,142 @@ def check_extraction_prompt_provenance() -> None:
               aliases_result is not None
               and aliases_result["prompt_files"] == [aliases_loc],
               str(aliases_result))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_extraction_skip_reasons() -> None:
+    """it-b6fd1a7e5ea0: extraction lumped five unrelated skip causes into
+    one `skipped` counter and one CLI word — "malformed" — which was
+    simply false for two of them: an unknown relation (VALID_RELATIONS)
+    and an unknown endpoint (not yet a known concept) are the extractor's
+    own deliberate policy, not a bad model reply. This proves the split:
+    each cause lands in its own bucket, the CLI never calls a policy
+    rejection "malformed", and the three buckets always reconstitute the
+    OLD single total exactly for the same input — reporting changed,
+    skip BEHAVIOR did not."""
+    import io
+
+    from authorlm import api as _api
+    from authorlm import cli as cli_module
+    from authorlm import extraction
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-skipreasons-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "00-seed.md").write_text("# Seed\n\nNothing to see here.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = _api.open_db(str(ws))
+        manuscript = _api.get_manuscript(db, "book")
+
+        _api.add_concept(db, manuscript, "KnownAlpha", kind="concept")
+        _api.add_concept(db, manuscript, "KnownBeta", kind="concept")
+        (ms / "01-skips.md").write_text(
+            "# Skips\n\nKnownAlpha relates to KnownBeta in this passage. "
+            "KnownAlpha also touches Ghost here.\n")
+
+        class SkipMixLLM:
+            """One payload exercising all five original skip sites: two
+            malformed concepts, two malformed links, one unknown-relation
+            link, one unknown-endpoint link, two malformed aliases."""
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {
+                    "concepts": [
+                        "not-a-dict",           # malformed: not a dict
+                        {"kind": "concept"},    # malformed: no name
+                    ],
+                    "links": [
+                        "not-a-dict",           # malformed: not a dict
+                        {"from": "KnownAlpha", "relation": "depends_on",
+                         "to": "KnownAlpha"},   # malformed: src == dst
+                        {"from": "KnownAlpha", "relation": "not-a-real-relation",
+                         "to": "KnownBeta"},    # unknown relation (policy)
+                        {"from": "KnownAlpha", "relation": "depends_on",
+                         "to": "Ghost"},        # unknown endpoint (Ghost unknown)
+                    ],
+                    "aliases": [
+                        "not-a-dict",           # malformed: not a dict
+                        {"alias": "", "canonical": "", "sentence": ""},
+                    ],
+                }
+
+            def stats_line(self):
+                return None
+
+        result = extraction.extract_concepts(
+            db, manuscript, SkipMixLLM(), files=["01-skips.md"])
+
+        check("an unknown-relation item lands in skipped_unknown_relation, "
+              "NOT skipped_malformed",
+              result is not None and result["skipped_unknown_relation"] == 1,
+              str(result))
+        check("an unknown-endpoint item lands in skipped_unknown_endpoint, "
+              "NOT skipped_malformed",
+              result["skipped_unknown_endpoint"] == 1, str(result))
+        check("a non-dict item (concept/link/alias) lands in "
+              "skipped_malformed",
+              result["skipped_malformed"] == 6, str(result))
+        check("the three buckets sum EXACTLY to the old single 'skipped' "
+              "total for the same input — reporting split, skip BEHAVIOR "
+              "unchanged",
+              result["skipped_malformed"] + result["skipped_unknown_endpoint"]
+              + result["skipped_unknown_relation"] == result["skipped"]
+              and result["skipped"] == 8,
+              str(result))
+
+        # --- CLI wording: only the malformed bucket may say "malformed";
+        # the other two are named for what they actually are. ---
+        (ms / "02-skips.md").write_text(
+            "# Skips2\n\nKnownAlpha relates to KnownBeta in this passage too. "
+            "KnownAlpha also touches Ghost2 here.\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_module._run_extraction(db, manuscript, SkipMixLLM(),
+                                       files=["02-skips.md"])
+        cli_out = buf.getvalue()
+        check("CLI reports the malformed count under the word 'malformed'",
+              "skipped 6 malformed item(s)" in cli_out, cli_out)
+        check("CLI names the unknown-relation skips honestly, not as "
+              "'malformed'",
+              "1 relationship(s) named an unrecognized relation" in cli_out,
+              cli_out)
+        check("CLI names the unknown-endpoint skips honestly, not as "
+              "'malformed'",
+              "1 relationship(s) named an unknown concept" in cli_out,
+              cli_out)
+
+        # --- MCP carries the same three buckets as structured data,
+        # resolved in the same one place extraction.py already computes
+        # them — no separate MCP-side logic to drift. ---
+        from authorlm import mcp_server
+
+        (ms / "03-skips.md").write_text(
+            "# Skips3\n\nKnownAlpha relates to KnownBeta in this passage as "
+            "well. KnownAlpha also touches Ghost3 here.\n")
+        prev_workspace = mcp_server._WORKSPACE
+        prev_llm = mcp_server._llm
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_server._llm = lambda: SkipMixLLM()
+            mcp_result = mcp_server.extract_concepts(
+                files=["03-skips.md"], manuscript="book")
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+            mcp_server._llm = prev_llm
+        check("MCP extract_concepts carries the split skip buckets as "
+              "structured data, matching the CLI/direct-call shape",
+              mcp_result["ok"] is True
+              and mcp_result["result"]["skipped_malformed"] == 6
+              and mcp_result["result"]["skipped_unknown_relation"] == 1
+              and mcp_result["result"]["skipped_unknown_endpoint"] == 1,
+              str(mcp_result))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -745,6 +957,7 @@ def main_test() -> None:
     check_config_parity()
     check_extraction_failure_traced()
     check_extraction_prompt_provenance()
+    check_extraction_skip_reasons()
     check_backup_and_restore()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:

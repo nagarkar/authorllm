@@ -74,11 +74,15 @@ EDGES_ONLY_SYSTEM = (
 def _prompt_locations(edges_only: bool, aliases_only: bool,
                       adjudicated: bool) -> list[str]:
     """`Prompt.location` (prompt_registry.py) of every prompt THIS pass
-    actually sent to the LLM — deterministic: reflects what ran, not what
-    the flags merely permit. `adjudicated` is True only when
-    adjudication.adjudicate() ran and came back with verdicts (opted in,
-    and there were candidates to judge). Always derived from the registry
-    — never a hardcoded filename — so a renamed/moved prompt is picked up
+    actually invoked — deterministic: reflects what ran, not what the
+    flags merely permit. `adjudicated` is True whenever the adjudication
+    CALL was made (opted in, and not an aliases-only pass) — including a
+    call that came back with nothing usable (model failure, malformed
+    reply, zero candidates). It is deliberately NOT gated on getting
+    verdicts back: the Sponsor asked to see the prompt "every time it
+    runs", not every time it succeeds — see `adjudication_empty` for the
+    distinct "ran but empty" signal. Always derived from the registry —
+    never a hardcoded filename — so a renamed/moved prompt is picked up
     automatically, and the single source of truth keeps the CLI and MCP
     surfaces (both of which just forward this list) from drifting apart."""
     if edges_only:
@@ -443,9 +447,12 @@ def extract_concepts(
         skip of the remaining payloads on the next run)."""
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
+            "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
+            "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "proposed": 0, "screened": 0, "truncated": False,
             "scope": scope_label, "prompt_files": [],
+            "adjudication_empty": False,
         }
         failed = False
         for payload in payloads:
@@ -461,10 +468,14 @@ def extract_concepts(
                 continue
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
-            for key in ("skipped", "suppressed", "ungrounded_links",
+            for key in ("skipped", "skipped_malformed",
+                        "skipped_unknown_endpoint", "skipped_unknown_relation",
+                        "suppressed", "ungrounded_links",
                         "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             _merge_prompts(aggregate, sub)
+            aggregate["adjudication_empty"] = (
+                aggregate["adjudication_empty"] or sub.get("adjudication_empty", False))
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
         if failed:
@@ -532,9 +543,12 @@ def extract_concepts(
         selected = [n for n in order if target is None or n in target]
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
+            "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
+            "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "proposed": 0, "screened": 0,
             "truncated": False, "prompt_files": [],
+            "adjudication_empty": False,
         }
         failed = False
         for name in selected:
@@ -552,11 +566,15 @@ def extract_concepts(
                 continue
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
-            for key in ("skipped", "suppressed", "ungrounded_links",
+            for key in ("skipped", "skipped_malformed",
+                        "skipped_unknown_endpoint", "skipped_unknown_relation",
+                        "suppressed", "ungrounded_links",
                         "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
             _merge_prompts(aggregate, sub)
+            aggregate["adjudication_empty"] = (
+                aggregate["adjudication_empty"] or sub.get("adjudication_empty", False))
         aggregate["scope"] = (
             f"hierarchical: {len(selected)} file(s) in reading order, "
             f"one pass each (cap {max_chars} chars)"
@@ -621,12 +639,23 @@ def extract_concepts(
     # survivors continue below, so every gate that follows still applies.
     # With the flag off, `enabled` is False and nothing here runs.
     screened = improved = 0
-    adjudicated = False
-    if adjudication.enabled(llm) and not aliases_only:
+    # `adjudicated` marks that the CALL was made — not that it came back
+    # with anything usable. The Sponsor's own words: "as long as the
+    # adjudicator prompts are visible every time it runs, I'll be able to
+    # figure out if there is something wrong with the prompt" — "every
+    # time it runs", not "every time it succeeds". A run that adjudicated
+    # and got nothing back (model failure, malformed reply, zero
+    # candidates) is exactly the run they most need surfaced, so
+    # `adjudication.md` must still appear in `prompt_files` for it — see
+    # `adjudication_empty` below for the distinct "ran but empty" signal.
+    adjudicated = adjudication.enabled(llm) and not aliases_only
+    adjudication_empty = False
+    if adjudicated:
         result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
         if verdicts:
             screened, improved = verdicts["screened"], verdicts["improves"]
-            adjudicated = True
+        else:
+            adjudication_empty = True
 
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
@@ -647,6 +676,11 @@ def extract_concepts(
         for alias in json.loads(row["aliases"] or "[]")
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
+    # `skipped` stays the total (back-compat / at-a-glance count);
+    # these three are WHY, so the author can tell a model problem
+    # (malformed payload) from the extractor's own deliberate
+    # policy (unknown relation/endpoint) — see it-b6fd1a7e5ea0.
+    skipped_malformed = skipped_unknown_endpoint = skipped_unknown_relation = 0
     proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
@@ -655,6 +689,7 @@ def extract_concepts(
     for item in [] if edges_only or aliases_only else result.get("concepts", []):
         if not isinstance(item, dict) or not str(item.get("name", "")).strip():
             skipped += 1
+            skipped_malformed += 1
             continue
         name = str(item["name"]).strip()[:80]
         kind = item.get("kind", "concept")
@@ -779,6 +814,7 @@ def extract_concepts(
     for item in [] if aliases_only else (result.get("links") or []):
         if not isinstance(item, dict):
             skipped += 1
+            skipped_malformed += 1
             continue
         src = str(item.get("from", "")).strip()
         dst = str(item.get("to", "")).strip()
@@ -786,14 +822,20 @@ def extract_concepts(
         # Only link concepts that exist; unknown relations become 'elaborates'.
         if not src or not dst or src.lower() == dst.lower():
             skipped += 1
+            skipped_malformed += 1
             continue
         if src.lower() not in known or dst.lower() not in known:
+            # Not malformed — the model named a real endpoint that simply
+            # isn't (yet) a known concept in this graph.
             skipped += 1
+            skipped_unknown_endpoint += 1
             continue
         if relation not in VALID_RELATIONS:
             # Honesty over volume: an unknown relation is dropped, not
-            # coerced into 'elaborates' — coercion manufactures wrong edges.
+            # coerced into 'elaborates' — coercion manufactures wrong
+            # edges. Not malformed either — a deliberate policy call.
             skipped += 1
+            skipped_unknown_relation += 1
             continue
         if not (endpoint_in_text(src) and endpoint_in_text(dst)):
             ungrounded_links += 1
@@ -825,12 +867,14 @@ def extract_concepts(
     for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
         if not isinstance(item, dict):
             skipped += 1
+            skipped_malformed += 1
             continue
         alias_name = str(item.get("alias", "")).strip()[:80]
         canonical_name = str(item.get("canonical", "")).strip()[:80]
         sentence = " ".join(str(item.get("sentence", "")).split())[:300]
         if not alias_name or not canonical_name or not sentence:
             skipped += 1
+            skipped_malformed += 1
             continue
         a_node = get_concept(db, mid, alias_name)
         c_node = get_concept(db, mid, canonical_name)
@@ -881,6 +925,9 @@ def extract_concepts(
         "edges": new_edges,
         "realized": realized,
         "skipped": skipped,
+        "skipped_malformed": skipped_malformed,
+        "skipped_unknown_endpoint": skipped_unknown_endpoint,
+        "skipped_unknown_relation": skipped_unknown_relation,
         "suppressed": suppressed,
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
@@ -889,4 +936,5 @@ def extract_concepts(
         "scope": scope,
         "truncated": truncated,
         "prompt_files": _prompt_locations(edges_only, aliases_only, adjudicated),
+        "adjudication_empty": adjudication_empty,
     }

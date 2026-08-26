@@ -651,8 +651,12 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("init extracts concepts", "Extracted 4 new concept(s)" in out, out)
         check("the recurrence bar drops the single-context candidate",
               "1 below the recurrence bar" in out and "'Becoming'" in out, out)
-        check("valid links kept; unknown relation and unknown concept dropped",
-              "2 inferred relationship(s)" in out and "skipped 2" in out, out)
+        check("valid links kept; unknown relation and unknown concept dropped "
+              "— honestly labeled, not lumped into 'malformed'",
+              "2 inferred relationship(s)" in out
+              and "1 relationship(s) named an unrecognized relation" in out
+              and "1 relationship(s) named an unknown concept" in out
+              and "malformed" not in out, out)
         check("step reports live calls and token usage",
               "LLM: 1 live call(s) (120 in / 45 out tokens)" in out, out)
 
