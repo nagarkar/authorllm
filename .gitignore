@@ -21,3 +21,4 @@ authorlm/manuscripts/
 # Scratch build output — rendered PDFs/epubs, ad-hoc pandoc-profile tests
 output/
 tmp/
+.ai-productionization/
