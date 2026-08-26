@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import proposals
+from . import adjudication, proposals
 from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -322,6 +322,29 @@ def _section_payloads(units: list[tuple[str, str]], cap: int) -> list[str]:
     return ["\n\n".join(p) for p in payloads]
 
 
+def _inventory_names(db: Database, mid: str, limit: int) -> list[str]:
+    return [
+        row["name"] for row in db.all(
+            "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired' ORDER BY name LIMIT ?",
+            (mid, limit),
+        )
+    ]
+
+
+def _fit_inventory(names: list[str], max_chars: int, body_len: int) -> str:
+    """'; '-joined `names`, dropping from the end until the KNOWN CONCEPTS
+    prefix — attached ahead of a payload of `body_len` chars — counts
+    against `max_chars` instead of riding free on top of it (TrackA/2:
+    measured pushing payloads up to 26,865 chars against a 24,000 cap). The
+    manuscript text is what extraction must never truncate, so when the two
+    don't both fit, the inventory is what gives way, never the text."""
+    budget = max_chars - body_len - len("KNOWN CONCEPTS: \n\n")
+    while names and len("; ".join(names)) > max(0, budget):
+        names = names[:-1]
+    return "; ".join(names)
+
+
 def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
@@ -329,10 +352,18 @@ def _normalize(text: str | None) -> str:
 def _set_extraction_watermark(db: Database, manuscript: dict,
                               latest_id: str | None) -> None:
     """Advance the incremental-extract watermark and keep the in-memory
-    manuscript dict in sync (multi-pass aggregators re-read it)."""
+    manuscript dict in sync (multi-pass aggregators re-read it).
+
+    Extraction can run for minutes; `manuscript["metadata"]` was captured
+    before that call started and may be stale by the time this runs (e.g. a
+    Google Docs mapping update landed in the meantime). Re-reading from the
+    DB immediately before merging narrows that lost-update window from
+    minutes to microseconds — it does not make the write atomic."""
     if not latest_id:
         return
-    meta = json.loads(manuscript["metadata"] or "{}")
+    current = db.one(
+        "SELECT metadata FROM manuscripts WHERE id = ?", (manuscript["id"],))
+    meta = json.loads((current["metadata"] if current else None) or "{}")
     meta["last_extracted_version"] = latest_id
     encoded = json.dumps(meta)
     db.update("manuscripts", manuscript["id"], {"metadata": encoded})
@@ -384,7 +415,8 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0, "truncated": False, "scope": scope_label,
+            "proposed": 0, "screened": 0, "truncated": False,
+            "scope": scope_label,
         }
         failed = False
         for payload in payloads:
@@ -401,7 +433,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
@@ -471,7 +503,7 @@ def extract_concepts(
         aggregate: dict = {
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0,
+            "proposed": 0, "screened": 0,
             "truncated": False,
         }
         failed = False
@@ -491,7 +523,7 @@ def extract_concepts(
             for key in ("nodes", "edges", "realized", "below_bar"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "suppressed", "ungrounded_links",
-                        "proposed"):
+                        "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
         aggregate["scope"] = (
@@ -519,26 +551,16 @@ def extract_concepts(
         return any(concept_pattern(n).search(attention) for n in names if n)
     if edges_only or aliases_only:
         scope += ", edges only" if edges_only else ", aliases only"
-        inventory = "; ".join(
-            row["name"] for row in db.all(
-                "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                "AND status != 'retired' ORDER BY name LIMIT 120",
-                (mid,),
-            )
-        )
+        inventory = _fit_inventory(_inventory_names(db, mid, 120),
+                                   max_chars, len(text))
         system = (EDGES_ONLY_SYSTEM if edges_only else ALIASES_ONLY_SYSTEM) \
             + triage_feedback(db, mid)
         text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
     else:
         system = extraction_system() + triage_feedback(db, mid)
         if _inventory:
-            inventory = "; ".join(
-                row["name"] for row in db.all(
-                    "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-                    "AND status != 'retired' ORDER BY name LIMIT 200",
-                    (mid,),
-                )
-            )
+            inventory = _fit_inventory(_inventory_names(db, mid, 200),
+                                       max_chars, len(text))
             if inventory:
                 system += (
                     " Concepts listed under KNOWN CONCEPTS are already in the "
@@ -550,6 +572,28 @@ def extract_concepts(
     result = llm.complete_json(system, text, thinking_budget=0)
     if not isinstance(result, dict):
         return None
+    if not (edges_only or aliases_only) and not isinstance(result.get("concepts"), list):
+        # A null (or otherwise non-list) 'concepts' payload is exactly as
+        # malformed as a non-dict result above. Coercing it to [] here would
+        # make a bad-shaped reply look like a clean "no concepts found" pass:
+        # `_set_extraction_watermark` would then advance and the section
+        # would never be re-mined. Returning None instead reuses the same
+        # "incomplete" signal the caller already checks (`sub is None` /
+        # `sub.get("incomplete")`) to hold the watermark back and keep the
+        # section eligible for retry.
+        return None
+
+    # Step two, opt-in ([extraction] adjudicate): the candidates above are a
+    # first pass, not a verdict. Adjudication asks — once, for the whole
+    # batch — whether each one is a new concept, an improvement to an
+    # existing definition, already subsumed, or not a concept at all. Only
+    # survivors continue below, so every gate that follows still applies.
+    # With the flag off, `enabled` is False and nothing here runs.
+    screened = improved = 0
+    if adjudication.enabled(llm) and not aliases_only:
+        result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
+        if verdicts:
+            screened, improved = verdicts["screened"], verdicts["improves"]
 
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
@@ -570,7 +614,7 @@ def extract_concepts(
         for alias in json.loads(row["aliases"] or "[]")
     }
     new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
-    proposed = 0
+    proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
     disk_files: dict[str, str] | None = None
@@ -581,7 +625,10 @@ def extract_concepts(
             continue
         name = str(item["name"]).strip()[:80]
         kind = item.get("kind", "concept")
-        if kind not in NODE_KINDS:
+        # `kind` may come back model-shaped-but-malformed (a list, a dict) —
+        # `in` against the NODE_KINDS frozenset raises TypeError on an
+        # unhashable value instead of just failing the membership test.
+        if not (isinstance(kind, str) and kind in NODE_KINDS):
             kind = "concept"
         notes = (str(item["notes"]).strip()[:300] or None) if item.get("notes") else None
         if name.lower() in banned:
@@ -602,10 +649,11 @@ def extract_concepts(
                     continue
             suppressed += 1
             continue
-        before = db.one(
-            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?)",
-            (mid, name),
-        )
+        # Alias-aware: a hit on an alias is a hit on the concept it belongs
+        # to, not a new concept — a name-only lookup here would send an
+        # alias hit down the `before is None` branch below, discarding the
+        # existing concept's metadata (including a confirmed 'True').
+        before = get_concept(db, mid, name)
         if before is None and banned:
             # A near-miss of a retired name is called out interactively, not
             # silently admitted as a "new" concept (nor silently banned).
@@ -639,7 +687,13 @@ def extract_concepts(
             if not admitted:
                 below_bar.append(name)
                 continue
-        node = add_concept(db, mid, name, kind=kind, notes=notes,
+        # Existing knowledge is machine-unwritable (see the note_update branch
+        # below): `add_concept` applies `notes` unconditionally when the
+        # concept already exists, so an existing concept's notes must never
+        # be passed through — only a brand-new concept may be seeded with
+        # extracted notes.
+        node = add_concept(db, mid, name, kind=kind,
+                           notes=notes if before is None else None,
                            source_id=db.source("system"))
         if before is None:
             # Machine-extracted nodes are hypotheses awaiting the author's
@@ -689,7 +743,7 @@ def extract_concepts(
         node = known_nodes.get(name.lower())
         names = node_names(node) if node else [name]
         return any(concept_pattern(nm).search(text) for nm in names if nm)
-    for item in [] if aliases_only else result.get("links", []):
+    for item in [] if aliases_only else (result.get("links") or []):
         if not isinstance(item, dict):
             skipped += 1
             continue
@@ -798,6 +852,7 @@ def extract_concepts(
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
         "proposed": proposed,
+        "screened": screened,
         "scope": scope,
         "truncated": truncated,
     }

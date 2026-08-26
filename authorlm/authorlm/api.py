@@ -68,8 +68,21 @@ def open_db(workspace: str | None = None) -> Database:
 
 
 def load_config(workspace: str | None = None) -> dict:
-    base = Path(workspace).resolve() if workspace else Path.home()
-    toml_path = base / ".authorlm" / "config.toml"
+    """Load the project's config.toml, matching cli._load_config exactly.
+
+    `workspace` is accepted for signature compatibility with callers that
+    also pass it to `open_db` (workspace state and project config are two
+    different homes — see authorlm/paths.py) but is otherwise unused:
+    config resolution goes through `paths.config_path()` (the
+    AUTHORLM_CONFIG override, else the project's config.toml) after
+    `paths.load_env()` populates the environment from .env. This used to
+    diverge from cli._load_config, which read this project config all
+    along — the divergence silently left the LLM off on the MCP server
+    and the triage app while the CLI had it on (ORCH-3)."""
+    from . import paths
+
+    paths.load_env()
+    toml_path = paths.config_path()
     if toml_path.exists():
         import tomllib
         try:
@@ -533,8 +546,15 @@ def collect(db: Database, manuscript: dict, config: dict,
         if llm.enabled:
             try:
                 summary = run_extraction(db, manuscript, llm) or {}
-            except Exception:
+            except Exception as err:
                 summary = {}
+                from . import tracelog
+
+                tracelog.record(
+                    "extraction", surface="api",
+                    workspace=str(db.path.parent.parent),
+                    manuscript=manuscript.get("name"),
+                    ok=False, error=f"{type(err).__name__}: {err}")
             if summary and not summary.get("up_to_date"):
                 report["auto_analysis"] = {
                     "new_concepts": len(summary.get("nodes", [])),
@@ -943,8 +963,15 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     if llm.enabled:
         try:
             extraction = run_extraction(db, manuscript, llm)
-        except Exception:
+        except Exception as err:
             extraction = None
+            from . import tracelog
+
+            tracelog.record(
+                "extraction", surface="api",
+                workspace=str(db.path.parent.parent),
+                manuscript=manuscript.get("name"),
+                ok=False, error=f"{type(err).__name__}: {err}")
     plan = loads(writeup["plan"], [])
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
@@ -959,6 +986,11 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
                   prefix: str | None = None) -> dict:
     """Abandon the writeup and restore the file from the pinned source
     version — a truncated file with a dead writeup is the worst end state."""
+    # Snapshot whatever the author has on disk right now — even a
+    # half-typed, never-collected draft — before it gets overwritten by
+    # the restored source text below (BUG-2 / A1: a destructive write
+    # must never be the first thing that observes the current state).
+    collect(db, manuscript, config, source="pre-write-abandon")
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
@@ -1066,6 +1098,11 @@ def restore_version(db: Database, manuscript: dict, version_no: int, config: dic
     """Write a past version's files to disk and collect them as a new
     revision (MVP.md 'Deliberately deferred': history is never rewound,
     only advanced — restoration persists forward as a new snapshot)."""
+    # Snapshot the current disk state FIRST: the loop below unlinks and
+    # overwrites files unconditionally, and any uncollected work sitting
+    # on disk would otherwise be destroyed with no recovery point
+    # (BUG-2 / A1). A no-op when there is nothing uncollected.
+    collect(db, manuscript, config, source=f"pre-restore:v{version_no}")
     version = get_version(db, manuscript, version_no)
     files = loads(version["files"], {})
     root = Path(manuscript["path"])

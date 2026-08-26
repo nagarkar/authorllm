@@ -6,6 +6,41 @@ Run: python3 tests/test_summaries.py
 
 from __future__ import annotations
 
+import os
+
+# Offline suite: pin the project-config and .env lookups away from the
+# real ones. Without this a checkout's config.toml (llm enabled, keys in
+# .env) is picked up by every test process and the suite makes live,
+# billed model calls — and asserts against whatever they return.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+def _assert_offline() -> None:
+    """Fail loudly if the real project config or .env leaks into a test.
+
+    Before config moved into the repo, a test workspace simply had no
+    config.toml, so the LLM was off and no suite could make a billed
+    call. Now a checkout always HAS an enabled config, and that safety
+    came from nothing but the pins above — so it is asserted, not
+    assumed."""
+    import os as _os
+
+    from authorlm import paths as _paths
+
+    assert not _paths.config_path().exists(), (
+        f"test isolation broken: reading the real config at "
+        f"{_paths.config_path()}")
+    assert _paths.load_env() == [], "test isolation broken: .env was loaded"
+    leaked = [v for v in _paths_vendor_vars() if _os.environ.get(v)]
+    assert not leaked, f"test isolation broken: vendor keys in env: {leaked}"
+
+
+def _paths_vendor_vars() -> list:
+    from authorlm.llm import VENDOR_KEY_ENV
+
+    return sorted(VENDOR_KEY_ENV.values())
+
+
 import contextlib
 import http.server
 import io
@@ -95,6 +130,14 @@ def main_test() -> None:
                       "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
+        # Establish the v1 baseline explicitly. `init` used to do this as a
+        # side effect of an LLM-enabled extraction pass picked up from a
+        # leaked project config (closed by the AUTHORLM_CONFIG/AUTHORLM_ENV
+        # pins above); with the suite correctly offline, `init` no longer
+        # runs extraction, so "mark, don't cascade" below needs its own
+        # explicit prior version to diff the alpha.md edit against.
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, {}, source="test")
 
         print("reading order & status:")
         order = [f for f, _ in sums.units(manuscript)]
@@ -172,9 +215,24 @@ def main_test() -> None:
             cli_main(["--workspace", str(ws), "summarize", "show", "beta.md"])
         check("summarize show prints the stored summary",
               "summary of beta.md" in buf.getvalue())
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_main(["--workspace", str(ws), "summarize", "rebuild", "gamma.md"])
+        # `cli_main`'s config loader reads the project config.toml
+        # (AUTHORLM_CONFIG), not `--workspace`'s local one — so this call
+        # needs the pin pointed at the workspace config we wrote above (the
+        # one with `base_url` aimed at EchoSummarizer) or it would either
+        # find the LLM disabled (pinned to /nonexistent) or, unpinned,
+        # silently attempt a real call to the provider named in the repo's
+        # own config.toml. Scoped to this one call; restored immediately.
+        prev_config = os.environ.get("AUTHORLM_CONFIG")
+        os.environ["AUTHORLM_CONFIG"] = str(ws / ".authorlm" / "config.toml")
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli_main(["--workspace", str(ws), "summarize", "rebuild", "gamma.md"])
+        finally:
+            if prev_config is None:
+                os.environ.pop("AUTHORLM_CONFIG", None)
+            else:
+                os.environ["AUTHORLM_CONFIG"] = prev_config
         check("summarize rebuild <file> reports the one-unit rebuild",
               "rebuilt gamma.md" in buf.getvalue())
 
@@ -193,14 +251,19 @@ def main_test() -> None:
               pr.by_name("summarizer").file == "summarizer.md")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cli_main(["prompts"])
+            # --workspace matters here even though "prompts" touches no
+            # DB: cli.py's dispatch traces every command via
+            # tracelog.record(workspace=args.workspace), which defaults to
+            # the real home directory when unset — an unpinned call here
+            # would write into the author's actual ~/.authorlm trace log.
+            cli_main(["--workspace", str(ws), "prompts"])
         listing = buf.getvalue()
         check("'authorlm prompts' lists every prompt with its location",
               all(p.name in listing and p.location in listing
                   for p in pr.REGISTRY))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cli_main(["prompts", "show", "summarizer"])
+            cli_main(["--workspace", str(ws), "prompts", "show", "summarizer"])
         check("'prompts show' prints the prompt text",
               "MOVES:" in buf.getvalue())
         for verb in ("summarize", "extract", "guide", "illus", "critique"):
@@ -218,4 +281,5 @@ def main_test() -> None:
 
 
 if __name__ == "__main__":
+    _assert_offline()
     main_test()

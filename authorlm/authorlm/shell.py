@@ -268,6 +268,12 @@ def run_shell(args, db, manuscript: dict) -> None:
     else:
         session = ses.start_session(db, manuscript["id"])
         print(f"Session {session['id']} started for '{manuscript['name']}'.\n")
+        backup_result = session.get("backup") or {}
+        if not backup_result.get("ok", True):
+            from . import ui
+            print(ui.yellow(f"warning: knowledge-store backup failed "
+                             f"({backup_result.get('error')}) — no fresh "
+                             "backup was taken this session."))
         _print_briefing(db, manuscript)
 
     # Catch up on edits made while the shell was closed, then watch.
@@ -280,7 +286,18 @@ def run_shell(args, db, manuscript: dict) -> None:
 
         def watch_loop():
             while not stop.wait(1.0):
-                if watcher.poll():
+                try:
+                    fired = watcher.poll()
+                except Exception as err:  # noqa: BLE001 — poll() must not kill the loop unnoticed
+                    # A dead watcher thread leaves the "Watching…" banner
+                    # lying — the author keeps writing believing revisions
+                    # are being observed. Say so instead of vanishing.
+                    with lock:
+                        print(f"\nwatcher stopped: {err} — restart the shell "
+                              f"to resume automatic collection.")
+                        print(prompt, end="", flush=True)
+                    return
+                if fired:
                     _collect_via_watcher(base_argv, lock, prompt)
 
         threading.Thread(target=watch_loop, daemon=True).start()
@@ -336,7 +353,16 @@ def run_watch(args, manuscript: dict) -> None:
     try:
         while True:
             time.sleep(args.interval)
-            if watcher.poll():
+            try:
+                fired = watcher.poll()
+            except Exception as err:  # noqa: BLE001 — poll() must not kill the loop unnoticed
+                # A dead watcher here stops collection outright with no one
+                # in the shell to notice the silence — say so and exit
+                # instead of vanishing behind the "Watching…" banner.
+                print(f"\nwatcher stopped: {err} — restart 'authorlm watch' "
+                      f"to resume.")
+                sys.exit(1)
+            if fired:
                 _dispatch(base_argv, ["collect", "--auto"])
     except KeyboardInterrupt:
         print("\nStopped watching.")

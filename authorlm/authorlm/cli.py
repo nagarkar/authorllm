@@ -142,6 +142,8 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            if summary.get("ungrounded_links") else "")
         + (f"; {len(summary['below_bar'])} below the recurrence bar"
            if summary.get("below_bar") else "")
+        + (f"; adjudication screened out {summary['screened']} candidate(s) "
+           "before triage" if summary.get("screened") else "")
         + "."
     )
     if summary.get("below_bar"):
@@ -386,10 +388,11 @@ def cmd_session(args):
     manuscript = _manuscript(db, args)
     if args.action == "start":
         _expire_idle_session(db, manuscript, args)
-        _reconcile_gdocs(db, manuscript, args)
         # Session start must never open blind to work done between
-        # sessions — collect first, with the full report (new chapters,
-        # transitions, realizations) so nothing arrives unacknowledged.
+        # sessions — collect BEFORE any Doc reconcile below, so an
+        # uncollected local edit can never be destroyed by a base-less
+        # Doc pull (BUG-1 / A2). Full report (new chapters, transitions,
+        # realizations) so nothing arrives unacknowledged.
         # Virgin manuscripts (no baseline version) keep the classic flow:
         # first collect runs after the author declares their concepts.
         has_baseline = db.one(
@@ -403,11 +406,17 @@ def cmd_session(args):
                     _print_collect_report(opening)
             except Exception as err:
                 print(ui.dim(f"note: opening collect skipped ({err})"))
+        _reconcile_gdocs(db, manuscript, args)
         try:
             session = ses.start_session(db, manuscript["id"])
         except ValueError as err:
             sys.exit(f"error: {err}")
         print(f"Session {session['id']} started for '{manuscript['name']}'.\n")
+        backup_result = session.get("backup") or {}
+        if not backup_result.get("ok", True):
+            print(ui.yellow(f"warning: knowledge-store backup failed "
+                             f"({backup_result.get('error')}) — no fresh "
+                             "backup was taken this session."))
         _print_briefing(db, manuscript)
         print("\nDeclare your objective: intent declare \"...\"")
     else:  # end
@@ -1107,6 +1116,11 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         sys.exit(f"error: {err}")
     marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
     final, forms = passes.final_text_from_marked(marked, written=written)
+    # Snapshot whatever is on disk right now — including any local edit
+    # made outside this Doc/critique flow — before it's overwritten below
+    # (BUG-2 / A1).
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="pre-critique-resolve")
     # Apply locally: the author's post-edits win.
     path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)
@@ -1188,12 +1202,18 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     files = loads(row["files"], {})
     if file not in files:
         sys.exit(f"error: pinned version has no {file}.")
+    # Snapshot the current disk state before it's overwritten below — an
+    # uncollected local edit made since the pin must not be silently
+    # destroyed by the rollback (BUG-2 / A1). Config is loaded here,
+    # above the write, so the pre-collect can run.
+    config = _load_config(args)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="pre-critique-rollback")
     (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
     for t in passes.staged_threads(db, mid, file,
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
         db.update("doc_threads", t["id"], {"state": "withdrawn"})
-    config = _load_config(args)
     try:
         service = gdocs.get_service(config, args.workspace, interactive=True)
         docs_service = gdocs.get_docs_service(config, args.workspace,
@@ -3071,6 +3091,11 @@ def cmd_profile(args):
                 print(ui.yellow("Checked out to the workspace Doc — edit "
                                 "there, then 'profile pull'."))
             else:
+                # Snapshot before the pull can overwrite anything
+                # (BUG-1 / A2): a base-less mapped file's pull is
+                # destructive, and this is the recovery point.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    api.collect(db, manuscript, config, source="pre-doc-pull")
                 result = gdocs.pull_doc(db, manuscript, filename,
                                         service=service,
                                         docs_service=docs_service,
@@ -3596,6 +3621,11 @@ def cmd_doc(args):
 
                     webbrowser.open(gdocs.tab_url(result["doc_id"]))
             else:
+                # Snapshot before the pull can overwrite anything
+                # (BUG-1 / A2): a base-less mapped file's pull is
+                # destructive, and this is the recovery point.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    api.collect(db, manuscript, config, source="pre-doc-pull")
                 result = gdocs.pull_doc(db, manuscript, args.name or None,
                                         service=service, force=args.force,
                                         with_comments=not args.no_comments,

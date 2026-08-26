@@ -56,7 +56,8 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
 
     new_beliefs = [
         dict(p) for p in db.all(
-            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND created_at > ?",
+            "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? "
+            "AND created_at > ? AND status != 'retired'",
             (manuscript_id, since),
         )
     ]

@@ -121,9 +121,414 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_config_parity() -> None:
+    """ORCH-3: api.load_config and cli._load_config must resolve the
+    same config.
+
+    Before the fix, api.load_config(workspace) read
+    <workspace-or-home>/.authorlm/config.toml while cli._load_config
+    already read paths.config_path() (AUTHORLM_CONFIG override, else the
+    project's config.toml) plus paths.load_env(). The two diverged: the
+    CLI had the LLM on and the MCP server (which calls api.load_config)
+    had it silently off. Pin AUTHORLM_CONFIG at a throwaway config with
+    the LLM enabled and prove api.load_config sees it regardless of the
+    `workspace` argument passed in — that's what proves it no longer
+    keys off workspace/home."""
+    import argparse
+
+    from authorlm import cli as cli_module
+
+    prev_config = os.environ.get("AUTHORLM_CONFIG")
+    prev_env = os.environ.get("AUTHORLM_ENV")
+    cfg_root = Path(tempfile.mkdtemp(prefix="authorlm-config-parity-"))
+    try:
+        pinned_config = cfg_root / "config.toml"
+        pinned_config.write_text(
+            '[llm]\nenabled = true\nmodel = "gemini/gemini-2.5-flash"\n'
+        )
+        pinned_env = cfg_root / ".env"
+        pinned_env.write_text("")
+        os.environ["AUTHORLM_CONFIG"] = str(pinned_config)
+        os.environ["AUTHORLM_ENV"] = str(pinned_env)
+
+        # An unrelated workspace, far from the pinned config directory —
+        # neither this workspace nor $HOME holds a config.toml.
+        unrelated_ws = cfg_root / "unrelated-workspace"
+        unrelated_ws.mkdir()
+        args = argparse.Namespace(workspace=str(unrelated_ws))
+
+        from_api = api.load_config(str(unrelated_ws))
+        from_cli = cli_module._load_config(args)
+
+        check("api.load_config and cli._load_config resolve the same config",
+              from_api == from_cli, f"api={from_api!r} cli={from_cli!r}")
+        check("api.load_config picks up the AUTHORLM_CONFIG pin, not "
+              "workspace/home",
+              from_api.get("llm", {}).get("enabled") is True, str(from_api))
+    finally:
+        if prev_config is None:
+            os.environ.pop("AUTHORLM_CONFIG", None)
+        else:
+            os.environ["AUTHORLM_CONFIG"] = prev_config
+        if prev_env is None:
+            os.environ.pop("AUTHORLM_ENV", None)
+        else:
+            os.environ["AUTHORLM_ENV"] = prev_env
+        shutil.rmtree(cfg_root, ignore_errors=True)
+
+
+def check_extraction_failure_traced() -> None:
+    """OPS-2: a raising run_extraction must leave a trace, not just a
+    silently-empty result.
+
+    `collect(..., analyze=True)` and `write_complete` both swallow
+    run_extraction's exceptions with a bare `except Exception:` — by
+    design, extraction failure must never block observation — but before
+    this fix nothing recorded that it happened: `collect`/`write_complete`
+    returned the same shape as a genuinely empty extraction pass, so a
+    silently-broken LLM pipeline was indistinguishable from a quiet day.
+    This does not change control flow (still swallowed, still returns
+    `{}`/`None`) — it only asserts a `trace.jsonl` record now exists."""
+    import io
+    import json as _tjson
+
+    from authorlm import api as _api
+    from authorlm import tracelog
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-ops2-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-draft.md").write_text("# Draft\n\nOriginal text.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = _api.open_db(str(ws))
+        manuscript = _api.get_manuscript(db)
+        config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
+        trace_path = tracelog.log_dir(str(ws)) / "trace.jsonl"
+
+        def boom(*a, **kw):
+            raise RuntimeError("stub extraction failure")
+
+        # --- collect(..., analyze=True): api.py's first swallow site ---
+        prev_run_extraction = _api.run_extraction
+        _api.run_extraction = boom
+        try:
+            (ms / "01-draft.md").write_text("# Draft\n\nChanged text.\n")
+            report = _api.collect(db, manuscript, config, analyze=True)
+        finally:
+            _api.run_extraction = prev_run_extraction
+        check("collect() with a raising run_extraction still returns "
+              "(swallow behaviour unchanged)",
+              "auto_analysis" not in report, report)
+        entries = [_tjson.loads(line)
+                  for line in trace_path.read_text().splitlines()]
+        collect_entry = entries[-1]
+        check("collect()'s swallowed extraction failure is traced",
+              collect_entry["verb"] == "extraction"
+              and collect_entry["surface"] == "api"
+              and collect_entry["manuscript"] == "book"
+              and collect_entry["ok"] is False
+              and "stub extraction failure" in collect_entry["error"],
+              collect_entry)
+
+        # --- write_complete: api.py's second swallow site ---
+        _api.define_style_guide(db, manuscript, "house")
+        _api.attach_style(db, manuscript, "01-draft.md", "house")
+        declared = _api.declare_intent(db, manuscript, "Finish the draft")
+        intent_id = declared["intent"]["id"]
+        _api.write_start(db, manuscript, config, "01-draft.md", intent_id[:8])
+
+        _api.run_extraction = boom
+        try:
+            result = _api.write_complete(db, manuscript, config)
+        finally:
+            _api.run_extraction = prev_run_extraction
+        check("write_complete() with a raising run_extraction still "
+              "returns (swallow behaviour unchanged)",
+              result["extraction"] is None, result)
+        entries = [_tjson.loads(line)
+                  for line in trace_path.read_text().splitlines()]
+        complete_entry = entries[-1]
+        check("write_complete()'s swallowed extraction failure is traced",
+              complete_entry["verb"] == "extraction"
+              and complete_entry["surface"] == "api"
+              and complete_entry["manuscript"] == "book"
+              and complete_entry["ok"] is False
+              and "stub extraction failure" in complete_entry["error"],
+              complete_entry)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_backup_and_restore() -> None:
+    """OPS-4: the knowledge store has no backup, no integrity check, no
+    verified copy today. This proves the fix actually works, not just
+    that it runs:
+
+    - A backup taken via the SQLite backup API genuinely RESTORES: after
+      the original `.db`/`-wal`/`-shm` files are deleted outright, the
+      restored file is queryable through the application layer and holds
+      the exact row written before the backup.
+    - Skip-if-unchanged: a second backup with no intervening write is
+      skipped, not duplicated.
+    - Rotation: the 8th distinct backup evicts the 1st; only the 7 most
+      recent ever remain on disk.
+    - Failure path: an unwritable backups directory fails loudly
+      (ok=False, a stderr warning) but never blocks session start.
+    - Latency against a realistic (~56 MB) database is measured and
+      printed, not just asserted under some threshold blindly.
+    - A corrupted store is caught by the new readiness "database sound"
+      item instead of crashing the sweep."""
+    import contextlib as _ctx
+    import io as _io
+    import time as _time
+
+    from authorlm import backup, sessions as bses
+    from authorlm.db import ko_fields as _ko_fields
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-backup-"))
+    try:
+        # --- setup: a real manuscript + one row of real data ---
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-draft.md").write_text("# Draft\n\nSome text.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        concept = _ko_fields("cn")
+        concept.update(manuscript_id=manuscript["id"], name="Gravity",
+                       kind="concept", status="declared", introduced_in=None,
+                       notes="The pull of consequence.", aliases="[]")
+        db.insert("concept_nodes", concept)
+
+        # --- session start triggers exactly one backup, via the SQLite
+        # backup API against the live connection (WAL-safe) ---
+        session = bses.start_session(db, manuscript["id"])
+        check("starting a session performs a backup (not skipped: it's "
+              "the first one)",
+              session["backup"]["ok"] and not session["backup"]["skipped"],
+              session["backup"])
+        bdir = backup.backup_dir(db.path)
+        made = sorted(bdir.glob("authorlm-*.db"))
+        check("exactly one backup file exists in <workspace>/.authorlm/"
+              "backups/ after session start", len(made) == 1, made)
+        backup_path = made[0]
+
+        # --- RESTORE_PROOF: destroy the original (.db + WAL + SHM), then
+        # prove the backup alone reconstitutes a working, queryable store ---
+        db.conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(db.path) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+        check("the original .db/-wal/-shm are gone (real loss, not a "
+              "copy-elsewhere)", not db.path.exists())
+
+        shutil.copy2(backup_path, db.path)
+        restored = api.open_db(str(ws))
+        integrity = restored.all("PRAGMA integrity_check")
+        check("the restored file is a sound SQLite database "
+              "(PRAGMA integrity_check)",
+              len(integrity) == 1 and integrity[0][0] == "ok", integrity)
+        restored_manuscript = api.get_manuscript(restored, "book")
+        check("the restored store is queryable through the application "
+              "layer (api.get_manuscript)",
+              restored_manuscript["name"] == "book")
+        restored_row = restored.one(
+            "SELECT name, notes FROM concept_nodes WHERE manuscript_id = ? "
+            "AND name = 'Gravity'", (restored_manuscript["id"],))
+        check("the exact row written before the backup survives restore "
+              "verbatim",
+              restored_row is not None
+              and restored_row["notes"] == "The pull of consequence.",
+              dict(restored_row) if restored_row else None)
+        restored.update("concept_nodes", concept["id"],
+                        {"notes": "revised after restore"})
+        reread = restored.one("SELECT notes FROM concept_nodes WHERE id = ?",
+                              (concept["id"],))
+        check("the restored database accepts new writes — it's a live "
+              "store, not an inert blob",
+              reread["notes"] == "revised after restore")
+        restored.conn.close()
+
+        # --- skip-if-unchanged: a second backup with no write between is
+        # skipped, not duplicated ---
+        skip_ws = root / "ws-skip"
+        skip_ms = skip_ws / "manuscript"
+        skip_ms.mkdir(parents=True)
+        (skip_ms / "01.md").write_text("# hi\n")
+        skip_db = api.open_db(str(skip_ws))
+        api.register_manuscript(skip_db, "book", str(skip_ms))
+        first = backup.perform_backup(skip_db)
+        check("the first-ever backup is never skipped",
+              first["ok"] and not first["skipped"], first)
+        second = backup.perform_backup(skip_db)
+        check("a second backup with no intervening write is skipped, so "
+              "identical snapshots don't evict useful history",
+              second["ok"] and second["skipped"], second)
+        skip_bdir = backup.backup_dir(skip_db.path)
+        check("the skipped backup left exactly one file behind",
+              len(list(skip_bdir.glob("authorlm-*.db"))) == 1)
+        skip_node = _ko_fields("cn")
+        skip_node.update(manuscript_id="does-not-matter", name="Mutation",
+                         kind="concept", status="declared",
+                         introduced_in=None, notes="", aliases="[]")
+        skip_db.insert("concept_nodes", skip_node)
+        third = backup.perform_backup(skip_db)
+        check("a real change since the last backup is never skipped",
+              third["ok"] and not third["skipped"], third)
+        check("the changed-content backup produced a second file",
+              len(list(skip_bdir.glob("authorlm-*.db"))) == 2)
+
+        # --- rotation: the 8th distinct backup evicts the 1st; only the
+        # 7 most recent are ever kept, and nothing is deleted before the
+        # new backup is safely in place ---
+        rot_ws = root / "ws-rotate"
+        rot_ms = rot_ws / "manuscript"
+        rot_ms.mkdir(parents=True)
+        (rot_ms / "01.md").write_text("# hi\n")
+        rot_db = api.open_db(str(rot_ws))
+        api.register_manuscript(rot_db, "book", str(rot_ms))
+        made_paths = []
+        for i in range(9):
+            node = _ko_fields("cn")
+            node.update(manuscript_id="rotate", name=f"Concept {i}",
+                       kind="concept", status="declared", introduced_in=None,
+                       notes=f"distinct payload {i}", aliases="[]")
+            rot_db.insert("concept_nodes", node)
+            result = backup.perform_backup(rot_db)
+            check(f"rotation backup #{i + 1} succeeds and is not skipped "
+                  "(content changed each time)",
+                  result["ok"] and not result["skipped"], result)
+            made_paths.append(Path(result["path"]))
+            if i == 6:  # 7 kept so far — 1st is still present, none evicted
+                check("before the 8th backup, all 7 made so far are still "
+                      "kept (retention isn't over-eager)",
+                      made_paths[0].exists(), [p.name for p in made_paths])
+            if i == 7:  # the 8th backup just landed
+                check("the 8th backup evicts exactly the 1st (oldest)",
+                      not made_paths[0].exists()
+                      and all(p.exists() for p in made_paths[1:8]),
+                      [p.name for p in made_paths])
+            _time.sleep(0.002)  # keep the microsecond-resolution names distinct
+        rot_bdir = backup.backup_dir(rot_db.path)
+        remaining = sorted(rot_bdir.glob("authorlm-*.db"))
+        check("rotation keeps exactly the 7 most recent backups",
+              len(remaining) == backup.KEEP, remaining)
+        check("the 8th backup evicted the 1st (oldest two of nine gone: "
+              "8 made it past #7's retention, so #1 and #2 are evicted)",
+              not made_paths[0].exists() and not made_paths[1].exists()
+              and all(p.exists() for p in made_paths[2:]),
+              [p.name for p in made_paths])
+
+        # --- failure path: an unwritable backups directory fails loudly
+        # but never blocks the session ---
+        fail_ws = root / "ws-fail"
+        fail_ms = fail_ws / "manuscript"
+        fail_ms.mkdir(parents=True)
+        (fail_ms / "01.md").write_text("# hi\n")
+        fail_db = api.open_db(str(fail_ws))
+        fail_manuscript = api.register_manuscript(fail_db, "book", str(fail_ms))
+        data_dir = fail_db.path.parent  # <workspace>/.authorlm
+        os.chmod(data_dir, 0o500)  # read+execute only: mkdir("backups") fails
+        try:
+            stderr_capture = _io.StringIO()
+            with _ctx.redirect_stderr(stderr_capture):
+                fail_result = backup.run(fail_db)
+            check("a backup into an unwritable directory reports failure, "
+                  "not success", fail_result["ok"] is False, fail_result)
+            check("the failure is printed loudly to stderr — never "
+                  "swallowed silently",
+                  "AUTHORLM BACKUP FAILED" in stderr_capture.getvalue(),
+                  stderr_capture.getvalue())
+            fail_session = bses.start_session(fail_db, fail_manuscript["id"])
+            check("a failed backup never blocks the author's session from "
+                  "starting",
+                  fail_session["status"] == "active"
+                  and fail_session["backup"]["ok"] is False,
+                  fail_session)
+        finally:
+            os.chmod(data_dir, 0o700)  # restore so cleanup can rmtree it
+
+        # --- latency against a realistic (~56 MB) database ---
+        lat_ws = root / "ws-latency"
+        lat_ms = lat_ws / "manuscript"
+        lat_ms.mkdir(parents=True)
+        (lat_ms / "01.md").write_text("# hi\n")
+        lat_db = api.open_db(str(lat_ws))
+        lat_manuscript = api.register_manuscript(lat_db, "book", str(lat_ms))
+        # ~56 MB, matching ~/.authorlm/authorlm.db's real size (RFC OPS-4):
+        # 60 rows of ~1 MB of text in manuscript_versions.files.
+        blob = "x" * (1024 * 1024)
+        with lat_db.transaction():
+            for i in range(60):
+                version = _ko_fields("mv")
+                version.update(manuscript_id=lat_manuscript["id"],
+                               version_no=i, checksum=f"c{i}",
+                               files=blob, source="synthetic", session_id=None)
+                lat_db.insert("manuscript_versions", version)
+        lat_db.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        db_size_mb = lat_db.path.stat().st_size / (1024 * 1024)
+        started = _time.monotonic()
+        lat_result = backup.perform_backup(lat_db)
+        measured_s = _time.monotonic() - started
+        check(f"backing up a {db_size_mb:.1f} MB database succeeds",
+              lat_result["ok"] and not lat_result["skipped"], lat_result)
+        check("backing up a realistic-size database completes fast enough "
+              "not to make the shell feel broken (< 10s, generous bound)",
+              measured_s < 10, measured_s)
+        print(f"  ok: measured backup latency for {db_size_mb:.1f} MB db "
+              f"= {measured_s:.3f}s (internal timer: "
+              f"{lat_result['elapsed_s']}s)")
+
+        # --- corruption is caught by readiness's new "database sound"
+        # item instead of crashing the sweep ---
+        from authorlm import sweeps
+
+        corrupt_ws = root / "ws-corrupt"
+        corrupt_ms = corrupt_ws / "manuscript"
+        corrupt_ms.mkdir(parents=True)
+        (corrupt_ms / "01.md").write_text("# hi\n")
+        corrupt_db = api.open_db(str(corrupt_ws))
+        corrupt_manuscript = api.register_manuscript(
+            corrupt_db, "book", str(corrupt_ms))
+        for i in range(3000):
+            node = _ko_fields("cn")
+            node.update(manuscript_id=corrupt_manuscript["id"],
+                       name=f"Concept {i}", kind="concept",
+                       status="declared", introduced_in=None,
+                       notes="x" * 300, aliases="[]")
+            corrupt_db.insert("concept_nodes", node)
+        corrupt_db.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        corrupt_db.conn.close()
+        size = corrupt_db.path.stat().st_size
+        with open(corrupt_db.path, "r+b") as handle:
+            handle.seek(int(size * 0.7))
+            chunk = handle.read(4096)
+            handle.seek(int(size * 0.7))
+            handle.write(bytes(b ^ 0xFF for b in chunk))
+        reopened = api.open_db(str(corrupt_ws))
+        report = sweeps.readiness(reopened, corrupt_manuscript)
+        corrupt_item = next(i for i in report["items"]
+                            if i["check"] == "database sound")
+        check("readiness catches a corrupted store via 'database sound' "
+              "instead of crashing the sweep",
+              corrupt_item["ok"] is False
+              and "database sound" in report["blocking"],
+              corrupt_item)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_config_parity()
+    check_extraction_failure_traced()
+    check_backup_and_restore()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
@@ -332,6 +737,165 @@ def main_test() -> None:
         check("files under min_chars are exempt from the deletion safety net",
               "staged" not in report)
 
+        # --- FAIL-3: read_manuscript_files tolerates a non-UTF-8 file
+        # instead of raising and taking down collect() — the recovery path
+        # must not die on the failure it is meant to recover from. Every
+        # file present on disk must still appear in the result: a dropped
+        # entry reads to massive_deletions() as a 100%-shrunk file (via
+        # disk.get(name, "")) and would misfire the mass-deletion guard.
+        # Exercised at the revisions.py layer directly (collect_revision /
+        # massive_deletions) to isolate this from the unrelated, separately
+        # scoped decode call in illus.maintain_excerpts (also invoked by
+        # api.collect(), not part of this finding). ---
+        from authorlm.revisions import (collect_revision as collect_rev_bad_utf8,
+                                        massive_deletions as massive_del_bad_utf8,
+                                        read_manuscript_files as read_files_bad_utf8)
+
+        bad_root = root / "badbytes-ws"
+        bad_ms = bad_root / "manuscript"
+        bad_ms.mkdir(parents=True)
+        (bad_ms / "01-good.md").write_text("Good paragraph. " * 40)  # >min_chars
+        (bad_ms / "02-bad.md").write_bytes(b"# Heading\n\xff\xfe not valid utf-8\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(bad_root), "init", "--name", "badbytes",
+                      "--path", str(bad_ms)])
+        bad_db = api.open_db(str(bad_root))
+        bad_manuscript = api.get_manuscript(bad_db)
+
+        files = read_files_bad_utf8(bad_ms)
+        check("read_manuscript_files does not drop a file it cannot decode",
+              set(files) == {"01-good.md", "02-bad.md"}, str(sorted(files)))
+        check("the unreadable file's content is a replacement, not empty "
+              "(an empty string would read as a full deletion)",
+              "�" in files["02-bad.md"] and files["02-bad.md"] != "",
+              repr(files["02-bad.md"]))
+
+        v1 = collect_rev_bad_utf8(bad_db, bad_manuscript, None)
+        check("collect_revision() completes through a mixed-encoding "
+              "manuscript instead of raising",
+              v1 is not None and v1["version_no"] == 1, str(v1))
+        stored_files = loads(v1["files"], {})
+        check("the unreadable file is still present in the persisted "
+              "snapshot, not silently dropped as a phantom deletion",
+              "02-bad.md" in stored_files, str(sorted(stored_files)))
+
+        # Re-collecting unchanged content must not look like a deletion.
+        flagged = massive_del_bad_utf8(bad_db, bad_manuscript)
+        check("massive_deletions does not flag an unreadable-but-unchanged "
+              "file as a mass deletion",
+              flagged == [], str(flagged))
+
+        # --- FAIL-3 (end-to-end): the checks above exercise
+        # read_manuscript_files directly, which is exactly how this gap
+        # survived — api.collect() runs illus.maintain_excerpts BEFORE
+        # read_manuscript_files, and maintain_excerpts had its own bare
+        # `path.read_text(encoding="utf-8")` with no error handling.
+        # api.collect() wraps that call in `except OSError` only, and
+        # UnicodeDecodeError is a ValueError, not an OSError, so it was
+        # not caught: a single bad byte in any manuscript file crashed
+        # api.collect() end-to-end — the recovery path itself. This test
+        # goes through api.collect() to prove that path survives, using a
+        # fresh workspace so it is not coupled to the direct-layer
+        # assertions above. ---
+        e2e_root = root / "e2e-badbytes-ws"
+        e2e_ms = e2e_root / "manuscript"
+        e2e_ms.mkdir(parents=True)
+        (e2e_ms / "01-good.md").write_text("Good paragraph. " * 40)
+        (e2e_ms / "02-bad.md").write_bytes(b"# Heading\n\xff\xfe not valid utf-8\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(e2e_root), "init", "--name", "e2ebadbytes",
+                      "--path", str(e2e_ms)])
+        e2e_db = api.open_db(str(e2e_root))
+        e2e_manuscript = api.get_manuscript(e2e_db)
+
+        report = api.collect(e2e_db, e2e_manuscript, {})
+        check("api.collect() completes end-to-end through a manuscript "
+              "containing invalid UTF-8, instead of raising",
+              "staged" not in report, str(report))
+        v1 = e2e_db.one(
+            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1",
+            (e2e_manuscript["id"],))
+        stored_files = loads(v1["files"], {}) if v1 else {}
+        check("the file with invalid UTF-8 is snapshotted by api.collect(), "
+              "not silently dropped as a phantom deletion",
+              "02-bad.md" in stored_files, str(sorted(stored_files)))
+        # --- detect_transitions in isolation (T5, risk-register §3): no
+        # existing test calls the diff/opcode logic directly, only through
+        # the full collect() pipeline. Isolated manuscript, own history. ---
+        from authorlm.revisions import collect_revision, detect_transitions
+
+        dt_root = root / "dt-ws"
+        dt_ms = dt_root / "manuscript"
+        dt_ms.mkdir(parents=True)
+        dt_db = api.open_db(str(dt_root))
+
+        # Paragraph reorder: difflib has no "moved" concept, so swapping two
+        # adjacent paragraphs is reported as the moved paragraph's text
+        # being inserted at its new position and deleted from its old one —
+        # not a single "reorder" transition. Characterizing, not endorsing.
+        dt_ms1 = dt_root / "reorder"
+        dt_ms1.mkdir()
+        row_reorder = api.register_manuscript(dt_db, "reorder", str(dt_ms1))
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP1 text here.\n\nP2 text here.\n\nP3 text here.\n")
+        v1 = collect_revision(dt_db, row_reorder, None, source="test")
+        (dt_ms1 / "a.md").write_text(
+            "# Heading\n\nP2 text here.\n\nP1 text here.\n\nP3 text here.\n")
+        v2 = collect_revision(dt_db, row_reorder, None, source="test")
+        reorder_trans = detect_transitions(dt_db, row_reorder["id"], dict(v1), v2)
+        check("paragraph reorder is an insert of the moved text at its new "
+              "position plus a delete at its old one, not a single move",
+              [(t["kind"], t["location"]) for t in reorder_trans]
+              == [("insert", "a.md#Heading"), ("delete", "a.md#Heading")],
+              str([(t["kind"], t["location"], t["summary"])
+                   for t in reorder_trans]))
+        check("the reorder's insert/delete pair both carry the moved "
+              "paragraph's own text, not the paragraph it displaced",
+              "P2 text here." in reorder_trans[0]["summary"]
+              and "P2 text here." in reorder_trans[1]["summary"])
+
+        # Two non-adjacent hunks in one file: each rewritten paragraph is
+        # its own transition, not merged into a single spanning edit.
+        dt_ms2 = dt_root / "hunks"
+        dt_ms2.mkdir()
+        row_hunks = api.register_manuscript(dt_db, "hunks", str(dt_ms2))
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 original.\n\nP3 unchanged.\n\n"
+            "P4 original.\n\nP5 unchanged.\n")
+        h1 = collect_revision(dt_db, row_hunks, None, source="test")
+        (dt_ms2 / "a.md").write_text(
+            "# Heading\n\nP1 unchanged.\n\nP2 REWRITTEN.\n\nP3 unchanged.\n\n"
+            "P4 REWRITTEN.\n\nP5 unchanged.\n")
+        h2 = collect_revision(dt_db, row_hunks, None, source="test")
+        hunk_trans = detect_transitions(dt_db, row_hunks["id"], dict(h1), h2)
+        check("two non-adjacent hunks in one file produce two separate "
+              "rewrite transitions, not one spanning edit",
+              len(hunk_trans) == 2
+              and all(t["kind"] == "rewrite" for t in hunk_trans)
+              and "P2 REWRITTEN" in hunk_trans[0]["summary"]
+              and "P4 REWRITTEN" in hunk_trans[1]["summary"],
+              str([(t["kind"], t["summary"]) for t in hunk_trans]))
+
+        # Heading-less file: location falls back to the bare filename, no
+        # '#heading' suffix, since _nearest_heading finds nothing to anchor to.
+        dt_ms3 = dt_root / "noheading"
+        dt_ms3.mkdir()
+        row_noheading = api.register_manuscript(dt_db, "noheading", str(dt_ms3))
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph.\n")
+        n1 = collect_revision(dt_db, row_noheading, None, source="test")
+        (dt_ms3 / "b.md").write_text(
+            "Just prose, no headings at all.\n\nSecond paragraph, edited.\n")
+        n2 = collect_revision(dt_db, row_noheading, None, source="test")
+        noheading_trans = detect_transitions(
+            dt_db, row_noheading["id"], dict(n1), n2)
+        check("a heading-less file's transition location is the bare "
+              "filename, with no '#heading' suffix",
+              len(noheading_trans) == 1
+              and noheading_trans[0]["location"] == "b.md",
+              str([(t["kind"], t["location"]) for t in noheading_trans]))
+
         # --- history show/restore (MVP.md 'Deliberately deferred': version
         # access & restoration — implementable at any time, no schema change) ---
         try:
@@ -356,6 +920,50 @@ def main_test() -> None:
         check("the restored snapshot is itself a new, real version",
               loads(latest["files"], {})["safety.md"] == big_text
               and "tiny.md" not in loads(latest["files"], {}))
+
+        # --- BUG-2 / A1 regression: restore_version must snapshot the
+        # current on-disk state into history BEFORE unlinking/overwriting
+        # it, so any work the author had on disk but never collected is
+        # still recoverable afterward (a self-contained fixture, so it
+        # cannot be confused with the version-numbering narrative above) ---
+        rv_root = root / "rv-ws"
+        rv_ms = rv_root / "manuscript"
+        rv_ms.mkdir(parents=True)
+        (rv_ms / "only.md").write_text("Original collected content.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(rv_root), "init", "--name", "rv",
+                      "--path", str(rv_ms)])
+        rv_db = api.open_db(str(rv_root))
+        rv_manuscript = api.get_manuscript(rv_db)
+        api.collect(rv_db, rv_manuscript, {})  # v1
+
+        # The author edits the tracked file AND starts a brand-new file —
+        # neither ever collected. This is the exact state a live session
+        # sits in between autosaves; restore_version must not be the thing
+        # that erases it.
+        (rv_ms / "only.md").write_text("EDITED BUT NEVER COLLECTED.\n")
+        (rv_ms / "new-uncollected.md").write_text(
+            "A NEW FILE, NEVER COLLECTED.\n")
+
+        api.restore_version(rv_db, rv_manuscript, 1, {})
+        check("restore_version still restores the target version's content",
+              (rv_ms / "only.md").read_text()
+              == "Original collected content.\n"
+              and not (rv_ms / "new-uncollected.md").exists())
+
+        rv_versions = rv_db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (rv_manuscript["id"],))
+        recovered = any(
+            loads(v["files"], {}).get("only.md")
+            == "EDITED BUT NEVER COLLECTED.\n"
+            and loads(v["files"], {}).get("new-uncollected.md")
+            == "A NEW FILE, NEVER COLLECTED.\n"
+            for v in rv_versions)
+        check("restore_version snapshots the pre-destruction disk state "
+              "into history before overwriting/deleting it (BUG-2 / A1)",
+              recovered,
+              [sorted(loads(v["files"], {})) for v in rv_versions])
 
         try:
             api.diff_versions(md_db, md_manuscript, older=1, newer=99)
@@ -440,6 +1048,26 @@ def main_test() -> None:
         briefing = api.get_briefing(db, manuscript)
         check("briefing is a serializable dict",
               "learning_velocity" in briefing)
+
+        # --- INV-15: a belief retired inside the briefing window must not
+        # reappear under "newly seeded candidate beliefs" — that is the
+        # author's explicit "no" shown back as a fresh finding. ---
+        retired_belief_row = ko_fields("pol")
+        retired_belief_row.update(
+            manuscript_id=manuscript["id"],
+            statement="INV-15 regression: a belief the author retires.",
+            status="candidate", confidence=0.5, supporting=1,
+            contradicting=0, outstanding_questions="[]",
+            source="review-explanation", source_id=db.source("author"))
+        db.insert("editorial_beliefs", retired_belief_row)
+        api.retire_belief(db, manuscript, retired_belief_row["id"][:8],
+                          "author said no")
+        briefing_after_retire = api.get_briefing(db, manuscript)
+        check("INV-15: a belief retired within the window is absent from "
+              "the briefing's newly-seeded list",
+              retired_belief_row["id"] not in
+              {b["id"] for b in briefing_after_retire["new_beliefs"]},
+              str(briefing_after_retire["new_beliefs"]))
         diff = api.diff_versions(db, manuscript)
         check("diff_versions returns per-file line lists",
               diff["new"] == "v1" and "01-choice.md" in diff["files"])
@@ -1265,6 +1893,86 @@ def main_test() -> None:
         restored = "# Title\n\nDoc went another way.\n"
         stub.set_tab("01-choice.md", restored)
         (ms / "01-choice.md").write_text(restored)
+
+        # --- doc pull truncation on a base-less mapped file (T2,
+        # risk-register BUG-1 repro): ensure_master gives every file in
+        # reading order a tab, but only the pushed file gets a
+        # pushed_hash. A pull of "everything mapped" then sees the
+        # never-pushed file's empty tab as "changed" with no recorded
+        # base and overwrites the local file with nothing. Own
+        # workspace, own FakeGoogle instance — isolated from the shared
+        # fixture above. CHARACTERIZATION repro (risk-register §3, T2):
+        # this stays green as today's behavior, not a specification,
+        # until the Sponsor authorizes the three_way base-less guard.
+        t2_root = root / "t2-ws"
+        t2_ms = t2_root / "manuscript"
+        t2_ms.mkdir(parents=True)
+        (t2_ms / "a.md").write_text("# A\n\nOriginal a content.\n")
+        (t2_ms / "b.md").write_text(
+            "# B\n\nOriginal b content, never individually pushed.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(t2_root), "init", "--name", "t2book",
+                      "--path", str(t2_ms), "--no-extract"])
+        t2_db = api.open_db(str(t2_root))
+        t2_manuscript = api.get_manuscript(t2_db)
+        t2_stub = FakeGoogle()
+        pushed_a = push_doc(t2_db, t2_manuscript, "a.md",
+                            service=t2_stub, docs_service=t2_stub)
+        master_tabs = t2_stub.state["docs"][pushed_a["doc_id"]]
+        b_tab = next(t for t in master_tabs if t["title"] == "b.md")
+        check("ensure_master gave the never-pushed file b.md its own tab "
+              "too — empty, since only a.md was actually pushed",
+              b_tab["text"] == "", str(master_tabs))
+        t2_manuscript = api.get_manuscript(t2_db)  # refresh metadata
+        report = pull_doc(t2_db, t2_manuscript,
+                          service=t2_stub, docs_service=t2_stub)
+        check("a pull of everything mapped treats the base-less empty tab "
+              "as 'changed' (no pushed_hash to compare against) and "
+              "overwrites the never-pushed local file with nothing",
+              "b.md" in report["changed"]
+              and (t2_ms / "b.md").read_text() == "",
+              str(report))
+        check("meanwhile the actually-pushed file is untouched",
+              "a.md" not in report["changed"]
+              and "Original a content" in (t2_ms / "a.md").read_text())
+
+        # --- gdocs failure path: documents().get() outage during reconcile
+        # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
+        # in a bare try/except (gdocs.py reconcile, ~line 1610-1616); this
+        # pins that it actually behaves as documented: the session survives
+        # (no exception escapes), the failure surfaces as a per-file error
+        # instead of being silently swallowed, and an in-sync local file is
+        # left untouched rather than being mistaken for a change. ---
+        class FailingDocsService:
+            def documents(self):
+                class _Boom:
+                    def get(self, **kwargs):
+                        raise RuntimeError("simulated Docs API outage")
+                return _Boom()
+
+        manuscript = api.get_manuscript(db)
+        before_text = (ms / "01-choice.md").read_text()
+        try:
+            report = reconcile(db, manuscript, stub,
+                               docs_service=FailingDocsService())
+            reconcile_survived = True
+        except Exception:
+            reconcile_survived = False
+        check("reconcile survives a documents().get() failure during tab "
+              "listing instead of raising and killing the session",
+              reconcile_survived)
+        check("the failure surfaces as a per-file error, not silently "
+              "swallowed",
+              any(e.get("file") == "(tab listing)"
+                  and "simulated Docs API outage" in e.get("error", "")
+                  for e in report["errors"]), str(report))
+        check("the local file is untouched — reconcile wrote nothing "
+              "despite the tab-listing failure",
+              (ms / "01-choice.md").read_text() == before_text)
+        check("a file that was actually in sync is still reported in_sync "
+              "despite the tab-listing failure (resolved via the plain "
+              "export, independent of the failed tab walk)",
+              "01-choice.md" in report["in_sync"], str(report))
 
         # --- margin threads: propose in-context; canonical stays old ---
         from authorlm import threads as th
@@ -2113,6 +2821,10 @@ def main_test() -> None:
         check("readiness flags the unrendered slot as a blocker",
               not ready["ready"]
               and "illustrations rendered" in ready["blocking"], str(ready))
+        sound_item = next(i for i in ready["items"] if i["check"] == "database sound")
+        check("readiness runs PRAGMA integrity_check against the live store "
+              "and reports a healthy database as sound (OPS-4)",
+              sound_item["ok"] and sound_item["detail"] == "ok", str(sound_item))
 
         class FakeLLM:
             enabled = True
@@ -2281,6 +2993,32 @@ def main_test() -> None:
               and "Tremor" in props.describe(incongruence[0])[0]
               and "Acknowledged" in props.adopt(db, manuscript["id"],
                                                 incongruence[0]))
+
+        # --- BUG-20: an `item` index of 0 (or negative) must be rejected,
+        # not silently wrapped by Python's negative-index behaviour onto a
+        # DIFFERENT paragraph. `pairs[int(f.get("item",0)) - 1]` with
+        # item=0 computes index -1, which Python resolves to the last pair
+        # instead of raising IndexError, so the bounds guard never fires. ---
+        zero_item_llm = FakeLLM({"findings": [
+            {"item": 0, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "The Tremor is never caused; it causes.",
+             "why": "an out-of-range item must not bind to any paragraph"},
+        ]})
+        onto_zero = sweeps.ontology(db, manuscript, zero_item_llm,
+                                    file="01-choice.md")
+        check("BUG-20: item=0 is dropped instead of wrapping onto the "
+              "last pair via negative indexing",
+              onto_zero["findings"] == 0
+              and onto_zero["dropped_ungrounded"] == 1, str(onto_zero))
+        neg_item_llm = FakeLLM({"findings": [
+            {"item": -1, "concept": "Tremor", "quote": grounded_quote,
+             "claim": "x", "why": "a negative item must not bind either"},
+        ]})
+        onto_neg = sweeps.ontology(db, manuscript, neg_item_llm,
+                                   file="01-choice.md")
+        check("BUG-20: a negative item is dropped, not indexed from the end",
+              onto_neg["findings"] == 0
+              and onto_neg["dropped_ungrounded"] == 1, str(onto_neg))
 
         lenses.add_lens(manuscript, "clarity",
                         "Flag sentences that assert a claim without "
@@ -2923,6 +3661,205 @@ def main_test() -> None:
                      (manuscript["id"], "AlphaConcept")) is not None,
               str(multi))
 
+        # --- BUG-7: extraction must never overwrite the author's ratified
+        # concept notes, even when a materially different paraphrase comes
+        # back for text the author actually changed. ---
+        (ms / "09-ratified.md").write_text(
+            "# Ratified\n\nRatifiedTerm is discussed at length here.\n"
+        )
+        api.add_concept(db, manuscript, "RatifiedTerm", kind="concept",
+                        notes="AUTHOR RATIFIED TEXT")
+        note_proposals_before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+
+        class NoteOverwriteLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "RatifiedTerm", "kind": "concept",
+                     "notes": "machine paraphrase of the definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, NoteOverwriteLLM(),
+                         files=["09-ratified.md"])
+        ratified_after = concepts.get_concept(db, manuscript["id"], "RatifiedTerm")
+        note_proposals_after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals "
+            "WHERE manuscript_id = ? AND kind = 'note_update'",
+            (manuscript["id"],))["n"]
+        check("extraction never overwrites the author's ratified concept notes",
+              ratified_after["notes"] == "AUTHOR RATIFIED TEXT",
+              f"notes became: {ratified_after['notes']!r}")
+        check("a materially different extraction files a note_update "
+              "proposal instead of applying itself",
+              note_proposals_after == note_proposals_before + 1,
+              f"before={note_proposals_before} after={note_proposals_after}")
+
+        # --- BUG-8: a hit on a concept's ALIAS (not its primary name) must
+        # not be treated as a brand-new concept — that discards a confirmed
+        # concept's metadata (including 'confirmed': True) and reopens it to
+        # silent auto-retirement. ---
+        (ms / "10-alias.md").write_text(
+            "# Alias\n\nAliasSecondary shows up in the prose here.\n\n"
+            "## Elsewhere\n\nAliasSecondary appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+        api.add_concept(db, manuscript, "AliasPrimary", kind="concept",
+                        notes="primary notes")
+        api.confirm_concept(db, manuscript, "AliasPrimary")
+        api.alias_concept(db, manuscript, "AliasPrimary", ["AliasSecondary"])
+        primary_meta_before = _json.loads(
+            concepts.get_concept(db, manuscript["id"], "AliasPrimary")["metadata"]
+            or "{}")
+        check("fixture concept starts confirmed",
+              primary_meta_before.get("confirmed") is True,
+              str(primary_meta_before))
+
+        class AliasHitLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "AliasSecondary", "kind": "concept",
+                     "notes": "some notes about the alias"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        extract_concepts(db, manuscript, AliasHitLLM(), files=["10-alias.md"])
+        primary_after = concepts.get_concept(db, manuscript["id"], "AliasPrimary")
+        primary_meta_after = _json.loads(primary_after["metadata"] or "{}")
+        check("an alias hit does not reset the primary concept's 'confirmed' flag",
+              primary_meta_after.get("confirmed") is True,
+              f"metadata became: {primary_meta_after}")
+        check("an alias hit does not fork a duplicate concept node",
+              db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                     "manuscript_id = ? AND lower(name) = lower(?)",
+                     (manuscript["id"], "AliasSecondary"))["n"] == 0)
+
+        # --- BUG-21: a model-shaped-but-malformed reply (a list where a
+        # string kind is expected, null where an empty list is expected)
+        # must not abort the extraction pass with a TypeError. ---
+        (ms / "11-coerce.md").write_text(
+            "# Coerce\n\nCoerceTarget needs a name here.\n\n"
+            "## Elsewhere\n\nCoerceTarget appears again in a different "
+            "section, clearing the recurrence bar.\n"
+        )
+
+        class MalformedLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "CoerceTarget", "kind": ["concept"]}],
+                        "links": None, "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        coerce_error = None
+        try:
+            extract_concepts(db, manuscript, MalformedLLM(),
+                             files=["11-coerce.md"])
+        except TypeError as err:
+            coerce_error = err
+        check("a malformed 'kind' (list, not str) does not abort extraction",
+              coerce_error is None, str(coerce_error))
+        coerced_node = concepts.get_concept(db, manuscript["id"], "CoerceTarget")
+        check("the malformed kind coerces to the 'concept' default",
+              coerced_node is not None and coerced_node["kind"] == "concept",
+              str(coerced_node))
+
+        # --- BUG-21 follow-up: a null 'concepts' payload (as opposed to a
+        # malformed item inside a present list) must be treated as a FAILED
+        # pass, not a clean "nothing found" pass. Coercing null to []
+        # (the original BUG-21 fix) let the watermark advance on a broken
+        # reply, permanently skipping the section on every future
+        # incremental run — a silent, unrecoverable content skip. ---
+        (ms / "12-nullconcepts.md").write_text(
+            "# NullConcepts\n\nNullConceptsTarget needs a name here.\n\n"
+            "## Elsewhere\n\nNullConceptsTarget appears again in a "
+            "different section, clearing the recurrence bar.\n"
+        )
+
+        class NullConceptsLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": None, "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        api.collect(db, manuscript, {})
+        nullconcepts_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        # Query the DB directly rather than trusting the long-lived in-memory
+        # `manuscript` dict: several extractions upstream in this same test
+        # (FlakyLLM's first payload, NoteOverwriteLLM, AliasHitLLM,
+        # MalformedLLM/BUG-21) have already advanced the real watermark in
+        # the DB since `manuscript` was first bound.
+        nullconcepts_before_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        nullconcepts_result = extract_concepts(
+            db, manuscript, NullConceptsLLM(), files=["12-nullconcepts.md"])
+        nullconcepts_after_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("a null 'concepts' payload is reported as a failed pass, "
+              "not a clean miss",
+              nullconcepts_result is None, str(nullconcepts_result))
+        check("a null 'concepts' payload does not advance the watermark "
+              "(the section stays eligible for re-mining)",
+              nullconcepts_after_meta.get("last_extracted_version")
+              == nullconcepts_before_meta.get("last_extracted_version")
+              and nullconcepts_after_meta.get("last_extracted_version")
+              != nullconcepts_latest["id"],
+              str({"before": nullconcepts_before_meta,
+                   "after": nullconcepts_after_meta,
+                   "latest": nullconcepts_latest["id"]}))
+        check("a null 'concepts' payload creates no concept node",
+              concepts.get_concept(db, manuscript["id"], "NullConceptsTarget")
+              is None)
+
+        # --- BUG-5: the watermark write must re-read metadata from the DB
+        # immediately before writing, not merge into an in-memory dict
+        # captured before a multi-minute LLM call — otherwise a concurrent
+        # write (e.g. a Google Docs mapping update) is clobbered wholesale. ---
+        from authorlm.extraction import _set_extraction_watermark
+        from authorlm.gdocs import _save_mapping
+
+        stale_manuscript = dict(manuscript)  # snapshot "before the LLM call"
+        _save_mapping(db, manuscript, {"gdocs": {"_master_id": "doc-survives"}})
+        watermark_latest = db.one(
+            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        _set_extraction_watermark(db, stale_manuscript, watermark_latest["id"])
+        watermark_final_meta = _json.loads(
+            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                   (manuscript["id"],))["metadata"] or "{}")
+        check("the watermark write re-reads fresh metadata instead of "
+              "clobbering a concurrent write with a stale in-memory copy",
+              watermark_final_meta.get("gdocs", {}).get("_master_id")
+              == "doc-survives"
+              and watermark_final_meta.get("last_extracted_version")
+              == watermark_latest["id"],
+              str(watermark_final_meta))
+        manuscript = api.get_manuscript(db)  # refresh metadata
+
         # --- prerequisite-gap first mentions: terms of art, not casual words ---
         # Repro from improvement task it-e34cf5227223: 'wandered through time
         # and space' must not count as the first mention of concept 'Space'.
@@ -3166,6 +4103,58 @@ def main_test() -> None:
                   str(seen_http))
         finally:
             sys.modules.pop("google_auth_httplib2", None)
+
+        # --- SEC-3: cached Google OAuth tokens must be written 0600, not
+        # world-readable, at both write sites (post-refresh and initial
+        # consent) -- a long-lived refresh token readable by any other
+        # local account grants full read/write of every manuscript Doc. ---
+        import stat
+
+        class _FakeGoogleCreds:
+            def __init__(self, expired, refresh_token, valid_after_refresh=True):
+                self.expired = expired
+                self.refresh_token = refresh_token
+                self.valid = not expired
+                self._valid_after_refresh = valid_after_refresh
+
+            def refresh(self, request):
+                self.valid = self._valid_after_refresh
+                self.expired = False
+
+            def to_json(self):
+                return _rjson.dumps({"token": "secret-refresh-token"})
+
+        gdocs_sec3_ws = root / "gdocs-sec3-ws"
+        gdocs_sec3_ws.mkdir()
+        token_path = gdocs_sec3_ws / ".authorlm" / "gdocs_token.json"
+        token_path.parent.mkdir(parents=True)
+        token_path.write_text('{"token": "stale"}')
+
+        with mock.patch(
+            "google.oauth2.credentials.Credentials.from_authorized_user_file",
+            return_value=_FakeGoogleCreds(expired=True, refresh_token="rt")):
+            gdocs_mod.get_credentials({}, workspace=str(gdocs_sec3_ws))
+        refreshed_mode = stat.S_IMODE(token_path.stat().st_mode)
+        check("SEC-3: a refreshed Google token is written 0600, not "
+              "world-readable",
+              refreshed_mode == 0o600, oct(refreshed_mode))
+
+        token_path.unlink()
+        secret_path = gdocs_sec3_ws / "client_secret_fake.json"
+        secret_path.write_text("{}")
+        fake_flow = types.SimpleNamespace(
+            run_local_server=lambda port=0: _FakeGoogleCreds(
+                expired=False, refresh_token=None))
+        with mock.patch(
+            "google_auth_oauthlib.flow.InstalledAppFlow"
+            ".from_client_secrets_file",
+            return_value=fake_flow):
+            gdocs_mod.get_credentials(
+                {"gdocs": {"client_secret": str(secret_path)}},
+                workspace=str(gdocs_sec3_ws))
+        consented_mode = stat.S_IMODE(token_path.stat().st_mode)
+        check("SEC-3: a freshly-consented Google token is written 0600 too",
+              consented_mode == 0o600, oct(consented_mode))
 
         # toc.toml matter attributes + liberal parse (never raise)
         matter_files = {
@@ -3772,6 +4761,50 @@ def main_test() -> None:
               {e["statement"] for e in overridden["elements"]}
               == {"Prefer terse fragments.",
                   "Address the reader in second person."})
+
+        # --- MCP tool envelope (T4, risk-register §3): _guard's real
+        # contract at the @mcp.tool() seam — (LookupError, ValueError,
+        # RuntimeError) become an {"ok": False, "error": ...} dict every
+        # other exception type propagates instead of being swallowed. ---
+        from authorlm import mcp_server
+
+        # _guard's tracelog write defaults to ~/.authorlm when _WORKSPACE
+        # is None (its untouched default here) — pin it to a throwaway
+        # workspace first so this test can never write into the author's
+        # real trace log.
+        guard_ws = root / "mcp-guard-ws"
+        guard_ws.mkdir()
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(guard_ws)
+        try:
+            for exc_cls, message in (
+                (LookupError, "no such manuscript"),
+                (ValueError, "bad argument"),
+                (RuntimeError, "operation failed"),
+            ):
+                def boom(exc_cls=exc_cls, message=message):
+                    raise exc_cls(message)
+                result = mcp_server._guard(boom)
+                check(f"_guard maps a bare {exc_cls.__name__} to an "
+                      "{ok: False, error} envelope",
+                      result == {"ok": False, "error": message}, str(result))
+
+            def crash():
+                raise TypeError("not one of the guarded error types")
+            try:
+                mcp_server._guard(crash)
+                propagated = False
+            except TypeError as err:
+                propagated = str(err) == "not one of the guarded error types"
+            check("_guard re-raises exception types outside its guarded "
+                  "set instead of swallowing them into an ok:false envelope",
+                  propagated)
+
+            ok_result = mcp_server._guard(lambda: {"value": 42})
+            check("_guard wraps a successful call as {ok: True, result}",
+                  ok_result == {"ok": True, "result": {"value": 42}})
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
 
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp

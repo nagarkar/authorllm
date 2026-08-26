@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 from .revisions import iter_manuscript_paths
@@ -190,6 +191,22 @@ def externalize(root: Path, slot: dict) -> dict:
             "desc_hash": slot["desc_hash"]}
 
 
+def _read_manuscript_text(path: Path, rel: str) -> str:
+    """Read a manuscript file, tolerating invalid UTF-8 the same way
+    `revisions.read_manuscript_files` does: warn on stderr and re-read
+    with `errors="replace"` (invalid bytes become U+FFFD) rather than
+    raising. Every one of this module's manuscript reads sits on the
+    `api.collect()` recovery path, so a decode failure must not take
+    down the very path that exists to recover from it."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"warning: {rel} is not valid UTF-8; reading it with "
+              f"replacement characters in place of the invalid bytes",
+              file=sys.stderr)
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
 def maintain_excerpts(root: Path) -> list[dict]:
     """Regenerate every ref tag's excerpt from its canonical file —
     drift is impossible by construction. Returns the rewrites, each
@@ -207,7 +224,7 @@ def maintain_excerpts(root: Path) -> list[dict]:
     report = []
     picked: dict[str, list[str]] = {}
     for rel, path in iter_manuscript_paths(root).items():
-        lines = path.read_text(encoding="utf-8").split("\n")
+        lines = _read_manuscript_text(path, rel).split("\n")
         changed = False
         for i, line in enumerate(lines):
             tag = parse_tag(line)
@@ -259,7 +276,7 @@ def externalize_offers(root: Path, long_words: int = 50,
     offers = []
     prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
-        for slot in scan_text(path.read_text(encoding="utf-8"), prompts):
+        for slot in scan_text(_read_manuscript_text(path, rel), prompts):
             if slot.get("ref"):
                 continue
             reason = None
@@ -358,7 +375,7 @@ def slot_report(root: Path) -> dict:
     slots = []
     prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
-        for slot in scan_text(path.read_text(encoding="utf-8"), prompts):
+        for slot in scan_text(_read_manuscript_text(path, rel), prompts):
             slots.append({"file": rel, **slot})
     rendered = {c["desc"] for c in candidate_files(root)}
     declared = {s["desc_hash"] for s in slots}

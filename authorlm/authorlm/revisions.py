@@ -11,6 +11,7 @@ import difflib
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
@@ -52,10 +53,23 @@ def iter_manuscript_paths(root: Path) -> dict[str, Path]:
 
 
 def read_manuscript_files(root: Path) -> dict[str, str]:
-    return {
-        rel: strip_embed_lines(path.read_text(encoding="utf-8"))
-        for rel, path in iter_manuscript_paths(root).items()
-    }
+    """Every file returned by `iter_manuscript_paths` MUST appear in the
+    result — a dropped entry reads downstream as a deletion and can feed
+    the auto-retire path (api.py). A file that is not valid UTF-8 is
+    re-read with `errors="replace"` (invalid bytes become U+FFFD) rather
+    than raising: this is the recovery path itself (`collect()`), so it
+    must not die on the failure it exists to recover from."""
+    files: dict[str, str] = {}
+    for rel, path in iter_manuscript_paths(root).items():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            print(f"warning: {rel} is not valid UTF-8; reading it with "
+                  f"replacement characters in place of the invalid bytes",
+                  file=sys.stderr)
+            text = path.read_text(encoding="utf-8", errors="replace")
+        files[rel] = strip_embed_lines(text)
+    return files
 
 
 def checksum(files: dict[str, str]) -> str:

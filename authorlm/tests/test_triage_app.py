@@ -1,15 +1,57 @@
 from __future__ import annotations
 
+import os
+
+# Offline suite: pin the project-config and .env lookups away from the
+# real ones. Without this a checkout's config.toml (llm enabled, keys in
+# .env) is picked up by every test process and the suite makes live,
+# billed model calls — and asserts against whatever they return.
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+def _assert_offline() -> None:
+    """Fail loudly if the real project config or .env leaks into a test.
+
+    Before config moved into the repo, a test workspace simply had no
+    config.toml, so the LLM was off and no suite could make a billed
+    call. Now a checkout always HAS an enabled config, and that safety
+    came from nothing but the pins above — so it is asserted, not
+    assumed."""
+    import os as _os
+
+    from authorlm import paths as _paths
+
+    assert not _paths.config_path().exists(), (
+        f"test isolation broken: reading the real config at "
+        f"{_paths.config_path()}")
+    assert _paths.load_env() == [], "test isolation broken: .env was loaded"
+    leaked = [v for v in _paths_vendor_vars() if _os.environ.get(v)]
+    assert not leaked, f"test isolation broken: vendor keys in env: {leaked}"
+
+
+def _paths_vendor_vars() -> list:
+    from authorlm.llm import VENDOR_KEY_ENV
+
+    return sorted(VENDOR_KEY_ENV.values())
+
+
 import contextlib
+import http.server
 import io
 import json
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from authorlm import api, cli, triage, triage_analysis, triage_rules, triage_transport
+from authorlm import (
+    api, cli, triage, triage_analysis, triage_rules, triage_server,
+    triage_transport,
+)
 from authorlm.db import Database, ko_fields
 from authorlm.extraction import triage_feedback
 
@@ -583,5 +625,98 @@ class TriageAppTest(unittest.TestCase):
         self.assertEqual(row["analysis"]["state"], "outdated")
 
 
+class TriageServerWireContractTest(unittest.TestCase):
+    """T3 (risk-register §3): triage_server.make_handler had zero test
+    references anywhere in the suite. Pins the actual HTTP wire contract a
+    live triage_server process exposes: GET /health, the POST /api/triage
+    envelope shape, and the 409 status the handler maps a TriageConflict
+    onto — as opposed to calling triage.py's functions directly, which
+    every other test in this file does and none of which exercises
+    triage_server.py itself."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="authorlm-triage-http-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        # api.open_db (which the handler calls per request via
+        # triage_transport.dispatch) resolves to <workspace>/.authorlm/
+        # authorlm.db — a different path than manuscript_fixture's flat
+        # root/authorlm.db used elsewhere in this file, so this fixture is
+        # built directly against that convention instead.
+        self.db = api.open_db(str(self.root))
+        self.addCleanup(self.db.conn.close)
+        manuscript_path = self.root / "book"
+        manuscript_path.mkdir()
+        (manuscript_path / "chapter.md").write_text(
+            "# Choice\n\nChoice makes distinction possible.\n",
+            encoding="utf-8")
+        self.manuscript = api.register_manuscript(
+            self.db, "book", str(manuscript_path))
+
+        self.server = http.server.HTTPServer(
+            ("127.0.0.1", 0),
+            triage_server.make_handler(str(self.root), "book"))
+        threading.Thread(target=self.server.serve_forever,
+                         daemon=True).start()
+        # LIFO: shutdown (stop serve_forever's loop) must run before
+        # server_close (close the socket), so register close first.
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def _post(self, method: str, params: dict):
+        req = urllib.request.Request(
+            f"{self.base_url}/api/triage",
+            data=json.dumps({"method": method, "params": params}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read())
+
+    def test_health(self):
+        with urllib.request.urlopen(f"{self.base_url}/health") as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read()), {"ok": True})
+
+    def test_triage_envelope_on_success(self):
+        status, body = self._post("snapshot", {"triage_type": "concepts"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertIn("result", body)
+        self.assertIn("rows", body["result"])
+
+    def test_triage_conflict_maps_to_409(self):
+        concept = ko_fields("cn")
+        concept.update(
+            manuscript_id=self.manuscript["id"], name="Choice",
+            kind="concept", status="realized", introduced_in="chapter.md",
+            notes="Choice notes", aliases="[]",
+            source_id=self.db.source("system"),
+            metadata=json.dumps({"origin": "extracted"}))
+        self.db.insert("concept_nodes", concept)
+        draft = ko_fields("td")
+        draft.update(
+            manuscript_id=self.manuscript["id"], triage_type="concepts",
+            object_id=concept["id"], object_version=concept["version"],
+            action="confirm", parameters="{}", reason=None,
+            updated_at=concept["created_at"])
+        self.db.insert("triage_drafts", draft)
+        # Someone else changed the concept after the draft was staged,
+        # bumping its version — the staged draft is now stale.
+        self.db.update("concept_nodes", concept["id"],
+                       {"notes": "changed elsewhere"})
+
+        status, body = self._post(
+            "apply", {"triage_type": "concepts",
+                     "object_ids": [concept["id"]]})
+        self.assertEqual(status, 409, body)
+        self.assertFalse(body["ok"])
+        self.assertIn("conflicts", body)
+        self.assertEqual(body["conflicts"][0]["object_id"], concept["id"])
+
+
 if __name__ == "__main__":
+    _assert_offline()
     unittest.main()
