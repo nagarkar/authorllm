@@ -263,6 +263,222 @@ def check_extraction_failure_traced() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_extraction_prompt_provenance() -> None:
+    """The author asked: when extraction (or its adjudication pass) runs,
+    say which prompt files shaped it, so they can go read them. The list
+    must be derived from prompt_registry.REGISTRY (never a hardcoded
+    filename), must reflect the run that actually happened — adjudication
+    appears only when it was opted in AND had candidates to judge — and
+    CLI and MCP must report the identical set, since both surfaces just
+    forward the same `prompt_files` field returned by
+    `extraction.extract_concepts`."""
+    import io
+
+    from authorlm import api as _api
+    from authorlm import cli as cli_module
+    from authorlm import extraction
+    from authorlm import mcp_server
+    from authorlm import prompt_registry as pr
+
+    repo_root = Path(__file__).resolve().parent.parent
+
+    def _on_disk(location: str) -> bool:
+        # module-backed locations carry a ":SYMBOL" suffix after the real
+        # file path (prompt_registry.Prompt.location) — strip it before
+        # checking existence.
+        return (repo_root / location.split(":", 1)[0]).is_file()
+
+    check("every registered prompt's location resolves to a real file "
+          "on disk",
+          all(_on_disk(p.location) for p in pr.REGISTRY),
+          str([p.location for p in pr.REGISTRY if not _on_disk(p.location)]))
+
+    extraction_loc = pr.by_name("extraction").location
+    adjudication_loc = pr.by_name("adjudication").location
+    edges_loc = pr.by_name("extraction-edges").location
+    aliases_loc = pr.by_name("extraction-aliases").location
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-promptprov-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "00-seed.md").write_text("# Seed\n\nNothing to see here.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = _api.open_db(str(ws))
+        manuscript = _api.get_manuscript(db, "book")
+
+        def two_context_paragraphs(name: str) -> str:
+            return (f"# {name}\n\n" + (f"{name} appears here. " * 4)
+                    + f"\n\n## Later\n\n" + (f"{name} returns here. " * 4)
+                    + "\n")
+
+        class ExtractOnlyLLM:
+            """No `.config` attribute — adjudication.enabled() reads
+            `getattr(llm, 'config', None) or {}`, so this stays off."""
+            enabled = True
+            extraction_max_chars = 24000
+
+            def __init__(self, concept_name: str):
+                self.concept_name = concept_name
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": self.concept_name, "kind": "concept",
+                     "notes": "a definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        class AdjudicatingLLM:
+            """Opts into adjudication and answers both LLM calls the pass
+            makes: extraction (plain payload) then adjudication (payload
+            starts with 'CANDIDATE ...', per adjudication._render_candidates)."""
+            enabled = True
+            extraction_max_chars = 24000
+
+            def __init__(self, concept_name: str):
+                self.config = {"extraction": {"adjudicate": True}}
+                self.concept_name = concept_name
+                self.calls = 0
+
+            def complete_json(self, system, user, thinking_budget=None):
+                self.calls += 1
+                if user.startswith("CANDIDATE"):
+                    return {"concepts": [
+                        {"name": self.concept_name, "verdict": "new"}],
+                            "links": []}
+                return {"concepts": [
+                    {"name": self.concept_name, "kind": "concept",
+                     "notes": "a definition"}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        # --- (a)+(b): adjudication OFF — only extraction.md is reported,
+        # via the CLI surface (_run_extraction's printed output). ---
+        (ms / "01-cli-off.md").write_text(two_context_paragraphs("CliOffConcept"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_module._run_extraction(db, manuscript, ExtractOnlyLLM("CliOffConcept"),
+                                       files=["01-cli-off.md"])
+        cli_off_out = buf.getvalue()
+        check("CLI reports the extraction prompt file after a plain pass",
+              f"Prompts: {extraction_loc}" in cli_off_out, cli_off_out)
+        check("CLI does NOT report adjudication.md when adjudication "
+              "never ran",
+              adjudication_loc not in cli_off_out, cli_off_out)
+
+        # --- same scenario via MCP: adjudication OFF. ---
+        (ms / "02-mcp-off.md").write_text(two_context_paragraphs("McpOffConcept"))
+        prev_workspace = mcp_server._WORKSPACE
+        prev_llm = mcp_server._llm
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_server._llm = lambda: ExtractOnlyLLM("McpOffConcept")
+            mcp_off = mcp_server.extract_concepts(
+                files=["02-mcp-off.md"], manuscript="book")
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+            mcp_server._llm = prev_llm
+        check("MCP extract_concepts carries prompt_files as structured "
+              "data, matching the CLI's set when adjudication is off",
+              mcp_off["ok"] is True
+              and mcp_off["result"]["prompt_files"] == [extraction_loc],
+              str(mcp_off))
+
+        # --- (b): adjudication ON, via CLI — both files listed. ---
+        (ms / "03-cli-on.md").write_text(two_context_paragraphs("CliOnConcept"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_module._run_extraction(db, manuscript, AdjudicatingLLM("CliOnConcept"),
+                                       files=["03-cli-on.md"])
+        cli_on_out = buf.getvalue()
+        check("CLI reports BOTH extraction.md and adjudication.md when "
+              "adjudication actually ran",
+              f"Prompts: " in cli_on_out
+              and extraction_loc in cli_on_out
+              and adjudication_loc in cli_on_out,
+              cli_on_out)
+
+        # --- same scenario via MCP: adjudication ON — identical set. ---
+        (ms / "04-mcp-on.md").write_text(two_context_paragraphs("McpOnConcept"))
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_server._llm = lambda: AdjudicatingLLM("McpOnConcept")
+            mcp_on = mcp_server.extract_concepts(
+                files=["04-mcp-on.md"], manuscript="book")
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+            mcp_server._llm = prev_llm
+        check("MCP reports the same prompt set as the CLI when "
+              "adjudication ran (deterministic: reflects the actual run)",
+              mcp_on["ok"] is True
+              and set(mcp_on["result"]["prompt_files"])
+              == {extraction_loc, adjudication_loc},
+              str(mcp_on))
+
+        # --- edges-only and aliases-only runs report THEIR prompt, not
+        # the base 'extraction' one — the flags change which prompt the
+        # run actually used. ---
+        _api.add_concept(db, manuscript, "EdgeAlpha", kind="concept")
+        _api.add_concept(db, manuscript, "EdgeBeta", kind="concept")
+        (ms / "05-edges.md").write_text(
+            "# Edges\n\nEdgeAlpha relates closely to EdgeBeta in this text.\n")
+
+        class EdgesLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [], "links": [
+                    {"from": "EdgeAlpha", "relation": "depends_on",
+                     "to": "EdgeBeta"}]}
+
+            def stats_line(self):
+                return None
+
+        edges_result = extraction.extract_concepts(
+            db, manuscript, EdgesLLM(), files=["05-edges.md"], edges_only=True)
+        check("an --edges run reports extraction-edges' prompt, not the "
+              "base extraction prompt",
+              edges_result is not None
+              and edges_result["prompt_files"] == [edges_loc],
+              str(edges_result))
+
+        _api.add_concept(db, manuscript, "AliasGamma", kind="concept")
+        _api.add_concept(db, manuscript, "AliasGammaAlt", kind="concept")
+        sentence = "AliasGammaAlt is another name for AliasGamma in this text."
+        (ms / "06-aliases.md").write_text(f"# Aliases\n\n{sentence}\n")
+
+        class AliasesLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [], "links": [], "aliases": [
+                    {"alias": "AliasGammaAlt", "canonical": "AliasGamma",
+                     "sentence": sentence}]}
+
+            def stats_line(self):
+                return None
+
+        aliases_result = extraction.extract_concepts(
+            db, manuscript, AliasesLLM(), files=["06-aliases.md"],
+            aliases_only=True)
+        check("an --aliases run reports extraction-aliases' prompt, not "
+              "the base extraction prompt",
+              aliases_result is not None
+              and aliases_result["prompt_files"] == [aliases_loc],
+              str(aliases_result))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_backup_and_restore() -> None:
     """OPS-4: the knowledge store has no backup, no integrity check, no
     verified copy today. This proves the fix actually works, not just
@@ -528,6 +744,7 @@ def main_test() -> None:
     check_show_verbs()
     check_config_parity()
     check_extraction_failure_traced()
+    check_extraction_prompt_provenance()
     check_backup_and_restore()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:

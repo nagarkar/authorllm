@@ -146,6 +146,8 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            "before triage" if summary.get("screened") else "")
         + "."
     )
+    if summary.get("prompt_files"):
+        print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
     if summary.get("below_bar"):
         print(ui.dim(
             "Below the recurrence bar (single-context phrases, not "

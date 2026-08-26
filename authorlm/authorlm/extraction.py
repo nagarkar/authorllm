@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from . import adjudication, proposals
+from . import adjudication, proposals, prompt_registry
 from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -69,6 +69,35 @@ EDGES_ONLY_SYSTEM = (
     '"links": [{"from": str, "relation": str, "to": str}]} using known '
     "concept names verbatim. " + RELATION_GUIDE
 )
+
+
+def _prompt_locations(edges_only: bool, aliases_only: bool,
+                      adjudicated: bool) -> list[str]:
+    """`Prompt.location` (prompt_registry.py) of every prompt THIS pass
+    actually sent to the LLM — deterministic: reflects what ran, not what
+    the flags merely permit. `adjudicated` is True only when
+    adjudication.adjudicate() ran and came back with verdicts (opted in,
+    and there were candidates to judge). Always derived from the registry
+    — never a hardcoded filename — so a renamed/moved prompt is picked up
+    automatically, and the single source of truth keeps the CLI and MCP
+    surfaces (both of which just forward this list) from drifting apart."""
+    if edges_only:
+        names = ["extraction-edges"]
+    elif aliases_only:
+        names = ["extraction-aliases"]
+    else:
+        names = ["extraction"]
+    if adjudicated:
+        names.append("adjudication")
+    return [prompt_registry.by_name(name).location for name in names]
+
+
+def _merge_prompts(aggregate: dict, sub: dict) -> None:
+    """Union sub-pass prompt locations into an aggregate, order preserved,
+    no duplicates — so a multi-pass run reports each prompt file once."""
+    for location in sub.get("prompt_files", []):
+        if location not in aggregate["prompt_files"]:
+            aggregate["prompt_files"].append(location)
 
 
 def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
@@ -416,7 +445,7 @@ def extract_concepts(
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "proposed": 0, "screened": 0, "truncated": False,
-            "scope": scope_label,
+            "scope": scope_label, "prompt_files": [],
         }
         failed = False
         for payload in payloads:
@@ -435,6 +464,7 @@ def extract_concepts(
             for key in ("skipped", "suppressed", "ungrounded_links",
                         "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
+            _merge_prompts(aggregate, sub)
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
         if failed:
@@ -504,7 +534,7 @@ def extract_concepts(
             "nodes": [], "edges": [], "realized": [], "skipped": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "proposed": 0, "screened": 0,
-            "truncated": False,
+            "truncated": False, "prompt_files": [],
         }
         failed = False
         for name in selected:
@@ -526,6 +556,7 @@ def extract_concepts(
                         "proposed", "screened"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
+            _merge_prompts(aggregate, sub)
         aggregate["scope"] = (
             f"hierarchical: {len(selected)} file(s) in reading order, "
             f"one pass each (cap {max_chars} chars)"
@@ -590,10 +621,12 @@ def extract_concepts(
     # survivors continue below, so every gate that follows still applies.
     # With the flag off, `enabled` is False and nothing here runs.
     screened = improved = 0
+    adjudicated = False
     if adjudication.enabled(llm) and not aliases_only:
         result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
         if verdicts:
             screened, improved = verdicts["screened"], verdicts["improves"]
+            adjudicated = True
 
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
@@ -855,4 +888,5 @@ def extract_concepts(
         "screened": screened,
         "scope": scope,
         "truncated": truncated,
+        "prompt_files": _prompt_locations(edges_only, aliases_only, adjudicated),
     }
