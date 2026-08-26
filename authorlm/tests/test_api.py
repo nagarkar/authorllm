@@ -1809,6 +1809,11 @@ def main_test() -> None:
               and any(item.startswith("copyright-year=")
                       for item in pdf_metadata),
               str(pdf_command))
+        check("review PDF writes a mode-specific filename",
+              Path(pdf_result["pdf"]).name.endswith(".review.pdf")
+              and pdf_command[pdf_command.index("-o") + 1]
+              == pdf_result["pdf"],
+              pdf_result["pdf"])
         check("PDF export starts the whole essay before its epigraph",
               "::: {.authorlm-file .authorlm-essay}\n"
               "An opening epigraph.\n\n# Intro"
@@ -1844,6 +1849,12 @@ def main_test() -> None:
               and "author=Author Penname" in print_metadata
               and any(item.startswith("subject=Copyright © ")
                       for item in print_metadata), str(print_command))
+        check("print-ready PDF writes a distinct filename from review",
+              Path(print_result["pdf"]).name.endswith(".print.pdf")
+              and print_result["pdf"] != pdf_result["pdf"]
+              and print_command[print_command.index("-o") + 1]
+              == print_result["pdf"],
+              f"{pdf_result['pdf']} vs {print_result['pdf']}")
         from authorlm.cli import build_parser as _build_parser
         print_args = _build_parser().parse_args(
             ["export", "pdf", "--print-ready"])
