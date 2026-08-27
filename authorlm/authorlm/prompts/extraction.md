@@ -64,6 +64,10 @@ not a relationship, and direction matters. Prefer 5-15 strong links; if unsure
 which relation holds, omit the link rather than guessing.
 
 ALIAS GUIDE:
+An alias is the SAME concept under a different name — not a related,
+broader, narrower, or contrasting concept. If two concepts merely resemble,
+imply, or bear on one another, that is a relationship: use RELATION GUIDE
+(generalizes/specializes/contrasts_with/etc.), never "aliases".
 Report ALIASING STATEMENTS under "aliases": sentences that identify or name
 one known concept in terms of another ("What ye call Experience is the
 discernment of qualities separated"; "We call it The Chid"). Match names

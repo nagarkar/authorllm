@@ -149,6 +149,10 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            if summary.get("below_bar") else "")
         + (f"; adjudication screened out {summary['screened']} candidate(s) "
            "before triage" if summary.get("screened") else "")
+        + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
+           "naming an already-live concept (would be a merge, not an "
+           "alias — logged, not queued)"
+           if summary.get("alias_folds_refused") else "")
         + "."
     )
     if summary.get("prompt_files"):

@@ -944,17 +944,65 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("precedent carries the analyzed decision sequence",
               "opened the section with a sailing metaphor" in out, out)
 
-        # --- alias detection: naming sentences become merge proposals ---
+        # --- alias detection: naming sentences that identify two ALREADY
+        # LIVE concepts are refused, not turned into merge proposals
+        # (Q/alias-guard). An alias means the same concept under a
+        # different name — 'Distinction' and 'Persistence' already stand
+        # as independent live concepts of their own, so reading either
+        # naming sentence as an alias would fold one live concept into
+        # another (a merge), which is heavier than a single sentence can
+        # license on its own. ---
         write(ms / "03-names.md",
               "# Names\n\nWhat ye call Distinction is the choice of "
               "qualities parted. What ye call Persistence is the becoming "
               "of shapes.\n")
         out = run(ws, "extract", "--aliases")
         check("aliases pass reports its scope", "aliases only" in out, out)
-        check("aliasing statements become proposals",
-              "2 proposal(s) against settled knowledge" in out, out)
+        check("both naming sentences are refused as live-concept folds",
+              "refused 2 alias proposal(s) naming an already-live concept"
+              in out, out)
+        check("a refused fold never becomes a proposal to review",
+              "proposal(s) against settled knowledge" not in out, out)
         out = run(ws, "proposal", "list")
-        check("alias proposals listed with both names",
+        check("no alias proposal reaches the queue",
+              "'Distinction' with 'Choice'" not in out
+              and "'Persistence' with 'Becoming'" not in out, out)
+
+        # Refused is not silently dropped: the extractor's read is recorded
+        # as system-provenance evidence, exactly like what adjudication.py
+        # screens out — auditable without becoming queue.
+        alias_guard_evidence = _db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'extraction_adjudication' "
+            "AND signal = 'alias_fold_refused'", (_mid,))
+        check("the refused folds are recorded as system-provenance evidence",
+              len(alias_guard_evidence) == 2
+              and all(row["weight"] == "low" for row in alias_guard_evidence),
+              str([dict(r) for r in alias_guard_evidence]))
+
+        # proposals.adopt()/demote_to_edge() still know how to settle an
+        # alias proposal once one actually exists (e.g. the legacy queue
+        # this guard is forward-only and does not touch) — exercised
+        # directly here, since extraction itself can no longer manufacture
+        # one for a pair of already-live concepts.
+        from authorlm import proposals as _prop
+
+        distinction_row = _db.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (_mid, "Distinction"))
+        persistence_row = _db.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (_mid, "Persistence"))
+        _prop.create(_db, _mid, "alias", distinction_row["id"],
+                    {"alias": "Distinction", "canonical": "Choice",
+                     "sentence": "What ye call Distinction is the choice "
+                                 "of qualities parted."})
+        _prop.create(_db, _mid, "alias", persistence_row["id"],
+                    {"alias": "Persistence", "canonical": "Becoming",
+                     "sentence": "What ye call Persistence is the becoming "
+                                 "of shapes."})
+        out = run(ws, "proposal", "list")
+        check("a manually-raised alias proposal still lists with both names",
               "'Distinction' with 'Choice'" in out
               and "'Persistence' with 'Becoming'" in out, out)
         persistence_id = next(line.split("[")[1].split("]")[0]
@@ -971,9 +1019,6 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("merged alias resolves to canonical with the sentence absorbed",
               "aliases: Distinction" in out
               and "What ye call Distinction" in out, out)
-        out = run(ws, "extract", "--aliases")
-        check("settled aliasing statements are not re-proposed",
-              "proposal(s) against settled knowledge" not in out, out)
 
         # A merged-away name is an alias now, not a banned retiree — the
         # extractor re-proposing it must resolve, never suggest revival.
@@ -983,7 +1028,9 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "revive retired concept 'Distinction'" not in out, out)
 
         # An oversized aliases sweep must fall back to file-by-file passes —
-        # a full sweep is full, never a silently truncated prefix.
+        # a full sweep is full, never a silently truncated prefix — and the
+        # alias guard must hold across every pass of that hierarchical sweep,
+        # not just a single payload.
         ws2 = root / "e2"
         ms2 = ws2 / "manuscript"
         write(ms2 / "01-choice.md",
@@ -1002,8 +1049,11 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(ws2, "extract", "--aliases")
         check("oversized aliases sweep goes hierarchical",
               "hierarchical" in out and "aliases only" in out, out)
-        check("hierarchical aliases sweep covers every file",
-              "2 proposal(s) against settled knowledge" in out, out)
+        check("the alias guard holds across every pass of the hierarchical "
+              "sweep — both folds refused, none queued",
+              "refused 2 alias proposal(s) naming an already-live concept"
+              in out
+              and "proposal(s) against settled knowledge" not in out, out)
 
         # --- collect --auto (the watcher's path) runs the analyzers itself ---
         write(ms / "04-auto.md", "# Auto\n\nBecoming continues apace.\n")

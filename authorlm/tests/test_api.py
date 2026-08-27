@@ -951,6 +951,85 @@ def check_backup_and_restore() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _guard_fixture(prefix: str):
+    """Common workspace/manuscript setup for the Q-remediation guard tests
+    (check_alias_guard / check_alias_dedupe / check_note_group /
+    check_note_materiality below). Caller is responsible for
+    shutil.rmtree(root, ignore_errors=True) in a finally block."""
+    import io
+
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "00-seed.md").write_text("# Seed\n\nNothing to see here.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db, "book")
+    return root, ws, ms, db, manuscript
+
+
+def check_alias_guard() -> None:
+    """Q/alias-guard: never propose an alias whose name is already a live
+    concept — refused at the extraction.py creation site and recorded as
+    system-provenance evidence instead of silently dropped.
+
+    Ratified against measured evidence on the author's live graph: 13 of
+    20 open alias proposals named a concept that was already its own live
+    concept (e.g. 'History' -> 'Rebirth', with 'History' itself live)."""
+    from authorlm import extraction
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-guard-")
+    try:
+        mid = manuscript["id"]
+        api.add_concept(db, manuscript, "AliasHistory", kind="concept")
+        api.add_concept(db, manuscript, "AliasRebirth", kind="concept")
+        sentence = "AliasHistory is what we mean by AliasRebirth in this text."
+        (ms / "01-alias.md").write_text(f"# Alias\n\n{sentence}\n")
+
+        class LiveAliasLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [], "links": [], "aliases": [
+                    {"alias": "AliasHistory", "canonical": "AliasRebirth",
+                     "sentence": sentence}]}
+
+            def stats_line(self):
+                return None
+
+        alias_before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        alias_result = extraction.extract_concepts(
+            db, manuscript, LiveAliasLLM(), files=["01-alias.md"],
+            aliases_only=True)
+        alias_after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        check("an alias whose name is already a live concept creates no "
+              "proposal",
+              alias_result is not None and alias_after == alias_before,
+              str(alias_result))
+        check("extract_concepts reports exactly one refused fold",
+              alias_result is not None
+              and alias_result.get("alias_folds_refused") == 1,
+              str(alias_result))
+        alias_evidence = db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'extraction_adjudication' "
+            "AND signal = 'alias_fold_refused'", (mid,))
+        check("the refusal is recorded as low-weight system-provenance "
+              "evidence, not silently dropped",
+              len(alias_evidence) == 1 and alias_evidence[0]["weight"] == "low",
+              str([dict(r) for r in alias_evidence]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -959,6 +1038,7 @@ def main_test() -> None:
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
     check_backup_and_restore()
+    check_alias_guard()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

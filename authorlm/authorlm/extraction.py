@@ -17,7 +17,7 @@ from . import adjudication, proposals, prompt_registry
 from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
-from .db import Database
+from .db import Database, ko_fields
 from .llm import LLMClient
 from .revisions import read_manuscript_files
 
@@ -102,6 +102,39 @@ def _merge_prompts(aggregate: dict, sub: dict) -> None:
     for location in sub.get("prompt_files", []):
         if location not in aggregate["prompt_files"]:
             aggregate["prompt_files"].append(location)
+
+
+def _record_alias_fold_refused(db: Database, manuscript_id: str, a_node: dict,
+                               c_node: dict, sentence: str) -> None:
+    """Guard (Q/alias-guard): the extractor read a naming sentence as
+    identifying `a_node` with `c_node` — but `a_node` already stands as its
+    own live concept, so adopting that reading would MERGE it into
+    `c_node`, not merely rename it. A merge is the author's call, decided
+    with the full weight of both concepts' history, never something a
+    single naming sentence should settle on its own — so no proposal is
+    queued here.
+
+    The read is not discarded, though: the extractor believing two live
+    concepts share a name IS information, so it is logged the same way
+    `adjudication.py` logs what it screens out — system provenance
+    (`extraction_adjudication` is in SYSTEM_EVIDENCE_TYPES), auditable, but
+    never queue."""
+    row = ko_fields("ev")
+    row.update(
+        manuscript_id=manuscript_id,
+        episode_id=None,
+        evidence_type="extraction_adjudication",
+        signal="alias_fold_refused",
+        target=(f"'{a_node['name']}' named as an alias of '{c_node['name']}' "
+                f"— both are already live concepts; refused (would be a "
+                f"merge, not an alias)")[:200],
+        supports_belief=None,
+        weight="low",  # a machine screening decision, never author evidence
+        metadata=json.dumps({"alias": a_node["name"],
+                             "canonical": c_node["name"],
+                             "sentence": sentence}),
+    )
+    db.insert("evidence", row)
 
 
 def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
@@ -450,7 +483,8 @@ def extract_concepts(
             "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
             "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0, "screened": 0, "truncated": False,
+            "proposed": 0, "screened": 0, "alias_folds_refused": 0,
+            "truncated": False,
             "scope": scope_label, "prompt_files": [],
             "adjudication_empty": False,
         }
@@ -471,7 +505,7 @@ def extract_concepts(
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
                         "suppressed", "ungrounded_links",
-                        "proposed", "screened"):
+                        "proposed", "screened", "alias_folds_refused"):
                 aggregate[key] += sub.get(key, 0)
             _merge_prompts(aggregate, sub)
             aggregate["adjudication_empty"] = (
@@ -546,7 +580,7 @@ def extract_concepts(
             "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
             "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "proposed": 0, "screened": 0,
+            "proposed": 0, "screened": 0, "alias_folds_refused": 0,
             "truncated": False, "prompt_files": [],
             "adjudication_empty": False,
         }
@@ -569,7 +603,7 @@ def extract_concepts(
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
                         "suppressed", "ungrounded_links",
-                        "proposed", "screened"):
+                        "proposed", "screened", "alias_folds_refused"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
             _merge_prompts(aggregate, sub)
@@ -684,6 +718,7 @@ def extract_concepts(
     proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
+    alias_folds_refused = 0
     disk_files: dict[str, str] | None = None
 
     for item in [] if edges_only or aliases_only else result.get("concepts", []):
@@ -859,10 +894,14 @@ def extract_concepts(
             ):
                 proposed += 1
 
-    # Aliasing statements become proposals — a merge is the author's call,
-    # never the extractor's. Validation is deterministic: both names must
-    # resolve to distinct live concepts and the sentence must be a verbatim
-    # quote of the text sent to the model.
+    # Aliasing statements were once turned straight into 'alias' proposals;
+    # since Q/alias-guard they never are — the ALIAS GUIDE requires both
+    # names to already be known concepts (see prompts/extraction.md), which
+    # means `a_node` below always resolves to an already-live concept, and
+    # queuing "fold it into `c_node`" as a lightweight proposal was exactly
+    # the structurally-broken pattern this guard exists to stop (a merge is
+    # the author's call, decided with more than a naming sentence). What
+    # survives here is detection + an auditable, non-queued record.
     flat_text = " ".join(text.split()).lower()
     for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
         if not isinstance(item, dict):
@@ -888,17 +927,17 @@ def extract_concepts(
         if not in_attention(alias_name, canonical_name):
             suppressed += 1
             continue
-        location = next(
-            (fname for fname, ftext in (new_files or {}).items()
-             if sentence.lower() in " ".join(ftext.split()).lower()),
-            None,
-        )
-        if proposals.create(
-            db, mid, "alias", a_node["id"],
-            {"alias": a_node["name"], "canonical": c_node["name"],
-             "sentence": sentence, "location": location},
-        ):
-            proposed += 1
+        # Guard (Q/alias-guard): an alias means the SAME concept under a
+        # different name (see ALIAS GUIDE, prompts/extraction.md) — not a
+        # merge of two concepts each already standing on their own. `a_node`
+        # is only reachable here because it already resolved (via the
+        # alias-aware `get_concept`) to a live, non-retired node — i.e. it
+        # is already its own live concept. Adopting this proposal would
+        # therefore fold it into `c_node`: a MERGE, a heavier decision than
+        # a naming sentence can license on its own. Refused, recorded, never
+        # queued — see _record_alias_fold_refused.
+        _record_alias_fold_refused(db, mid, a_node, c_node, sentence)
+        alias_folds_refused += 1
 
     # Realize extracted concepts against the latest collected version.
     latest = db.one(
@@ -931,6 +970,7 @@ def extract_concepts(
         "suppressed": suppressed,
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
+        "alias_folds_refused": alias_folds_refused,
         "proposed": proposed,
         "screened": screened,
         "scope": scope,
