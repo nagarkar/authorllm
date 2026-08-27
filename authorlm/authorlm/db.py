@@ -13,6 +13,7 @@ from __future__ import annotations
 import getpass
 import json
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -416,11 +417,34 @@ SYSTEM_EVIDENCE_TYPES = {"episode_analysis", "deterministic_triage",
                          "extraction_adjudication"}
 
 
+def _unicode_lower(value: Any) -> str | None:
+    """Case-fold one SQL argument the same way Python does everywhere else
+    in this codebase (`.lower()`), instead of SQLite's built-in `lower()`,
+    which only knows ASCII. Registered over the name `LOWER` (see
+    Database.__init__) so every existing `lower(...)` in a SQL string gets
+    this behaviour automatically — no call site needs editing.
+
+    Normalizes to NFC first: two names that render identically but differ
+    in composed vs. decomposed accents (`ā` as one codepoint vs. 'a' +
+    combining macron) must compare equal, or the same ASCII/Unicode split
+    this function exists to close would just reopen one step later.
+    """
+    if value is None:
+        return None
+    return unicodedata.normalize("NFC", str(value)).lower()
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
+        # SQLite's built-in lower() is ASCII-only and disagrees with
+        # Python's str.lower() on exactly the non-Latin names this project
+        # stores (e.g. Sanskrit terms). Overriding it here makes every
+        # `lower(...)` already written in this module's SQL Unicode-aware
+        # and NFC-normalized, matching Python-side comparisons (X7-11).
+        self.conn.create_function("LOWER", 1, _unicode_lower, deterministic=True)
         # WAL: background watcher writes proceed alongside interactive reads.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")

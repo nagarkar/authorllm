@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from authorlm import adjudication, api  # noqa: E402
+from authorlm import concepts as concepts_mod  # noqa: E402
 from authorlm.db import Database, loads  # noqa: E402
 from authorlm.extraction import extract_concepts  # noqa: E402
 from authorlm.revisions import collect_revision  # noqa: E402
@@ -81,10 +82,60 @@ class StubLLM:
         return json.loads(json.dumps(CANDIDATES))
 
 
-def build(root: Path) -> tuple[Database, dict]:
+class NamedLLM(StubLLM):
+    """Like StubLLM, but step one returns `candidates` (an explicit payload)
+    instead of the fixed CANDIDATES — used by the X7-11 regression checks
+    below to control the exact spelling/casing the 'model' proposes."""
+
+    def __init__(self, adjudicate: bool, candidates: dict,
+                 verdicts: dict | None = None):
+        super().__init__(adjudicate, verdicts)
+        self.candidates = candidates
+
+    def complete_json(self, system, user, thinking_budget=None):
+        step = "adjudication" if "ADJUDICATOR" in system else "extraction"
+        self.calls.append((step, system, user))
+        if step == "adjudication":
+            return self.verdicts
+        return json.loads(json.dumps(self.candidates))
+
+
+# X7-11: SQLite's built-in lower() is ASCII-only; Python's str.lower() is
+# not. A Sanskrit term is exactly where they used to disagree.
+SANSKRIT_TEXT = (
+    "# Śūnyatā\n\n"
+    "Śūnyatā names the absence of any fixed, independent nature in "
+    "things.\n\n"
+    "## First reflection\n\n"
+    "Śūnyatā is not mere absence; it is the ground of dependent "
+    "origination.\n\n"
+    "## Second reflection\n\n"
+    "To sit with Śūnyatā is to release the grasping after a fixed "
+    "essence.\n"
+)
+
+SANSKRIT_CANDIDATES = {
+    "concepts": [{"name": "Śūnyatā", "kind": "concept",
+                 "notes": "The absence of inherent nature."}],
+    "links": [], "aliases": [],
+}
+
+# Same concept, proposed again in a different case — this is the shape of
+# mismatch that used to defeat the SQL-side `lower(name) = lower(?)` finds
+# (adjudication.py:379, extraction.py:709/734) even though the Python-side
+# retrieval that led to them already knew it was the same concept.
+SANSKRIT_CANDIDATES_LOWER = {
+    "concepts": [{"name": "śūnyatā", "kind": "concept",
+                 "notes": "The absence of inherent nature."}],
+    "links": [], "aliases": [],
+}
+
+
+def build(root: Path, filename: str = "01-herdsman.md",
+          text: str = TEXT) -> tuple[Database, dict]:
     source = root / "manuscript"
     source.mkdir(parents=True)
-    (source / "01-herdsman.md").write_text(TEXT, encoding="utf-8")
+    (source / filename).write_text(text, encoding="utf-8")
     db = Database(root / "authorlm.db")
     manuscript = api.register_manuscript(db, "stub", str(source))
     collect_revision(db, dict(manuscript), session_id=None, source="test")
@@ -270,6 +321,125 @@ def main() -> None:
               str([n["name"] for n in near]))
         check("a client without config is opted out",
               not adjudication.enabled(object()))
+
+        print("X7-11: non-ASCII names resolve to ONE node regardless of "
+              "case:")
+        db, manuscript = build(root / "unicode-lookup", "01-sunyata.md",
+                               SANSKRIT_TEXT)
+        mid = manuscript["id"]
+        added = concepts_mod.add_concept(db, mid, "Śūnyatā")
+        via_lower = concepts_mod.get_concept(db, mid, "śūnyatā")
+        via_upper = concepts_mod.get_concept(db, mid, "ŚŪNYATĀ")
+        check("a differently-cased non-ASCII lookup resolves to the same "
+              "node the mixed-case name created",
+              via_lower is not None and via_upper is not None
+              and via_lower["id"] == via_upper["id"] == added["id"],
+              f"{added}, {via_lower}, {via_upper}")
+        rows = db.all(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+            "AND lower(name) = lower(?)", (mid, "ŚŪNYATĀ"))
+        check("exactly one row answers to the name, case aside",
+              len(rows) == 1, str([dict(r) for r in rows]))
+
+        print("X7-11: ASCII names resolve exactly as they did before "
+              "(unchanged behaviour):")
+        dharma = concepts_mod.add_concept(db, mid, "Dharma")
+        ascii_lower = concepts_mod.get_concept(db, mid, "dharma")
+        ascii_upper = concepts_mod.get_concept(db, mid, "DHARMA")
+        check("an ASCII lookup still resolves case-insensitively",
+              ascii_lower is not None and ascii_upper is not None
+              and ascii_lower["id"] == ascii_upper["id"] == dharma["id"],
+              f"{dharma}, {ascii_lower}, {ascii_upper}")
+        ascii_rows = db.all(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+            "AND lower(name) = lower(?)", (mid, "DHARMA"))
+        check("exactly one row answers to the ASCII name, case aside",
+              len(ascii_rows) == 1, str([dict(r) for r in ascii_rows]))
+
+        print("X7-11: a differently-cased 'improves' verdict resolves to "
+              "the existing node instead of forking one (adjudication.py):")
+        db, manuscript = build(root / "unicode-improves", "01-sunyata.md",
+                               SANSKRIT_TEXT)
+        mid = manuscript["id"]
+        first = NamedLLM(adjudicate=True, candidates=SANSKRIT_CANDIDATES,
+                         verdicts={
+                             "concepts": [{"name": "Śūnyatā",
+                                          "verdict": "new"}],
+                             "links": []})
+        with contextlib.redirect_stderr(io.StringIO()):
+            extract_concepts(db, manuscript, first, files=["01-sunyata.md"])
+        created = db.one("SELECT * FROM concept_nodes WHERE "
+                         "manuscript_id = ? AND status != 'retired'", (mid,))
+        check("setup: the Sanskrit concept was created",
+              created is not None and created["name"] == "Śūnyatā",
+              str(dict(created) if created else None))
+
+        again = NamedLLM(adjudicate=True, candidates=SANSKRIT_CANDIDATES,
+                         verdicts={
+                             "concepts": [
+                                 {"name": "Śūnyatā", "verdict": "improves",
+                                  "existing": "śūnyatā",  # deliberately
+                                  # different case than the stored name
+                                  "notes": "The absence of inherent "
+                                           "nature — the ground of "
+                                           "dependent origination."},
+                             ],
+                             "links": []})
+        with contextlib.redirect_stderr(io.StringIO()):
+            extract_concepts(db, manuscript, again,
+                             files=["01-sunyata.md"], full=True)
+        nodes_after = db.all(
+            "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired'", (mid,))
+        check("no duplicate node was forked by the differently-cased "
+              "'improves' resolution",
+              len(nodes_after) == 1, str([dict(n) for n in nodes_after]))
+        proposal = db.one(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND kind = 'note_update' AND state = 'open'", (mid,))
+        check("the SQL resolve at adjudication.py:379 found the row "
+              "despite the case mismatch, so 'improves' became a "
+              "note_update proposal instead of silently dropping",
+              proposal is not None, "no note_update proposal was raised")
+
+        print("X7-11: a retired non-ASCII name is correctly banned even "
+              "when it recurs in a different case (extraction.py):")
+        db, manuscript = build(root / "unicode-retire", "01-sunyata.md",
+                               SANSKRIT_TEXT)
+        mid = manuscript["id"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            extract_concepts(
+                db, manuscript,
+                NamedLLM(adjudicate=False, candidates=SANSKRIT_CANDIDATES),
+                files=["01-sunyata.md"])
+        node = db.one("SELECT * FROM concept_nodes WHERE "
+                      "manuscript_id = ? AND status != 'retired'", (mid,))
+        check("setup: the Sanskrit concept exists before retiring",
+              node is not None, str(node))
+        db.update("concept_nodes", node["id"], {"status": "retired"})
+
+        # Re-extracting: the model proposes the same concept again, but
+        # spelled all-lowercase — the retired-name ban (extraction.py:
+        # 709/734) has to find the retired row via the same SQL lookup
+        # this fix repairs, or the retired name slips back in as a live
+        # duplicate instead of raising the revival proposal.
+        with contextlib.redirect_stderr(io.StringIO()):
+            extract_concepts(
+                db, manuscript,
+                NamedLLM(adjudicate=False,
+                        candidates=SANSKRIT_CANDIDATES_LOWER),
+                files=["01-sunyata.md"], full=True)
+        live_after = db.all(
+            "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status != 'retired'", (mid,))
+        check("the retired name did not slip back in as a new live node",
+              len(live_after) == 0, str([dict(n) for n in live_after]))
+        revival = db.one(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND kind = 'revival' AND state = 'open'", (mid,))
+        check("the recurrence instead raised the revival proposal the "
+              "design promises",
+              revival is not None, "no revival proposal was raised")
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nall checks passed ({PASSED})")
