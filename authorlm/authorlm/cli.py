@@ -1113,10 +1113,13 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")
     diffs = passes.record_resolution(db, mid, file, forms)
-    # Strip the forms from the tab: a plain push of the now-final local
-    # file rebuilds the tab clean (read-back proof inside push).
+    # Strip the forms from the tab: rebuild the now-final local file into
+    # the tab (design §6.3). Must force rebuild — open margin comments
+    # (common during the pause) would otherwise route through surgical
+    # diff_push, which refuses paragraphs still holding <<>>/{{ }} forms
+    # and leaves local final / Doc marked / threads cleaned, unretryable.
     gdocs.push_doc(db, manuscript, file, service=service,
-                   docs_service=docs_service)
+                   docs_service=docs_service, force_rebuild=True)
     print(ui.green(f"resolved {file}: {len(forms)} form(s) made final")
           + (ui.dim(f", {len(diffs)} modified acceptance(s) recorded")
              if diffs else ""))

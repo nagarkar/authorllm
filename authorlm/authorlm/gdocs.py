@@ -943,10 +943,17 @@ def critique_forms_pending(db: Database, manuscript_id: str,
 
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
-             docs_service=None, bridge: DocBridge | None = None) -> dict:
+             docs_service=None, bridge: DocBridge | None = None,
+             force_rebuild: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
-    → transplant into the tab → temp deleted. Marks the file checked out."""
+    → transplant into the tab → temp deleted. Marks the file checked out.
+
+    `force_rebuild` skips the critique-pause gate and the surgical path.
+    Only critique resolve may set it: local is already final and the Doc
+    still holds <<old>>{{new}} forms that surgical push would refuse as
+    overlapping pending markers (open margin comments are common during
+    the pause; an unattributable comment makes every tab "bearing")."""
     import hashlib
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -956,13 +963,16 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # only sees author_comment rows, so without this gate a rebuild
     # (or a surgical push that only guards '<<') would wipe the forms
     # — including via session-start reconcile auto-push.
-    if critique_forms_pending(db, manuscript["id"], relpath):
+    if (not force_rebuild
+            and critique_forms_pending(db, manuscript["id"], relpath)):
         raise LookupError(
             f"'{relpath}' has critique pending forms in the Doc — "
             f"run 'critique resolve {relpath}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
-    if (threads_mod.open_threads(db, manuscript["id"], relpath)
-            or comment_bearing(db, manuscript, bridge, relpath, service)):
+    if (not force_rebuild
+            and (threads_mod.open_threads(db, manuscript["id"], relpath)
+                 or comment_bearing(db, manuscript, bridge, relpath,
+                                    service))):
         # Surgical path: a rebuild would orphan the open margin threads
         # AND every open comment anchor (it-77ef98f5289e), so tabs
         # carrying either push by paragraph diff instead — anchors on

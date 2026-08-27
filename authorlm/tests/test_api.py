@@ -2730,6 +2730,69 @@ def main_test() -> None:
               and "post-edited in Docs" in tab_after
               and "{{A bridging insert the author refined.}}" in tab_after,
               str({"raised": raised, "tab": tab_after[:120]}))
+
+        # Critique resolve must force-rebuild: an open margin comment routes
+        # ordinary push through surgical diff_push, which refuses paragraphs
+        # still holding <<>>/{{ }} forms — leaving local final, threads
+        # cleaned, and the Doc marked (unretryable).
+        from authorlm.gdocs import critique_tab_text
+        from authorlm import passes as passes_mod
+
+        stub.add_comment("c-resolve-block", "distinctive orrery sentence",
+                         "still open during critique resolve")
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\n"
+            "Brass planets on brass rails, polished.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        marked = critique_tab_text(db, manuscript, "06-orrery.md", stub)
+        written_rows = [dict(db.one(
+            "SELECT * FROM doc_threads WHERE id = ?", (crit["id"],)))]
+        # Re-insert the insert-form thread the pending_tab also carries.
+        ins = _ko_dt("dt")
+        ins.update(
+            manuscript_id=manuscript["id"], origin_type="critique",
+            origin_id="pass:06-orrery.md:2", file="06-orrery.md",
+            proposed_old="", proposed_new="A bridging insert the author refined.",
+            note="critique", state="written", our_reply_ids="[]",
+            metadata='{"kind":"insert","anchor_paragraph":1}')
+        db.insert("doc_threads", ins)
+        written_rows.append(dict(db.one(
+            "SELECT * FROM doc_threads WHERE id = ?", (ins["id"],))))
+        final, forms = passes_mod.final_text_from_marked(
+            marked, written=written_rows)
+        (ms / "06-orrery.md").write_text(
+            final if final.endswith("\n") else final + "\n")
+        passes_mod.record_resolution(
+            db, manuscript["id"], "06-orrery.md", forms)
+        surgical_err = None
+        try:
+            push_doc(db, manuscript, "06-orrery.md", service=stub,
+                     docs_service=stub)
+        except LookupError as err:
+            surgical_err = str(err)
+        check("resolve-shaped push without force_rebuild dies on "
+              "open comments + leftover critique forms",
+              surgical_err is not None
+              and ("pending margin" in surgical_err
+                   or "tab structure" in surgical_err
+                   or "disagree" in surgical_err),
+              str(surgical_err))
+        rebuilt = push_doc(db, manuscript, "06-orrery.md", service=stub,
+                           docs_service=stub, force_rebuild=True)
+        tab_resolved = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                            if t["title"] == "06-orrery.md")
+        check("force_rebuild clears critique forms despite open comments",
+              "mode" not in rebuilt
+              and "<<" not in tab_resolved and "{{" not in tab_resolved
+              and "post-edited in Docs" in tab_resolved
+              and "bridging insert the author refined" in tab_resolved
+              and db.one(
+                  "SELECT COUNT(*) AS n FROM doc_threads "
+                  "WHERE manuscript_id = ? AND file = ? AND state = 'written'",
+                  (manuscript["id"], "06-orrery.md"))["n"] == 0,
+              str({"tab": tab_resolved[:200], "rebuilt": rebuilt}))
+        stub.state["comments"]["c-resolve-block"]["resolved"] = True
+
         db.update("doc_threads", crit["id"], {"state": "cleaned"})
 
         # --- session start is no longer blind to the margin ---
