@@ -19,6 +19,7 @@ from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
+from .loop import similarity as _similarity
 from .revisions import read_manuscript_files
 
 VALID_RELATIONS = {
@@ -29,6 +30,13 @@ VALID_RELATIONS = {
 MAX_TEXT_CHARS = 24000
 MAX_CONCEPTS = 40
 EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
+# Materiality floor (Q/note-materiality): a note_update that says the same
+# thing in different words is not new information — see _note_update_blocked.
+# Measured (proposal-learning-loop design doc), not guessed: 0.72 is the
+# firewall's identical-restatement threshold; 0.90 sits well inside the
+# "real refinement" band the adjudicator already rules on correctly, and is
+# reserved for the unambiguous paraphrase case ratified for this fix.
+NOTE_UPDATE_PARAPHRASE_FLOOR = 0.90
 
 
 def extraction_system() -> str:
@@ -415,6 +423,35 @@ def _normalize(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
 
+def _note_update_blocked(current: str | None, proposed: str) -> str | None:
+    """Materiality floor for note_update creation (Q/note-materiality): a
+    fresh note that says the same thing in different words costs the author
+    a review for nothing. Returns the refusal reason, or None when the
+    proposal clears the floor and may be raised.
+
+    `_normalize(notes) != _normalize(before['notes'])` already keeps a pure
+    case/whitespace change from reaching this function at all (both
+    lower-case and collapse whitespace, so such a pair normalizes equal) —
+    the check is repeated here anyway because the rule belongs with the
+    metric that enforces it, not left implicit in a helper named for
+    something else, and because it is exactly what let a term of art
+    ('Quality') survive as 'quality' — a live style-law violation — through
+    a note_update proposal (it-Q/note-materiality: this codebase writes
+    another one from a DIFFERENT site, adjudication.py's 'improves' verdict,
+    which carries no equivalent gate at all).
+
+    Only a floor, never a ceiling: 0.75-0.90 stays open on purpose — that
+    band holds real refinements, and screen/adjudication already rule on
+    those correctly (do not lower NOTE_UPDATE_PARAPHRASE_FLOOR to 0.75)."""
+    current = current or ""
+    if _normalize(current) == _normalize(proposed):
+        return "case/whitespace-only change"
+    score = _similarity(current, proposed)
+    if score >= NOTE_UPDATE_PARAPHRASE_FLOOR:
+        return f"near-paraphrase (similarity {score:.2f})"
+    return None
+
+
 def _set_extraction_watermark(db: Database, manuscript: dict,
                               latest_id: str | None) -> None:
     """Advance the incremental-extract watermark and keep the in-memory
@@ -483,6 +520,7 @@ def extract_concepts(
             "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
             "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
+            "materiality_refused": [],
             "proposed": 0, "screened": 0, "alias_folds_refused": 0,
             "truncated": False,
             "scope": scope_label, "prompt_files": [],
@@ -500,7 +538,8 @@ def extract_concepts(
                 continue
             if sub.get("up_to_date"):
                 continue
-            for key in ("nodes", "edges", "realized", "below_bar"):
+            for key in ("nodes", "edges", "realized", "below_bar",
+                        "materiality_refused"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
@@ -580,6 +619,7 @@ def extract_concepts(
             "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
             "skipped_unknown_relation": 0,
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
+            "materiality_refused": [],
             "proposed": 0, "screened": 0, "alias_folds_refused": 0,
             "truncated": False, "prompt_files": [],
             "adjudication_empty": False,
@@ -598,7 +638,8 @@ def extract_concepts(
                     continue
             if sub.get("up_to_date"):
                 continue
-            for key in ("nodes", "edges", "realized", "below_bar"):
+            for key in ("nodes", "edges", "realized", "below_bar",
+                        "materiality_refused"):
                 aggregate[key].extend(sub.get(key, []))
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
@@ -718,6 +759,7 @@ def extract_concepts(
     proposed = improved  # adjudicated 'improves' verdicts are note_updates
     ungrounded_links = 0
     below_bar: list[str] = []
+    materiality_refused: list[str] = []
     alias_folds_refused = 0
     disk_files: dict[str, str] | None = None
 
@@ -813,18 +855,26 @@ def extract_concepts(
         ):
             # Existing knowledge is machine-unwritable, but a materially
             # different definition arising from changed text is surfaced for
-            # the author instead of silently discarded.
-            if proposals.create(
-                db, mid, "note_update", before["id"],
-                {
-                    "name": before["name"],
-                    "current_note": before["notes"],
-                    "proposed_note": notes,
-                    "current_kind": before["kind"],
-                    "proposed_kind": kind,
-                },
-            ):
-                proposed += 1
+            # the author instead of silently discarded — UNLESS it does not
+            # clear the materiality floor (Q/note-materiality): a
+            # case/whitespace-only edit or a near-paraphrase (>=0.90
+            # similarity) is not new information, and queuing it just spends
+            # the author's attention on a restatement.
+            reason = _note_update_blocked(before["notes"], notes)
+            if reason is None:
+                if proposals.create(
+                    db, mid, "note_update", before["id"],
+                    {
+                        "name": before["name"],
+                        "current_note": before["notes"],
+                        "proposed_note": notes,
+                        "current_kind": before["kind"],
+                        "proposed_kind": kind,
+                    },
+                ):
+                    proposed += 1
+            else:
+                materiality_refused.append(f"{before['name']} ({reason})")
         if len(new_nodes) >= MAX_CONCEPTS:
             break
 
@@ -970,6 +1020,7 @@ def extract_concepts(
         "suppressed": suppressed,
         "ungrounded_links": ungrounded_links,
         "below_bar": below_bar,
+        "materiality_refused": materiality_refused,
         "alias_folds_refused": alias_folds_refused,
         "proposed": proposed,
         "screened": screened,

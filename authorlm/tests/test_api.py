@@ -1151,6 +1151,128 @@ def check_note_group() -> None:
 
 
 
+def check_note_materiality() -> None:
+    """Q/note-materiality: a case/whitespace-only change, or a >=0.90
+    near-paraphrase, is refused at note_update creation (one observed
+    proposal decapitalized the term of art 'Quality' to 'quality' — a
+    live style-law violation); a genuine refinement in the 0.75-0.90 band
+    still gets through (no over-cutting; the adjudicator already rules on
+    that band correctly)."""
+    from authorlm import extraction
+    from authorlm.loop import similarity
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-note-materiality-")
+    try:
+        mid = manuscript["id"]
+        blocked_case = extraction._note_update_blocked("Quality", "quality")
+        check("a case-only note change is refused (the 'Quality' -> "
+              "'quality' degradation)",
+              blocked_case is not None, str(blocked_case))
+        blocked_ws = extraction._note_update_blocked(
+            "the   term  of   art", "the term of art")
+        check("a whitespace-only note change is refused",
+              blocked_ws is not None, str(blocked_ws))
+
+        base_note = (
+            "The clasp of every opposite, the ground of becoming, the "
+            "shape that holds all form, the light within shadow, the "
+            "silence beneath depth, the stillness at the origin of "
+            "things, the quiet heart of paradox.")
+        near_paraphrase = (
+            "The clasp of every opposite, the ground of becoming, the "
+            "shape that holds all form, the light within shadow, the "
+            "silence beneath depth, the stillness at the source of "
+            "things, the quiet heart of paradox.")
+        refinement = (
+            "The clasp of every opposite, the ground of becoming, the "
+            "shape that holds all pattern, the light within shadow, the "
+            "silence beneath distance, the stillness at the origin of "
+            "things, the quiet heart of paradox.")
+        para_score = similarity(base_note, near_paraphrase)
+        refine_score = similarity(base_note, refinement)
+        check(f"fixture calibration: the paraphrase pair scores >=0.90 "
+              f"(measured {para_score:.3f})", para_score >= 0.90,
+              str(para_score))
+        check(f"fixture calibration: the refinement pair sits in the "
+              f"0.75-0.90 band (measured {refine_score:.3f})",
+              0.75 <= refine_score < 0.90, str(refine_score))
+        blocked_para = extraction._note_update_blocked(base_note, near_paraphrase)
+        check("a near-paraphrase (>=0.90 similarity) is refused",
+              blocked_para is not None, str(blocked_para))
+        allowed_refine = extraction._note_update_blocked(base_note, refinement)
+        check("a genuine refinement in the 0.75-0.90 band is NOT refused "
+              "— the floor must not become a ceiling (guard against "
+              "over-cutting; do not lower it to 0.75)",
+              allowed_refine is None, str(allowed_refine))
+
+        # End-to-end through extract_concepts, not just the helper: the
+        # near-paraphrase creates no proposal and is reported refused; the
+        # 0.75-0.90 refinement still reaches the queue as a real proposal.
+        api.add_concept(db, manuscript, "MaterialTerm", kind="concept",
+                        notes=base_note)
+        (ms / "02-materiality-block.md").write_text(
+            f"# M\n\nMaterialTerm: {near_paraphrase}\n")
+
+        class NearParaphraseLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "MaterialTerm", "kind": "concept",
+                     "notes": near_paraphrase}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        note_before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
+        block_result = extraction.extract_concepts(
+            db, manuscript, NearParaphraseLLM(),
+            files=["02-materiality-block.md"])
+        note_after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
+        check("end-to-end: a >=0.90 paraphrase creates no note_update "
+              "proposal", note_after == note_before, str(block_result))
+        check("end-to-end: extract_concepts reports the materiality "
+              "refusal",
+              block_result is not None
+              and len(block_result.get("materiality_refused") or []) == 1
+              and "MaterialTerm" in block_result["materiality_refused"][0],
+              str(block_result))
+
+        (ms / "03-materiality-allow.md").write_text(
+            f"# M2\n\nMaterialTerm: {refinement}\n")
+
+        class RefinementLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [
+                    {"name": "MaterialTerm", "kind": "concept",
+                     "notes": refinement}],
+                        "links": [], "aliases": []}
+
+            def stats_line(self):
+                return None
+
+        allow_result = extraction.extract_concepts(
+            db, manuscript, RefinementLLM(),
+            files=["03-materiality-allow.md"])
+        note_after_allow = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
+        check("end-to-end: a genuine ~0.80-similarity refinement still "
+              "reaches the queue as a real note_update proposal",
+              note_after_allow == note_after + 1, str(allow_result))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1162,6 +1284,7 @@ def main_test() -> None:
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()
+    check_note_materiality()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

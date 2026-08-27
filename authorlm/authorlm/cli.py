@@ -153,6 +153,9 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            "naming an already-live concept (would be a merge, not an "
            "alias — logged, not queued)"
            if summary.get("alias_folds_refused") else "")
+        + (f"; refused {len(summary['materiality_refused'])} note update(s) "
+           "below the materiality floor"
+           if summary.get("materiality_refused") else "")
         + "."
     )
     if summary.get("prompt_files"):
@@ -166,6 +169,11 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
             "Below the recurrence bar (single-context phrases, not "
             "admitted; self-healing on a future mention): "
             + ", ".join(f"'{n}'" for n in summary["below_bar"])))
+    if summary.get("materiality_refused"):
+        print(ui.dim(
+            "Note updates below the materiality floor (case/whitespace-only "
+            "or >=0.90 similarity — not queued): "
+            + ", ".join(f"'{n}'" for n in summary["materiality_refused"])))
     if summary.get("proposed"):
         print(ui.yellow(
             f"{summary['proposed']} proposal(s) against settled knowledge — "

@@ -30,6 +30,10 @@ CONCEPT NAMING LAW:
 - Before emitting a name, verify that the exact compact label appears in the
   manuscript as a recurring referent or heading. Do not invent a
   canonical-sounding paraphrase.
+- Never change the capitalization of a term of art: if the manuscript
+  capitalizes it ("Quality"), the name and every note that uses it stay
+  capitalized; if the manuscript keeps it lowercase, keep it lowercase.
+  Casing is part of the term, not free variation.
 
 Example: from "The hard floor is the minimum expected standard of behavior in
 a society - the threshold below which consequences follow", emit name "Hard
