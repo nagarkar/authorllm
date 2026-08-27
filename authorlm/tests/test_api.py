@@ -1074,6 +1074,83 @@ def check_alias_dedupe() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_note_group() -> None:
+    """Q/note-group: several open note_update proposals on the same
+    concept present as ONE grouped decision with every candidate note, not
+    N separate ones — storage is untouched, each candidate keeps its own
+    id and the author picks, nothing is auto-chosen. Ratified against
+    measured evidence on the author's live graph: 31 of 64 open proposals
+    compete, unpresented, over just 11 concepts (e.g. 'History' x4)."""
+    from authorlm import proposals as prop
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-note-group-")
+    try:
+        mid = manuscript["id"]
+        api.add_concept(db, manuscript, "GroupedConcept", kind="concept",
+                        notes="original note")
+        grouped_target = db.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (mid, "GroupedConcept"))["id"]
+        candidate_notes = [
+            "A first rewrite arguing the concept is fundamentally relational.",
+            "A second rewrite arguing the concept is fundamentally temporal.",
+            "A third rewrite arguing the concept is fundamentally structural.",
+        ]
+        for note in candidate_notes:
+            created = prop.create(db, mid, "note_update", grouped_target,
+                                  {"name": "GroupedConcept",
+                                   "current_note": "original note",
+                                   "proposed_note": note,
+                                   "current_kind": "concept",
+                                   "proposed_kind": "concept"})
+            check(f"competing note_update candidate is created: {note[:30]}…",
+                  created is not None)
+        grouped_rows = prop.group_open(prop.open_proposals(db, mid))
+        group_entry = next(r for r in grouped_rows
+                           if r["kind"] == "note_update_group"
+                           and r["target"] == grouped_target)
+        check("three competing note_update proposals present as ONE "
+              "grouped decision, not three",
+              len(group_entry["members"]) == 3, str(group_entry))
+        summary, details = prop.describe(group_entry)
+        check("the grouped decision's summary names how many candidates "
+              "are on the table",
+              "3 candidate notes" in summary, summary)
+        check("every candidate note appears in the rendered details, each "
+              "addressable by its own id",
+              all(any(m["id"][:8] in line and
+                      loads(m["payload"], {})["proposed_note"][:20] in line
+                      for line in details)
+                  for m in group_entry["members"]),
+              str(details))
+        listed = api.list_proposals(db, manuscript, kind="note_update")
+        listed_group = next(
+            (r for r in listed["open"] if r["kind"] == "note_update_group"),
+            None)
+        check("list_proposals (the api/MCP surface) groups them too, "
+              "without changing how they are stored",
+              listed_group is not None
+              and db.one(
+                  "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+                  "manuscript_id = ? AND kind = 'note_update' AND "
+                  "state = 'open'", (mid,))["n"] == 3,
+              str(listed.get("open")))
+        # Each candidate is still individually actionable by its own id.
+        one_member = group_entry["members"][0]
+        adopt_msg = prop.adopt(db, mid, one_member)
+        check("a single candidate inside a group still adopts on its own id",
+              "Updated 'GroupedConcept'" in adopt_msg, adopt_msg)
+        still_open = [r for r in prop.open_proposals(db, mid)
+                     if r["kind"] == "note_update" and r["target"] == grouped_target]
+        check("adopting one candidate leaves its siblings open for their "
+              "own review (no auto-picked winner)",
+              len(still_open) == 2, str(still_open))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1084,6 +1161,7 @@ def main_test() -> None:
     check_backup_and_restore()
     check_alias_guard()
     check_alias_dedupe()
+    check_note_group()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

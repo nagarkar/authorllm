@@ -1419,7 +1419,13 @@ def list_proposals(db: Database, manuscript: dict, kind: str | None = None,
     by_kind: dict[str, int] = {}
     for r in rows:
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
-    shown = rows if limit is None else rows[:limit]
+    # Q/note-group: several open note_update rows on the same concept are
+    # ONE decision with N candidates, not N separate list entries — grouped
+    # here for display only (storage, ids, and `counts.open` above all stay
+    # per-row). Skipped when looking up one specific id: that lookup wants
+    # exactly the row asked for, not its siblings folded in around it.
+    display_rows = rows if proposal_id else prop.group_open(rows)
+    shown = display_rows if limit is None else display_rows[:limit]
     folds = []
     for spec in loop.REGISTRY.values():
         if spec.table == "knowledge_proposals":
@@ -1427,7 +1433,7 @@ def list_proposals(db: Database, manuscript: dict, kind: str | None = None,
     return {
         "open": [_proposal_row(r, verbose) for r in shown],
         "counts": {"open": len(rows), "shown": len(shown), "by_kind": by_kind},
-        "truncated": len(shown) < len(rows),
+        "truncated": len(shown) < len(display_rows),
         "folded": folds,
     }
 

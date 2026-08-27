@@ -129,9 +129,54 @@ def open_proposals(db: Database, manuscript_id: str) -> list[dict]:
     )]
 
 
+def group_open(rows: list[dict]) -> list[dict]:
+    """Collapse open `note_update` rows that target the same concept into
+    ONE synthetic 'note_update_group' entry carrying every candidate note
+    (Q/note-group), so the author reviews N competing rewrites of one
+    concept as a single decision instead of N unrelated-looking ones.
+
+    Storage is untouched: every candidate stays its own row in
+    `knowledge_proposals`, addressable by its own id ('proposal accept
+    <id>' still works on any one of them) — this only changes what a
+    LISTING shows. A target with a single open note_update, and every
+    other kind, passes through unchanged. Never picks a winner: the
+    grouped entry lists all candidates and lets the author choose."""
+    by_target: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        if row["kind"] != "note_update":
+            continue
+        if row["target"] not in by_target:
+            order.append(row["target"])
+        by_target.setdefault(row["target"], []).append(row)
+    competing = {t for t in order if len(by_target[t]) > 1}
+    if not competing:
+        return list(rows)
+    out: list[dict] = []
+    folded_in: set[str] = set()
+    for row in rows:
+        if row["kind"] == "note_update" and row["target"] in competing:
+            if row["target"] in folded_in:
+                continue
+            folded_in.add(row["target"])
+            members = by_target[row["target"]]
+            out.append({
+                "id": members[0]["id"], "kind": "note_update_group",
+                "target": row["target"], "state": "open",
+                "created_at": members[0]["created_at"],
+                "source": members[0]["source"], "members": members,
+            })
+        else:
+            out.append(row)
+    return out
+
+
 def describe(row: dict) -> tuple[str, list[str]]:
     """(one-line summary, detail lines) for list/review displays."""
-    payload = loads(row["payload"], {})
+    # group_open's synthetic 'note_update_group' row carries `members`
+    # instead of a single `payload` — its branch below reads `members`
+    # directly, so `.get` here just keeps this lookup from raising on it.
+    payload = loads(row.get("payload"), {})
     kind = row["kind"]
     if kind == "note_update":
         summary = f"reframe '{payload['name']}' — new material suggests a different definition"
@@ -141,6 +186,22 @@ def describe(row: dict) -> tuple[str, list[str]]:
         ]
         if payload.get("proposed_kind") and payload.get("proposed_kind") != payload.get("current_kind"):
             details.append(f"kind: {payload.get('current_kind')} → {payload['proposed_kind']}")
+    elif kind == "note_update_group":
+        # Synthetic entry from group_open (Q/note-group): several open
+        # note_update rows on the same concept, shown as ONE decision with
+        # every candidate — never auto-picked, the author chooses.
+        members = row["members"]
+        first_payload = loads(members[0]["payload"], {})
+        summary = (f"reframe '{first_payload.get('name', '?')}' — "
+                   f"{len(members)} candidate notes on the table, choose one")
+        details = [f"current:  {first_payload.get('current_note') or '(no notes)'}"]
+        for n, member in enumerate(members, 1):
+            p = loads(member["payload"], {})
+            details.append(
+                f"  {n}. [{member['id'][:8]}] {p.get('proposed_note') or '(no notes)'}")
+        details.append(
+            "adopt = 'proposal accept <candidate-id>' for the one you want "
+            "— the others stay open for their own review")
     elif kind == "revival":
         summary = f"revive retired concept '{payload['name']}' — it recurs in new material"
         details = [f"as: {payload.get('kind', 'concept')}"]

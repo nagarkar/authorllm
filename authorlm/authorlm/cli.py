@@ -4179,9 +4179,15 @@ def cmd_proposal(args):
                   "recurring, rejected relationships argued again).")
             return
         print(ui.bold(f"Open proposals ({len(rows)}):"))
-        for row in rows:
+        # Q/note-group: several open note_update rows on the same concept
+        # are shown together as one entry with every candidate note, not as
+        # N separate lines — see proposals.group_open. Storage is untouched;
+        # accept/dismiss still take an individual candidate's own id.
+        for row in prop.group_open(rows):
             summary, _ = prop.describe(row)
-            print(f"  [{row['id'][:8]}] ({row['kind']}) {summary}")
+            label = (f"{len(row['members'])} candidates" if row["kind"] == "note_update_group"
+                     else row["id"][:8])
+            print(f"  [{label}] ({row['kind']}) {summary}")
         print(ui.dim("  → proposal review (interactive) · "
                      "proposal accept|dismiss <id>"))
         return
@@ -4189,16 +4195,23 @@ def cmd_proposal(args):
     if args.action == "review":
         import textwrap
 
-        rows = prop.open_proposals(db, mid)
-        if not rows:
+        raw_rows = prop.open_proposals(db, mid)
+        if not raw_rows:
             print("No open proposals to review.")
             return
-        print(f"{len(rows)} open proposal(s).")
+        # Q/note-group: several open note_update rows on the same concept
+        # review as ONE turn with every candidate note on the table, not as
+        # N separate turns — see proposals.group_open. Nothing is auto-
+        # picked: the author chooses a candidate by number.
+        rows = prop.group_open(raw_rows)
+        print(f"{len(raw_rows)} open proposal(s).")
         print(ui.dim("Keys: [k]eep (adopt)  [e]dge (alias → generalizes)  "
-                     "[r]eject (dismiss)  [s]kip (or Enter)  [x] quit"))
+                     "[r]eject (dismiss)  [s]kip (or Enter)  [x] quit  "
+                     "(grouped notes: type a candidate number to adopt it)"))
         adopted = dismissed = skipped = 0
         for index, row in enumerate(rows, start=1):
             summary, details = prop.describe(row)
+            members = row["members"] if row["kind"] == "note_update_group" else None
             print(f"{ui.dim(f'[{index}/{len(rows)}]')} ({ui.cyan(row['kind'])}) "
                   f"{ui.bold(summary)}")
             for line in details:
@@ -4211,7 +4224,17 @@ def cmd_proposal(args):
                     choice = input("> ").strip().lower()
                 except EOFError:
                     choice = "x"
+                if members and choice.isdigit() and 1 <= int(choice) <= len(members):
+                    chosen = members[int(choice) - 1]
+                    print(f"  {ui.green(prop.adopt(db, mid, chosen))}")
+                    adopted += 1
+                    break
                 if choice in ("k", "keep", "adopt", "accept"):
+                    if members:
+                        print(ui.dim(f"  ? {len(members)} candidates on the table — "
+                                     "type a number (1-"
+                                     f"{len(members)}) to adopt one"))
+                        continue
                     print(f"  {ui.green(prop.adopt(db, mid, row))}")
                     adopted += 1
                     break
@@ -4220,18 +4243,28 @@ def cmd_proposal(args):
                     adopted += 1
                     break
                 if choice in ("r", "reject", "dismiss"):
-                    print(f"  {ui.yellow(prop.dismiss(db, mid, row))}")
-                    dismissed += 1
+                    if members:
+                        for member in members:
+                            print(f"  {ui.yellow(prop.dismiss(db, mid, member))}")
+                        dismissed += len(members)
+                    else:
+                        print(f"  {ui.yellow(prop.dismiss(db, mid, row))}")
+                        dismissed += 1
                     break
                 if choice in ("s", "skip", ""):
-                    skipped += 1
+                    skipped += len(members) if members else 1
                     break
                 if choice in ("x", "quit"):
-                    skipped += len(rows) - index + 1
+                    for remaining in rows[index - 1:]:
+                        skipped += (len(remaining["members"])
+                                    if remaining["kind"] == "note_update_group" else 1)
                     print(f"Proposals: adopted {adopted}, dismissed {dismissed}, "
                           f"skipped {skipped}.")
                     return
-                print(ui.dim("  ? use k / e / r / s / x"))
+                hint = "  ? use k / e / r / s / x"
+                if members:
+                    hint += f" — or a number 1-{len(members)}"
+                print(ui.dim(hint))
         print(f"Proposals: adopted {adopted}, dismissed {dismissed}, skipped {skipped}.")
         return
 
