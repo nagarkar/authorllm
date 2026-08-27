@@ -211,6 +211,20 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
     elif kind == "belief_revival":
         from .beliefs import _record_support, reinforce_belief
 
+        # If the revived belief was retired by being merged into another
+        # (metadata.curation.action == "merged"), remember the canonical
+        # it was folded into BEFORE flipping this row's status — once this
+        # row is no longer 'retired', beliefs._merged_into (which walks
+        # only retired rows) stops seeing it from the canonical side, so
+        # the canonical must be recomputed too or its stored `supporting`
+        # stays stale, double-counting this belief's evidence against
+        # BOTH beliefs until the canonical happens to be touched again.
+        revived = db.one("SELECT metadata FROM editorial_beliefs WHERE id = ?",
+                         (row["target"],))
+        revived_curation = (loads(revived["metadata"], {}) if revived else {}).get("curation", {})
+        merged_into_id = (revived_curation.get("into")
+                          if revived_curation.get("action") == "merged" else None)
+
         db.update("editorial_beliefs", row["target"], {"status": "candidate"})
         # Adopting the proposal IS the author's evidence for this event;
         # write it before reinforcing so the derived count (INV-2) can see
@@ -221,6 +235,11 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         _record_support(db, manuscript_id, row["target"], None,
                         payload.get("new_explanation") or payload["statement"])
         reinforce_belief(db, row["target"], "accepted")
+        if merged_into_id:
+            # Recompute the canonical NOW rather than leaving it stale —
+            # closes the double count immediately instead of waiting on
+            # the canonical's next unrelated touch.
+            reinforce_belief(db, merged_into_id, "accepted")
         message = f"Belief revived as candidate: \"{payload['statement']}\""
     elif kind == "alias":
         from .concepts import get_concept, merge_concepts

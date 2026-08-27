@@ -208,11 +208,15 @@ def _merged_into(db: Database, manuscript_id: str, belief_id: str) -> list[str]:
         if curation.get("action") == "merged" and curation.get("into"):
             children_of.setdefault(curation["into"], []).append(r["id"])
     found: list[str] = []
+    seen = {belief_id}
     frontier = [belief_id]
     while frontier:
-        children = children_of.get(frontier.pop(), [])
-        found.extend(children)
-        frontier.extend(children)
+        for child in children_of.get(frontier.pop(), []):
+            if child in seen:  # X7-12: guards a merge cycle from wedging this.
+                continue
+            seen.add(child)
+            found.append(child)
+            frontier.append(child)
     return found
 
 
@@ -257,16 +261,56 @@ def _derive_supporting(db: Database, manuscript_id: str, belief_id: str) -> int:
 
 
 def _validated_floor(belief: dict) -> int:
-    """The one exception to pure derivation: a belief that is validated
-    TODAY must not be retroactively demoted by this change. 8 of 12
-    validated beliefs on the live database carry stored `supporting` of
-    2-11 with zero linked evidence rows (evidence linkage predates them) —
-    deriving naively would collapse all of them to 0 on next touch, and
-    their fate is a separate decision the Sponsor has not ruled on. So: a
-    validated belief's supporting floors at whatever is already on record;
-    a candidate (or retired) belief gets no floor — pure derivation governs
-    all FUTURE promotion, which is the whole point of INV-2."""
-    return belief["supporting"] if belief["status"] == "validated" else 0
+    """The one exception to pure derivation — and, per X7-13, a ONE-TIME
+    exception, not a permanent ratchet. A belief that is validated TODAY
+    must not be retroactively demoted by this change (8 of 12 validated
+    beliefs on the live database carry stored `supporting` of 2-11 with
+    zero linked evidence rows — evidence linkage predates them — and their
+    fate is a separate decision the Sponsor has not ruled on). So: on a
+    validated belief's FIRST touch under this code, supporting floors at
+    whatever is already on record.
+
+    X7-13: the original version of this function returned
+    `belief["supporting"]` — the STORED column — every time `status ==
+    "validated"`. Because `reinforce_belief`/`merge_beliefs` persist
+    `max(derived, floor)` back into that same column, the floor became
+    self-referential: it could grow (fresh positive evidence raises the
+    stored value, which becomes next call's floor) but never shrink, and
+    it applied on every single call for as long as the belief stayed
+    validated — a permanent, ever-climbing ratchet. Measured: 9
+    contradicting verdicts were needed to demote a belief with zero real
+    derived support.
+
+    The fix is `_stamp_validation` below: the call that applies this floor
+    also stamps `metadata['derived_validation']`, and this function reads
+    that stamp — never the stored `supporting` value it may itself have
+    inflated — to know whether the grandfather has already been spent. A
+    belief that was NOT already validated before the current call (i.e.
+    every belief validating for the first time under this code) never
+    reaches this branch at all: `status` here is read BEFORE the current
+    call's changes, so it is still 'candidate'. And a belief `belief
+    demote` sends back to 'candidate' cannot be resurrected by it either —
+    the status check below is false the moment status is no longer
+    'validated', regardless of what the metadata stamp says."""
+    if belief["status"] != "validated":
+        return 0
+    meta = loads(belief["metadata"], {}) or {}
+    if meta.get("derived_validation"):
+        return 0
+    return belief["supporting"]
+
+
+def _stamp_validation(meta: dict, status: str) -> dict:
+    """Marks a belief's metadata as validated-under-pure-derivation the
+    moment its (about-to-be-written) status is 'validated', so
+    `_validated_floor` never floors it again — this is what makes the
+    grandfather in `_validated_floor` a ONE-TIME allowance rather than a
+    standing entitlement. Idempotent: a belief already stamped is left
+    alone (also covers the ordinary case of a validated belief simply
+    staying validated on some later, unrelated touch)."""
+    if status == "validated" and not meta.get("derived_validation"):
+        meta = {**meta, "derived_validation": True}
+    return meta
 
 
 def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | None = None) -> dict:
@@ -287,12 +331,14 @@ def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | 
     questions = loads(belief["outstanding_questions"], [])
     if question and question not in questions:
         questions.append(question)
+    meta = _stamp_validation(loads(belief["metadata"], {}) or {}, status)
     changes = {
         "supporting": supporting,
         "contradicting": contradicting,
         "confidence": conf,
         "status": status,
         "outstanding_questions": json.dumps(questions),
+        "metadata": json.dumps(meta),
     }
     db.update("editorial_beliefs", belief_id, changes)
     return {**dict(belief), **changes}
@@ -449,10 +495,12 @@ def merge_beliefs(db: Database, manuscript_id: str, duplicate: dict,
     for question in loads(duplicate["outstanding_questions"], []):
         if question not in questions:
             questions.append(question)
+    canon_meta = _stamp_validation(loads(canonical["metadata"], {}) or {}, status)
     changes = {
         "supporting": supporting, "contradicting": contradicting,
         "confidence": conf, "status": status,
         "outstanding_questions": json.dumps(questions),
+        "metadata": json.dumps(canon_meta),
     }
     db.update("editorial_beliefs", canonical["id"], changes)
     _curation_evidence(

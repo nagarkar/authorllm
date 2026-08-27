@@ -352,6 +352,149 @@ def test_inv2_no_retroactive_demotion(db, ms):
           str(dict(after)))
 
 
+def test_x7_13_floor_is_one_time_grandfather(db, ms):
+    """X7-13: `_validated_floor` was a PERMANENT ratchet, not the one-time
+    grandfather INV-2 intended. Because `reinforce_belief`/`merge_beliefs`
+    persisted `max(derived, floor)` back into the stored `supporting`
+    column, and the floor read that SAME stored column on every call, a
+    validated belief's floor could only ever grow and never expired — the
+    reviewer measured 9 contradicting author verdicts needed to demote a
+    belief whose real derived support was 0.
+
+    The fix: the floor applies for exactly ONE call — the belief's first
+    touch under this code — which stamps metadata['derived_validation']
+    so every later call (and every belief validated for the first time
+    under this code, whose status was 'candidate' when the floor check
+    ran) derives purely. Reusing the exact live shape from
+    test_inv2_no_retroactive_demotion (validated, supporting on record,
+    zero linked evidence): the first touch still isn't retroactively
+    demoted (INV-2's guarantee, unchanged) — even when that first touch is
+    itself a contradicting verdict. But with zero real supporting
+    evidence, exactly ONE further contradicting verdict — not 9 — demotes
+    it."""
+    row = ko_fields("pol")
+    row.update(manuscript_id=ms["id"],
+              statement="X7-13 legacy: validated before this fix landed.",
+              status="validated", confidence=bel._confidence(5, 0),
+              supporting=5, contradicting=0, outstanding_questions="[]",
+              source="review-explanation", source_id=db.source("author"))
+    db.insert("editorial_beliefs", row)
+
+    # First touch: a contradicting verdict. The grandfather floor still
+    # protects it — the Sponsor has not ruled on THIS belief yet.
+    g1 = _guidance_row(ms["id"], "x713-sess-0", [row["id"]], "x713-batch-0")
+    db.insert("guidance_history", g1)
+    bel.record_review(db, ms["id"], g1, "rejected",
+                      "X7-13 first rejection — grandfather still spends here.",
+                      None, llm=None)
+    touched = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (row["id"],))
+    check("first touch: still validated — even a rejection does not "
+          "retroactively demote it (INV-2's guarantee, preserved)",
+          touched["status"] == "validated", str(dict(touched)))
+    meta = loads(touched["metadata"], {})
+    check("the one-time grandfather is now spent (stamped in metadata)",
+          meta.get("derived_validation") is True, str(meta))
+
+    # Second touch: ONE MORE contradicting verdict. No support evidence
+    # exists for this belief anywhere — pure derivation says supporting
+    # is 0, and the floor no longer applies.
+    g2 = _guidance_row(ms["id"], "x713-sess-1", [row["id"]], "x713-batch-1")
+    db.insert("guidance_history", g2)
+    bel.record_review(db, ms["id"], g2, "rejected",
+                      "X7-13 second rejection — this one must demote it.",
+                      None, llm=None)
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (row["id"],))
+    check("ONE further contradicting verdict demotes it — not 9 (X7-13); "
+          "the floor already spent, so supporting derives to 0",
+          after["status"] == "candidate" and after["supporting"] == 0,
+          str(dict(after)))
+
+
+def test_x7_13_no_floor_for_newly_validated(db, ms):
+    """X7-13 (companion claim): a belief that validates for the FIRST TIME
+    under this code never sees a floor at all — `_validated_floor` reads
+    the belief's status as it stood BEFORE the promoting call (i.e. still
+    'candidate'), so the floor gate is false on that very call, and the
+    call stamps metadata['derived_validation'] immediately. No belief
+    validated after this fix ships can ever be floored."""
+    belief = bel.seed_candidate_belief(
+        db, ms["id"], "X7-13(b): a fresh rule with no history at all.",
+        source="review-explanation", llm=None)
+    check("a fresh candidate belief has no floor",
+          bel._validated_floor(belief) == 0, str(belief))
+
+    for i in range(2):
+        ep = _closed_episode(db, ms["id"], f"x713b-sess-{i}")
+        g = _guidance_row(ms["id"], f"x713b-sess-{i}", [belief["id"]],
+                          f"x713b-batch-{i}")
+        db.insert("guidance_history", g)
+        bel.record_review(db, ms["id"], g, "accepted", None, ep["id"], llm=None)
+
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (belief["id"],))
+    check("it validated purely on derived evidence",
+          after["status"] == "validated", str(dict(after)))
+    meta = loads(after["metadata"], {})
+    check("the promoting call itself stamped the grandfather as spent — "
+          "this belief was never eligible for a floor in the first place",
+          meta.get("derived_validation") is True, str(meta))
+    check("_validated_floor is 0 for it, even though status is now "
+          "'validated' — the stamp forecloses it permanently",
+          bel._validated_floor(dict(after)) == 0, str(dict(after)))
+
+
+def test_x7_13_revival_does_not_double_count_merged_evidence(db, ms):
+    """The reviewer's second X7-13 finding: reviving a merged-away
+    duplicate used to make the SAME evidence rows support both beliefs at
+    once. The duplicate re-derives its own evidence the moment it goes
+    live again (belief_revival's own reinforce_belief call), but nothing
+    recomputed the canonical — its stored `supporting`, absorbed at merge
+    time via `_merged_into`'s metadata walk, stayed stale and kept
+    counting the same evidence too. proposals.adopt's belief_revival path
+    now recomputes the canonical in the same call that revives the
+    duplicate, closing the double count immediately rather than waiting
+    on the canonical's next unrelated touch."""
+    dup = bel.seed_candidate_belief(
+        db, ms["id"], "X7-13 dup: to be merged then revived.",
+        source="review-explanation", llm=None)
+    canon = bel.seed_candidate_belief(
+        db, ms["id"], "X7-13 canon: the survivor of the merge.",
+        source="review-explanation", llm=None)
+
+    ep = _closed_episode(db, ms["id"], "x713rev-sess-extra")
+    g = _guidance_row(ms["id"], "x713rev-sess-extra", [dup["id"]],
+                      "x713rev-batch-extra")
+    db.insert("guidance_history", g)
+    bel.record_review(db, ms["id"], g, "accepted", None, ep["id"], llm=None)
+
+    dup_row = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (dup["id"],))
+    canon_row = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (canon["id"],))
+    check("dup carries 2 units of its own real support before the merge",
+          dup_row["supporting"] == 2, str(dict(dup_row)))
+
+    merged = bel.merge_beliefs(db, ms["id"], dict(dup_row), dict(canon_row))
+    check("canonical absorbs the duplicate's evidence on merge (1 + 2)",
+          merged["supporting"] == 3, str(merged))
+
+    revival = prop.create(db, ms["id"], "belief_revival", dup["id"],
+                          {"statement": dup["statement"],
+                           "new_explanation": "actually still right"})
+    prop.adopt(db, ms["id"], revival)
+
+    dup_after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?", (dup["id"],))
+    canon_after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                         (canon["id"],))
+    check("revived duplicate is live again with only its OWN evidence "
+          "(its earlier 2 units plus the revival's own support = 3, which "
+          "genuinely clears the review-explanation bar on its own merits "
+          "— not the floor, since it was never 'validated' going into "
+          "this call)",
+          dup_after["status"] == "validated" and dup_after["supporting"] == 3,
+          str(dict(dup_after)))
+    check("canonical is recomputed on revival — back to just its own "
+          "evidence (1), no longer double-counting the revived duplicate's",
+          canon_after["supporting"] == 1, str(dict(canon_after)))
+
+
 def test_platitude_guard(db, ms):
     """A NEW with no EXAMPLE is refused. A rule whose author cannot point at
     the case that produced it has been generalized past its evidence — and
@@ -710,6 +853,10 @@ def main_test():
     test_inv2_same_session_dedup(db, ms)
     print("INV-2 (d) no retroactive demotion")
     test_inv2_no_retroactive_demotion(db, ms)
+    print("X7-13 floor is a one-time grandfather, not a permanent ratchet")
+    test_x7_13_floor_is_one_time_grandfather(db, ms)
+    test_x7_13_no_floor_for_newly_validated(db, ms)
+    test_x7_13_revival_does_not_double_count_merged_evidence(db, ms)
     test_platitude_guard(db, ms)
     test_retired_belief_returns_as_proposal(db, ms)
     print("batch distillation")
