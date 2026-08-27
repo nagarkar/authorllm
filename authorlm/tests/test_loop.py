@@ -82,6 +82,37 @@ def note_payload(note: str, name: str = "Nothing") -> dict:
 
 # ------------------------------------------------------------------ ① firewall
 
+def test_near_duplicate_threshold():
+    """Lock the measured NEAR_DUPLICATE bar and empty-token edges.
+
+    The firewall runs on every extraction; a silent drift in similarity or
+    the 0.72 threshold re-asks settled questions or collapses distinct ones."""
+    check("empty or stopword-only text scores 0 against anything",
+          loop.similarity("", "hello world") == 0.0
+          and loop.similarity("the and of", "a concept note") == 0.0)
+    # Measured pair from the module docstring: punctuation restatement.
+    a = ("The sum of all opposites, all paradoxes, all possibilities; "
+         "potent, pregnant with paradox.")
+    b = ("The sum of all opposites—all paradoxes, all possibilities; "
+         "potent, pregnant with paradox.")
+    score = loop.similarity(a, b)
+    check("punctuation-only restatement sits at or above NEAR_DUPLICATE",
+          score >= loop.NEAR_DUPLICATE, f"score={score}")
+    # Below-threshold pair from the calibration note (first false positive
+    # appears at 0.71). Distinct noun phrases must stay open.
+    left = ("the spiritual realm, equally existent with the corporeal realm")
+    right = ("the spiritual realm, equally existent with the Realm of Qualities")
+    below = loop.similarity(left, right)
+    check("distinct noun-phrase variants stay under NEAR_DUPLICATE",
+          below < loop.NEAR_DUPLICATE, f"score={below}")
+    hit = loop.near_duplicate(a, [("old", b), ("other", "unrelated prose here")])
+    check("near_duplicate returns the best id above threshold",
+          hit is not None and hit[0] == "old" and hit[1] >= loop.NEAR_DUPLICATE,
+          str(hit))
+    check("near_duplicate returns None when nothing clears the bar",
+          loop.near_duplicate(left, [("x", right)]) is None)
+
+
 def test_firewall(db, ms, target):
     a = prop.create(db, ms["id"], "note_update", target, note_payload(
         "The sum of all opposites, all paradoxes, all possibilities; potent, pregnant with paradox."))
@@ -185,6 +216,67 @@ def test_platitude_guard(db, ms):
     menu = bel.belief_menu(bel.live_beliefs(db, ms["id"], "triage-alias"))
     check("the match menu shows examples, so matching compares grounded rules",
           "e.g." in menu, menu[:200])
+
+
+def test_seed_margin_candidate(db, ms):
+    """Margin feedback seeds only through the scoped, decline-capable path."""
+    guide = [{"id": "sg-root", "name": "Root"}]
+    check("seed_margin_candidate is a no-op without an LLM",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Prefer concrete anchors.", "a.md",
+              guide, None) is None)
+
+    class Off:
+        enabled = False
+
+        def complete(self, system, user):
+            raise AssertionError("disabled LLM must not be called")
+
+    check("seed_margin_candidate is a no-op when LLM is disabled",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Prefer concrete anchors.", "a.md",
+              guide, Off()) is None)
+
+    declined = ScriptedLLM("NONE")
+    check("seed_margin_candidate honors an explicit decline",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Situation-specific only.", "a.md",
+              guide, declined) is None)
+
+    seeded = ScriptedLLM(
+        "SCOPE: file\n"
+        "STATEMENT: Prefer concrete illustration anchors over mood.\n"
+        "EXAMPLE: Author rejected a foggy-atmosphere proposal on a.md.")
+    created = bel.seed_margin_candidate(
+        db, ms["id"], "Too atmospheric — need a concrete object.", "a.md",
+        guide, seeded)
+    check("seed_margin_candidate seeds a scoped belief from STATEMENT",
+          created is not None and created.get("id"), str(created))
+    row = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                 (created["id"],))
+    meta = loads(row["metadata"], {}) or {}
+    check("seed_margin_candidate records file scope and example",
+          row["source"] == "margin-thread"
+          and meta.get("scope_kind") == "file"
+          and meta.get("scope_ref") == "a.md"
+          and "foggy-atmosphere" in (meta.get("example") or ""),
+          str(meta))
+
+    matched = ScriptedLLM(f"MATCH: {created['id']}")
+    again = bel.seed_margin_candidate(
+        db, ms["id"], "Still too foggy.", "a.md", guide, matched)
+    check("seed_margin_candidate MATCH reinforces the existing belief",
+          again is not None and again["id"] == created["id"]
+          and again["supporting"] >= 2, str(again))
+
+    bad_scope = ScriptedLLM(
+        "SCOPE: chapter\n"
+        "STATEMENT: An invalid scope must not seed.\n"
+        "EXAMPLE: Would be wrong.")
+    check("seed_margin_candidate refuses an unknown SCOPE kind",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Bad scope reply.", "a.md",
+              guide, bad_scope) is None)
 
 
 def test_retired_belief_returns_as_proposal(db, ms):
@@ -464,12 +556,14 @@ def test_proposals_triage_type(db, ms, target):
 def main_test():
     db, ms, target = fixture()
     print("firewall")
+    test_near_duplicate_threshold()
     test_firewall(db, ms, target)
     print("thresholds")
     test_thresholds()
     print("semantic matching")
     test_semantic_matching(db, ms)
     test_platitude_guard(db, ms)
+    test_seed_margin_candidate(db, ms)
     test_retired_belief_returns_as_proposal(db, ms)
     print("batch distillation")
     test_distil_batching(db, ms)

@@ -121,9 +121,140 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_critique_tab_text_rejoin() -> None:
+    """Resolve reads Docs tabs via critique_tab_text — must rejoin with \\n\\n.
+
+    Docs API runs end each paragraph with a single \\n and push drops blank
+    separators. Joining those runs raw collapses the essay into one
+    `_paragraphs` blob (#26). This locks the rejoin contract hermetically."""
+    import json as _json
+
+    from authorlm.db import Database
+    from authorlm.gdocs import critique_tab_text
+
+    class _Req:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def execute(self):
+            return self._payload
+
+    class _Docs:
+        def get(self, documentId=None, includeTabsContent=None):
+            # Real Docs shape after a transplant: consecutive non-empty
+            # paragraphs, each ending in a single \\n — no blank separators.
+            content = [
+                {"paragraph": {"elements": [
+                    {"textRun": {"content": "Heading line.\n"}}]}},
+                {"paragraph": {"elements": [
+                    {"textRun": {"content": "First body paragraph.\n"}}]}},
+                {"paragraph": {"elements": [
+                    {"textRun": {"content": "Second body paragraph.\n"}}]}},
+            ]
+            return _Req({"tabs": [{
+                "tabProperties": {"tabId": "tab-essay", "title": "essay.md"},
+                "documentTab": {"body": {"content": content}},
+                "childTabs": [],
+            }]})
+
+    class _Stub:
+        def documents(self):
+            return _Docs()
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-crit-tab-"))
+    try:
+        (root / "essay.md").write_text(
+            "Heading line.\n\nFirst body paragraph.\n\n"
+            "Second body paragraph.\n")
+        db = Database(root / "t.db")
+        ms = api.register_manuscript(db, "crit-tab", str(root))
+        meta = {"gdocs": {
+            "_master_id": "doc-master",
+            "essay.md": {"tab_id": "tab-essay", "pushed_hash": "x"},
+        }}
+        db.update("manuscripts", ms["id"],
+                  {"metadata": _json.dumps(meta)})
+        ms = api.get_manuscript(db)
+        text = critique_tab_text(db, ms, "essay.md", _Stub())
+        check("critique_tab_text rejoins Docs paragraphs with blank lines",
+              text == ("Heading line.\n\nFirst body paragraph.\n\n"
+                       "Second body paragraph.\n"),
+              repr(text))
+        # The collapse that #26 fixed: raw join of textRuns would be this.
+        collapsed = ("Heading line.\nFirst body paragraph.\n"
+                     "Second body paragraph.\n")
+        check("critique_tab_text is not a raw textRun join",
+              text != collapsed and "\n\n" in text, repr(text))
+        try:
+            critique_tab_text(db, ms, "missing.md", _Stub())
+            unmapped_raised = False
+        except LookupError:
+            unmapped_raised = True
+        check("critique_tab_text raises when the file has no tab mapping",
+              unmapped_raised)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_illus_render_multi_slot_isolation() -> None:
+    """One slot's render failure must not abort the rest of `illus render`.
+
+    Batch render walks every unrendered slot; a network timeout on slot A
+    used to be able to sink slots B..N. The CLI catches per-slot errors and
+    keeps going — lock that isolation without calling a real image API."""
+    import io as _io
+    from unittest.mock import patch
+
+    from authorlm import illus as illus_mod
+    from authorlm.cli import main as _main
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-illus-iso-"))
+    try:
+        ms_dir = root / "book"
+        ms_dir.mkdir()
+        (ms_dir / "a.md").write_text(
+            "# A\n\n[Illustration: a brass pendulum at rest]\n")
+        (ms_dir / "b.md").write_text(
+            "# B\n\n[Illustration: a silver orrery under glass]\n")
+        with contextlib.redirect_stdout(_io.StringIO()):
+            _main(["--workspace", str(root), "init", "--name", "book",
+                   "--path", str(ms_dir)])
+
+        calls: list[str] = []
+
+        def _fake_render(db, manuscript, slot, config, from_n=None,
+                         count=1, generator=None):
+            calls.append(slot["prompt"])
+            if "pendulum" in slot["prompt"]:
+                raise RuntimeError("simulated image timeout")
+            return {"written": ["ok.png"], "had_embed": False,
+                    "embedded": "_illustrations/ok.png"}
+
+        out = _io.StringIO()
+        with patch.object(illus_mod, "render_slot", side_effect=_fake_render), \
+             contextlib.redirect_stdout(out):
+            _main(["--workspace", str(root), "illus", "render"])
+        printed = out.getvalue()
+        check("multi-slot render attempts every unrendered slot",
+              len(calls) == 2
+              and any("pendulum" in p for p in calls)
+              and any("orrery" in p for p in calls),
+              str(calls))
+        check("multi-slot render isolates a failed slot and reports the rest",
+              "render failed" in printed
+              and "Rendered 1 of 2" in printed
+              and "1 failed" in printed
+              and "wrote _illustrations/ok.png" in printed,
+              printed)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_critique_tab_text_rejoin()
+    check_illus_render_multi_slot_isolation()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
