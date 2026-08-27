@@ -1651,6 +1651,23 @@ def retire_belief(db: Database, manuscript: dict, prefix: str,
     return bel.retire_belief(db, manuscript["id"], belief, reason)
 
 
+def demote_belief(db: Database, manuscript: dict, prefix: str,
+                  reason: str) -> dict:
+    """Send a validated belief back to 'candidate' (Sponsor override,
+    contradicting evidence, etc.) — not retired: the statement is not
+    banned, and real future evidence can re-validate it. See
+    beliefs.demote_belief for why the validated-floor grandfather (X7-13)
+    cannot resurrect it on the next reinforce_belief."""
+    from . import beliefs as bel
+
+    belief = _belief_by_prefix(db, manuscript, prefix)
+    if belief["status"] != "validated":
+        raise ValueError(
+            f"belief {belief['id'][:8]} is '{belief['status']}', not "
+            "validated — nothing to demote")
+    return bel.demote_belief(db, manuscript["id"], belief, reason)
+
+
 def merge_beliefs(db: Database, manuscript: dict, duplicate: str,
                    canonical: str, reason: str | None = None) -> dict:
     from . import beliefs as bel

@@ -5283,7 +5283,7 @@ def main_test() -> None:
             "extract_concepts", "get_plan", "get_doc_links",
             "file_improvement", "list_improvements", "improvement_bundle",
             "resolve_improvement", "alias_concept", "merge_concepts",
-            "retire_belief", "merge_beliefs", "convert_belief_to_law",
+            "retire_belief", "demote_belief", "merge_beliefs", "convert_belief_to_law",
             "define_style_guide", "add_style_law", "retire_style_law",
             "attach_style", "get_style", "get_profile", "run_sweep",
             "get_illustration_prompt", "scan_illustrations",

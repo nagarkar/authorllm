@@ -465,6 +465,33 @@ def retire_belief(db: Database, manuscript_id: str, belief: dict,
             "status": "retired"}
 
 
+def demote_belief(db: Database, manuscript_id: str, belief: dict,
+                  reason: str) -> dict:
+    """Author/Sponsor-initiated demotion: the belief is not banned like a
+    retirement — it goes back to 'candidate' because it may still be
+    right, and real future evidence can re-validate it. That is the
+    entire difference from retire_belief above; everything else about the
+    shape (reason required and recorded verbatim, curation metadata,
+    auditable evidence) mirrors it exactly.
+
+    X7-13's seam with the validated-floor fix: this only ever WRITES
+    status='candidate' here — it never re-derives or re-floors anything.
+    The next `reinforce_belief`/`merge_beliefs` call for this belief reads
+    that status as 'candidate' BEFORE computing anything, so
+    `_validated_floor` returns 0 regardless of any stale
+    metadata['derived_validation'] stamp — a demoted belief cannot be
+    bounced straight back to 'validated' by the floor. It can still climb
+    back to 'validated' on genuine derived support, which is the point."""
+    meta = loads(belief["metadata"], {})
+    meta["curation"] = {"action": "demoted", "reason": reason}
+    db.update("editorial_beliefs", belief["id"],
+              {"status": "candidate", "metadata": json.dumps(meta)})
+    _curation_evidence(db, manuscript_id, "demoted",
+                       f"{belief['statement']} — {reason}", belief["id"])
+    return {"id": belief["id"], "statement": belief["statement"],
+            "status": "candidate"}
+
+
 def merge_beliefs(db: Database, manuscript_id: str, duplicate: dict,
                    canonical: dict, reason: str | None = None) -> dict:
     """Fold a duplicate belief's evidence record into the canonical one and

@@ -3332,6 +3332,13 @@ def cmd_belief(args):
             sys.exit(str(err))
         print(f"Belief retired: \"{result['statement']}\" "
               "(statement stays banned from re-seeding).")
+    elif args.action == "demote":
+        try:
+            result = api.demote_belief(db, manuscript, args.id, args.reason)
+        except (LookupError, ValueError) as err:
+            sys.exit(str(err))
+        print(f"Belief demoted to candidate: \"{result['statement']}\" "
+              "(not retired — may re-validate on real evidence).")
     elif args.action == "merge":
         try:
             result = api.merge_beliefs(db, manuscript, args.id, args.answer,
@@ -4946,6 +4953,9 @@ def build_parser() -> argparse.ArgumentParser:
                "                                  closes Q2 of belief pol-d970; the\n"
                "                                  answer becomes declared evidence\n"
                '  belief retire pol-4c5d --reason "garbled inference"\n'
+               '  belief demote pol-4c5d --reason "no longer stands behind it"\n'
+               "                                  back to candidate — unlike retire, "
+               "may re-validate\n"
                "  belief merge pol-8e69 pol-2c85  fold the duplicate (first) into\n"
                "                                  the canonical (second)\n"
                '  belief convert pol-3b85 --aspect formatting --guide "Essays"\n'
@@ -4953,7 +4963,7 @@ def build_parser() -> argparse.ArgumentParser:
                "                                  element; the belief is retired",
     )
     p.add_argument("action", choices=["list", "show", "answer", "retire",
-                                      "merge", "convert"])
+                                      "demote", "merge", "convert"])
     p.add_argument("id", nargs="?",
                    help="belief id prefix, from 'belief list'")
     p.add_argument("answer", nargs="?",
@@ -5148,6 +5158,8 @@ def _dispatch(argv: list[str] | None = None) -> None:
         sys.exit("usage: belief answer <id-prefix> \"answer text\"")
     if args.command == "belief" and args.action == "retire" and not (args.id and args.reason):
         sys.exit('usage: belief retire <id-prefix> --reason "why"')
+    if args.command == "belief" and args.action == "demote" and not (args.id and args.reason):
+        sys.exit('usage: belief demote <id-prefix> --reason "why"')
     if args.command == "belief" and args.action == "merge" and not (args.id and args.answer):
         sys.exit("usage: belief merge <duplicate-id-prefix> <canonical-id-prefix>")
     if args.command == "belief" and args.action == "convert" and not (args.id and args.aspect):

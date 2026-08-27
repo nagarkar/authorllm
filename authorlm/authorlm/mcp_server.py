@@ -1079,6 +1079,18 @@ def retire_belief(prefix: str, reason: str, manuscript: str | None = None) -> di
 
 
 @mcp.tool()
+def demote_belief(prefix: str, reason: str, manuscript: str | None = None) -> dict:
+    """Demote a validated editorial belief back to candidate (Sponsor
+    override, contradicting evidence, etc.) — unlike retire_belief, the
+    statement is NOT banned from re-seeding, and the belief can re-validate
+    on real future evidence. Record the author's reason verbatim."""
+    def run():
+        db = _db()
+        return api.demote_belief(db, _manuscript(db, manuscript), prefix, reason)
+    return _guard(run)
+
+
+@mcp.tool()
 def merge_beliefs(duplicate: str, canonical: str,
                    reason: str | None = None,
                    manuscript: str | None = None) -> dict:

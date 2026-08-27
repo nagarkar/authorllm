@@ -306,6 +306,48 @@ def scenario_editorial_loop(root: Path) -> None:
     check("retired statement re-seeds as revival proposal, not a new belief",
           reseed.get("kind") == "revival_proposal", str(reseed))
 
+    # --- belief demote (Sponsor: "Build demote, then use it.") ---
+    from authorlm.db import ko_fields as _ko_fields
+    demotee = _ko_fields("pol")
+    demotee.update(manuscript_id=_cmid,
+                   statement="Demote me: validated, Sponsor no longer stands behind it.",
+                   status="validated", confidence=_cbel._confidence(4, 0),
+                   supporting=4, contradicting=0, outstanding_questions="[]",
+                   source="review-explanation", source_id=_cdb.source("author"))
+    _cdb.insert("editorial_beliefs", demotee)
+    out = run(ws, "belief", "demote", demotee["id"], expect_exit=True)
+    check("belief demote refuses with no reason — a demote with no reason "
+          "would be a silent status edit",
+          "reason" in out.lower(), out)
+    out = run(ws, "belief", "demote", demotee["id"],
+              "--reason", "Sponsor override: no longer stands behind this rule.")
+    check("belief demote records the author verdict",
+          "demoted" in out.lower(), out)
+    demoted_row = _cdb.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                           (demotee["id"],))
+    check("status is 'candidate', not 'retired' — a demoted belief may "
+          "re-validate on real future evidence",
+          demoted_row["status"] == "candidate", str(dict(demoted_row)))
+    demote_ev = _cdb.one(
+        "SELECT * FROM evidence WHERE supports_belief = ? "
+        "AND signal = 'demoted'", (demotee["id"],))
+    check("the demotion is recorded as auditable evidence, reason verbatim",
+          demote_ev is not None
+          and "Sponsor override" in demote_ev["target"], str(demote_ev))
+    out = run(ws, "belief", "list")
+    check("a demoted belief still surfaces as a live (candidate) belief, "
+          "unlike retire which removes it from the list",
+          "Demote me:" in out, out)
+
+    # X7-13's seam: the floor must not resurrect a demote. A subsequent
+    # reinforce_belief call, with no real supporting evidence anywhere for
+    # this belief, must not bounce it straight back to 'validated'.
+    resurrection_check = _cbel.reinforce_belief(_cdb, demotee["id"], "accepted")
+    check("a demoted belief stays demoted across a subsequent "
+          "reinforce_belief — the floor cannot resurrect it (X7-13/demote seam)",
+          resurrection_check["status"] == "candidate",
+          str(resurrection_check))
+
     # --- compact MCP projections: delta-only, no row boilerplate ---
     from authorlm import api as _capi
     _cms = _capi.get_manuscript(_cdb, "book")
