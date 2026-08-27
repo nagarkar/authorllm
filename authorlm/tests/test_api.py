@@ -2614,6 +2614,44 @@ def main_test() -> None:
               and display in report["in_sync"]
               and "Tab 31" in report.get("ignored_tabs", []), str(report))
         stub.state["docs"]["doc-2"].pop()
+
+        # Container tab title == manuscript name ("book"). A content H1
+        # with that same text must NOT be a split boundary — otherwise
+        # the section resets, the body orphans into the non-mapped
+        # container bucket, and reconcile auto-pulls empty over local.
+        from authorlm.gdocs import split_tabbed_export as _split_export
+        from authorlm.gdocs import _content_tab_titles as _tab_titles
+
+        wipe_whole = (
+            "# **book**\n\n"
+            "# **01-choice.md**\n\n"
+            "# **book**\n\n"
+            "A subtitle that must survive pull.\n\n"
+            "Body after the title-page H1.\n"
+        )
+        wiped = _split_export(
+            wipe_whole, {"book", "01-choice.md", "manifest"})
+        safe = _split_export(
+            wipe_whole, {"01-choice.md", "manifest"})
+        check("including the container title as a boundary empties the "
+              "essay section (the wipe shape)",
+              wiped.get("01-choice.md", "").strip() == ""
+              and "subtitle" in wiped.get("book", ""),
+              str(wiped))
+        check("excluding the container title keeps the title-page H1 "
+              "inside the essay section",
+              "subtitle that must survive" in safe.get("01-choice.md", "")
+              and "Body after the title-page H1"
+              in safe.get("01-choice.md", ""),
+              str(safe))
+        check("content-tab titles skip the container id and title",
+              _tab_titles([("c1", "book"), ("t1", "01-choice.md"),
+                           ("t2", "Tab 31")],
+                          container_id="c1")
+              == {"01-choice.md", "Tab 31"}
+              and _tab_titles([("c1", "book"), ("t1", "01-choice.md")],
+                              container_title="book")
+              == {"01-choice.md"})
         il.maintain_excerpts(ms)
 
         # --- prompt preview embeds: ![](../…) derived machinery ---

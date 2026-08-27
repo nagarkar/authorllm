@@ -803,7 +803,12 @@ def split_tabbed_export(text: str, known_files) -> dict[str, str]:
     """Split a whole-master markdown export into per-file sections. Tab
     titles export as top-level headings ('# **<title>**'); only headings
     naming a known mapped file are boundaries — content headings, even
-    H1s, pass through untouched."""
+    H1s, pass through untouched.
+
+    Callers must not put the container tab's title (the manuscript name)
+    in `known_files`: a title-page or chapter H1 with that same text
+    would reset the section and orphan the body into a non-mapped
+    bucket, which pull/reconcile then auto-writes over the local file."""
     pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -818,6 +823,24 @@ def split_tabbed_export(text: str, known_files) -> dict[str, str]:
             sections[current].append(line)
     return {name: "\n".join(lines).strip() + "\n"
             for name, lines in sections.items()}
+
+
+def _content_tab_titles(tab_props: list[tuple[str, str]],
+                        container_id: str | None = None,
+                        container_title: str | None = None) -> set[str]:
+    """Tab titles safe to use as markdown-export split boundaries.
+
+    The container root tab is titled the manuscript name and is not a
+    content file. Including it as a boundary makes any content H1 with
+    the same text (title page, chapter) reset that section — silent
+    wipe on the next pull/reconcile auto-pull. Prefer excluding by
+    container tab id; fall back to title when the id is not yet known."""
+    if container_id:
+        return {title for tid, title in tab_props
+                if title and tid != container_id}
+    skip = {container_title} if container_title else set()
+    return {title for _, title in tab_props
+            if title and title not in skip}
 
 
 # ---------------------------------------------------------------- mapping
@@ -1324,14 +1347,19 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
-    # Every tab title is a split boundary — a tab that isn't a boundary
-    # would have its lines swallowed into whichever tab precedes it in the
-    # export (the manifest always is one, even without the tab listing).
-    # Mapped prompt-tab titles join unconditionally so a docs_service-less
-    # pull still separates them.
+    # Every content-tab title is a split boundary — a tab that isn't a
+    # boundary would have its lines swallowed into whichever tab precedes
+    # it in the export (the manifest always is one, even without the tab
+    # listing). The container root tab is excluded: its title is the
+    # manuscript name, and a content H1 with that same text must not
+    # reset the section. Mapped prompt-tab titles join unconditionally
+    # so a docs_service-less pull still separates them.
     pmapped = (prompt_links(links) if bridge.meta_key == "gdocs" else {})
     boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
-                  | set(pmapped) | {t for _, t in tab_props if t})
+                  | set(pmapped)
+                  | _content_tab_titles(tab_props,
+                                        links.get("_container_tab"),
+                                        bridge.doc_name))
     sections = split_tabbed_export(whole, boundaries)
     targets = mapped
     prompt_targets = sorted(pmapped)
@@ -1600,11 +1628,15 @@ def reconcile(db: Database, manuscript: dict, service,
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
     pmapped = prompt_links(links)
-    # Every tab title is a split boundary, mapped or not — the same rule
-    # pull_doc follows. A hand-made tab that is NOT a boundary has its
-    # heading and body swallowed into whichever tab precedes it in the
-    # export, and the three-way check then reads that as a Doc-side edit
-    # and writes it over the local file (it-307dc1279a7e).
+    # Every content-tab title is a split boundary, mapped or not — the
+    # same rule pull_doc follows. A hand-made tab that is NOT a boundary
+    # has its heading and body swallowed into whichever tab precedes it
+    # in the export, and the three-way check then reads that as a
+    # Doc-side edit and writes it over the local file (it-307dc1279a7e).
+    # The container root tab is never a boundary: its title equals the
+    # manuscript name, and a title-page/chapter H1 with that text must
+    # pass through (otherwise the section resets and auto-pull wipes
+    # the local file).
     tab_props: list[tuple[str, str]] = []
     if docs_service is not None:
         try:
@@ -1615,10 +1647,11 @@ def reconcile(db: Database, manuscript: dict, service,
             report["errors"].append({"file": "(tab listing)",
                                      "error": str(err)})
     known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
-    titles = {t for _, t in tab_props if t}
+    titles = _content_tab_titles(tab_props,
+                                 links.get("_container_tab"),
+                                 manuscript["name"])
     sections = split_tabbed_export(whole, known | titles)
-    ignored = sorted(t for t in titles - known
-                     if t != manuscript["name"])
+    ignored = sorted(titles - known)
     if ignored:
         report["ignored_tabs"] = ignored
     dirty = False
