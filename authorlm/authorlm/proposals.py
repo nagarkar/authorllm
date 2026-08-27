@@ -28,6 +28,36 @@ def _content_hash(payload: dict) -> str:
     ).hexdigest()[:16]
 
 
+def _norm(text: str | None) -> str:
+    return " ".join((text or "").split()).strip().lower()
+
+
+def _alias_canonical_conflict(db: Database, manuscript_id: str,
+                              alias_name: str, canonical_name: str) -> str | None:
+    """Guard (Q/alias-dedupe): one alias name may not have two open,
+    competing canonicals — 'Prophecy' -> 'Birth-based Superstition' and
+    'Prophecy' -> 'Essentialism' cannot both stand as open questions; they
+    are two different answers to the same one. Returns the conflicting
+    row's canonical name when the newcomer must be refused, else None.
+
+    Chosen rule: REFUSE the newcomer rather than superseding the standing
+    proposal. The standing one is a question already on the author's
+    queue — silently dismissing it to make room for a second guess would
+    let a later pass overwrite an earlier one the author simply has not
+    reached yet, which is the opposite of 'never silently drop it'. An
+    exact repeat (same alias, same canonical, any sentence) also matches
+    here and collapses into the standing row rather than piling up a
+    second copy that only differs by which sentence quoted it."""
+    for row in db.all(
+        "SELECT payload FROM knowledge_proposals WHERE manuscript_id = ? "
+        "AND kind = 'alias' AND state = 'open'", (manuscript_id,),
+    ):
+        payload = loads(row["payload"], {}) or {}
+        if _norm(payload.get("alias")) == _norm(alias_name):
+            return payload.get("canonical")
+    return None
+
+
 def create(
     db: Database, manuscript_id: str, kind: str, target: str, payload: dict,
     source: str = "extraction",
@@ -44,6 +74,10 @@ def create(
     if existing:
         return None
     if _suppressed_as_near_duplicate(db, manuscript_id, kind, target, payload):
+        return None
+    if kind == "alias" and _alias_canonical_conflict(
+        db, manuscript_id, payload.get("alias", ""), payload.get("canonical", "")
+    ) is not None:
         return None
     row = ko_fields("pr")
     row.update(

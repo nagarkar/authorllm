@@ -1030,6 +1030,50 @@ def check_alias_guard() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_alias_dedupe() -> None:
+    """Q/alias-dedupe: one alias name may not have two open, contradictory
+    canonicals — 'Prophecy' -> 'Birth-based Superstition' and 'Prophecy' ->
+    'Essentialism' cannot both stand open simultaneously (measured on the
+    author's live graph: exactly this pair). An exact repeat (same alias,
+    same canonical) collapses to the standing row instead of piling up a
+    second one."""
+    from authorlm import proposals as prop
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-dedupe-")
+    try:
+        mid = manuscript["id"]
+        api.add_concept(db, manuscript, "AliasHistory", kind="concept")
+        alias_target = db.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (mid, "AliasHistory"))["id"]
+        first = prop.create(db, mid, "alias", alias_target,
+                            {"alias": "Prophecy",
+                             "canonical": "Birth-based Superstition",
+                             "sentence": "Prophecy is birth-based superstition."})
+        check("the first open canonical for an alias name is created",
+              first is not None)
+        second = prop.create(db, mid, "alias", alias_target,
+                             {"alias": "Prophecy", "canonical": "Essentialism",
+                              "sentence": "Prophecy is mere essentialism."})
+        check("a second, contradictory canonical for the same alias name "
+              "is refused while the first is still open",
+              second is None)
+        repeat = prop.create(db, mid, "alias", alias_target,
+                             {"alias": "Prophecy",
+                              "canonical": "Birth-based Superstition",
+                              "sentence": "A differently-worded restatement."})
+        check("an exact repeat (same alias, same canonical, different "
+              "sentence) collapses instead of piling up a second row",
+              repeat is None)
+        open_alias_rows = [r for r in prop.open_proposals(db, mid)
+                          if r["kind"] == "alias"]
+        check("only the first alias proposal for 'Prophecy' ever reached "
+              "the queue",
+              len(open_alias_rows) == 1, str(open_alias_rows))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1039,6 +1083,7 @@ def main_test() -> None:
     check_extraction_skip_reasons()
     check_backup_and_restore()
     check_alias_guard()
+    check_alias_dedupe()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
