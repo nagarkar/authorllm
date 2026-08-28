@@ -1430,6 +1430,111 @@ def check_alias_retired_guard() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_vanished_directory_guard() -> None:
+    """it-258752ea91f9: a manuscript root that has gone missing (deleted
+    directory, unmounted volume, etc.) must never be read the same as the
+    author having deleted every file in it. `read_manuscript_files`
+    returns {} for a missing root with no error, which — before this fix —
+    fed straight into collect_revision() and made every tracked file look
+    removed. The auto-collect mass-deletion guard only ever ran when
+    `auto=True`, and _catch_up (reached by MCP get_briefing/get_guidance
+    with no human present) always passes auto=False, so this was the
+    exact unattended path that silently retired unconfirmed hypotheses."""
+    import json as _json
+
+    from authorlm.revisions import ManuscriptRootUnreadable
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-vanished-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# Opening\n\nA placeholder paragraph.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.collect(db, manuscript, {})  # v1 baseline, no concepts yet
+
+        # An unconfirmed extracted hypothesis (what extraction.py stamps
+        # before the author has confirmed it), realized once its name
+        # actually lands in the text — realization only runs on a version
+        # that is actually recorded, so the checksum must change too.
+        hypothesis = api.add_concept(db, manuscript, "Gravity")
+        db.update("concept_nodes", hypothesis["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        (ms / "01.md").write_text(
+            "# Opening\n\nA placeholder paragraph. Gravity is discussed early.\n")
+        api.collect(db, manuscript, {})  # v2: realizes Gravity
+        check("fixture: the hypothesis is realized before the directory "
+              "vanishes",
+              db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                     (hypothesis["id"],))["status"] == "realized")
+        version_before = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE "
+            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+            (manuscript["id"],))["version_no"]
+
+        shutil.rmtree(ms)  # the reported repro: the directory itself vanishes
+
+        raised = None
+        try:
+            # This is exactly the shape _catch_up calls: auto defaults to
+            # False, so no human is standing by to see a 'staged' prompt.
+            api.collect(db, manuscript, {})
+        except Exception as err:  # noqa: BLE001 — inspected below
+            raised = err
+        check("a non-auto collect against a vanished directory refuses "
+              "instead of silently recording an all-files-removed version",
+              isinstance(raised, ManuscriptRootUnreadable), repr(raised))
+
+        after = db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                       (hypothesis["id"],))
+        check("the unconfirmed hypothesis was NOT retired by the "
+              "unreadable directory — that is not an editorial act",
+              after["status"] == "realized", dict(after))
+
+        version_after = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE "
+            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+            (manuscript["id"],))["version_no"]
+        check("no new version was recorded for the vanished directory",
+              version_after == version_before, (version_before, version_after))
+
+        # --- _catch_up must surface hypotheses_dropped/vanished ---
+        # Restore the directory, add a confirmed concept and another
+        # unconfirmed hypothesis, realize both, then genuinely remove
+        # their text (a real editorial deletion, not a vanished root) and
+        # prove _catch_up's slimmer return shape still carries both
+        # fields through to MCP get_briefing/get_guidance.
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text(
+            "# Opening\n\nChoice enters here. A Fleeting Aside too.\n")
+        confirmed_concept = api.add_concept(db, manuscript, "Choice")
+        fleeting = api.add_concept(db, manuscript, "Fleeting Aside")
+        db.update("concept_nodes", fleeting["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        api.collect(db, manuscript, {})  # realizes both
+        check("fixture: both concepts realized before their text is removed",
+              db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                     (confirmed_concept["id"],))["status"] == "realized"
+              and db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                        (fleeting["id"],))["status"] == "realized")
+        (ms / "01.md").write_text("# Opening\n\nNeither name remains.\n")
+
+        caught = api._catch_up(db, manuscript, {})
+        check("_catch_up surfaces the vanished (confirmed) proposal, not "
+              "just version_no/transitions/new_files",
+              caught is not None and caught.get("vanished") == ["Choice"],
+              caught)
+        check("_catch_up surfaces hypotheses_dropped (unconfirmed, retired "
+              "quietly)",
+              caught is not None
+              and caught.get("hypotheses_dropped") == ["Fleeting Aside"],
+              caught)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1438,6 +1543,7 @@ def main_test() -> None:
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
     check_backup_and_restore()
+    check_vanished_directory_guard()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()

@@ -1020,7 +1020,13 @@ def _catch_up(db: Database, manuscript: dict, config: dict) -> dict | None:
         return None
     return {"version_no": report.get("version_no"),
             "transitions": report.get("transitions", []),
-            "new_files": report.get("new_files", [])}
+            "new_files": report.get("new_files", []),
+            # A catch-up runs with no human present (get_briefing /
+            # get_guidance) — vanished concepts and quietly-retired
+            # hypotheses must reach the author here or nowhere
+            # (it-258752ea91f9).
+            "vanished": report.get("vanished", []),
+            "hypotheses_dropped": report.get("hypotheses_dropped", [])}
 
 
 def get_briefing(db: Database, manuscript: dict, since: str | None = None,
