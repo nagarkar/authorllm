@@ -179,16 +179,12 @@ def snapshot_prompts(db, manuscript: dict, source: str) -> dict | None:
     return row
 
 
-def restore_prompts(db, manuscript: dict, version_no: int | None = None) -> dict:
-    """Write a `snapshot_prompts` row back to `_illustrations/prompts/` —
-    the recovery half of X7-3. `version_no=None` restores the latest
-    snapshot. A prompt file present in the snapshot but currently
-    missing or edited on disk is overwritten; a prompt file that exists
-    now but wasn't in the snapshot is left alone (restore recovers what
-    the snapshot held, it does not prune newer prompt files). Never
-    called automatically — this is manual recovery only."""
-    from .db import loads as _loads
-
+def get_prompt_version(db, manuscript: dict,
+                       version_no: int | None = None) -> "sqlite3.Row":
+    """The stored `snapshot_prompts` row for `version_no` (default: the
+    latest). Single source of truth for version lookup — shared by
+    `restore_prompts`, `preview_restore`, and the CLI's `illus versions`.
+    Raises `LookupError`, never guesses, when there is no such snapshot."""
     if version_no is None:
         version = db.one(
             "SELECT * FROM illustration_prompt_versions WHERE "
@@ -205,12 +201,63 @@ def restore_prompts(db, manuscript: dict, version_no: int | None = None) -> dict
         which = "latest" if version_no is None else f"v{version_no}"
         raise LookupError(f"no illustration-prompt snapshot ({which}) "
                           f"to restore from")
+    return version
+
+
+def preview_restore(db, manuscript: dict,
+                    version_no: int | None = None) -> dict:
+    """What `restore_prompts(db, manuscript, version_no)` WOULD do,
+    without writing anything — the CLI prints this before the write so
+    the author sees which files, from which snapshot, before their
+    current content is overwritten (X7-3: a silent restore that clobbers
+    newer text would be the same class of defect this fixes)."""
+    from .db import loads as _loads
+
+    version = get_prompt_version(db, manuscript, version_no)
+    files = sorted(_loads(version["files"], {}))
+    return {"version_no": version["version_no"],
+           "created_at": version["created_at"], "source": version["source"],
+           "files": files}
+
+
+def restore_prompts(db, manuscript: dict, version_no: int | None = None) -> dict:
+    """Write a `snapshot_prompts` row back to `_illustrations/prompts/` —
+    the recovery half of X7-3. `version_no=None` restores the latest
+    snapshot. A prompt file present in the snapshot but currently
+    missing or edited on disk is overwritten; a prompt file that exists
+    now but wasn't in the snapshot is left alone (restore recovers what
+    the snapshot held, it does not prune newer prompt files — additive,
+    not a wholesale revert). Never called automatically — this is manual
+    recovery only, reached via `authorlm illus restore` or by hand."""
+    from .db import loads as _loads
+
+    version = get_prompt_version(db, manuscript, version_no)
     files = _loads(version["files"], {})
     directory = Path(manuscript["path"]) / ILLUS_DIR / PROMPTS_SUBDIR
     directory.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
         (directory / name).write_text(text, encoding="utf-8")
     return {"restored": sorted(files), "version_no": version["version_no"]}
+
+
+def list_prompt_versions(db, manuscript: dict) -> list[dict]:
+    """Every `snapshot_prompts` row for this manuscript, oldest first —
+    what the author needs to see to pick a `--version N` meaningfully.
+    {version_no, created_at, source, file_count, files}."""
+    from .db import loads as _loads
+
+    rows = db.all(
+        "SELECT * FROM illustration_prompt_versions WHERE "
+        "manuscript_id = ? ORDER BY version_no",
+        (manuscript["id"],),
+    )
+    out = []
+    for row in rows:
+        files = sorted(_loads(row["files"], {}))
+        out.append({"version_no": row["version_no"],
+                    "created_at": row["created_at"], "source": row["source"],
+                    "file_count": len(files), "files": files})
+    return out
 
 
 def desc_hash(prompt: str) -> str:

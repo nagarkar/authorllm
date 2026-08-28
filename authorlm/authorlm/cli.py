@@ -2661,6 +2661,41 @@ def cmd_illus(args):
         for name in removed:
             print(f"removed _illustrations/{name}")
 
+    if args.action == "versions":
+        versions = illus.list_prompt_versions(db, manuscript)
+        if not versions:
+            print("No illustration-prompt snapshots yet — one is taken "
+                  "automatically, before the fact, the first time a "
+                  "'doc pull' or session-start reconcile touches "
+                  "_illustrations/prompts/.")
+            return
+        print(f"Illustration-prompt snapshots ({len(versions)}):")
+        for v in versions:
+            print(f"  v{v['version_no']:<3} {v['created_at']}  "
+                  f"{v['file_count']} file(s)  source={v['source']}")
+        print(ui.dim("Restore one with 'illus restore --version N' "
+                     "(omit --version for the latest)."))
+
+    if args.action == "restore":
+        try:
+            plan = illus.preview_restore(db, manuscript, args.version)
+        except LookupError as err:
+            raise SystemExit(f"error: {err}")
+        label = f"v{plan['version_no']}"
+        print(f"Restoring illustration prompts from snapshot {label} "
+              f"(taken {plan['created_at']}, before a "
+              f"{plan['source']!r} write):")
+        for name in plan["files"]:
+            print(f"  _illustrations/prompts/{name}")
+        print(ui.yellow(
+            "This OVERWRITES the current content of the file(s) above "
+            f"with the {label} text. It is additive, not a wholesale "
+            "revert to that moment: any prompt file created since this "
+            "snapshot is left untouched."))
+        result = illus.restore_prompts(db, manuscript, args.version)
+        print(ui.green(f"Restored {len(result['restored'])} file(s) "
+                       f"from {label}."))
+
 
 def cmd_sweep(args):
     from pathlib import Path
@@ -4919,11 +4954,17 @@ def build_parser() -> argparse.ArgumentParser:
                "  illus externalize dial          move a description to "
                "_illustrations/prompts/<slug>.md (tag keeps excerpt ⇢ ref)\n"
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
-               "--reason \"…\"   bulk verdicts")
+               "--reason \"…\"   bulk verdicts\n"
+               "  illus versions                  list snapshots of "
+               "_illustrations/prompts/ (recovery points before a pull)\n"
+               "  illus restore                   restore prompts/ from "
+               "the latest snapshot (prints the plan first)\n"
+               "  illus restore --version 2       restore from a specific "
+               "snapshot instead of the latest")
     p.add_argument("action",
                    choices=["list", "show", "render", "rerender", "pick",
                             "prune", "prompt", "scan", "triage",
-                            "externalize"])
+                            "externalize", "versions", "restore"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
@@ -4951,6 +4992,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason",
                    help="triage: the author's words for a rejection "
                         "(recorded verbatim as evidence)")
+    p.add_argument("--version", type=int, metavar="N",
+                   help="restore: snapshot version to restore from "
+                        "(default: the latest); versions: ignored")
     p.set_defaults(func=cmd_illus)
 
     p = sub.add_parser(

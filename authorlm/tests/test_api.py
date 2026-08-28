@@ -4404,6 +4404,64 @@ def main_test() -> None:
                   "999999" not in str(err) or "no illustration-prompt"
                   in str(err), str(err))
 
+        # --- X7-3-cli: 'illus restore' / 'illus versions' via cli_main ---
+        # The recovery mechanism only counts if the author can reach it
+        # without hand-running Python — prove the CLI verb itself,
+        # end-to-end through cli_main, not the API function directly.
+        cli_precious = "A second precious edit, restored via the CLI.\n"
+        prompt_path.write_text(cli_precious)
+        stub.set_tab(ref, "Doc wording that would destroy the CLI text")
+        pull_doc(db, manuscript, service=stub, docs_service=stub, force=True)
+        check("X7-3-cli PRE-FIX REGRESSION setup: the destructive pull "
+              "still clobbers the file",
+              cli_precious != prompt_path.read_text(), prompt_path.read_text())
+
+        versions_out = io.StringIO()
+        with contextlib.redirect_stdout(versions_out):
+            cli_main(["--workspace", str(ws), "illus", "versions"])
+        versions_text = versions_out.getvalue()
+        check("'illus versions' lists the snapshots (version, timestamp, "
+              "file count, triggering source) — how the author picks "
+              "--version N meaningfully",
+              "pre-doc-pull" in versions_text
+              and "file(s)" in versions_text
+              and "v1" in versions_text, versions_text)
+
+        restore_out = io.StringIO()
+        with contextlib.redirect_stdout(restore_out):
+            cli_main(["--workspace", str(ws), "illus", "restore"])
+        restore_text = restore_out.getvalue()
+        check("X7-3-cli RECOVERY: 'illus restore' actually restores the "
+              "destroyed prompt file, end-to-end through the CLI (not "
+              "just the Python API)",
+              prompt_path.read_text() == cli_precious, prompt_path.read_text())
+        check("the restore CLI prints the plan — which file(s), from "
+              "which snapshot — BEFORE doing the overwrite",
+              ref in restore_text
+              and "Restoring illustration prompts from snapshot v"
+              in restore_text, restore_text)
+        check("the restore CLI warns plainly that existing content will "
+              "be overwritten",
+              "OVERWRITES" in restore_text, restore_text)
+        check("the restore CLI states the restore is additive (not a "
+              "wholesale revert) — newer prompt files are left alone",
+              "not a wholesale revert" in restore_text
+              and "left untouched" in restore_text, restore_text)
+
+        bad_out = io.StringIO()
+        bad_err = None
+        try:
+            with contextlib.redirect_stdout(bad_out):
+                cli_main(["--workspace", str(ws), "illus", "restore",
+                         "--version", "999999"])
+        except SystemExit as exc:
+            bad_err = str(exc)
+        check("a nonexistent --version produces a clean error message, "
+              "never a traceback",
+              bad_err is not None and "999999" in bad_err
+              and "no illustration-prompt snapshot" in bad_err
+              and not bad_out.getvalue(), bad_err)
+
         # --- comment-anchor safety: pushes route around open comments ---
         from authorlm.gdocs import comment_bearing, manuscript_bridge
 
