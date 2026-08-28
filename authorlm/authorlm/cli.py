@@ -153,6 +153,10 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            "naming an already-live concept (would be a merge, not an "
            "alias — logged, not queued)"
            if summary.get("alias_folds_refused") else "")
+        + (f"; refused {summary['alias_retired_refused']} alias proposal(s) "
+           "naming a retired concept (would re-enter a banned name — "
+           "logged, not queued)"
+           if summary.get("alias_retired_refused") else "")
         + (f"; refused {len(summary['materiality_refused'])} note update(s) "
            "below the materiality floor"
            if summary.get("materiality_refused") else "")

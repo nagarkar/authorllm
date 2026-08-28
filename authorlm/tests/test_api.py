@@ -1356,6 +1356,80 @@ def check_alias_guide_flip() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_alias_retired_guard() -> None:
+    """Q/alias-retired-guard: an alias whose name is a RETIRED concept is
+    also refused, not just one whose name is a live concept. Retired names
+    are banned from re-entering the graph (extraction.py's `banned` set in
+    the concepts loop); an alias would be a side door around that ban, so
+    it is refused and recorded under a signal DISTINCT from the
+    live-concept fold (Q/alias-guard) — the two reasons stay separable in
+    the evidence: 6 of the author's 20 open alias proposals named a
+    retired concept."""
+    from authorlm import extraction
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-retired-")
+    try:
+        mid = manuscript["id"]
+        api.add_concept(db, manuscript, "RetiredGuardCanon", kind="concept")
+        api.add_concept(db, manuscript, "RetiredGuardName", kind="concept")
+        db.update(
+            "concept_nodes",
+            db.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+                   "AND name = ?", (mid, "RetiredGuardName"))["id"],
+            {"status": "retired"})
+        sentence = ("We once called RetiredGuardCanon by the name "
+                    "RetiredGuardName.")
+        (ms / "01-retired.md").write_text(f"# Retired\n\n{sentence}\n")
+
+        class RetiredAliasLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [], "links": [], "aliases": [
+                    {"alias": "RetiredGuardName",
+                     "canonical": "RetiredGuardCanon",
+                     "sentence": sentence}]}
+
+            def stats_line(self):
+                return None
+
+        before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        result = extraction.extract_concepts(
+            db, manuscript, RetiredAliasLLM(), files=["01-retired.md"],
+            aliases_only=True)
+        after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        check("an alias naming a retired concept creates no proposal",
+              result is not None and after == before, str(result))
+        check("extract_concepts reports exactly one retired-name refusal, "
+              "separately from live-concept folds",
+              result is not None
+              and result.get("alias_retired_refused") == 1
+              and result.get("alias_folds_refused") == 0,
+              str(result))
+        retired_evidence = db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'extraction_adjudication' "
+            "AND signal = 'alias_retired_refused'", (mid,))
+        check("the retired-name refusal is recorded under its own signal",
+              len(retired_evidence) == 1
+              and retired_evidence[0]["weight"] == "low", str(
+                  [dict(r) for r in retired_evidence]))
+        live_evidence = db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'extraction_adjudication' "
+            "AND signal = 'alias_fold_refused'", (mid,))
+        check("no live-concept-fold evidence is recorded for a retired-name "
+              "refusal — the two reasons stay separable",
+              len(live_evidence) == 0, str([dict(r) for r in live_evidence]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1369,6 +1443,7 @@ def main_test() -> None:
     check_note_group()
     check_note_materiality()
     check_alias_guide_flip()
+    check_alias_retired_guard()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

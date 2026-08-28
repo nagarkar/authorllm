@@ -145,6 +145,38 @@ def _record_alias_fold_refused(db: Database, manuscript_id: str, a_node: dict,
     db.insert("evidence", row)
 
 
+def _record_alias_retired_refused(db: Database, manuscript_id: str, a_node: dict,
+                                  c_node: dict, sentence: str) -> None:
+    """Guard (Q/alias-retired-guard): the extractor read a naming sentence
+    as bestowing `a_node`'s name on `c_node` — but `a_node` names a RETIRED
+    concept. Retired names are banned from re-entering the graph (see the
+    `banned` set in `extract_concepts`'s concept loop); letting one back in
+    through the alias door would be exactly the side door that ban exists
+    to close, even though the sentence names `c_node`, not the retired
+    concept's own old identity, as canonical.
+
+    Recorded with a signal distinct from the live-concept fold
+    (`alias_fold_refused`, Q/alias-guard) so the two refusal reasons stay
+    separable in the evidence — one is "these are the same live concept",
+    the other is "this name was retired on purpose"."""
+    row = ko_fields("ev")
+    row.update(
+        manuscript_id=manuscript_id,
+        episode_id=None,
+        evidence_type="extraction_adjudication",
+        signal="alias_retired_refused",
+        target=(f"'{a_node['name']}' named as an alias of '{c_node['name']}' "
+                f"— '{a_node['name']}' is a retired concept; refused (would "
+                f"re-enter a retired name through the alias door)")[:200],
+        supports_belief=None,
+        weight="low",  # a machine screening decision, never author evidence
+        metadata=json.dumps({"alias": a_node["name"],
+                             "canonical": c_node["name"],
+                             "sentence": sentence}),
+    )
+    db.insert("evidence", row)
+
+
 def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
                   new_kind: str | None = None,
                   reason: str | None = None) -> None:
@@ -522,6 +554,7 @@ def extract_concepts(
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "materiality_refused": [],
             "proposed": 0, "screened": 0, "alias_folds_refused": 0,
+            "alias_retired_refused": 0,
             "truncated": False,
             "scope": scope_label, "prompt_files": [],
             "adjudication_empty": False,
@@ -544,7 +577,8 @@ def extract_concepts(
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
                         "suppressed", "ungrounded_links",
-                        "proposed", "screened", "alias_folds_refused"):
+                        "proposed", "screened", "alias_folds_refused",
+                        "alias_retired_refused"):
                 aggregate[key] += sub.get(key, 0)
             _merge_prompts(aggregate, sub)
             aggregate["adjudication_empty"] = (
@@ -621,6 +655,7 @@ def extract_concepts(
             "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
             "materiality_refused": [],
             "proposed": 0, "screened": 0, "alias_folds_refused": 0,
+            "alias_retired_refused": 0,
             "truncated": False, "prompt_files": [],
             "adjudication_empty": False,
         }
@@ -644,7 +679,8 @@ def extract_concepts(
             for key in ("skipped", "skipped_malformed",
                         "skipped_unknown_endpoint", "skipped_unknown_relation",
                         "suppressed", "ungrounded_links",
-                        "proposed", "screened", "alias_folds_refused"):
+                        "proposed", "screened", "alias_folds_refused",
+                        "alias_retired_refused"):
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
             _merge_prompts(aggregate, sub)
@@ -761,6 +797,7 @@ def extract_concepts(
     below_bar: list[str] = []
     materiality_refused: list[str] = []
     alias_folds_refused = 0
+    alias_retired_refused = 0
     disk_files: dict[str, str] | None = None
 
     for item in [] if edges_only or aliases_only else result.get("concepts", []):
@@ -949,10 +986,14 @@ def extract_concepts(
     # extraction.md): the canonical must already be a known (live) concept,
     # and the alias must be a name that is NOT yet its own known concept —
     # a genuinely new label bestowed on something already established
-    # ("we call it The Chid"). When `alias_name` already resolves to its
-    # own LIVE concept, adopting the proposal would MERGE two established
-    # concepts, not alias one — a heavier decision than a naming sentence
-    # can license, so it is refused and recorded instead (Q/alias-guard).
+    # ("we call it The Chid"). Two ways a candidate can fail that and still
+    # be kept separable in the evidence: `alias_name` may already resolve
+    # to its own LIVE concept (Q/alias-guard — adopting would MERGE two
+    # established concepts, not alias one, heavier than a naming sentence
+    # can license), or it may name a RETIRED concept (Q/alias-retired-
+    # guard — retired names are banned from re-entering the graph, and an
+    # alias would be a side door around that ban). Both are refused and
+    # recorded, never silently dropped.
     flat_text = " ".join(text.split()).lower()
     for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
         if not isinstance(item, dict):
@@ -985,11 +1026,14 @@ def extract_concepts(
             suppressed += 1
             continue
         if a_node is not None and a_node["status"] == "retired":
-            # A retired alias name is not yet specially guarded here — see
-            # Q/alias-retired-guard, which follows this commit. For now it
-            # falls through to the generic suppression below, matching how
-            # it was already treated before this guide flip.
-            suppressed += 1
+            # Guard (Q/alias-retired-guard): `alias_name` names a RETIRED
+            # concept. Retired names are banned from re-entering the graph
+            # (see the `banned` set above); letting one back in as an
+            # "alias" would be a side door around that ban. Refused,
+            # recorded with a signal distinct from the live-concept fold,
+            # never queued.
+            _record_alias_retired_refused(db, mid, a_node, c_node, sentence)
+            alias_retired_refused += 1
             continue
         if a_node is not None:
             # Guard (Q/alias-guard): `alias_name` already stands as its own
@@ -1048,6 +1092,7 @@ def extract_concepts(
         "below_bar": below_bar,
         "materiality_refused": materiality_refused,
         "alias_folds_refused": alias_folds_refused,
+        "alias_retired_refused": alias_retired_refused,
         "proposed": proposed,
         "screened": screened,
         "scope": scope,

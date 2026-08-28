@@ -604,6 +604,11 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                     {"alias": "Elective Ground", "canonical": "Choice",
                      "sentence": "We call it Elective Ground, the settled "
                                  "name for Choice."},
+                    # Q/alias-retired-guard: the bestowed name is a RETIRED
+                    # concept — a side door around the retired-name ban.
+                    {"alias": "RetiredAliasCandidate", "canonical": "Choice",
+                     "sentence": "We once called Choice by the name "
+                                 "RetiredAliasCandidate."},
                 ],
             })
         elif ("LOAD-BEARING units of thought" in system
@@ -954,34 +959,45 @@ def scenario_llm_and_unregister(root: Path) -> None:
         # --- alias detection: the ALIAS GUIDE was flipped (Q/alias-guide-
         # flip) — an alias must bestow a genuinely NEW name on a known
         # concept (the naming-ceremony case); it is no longer enough for
-        # both names to already be known concepts. A candidate can still
-        # fail: the bestowed name is already its own LIVE concept
+        # both names to already be known concepts. Two ways a candidate can
+        # still fail: the bestowed name is already its own LIVE concept
         # ('Distinction', 'Persistence' — a merge mislabelled as an alias,
-        # Q/alias-guard). Only a truly new name ('Elective Ground', never a
-        # concept anywhere in this test) produces a proposal. ---
+        # Q/alias-guard) or it names a RETIRED concept (a side door around
+        # the retired-name ban, Q/alias-retired-guard). Only a truly new
+        # name ('Elective Ground', never a concept anywhere in this test)
+        # produces a proposal. ---
+        run(ws, "concept", "add", "RetiredAliasCandidate")
+        run(ws, "concept", "retire", "RetiredAliasCandidate")
         write(ms / "03-names.md",
               "# Names\n\nWhat ye call Distinction is the choice of "
               "qualities parted. What ye call Persistence is the becoming "
               "of shapes. We call it Elective Ground, the settled name for "
-              "Choice.\n")
+              "Choice. We once called Choice by the name "
+              "RetiredAliasCandidate.\n")
         out = run(ws, "extract", "--aliases")
         check("aliases pass reports its scope", "aliases only" in out, out)
         check("both live-concept naming sentences are refused as folds",
               "refused 2 alias proposal(s) naming an already-live concept"
               in out, out)
+        check("the retired-name naming sentence is refused separately",
+              "refused 1 alias proposal(s) naming a retired concept" in out,
+              out)
         check("the genuinely new naming ceremony PRODUCES a proposal — "
               "the guide flip did not leave the feature dead",
               "1 proposal(s) against settled knowledge" in out, out)
         out = run(ws, "proposal", "list")
-        check("no live-concept-fold alias proposal reaches the queue",
+        check("no live-concept-fold or retired-name alias proposal "
+              "reaches the queue",
               "'Distinction' with 'Choice'" not in out
-              and "'Persistence' with 'Becoming'" not in out, out)
+              and "'Persistence' with 'Becoming'" not in out
+              and "'RetiredAliasCandidate' with 'Choice'" not in out, out)
         check("the new naming ceremony DOES reach the queue",
               "'Elective Ground' with 'Choice'" in out, out)
 
         # Refused is not silently dropped: the extractor's read is recorded
         # as system-provenance evidence, exactly like what adjudication.py
-        # screens out — auditable without becoming queue.
+        # screens out — auditable without becoming queue. The two refusal
+        # reasons stay separable by signal.
         alias_guard_evidence = _db.all(
             "SELECT * FROM evidence WHERE manuscript_id = ? "
             "AND evidence_type = 'extraction_adjudication' "
@@ -991,6 +1007,15 @@ def scenario_llm_and_unregister(root: Path) -> None:
               len(alias_guard_evidence) == 2
               and all(row["weight"] == "low" for row in alias_guard_evidence),
               str([dict(r) for r in alias_guard_evidence]))
+        alias_retired_evidence = _db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'extraction_adjudication' "
+            "AND signal = 'alias_retired_refused'", (_mid,))
+        check("the retired-name fold is recorded under a DISTINCT signal, "
+              "separable from the live-concept fold",
+              len(alias_retired_evidence) == 1
+              and alias_retired_evidence[0]["weight"] == "low",
+              str([dict(r) for r in alias_retired_evidence]))
 
         # The produced proposal must be genuinely adoptable, not merely
         # created: adopting it ADDS the bestowed name to the canonical
