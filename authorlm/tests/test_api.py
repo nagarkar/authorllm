@@ -1273,6 +1273,89 @@ def check_note_materiality() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_alias_guide_flip() -> None:
+    """Q/alias-guide-flip: the ALIAS GUIDE now requires the canonical to
+    already be a known concept and the alias to be a name that is NOT yet
+    its own known concept — the naming-ceremony case ("we call it The
+    Chid"). Measured against the author's 20 open alias proposals: 14
+    alias names were LIVE concepts (genuine merges mislabelled as
+    aliases), 6 were RETIRED, and 0 were the naming-ceremony case the old
+    guide actually forbade ("BOTH names are known concepts"). This proves
+    the positive case: a genuinely new name bestowed on a known concept
+    now PRODUCES a real, adoptable alias proposal — without it the guard
+    would leave the whole feature dead."""
+    from authorlm import extraction, proposals as prop
+    from authorlm.concepts import get_concept as _get_concept
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-flip-")
+    try:
+        mid = manuscript["id"]
+        api.add_concept(db, manuscript, "FlipCanonical", kind="concept",
+                        notes="the established term")
+        sentence = "We call it FlipBestowed, the settled name for FlipCanonical."
+        (ms / "01-flip.md").write_text(f"# Flip\n\n{sentence}\n")
+
+        class NamingCeremonyLLM:
+            enabled = True
+            extraction_max_chars = 24000
+
+            def complete_json(self, system, user, thinking_budget=None):
+                return {"concepts": [], "links": [], "aliases": [
+                    {"alias": "FlipBestowed", "canonical": "FlipCanonical",
+                     "sentence": sentence}]}
+
+            def stats_line(self):
+                return None
+
+        check("the bestowed name does not exist as a concept before "
+              "extraction",
+              _get_concept(db, mid, "FlipBestowed") is None)
+        before = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        result = extraction.extract_concepts(
+            db, manuscript, NamingCeremonyLLM(), files=["01-flip.md"],
+            aliases_only=True)
+        after = db.one(
+            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        check("a naming ceremony for a genuinely new name PRODUCES an "
+              "alias proposal",
+              result is not None and after == before + 1, str(result))
+        row = db.one(
+            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
+            "AND kind = 'alias' AND state = 'open'", (mid,))
+        payload = loads(row["payload"], {})
+        check("the produced proposal is flagged as a new-name naming "
+              "ceremony, not a merge",
+              payload.get("alias_is_new") is True, str(payload))
+        summary, details = prop.describe(dict(row))
+        check("describe() phrases adoption as 'add', not 'merge', for a "
+              "naming ceremony",
+              "adopt = add:" in " ".join(details), details)
+
+        message = prop.adopt(db, mid, dict(row))
+        check("adopting the naming-ceremony proposal ADDS the name rather "
+              "than attempting a merge",
+              "recorded as a new name for 'FlipCanonical'" in message,
+              message)
+        canonical = db.one(
+            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
+            (mid, "FlipCanonical"))
+        check("the canonical concept's aliases now include the bestowed "
+              "name",
+              "FlipBestowed" in loads(canonical["aliases"], []),
+              canonical["aliases"])
+        check("no second concept_nodes row was created for the bestowed "
+              "name (it is an alias, not a new node)",
+              db.one(
+                  "SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                  "manuscript_id = ? AND lower(name) = lower(?)",
+                  (mid, "FlipBestowed"))["n"] == 0)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1285,6 +1368,7 @@ def main_test() -> None:
     check_alias_dedupe()
     check_note_group()
     check_note_materiality()
+    check_alias_guide_flip()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

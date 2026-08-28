@@ -228,12 +228,18 @@ def describe(row: dict) -> tuple[str, list[str]]:
         summary = f"revive retired belief: \"{payload['statement']}\""
         details = [f"new supporting explanation: {payload.get('new_explanation', '')}"]
     elif kind == "alias":
+        # Q/alias-guide-flip: a naming ceremony ('alias_is_new' in payload)
+        # bestows a genuinely new name on an existing concept — adopting it
+        # ADDS the name, it does not MERGE two pre-existing nodes. Legacy
+        # rows (created before the flip, or raised by hand) lack the key
+        # and default to the original merge phrasing.
+        verb = "add" if payload.get("alias_is_new") else "merge"
         summary = (f"the text identifies '{payload['alias']}' with "
                    f"'{payload['canonical']}' — same concept?")
         where = f" ({payload['location']})" if payload.get("location") else ""
         details = [
             f"“{payload.get('sentence', '')}”{where}",
-            f"adopt = merge: '{payload['alias']}' becomes an alias of "
+            f"adopt = {verb}: '{payload['alias']}' becomes an alias of "
             f"'{payload['canonical']}' and its notes absorb this sentence · "
             f"edge = a kind, not an identity: record '{payload['canonical']}' "
             f"—generalizes→ '{payload['alias']}' instead · dismiss = keep "
@@ -337,29 +343,60 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
             reinforce_belief(db, merged_into_id, "accepted")
         message = f"Belief revived as candidate: \"{payload['statement']}\""
     elif kind == "alias":
-        from .concepts import get_concept, merge_concepts
+        from .concepts import add_alias, get_concept, merge_concepts
 
         canonical = get_concept(db, manuscript_id, payload["canonical"])
-        duplicate = db.one(
-            "SELECT * FROM concept_nodes WHERE id = ?", (row["target"],))
-        if (not canonical or not duplicate or canonical["status"] == "retired"
-                or duplicate["status"] == "retired"
-                or canonical["id"] == duplicate["id"]):
-            db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
-            return ("error: these concepts have changed since the proposal — "
-                    "nothing merged.")
-        merged = merge_concepts(db, manuscript_id, dict(canonical), dict(duplicate))
-        sentence = payload.get("sentence")
-        if sentence:
-            base = (canonical["notes"] or "").rstrip()
-            quote = f"“{sentence}”"
-            if quote.lower() not in base.lower():
-                db.update("concept_nodes", canonical["id"],
-                          {"notes": (base + " " if base else "") + quote})
-        message = (f"Merged '{payload['alias']}' into '{payload['canonical']}' "
-                   f"— {merged['repointed']} edge(s) re-pointed, "
-                   f"{merged['dropped']} retired; the notes absorbed the "
-                   "aliasing sentence.")
+        if payload.get("alias_is_new"):
+            # Q/alias-guide-flip: a naming ceremony for a name that was
+            # never its own concept node — adopting it ADDS the name to
+            # the canonical concept, it does not merge two existing nodes
+            # (there is only one: `canonical`; `row['target']` points at
+            # it too, since there was nothing else to reference at
+            # creation time).
+            if not canonical or canonical["status"] == "retired":
+                db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
+                return ("error: the canonical concept has changed since "
+                        "the proposal — nothing added.")
+            restale = get_concept(db, manuscript_id, payload["alias"])
+            if restale and restale["status"] != "retired":
+                # The world moved since this was raised: the bestowed name
+                # is now itself a live concept — exactly what Q/alias-guard
+                # refuses at creation, so adoption must refuse it too.
+                db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
+                return (f"error: '{payload['alias']}' has since become its "
+                        "own concept — nothing added.")
+            add_alias(db, manuscript_id, dict(canonical), payload["alias"])
+            sentence = payload.get("sentence")
+            if sentence:
+                base = (canonical["notes"] or "").rstrip()
+                quote = f"“{sentence}”"
+                if quote.lower() not in base.lower():
+                    db.update("concept_nodes", canonical["id"],
+                              {"notes": (base + " " if base else "") + quote})
+            message = (f"'{payload['alias']}' recorded as a new name for "
+                       f"'{payload['canonical']}' — the notes absorbed the "
+                       "naming sentence.")
+        else:
+            duplicate = db.one(
+                "SELECT * FROM concept_nodes WHERE id = ?", (row["target"],))
+            if (not canonical or not duplicate or canonical["status"] == "retired"
+                    or duplicate["status"] == "retired"
+                    or canonical["id"] == duplicate["id"]):
+                db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
+                return ("error: these concepts have changed since the proposal — "
+                        "nothing merged.")
+            merged = merge_concepts(db, manuscript_id, dict(canonical), dict(duplicate))
+            sentence = payload.get("sentence")
+            if sentence:
+                base = (canonical["notes"] or "").rstrip()
+                quote = f"“{sentence}”"
+                if quote.lower() not in base.lower():
+                    db.update("concept_nodes", canonical["id"],
+                              {"notes": (base + " " if base else "") + quote})
+            message = (f"Merged '{payload['alias']}' into '{payload['canonical']}' "
+                       f"— {merged['repointed']} edge(s) re-pointed, "
+                       f"{merged['dropped']} retired; the notes absorbed the "
+                       "aliasing sentence.")
     elif kind == "incongruence":
         # No object mutation: the author is the execution engine. Adoption
         # records the acknowledged conflict as evidence; the fix (text or

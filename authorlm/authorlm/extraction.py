@@ -944,14 +944,15 @@ def extract_concepts(
             ):
                 proposed += 1
 
-    # Aliasing statements were once turned straight into 'alias' proposals;
-    # since Q/alias-guard they never are — the ALIAS GUIDE requires both
-    # names to already be known concepts (see prompts/extraction.md), which
-    # means `a_node` below always resolves to an already-live concept, and
-    # queuing "fold it into `c_node`" as a lightweight proposal was exactly
-    # the structurally-broken pattern this guard exists to stop (a merge is
-    # the author's call, decided with more than a naming sentence). What
-    # survives here is detection + an auditable, non-queued record.
+    # Aliasing statements become proposals only for the naming-ceremony
+    # case the ALIAS GUIDE now requires (Q/alias-guide-flip, prompts/
+    # extraction.md): the canonical must already be a known (live) concept,
+    # and the alias must be a name that is NOT yet its own known concept —
+    # a genuinely new label bestowed on something already established
+    # ("we call it The Chid"). When `alias_name` already resolves to its
+    # own LIVE concept, adopting the proposal would MERGE two established
+    # concepts, not alias one — a heavier decision than a naming sentence
+    # can license, so it is refused and recorded instead (Q/alias-guard).
     flat_text = " ".join(text.split()).lower()
     for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
         if not isinstance(item, dict):
@@ -965,10 +966,16 @@ def extract_concepts(
             skipped += 1
             skipped_malformed += 1
             continue
-        a_node = get_concept(db, mid, alias_name)
+        # The canonical must already be a known, live concept — nothing to
+        # alias against otherwise.
         c_node = get_concept(db, mid, canonical_name)
-        if (not a_node or not c_node or a_node["id"] == c_node["id"]
-                or a_node["status"] == "retired" or c_node["status"] == "retired"):
+        if not c_node or c_node["status"] == "retired":
+            suppressed += 1
+            continue
+        a_node = get_concept(db, mid, alias_name)
+        if a_node is not None and a_node["id"] == c_node["id"]:
+            # Already resolves to the same concept (e.g. already a
+            # registered alias of it) — nothing to propose.
             suppressed += 1
             continue
         if sentence.lower() not in flat_text:
@@ -977,17 +984,36 @@ def extract_concepts(
         if not in_attention(alias_name, canonical_name):
             suppressed += 1
             continue
-        # Guard (Q/alias-guard): an alias means the SAME concept under a
-        # different name (see ALIAS GUIDE, prompts/extraction.md) — not a
-        # merge of two concepts each already standing on their own. `a_node`
-        # is only reachable here because it already resolved (via the
-        # alias-aware `get_concept`) to a live, non-retired node — i.e. it
-        # is already its own live concept. Adopting this proposal would
-        # therefore fold it into `c_node`: a MERGE, a heavier decision than
-        # a naming sentence can license on its own. Refused, recorded, never
-        # queued — see _record_alias_fold_refused.
-        _record_alias_fold_refused(db, mid, a_node, c_node, sentence)
-        alias_folds_refused += 1
+        if a_node is not None and a_node["status"] == "retired":
+            # A retired alias name is not yet specially guarded here — see
+            # Q/alias-retired-guard, which follows this commit. For now it
+            # falls through to the generic suppression below, matching how
+            # it was already treated before this guide flip.
+            suppressed += 1
+            continue
+        if a_node is not None:
+            # Guard (Q/alias-guard): `alias_name` already stands as its own
+            # live concept — adopting this proposal would fold it into
+            # `c_node`, a MERGE, a heavier decision than a naming sentence
+            # can license on its own. Refused, recorded, never queued.
+            _record_alias_fold_refused(db, mid, a_node, c_node, sentence)
+            alias_folds_refused += 1
+            continue
+        # a_node is None: `alias_name` is genuinely new — the naming
+        # ceremony the ALIAS GUIDE now requires. This is the one case that
+        # actually produces a proposal.
+        location = next(
+            (fname for fname, ftext in (new_files or {}).items()
+             if sentence.lower() in " ".join(ftext.split()).lower()),
+            None,
+        )
+        if proposals.create(
+            db, mid, "alias", c_node["id"],
+            {"alias": alias_name, "canonical": c_node["name"],
+             "sentence": sentence, "location": location,
+             "alias_is_new": True},
+        ):
+            proposed += 1
 
     # Realize extracted concepts against the latest collected version.
     latest = db.one(

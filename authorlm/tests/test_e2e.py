@@ -597,6 +597,13 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                                  "of shapes."},
                     {"alias": "Field", "canonical": "Ghost",
                      "sentence": "A sentence naming an unknown concept."},
+                    # Q/alias-guide-flip: a genuine naming ceremony — the
+                    # bestowed name is not yet its own concept anywhere in
+                    # this test — the positive case the flipped ALIAS GUIDE
+                    # exists to admit.
+                    {"alias": "Elective Ground", "canonical": "Choice",
+                     "sentence": "We call it Elective Ground, the settled "
+                                 "name for Choice."},
                 ],
             })
         elif ("LOAD-BEARING units of thought" in system
@@ -944,29 +951,33 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("precedent carries the analyzed decision sequence",
               "opened the section with a sailing metaphor" in out, out)
 
-        # --- alias detection: naming sentences that identify two ALREADY
-        # LIVE concepts are refused, not turned into merge proposals
-        # (Q/alias-guard). An alias means the same concept under a
-        # different name — 'Distinction' and 'Persistence' already stand
-        # as independent live concepts of their own, so reading either
-        # naming sentence as an alias would fold one live concept into
-        # another (a merge), which is heavier than a single sentence can
-        # license on its own. ---
+        # --- alias detection: the ALIAS GUIDE was flipped (Q/alias-guide-
+        # flip) — an alias must bestow a genuinely NEW name on a known
+        # concept (the naming-ceremony case); it is no longer enough for
+        # both names to already be known concepts. A candidate can still
+        # fail: the bestowed name is already its own LIVE concept
+        # ('Distinction', 'Persistence' — a merge mislabelled as an alias,
+        # Q/alias-guard). Only a truly new name ('Elective Ground', never a
+        # concept anywhere in this test) produces a proposal. ---
         write(ms / "03-names.md",
               "# Names\n\nWhat ye call Distinction is the choice of "
               "qualities parted. What ye call Persistence is the becoming "
-              "of shapes.\n")
+              "of shapes. We call it Elective Ground, the settled name for "
+              "Choice.\n")
         out = run(ws, "extract", "--aliases")
         check("aliases pass reports its scope", "aliases only" in out, out)
-        check("both naming sentences are refused as live-concept folds",
+        check("both live-concept naming sentences are refused as folds",
               "refused 2 alias proposal(s) naming an already-live concept"
               in out, out)
-        check("a refused fold never becomes a proposal to review",
-              "proposal(s) against settled knowledge" not in out, out)
+        check("the genuinely new naming ceremony PRODUCES a proposal — "
+              "the guide flip did not leave the feature dead",
+              "1 proposal(s) against settled knowledge" in out, out)
         out = run(ws, "proposal", "list")
-        check("no alias proposal reaches the queue",
+        check("no live-concept-fold alias proposal reaches the queue",
               "'Distinction' with 'Choice'" not in out
               and "'Persistence' with 'Becoming'" not in out, out)
+        check("the new naming ceremony DOES reach the queue",
+              "'Elective Ground' with 'Choice'" in out, out)
 
         # Refused is not silently dropped: the extractor's read is recorded
         # as system-provenance evidence, exactly like what adjudication.py
@@ -975,16 +986,33 @@ def scenario_llm_and_unregister(root: Path) -> None:
             "SELECT * FROM evidence WHERE manuscript_id = ? "
             "AND evidence_type = 'extraction_adjudication' "
             "AND signal = 'alias_fold_refused'", (_mid,))
-        check("the refused folds are recorded as system-provenance evidence",
+        check("the live-concept folds are recorded as system-provenance "
+              "evidence",
               len(alias_guard_evidence) == 2
               and all(row["weight"] == "low" for row in alias_guard_evidence),
               str([dict(r) for r in alias_guard_evidence]))
+
+        # The produced proposal must be genuinely adoptable, not merely
+        # created: adopting it ADDS the bestowed name to the canonical
+        # concept (not a merge — there was no second node to merge).
+        elective_id = next(line.split("[")[1].split("]")[0]
+                           for line in out.splitlines()
+                           if "'Elective Ground'" in line)
+        out = run(ws, "proposal", "accept", elective_id)
+        check("adopting a naming-ceremony alias ADDS the name, phrased as "
+              "'add', not 'merge'",
+              "'Elective Ground' recorded as a new name for 'Choice'" in out,
+              out)
+        out = run(ws, "concept", "show", "Choice")
+        check("the canonical concept now answers to the bestowed name too",
+              "aliases: Elective Ground" in out
+              and "We call it Elective Ground" in out, out)
 
         # proposals.adopt()/demote_to_edge() still know how to settle an
         # alias proposal once one actually exists (e.g. the legacy queue
         # this guard is forward-only and does not touch) — exercised
         # directly here, since extraction itself can no longer manufacture
-        # one for a pair of already-live concepts.
+        # a MERGE-mode proposal for a pair of already-live concepts.
         from authorlm import proposals as _prop
 
         distinction_row = _db.one(
@@ -1016,8 +1044,12 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("alias proposal adopts as a merge",
               "Merged 'Distinction' into 'Choice'" in out, out)
         out = run(ws, "concept", "show", "Distinction")
+        # Choice already carries the 'Elective Ground' alias from the
+        # naming-ceremony proposal adopted above, so the aliases list is
+        # order-sensitive — check membership, not a fixed prefix.
+        alias_line = next((l for l in out.splitlines() if "aliases:" in l), "")
         check("merged alias resolves to canonical with the sentence absorbed",
-              "aliases: Distinction" in out
+              "Distinction" in [a.strip() for a in alias_line.split(":", 1)[-1].split(",")]
               and "What ye call Distinction" in out, out)
 
         # A merged-away name is an alias now, not a banned retiree — the

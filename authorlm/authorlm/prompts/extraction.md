@@ -82,5 +82,10 @@ sentence copied verbatim from the text. Direction: in "X is the Y of Z" the
 head Y is canonical; in a naming ceremony ("we call it X", "ye name it X")
 the pre-existing term is canonical and the bestowed name is the alias; in a
 bare "X is Y", Y is canonical. Only sentences that identify or (re)name
-qualify. Kinship, causation, or resemblance is not aliasing. Report only pairs
-where BOTH names are known concepts.
+qualify. Kinship, causation, or resemblance is not aliasing. The canonical
+must already be a known concept; the alias must be a name that is NOT yet
+its own known concept — a naming ceremony bestows a genuinely new label
+("we call it The Chid") on something already established. When both names
+are already separately known concepts, that is not aliasing to report here
+— it would take more than one sentence to justify merging two established
+concepts.
