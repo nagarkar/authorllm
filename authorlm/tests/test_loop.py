@@ -26,7 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api, beliefs as bel, loop, proposals as prop  # noqa: E402
+from authorlm import (  # noqa: E402
+    api, beliefs as bel, loop, proposals as prop, threads as th,
+)
 from authorlm.db import Database, ko_fields, loads  # noqa: E402
 
 PASSED = 0
@@ -203,6 +205,143 @@ def test_retired_belief_returns_as_proposal(db, ms):
                  (belief["id"],))["status"] == "retired")
     check("retired beliefs appear on the menu so paraphrases cannot slip past",
           "[retired]" in llm.prompts[0][1])
+
+
+def test_reinforce_belief(db, ms):
+    """Direct evidence counters — every accept/reject/modify path funnels here."""
+    check("reinforce_belief is a no-op for an unknown id",
+          bel.reinforce_belief(db, "pol_missing", "accepted") == {})
+
+    row = ko_fields("pol")
+    row.update(
+        manuscript_id=ms["id"],
+        statement="A concept note states what a thing is.",
+        status="candidate", confidence=bel._confidence(1, 0),
+        supporting=1, contradicting=0, outstanding_questions="[]",
+        source="triage-note_update", source_id=db.source("system"),
+    )
+    db.insert("editorial_beliefs", row)
+
+    accepted = bel.reinforce_belief(db, row["id"], "accepted",
+                                    question="What counts as a role?")
+    check("accepted increments supporting and promotes at the triage bar",
+          accepted["supporting"] == 2 and accepted["contradicting"] == 0
+          and accepted["status"] == "validated", str(accepted))
+    check("a new outstanding question is recorded once",
+          loads(accepted["outstanding_questions"], [])
+          == ["What counts as a role?"], str(accepted))
+
+    again = bel.reinforce_belief(db, row["id"], "modified",
+                                 question="What counts as a role?")
+    check("modified also counts as supporting evidence",
+          again["supporting"] == 3 and again["contradicting"] == 0, str(again))
+    check("duplicate outstanding questions are not re-appended",
+          loads(again["outstanding_questions"], [])
+          == ["What counts as a role?"], str(again))
+
+    # Drive confidence under DEMOTE_CONFIDENCE while staying validated → demote.
+    # conf = (s+1)/(s+c+2); with s=3, need c≥3 for conf ≤ 0.5 < 0.55.
+    demoted = bel.reinforce_belief(db, row["id"], "rejected")
+    demoted = bel.reinforce_belief(db, demoted["id"], "rejected")
+    demoted = bel.reinforce_belief(db, demoted["id"], "rejected")
+    check("rejects increment contradicting and demote a validated belief",
+          demoted["contradicting"] == 3 and demoted["supporting"] == 3
+          and demoted["status"] == "candidate"
+          and demoted["confidence"] < bel.DEMOTE_CONFIDENCE, str(demoted))
+
+
+def test_law_text_and_generator_feedback():
+    """Screen prompts and generator injection both render active law; a
+    formatting regression would cut the wrong proposals or forget settled
+    judgments at the source."""
+    check("law_text is empty when there is no law", loop.law_text([]) == "")
+    rendered = loop.law_text([
+        {"id": "pol_belief", "statement": "Notes state being.",
+         "accepted": False, "support": "2+/0-"},
+        {"id": "sle_law", "statement": "No modern idiom.",
+         "accepted": True, "support": "ratified"},
+    ])
+    check("law_text tags unblessed beliefs with their support tally",
+          "pol_belief | Notes state being.  (belief, 2+/0-)" in rendered,
+          rendered)
+    check("law_text leaves ratified style laws unmarked",
+          "sle_law | No modern idiom.\n" in rendered + "\n"
+          or rendered.endswith("sle_law | No modern idiom."),
+          rendered)
+    check("law_text does not tag a ratified law as a belief",
+          "(belief" not in rendered.split("sle_law", 1)[1], rendered)
+
+    db, ms, _target = fixture()
+    spec = loop.spec_for("proposals/note_update")
+    check("generator_feedback is empty when nothing is settled",
+          loop.generator_feedback(db, ms["id"], spec) == "")
+
+    # style_laws CHECK: exactly one of guide_id / file is set.
+    law = ko_fields("sle")
+    law.update(manuscript_id=ms["id"], guide_id=None, file="a.md",
+               aspect=spec.aspect,
+               statement="Prefer ontological claims over functional ones.",
+               status="active", overrides=None, source_id=db.source("author"))
+    db.insert("style_laws", law)
+    feedback = loop.generator_feedback(db, ms["id"], spec)
+    check("generator_feedback injects ratified statements into the prompt",
+          "Prefer ontological claims over functional ones." in feedback
+          and "settled judgments" in feedback, feedback)
+    check("generator_feedback does not leak belief ids into the prompt",
+          law["id"] not in feedback, feedback)
+
+
+def test_record_margin_verdict(db, ms):
+    """Margin approve/decline always writes evidence; belief seeding only
+    fires when an explanation is present (and only through the distiller)."""
+    thread = th.create_thread(
+        db, ms["id"], "c-margin-1", "a.md", "anchor quote",
+        "old span", "new span", "note", "reply-1")
+    before = db.one(
+        "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+        "AND evidence_type = 'margin_thread'", (ms["id"],))["n"]
+    beliefs_before = db.one(
+        "SELECT COUNT(*) AS n FROM editorial_beliefs WHERE manuscript_id = ?",
+        (ms["id"],))["n"]
+
+    th.record_margin_verdict(db, ms["id"], thread, "accepted")
+    check("a verdict without explanation still writes margin evidence",
+          db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+                 "AND evidence_type = 'margin_thread'",
+                 (ms["id"],))["n"] == before + 1)
+    check("a verdict without explanation never seeds a belief",
+          db.one("SELECT COUNT(*) AS n FROM editorial_beliefs "
+                 "WHERE manuscript_id = ?", (ms["id"],))["n"]
+          == beliefs_before)
+
+    th.record_margin_verdict(
+        db, ms["id"], thread, "accepted",
+        explanation="Keep the metaphysical claim intact.")
+    row = db.one(
+        "SELECT * FROM evidence WHERE manuscript_id = ? "
+        "AND evidence_type = 'margin_thread' ORDER BY created_at DESC LIMIT 1",
+        (ms["id"],))
+    check("an explained verdict stores the explanation on the evidence row",
+          loads(row["metadata"], {}).get("explanation")
+          == "Keep the metaphysical claim intact.", str(row))
+    check("without an LLM the explanation stays evidence-only",
+          db.one("SELECT COUNT(*) AS n FROM editorial_beliefs "
+                 "WHERE manuscript_id = ?", (ms["id"],))["n"]
+          == beliefs_before)
+
+    meta = loads(thread.get("metadata"), {}) or {}
+    meta["original_new"] = "first proposal"
+    db.update("doc_threads", thread["id"], {"metadata": json.dumps(meta),
+                                            "proposed_new": "author edit"})
+    fresh = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                        (thread["id"],)))
+    th.record_margin_verdict(db, ms["id"], fresh, "modified")
+    target = db.one(
+        "SELECT target FROM evidence WHERE manuscript_id = ? "
+        "AND evidence_type = 'margin_thread' AND signal = 'modified' "
+        "ORDER BY created_at DESC LIMIT 1", (ms["id"],))["target"]
+    check("a modified verdict names both the original and final proposal",
+          "first proposal" in target and "author edit" in target, target)
 
 
 # ------------------------------------------------------------- ③ batch distil
@@ -471,6 +610,10 @@ def main_test():
     test_semantic_matching(db, ms)
     test_platitude_guard(db, ms)
     test_retired_belief_returns_as_proposal(db, ms)
+    print("reinforce / law text / margin verdict")
+    test_reinforce_belief(db, ms)
+    test_law_text_and_generator_feedback()
+    test_record_margin_verdict(db, ms)
     print("batch distillation")
     test_distil_batching(db, ms)
     print("reconcile")
