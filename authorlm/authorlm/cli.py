@@ -1135,13 +1135,32 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         sys.exit(f"error: nothing written to the Doc for {file} — "
                  "'critique write' first (or nothing to resolve).")
     config = _load_config(args)
-    # Resolve never talks to Google: 'doc pull' already brought the forms
-    # down as markdown, markers intact — reading the tab fresh here (as
-    # the old textRun-walk did) is what flattened every essay to plain
-    # prose, since Docs paragraphs carry no heading/list/bold markup in
-    # their character stream (it-x7-1). The local file is the only source.
-    path = Path(manuscript["path"]) / file
-    marked = path.read_text(encoding="utf-8")
+    try:
+        service = gdocs.get_service(config, args.workspace, interactive=True)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=True)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    # Read the tab as MARKDOWN (the same export + order-aware
+    # split_tabbed_export path 'doc pull' uses) instead of the textRun
+    # walk critique_tab_text used — textRuns carry no heading/list/bold/
+    # link markup, which is what flattened every essay to plain prose
+    # (it-x7-1). Three-wayed against local so an edit made elsewhere in
+    # the tab still lands, and a genuine two-sided edit is surfaced
+    # instead of a side being picked silently.
+    fetched = gdocs.critique_tab_markdown(db, manuscript, file,
+                                          service, docs_service)
+    if fetched["state"] == "missing":
+        sys.exit(f"error: '{file}' has no matching section in the "
+                 "master Doc export — 'doc push' first")
+    if fetched["state"] == "conflict":
+        sys.exit(f"error: '{file}' changed both locally and in the Doc "
+                 "since the last sync — resolve refuses to guess which "
+                 "wins. Compare the local file against the Doc tab by "
+                 "hand, then re-run 'critique resolve'.")
+    for warn in fetched["marker_warnings"]:
+        print(ui.yellow(f"  {warn}"))
+    marked = fetched["marked"]
     final, forms = passes.final_text_from_marked(marked, written=written)
     # Snapshot whatever is on disk right now — including any local edit
     # made outside this Doc/critique flow — before it's overwritten below
@@ -1149,6 +1168,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
     # Apply locally: the author's post-edits win.
+    path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")

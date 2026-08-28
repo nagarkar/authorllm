@@ -562,87 +562,259 @@ def main_test() -> None:
         check("critique rollback snapshots the uncollected edit into "
               "history before overwriting it (BUG-2 / A1)", recovered)
 
-        print("recovery: critique resolve snapshots uncollected edits "
-              "(BUG-2 / A1); it-x7-1: resolve reads the pending forms "
-              "from the LOCAL FILE, never the Doc, so an essay's heading "
-              "and other structure survive:")
+        print("recovery/it-x7-1v2: critique resolve reads the Doc tab as "
+              "MARKDOWN (export + split_tabbed_export, never the textRun "
+              "walk) and three-ways it against local:")
         import json as _json
 
-        import authorlm.gdocs as _gdocs_mod  # used by the doc-pull
-        # recovery block below (BUG-1 / A2) — resolve itself no longer
-        # touches gdocs at all (it-x7-1).
+        import authorlm.gdocs as _gdocs_mod
         from authorlm.cli import _critique_resolve_essay
         from authorlm.db import ko_fields as _ko
 
-        res_ws = root / "resolve-ws"
-        res_ms = res_ws / "book"
-        res_ms.mkdir(parents=True)
-        (res_ms / "solo.md").write_text("# Solo\n\nOriginal paragraph text.\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            cli_main(["--workspace", str(res_ws), "init", "--name", "book",
-                      "--path", str(res_ms)])
-        res_db = api.open_db(str(res_ws))
-        res_manuscript = api.get_manuscript(res_db)
-        res_mid = res_manuscript["id"]
-        api.collect(res_db, res_manuscript, {})  # v1
-        passes.ensure_pass(res_db, res_mid, res_db.source("system"))
+        class _ResolveDocFake:
+            """Minimal Drive+Docs stub for the real critique-resolve
+            flow. Only files().export() (whole-Doc markdown, forms
+            intact — the same shape the real exporter produces) and
+            documents().get(includeTabsContent=True) (tab titles/order,
+            what walk_tabs needs) are implemented. There is no
+            batchUpdate at all: if resolve ever tried to push, it would
+            raise AttributeError instead of silently succeeding — that
+            absence IS this suite's 'no push' proof."""
 
-        # A 'written' critique thread: the diff-write/pause step already
-        # ran, the Doc carries this pending form, and the author is
-        # resolving it now.
-        written_row = _ko("dt")
-        written_row.update(
-            manuscript_id=res_mid, origin_type="critique", origin_id="cp1",
-            file="solo.md", anchor_quote=None,
-            proposed_old="Original paragraph text.",
-            proposed_new="RESOLVED PARAGRAPH TEXT.",
-            note="test", state="written", our_reply_ids="[]",
-            last_author_reply_id=None, scope_kind="file",
-            scope_ref="solo.md",
-            metadata=_json.dumps({"kind": "replace", "anchor_paragraph": 1,
-                                  "intent_id": None,
-                                  "original_new": "RESOLVED PARAGRAPH TEXT."}))
-        res_db.insert("doc_threads", written_row)
+            def __init__(self, tabs):
+                self.tabs = [{"id": f"tab-{i}", "title": t, "text": x}
+                             for i, (t, x) in enumerate(tabs, 1)]
 
-        # 'doc pull' already brought this essay down with the pending
-        # form intact (design ruling for it-x7-1: resolve reads the
-        # LOCAL FILE, never the Doc). The author also separately edited
-        # the file locally (outside the critique/Doc flow) and never
-        # collected it — the exact state 'critique resolve' must not
-        # silently destroy when it applies the resolution. The heading
-        # is untouched local prose sitting outside the pending form —
-        # exactly what a textRun-only Doc fetch would have flattened.
-        UNCOLLECTED_RESOLVE = (
+            def set_tab(self, title, text):
+                for t in self.tabs:
+                    if t["title"] == title:
+                        t["text"] = text
+
+            def files(self):
+                outer = self
+
+                class _Files:
+                    def export(self, fileId=None, mimeType=None):
+                        def as_markdown(text):
+                            paras = [ln for ln in text.split("\n")
+                                    if ln.strip()]
+                            return ("\n\n".join(paras)
+                                    + ("\n" if paras else ""))
+                        whole = "\n".join(
+                            f"# **{t['title']}**\n\n{as_markdown(t['text'])}"
+                            for t in outer.tabs)
+
+                        class _Req:
+                            def execute(self):
+                                return whole.encode("utf-8")
+                        return _Req()
+                return _Files()
+
+            def documents(self):
+                outer = self
+
+                class _Documents:
+                    def get(self, documentId=None,
+                           includeTabsContent=None):
+                        tabs = [{"tabProperties": {"tabId": t["id"],
+                                                   "title": t["title"]},
+                                "childTabs": []} for t in outer.tabs]
+
+                        class _Req:
+                            def execute(self):
+                                return {"tabs": tabs}
+                        return _Req()
+                return _Documents()
+
+        def _resolve_fixture(subdir):
+            """A fresh workspace with 'solo.md' pushed (pristine, richly
+            formatted) and its base hash recorded, exactly as a real
+            push would leave it before 'critique write' marks any
+            spans."""
+            import hashlib as _hashlib
+
+            pristine = ("# Solo\n\n"
+                       "A **bold** claim opens the essay.\n\n"
+                       "Original paragraph text.\n\n"
+                       "- a list item\n\n"
+                       "[see the source](https://example.com/source)\n")
+            ws = root / subdir
+            ms = ws / "book"
+            ms.mkdir(parents=True)
+            (ms / "solo.md").write_text(pristine)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(ws), "init", "--name", "book",
+                          "--path", str(ms)])
+            db_ = api.open_db(str(ws))
+            manuscript_ = api.get_manuscript(db_)
+            mid_ = manuscript_["id"]
+            api.collect(db_, manuscript_, {})  # v1
+            passes.ensure_pass(db_, mid_, db_.source("system"))
+            normalized = _gdocs_mod.normalize_markdown(pristine)
+            base_hash = _hashlib.sha256(
+                normalized.encode()).hexdigest()[:16]
+            meta = _gdocs_mod._mapping(db_, manuscript_)
+            links = meta.setdefault("gdocs", {})
+            links["_master_id"] = "doc-fake"
+            links["solo.md"] = {"tab_id": "tab-1", "checked_out": False,
+                                "pushed_hash": base_hash}
+            _gdocs_mod._save_mapping(db_, manuscript_, meta)
+            return db_, manuscript_, ms, mid_, pristine
+
+        def _stage_written(db_, mid_, proposed_new):
+            written_row = _ko("dt")
+            written_row.update(
+                manuscript_id=mid_, origin_type="critique", origin_id="cp1",
+                file="solo.md", anchor_quote=None,
+                proposed_old="Original paragraph text.",
+                proposed_new=proposed_new,
+                note="test", state="written", our_reply_ids="[]",
+                last_author_reply_id=None, scope_kind="file",
+                scope_ref="solo.md",
+                metadata=_json.dumps({"kind": "replace",
+                                      "anchor_paragraph": 1,
+                                      "intent_id": None,
+                                      "original_new": proposed_new}))
+            db_.insert("doc_threads", written_row)
+            return written_row
+
+        # --- Scenario 1: the real flow — pristine local, forms in the Doc
+        # tab, an author post-edit to the {{new}} half (modified
+        # acceptance), and an unrelated edit made ELSEWHERE in the tab.
+        # Proves: heading/bold/list/link survive, the elsewhere edit
+        # lands, and the modified acceptance is recorded as evidence.
+        db1, ms1, msdir1, mid1, pristine1 = _resolve_fixture("resolve-ws-1")
+        _stage_written(db1, mid1, "RESOLVED PARAGRAPH TEXT.")
+        doc_text_1 = (
             "# Solo\n\n"
-            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT.}}\n\n"
-            "UNCOLLECTED PARAGRAPH ADDED LOCALLY, NEVER SENT TO THE DOC.\n")
-        (res_ms / "solo.md").write_text(UNCOLLECTED_RESOLVE)
+            "A **bold** claim opens the essay.\n\n"
+            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT, "
+            "POST-EDITED IN THE DOC.}}\n\n"
+            "- a list item\n\n"
+            "[see the source](https://example.com/source)\n\n"
+            "A sentence added only in the Doc, elsewhere in the tab, "
+            "never sent locally.\n")
+        fake1 = _ResolveDocFake([("solo.md", doc_text_1)])
+        _orig1 = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service)
+        _gdocs_mod.get_service = lambda *a, **k: fake1
+        _gdocs_mod.get_docs_service = lambda *a, **k: fake1
+        out1 = io.StringIO()
+        try:
+            args1 = argparse.Namespace(target="solo.md", workspace=str(
+                root / "resolve-ws-1"))
+            with contextlib.redirect_stdout(out1):
+                _critique_resolve_essay(db1, ms1, args1)
+        finally:
+            _gdocs_mod.get_service, _gdocs_mod.get_docs_service = _orig1
+        resolved1 = (msdir1 / "solo.md").read_text()
+        check("resolve keeps the heading, bold, list marker, and link "
+              "URL intact — the Doc-as-markdown path never flattens "
+              "structure the way the textRun walk did (it-x7-1v2)",
+              resolved1.startswith("# Solo\n\n")
+              and "**bold**" in resolved1
+              and "- a list item" in resolved1
+              and "[see the source](https://example.com/source)"
+              in resolved1
+              and "<<" not in resolved1 and "{{" not in resolved1,
+              resolved1)
+        check("the author's post-edit to the {{new}} half in the Doc wins",
+              "RESOLVED PARAGRAPH TEXT, POST-EDITED IN THE DOC." in
+              resolved1, resolved1)
+        check("an edit made elsewhere in the tab (outside any pending "
+              "form) lands in the local file",
+              "A sentence added only in the Doc, elsewhere in the tab, "
+              "never sent locally." in resolved1, resolved1)
+        check("the modified acceptance is recorded as evidence (proposal "
+              "→ final diff, the learnings feedstock)",
+              "1 modified acceptance(s) recorded" in out1.getvalue(),
+              out1.getvalue())
+        row1 = db1.one("SELECT * FROM doc_threads WHERE manuscript_id = ? "
+                       "AND file = 'solo.md'", (mid1,))
+        check("the written thread closed (cleaned) once resolved",
+              row1["state"] == "cleaned", dict(row1))
 
-        # No Drive/Docs stubbing at all, by design: resolve must never
-        # call gdocs.get_service / get_docs_service / critique_tab_text /
-        # push_doc (it-x7-1). If any of those were still called, get_service
-        # would hit this suite's pinned-missing config and sys.exit —
-        # this test passing with zero Google stubs IS the proof.
-        res_args = argparse.Namespace(target="solo.md",
-                                      workspace=str(res_ws))
-        with contextlib.redirect_stdout(io.StringIO()):
-            _critique_resolve_essay(res_db, res_manuscript, res_args)
-        resolved_text = (res_ms / "solo.md").read_text()
-        check("resolve overwrote the file with the resolved content and "
-              "kept the heading intact — no Doc round-trip flattened the "
-              "essay (it-x7-1)",
-              resolved_text.startswith("# Solo\n\n")
-              and "RESOLVED PARAGRAPH TEXT." in resolved_text
-              and "<<" not in resolved_text and "{{" not in resolved_text,
-              resolved_text)
-        res_versions = res_db.all(
+        # --- Scenario 2: a GENUINE two-sided conflict — local drifted
+        # AND the Doc's settled (form-collapsed) content drifted too, in
+        # unrelated ways. Resolve must stop and surface it, never pick a
+        # side silently.
+        db2, ms2, msdir2, mid2, pristine2 = _resolve_fixture("resolve-ws-2")
+        _stage_written(db2, mid2, "RESOLVED PARAGRAPH TEXT.")
+        LOCAL_DRIFT = pristine2.replace(
+            "- a list item", "- a DIFFERENTLY edited list item, local only")
+        (msdir2 / "solo.md").write_text(LOCAL_DRIFT)
+        doc_text_2 = (
+            "# Solo\n\n"
+            "A **very** different claim, edited only in the Doc.\n\n"
+            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT.}}\n\n"
+            "- a list item\n\n"
+            "[see the source](https://example.com/source)\n")
+        fake2 = _ResolveDocFake([("solo.md", doc_text_2)])
+        _orig2 = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service)
+        _gdocs_mod.get_service = lambda *a, **k: fake2
+        _gdocs_mod.get_docs_service = lambda *a, **k: fake2
+        conflict_err = None
+        try:
+            args2 = argparse.Namespace(target="solo.md", workspace=str(
+                root / "resolve-ws-2"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(db2, ms2, args2)
+        except SystemExit as exc:
+            conflict_err = str(exc)
+        finally:
+            _gdocs_mod.get_service, _gdocs_mod.get_docs_service = _orig2
+        check("a genuine two-sided edit is surfaced as a conflict, not "
+              "silently resolved",
+              conflict_err is not None
+              and "changed both locally and in the Doc" in conflict_err,
+              conflict_err)
+        check("the local file is untouched by a surfaced conflict",
+              (msdir2 / "solo.md").read_text() == LOCAL_DRIFT,
+              (msdir2 / "solo.md").read_text())
+        row2 = db2.one("SELECT * FROM doc_threads WHERE manuscript_id = ? "
+                       "AND file = 'solo.md'", (mid2,))
+        check("a surfaced conflict leaves the written thread untouched",
+              row2["state"] == "written", dict(row2))
+
+        # --- Scenario 3 (BUG-2 / A1, re-founded on the real flow): local
+        # drifted (an uncollected edit outside the critique/Doc flow) but
+        # the Doc's settled content did NOT — 'local_ahead', not a
+        # conflict. Resolve still applies the Doc's resolution (the
+        # explicit act the author invoked), snapshotting the local drift
+        # into version history first so it is never silently lost.
+        db3, ms3, msdir3, mid3, pristine3 = _resolve_fixture("resolve-ws-3")
+        _stage_written(db3, mid3, "RESOLVED PARAGRAPH TEXT.")
+        UNCOLLECTED_RESOLVE = pristine3 + (
+            "\nUNCOLLECTED PARAGRAPH ADDED LOCALLY, NEVER SENT TO THE "
+            "DOC.\n")
+        (msdir3 / "solo.md").write_text(UNCOLLECTED_RESOLVE)
+        doc_text_3 = pristine3.replace(
+            "Original paragraph text.",
+            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT.}}")
+        fake3 = _ResolveDocFake([("solo.md", doc_text_3)])
+        _orig3 = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service)
+        _gdocs_mod.get_service = lambda *a, **k: fake3
+        _gdocs_mod.get_docs_service = lambda *a, **k: fake3
+        try:
+            args3 = argparse.Namespace(target="solo.md", workspace=str(
+                root / "resolve-ws-3"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(db3, ms3, args3)
+        finally:
+            _gdocs_mod.get_service, _gdocs_mod.get_docs_service = _orig3
+        resolved3 = (msdir3 / "solo.md").read_text()
+        check("resolve still applies the Doc's resolution over a "
+              "local-only drift ('local_ahead', not a conflict)",
+              "RESOLVED PARAGRAPH TEXT." in resolved3
+              and "UNCOLLECTED PARAGRAPH" not in resolved3, resolved3)
+        res_versions = db3.all(
             "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (res_mid,))
+            "ORDER BY version_no", (mid3,))
         recovered = any(
             loads(v["files"], {}).get("solo.md") == UNCOLLECTED_RESOLVE
             for v in res_versions)
         check("critique resolve snapshots the uncollected local edit into "
               "history before overwriting the file (BUG-2 / A1)", recovered)
+
 
         print("recovery: doc pull snapshots uncollected edits before "
               "overwriting (BUG-1 / A2):")

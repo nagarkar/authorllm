@@ -1250,6 +1250,74 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
     return "conflict"
 
 
+def critique_tab_markdown(db: Database, manuscript: dict, file: str,
+                          service, docs_service,
+                          bridge: DocBridge | None = None) -> dict:
+    """Fetch `file`'s pending-review text straight from the master Doc, the
+    same way pull_doc does: whole-Doc markdown export + order-aware
+    split_tabbed_export (never the textRun walk that critique_tab_text
+    used, which discards headings/bold/lists/link targets — it-x7-1).
+
+    Three-ways the form-collapsed (OLD-only) rendering against local, on
+    the same base hash push/pull use, so:
+      - an edit the author made elsewhere in the tab (outside any pending
+        form) still lands, because `state` only reflects that collapsed
+        comparison — the returned `marked` text carries the elsewhere
+        edit through untouched, same as pull would;
+      - a genuine two-sided edit (local AND the Doc's settled content both
+        moved off the last agreed base) comes back as state='conflict'
+        instead of a side being picked silently.
+
+    Returns {"marked": str | None, "state": "unchanged"|"changed"
+    |"local_ahead"|"conflict"|"missing", "dangling": [...],
+    "marker_warnings": [...]}."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    entry = links.get(file) or {}
+    tab_id = entry.get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{file}' has no tab in the master Doc")
+
+    tab_props: list[tuple[str, str]] = []
+    if docs_service is not None:
+        try:
+            tab_doc = docs_service.documents().get(
+                documentId=master_id, includeTabsContent=True).execute()
+            walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+        except Exception:  # best-effort ordering — see split_tabbed_export
+            pass
+
+    data = service.files().export(
+        fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
+    boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
+                  | set(pmapped) | {t for _, t in tab_props if t})
+    # order-aware: a prose heading elsewhere that repeats another tab's
+    # title must never be mistaken for that tab's boundary (it-x7-2).
+    tab_order = [t for _, t in tab_props if t]
+    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    if file not in sections:
+        return {"marked": None, "state": "missing", "dangling": [],
+                "marker_warnings": []}
+    _, dangling = strip_dangling(sections[file])
+    marked = normalize_markdown(sections[file])
+    # Collapse pending forms to their OLD half purely to classify sync
+    # state — `marked` (forms intact) is what actually gets resolved.
+    collapsed, marker_warns = threads_mod.strip_pending(marked)
+    path = bridge.root / file
+    current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    current = strip_embed_lines(current_raw)
+    state = three_way(collapsed, current, entry.get("pushed_hash"))
+    return {"marked": marked, "state": state, "dangling": dangling,
+            "marker_warnings": marker_warns}
+
+
 def pull_doc(db: Database, manuscript: dict, query: str | None = None,
              service=None, force: bool = False,
              with_comments: bool = True, docs_service=None,
