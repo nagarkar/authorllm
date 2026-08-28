@@ -1683,6 +1683,66 @@ def check_unregister_safety() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_backup_on_active_session() -> None:
+    """it-0bffe1ff657b: backup.run() only ever fired from the branch of
+    start_session() that actually INSERTs a new session row (sessions.py).
+    With a session already active — the normal state for the entire span
+    of a working day, since the author does not re-run 'session start'
+    once one is open — that branch never runs, so no backup is ever
+    taken during the day the database is actually being changed. The
+    documented trigger ('roughly once per working day') was false
+    whenever a session was open. Reproduced live: CLI 'session start'
+    against an already-active session exited 1 with 'A session is
+    already active' and wrote no authorlm-*.db.
+
+    Fix: back up on resume too — the branch that finds an existing
+    session and is about to refuse now backs up first. skip-if-unchanged
+    (backup.py) means a rapid double 'session start' costs nothing extra
+    once the first backup that day has already captured the state."""
+    from authorlm import backup, sessions as bses
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-backup-trigger-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# hi\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+
+        bses.start_session(db, manuscript["id"])
+        bdir = backup.backup_dir(db.path)
+        check("starting the first session performs a backup",
+              len(list(bdir.glob("authorlm-*.db"))) == 1)
+
+        # A real change since the first backup, so the resume backup
+        # below has something new to capture (not skipped as identical).
+        node = ko_fields("cn")
+        node.update(manuscript_id=manuscript["id"], name="Gravity",
+                    kind="concept", status="declared", introduced_in=None,
+                    notes="", aliases="[]")
+        db.insert("concept_nodes", node)
+
+        raised = None
+        try:
+            bses.start_session(db, manuscript["id"])
+        except ValueError as err:
+            raised = err
+        check("starting a session while one is already active still "
+              "raises exactly as before — no confirmation prompt, no "
+              "silent takeover of the existing session",
+              raised is not None and "already active" in str(raised),
+              repr(raised))
+
+        made = sorted(bdir.glob("authorlm-*.db"))
+        check("a backup fires even when a session is already active — "
+              "this is the normal state for the whole of a working day, "
+              "which is exactly when the database is changing",
+              len(made) == 2, made)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 
 def main_test() -> None:
     check_broken_pipe()
@@ -1694,6 +1754,7 @@ def main_test() -> None:
     check_backup_and_restore()
     check_vanished_directory_guard()
     check_unregister_safety()
+    check_backup_on_active_session()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()

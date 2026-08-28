@@ -13,10 +13,15 @@ confidence. `perform_backup` therefore uses `sqlite3.Connection.backup()`
 (the SQLite backup API) against the live, already-open connection: it is
 safe against a concurrent writer and folds the WAL in correctly.
 
-Trigger: `sessions.start_session` calls `run()` once per session start —
-sessions stay open for a working day and are not reopened on every CLI
-invocation, so this fires roughly once per day rather than on every
-command (see sessions.py).
+Trigger: `sessions.start_session` calls `run()` both when it opens a new
+session AND when it finds one already active and is about to refuse
+("resume") — a session stays open for a working day and is not reopened
+on every CLI invocation, so without the resume call this would only ever
+fire on the first `session start` of that whole span, never again while
+the database was actually being edited (it-0bffe1ff657b). This still
+fires roughly once per day rather than on every command (see
+sessions.py); skip-if-unchanged below means a same-day resume attempt
+costs nothing beyond the one real backup.
 
 Design:
 - Retention: the 7 most recent backups (KEEP). Rotation only deletes an
