@@ -2439,9 +2439,26 @@ def main_test() -> None:
                     paras = [ln for ln in text.split("\n") if ln.strip()]
                     return "\n\n".join(paras) + ("\n" if paras else "")
 
+                flat = self.state["docs"][fileId]
+
+                def dfs(parent_id):
+                    # The real export concatenates tabs in document tab
+                    # order — a DFS of the tab tree (container, then its
+                    # nested children, then the next root sibling) — NOT
+                    # raw creation order, which can differ once a tab is
+                    # nested under a parent created earlier (it-x7-2:
+                    # this used to silently diverge from documents().get(),
+                    # which already walks the tree correctly).
+                    ordered = []
+                    for t in flat:
+                        if t.get("parent") == parent_id:
+                            ordered.append(t)
+                            ordered.extend(dfs(t["id"]))
+                    return ordered
+
                 whole = "\n".join(
                     f"# **{t['title']}**\n\n{as_markdown(t['text'])}"
-                    for t in self.state["docs"][fileId])
+                    for t in dfs(None))
                 return FakeRequest(whole.encode("utf-8"))
 
         class FakeDocuments:
@@ -2674,6 +2691,39 @@ def main_test() -> None:
         push_doc(db, manuscript, "02-fork.md",
                  service=stub, docs_service=stub)
         manuscript = api.get_manuscript(db)
+
+        # X7-2 regression: split_tabbed_export's documented contract says
+        # "content headings, even H1s, pass through untouched" unless they
+        # name a known tab — but a prose H1 that happens to repeat some
+        # OTHER tab's title used to be treated as that tab's boundary too,
+        # truncating the essay at the collision point. Put such a heading
+        # inside 01-choice.md's prose, matching the manifest tab's title
+        # (a real boundary that sits further down the true tab order, past
+        # 02-fork.md — not the essay's own immediate neighbor), and prove
+        # pull keeps everything after it.
+        collision_body = (
+            "# Title\n\n"
+            "manifest\n\n"
+            "Prose survives.\n\n"
+            "# manifest\n\n"
+            "More prose after the collision, never truncated.\n")
+        stub.set_tab("01-choice.md", collision_body)
+        collided = pull_doc(db, manuscript, "01-choice.md", service=stub,
+                            docs_service=stub)
+        pulled_text = (ms / "01-choice.md").read_text()
+        check("a prose heading matching another tab's title never "
+              "truncates the essay at the collision point (it-x7-2)",
+              collided["changed"] == ["01-choice.md"]
+              and "More prose after the collision, never truncated."
+              in pulled_text, str(collided) + "\n" + pulled_text)
+        check("the colliding heading itself passed through as ordinary "
+              "content, not consumed as a boundary",
+              "# manifest" in pulled_text, pulled_text)
+        check("the real manifest tab is untouched by the collision",
+              "Manuscript: book" in
+              next(t["text"] for t in stub.state["docs"]["doc-2"]
+                   if t["title"] == "manifest"))
+
         (ms / "toc.toml").write_text(
             '[[chapter]]\nfile = "01-choice.md"\n\n'
             '[[chapter]]\nfile = "02-fork.md"\n')

@@ -802,18 +802,36 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
-def split_tabbed_export(text: str, known_files) -> dict[str, str]:
+def split_tabbed_export(text: str, known_files,
+                        order: list[str] | None = None) -> dict[str, str]:
     """Split a whole-master markdown export into per-file sections. Tab
     titles export as top-level headings ('# **<title>**'); only headings
     naming a known mapped file are boundaries — content headings, even
-    H1s, pass through untouched."""
+    H1s, pass through untouched.
+
+    `order` is the tab titles in true document order (the Docs API's tab
+    tree, e.g. from `walk_tabs`). When given, a name in `order` only
+    starts a new section at its correct position in that sequence — so a
+    prose heading that happens to repeat some *other* tab's title, out of
+    turn, is never mistaken for a boundary (it-x7-2). A known name absent
+    from `order` (no positional info for it, e.g. docs_service wasn't
+    available) still matches anywhere, as before."""
     pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
     sections: dict[str, list[str]] = {}
     current: str | None = None
+    positioned = list(order) if order else []
+    idx = 0
     for line in text.splitlines():
         match = pattern.match(line)
         name = match.group(1).strip() if match else None
-        if name in known_files:
+        boundary = False
+        if name is not None:
+            if idx < len(positioned) and name == positioned[idx]:
+                boundary = True
+                idx += 1
+            elif name in known_files and name not in positioned:
+                boundary = True
+        if boundary:
             current = name
             sections[current] = []
             continue
@@ -1335,7 +1353,11 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     pmapped = (prompt_links(links) if bridge.meta_key == "gdocs" else {})
     boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
                   | set(pmapped) | {t for _, t in tab_props if t})
-    sections = split_tabbed_export(whole, boundaries)
+    # tab_props is the Docs API's live tab order — pass it through so a
+    # prose heading that repeats another tab's title, out of turn, is
+    # never mistaken for that tab's boundary (it-x7-2).
+    tab_order = [t for _, t in tab_props if t]
+    sections = split_tabbed_export(whole, boundaries, order=tab_order)
     targets = mapped
     prompt_targets = sorted(pmapped)
     if query:
@@ -1624,7 +1646,11 @@ def reconcile(db: Database, manuscript: dict, service,
                                      "error": str(err)})
     known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
     titles = {t for _, t in tab_props if t}
-    sections = split_tabbed_export(whole, known | titles)
+    # tab_props is the Docs API's live tab order — pass it through so a
+    # prose heading that repeats another tab's title, out of turn, is
+    # never mistaken for that tab's boundary (it-x7-2).
+    tab_order = [t for _, t in tab_props if t]
+    sections = split_tabbed_export(whole, known | titles, order=tab_order)
     ignored = sorted(t for t in titles - known
                      if t != manuscript["name"])
     if ignored:
