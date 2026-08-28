@@ -27,8 +27,8 @@ from pathlib import Path
 from .db import Database, loads
 from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
-                    join_prompt_embeds, reembed, split_prompt_embeds,
-                    strip_dangling)
+                    join_prompt_embeds, reembed, snapshot_prompts,
+                    split_prompt_embeds, strip_dangling)
 from .revisions import iter_manuscript_paths, strip_embed_lines
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -1412,6 +1412,11 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # Doc-side deletions never delete locally (the file is canonical; the
     # next push recreates the tab), so a missing section only reports.
     if prompt_targets:
+        # Pre-write recovery point (X7-3): _illustrations/prompts/*.md
+        # holds canonical author text nothing else snapshots — collect()
+        # skips '_'-prefixed dirs on purpose. Must run before the loop
+        # below writes anything.
+        snapshot_prompts(db, manuscript, source="pre-doc-pull")
         title_of = dict(illus_children)
         prompts_dir = bridge.root / ILLUS_DIR / PROMPTS_SUBDIR
         if illus_children:
@@ -1691,6 +1696,11 @@ def reconcile(db: Database, manuscript: dict, service,
     # locally deleted file whose tab is unchanged auto-pushes, which
     # prunes the tab.
     prompt_ahead = []
+    if pmapped:
+        # Pre-write recovery point (X7-3) — same seam as pull_doc above:
+        # session-start reconcile can also auto-pull a prompt tab, and
+        # nothing else snapshots these files before that write.
+        snapshot_prompts(db, manuscript, source="pre-reconcile")
     for name, entry in sorted(pmapped.items()):
         display = ILLUS_DISPLAY_PREFIX + name
         try:

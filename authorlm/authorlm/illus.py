@@ -115,6 +115,104 @@ def load_prompts(root: Path) -> dict[str, str]:
             for p in sorted(directory.glob("*.md"))}
 
 
+def _read_prompt_files_raw(root: Path) -> dict[str, str]:
+    """{<slug>.md: raw file text, preview embeds included} — the exact
+    bytes on disk, unlike `load_prompts` (which strips embeds for
+    identity comparisons). Used by `snapshot_prompts` so a restore
+    reproduces the file exactly."""
+    directory = Path(root) / ILLUS_DIR / PROMPTS_SUBDIR
+    if not directory.is_dir():
+        return {}
+    out: dict[str, str] = {}
+    for path in sorted(directory.glob("*.md")):
+        try:
+            out[path.name] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            out[path.name] = path.read_text(encoding="utf-8", errors="replace")
+    return out
+
+
+def snapshot_prompts(db, manuscript: dict, source: str) -> dict | None:
+    """Recovery point for `_illustrations/prompts/*.md` (X7-3).
+
+    These files hold the CANONICAL author text for externalized
+    illustration descriptions, but `revisions.iter_manuscript_paths`
+    deliberately skips '_'-prefixed directories (so drafts/exports stay
+    observation-invisible), which means `api.collect()` /
+    `collect_revision` never captures them — nothing else does either.
+    Yet `gdocs.pull_doc` and `gdocs.reconcile` overwrite them from the
+    Doc. This is the pre-write recovery point: call it immediately
+    before either of those can touch a prompt file, never as part of
+    ordinary observation (that would flood this table on every editing
+    session instead of only the moments a Doc write could destroy
+    something).
+
+    Checksum-deduped like `revisions.collect_revision`: a snapshot
+    identical to the last one is skipped, not stored again, so repeated
+    pulls with no local prompt edits between them don't grow the table.
+    Returns the new row, or None when nothing changed (including 'no
+    prompts directory yet' — never raises, must not block a pull)."""
+    import hashlib as _hashlib
+    import json as _json
+
+    from .db import ko_fields
+
+    files = _read_prompt_files_raw(manuscript["path"])
+    digest = _hashlib.sha256(
+        _json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
+    last = db.one(
+        "SELECT * FROM illustration_prompt_versions WHERE manuscript_id = ? "
+        "ORDER BY version_no DESC LIMIT 1",
+        (manuscript["id"],),
+    )
+    if last and last["checksum"] == digest:
+        return None
+    row = ko_fields("ipv")
+    row.update(
+        manuscript_id=manuscript["id"],
+        version_no=(last["version_no"] + 1) if last else 1,
+        checksum=digest,
+        files=_json.dumps(files),
+        source=source,
+    )
+    db.insert("illustration_prompt_versions", row)
+    return row
+
+
+def restore_prompts(db, manuscript: dict, version_no: int | None = None) -> dict:
+    """Write a `snapshot_prompts` row back to `_illustrations/prompts/` —
+    the recovery half of X7-3. `version_no=None` restores the latest
+    snapshot. A prompt file present in the snapshot but currently
+    missing or edited on disk is overwritten; a prompt file that exists
+    now but wasn't in the snapshot is left alone (restore recovers what
+    the snapshot held, it does not prune newer prompt files). Never
+    called automatically — this is manual recovery only."""
+    from .db import loads as _loads
+
+    if version_no is None:
+        version = db.one(
+            "SELECT * FROM illustration_prompt_versions WHERE "
+            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+            (manuscript["id"],),
+        )
+    else:
+        version = db.one(
+            "SELECT * FROM illustration_prompt_versions WHERE "
+            "manuscript_id = ? AND version_no = ?",
+            (manuscript["id"], version_no),
+        )
+    if not version:
+        which = "latest" if version_no is None else f"v{version_no}"
+        raise LookupError(f"no illustration-prompt snapshot ({which}) "
+                          f"to restore from")
+    files = _loads(version["files"], {})
+    directory = Path(manuscript["path"]) / ILLUS_DIR / PROMPTS_SUBDIR
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (directory / name).write_text(text, encoding="utf-8")
+    return {"restored": sorted(files), "version_no": version["version_no"]}
+
+
 def desc_hash(prompt: str) -> str:
     """Slot identity: hash of the whitespace-collapsed prompt (the
     caption is deliberately outside it)."""

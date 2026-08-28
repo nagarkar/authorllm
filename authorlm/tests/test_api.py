@@ -4341,6 +4341,69 @@ def main_test() -> None:
               "![](" not in prompt_path.read_text(),
               prompt_path.read_text())
 
+        # --- X7-3: pre-pull recovery point for _illustrations/prompts/ ---
+        # These files hold the CANONICAL author text — collect_revision
+        # skips '_'-prefixed dirs on purpose, so nothing else snapshots
+        # them, yet a pull overwrites them from the Doc. Prove: (1) a
+        # forced pull genuinely destroys the local text, (2) the author
+        # can actually get it back, (3) the snapshot table doesn't flood
+        # on ordinary observation or on repeated no-op pulls.
+        def _prompt_version_rows():
+            return db.all(
+                "SELECT * FROM illustration_prompt_versions WHERE "
+                "manuscript_id = ? ORDER BY version_no", (manuscript["id"],))
+
+        precious_text = ("The author's carefully chosen words for this "
+                         "orrery scene, never to be lost.\n")
+        prompt_path.write_text(precious_text)
+        before_rows = len(_prompt_version_rows())
+        stub.set_tab(ref, "Doc-side wording that will destroy the above")
+        destroyed = pull_doc(db, manuscript, service=stub, docs_service=stub,
+                             force=True)
+        check("X7-3 PRE-FIX REGRESSION: a forced pull overwrites the local "
+              "prompt file — the author's precious text is gone from disk",
+              display in destroyed["changed"]
+              and precious_text != prompt_path.read_text(),
+              prompt_path.read_text())
+        check("the pre-pull snapshot was taken before the destructive "
+              "write (one new row, holding the about-to-be-lost text)",
+              len(_prompt_version_rows()) == before_rows + 1
+              and loads(_prompt_version_rows()[-1]["files"], {}).get(ref)
+              == precious_text,
+              [dict(r) for r in _prompt_version_rows()])
+        recovered = il.restore_prompts(db, manuscript)
+        check("X7-3 RECOVERY: restore_prompts writes the exact pre-pull "
+              "text back to disk — the author gets it back",
+              ref in recovered["restored"]
+              and prompt_path.read_text() == precious_text,
+              prompt_path.read_text())
+        settled_rows = len(_prompt_version_rows())
+        settled = pull_doc(db, manuscript, service=stub, docs_service=stub)
+        check("after recovery, an ordinary (non-forced) pull leaves the "
+              "restored text alone (three-way sees it as local-ahead, not "
+              "a silent re-overwrite)",
+              display in settled["local_ahead"]
+              and prompt_path.read_text() == precious_text, str(settled))
+        check("no flooding: a pull whose disk state matches the last "
+              "snapshot adds no new row (skip-if-unchanged, like backup.py "
+              "and collect_revision)",
+              len(_prompt_version_rows()) == settled_rows,
+              [dict(r) for r in _prompt_version_rows()])
+        collect_rows_before = len(_prompt_version_rows())
+        api.collect(db, manuscript, {})
+        check("ordinary observation (api.collect) never touches the "
+              "illustration-prompt snapshot table — _illustrations/ stays "
+              "observation-invisible, no version-history flooding",
+              len(_prompt_version_rows()) == collect_rows_before)
+        try:
+            il.restore_prompts(db, manuscript, version_no=999999)
+            raise AssertionError("expected LookupError")
+        except LookupError as err:
+            check("restoring a nonexistent snapshot version raises, "
+                  "never guesses",
+                  "999999" not in str(err) or "no illustration-prompt"
+                  in str(err), str(err))
+
         # --- comment-anchor safety: pushes route around open comments ---
         from authorlm.gdocs import comment_bearing, manuscript_bridge
 

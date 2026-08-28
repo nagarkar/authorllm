@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS manuscript_versions (
     session_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS illustration_prompt_versions (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL REFERENCES manuscripts(id),
+    version_no INTEGER NOT NULL,
+    checksum TEXT NOT NULL,
+    files TEXT NOT NULL,          -- JSON: <slug>.md -> raw file text (_illustrations/prompts/ is
+                                   -- '_'-prefixed and so invisible to manuscript_versions/collect_revision
+                                   -- on purpose; this is its own recovery point, X7-3)
+    source TEXT NOT NULL          -- e.g. 'pre-doc-pull', 'pre-reconcile'
+);
+
 CREATE TABLE IF NOT EXISTS editorial_transitions (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
