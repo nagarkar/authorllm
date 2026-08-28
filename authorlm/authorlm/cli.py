@@ -1135,13 +1135,13 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         sys.exit(f"error: nothing written to the Doc for {file} — "
                  "'critique write' first (or nothing to resolve).")
     config = _load_config(args)
-    try:
-        service = gdocs.get_service(config, args.workspace, interactive=True)
-        docs_service = gdocs.get_docs_service(config, args.workspace,
-                                              interactive=True)
-    except ValueError as err:
-        sys.exit(f"error: {err}")
-    marked = gdocs.critique_tab_text(db, manuscript, file, docs_service)
+    # Resolve never talks to Google: 'doc pull' already brought the forms
+    # down as markdown, markers intact — reading the tab fresh here (as
+    # the old textRun-walk did) is what flattened every essay to plain
+    # prose, since Docs paragraphs carry no heading/list/bold markup in
+    # their character stream (it-x7-1). The local file is the only source.
+    path = Path(manuscript["path"]) / file
+    marked = path.read_text(encoding="utf-8")
     final, forms = passes.final_text_from_marked(marked, written=written)
     # Snapshot whatever is on disk right now — including any local edit
     # made outside this Doc/critique flow — before it's overwritten below
@@ -1149,15 +1149,12 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
     # Apply locally: the author's post-edits win.
-    path = Path(manuscript["path"]) / file
     normalized = gdocs.normalize_markdown(final)
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")
     diffs = passes.record_resolution(db, mid, file, forms)
-    # Strip the forms from the tab: a plain push of the now-final local
-    # file rebuilds the tab clean (read-back proof inside push).
-    gdocs.push_doc(db, manuscript, file, service=service,
-                   docs_service=docs_service)
+    # No push: the author settles these forms in the Doc themselves, in
+    # most cases. The Doc keeps them until their next ordinary 'doc push'.
     print(ui.green(f"resolved {file}: {len(forms)} form(s) made final")
           + (ui.dim(f", {len(diffs)} modified acceptance(s) recorded")
              if diffs else ""))

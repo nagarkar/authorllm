@@ -563,10 +563,14 @@ def main_test() -> None:
               "history before overwriting it (BUG-2 / A1)", recovered)
 
         print("recovery: critique resolve snapshots uncollected edits "
-              "(BUG-2 / A1):")
+              "(BUG-2 / A1); it-x7-1: resolve reads the pending forms "
+              "from the LOCAL FILE, never the Doc, so an essay's heading "
+              "and other structure survive:")
         import json as _json
 
-        import authorlm.gdocs as _gdocs_mod
+        import authorlm.gdocs as _gdocs_mod  # used by the doc-pull
+        # recovery block below (BUG-1 / A2) — resolve itself no longer
+        # touches gdocs at all (it-x7-1).
         from authorlm.cli import _critique_resolve_essay
         from authorlm.db import ko_fields as _ko
 
@@ -600,45 +604,37 @@ def main_test() -> None:
                                   "original_new": "RESOLVED PARAGRAPH TEXT."}))
         res_db.insert("doc_threads", written_row)
 
-        # The author separately edited the file locally (outside the
-        # critique/Doc flow) and never collected it — the exact state
-        # 'critique resolve' must not silently destroy when it applies
-        # the Doc-side resolution.
-        UNCOLLECTED_RESOLVE = ("# Solo\n\nOriginal paragraph text.\n\n"
-                               "UNCOLLECTED PARAGRAPH ADDED LOCALLY, "
-                               "NEVER SENT TO THE DOC.\n")
+        # 'doc pull' already brought this essay down with the pending
+        # form intact (design ruling for it-x7-1: resolve reads the
+        # LOCAL FILE, never the Doc). The author also separately edited
+        # the file locally (outside the critique/Doc flow) and never
+        # collected it — the exact state 'critique resolve' must not
+        # silently destroy when it applies the resolution. The heading
+        # is untouched local prose sitting outside the pending form —
+        # exactly what a textRun-only Doc fetch would have flattened.
+        UNCOLLECTED_RESOLVE = (
+            "# Solo\n\n"
+            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT.}}\n\n"
+            "UNCOLLECTED PARAGRAPH ADDED LOCALLY, NEVER SENT TO THE DOC.\n")
         (res_ms / "solo.md").write_text(UNCOLLECTED_RESOLVE)
 
-        # Stub Drive/Docs entirely: this test is about local write
-        # ordering, not the Google integration (untested elsewhere too —
-        # test-gaps #5 / SEC-4 R8).
-        def _fake_service(config, workspace=None, interactive=True):
-            return object()
-
-        def _fake_critique_tab_text(db, manuscript, file, docs_service):
-            return th.render_pending("Original paragraph text.",
-                                     "RESOLVED PARAGRAPH TEXT.")
-
-        def _fake_push_doc(db, manuscript, file, service=None,
-                           docs_service=None):
-            return {}
-
-        _orig = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
-                _gdocs_mod.critique_tab_text, _gdocs_mod.push_doc)
-        _gdocs_mod.get_service = _fake_service
-        _gdocs_mod.get_docs_service = _fake_service
-        _gdocs_mod.critique_tab_text = _fake_critique_tab_text
-        _gdocs_mod.push_doc = _fake_push_doc
-        try:
-            res_args = argparse.Namespace(target="solo.md",
-                                          workspace=str(res_ws))
-            with contextlib.redirect_stdout(io.StringIO()):
-                _critique_resolve_essay(res_db, res_manuscript, res_args)
-        finally:
-            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
-             _gdocs_mod.critique_tab_text, _gdocs_mod.push_doc) = _orig
-        check("resolve overwrote the file with the resolved content",
-              "RESOLVED PARAGRAPH TEXT." in (res_ms / "solo.md").read_text())
+        # No Drive/Docs stubbing at all, by design: resolve must never
+        # call gdocs.get_service / get_docs_service / critique_tab_text /
+        # push_doc (it-x7-1). If any of those were still called, get_service
+        # would hit this suite's pinned-missing config and sys.exit —
+        # this test passing with zero Google stubs IS the proof.
+        res_args = argparse.Namespace(target="solo.md",
+                                      workspace=str(res_ws))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _critique_resolve_essay(res_db, res_manuscript, res_args)
+        resolved_text = (res_ms / "solo.md").read_text()
+        check("resolve overwrote the file with the resolved content and "
+              "kept the heading intact — no Doc round-trip flattened the "
+              "essay (it-x7-1)",
+              resolved_text.startswith("# Solo\n\n")
+              and "RESOLVED PARAGRAPH TEXT." in resolved_text
+              and "<<" not in resolved_text and "{{" not in resolved_text,
+              resolved_text)
         res_versions = res_db.all(
             "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
             "ORDER BY version_no", (res_mid,))
