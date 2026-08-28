@@ -18,6 +18,35 @@ from .db import Database, ko_fields, loads
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
 
+
+class ManuscriptRootUnreadable(RuntimeError):
+    """The manuscript root directory does not exist (or is not a
+    readable directory) — a vanished mount point, a moved folder, a
+    permissions problem. `read_manuscript_files` returns {} for a
+    missing root with no error, and downstream that reads exactly like
+    the author having deleted every file. It is not: it is an I/O
+    condition, never an editorial act, and must never be allowed to
+    retire a concept or record a version (it-258752ea91f9).
+
+    Deliberately a RuntimeError (not bare OSError): it is caught by the
+    same `except (LookupError, ValueError, RuntimeError)` clause the MCP
+    surface already uses to turn an application error into a clean
+    {"ok": False, "error": ...} result instead of crashing an unattended
+    call (mcp_server._guard), and by the existing `except Exception`
+    around opening collects in cli.py's `session start`."""
+
+
+def check_manuscript_root(root: Path) -> None:
+    """Raise ManuscriptRootUnreadable unless `root` is a readable,
+    existing directory. Every path that can end up recording a version
+    or retiring a concept from an empty-looking read must call this
+    first — see collect_revision()."""
+    if not root.is_dir():
+        raise ManuscriptRootUnreadable(
+            f"manuscript root is not a readable directory: {root}"
+        )
+
+
 # Illustration embed lines (`![](_illustrations/….png)` under a tag) are
 # DERIVED machinery — written by `illus render`/`pick`, stripped on Doc
 # push, re-inserted after pull. Observation must not see them: the author
@@ -86,8 +115,18 @@ def collect_revision(
     db: Database, manuscript: dict, session_id: str | None, source: str = "snapshot"
 ) -> dict | None:
     """Snapshot the manuscript. Returns the new version row as a dict,
-    or None if nothing changed since the last version."""
-    files = read_manuscript_files(Path(manuscript["path"]))
+    or None if nothing changed since the last version.
+
+    Raises ManuscriptRootUnreadable — refuses to record a version — if
+    the root is missing or unreadable, regardless of the caller: an
+    unreadable directory must never be recorded as "every file removed"
+    (it-258752ea91f9). This runs unconditionally (not just on the
+    auto-collect path) because 19 of 20 api.collect() call sites,
+    including the unattended _catch_up, pass auto=False and would
+    otherwise bypass the mass-deletion guard entirely."""
+    root = Path(manuscript["path"])
+    check_manuscript_root(root)
+    files = read_manuscript_files(root)
     digest = checksum(files)
 
     last = db.one(

@@ -25,6 +25,15 @@ def active_session(db: Database, manuscript_id: str):
 def start_session(db: Database, manuscript_id: str) -> dict:
     existing = active_session(db, manuscript_id)
     if existing:
+        # A session already being open is the NORMAL state for the whole
+        # span of a working day — the author does not re-run 'session
+        # start' once one is open, so the INSERT branch below (the only
+        # place that used to call backup.run) never fired during exactly
+        # the stretch when the database is being changed
+        # (it-0bffe1ff657b). Back up on this "resume" attempt too, before
+        # refusing — never blocks (see backup.run), and skip-if-unchanged
+        # means a second attempt minutes later costs nothing extra.
+        backup.run(db)
         raise ValueError(f"A session is already active ({existing['id']}). End it first.")
     row = ko_fields("s")
     row.update(

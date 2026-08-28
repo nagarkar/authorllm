@@ -1430,6 +1430,320 @@ def check_alias_retired_guard() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_vanished_directory_guard() -> None:
+    """it-258752ea91f9: a manuscript root that has gone missing (deleted
+    directory, unmounted volume, etc.) must never be read the same as the
+    author having deleted every file in it. `read_manuscript_files`
+    returns {} for a missing root with no error, which — before this fix —
+    fed straight into collect_revision() and made every tracked file look
+    removed. The auto-collect mass-deletion guard only ever ran when
+    `auto=True`, and _catch_up (reached by MCP get_briefing/get_guidance
+    with no human present) always passes auto=False, so this was the
+    exact unattended path that silently retired unconfirmed hypotheses."""
+    import json as _json
+
+    from authorlm.revisions import ManuscriptRootUnreadable
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-vanished-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# Opening\n\nA placeholder paragraph.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.collect(db, manuscript, {})  # v1 baseline, no concepts yet
+
+        # An unconfirmed extracted hypothesis (what extraction.py stamps
+        # before the author has confirmed it), realized once its name
+        # actually lands in the text — realization only runs on a version
+        # that is actually recorded, so the checksum must change too.
+        hypothesis = api.add_concept(db, manuscript, "Gravity")
+        db.update("concept_nodes", hypothesis["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        (ms / "01.md").write_text(
+            "# Opening\n\nA placeholder paragraph. Gravity is discussed early.\n")
+        api.collect(db, manuscript, {})  # v2: realizes Gravity
+        check("fixture: the hypothesis is realized before the directory "
+              "vanishes",
+              db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                     (hypothesis["id"],))["status"] == "realized")
+        version_before = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE "
+            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+            (manuscript["id"],))["version_no"]
+
+        shutil.rmtree(ms)  # the reported repro: the directory itself vanishes
+
+        raised = None
+        try:
+            # This is exactly the shape _catch_up calls: auto defaults to
+            # False, so no human is standing by to see a 'staged' prompt.
+            api.collect(db, manuscript, {})
+        except Exception as err:  # noqa: BLE001 — inspected below
+            raised = err
+        check("a non-auto collect against a vanished directory refuses "
+              "instead of silently recording an all-files-removed version",
+              isinstance(raised, ManuscriptRootUnreadable), repr(raised))
+
+        after = db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                       (hypothesis["id"],))
+        check("the unconfirmed hypothesis was NOT retired by the "
+              "unreadable directory — that is not an editorial act",
+              after["status"] == "realized", dict(after))
+
+        version_after = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE "
+            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+            (manuscript["id"],))["version_no"]
+        check("no new version was recorded for the vanished directory",
+              version_after == version_before, (version_before, version_after))
+
+        # --- _catch_up must surface hypotheses_dropped/vanished ---
+        # Restore the directory, add a confirmed concept and another
+        # unconfirmed hypothesis, realize both, then genuinely remove
+        # their text (a real editorial deletion, not a vanished root) and
+        # prove _catch_up's slimmer return shape still carries both
+        # fields through to MCP get_briefing/get_guidance.
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text(
+            "# Opening\n\nChoice enters here. A Fleeting Aside too.\n")
+        confirmed_concept = api.add_concept(db, manuscript, "Choice")
+        fleeting = api.add_concept(db, manuscript, "Fleeting Aside")
+        db.update("concept_nodes", fleeting["id"], {"metadata": _json.dumps(
+            {"origin": "extracted", "confirmed": False})})
+        api.collect(db, manuscript, {})  # realizes both
+        check("fixture: both concepts realized before their text is removed",
+              db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                     (confirmed_concept["id"],))["status"] == "realized"
+              and db.one("SELECT status FROM concept_nodes WHERE id = ?",
+                        (fleeting["id"],))["status"] == "realized")
+        (ms / "01.md").write_text("# Opening\n\nNeither name remains.\n")
+
+        caught = api._catch_up(db, manuscript, {})
+        check("_catch_up surfaces the vanished (confirmed) proposal, not "
+              "just version_no/transitions/new_files",
+              caught is not None and caught.get("vanished") == ["Choice"],
+              caught)
+        check("_catch_up surfaces hypotheses_dropped (unconfirmed, retired "
+              "quietly)",
+              caught is not None
+              and caught.get("hypotheses_dropped") == ["Fleeting Aside"],
+              caught)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_unregister_safety() -> None:
+    """it-f661015221b0: cmd_unregister deletes every manuscript-scoped row
+    with no transaction and no backup. An interruption partway through
+    the delete loop must leave the manuscript intact (not half-purged),
+    and a fresh backup must exist before the delete is attempted at all."""
+    import io as _io
+    import sqlite3 as _sqlite3
+    import types as _types
+
+    from authorlm import backup, cli as cli_module
+    from authorlm import proposals as prop_mod
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-unreg-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# Opening\n\nGravity and Choice both appear.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.add_concept(db, manuscript, "Gravity")
+        choice = api.add_concept(db, manuscript, "Choice")
+        api.link_concepts(db, manuscript, "Choice", "permits", "Gravity")
+        api.collect(db, manuscript, {})  # populates manuscript_versions
+        # ORCH-2: knowledge_proposals was one of the 8 tables missing from
+        # the old hand-maintained MANUSCRIPT_TABLES list — a row here
+        # proves the schema-derived replacement actually purges it too.
+        prop_mod.create(db, manuscript["id"], "vanished", choice["id"],
+                        {"name": "Choice", "was_in": "01.md"})
+
+        def _counts() -> dict:
+            out = {}
+            for table in cli_module._manuscript_tables(db):
+                key = "id" if table == "manuscripts" else "manuscript_id"
+                out[table] = db.one(
+                    f"SELECT COUNT(*) AS c FROM {table} WHERE {key} = ?",
+                    (manuscript["id"],))["c"]
+            return out
+
+        before = _counts()
+        check("fixture has rows across multiple manuscript-scoped tables "
+              "before unregister",
+              before["concept_nodes"] == 2 and before["concept_edges"] == 1
+              and before["manuscript_versions"] == 1
+              and before["manuscripts"] == 1
+              and before["knowledge_proposals"] == 1, before)
+        check("no backup exists yet — this workspace never opened a "
+              "session",
+              not backup.backup_dir(db.path).exists()
+              or not list(backup.backup_dir(db.path).glob("authorlm-*.db")))
+
+        # Simulate an interruption partway through the purge loop: boom
+        # on the DELETE against concept_nodes, which sits in the middle
+        # of MANUSCRIPT_TABLES — tables before it in the list would have
+        # already had their DELETE issued under the old untransacted code.
+        # sqlite3.Connection attributes are read-only, so the boom is a
+        # thin proxy substituted for db.conn, not a monkeypatched method.
+        real_conn = db.conn
+
+        class _BoomConn:
+            def execute(self, sql, *a, **kw):
+                if sql.startswith("DELETE FROM concept_nodes"):
+                    raise _sqlite3.OperationalError("simulated interruption")
+                return real_conn.execute(sql, *a, **kw)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        db.conn = _BoomConn()
+        orig_open_db = cli_module._open_db
+        cli_module._open_db = lambda args: db
+        try:
+            args = _types.SimpleNamespace(name="book", manuscript=None)
+            raised = None
+            try:
+                cli_module.cmd_unregister(args)
+            except SystemExit as err:
+                raised = err
+            except Exception as err:  # noqa: BLE001 — inspected below
+                raised = err
+            check("an interrupted unregister propagates rather than "
+                  "silently completing",
+                  raised is not None and not isinstance(raised, SystemExit),
+                  repr(raised))
+        finally:
+            cli_module._open_db = orig_open_db
+            db.conn = real_conn
+            # Deliberately NOT rolling back here: a real interruption
+            # (process kill, disk full) gets no such courtesy either. If
+            # cmd_unregister wraps its loop in db.transaction(), the
+            # transaction() context manager itself already rolled back
+            # in its own except-clause before the exception reached us —
+            # so this is a no-op post-fix and a faithful simulation
+            # pre-fix.
+
+        # Without db.transaction(), sqlite3's implicit (deferred) tx
+        # means the tables deleted before the interruption are gone from
+        # THIS connection's own view already — a read-your-own-writes
+        # corruption, before any crash-recovery question even arises.
+        mid = _counts()
+        check("immediately after the interruption, on the very same "
+              "connection, the manuscript is not left in a torn state — "
+              "tables ordered before the interruption point were not "
+              "actually purged",
+              mid == before, {"before": before, "mid": mid})
+
+        # And it must not become PERMANENT the next time anything else
+        # commits on this connection (the ordinary case for a CLI process
+        # that keeps going, or a long-lived MCP connection).
+        from authorlm.db import ko_fields as _ko_fields
+
+        sentinel = _ko_fields("cn")
+        sentinel.update(manuscript_id="unrelated-manuscript", name="Sentinel",
+                        kind="concept", status="declared", introduced_in=None,
+                        notes=None, aliases="[]")
+        db.insert("concept_nodes", sentinel)  # commits at transaction depth 0
+        after = _counts()
+        check("an interrupted unregister leaves the manuscript fully "
+              "intact even after a later, unrelated commit on the same "
+              "connection — nothing purged, not even the tables deleted "
+              "before the interruption point",
+              after == before, {"before": before, "after": after})
+
+        made = list(backup.backup_dir(db.path).glob("authorlm-*.db"))
+        check("a backup was taken before the (interrupted) delete began",
+              len(made) == 1, made)
+
+        # --- happy path: an uninterrupted unregister still purges
+        # everything, and the transaction/backup addition doesn't change
+        # that outcome ---
+        cli_module._open_db = lambda args: db
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                cli_module.cmd_unregister(_types.SimpleNamespace(
+                    name="book", manuscript=None))
+        finally:
+            cli_module._open_db = orig_open_db
+        final = _counts()
+        check("an uninterrupted unregister still purges every "
+              "manuscript-scoped row",
+              all(v == 0 for v in final.values()), final)
+        made_final = list(backup.backup_dir(db.path).glob("authorlm-*.db"))
+        check("the successful unregister also left a backup behind "
+              "(taken before the delete, same as the interrupted run)",
+              len(made_final) >= 1, made_final)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_backup_on_active_session() -> None:
+    """it-0bffe1ff657b: backup.run() only ever fired from the branch of
+    start_session() that actually INSERTs a new session row (sessions.py).
+    With a session already active — the normal state for the entire span
+    of a working day, since the author does not re-run 'session start'
+    once one is open — that branch never runs, so no backup is ever
+    taken during the day the database is actually being changed. The
+    documented trigger ('roughly once per working day') was false
+    whenever a session was open. Reproduced live: CLI 'session start'
+    against an already-active session exited 1 with 'A session is
+    already active' and wrote no authorlm-*.db.
+
+    Fix: back up on resume too — the branch that finds an existing
+    session and is about to refuse now backs up first. skip-if-unchanged
+    (backup.py) means a rapid double 'session start' costs nothing extra
+    once the first backup that day has already captured the state."""
+    from authorlm import backup, sessions as bses
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-backup-trigger-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# hi\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+
+        bses.start_session(db, manuscript["id"])
+        bdir = backup.backup_dir(db.path)
+        check("starting the first session performs a backup",
+              len(list(bdir.glob("authorlm-*.db"))) == 1)
+
+        # A real change since the first backup, so the resume backup
+        # below has something new to capture (not skipped as identical).
+        node = ko_fields("cn")
+        node.update(manuscript_id=manuscript["id"], name="Gravity",
+                    kind="concept", status="declared", introduced_in=None,
+                    notes="", aliases="[]")
+        db.insert("concept_nodes", node)
+
+        raised = None
+        try:
+            bses.start_session(db, manuscript["id"])
+        except ValueError as err:
+            raised = err
+        check("starting a session while one is already active still "
+              "raises exactly as before — no confirmation prompt, no "
+              "silent takeover of the existing session",
+              raised is not None and "already active" in str(raised),
+              repr(raised))
+
+        made = sorted(bdir.glob("authorlm-*.db"))
+        check("a backup fires even when a session is already active — "
+              "this is the normal state for the whole of a working day, "
+              "which is exactly when the database is changing",
+              len(made) == 2, made)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1438,6 +1752,9 @@ def main_test() -> None:
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
     check_backup_and_restore()
+    check_vanished_directory_guard()
+    check_unregister_safety()
+    check_backup_on_active_session()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()
