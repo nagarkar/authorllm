@@ -235,21 +235,32 @@ def cmd_manuscript(args):
           f"{identity['hardcover_isbn'] or '(not set)'}")
 
 
-# Every table that carries manuscript-scoped rows, children first.
-MANUSCRIPT_TABLES = [
-    "triage_assessments", "triage_runs", "triage_drafts",
-    "evidence", "editorial_reviews", "guidance_history", "editorial_beliefs",
-    "concept_edges", "concept_nodes", "editorial_episodes", "inferred_intents",
-    "declared_intents", "sessions", "editorial_transitions",
-    "style_laws", "style_attachments", "style_guides",
-    "manuscript_versions", "manuscripts",
-]
+def _manuscript_tables(db: Database) -> list[str]:
+    """Every table that carries a manuscript_id column, plus 'manuscripts'
+    itself (keyed by 'id' instead). Derived from the live schema rather
+    than hand-maintained: the previous hand-written list had drifted 8
+    tables behind the schema (critique_passes, doc_comments, doc_threads,
+    essay_summaries, illus_proposals, improvement_tasks, knowledge_
+    proposals, writeups) by the time it was audited — exactly the kind of
+    silent gap a fixed list cannot help but accumulate (ORCH-2)."""
+    scoped = sorted(t for t in db._tables()
+                    if t != "manuscripts" and "manuscript_id" in db._columns(t))
+    return scoped + ["manuscripts"]
 
 
 def cmd_unregister(args):
     """Clean-slate removal. This is a workspace-management operation for
     prototyping and hermetic tests — it deletes the manuscript's entire
-    record, unlike retire/reject which preserve history."""
+    record, unlike retire/reject which preserve history.
+
+    Untransacted deletes with no backup were a deploy blocker
+    (it-f661015221b0): an interruption partway through left a half-purged
+    manuscript with no repair path. `backup.run()` gives a way back even
+    if the transaction below somehow isn't enough; `db.transaction()`
+    makes the purge itself all-or-nothing, so a raw `db.conn.execute`
+    loop can no longer leave some tables deleted and others untouched."""
+    from . import backup
+
     db = _open_db(args)
     name = args.name or getattr(args, "manuscript", None)
     if not name:
@@ -258,13 +269,14 @@ def cmd_unregister(args):
     if not row:
         sys.exit(f"error: no manuscript named '{name}'.")
     mid = row["id"]
+    backup.run(db)  # before the first delete — no repair path once these rows are gone
     deleted = {}
-    for table in MANUSCRIPT_TABLES:
-        key = "id" if table == "manuscripts" else "manuscript_id"
-        cursor = db.conn.execute(f"DELETE FROM {table} WHERE {key} = ?", (mid,))
-        if cursor.rowcount:
-            deleted[table] = cursor.rowcount
-    db.conn.commit()
+    with db.transaction():
+        for table in _manuscript_tables(db):
+            key = "id" if table == "manuscripts" else "manuscript_id"
+            cursor = db.conn.execute(f"DELETE FROM {table} WHERE {key} = ?", (mid,))
+            if cursor.rowcount:
+                deleted[table] = cursor.rowcount
     total = sum(deleted.values())
     detail = ", ".join(f"{table}: {count}" for table, count in deleted.items())
     print(f"Unregistered '{name}' — removed {total} row(s) ({detail}).")

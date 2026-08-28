@@ -1534,6 +1534,155 @@ def check_vanished_directory_guard() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_unregister_safety() -> None:
+    """it-f661015221b0: cmd_unregister deletes every manuscript-scoped row
+    with no transaction and no backup. An interruption partway through
+    the delete loop must leave the manuscript intact (not half-purged),
+    and a fresh backup must exist before the delete is attempted at all."""
+    import io as _io
+    import sqlite3 as _sqlite3
+    import types as _types
+
+    from authorlm import backup, cli as cli_module
+    from authorlm import proposals as prop_mod
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-unreg-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# Opening\n\nGravity and Choice both appear.\n")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.add_concept(db, manuscript, "Gravity")
+        choice = api.add_concept(db, manuscript, "Choice")
+        api.link_concepts(db, manuscript, "Choice", "permits", "Gravity")
+        api.collect(db, manuscript, {})  # populates manuscript_versions
+        # ORCH-2: knowledge_proposals was one of the 8 tables missing from
+        # the old hand-maintained MANUSCRIPT_TABLES list — a row here
+        # proves the schema-derived replacement actually purges it too.
+        prop_mod.create(db, manuscript["id"], "vanished", choice["id"],
+                        {"name": "Choice", "was_in": "01.md"})
+
+        def _counts() -> dict:
+            out = {}
+            for table in cli_module._manuscript_tables(db):
+                key = "id" if table == "manuscripts" else "manuscript_id"
+                out[table] = db.one(
+                    f"SELECT COUNT(*) AS c FROM {table} WHERE {key} = ?",
+                    (manuscript["id"],))["c"]
+            return out
+
+        before = _counts()
+        check("fixture has rows across multiple manuscript-scoped tables "
+              "before unregister",
+              before["concept_nodes"] == 2 and before["concept_edges"] == 1
+              and before["manuscript_versions"] == 1
+              and before["manuscripts"] == 1
+              and before["knowledge_proposals"] == 1, before)
+        check("no backup exists yet — this workspace never opened a "
+              "session",
+              not backup.backup_dir(db.path).exists()
+              or not list(backup.backup_dir(db.path).glob("authorlm-*.db")))
+
+        # Simulate an interruption partway through the purge loop: boom
+        # on the DELETE against concept_nodes, which sits in the middle
+        # of MANUSCRIPT_TABLES — tables before it in the list would have
+        # already had their DELETE issued under the old untransacted code.
+        # sqlite3.Connection attributes are read-only, so the boom is a
+        # thin proxy substituted for db.conn, not a monkeypatched method.
+        real_conn = db.conn
+
+        class _BoomConn:
+            def execute(self, sql, *a, **kw):
+                if sql.startswith("DELETE FROM concept_nodes"):
+                    raise _sqlite3.OperationalError("simulated interruption")
+                return real_conn.execute(sql, *a, **kw)
+
+            def __getattr__(self, name):
+                return getattr(real_conn, name)
+
+        db.conn = _BoomConn()
+        orig_open_db = cli_module._open_db
+        cli_module._open_db = lambda args: db
+        try:
+            args = _types.SimpleNamespace(name="book", manuscript=None)
+            raised = None
+            try:
+                cli_module.cmd_unregister(args)
+            except SystemExit as err:
+                raised = err
+            except Exception as err:  # noqa: BLE001 — inspected below
+                raised = err
+            check("an interrupted unregister propagates rather than "
+                  "silently completing",
+                  raised is not None and not isinstance(raised, SystemExit),
+                  repr(raised))
+        finally:
+            cli_module._open_db = orig_open_db
+            db.conn = real_conn
+            # Deliberately NOT rolling back here: a real interruption
+            # (process kill, disk full) gets no such courtesy either. If
+            # cmd_unregister wraps its loop in db.transaction(), the
+            # transaction() context manager itself already rolled back
+            # in its own except-clause before the exception reached us —
+            # so this is a no-op post-fix and a faithful simulation
+            # pre-fix.
+
+        # Without db.transaction(), sqlite3's implicit (deferred) tx
+        # means the tables deleted before the interruption are gone from
+        # THIS connection's own view already — a read-your-own-writes
+        # corruption, before any crash-recovery question even arises.
+        mid = _counts()
+        check("immediately after the interruption, on the very same "
+              "connection, the manuscript is not left in a torn state — "
+              "tables ordered before the interruption point were not "
+              "actually purged",
+              mid == before, {"before": before, "mid": mid})
+
+        # And it must not become PERMANENT the next time anything else
+        # commits on this connection (the ordinary case for a CLI process
+        # that keeps going, or a long-lived MCP connection).
+        from authorlm.db import ko_fields as _ko_fields
+
+        sentinel = _ko_fields("cn")
+        sentinel.update(manuscript_id="unrelated-manuscript", name="Sentinel",
+                        kind="concept", status="declared", introduced_in=None,
+                        notes=None, aliases="[]")
+        db.insert("concept_nodes", sentinel)  # commits at transaction depth 0
+        after = _counts()
+        check("an interrupted unregister leaves the manuscript fully "
+              "intact even after a later, unrelated commit on the same "
+              "connection — nothing purged, not even the tables deleted "
+              "before the interruption point",
+              after == before, {"before": before, "after": after})
+
+        made = list(backup.backup_dir(db.path).glob("authorlm-*.db"))
+        check("a backup was taken before the (interrupted) delete began",
+              len(made) == 1, made)
+
+        # --- happy path: an uninterrupted unregister still purges
+        # everything, and the transaction/backup addition doesn't change
+        # that outcome ---
+        cli_module._open_db = lambda args: db
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                cli_module.cmd_unregister(_types.SimpleNamespace(
+                    name="book", manuscript=None))
+        finally:
+            cli_module._open_db = orig_open_db
+        final = _counts()
+        check("an uninterrupted unregister still purges every "
+              "manuscript-scoped row",
+              all(v == 0 for v in final.values()), final)
+        made_final = list(backup.backup_dir(db.path).glob("authorlm-*.db"))
+        check("the successful unregister also left a backup behind "
+              "(taken before the delete, same as the interrupted run)",
+              len(made_final) >= 1, made_final)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 
 def main_test() -> None:
     check_broken_pipe()
@@ -1544,6 +1693,7 @@ def main_test() -> None:
     check_extraction_skip_reasons()
     check_backup_and_restore()
     check_vanished_directory_guard()
+    check_unregister_safety()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()
