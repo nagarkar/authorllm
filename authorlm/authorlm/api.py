@@ -53,6 +53,7 @@ __all__ = [
     "resolve_proposal",
     "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
     "write_start", "write_plan", "write_status", "write_propose",
+    "write_draft",
     "write_accept", "write_reject", "write_learn", "write_complete",
     "write_abandon", "write_digest", "get_profile",
 ]
@@ -1518,6 +1519,12 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "brief": meta.get("brief"),
         "created_file": bool(meta.get("created_file")),
         "digest": meta.get("digest"),
+        # One model drafts one writeup (design §8): the cache is
+        # model-scoped and the voice should not have a seam. Both are
+        # metadata, so a resumed writeup can show the seam with no schema
+        # change and no index.
+        "drafting_model": meta.get("drafting_model"),
+        "drafting_models": meta.get("drafting_models") or [],
         "marker_present": marker_present(_disk) and not is_placeholder(_disk),
         "accounting": _accounting(writeup),
         "drafting_context": _status_drafting_context(db, manuscript, writeup),
@@ -1557,6 +1564,108 @@ def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
     )
     db.insert("guidance_history", row)
     return {"writeup_id": writeup["id"], "beat": beat, "guidance_id": row["id"]}
+
+
+def write_draft(db: Database, manuscript: dict, config: dict,
+                prefix: str | None = None, dry_run: bool = False,
+                on_start=None) -> dict:
+    """Draft the current beat programmatically and register it.
+
+    The one LLM call on the write path (design-write-draft.md §1). Every
+    gate runs BEFORE the call, so a refused draft costs nothing and leaves
+    no row; and `write_propose` is the LAST statement of the success path,
+    so no failed, refused or unparseable draft can ever leave a pending
+    proposal (§1.6's ordering invariant).
+
+    `on_start(info)` is called once the gates have passed and the payload
+    is assembled, immediately before the model call — a beat with adaptive
+    thinking runs minutes, and a terminal that says nothing first looks
+    hung (risk R-d).
+
+    Deliberately NOT a gate: summary freshness. `write start` already
+    gated it; a neighbour that goes stale mid-chapter is warned about, not
+    blocked, and the `!! ` lines travel into the payload so the model sees
+    the warning too (Q1, default = warn)."""
+    from . import llm as llm_mod
+    from . import summaries as sums
+    from . import writing
+
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    _checkout_gate(db, manuscript, writeup["file"])
+    beat = _current_beat(writeup)
+    if not (config.get("llm", {}) or {}).get("enabled"):
+        raise ValueError(
+            "the LLM is disabled ([llm] enabled = false) — beat drafting is "
+            "the one call that cannot degrade to a heuristic. Enable it, or "
+            "draft the beat yourself and register it with "
+            "'write propose --why …'.")
+    client = llm_mod.writing_llm(config)   # refuses on [writing] / key
+
+    # ONE capture for this invocation (Stream AC's convention): the
+    # context the model is sent is the context assembled here, not a
+    # second read a parallel session could have changed underneath it.
+    capture = sums.capture(db, manuscript)
+    payload = writing.assemble(db, manuscript, writeup, beat,
+                               capture=capture)
+    meta = loads(writeup["metadata"], {})
+    previous_model = meta.get("drafting_model")
+    first_draft = not previous_model
+    changed_from = (previous_model
+                    if previous_model and previous_model != client.model
+                    else None)
+    info = {"writeup": writeup, "beat": beat, "model": client.model,
+            "model_changed_from": changed_from,
+            "beats_drafted": len(meta.get("drafting_beats", [])),
+            "payload_hashes": payload.hashes,
+            "payload_sizes": payload.sizes,
+            "prompt_location": writing.prompt_location()}
+    if dry_run:
+        return {**info, "dry_run": True, "payload": payload}
+    if on_start:
+        on_start(info)
+    result = client.draft(payload.system_blocks, payload.user_blocks)
+    parsed = writing.parse_reply(result.text)
+    usage = {"line": client.stats_line(),
+             "cache_read": result.cache_read,
+             "cache_write": result.cache_write,
+             "input_tokens": result.prompt_tokens,
+             "output_tokens": result.completion_tokens}
+    # §4's verification clause: a beat loop showing zero cache reads has a
+    # silent invalidator and should say so loudly. Never on the first
+    # draft (nothing to hit), and never on a model that does not
+    # advertise caching — a warning that cries wolf on every offline run
+    # trains the author to ignore it.
+    usage["cache_cold"] = bool(
+        client.cache and not first_draft and result.cache_read == 0
+        and llm_mod.caching_available(client.model, client.provider))
+    if isinstance(parsed, writing.Blocked):
+        # §13.3 made mechanical: a beat that needs an ungrounded fact
+        # becomes a question, never an invention. Nothing is registered
+        # and the cursor does not move.
+        return {**info, "blocked": True, "reason": parsed.reason,
+                "question": parsed.question, "usage": usage}
+
+    meta["drafting_model"] = client.model
+    models = meta.get("drafting_models") or []
+    if client.model not in models:
+        models.append(client.model)
+    meta["drafting_models"] = models
+    beats = meta.get("drafting_beats") or []
+    if beat["n"] not in beats:
+        beats.append(beat["n"])
+    meta["drafting_beats"] = beats
+    db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+
+    # LAST. Unmodified, unwrapped, un-parameterized: the row, the
+    # mandatory --why, supersede-on-redraft, the verdict evidence and the
+    # policy reinforcement are byte-for-byte what `write propose` makes.
+    proposal = write_propose(db, manuscript, text=parsed.text,
+                             explanation=parsed.why, prefix=prefix)
+    return {**info, "blocked": False, "why": parsed.why,
+            "self_check": parsed.self_check, "draft": parsed.text,
+            "guidance_id": proposal["guidance_id"], "usage": usage}
 
 
 def write_accept(db: Database, manuscript: dict, config: dict,
@@ -1742,6 +1851,8 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "beats_done": writeup["cursor"], "beats_unwritten": remaining,
             "tallies": _beat_tallies(db, writeup),
             "learnings": loads(writeup["learnings"], []),
+            # A completed essay's record should say what wrote it (Q7).
+            "drafting_models": meta.get("drafting_models") or [],
             "accounting": accounting, "toc_registered": toc_registered,
             "toc_stanza": toc_stanza, "toc_placement": placement,
             "marker_present": marker_survives,
