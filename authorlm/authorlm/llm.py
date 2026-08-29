@@ -229,6 +229,17 @@ class LLMClient:
             )
             return None
         litellm.suppress_debug_info = True
+        # AE/temp-compat: some models (Claude 5 family — sonnet-5, fable-5)
+        # reject any `temperature` but 1 and raise UnsupportedParamsError.
+        # That rejection is deterministic — retrying the identical call
+        # below would just fail the same way three times — so it must be
+        # resolved before the call is ever attempted, not caught after.
+        # `drop_params` is LiteLLM's own documented remedy for exactly this
+        # message ("To drop unsupported params, set litellm.drop_params =
+        # True"): it silently omits a param the target model doesn't
+        # support while leaving it untouched for models that do, so the
+        # backoff loop below only ever sees genuine transient failures.
+        litellm.drop_params = True
         for attempt in range(RETRIES + 1):
             try:
                 response = litellm.completion(
