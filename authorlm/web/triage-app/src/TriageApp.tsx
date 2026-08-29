@@ -27,6 +27,11 @@ import type {
   TriageRow,
   TriageType,
 } from "./types";
+// The canonical tutorial, imported at build time from the doc that ships
+// with the package (authorlm/docs/writing-essays-tutorial.md). One copy,
+// one source of truth: the Help tab can never drift from the doc.
+import tutorial from "../../../docs/writing-essays-tutorial.md?raw";
+import { renderMarkdown } from "./markdown";
 
 type View = "pending" | "all" | "decided" | "outdated";
 type ReviewState = "any" | "recommended" | "staged" | "unreviewed";
@@ -99,6 +104,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [helpTab, setHelpTab] = useState(false);
   const [drawer, setDrawer] = useState<{row: TriageRow; field: string}>();
   const [actionDialog, setActionDialog] = useState<ActionSchema>();
   const [parameterValue, setParameterValue] = useState("");
@@ -775,9 +781,10 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
 
       <nav className="tab-rail" aria-label="Triage type">
         {(["concepts", "edges", "proposals"] as TriageType[]).map((tab, i) => (
-          <button key={tab} className={triageType === tab ? "active" : ""}
+          <button key={tab} className={!helpTab && triageType === tab ? "active" : ""}
                   disabled={!!analysis}
                   onClick={() => {
+                    setHelpTab(false);
                     setProfileId(undefined); setProfileVersion(undefined); setTriageType(tab);
                     setView("pending"); setReviewState("any"); setRecommendations({});
                     setFieldFilters({}); setMobileFiltersOpen(false);
@@ -785,9 +792,33 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
             <span>{String(i + 1).padStart(2, "0")}</span>{tab}
           </button>
         ))}
+        <button className={helpTab ? "active" : ""}
+                onClick={() => { setHelpTab(true); setMobileFiltersOpen(false); }}>
+          <span>04</span>help
+        </button>
         <div className="tab-rule" />
-        <div className="row-count"><strong>{filteredRows.length}</strong> shown / {snapshot.rows.length}</div>
+        {!helpTab && <div className="row-count"><strong>{filteredRows.length}</strong> shown / {snapshot.rows.length}</div>}
       </nav>
+
+      {helpTab && (
+        <section className="help-doc">
+          <span className="kicker">AUTHORLM / HELP</span>
+          <p className="help-doc-intro">
+            This is the workbench's help. It covers the beat loop end to end,
+            and it covers the three triage tabs beside it too: the concepts,
+            edges and proposals you rule on here are the same graph the beat
+            loop draws its grounding from, and the decisions you stage and
+            apply on those tabs are recorded as the same author evidence a
+            beat verdict is. Nothing on any tab — analysis, safe
+            recommendation or accepted beat — changes the manuscript or the
+            graph until you apply or accept it. The `?` button in the
+            masthead still explains the current tab's own verbs and
+            analyzer.
+          </p>
+          <article className="help-doc-body">{renderMarkdown(tutorial)}</article>
+        </section>
+      )}
+      {!helpTab && <>
 
       {snapshot.incomplete_runs.length > 0 && !analysis && (
         <section className="run-banner">
@@ -951,6 +982,8 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
           })}
         </div>
       </section>
+
+      </>}
 
       {helpOpen && <div className="overlay" onMouseDown={() => setHelpOpen(false)}><aside className="panel help-panel" onMouseDown={(event) => event.stopPropagation()}>
         <button className="panel-close" onClick={() => setHelpOpen(false)}>Close</button>
