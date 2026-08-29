@@ -146,6 +146,13 @@ def main_test() -> None:
                         "gamma.md"], str(order))
         check("everything is missing before the first build",
               all(r["state"] == "missing" for r in sums.status(db, manuscript)))
+        bare = sums.drafting_context(db, manuscript, "alpha.md")
+        check("with no summaries at all the drafting context still renders "
+              "(it is the resume view, never a gate) but every entry is "
+              "loudly marked, not quietly blank",
+              bare.count("!! summary MISSING") == 4
+              and bare.count("(no summary — run 'summarize rebuild')") == 4,
+              bare)
 
         print("full rebuild:")
         import tomllib
@@ -308,6 +315,29 @@ def main_test() -> None:
         check("upstream units are untouched",
               states["title.md"] == "fresh" and states["part1.md"] == "fresh")
 
+        print("...and the drafting context says so LOUDLY — the less "
+              "trustworthy entry must not be the quieter one:")
+        ctx = sums.drafting_context(db, manuscript, "gamma.md")
+        stale_block = ctx.split("[alpha.md]", 1)[1].split("[beta.md]", 1)[0]
+        check("a STALE entry — exactly what the write_start gate refuses — "
+              "carries a loud warning naming the fix",
+              "!! summary STALE" in stale_block
+              and "summarize rebuild" in stale_block, ctx)
+        check("...and its summary text is still rendered: loud, not "
+              "blocking (write status is the resume entry point)",
+              "summary of alpha.md conditioned on 2 prior" in stale_block,
+              ctx)
+        fresh_block = ctx.split("[title.md]", 1)[1].split("[part1.md]", 1)[0]
+        check("a FRESH entry carries no such warning — the marker means "
+              "something because it is not on everything",
+              "!! summary STALE" not in fresh_block
+              and "!! summary MISSING" not in fresh_block, ctx)
+        upstream_block = ctx.split("[beta.md]", 1)[1]
+        check("an UPSTREAM_STALE entry carries no warning either — the "
+              "gate tolerates it (its text did not move, only its "
+              "conditioning), so the context must not cry wolf",
+              "!! summary" not in upstream_block, ctx)
+
         print("rebuild_one (the confirmation-gate rebuild):")
         EchoSummarizer.calls.clear()
         sums.rebuild_one(db, manuscript, "alpha.md", llm)
@@ -426,6 +456,11 @@ def main_test() -> None:
         check("summarize status renders the deprecated state (a new state "
               "must not KeyError the CLI's colour table)",
               "deprecated" in buf.getvalue(), buf.getvalue())
+        dep_ctx = sums.drafting_context(db, manuscript, "beta.md")
+        check("the drafting context marks a DEPRECATED entry loudly too — "
+              "the third state the start gate refuses",
+              "!! summary DEPRECATED" in dep_ctx.split("[gamma.md]", 1)[1],
+              dep_ctx)
         ready = _passes.summaries_ready(db, manuscript, "beta.md")
         check("summaries_ready blocks on a deprecated summary exactly as "
               "on a missing or stale one",

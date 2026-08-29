@@ -3043,11 +3043,15 @@ def _print_beat_spec(beat: dict, label: str = "Beat") -> None:
 def _print_drafting_context(text: str) -> None:
     """The L1 book-frame (summaries.drafting_context). Printed verbatim —
     it is the drafting payload, and the skill reads it out of this
-    output; the incomplete-coverage lines are highlighted so a summary
-    that quietly dropped a paragraph cannot be missed."""
+    output. Every line the reader must not skim past (a stale, missing
+    or deprecated summary; a summary that quietly dropped a paragraph)
+    arrives already prefixed by summaries.WARN_PREFIX, so one branch
+    colours them all."""
+    from . import summaries as sums
+
     print()
     for line in text.splitlines():
-        if line.startswith("coverage INCOMPLETE"):
+        if line.startswith(sums.WARN_PREFIX):
             print(ui.yellow(line))
         elif line.startswith(("DRAFTING CONTEXT", "BEFORE —", "AFTER —")):
             print(ui.bold(line))

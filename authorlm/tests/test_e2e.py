@@ -1630,6 +1630,20 @@ def scenario_write_loop(root: Path) -> None:
               "same context on resume (a new process, no flag repeated)",
               "placed after 01-choice.md" in out
               and "[02-essay.md]" in out.split("AFTER", 1)[1], out)
+        # F3: the resume entry point degrades, it does not die, when the
+        # context can no longer be computed — here because the placement
+        # target left the disk. Everything else about the writeup must
+        # still render, or the author loses the way out (write abandon).
+        choice_text = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").unlink()
+        out = run_stdin(ws, "", "write", "status")
+        check("write status survives a context it can no longer compute: a "
+              "one-line note replaces the block and points at write "
+              "abandon, and the writeup itself still renders",
+              "DRAFTING CONTEXT unavailable" in out
+              and "write abandon" in out
+              and "Writeup [" in out and "03-bridge.md" in out, out)
+        write(ms / "01-choice.md", choice_text)
         run_stdin(ws, "", "write", "abandon")
 
         # --- profiles: declared context, observation-invisible ------------

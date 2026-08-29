@@ -265,6 +265,29 @@ AFTER_HEADER = (
     "that needs one must forward-reference it (\"as a later essay will "
     "show\"), never assume it.")
 
+# Every line the reader must not skim past starts with this, so one
+# branch in cli._print_drafting_context colours all of them.
+WARN_PREFIX = "!! "
+
+# The three states write_start REFUSES. write_status cannot refuse — it
+# is the resume entry point and must keep working — so it says so
+# loudly instead. Without this the untrustworthy entry was the QUIETER
+# one: its summary rendered as plain text and _coverage_note returned
+# None for it, so a mid-writeup collect could flip a neighbour stale and
+# the resume view would serve, unmarked, the exact lie the start gate
+# had refused. `upstream_stale` is deliberately absent: the gate
+# tolerates it (the text did not move, only the conditioning), and a
+# marker on everything marks nothing.
+STATE_WARNING = {
+    "missing": "summary MISSING — this essay has no summary at all; run "
+               "'summarize rebuild' before drafting against it.",
+    "stale": "summary STALE — the essay's text changed after this summary "
+             "was written, so what follows is a lie about it; run "
+             "'summarize rebuild'.",
+    "deprecated": "summary DEPRECATED — this essay left the toc and came "
+                  "back; run 'summarize rebuild' to resurrect it.",
+}
+
 
 def _coverage_note(entry: dict, text: str) -> str | None:
     """Item 4's loudness. Coverage is recomputed here rather than read
@@ -289,7 +312,7 @@ def _coverage_note(entry: dict, text: str) -> str | None:
         bits.append(", ".join(f"¶{n}" for n in cov["out_of_range"])
                     + f" cited but the essay has {cov['paragraph_count']} "
                       "paragraph(s)")
-    return "coverage INCOMPLETE: " + "; ".join(bits)
+    return WARN_PREFIX + "coverage INCOMPLETE: " + "; ".join(bits)
 
 
 def drafting_context(db: Database, manuscript: dict, file: str,
@@ -317,6 +340,9 @@ def drafting_context(db: Database, manuscript: dict, file: str,
             return lines
         for e in entries:
             lines += ["", f"[{e['file']}] ({e['state']})"]
+            warning = STATE_WARNING.get(e["state"])
+            if warning:
+                lines.append(WARN_PREFIX + warning)
             note = _coverage_note(e, texts.get(e["file"], ""))
             if note:
                 lines.append(note)

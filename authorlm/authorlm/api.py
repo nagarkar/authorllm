@@ -399,11 +399,17 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
     """A summary whose file has left the toc is never deleted — it is
     the record of an essay that existed — but it must not linger
     ambiguously as if it were still live. `essay_summaries.status`
-    ('current' | 'deprecated') marks it so a future direct query of the
-    table (unlike sums.status()/before_after(), which are driven off
-    the CURRENT toc reading order and so already never see a departed
-    file's row) does not mistake it for a stale current summary.
-    Idempotent: only rows not already 'deprecated' are touched."""
+    ('current' | 'deprecated') marks it so nothing mistakes it for a
+    stale current summary.
+
+    While the file stays gone, sums.status()/before_after() never see
+    the row at all: both are driven off the CURRENT toc reading order.
+    The mark earns its keep when the file COMES BACK — possibly
+    byte-identical, so its source_hash still matches. Both functions now
+    read this column (summaries._state) and report 'deprecated' rather
+    than 'fresh'; the drafting and edit gates refuse it, and a rebuild
+    resurrects it to 'current'. Idempotent: only rows not already
+    'deprecated' are touched."""
     current = {f for f, _ in sums.units(manuscript)}
     deprecated = []
     for file, row in sums.all_summaries(db, manuscript["id"]).items():
@@ -752,6 +758,23 @@ def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
                                  placement=placement)
 
 
+def _status_drafting_context(db: Database, manuscript: dict,
+                             writeup: dict) -> str:
+    """`write status` is the resume entry point, so it degrades rather
+    than dies: if the file (or the placement target) has left the disk,
+    the context is replaced by a one-line note and the plan, cursor,
+    pending proposal and tallies still render. write_start does NOT get
+    this treatment — its gate has already proved the context resolves."""
+    from . import summaries as sums
+
+    try:
+        return _drafting_context(db, manuscript, writeup)
+    except LookupError as err:
+        return (f"{sums.WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
+                f"Restore the file, or close the writeup with "
+                f"'write abandon' (it restores the pinned source version).")
+
+
 def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
     """The `--after` argument as a placement for summaries.before_after:
     the sentinel passes through, anything else resolves to a real
@@ -887,7 +910,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "pending_proposal": dict(pending) if pending else None,
         "learnings": loads(writeup["learnings"], []),
         "tallies": _beat_tallies(db, writeup),
-        "drafting_context": _drafting_context(db, manuscript, writeup),
+        "drafting_context": _status_drafting_context(db, manuscript, writeup),
     }
 
 
