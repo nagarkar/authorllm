@@ -70,6 +70,10 @@ REGISTRY: list[Prompt] = [
     Prompt("summarizer", "summarize rebuild; critique resolve",
            "essay summaries — the editor's working memory of each unit",
            file="summarizer.md", module=None),
+    Prompt("beat-draft", "write draft",
+           "one beat of the author's prose from the layered drafting payload "
+           "(style law, book context, plan, graph, accepted text, beat spec)",
+           file="beat-draft.md", module=None),
     Prompt("editor", "critique run",
            "the critique pass's per-essay edit proposals (paragraph-aligned "
            "JSON: keep/replace/insert + suggestions)",
