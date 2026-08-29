@@ -1041,9 +1041,11 @@ def write_plan(db: Database, manuscript: dict, beats: list,
             if row["batch_index"] in dropped
         ]
         if stranded:
-            beats = ", ".join(f"n={row['batch_index']}" for row in stranded)
+            stranded_beats = ", ".join(
+                f"n={row['batch_index']}" for row in stranded)
             raise ValueError(
-                f"a draft is still awaiting your verdict on beat {beats} — "
+                f"a draft is still awaiting your verdict on beat "
+                f"{stranded_beats} — "
                 f"replacing the plan would strand it as 'proposed' forever "
                 f"and lose the reason you are replanning for. Settle it "
                 f"first: 'write reject --reason \"<why the plan is wrong>\"' "

@@ -267,9 +267,12 @@ not said.
    interruption in the whole workflow. **Bring the author ONLY the
    removals**, one at a time, in words: a point that is in the digest and
    in no accepted beat is a removal awaiting their ruling, and the reason
-   is theirs and required. Report the derived `kept` set in one line
-   afterwards ("p1, p3, p7 kept across beats 2-4") so they can contradict
-   it — do not ask them to compose it.
+   is theirs and required. State the derived `kept` set in one line
+   BEFORE you run `write digest --dispositions` ("p1, p3, p7 kept across
+   beats 2-4 — recording that"), in the same turn and without asking a
+   question: shown before recorded, so a wrong derivation is contradicted
+   while it is still a sentence rather than after it is evidence. Do not
+   ask them to compose it, and do not make them answer to proceed.
    The **final beat(s) are the `## **What Was Removed and Why**` section**,
    drafted from the RECORDED reasons — do not re-invent them at drafting
    time; the judgments were made when they were recorded, and you write
