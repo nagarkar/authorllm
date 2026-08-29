@@ -121,9 +121,198 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_write_api_gates() -> None:
+    """Hermetic write_* API coverage — Scenario W only hits these via CLI.
+
+    Gates that corrupt the manuscript file or lose verdict evidence if
+    they slip: style attachment, empty draft/--why/--reason, propose
+    before plan, accept without a draft, reject leaving the cursor,
+    modified accept preserving draft→final, learn/abandon restore."""
+    import io as _io
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-write-api-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        original = "# Essay\n\nold opening paragraph.\n"
+        (ms / "02-essay.md").write_text(original, encoding="utf-8")
+        (ms / "01-choice.md").write_text(
+            "# Choice\n\nEvery act begins with choice.\n", encoding="utf-8")
+        with contextlib.redirect_stdout(_io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        config: dict = {}
+        api.ensure_session(db, manuscript)
+
+        intent = api.declare_intent(db, manuscript, "Rewrite the essay")
+        intent_id = intent["intent"]["id"]
+        try:
+            api.write_start(db, manuscript, config, "02-essay.md", intent_id)
+            check("write_start requires an attached style guide", False)
+        except ValueError as err:
+            check("write_start requires an attached style guide",
+                  "no attached style guide" in str(err), str(err))
+
+        api.define_style_guide(db, manuscript, "House")
+        api.attach_style(db, manuscript, "02-essay.md", "House")
+        api.attach_style(db, manuscript, "01-choice.md", "House")
+        started = api.write_start(
+            db, manuscript, config, "02-essay.md", intent_id)
+        check("write_start truncates the file and pins a source version",
+              (ms / "02-essay.md").read_text(encoding="utf-8") == ""
+              and started["source_chars"] == len(original),
+              str(started))
+
+        try:
+            api.write_propose(db, manuscript, "A draft.", "why")
+            check("write_propose before a plan is refused", False)
+        except LookupError as err:
+            check("write_propose before a plan is refused",
+                  "no ratified beat plan" in str(err), str(err))
+
+        planned = api.write_plan(
+            db, manuscript,
+            [{"role": "opener", "concepts": ["Choice"], "budget": 40},
+             {"role": "turn", "concepts": ["Distinction"], "budget": 60}])
+        check("write_plan stores two beats with stable n",
+              [b["n"] for b in planned["plan"]] == [1, 2], str(planned))
+
+        try:
+            api.write_propose(db, manuscript, "   ", "has a why")
+            check("write_propose refuses empty draft text", False)
+        except ValueError as err:
+            check("write_propose refuses empty draft text",
+                  "no draft text" in str(err), str(err))
+        try:
+            api.write_propose(db, manuscript, "A draft.", "  ")
+            check("write_propose refuses an empty explanation", False)
+        except ValueError as err:
+            check("write_propose refuses an empty explanation",
+                  "--why is required" in str(err), str(err))
+
+        try:
+            api.write_accept(db, manuscript, config)
+            check("write_accept without a proposal is refused", False)
+        except LookupError as err:
+            check("write_accept without a proposal is refused",
+                  "nothing proposed" in str(err), str(err))
+
+        draft_1 = "Choice is the first cut."
+        prop_1 = api.write_propose(
+            db, manuscript, draft_1,
+            "realizes Choice; opener per the plan")
+        check("write_propose registers a draft for beat 1",
+              prop_1["beat"]["n"] == 1 and prop_1["guidance_id"],
+              str(prop_1))
+        redraft = api.write_propose(
+            db, manuscript, "Choice opens the field.",
+            "redraft: tighter opener")
+        check("a redraft supersedes the pending proposal",
+              redraft["guidance_id"] != prop_1["guidance_id"]
+              and db.one(
+                  "SELECT state FROM guidance_history WHERE id = ?",
+                  (prop_1["guidance_id"],))["state"] == "superseded",
+              str(redraft))
+
+        try:
+            api.write_reject(db, manuscript, "  ")
+            check("write_reject refuses an empty reason", False)
+        except ValueError as err:
+            check("write_reject refuses an empty reason",
+                  "--reason is required" in str(err), str(err))
+        cursor_before = db.one(
+            "SELECT cursor FROM writeups WHERE id = ?",
+            (prop_1["writeup_id"],))["cursor"]
+        rejected = api.write_reject(
+            db, manuscript, "Too abstract; ground it in a lived moment")
+        cursor_after = db.one(
+            "SELECT cursor FROM writeups WHERE id = ?",
+            (prop_1["writeup_id"],))["cursor"]
+        check("write_reject records the review without advancing the cursor",
+              rejected["beat"]["n"] == 1
+              and rejected["review"]["review"]["decision"] == "rejected"
+              and cursor_after == cursor_before == 0,
+              str(rejected))
+
+        draft_1b = "Standing at a fork, the first cut is made."
+        api.write_propose(db, manuscript, draft_1b,
+                          "redraft: grounded in a lived moment")
+        accepted = api.write_accept(db, manuscript, config)
+        check("write_accept as proposed advances the cursor and lands text",
+              accepted["decision"] == "accepted"
+              and accepted["beat"]["n"] == 1
+              and draft_1b in (ms / "02-essay.md").read_text(encoding="utf-8")
+              and db.one("SELECT cursor FROM writeups WHERE id = ?",
+                         (prop_1["writeup_id"],))["cursor"] == 1,
+              str(accepted))
+
+        draft_2 = "Distinction follows from the cut."
+        api.write_propose(db, manuscript, draft_2, "realizes Distinction")
+        reworded = "Distinction names what the cut set apart."
+        modified = api.write_accept(db, manuscript, config, text=reworded)
+        row = db.one(
+            "SELECT suggestion, metadata, state FROM guidance_history "
+            "WHERE batch_id = ? AND batch_index = 2 AND state = 'modified'",
+            (prop_1["writeup_id"],))
+        meta = loads(row["metadata"], {})
+        check("reworded accept is 'modified' and preserves draft→final",
+              modified["decision"] == "modified"
+              and row["suggestion"] == draft_2
+              and meta.get("accepted_text") == reworded
+              and reworded in (ms / "02-essay.md").read_text(encoding="utf-8")
+              and draft_2 not in (ms / "02-essay.md").read_text(encoding="utf-8"),
+              str(modified))
+        check("plan reports complete after the last beat",
+              modified["plan_complete"] is True, str(modified))
+
+        try:
+            api.write_learn(db, manuscript, "  ")
+            check("write_learn refuses an empty lesson", False)
+        except ValueError as err:
+            check("write_learn refuses an empty lesson",
+                  "empty lesson" in str(err), str(err))
+        learned = api.write_learn(
+            db, manuscript, "author tightens openers — propose tighter")
+        check("write_learn appends a session lesson",
+              learned["learnings"] == [
+                  "author tightens openers — propose tighter"],
+              str(learned))
+
+        completed = api.write_complete(db, manuscript, config)
+        check("write_complete closes the writeup",
+              completed["writeup_id"] == prop_1["writeup_id"]
+              and db.one("SELECT status FROM writeups WHERE id = ?",
+                         (prop_1["writeup_id"],))["status"] == "completed",
+              str(completed))
+        try:
+            api.write_propose(db, manuscript, "late", "why")
+            check("write_propose on a completed writeup is refused", False)
+        except LookupError as err:
+            check("write_propose on a completed writeup is refused",
+                  "no active writeup" in str(err), str(err))
+
+        # Abandon must restore the pinned source — a truncated dead writeup
+        # is the worst end state for the manuscript file.
+        api.write_start(db, manuscript, config, "01-choice.md", intent_id)
+        check("second writeup truncates its file",
+              (ms / "01-choice.md").read_text(encoding="utf-8") == "")
+        abandoned = api.write_abandon(db, manuscript, config)
+        check("write_abandon restores the pinned source version",
+              abandoned["restored"] is True
+              and (ms / "01-choice.md").read_text(encoding="utf-8")
+              == "# Choice\n\nEvery act begins with choice.\n",
+              str(abandoned))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
+    check_write_api_gates()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

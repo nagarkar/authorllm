@@ -316,6 +316,37 @@ def test_reconcile_other_kinds(db, ms, target):
 
 # ------------------------------------------------------------------ ④ screen
 
+def test_screen_short_circuits(db, ms, target):
+    """Screen must be a silent no-op when it cannot name a law to cut on —
+    empty queue, disabled/missing LLM, or no active law. Otherwise a
+    confused reply (or a billed call with nothing to enforce) would
+    resolve open proposals without attribution."""
+    spec = loop.spec_for("proposals/note_update")
+    check("screen finds no active law before any belief is validated",
+          loop.active_law(db, ms["id"], spec) == [])
+    fresh = prop.create(db, ms["id"], "note_update", target, note_payload(
+        "A provisional note that only exists so the short-circuit has a row."))
+    rows = [dict(db.one("SELECT * FROM knowledge_proposals WHERE id = ?",
+                        (fresh["id"],)))]
+    class Off:
+        enabled = False
+
+    noisy = ScriptedLLM(json.dumps(
+        {"cut": [{"n": 1, "law": "x", "reason": "should never run"}]}))
+    check("empty queue never calls the model",
+          loop.screen(db, ms["id"], spec, [], noisy) == []
+          and noisy.prompts == [])
+    check("disabled LLM never calls the model",
+          loop.screen(db, ms["id"], spec, rows, Off()) == [])
+    check("missing LLM never calls the model",
+          loop.screen(db, ms["id"], spec, rows, None) == [])
+    check("no active law never calls the model",
+          loop.screen(db, ms["id"], spec, rows, noisy) == []
+          and noisy.prompts == [])
+    check("short-circuits leave the proposal open",
+          fresh["id"] in {r["id"] for r in prop.open_proposals(db, ms["id"])})
+
+
 def test_screen_and_folds(db, ms, target):
     spec = loop.spec_for("proposals/note_update")
     law = [e for e in loop.active_law(db, ms["id"], spec)]
@@ -363,6 +394,21 @@ def test_screen_and_folds(db, ms, target):
           folds[0]["statement"])
     check("the fold shows the belief is unblessed",
           folds[0]["accepted"] is False)
+
+    # A retired belief must stay visible in the fold — vanishing would hide
+    # the damage that falsifies it. Restore afterward so retraction can run.
+    live_statement = folds[0]["statement"]
+    db.update("editorial_beliefs", law[0]["id"], {"status": "retired"})
+    retired_folds = loop.folded(db, ms["id"], spec)
+    check("a cut whose law was retired still folds, labeled as retired",
+          len(retired_folds) == 1
+          and retired_folds[0]["statement"] == "(law retired)"
+          and retired_folds[0]["accepted"] is False
+          and retired_folds[0]["count"] == 1,
+          str(retired_folds))
+    check("retiring does not invent a substitute statement",
+          retired_folds[0]["statement"] != live_statement)
+    db.update("editorial_beliefs", law[0]["id"], {"status": "validated"})
 
     listing = api.list_proposals(db, ms)
     check("list_proposals is compact by default",
@@ -465,6 +511,10 @@ def main_test():
     db, ms, target = fixture()
     print("firewall")
     test_firewall(db, ms, target)
+    print("screen short-circuits")
+    # Before any belief is validated — the no-law branch is otherwise
+    # unreachable once semantic matching promotes a triage belief.
+    test_screen_short_circuits(db, ms, target)
     print("thresholds")
     test_thresholds()
     print("semantic matching")
