@@ -1833,6 +1833,177 @@ def check_summary_deprecation() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+DIGEST_OK = {
+    "points": [
+        {"id": "p1", "claim": "the first point"},
+        {"id": "p2", "claim": "the second point"},
+    ],
+    "examples": [{"id": "x1", "example": "an example", "serves": ["p1"]}],
+    "references": [{"id": "r1", "reference": "a reference"}],
+    "inconsistencies": [{"id": "i1", "with": "01-choice.md",
+                         "note": "contradicts the opening", "points": ["p2"]}],
+}
+
+
+def check_digest_schema() -> None:
+    """UC-B's digest schema (design-usecases §1.2.3, tests B8-B19) plus the
+    two invariants the feature must not move (I1, I6).
+
+    The digest is what makes the removal accounting trustworthy rather than
+    decorative, so every rule here is a refusal, not a coercion: a dangling
+    cross-reference, a duplicate id, or a contradiction "with" an essay that
+    does not exist is a typo, and storing it would make the accounting lie.
+    """
+    import copy
+    import json as _json
+
+    from authorlm.db import ko_fields as _ko
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-digest-")
+    try:
+        (ms / "01-choice.md").write_text("# Opening\n\nEvery act begins with "
+                                         "a choice.\n")
+        (ms / "02-essay.md").write_text("# The Essay\n\nThe old opening "
+                                        "paragraph, soon to be raw "
+                                        "material.\n")
+        config = api.load_config(str(ws))
+        api.ensure_session(db, manuscript)
+        api.collect(db, manuscript, config, source="test")
+        version = db.one("SELECT * FROM manuscript_versions WHERE "
+                         "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
+                         (manuscript["id"],))
+        intent = api.declare_intent(db, manuscript, "Rewrite the essay")
+        writeup = _ko("wu")
+        writeup.update(
+            manuscript_id=manuscript["id"], intent_id=intent["intent"]["id"],
+            file="02-essay.md", mode="fresh", status="active",
+            source_version_id=version["id"], plan="[]", cursor=0,
+            learnings="[]",
+            metadata=_json.dumps({"next_n": 1, "placement": None,
+                                  "created_file": False, "brief": None}))
+        db.insert("writeups", writeup)
+
+        def refused(label: str, payload, *needles: str) -> None:
+            try:
+                api._validate_digest(db, manuscript, payload)
+            except ValueError as err:
+                missing = [n for n in needles if n not in str(err)]
+                check(label, not missing, f"{err}\nmissing: {missing}")
+                return
+            check(label, False, "no ValueError raised")
+
+        refused("B8 — a digest that is not a JSON object is refused",
+                ["p1"], "JSON object")
+        refused('B8 — a digest with no "points" is refused, naming the key',
+                {"examples": []}, "points")
+        refused('B8 — an EMPTY "points" list is refused: a digest with no '
+                "points cannot account for anything",
+                {"points": []}, "points", "non-empty")
+        refused("B9 — a typo'd top-level key is REFUSED, not silently "
+                "dropped (a mislaid \"referances\" would discard the "
+                "references and the accounting would never know)",
+                dict(DIGEST_OK, referances=[]), "referances", "unknown")
+        duplicated = copy.deepcopy(DIGEST_OK)
+        duplicated["examples"][0]["id"] = "p1"
+        refused("B10 — an id reused across two lists is refused: there is "
+                "one id namespace, because the accounting references ids "
+                "without saying which list they came from",
+                duplicated, "p1", "unique")
+        for bad_id in ("p 1", "p" * 40, "", None):
+            broken = copy.deepcopy(DIGEST_OK)
+            broken["points"][0]["id"] = bad_id
+            refused(f"B11 — the id {bad_id!r} fails the charset/length rule",
+                    broken, "id")
+        for list_name, field in api.DIGEST_LISTS.items():
+            broken = copy.deepcopy(DIGEST_OK)
+            broken[list_name][0][field] = "   "
+            refused(f'B12 — an empty "{field}" in {list_name} is refused',
+                    broken, field)
+        dangling = copy.deepcopy(DIGEST_OK)
+        dangling["examples"][0]["serves"] = ["p9"]
+        refused("B13 — a cross-reference to an id the digest does not have "
+                "is refused as dangling",
+                dangling, "p9", "dangling")
+        not_a_point = copy.deepcopy(DIGEST_OK)
+        not_a_point["references"][0]["serves"] = ["x1"]
+        refused("B14 — a cross-reference to a non-point id is refused: "
+                "serves/points name POINT ids",
+                not_a_point, "x1", "point ids")
+        ghost = copy.deepcopy(DIGEST_OK)
+        ghost["inconsistencies"][0]["with"] = "nope.md"
+        refused('B15 — an inconsistency "with" an essay that does not exist '
+                "is a typo, not a finding",
+                ghost, "no document matching 'nope.md'")
+
+        stored = _json.loads(db.one("SELECT * FROM writeups WHERE id = ?",
+                                    (writeup["id"],))["metadata"])
+        check("B16 — after every one of B8-B15 the writeup still carries no "
+              "digest: validation is all-or-nothing, because a digest that "
+              "half-persists leaves the accounting silently wrong (K8)",
+              "digest" not in stored, str(stored))
+        for label, payload in (("bad top-level key",
+                                dict(DIGEST_OK, referances=[])),
+                               ("dangling cross-reference", dangling)):
+            try:
+                api.write_digest(db, manuscript, payload=payload)
+                check(f"B16 — write_digest refuses a digest with a {label}",
+                      False, "no ValueError raised")
+            except ValueError:
+                check(f"B16 — write_digest refuses a digest with a {label}",
+                      True)
+        stored = _json.loads(db.one("SELECT * FROM writeups WHERE id = ?",
+                                    (writeup["id"],))["metadata"])
+        check("B16 — and the refused digest was not written",
+              "digest" not in stored, str(stored))
+
+        minimal = api._validate_digest(
+            db, manuscript, {"points": [{"id": "p1", "claim": "only point"}]})
+        check("B17 — the three optional lists normalize to [] when absent",
+              minimal["examples"] == [] and minimal["references"] == []
+              and minimal["inconsistencies"] == [], str(minimal))
+        result = api.write_digest(
+            db, manuscript,
+            payload={"points": [{"id": "p1", "claim": "only point",
+                                 "confidence": 0.4}],
+                     "source_version_id": "forged-by-the-skill"})
+        digest = result["digest"]
+        check("B17 — the verb stamps the provenance the skill cannot forge",
+              digest["source_version_id"] == version["id"]
+              and digest["source_file"] == "02-essay.md"
+              and digest["point_count"] == 1
+              and digest["recorded_at"], str(digest))
+        check("B18 — an item-level key the CLI has no opinion about is "
+              "preserved verbatim (the skill may carry extra structure)",
+              digest["points"][0]["confidence"] == 0.4, str(digest["points"]))
+        check("B19 — a stdin-supplied source_version_id is OVERWRITTEN, "
+              "never trusted",
+              digest["source_version_id"] != "forged-by-the-skill",
+              str(digest))
+
+        # --- invariants -------------------------------------------------
+        check("I1 — GUIDANCE_KINDS is untouched: the digest is metadata, "
+              "not a guidance kind — it is proposed by nobody, reviewed by "
+              "nobody, superseded by nobody",
+              guidance_module.GUIDANCE_KINDS == frozenset(
+                  {"bridge", "prerequisite", "definition", "objection",
+                   "belief_reminder", "focus", "abstention"})
+              and "digest" not in guidance_module.GUIDANCE_KINDS
+              and "beat" not in guidance_module.GUIDANCE_KINDS,
+              str(sorted(guidance_module.GUIDANCE_KINDS)))
+        columns = {r[1] for r in
+                   db.conn.execute("PRAGMA table_info(writeups)").fetchall()}
+        check("I6 — no schema change: everything new rides in "
+              "writeups.metadata, which is already a JSON TEXT column",
+              columns == {"id", "version", "created_at", "created_by",
+                          "schema_version", "metadata", "manuscript_id",
+                          "intent_id", "file", "mode", "status",
+                          "source_version_id", "plan", "cursor",
+                          "learnings"},
+              str(sorted(columns)))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
@@ -1851,6 +2022,7 @@ def main_test() -> None:
     check_note_materiality()
     check_alias_guide_flip()
     check_alias_retired_guard()
+    check_digest_schema()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
