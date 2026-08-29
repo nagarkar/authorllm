@@ -2491,6 +2491,37 @@ def scenario_parallel_writeups(root: Path) -> None:
               being["status"] == "declared"
               and being["introduced_in"] is None, str(dict(being)))
 
+        # E9, the half that matters: an extraction that ACTUALLY RUNS
+        # while the file is mid-rewrite. The payloads this module builds
+        # are `=== <name> ===` labelled concatenations, so a whole-payload
+        # `is_placeholder` check can never fire — the guard has to be per
+        # FILE or it is dead code that reads like a guard.
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = run(ws, "extract", "01-choice.md", "--full")
+        check("E9 — extracting the in-flight file specifically mines "
+              "NOTHING: it is dropped per file, so the payload is empty "
+              "and the pass ends rather than sending a marker to a model",
+              not [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                   if _api.MARKER in u],
+              next((u[:400] for s, u in StubLLMHandler.PAYLOADS[mark:]
+                    if _api.MARKER in u), out))
+
+        mark = len(StubLLMHandler.PAYLOADS)
+        write(ms / "03-third.md", CH3 + "\nA paragraph added during the "
+                                        "rewrite window.\n")
+        run(ws, "collect")
+        run(ws, "extract", "--full")
+        during = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                  if "LOAD-BEARING units of thought" in s]
+        check("E9 — and a FULL extraction during the window mines the "
+              "other essays and skips only the one in flight",
+              during and not any(_api.MARKER in u for u in during)
+              and any("trajectory" in u for u in during),
+              next((u[:400] for u in during if _api.MARKER in u),
+                   f"{len(during)} payload(s)"))
+        write(ms / "03-third.md", CH3)
+        run(ws, "collect")
+
         out = run_stdin(ws, "", "write", "complete", "--writeup", b_id,
                         expect_exit=True)
         check("E5 — completing a writeup whose file is STILL only the "
@@ -2644,16 +2675,21 @@ def scenario_parallel_writeups(root: Path) -> None:
         # (An episode-analysis payload legitimately quotes the truncation
         # transition — that is a record of what happened on disk, not the
         # extractor being asked to mine a marker for concepts.)
-        mined = [user for system, user in StubLLMHandler.PAYLOADS[payload_mark:]
-                 if "LOAD-BEARING units of thought" in system
-                 or "ONLY relationships among the known concepts" in system
-                 or "sole task is to find aliasing statements" in system]
+        def _mined(since: int) -> list[str]:
+            return [user for system, user
+                    in StubLLMHandler.PAYLOADS[since:]
+                    if "LOAD-BEARING units of thought" in system
+                    or "ONLY relationships among the known concepts" in system
+                    or "sole task is to find aliasing statements" in system]
+
+        mined = _mined(payload_mark)
         check("E9 — and no EXTRACTION payload in this scenario was ever "
-              "handed the marker as prose: the extractor's empty-chapter "
-              "skip covers a placeholder too",
+              "handed the marker as prose",
               mined and not any(_api.MARKER in u for u in mined),
               next((u[:400] for u in mined if _api.MARKER in u),
                    f"{len(mined)} extraction payload(s)"))
+        check("E9 — and the run did extract, so that is not vacuous",
+              len(mined) >= 1, f"{len(mined)} extraction payload(s)")
     finally:
         server.shutdown()
 

@@ -513,7 +513,12 @@ def collect(db: Database, manuscript: dict, config: dict,
     gaps_before = (
         compute_prerequisite_gaps(db, mid, loads(before["files"], {})) if before else []
     )
-    gaps_after = compute_prerequisite_gaps(db, mid, loads(version["files"], {}))
+    # Blinded for the same reason the concept scans are (`_blind`, above):
+    # this walks the same case-insensitive concept patterns over the same
+    # file texts, so an unblinded placeholder could close a prerequisite
+    # gap — "the concept now appears in this essay" — on the strength of a
+    # word inside a marker.
+    gaps_after = compute_prerequisite_gaps(db, mid, _blind)
     before_keys = {g["edge_id"] for g in gaps_before}
     after_keys = {g["edge_id"] for g in gaps_after}
 
@@ -786,17 +791,51 @@ def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
 
 
 def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
-    """The active writeup (or one matched by id prefix)."""
+    """The active writeup — matched by id prefix, or by FILE NAME.
+
+    Two writeups at once is now an ordinary way to work (design §14), and
+    it makes `--writeup` a constant companion. The author knows which
+    essay they mean; asking them to go and fetch an opaque `wu-…` id to
+    say so is friction for nothing. So the disambiguator also accepts the
+    file: exact relpath first, then a unique case-insensitive substring —
+    the same forgiveness `docs._match` gives every other file argument.
+
+    Id matching is tried FIRST and unchanged, so nothing that worked
+    before resolves differently now. Ambiguity is still refused rather
+    than guessed at, in both directions, and an id-shaped miss still
+    reports itself as one."""
     if prefix:
         rows = db.all(
             "SELECT * FROM writeups WHERE manuscript_id = ? AND id LIKE ?",
             (manuscript["id"], f"%{prefix}%"),
         )
-        if not rows:
-            raise LookupError(f"no writeup matching '{prefix}'")
         if len(rows) > 1:
             raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} writeups)")
-        return dict(rows[0])
+        if rows:
+            return dict(rows[0])
+        # Not an id. Try it as the essay's name, ACTIVE writeups first —
+        # a finished writeup on the same file must not shadow the open
+        # one the author is obviously talking about.
+        by_file = db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? "
+            "ORDER BY (status = 'active') DESC, created_at DESC",
+            (manuscript["id"],))
+        exact = [r for r in by_file if r["file"] == prefix]
+        hits = exact or [r for r in by_file
+                         if prefix.lower() in r["file"].lower()]
+        if not hits:
+            raise LookupError(
+                f"no writeup matching '{prefix}' — it is neither a writeup "
+                f"id prefix nor the name of a file with a writeup on it "
+                f"(open ones: "
+                f"{', '.join(r['file'] for r in by_file if r['status'] == 'active') or 'none'})")
+        names = {r["file"] for r in hits}
+        if len(names) > 1:
+            raise LookupError(
+                f"'{prefix}' is ambiguous — it matches "
+                f"{', '.join(sorted(names))}; name the file exactly, or "
+                f"pass the writeup id")
+        return dict(hits[0])
     rows = db.all(
         "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
         (manuscript["id"],),
@@ -805,7 +844,9 @@ def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
         raise LookupError("no active writeup — start one: write start <file> --intent <id>")
     if len(rows) > 1:
         files = ", ".join(r["file"] for r in rows)
-        raise LookupError(f"multiple active writeups ({files}) — pass --writeup")
+        raise LookupError(
+            f"multiple active writeups ({files}) — pass --writeup with the "
+            f"file name (e.g. --writeup {rows[0]['file']}) or a writeup id")
     return dict(rows[0])
 
 

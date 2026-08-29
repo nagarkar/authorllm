@@ -2708,8 +2708,6 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     from .revisions import strip_embed_lines as _strip_embeds
 
     bridge = bridge or manuscript_bridge(manuscript)
-    _refuse_mid_rewrite(
-        relpath, (bridge.root / relpath).read_text(encoding="utf-8"))
     mid = manuscript["id"]
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
@@ -2718,6 +2716,11 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     tab_id = entry.get("tab_id")
     if not (master_id and tab_id):
         raise LookupError(f"'{relpath}' has no tab in the master Doc")
+    # AFTER the no-tab refusal, deliberately: this reads the file, and a
+    # mapped-but-missing file would otherwise surface a raw
+    # FileNotFoundError in place of the precise message above.
+    _refuse_mid_rewrite(
+        relpath, (bridge.root / relpath).read_text(encoding="utf-8"))
 
     local_md = _strip_embeds(normalize_markdown(
         (bridge.root / relpath).read_text(encoding="utf-8")))

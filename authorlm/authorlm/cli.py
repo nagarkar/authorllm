@@ -5149,7 +5149,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "yet — the file it follows, or 'start' to open the "
                         "book. Without it the reading order's own position "
                         "is used (unlisted files sort to the end)")
-    p.add_argument("--writeup", help="writeup id prefix (default: the active writeup)")
+    p.add_argument("--writeup", help="which writeup: an id prefix or the "
+                                     "essay's file name (default: the active "
+                                     "writeup, when there is only one)")
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")
     p.add_argument("--reason", help="reject: the author's why, verbatim "

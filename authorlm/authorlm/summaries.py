@@ -285,8 +285,15 @@ def status(db: Database, manuscript: dict) -> list[dict]:
     for file, text in texts.items():
         row = have.get(file)
         state = _state(row, text, flight.get(file, NOT_IN_FLIGHT))
+        # A word count is a claim that a summary is being offered for this
+        # essay. For `unwritten` there is none (§1.3 serves nothing
+        # regardless of any row), exactly as for `deprecated`'s dead row —
+        # so neither reports a length borrowed from a summary of something
+        # else.
+        countable = row is not None and state not in ("unwritten",
+                                                      "deprecated")
         out.append({"file": file, "state": state,
-                    "words": len(row["summary"].split()) if row else 0,
+                    "words": len(row["summary"].split()) if countable else 0,
                     "created_at": row["created_at"] if row else None})
     return out
 

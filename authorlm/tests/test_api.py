@@ -2074,6 +2074,192 @@ def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
     return root, ws, db, manuscript, intent
 
 
+def check_placeholder_reader_paths() -> None:
+    """AC-1 review F5/F6/RK6: the paths that READ a mid-rewrite file.
+
+    Each of these vanished silently under neutralization — the code was
+    there and nothing would have noticed its removal, which for a marker
+    that must never reach a reader is the wrong kind of quiet."""
+    import io
+    import json as _json
+
+    from authorlm import gdocs as _gdocs
+    from authorlm import sweeps as _sweeps
+
+    root, ws, db, manuscript, intent = _writeup_fixture("authorlm-ph-")
+    ms = Path(manuscript["path"])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_start(db, manuscript, {}, "01-epictetus.md",
+                            intent["id"][:8])
+        path = ms / "01-epictetus.md"
+        check("the fixture is mid-rewrite",
+              path.read_text() == api.PLACEHOLDER)
+
+        # --- change 25: no readability row for a marker.
+        check("F5 — chapter_stats returns {} for a placeholder, as it "
+              "already does for an empty file: a Flesch score for a "
+              "mid-rewrite marker is noise in the manifest",
+              _gdocs.chapter_stats(api.PLACEHOLDER) == {},
+              str(_gdocs.chapter_stats(api.PLACEHOLDER)))
+        check("...and it still scores real prose (the guard did not "
+              "swallow the function)",
+              _gdocs.chapter_stats("# H\n\nA sentence of real prose "
+                                   "stands here.\n").get("fre") is not None)
+
+        # --- change 24: neither push path may make the Doc the working
+        # copy for a file that has no text yet.
+        try:
+            _gdocs.push_doc(db, manuscript, "01-epictetus.md",
+                            service=None, docs_service=None)
+            raised = None
+        except Exception as err:
+            # Deliberately broad: without the refusal this path runs on
+            # into the Google client and dies with an AttributeError, and
+            # the point of the check is that it stops HERE, with a message
+            # for the author — not merely that something went wrong.
+            raised = f"{type(err).__name__}: {err}"
+        check("F5 — doc push is REFUSED on a mid-rewrite file, naming both "
+              "exits: a push makes the Doc the working copy, and the next "
+              "pull would then be the authority over an essay that lives "
+              "only in the database",
+              raised is not None and "mid-rewrite" in raised
+              and "write complete" in raised and "write abandon" in raised,
+              str(raised))
+
+        row = db.one("SELECT * FROM manuscripts WHERE id = ?",
+                     (manuscript["id"],))
+        meta = _json.loads(row["metadata"] or "{}")
+        meta["gdocs"] = {"_master_id": "doc-1",
+                         "01-epictetus.md": {"tab_id": "tab-1"}}
+        db.update("manuscripts", manuscript["id"],
+                  {"metadata": _json.dumps(meta)})
+        manuscript = api.get_manuscript(db)
+        try:
+            _gdocs.diff_push(db, manuscript, "01-epictetus.md", None, None)
+            raised = None
+        except Exception as err:
+            raised = f"{type(err).__name__}: {err}"
+        check("F5 — and so is the SURGICAL push (diff_push), which is the "
+              "path an essay with open margin threads actually takes",
+              raised is not None and "mid-rewrite" in raised, str(raised))
+        # F8: the read that refusal performs must sit BELOW the no-tab
+        # check, or a mapped-but-missing file surfaces a raw OSError in
+        # place of the precise message.
+        meta["gdocs"] = {"_master_id": "doc-1"}
+        db.update("manuscripts", manuscript["id"],
+                  {"metadata": _json.dumps(meta)})
+        manuscript = api.get_manuscript(db)
+        try:
+            _gdocs.diff_push(db, manuscript, "gone.md", None, None)
+            raised = None
+        except Exception as err:
+            raised = f"{type(err).__name__}: {err}"
+        check("F8 — a file with no tab still gets the precise no-tab "
+              "refusal, not a FileNotFoundError from the mid-rewrite read",
+              raised is not None and "has no tab in the master Doc" in raised,
+              str(raised))
+
+        # --- change 29: the pre-publication checklist saw nothing.
+        ready = _sweeps.readiness(db, manuscript)
+        writeup_item = next((i for i in ready["items"]
+                             if i["check"] == "no open writeups"), None)
+        check("F5 — the pre-publication checklist reports the open "
+              "writeup instead of calling a mid-surgery manuscript ready",
+              writeup_item is not None and writeup_item["ok"] is False
+              and "01-epictetus.md" in writeup_item["detail"],
+              str(writeup_item))
+        check("F5 — and 'ready' is False while it is open",
+              ready["ready"] is False)
+
+        # --- F6: the prerequisite-gap walk reads the same case-insensitive
+        # concept patterns over the same texts as the concept scans, so it
+        # takes the same blinding.
+        seen = []
+        real_gaps = api.compute_prerequisite_gaps
+
+        def recording(db_, mid_, files):
+            seen.append(dict(files))
+            return real_gaps(db_, mid_, files)
+
+        api.compute_prerequisite_gaps = recording
+        try:
+            (ms / "02-second.md").write_text("# Second\n\nA new essay.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                api.collect(db, manuscript, {}, source="test")
+        finally:
+            api.compute_prerequisite_gaps = real_gaps
+        check("F6 — compute_prerequisite_gaps is handed the BLINDED file "
+              "map: an unblinded placeholder could close a prerequisite "
+              "gap on the strength of a word inside a marker",
+              seen and seen[-1].get("01-epictetus.md") == ""
+              and "A new essay." in seen[-1].get("02-second.md", ""),
+              str({k: v[:40] for k, v in (seen[-1] if seen else {}).items()}))
+
+        # --- RK6: two writeups make --writeup a constant companion, so it
+        # takes the essay's name as well as an opaque id.
+        api.attach_style(db, manuscript, "02-second.md",
+                         "Connections essays")
+        # The freshness gate is not what is under test here; give the
+        # in-flight neighbour a summary that matches its PINNED text, the
+        # state a `summarize rebuild` would leave it in (`rewriting`).
+        from authorlm import summaries as _sums
+        from authorlm.db import ko_fields as _ko
+
+        srow = _ko("es")
+        srow.update(manuscript_id=manuscript["id"], file="01-epictetus.md",
+                    summary="MOVES: [1] the pre-rewrite essay.",
+                    source_hash=_sums._hash(
+                        "# Epictetus\n\nThe old essay stands here.\n"),
+                    upstream_hash="", upstream_stale=0, status="current")
+        db.insert("essay_summaries", srow)
+        with contextlib.redirect_stdout(io.StringIO()):
+            second = api.write_start(db, manuscript, {}, "02-second.md",
+                                     intent["id"][:8])
+        try:
+            api._writeup(db, manuscript)
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("RK6 — with two open, a bare lookup still refuses rather "
+              "than guessing, and now shows the file-name form",
+              raised is not None and "multiple active writeups" in raised
+              and "--writeup 01-epictetus.md" in raised, str(raised))
+        check("RK6 — --writeup takes the exact file name",
+              api._writeup(db, manuscript, "02-second.md")["id"]
+              == second["writeup"]["id"])
+        check("RK6 — and a unique case-insensitive fragment of it, the "
+              "same forgiveness every other file argument gets",
+              api._writeup(db, manuscript, "EPICTETUS")["file"]
+              == "01-epictetus.md")
+        check("RK6 — the id prefix is tried FIRST and is unchanged, so "
+              "nothing that resolved before resolves differently now",
+              api._writeup(db, manuscript,
+                           second["writeup"]["id"][:8])["id"]
+              == second["writeup"]["id"])
+        try:
+            api._writeup(db, manuscript, ".md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("RK6 — a fragment matching both files is REFUSED, naming "
+              "them, rather than picking one",
+              raised is not None and "ambiguous" in raised
+              and "01-epictetus.md" in raised and "02-second.md" in raised,
+              str(raised))
+        try:
+            api._writeup(db, manuscript, "no-such-thing")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("RK6 — and a miss says it is neither an id nor a file, and "
+              "lists what IS open",
+              raised is not None and "neither a writeup id prefix" in raised
+              and "01-epictetus.md" in raised, str(raised))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_briefing_active_writeups() -> None:
     """AB-1: an essay truncated mid-writeup must surface at the system's
     front door.
@@ -2250,6 +2436,7 @@ def check_style_refusal_names_candidates() -> None:
 
 
 def main_test() -> None:
+    check_placeholder_reader_paths()
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()
     check_style_refusal_names_candidates()
