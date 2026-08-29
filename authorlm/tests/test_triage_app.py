@@ -678,22 +678,50 @@ class HelpTabTest(unittest.TestCase):
                         "the parallel-writeups section did not reach the dist")
 
     def _narrative(self) -> str:
-        """The tutorial's MAIN FLOW: everything outside a `<details>` fold
-        and outside a fenced block. Fenced blocks are excluded because
-        they quote program output verbatim, which is precisely 'what the
-        author SEES' and belongs in the main flow."""
-        out, depth, fenced = [], 0, False
+        """The tutorial's MAIN FLOW: everything outside a `<details>` fold,
+        minus the blocks that quote program output verbatim.
+
+        A ```text block is quoted output — precisely 'what the author
+        SEES', which belongs in the main flow and legitimately contains
+        verb names, because that is what the program printed. Every OTHER
+        fenced block is something the author would TYPE, so it is scanned
+        like prose: the one command block the main flow carries (the `cp`
+        backup in §3.2) must keep earning its place there rather than
+        hiding behind a blanket exemption."""
+        out, depth, quoted = [], 0, False
         for line in self.DOC.read_text(encoding="utf-8").splitlines():
-            if line.startswith("```"):
-                fenced = not fenced
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if quoted:
+                    quoted = False
+                    continue
+                if stripped == "```text":
+                    quoted = True
+                    continue
+            if quoted:
                 continue
-            if line.strip().startswith("<details"):
+            if stripped.startswith("<details"):
                 depth += 1
-            if depth == 0 and not fenced:
+            if depth == 0:
                 out.append(line)
-            if line.strip().startswith("</details>"):
+            if stripped.startswith("</details>"):
                 depth = max(0, depth - 1)
         return "\n".join(out)
+
+    def test_the_one_command_in_the_main_flow_is_the_deliberate_one(self):
+        """The main flow carries exactly one thing the author types: the
+        `cp` backup before a rewrite, which is there because the
+        manuscript directory has no version control. Asserted by name so
+        it cannot be quietly joined by others, and so `_narrative`'s
+        output-block exemption cannot be widened into a hiding place."""
+        body = self._narrative()
+        fences = [line for line in body.splitlines()
+                  if line.strip().startswith("```")]
+        self.assertEqual(len(fences), 2,
+                         f"expected one command block in the main flow, "
+                         f"found {len(fences) // 2}: {fences}")
+        self.assertIn("cp authorlm/manuscripts/", body)
+        self.assertIn("_drafts/", body)
 
     def test_the_tutorial_keeps_the_machinery_out_of_the_main_flow(self):
         """The author's audience rule: the main flow is what they SAY and
@@ -735,11 +763,67 @@ class HelpTabTest(unittest.TestCase):
                        "zero LLM"):
             self.assertNotIn(banned, text,
                              f"{banned!r}: mechanism-negation, not purpose")
-        # ...and the three spending moments are still named truthfully.
         for claim in ("Reading the finished prose for concepts",
                       "Writing each essay's compressed summary",
                       "anthropic/claude-sonnet-5"):
             self.assertIn(claim, text)
+
+    def test_the_spending_moments_are_counted_truthfully(self):
+        """Truth-in-instrument. The doc used to claim THREE spending
+        moments and omit the most frequent one: `write reject` passes an
+        LLMClient into `record_review`, which distils every explained
+        rejection into a candidate belief — and `--reason` is mandatory on
+        a rejection, so every rejection spends. A reworded acceptance the
+        author explains does the same. A tutorial that undercounts what an
+        instrument costs is the defect, not the wording."""
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertNotIn("Three moments", text,
+                         "the three-moment count omits verdict distillation")
+        self.assertIn("Four moments call out to a model", text)
+        # The frequent one, named as such and framed by its purpose.
+        self.assertIn("Every rejection, and every reworded acceptance you "
+                      "explain", text)
+        self.assertIn("every rejection spends", text)
+        # ...and the plain acceptance that does NOT spend, so the reader
+        # can tell the two apart.
+        self.assertIn("A plain acceptance costs nothing", text)
+        # F3: the three end-of-essay calls do NOT degrade alike.
+        self.assertIn("fails loudly", text)
+        self.assertNotIn("all three still succeed", text)
+
+    def test_the_session_claim_matches_the_actual_dedup(self):
+        """F4: the doc claimed a long session 'quietly caps what the system
+        can learn'. It does not — `beliefs._derive_supporting` groups
+        evidence by (session, target), so two verdicts on two different
+        beats are two different targets and both count, however long the
+        session runs. Two sections drew opposite conclusions from the same
+        false premise."""
+        text = self.DOC.read_text(encoding="utf-8")
+        for banned in ("quietly caps what",
+                       "counted once per session",
+                       "only on independent evidence\nfrom separate sessions",
+                       "chopping a session in half is the"):
+            self.assertNotIn(banned, text, f"{banned!r} is not true")
+        self.assertIn("both count, however long the session runs", text)
+        self.assertIn("does not cap what the loop learns", text)
+
+    def test_the_help_tab_renders_details_as_real_folds(self):
+        """The author's rule 3 has to hold where they actually read it.
+        The renderer used to DISCARD the <details>/<summary> tags, so the
+        Help tab showed every command expanded inline — the document was
+        arranged one way and displayed the other."""
+        src = (self.REPO / "web" / "triage-app" / "src"
+               / "markdown.tsx").read_text(encoding="utf-8")
+        self.assertNotIn(
+            'if (trimmed === "<details>" || trimmed === "</details>") '
+            "{ flush(); continue; }", src,
+            "the renderer is discarding <details> again")
+        self.assertIn("<details className=\"doc-fold\"", src,
+                      "the renderer no longer builds a real <details>")
+        built = self.DIST.read_text(encoding="utf-8")
+        self.assertTrue("doc-fold" in built,
+                        "the fold class did not reach the dist — rebuild "
+                        "(cd web/triage-app && npm run build)")
 
     def test_built_dist_carries_the_help_tab_itself(self):
         built = self.DIST.read_text(encoding="utf-8")

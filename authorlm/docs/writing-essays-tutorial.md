@@ -33,10 +33,12 @@ and why you can argue with it. It is also why the drafting step has no model
 setting of its own: there is nothing to configure, because the conversation is
 the drafting.
 
-Three moments in the workflow do call out to a model, each to do a specific job,
-each worth knowing about: finishing an essay, refreshing the summaries, and
-closing an intent. Section 10 says which model does which job and what each one
-is for.
+Other moments in the workflow do call out to a model, each to do a specific job:
+finishing an essay, refreshing the summaries, closing a goal — and, the one that
+happens most often, **turning the reason you gave into a rule you might want.**
+Every rejection you explain, and every reworded acceptance you explain, is read
+by a model that tries to state the principle behind it. Section 10 lists them
+all, says which model does which job, and says where each is configured.
 
 **One workspace note.** This workspace holds more than one manuscript, so every
 command carries the manuscript's name. The assistant adds it. If you are typing
@@ -62,9 +64,10 @@ That is deliberate: you cannot consent past a false statement about your own
 text.
 
 A sixth, softer one: if the current work session was opened on a previous day,
-the assistant should offer once to close it and start fresh. Evidence from your
-verdicts is counted once per session, so a week-long session quietly caps what
-the system can learn from you.
+the assistant should offer once to close it and start fresh. That is for
+tidiness — a stretch of work that spans a week is hard to reason about
+afterwards — and **not** because a long session costs you anything. It does not:
+see §6.
 
 <details>
 <summary><b>Under the hood — checking the prerequisites yourself</b></summary>
@@ -327,8 +330,13 @@ All three make model calls, each for its own purpose: completion runs the
 deferred concept-extraction pass (one call, plus one adjudication call when
 two-step extraction is on); the rebuild writes one fresh summary per essay whose
 text moved; `intent complete` reconstructs what you decided across the episode.
-Completion's is the only one inside `authorlm write`. With no model configured
-all three still succeed and simply learn nothing from the prose.
+Completion's is the only one inside `authorlm write`.
+
+They do NOT degrade alike with no model configured, and the difference matters:
+`write complete` succeeds and simply defers the extraction, and
+`intent complete` succeeds and skips the analysis — but `summarize rebuild`
+**fails loudly**, because a summary is the thing it exists to produce and there
+is no honest way to produce one without the model.
 </details>
 
 ---
@@ -520,7 +528,7 @@ ship, delete it — the durable record is kept separately from the prose.
 
 ### Step 7 — finishing, and the tally
 
-```
+```text
 Removal accounting: 5 point(s) kept, 2 removed, 2 UNACCOUNTED.
   UNACCOUNTED — no disposition recorded, and no 'What Was Removed and Why'
   entry can be trusted while these are open:
@@ -554,7 +562,7 @@ a replan to corrupt a verdict you already gave. Accepted text is never at risk.
 **Settle the pending draft first.** Replanning is refused while a draft awaits
 your verdict:
 
-```
+```text
 a draft is still awaiting your verdict on beat n=7 — replacing the plan would
 strand it as 'proposed' forever and lose the reason you are replanning for.
 Settle it first: 'write reject --reason "<why the plan is wrong>"' (that reason
@@ -584,14 +592,26 @@ system can be told. A bare "no" teaches nothing; "you cited *Gravity and Grace*
 — the plan said no citation beyond her name and I meant it" teaches a rule, and
 you will see it come back:
 
-```
+```text
 Beat n=1 rejected — reason recorded verbatim. Redraft with the reason in context.
 Seeded candidate belief: Do not introduce a source the ratified plan did not name.
 ```
 
-A candidate belief is not a rule yet. It becomes one only on independent evidence
-from separate sessions — a machine-authored conjecture can seed a candidate but
-can never validate one.
+**That line is where a model call happens, and it is the one you will meet most
+often:** your reason, read by a model whose whole job is to say what principle
+it implies — or to say that it implies none, when the reason was about this beat
+and nothing else. It never invents the rule from the draft; it works from the
+sentence you actually wrote. A reason is required on a rejection, so **every
+rejection spends**, and so does a reworded acceptance when you explain it. A
+plain "yes" costs nothing. If no model is configured your reason is still
+recorded and still seeds a candidate — just verbatim, unpolished.
+
+A candidate belief is not a rule yet. It becomes one only on several
+**independent** observations — different verdicts about different drafts. Two
+records collapse into one only when they are literally the same observation
+twice (same session, same draft), which is there so a replay cannot inflate the
+count; two real verdicts always count as two, even in one sitting. A
+machine-authored conjecture can seed a candidate but can never validate one.
 
 A reason is required on a rejection. On an acceptance it is optional but welcome:
 an explained *yes* is evidence too. If you accept bare, you should be asked once
@@ -673,11 +693,19 @@ what to leave alone.
 
 **A session is the ambient stretch of work.** It starts by itself the moment you
 do anything, and it closes by itself when you have been away long enough. It is
-the container for everything below. **You never need to restart it**, and
-restarting it mid-work is the one thing that actively costs you: evidence from
-your verdicts is counted once per session, so chopping a session in half is the
-only way to lose what the system learned. The only good reason to close one is
-that it was opened on a previous day.
+the container for everything below, and **you never need to restart it.**
+
+It is worth being exact about what a session does and does not affect, because
+it is easy to assume the wrong thing in either direction. When the system counts
+how much evidence stands behind a candidate rule, two records collapse into one
+**only when they are the same observation twice** — the same session *and* the
+same thing observed. That is there so replaying an analysis, or your typing the
+identical explanation twice in one sitting, does not look like two independent
+findings. Two different verdicts on two different beats are two different
+things observed, so **both count, however long the session runs.** A long
+session does not cap what the loop learns from you, and chopping one in half
+does not help it. Close one when it has stopped describing a coherent stretch of
+work, and for no other reason.
 
 **An intent is a goal you declared.** "Rewrite the Epictetus essay." "Write the
 Weil essay." Several can be open at once, and they are closed one at a time when
@@ -698,7 +726,11 @@ the session is not a thing you manage.
 <summary><b>Under the hood</b></summary>
 
 A session is a `sessions` row, auto-created by `ensure_session` on any state
-change and retroactively closed once it exceeds `idle_hours`. An intent is a
+change and retroactively closed once it exceeds `idle_hours`. The dedup above is
+`beliefs._derive_supporting`, which groups evidence by
+`(session_id or evidence id, target)` — so same session AND same target
+collapses, and nothing else does; a beat's `target` is its own draft text, so two
+beats never collide. An intent is a
 `declared_intents` row (`declare` / `complete` / `abandon`); `intent complete`
 runs episode analysis. A writeup is a `writeups` row bound to one intent by
 `intent_id`, holding `source_version_id` (the pinned original), `plan`,
@@ -724,7 +756,7 @@ database, never the placeholder on disk. That is the honest thing to serve, and
 it is the useful one. But it is a version of the essay that is on its way out,
 and you are told so, at the top of the frame and again on the entry itself:
 
-```
+```text
 !! 1 essay in this context is being written right now, in another writeup:
 !!   01-choice.md — mid-rewrite. What you get below is the PRE-REWRITE essay,
 !!     summarized from that writeup's pinned source version, not from the file
@@ -790,7 +822,7 @@ says so, and the single-file rebuild refuses. Design: §14 of
 mid-surgery on disk, so it is manuscript state, not knowledge, and it is printed
 first and in yellow whenever you open a conversation or ask for a briefing:
 
-```
+```text
 Open writeups — these files are truncated on disk and rebuilding one accepted
 beat at a time:
   • epictetus.md — beat 4 of 9 · a draft awaits your verdict [wu-55ce0 · intent di-b814d]
@@ -847,14 +879,14 @@ and the difference is severe enough to state plainly.
 **Rewriting an existing essay:** the file is restored from the pinned copy,
 exactly as it was, byte for byte.
 
-```
+```text
 Writeup [wu-3d80b6e2] abandoned; file restored from the pinned source version.
 ```
 
 **A new essay:** the thing to restore it to is *nonexistence*, so **the file is
 deleted**, and the style attachment created along with it is removed too.
 
-```
+```text
 Writeup [wu-9c2f4a1b] abandoned; weil.md deleted — the writeup created it, so
 the restore target is nonexistence.
 Its text is preserved in v421 (nothing typed into it was lost).
@@ -887,14 +919,19 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 ## 10. What it costs, and which model does what
 
 Drafting the beats costs nothing beyond the conversation you are already having —
-it happens there, in front of you. Three moments call out to a model, each for a
+it happens there, in front of you. Four moments call out to a model, each for a
 job worth naming:
 
 | Moment | What the model is for |
 |---|---|
+| **Every rejection, and every reworded acceptance you explain** | Reading the reason you gave and trying to state the principle behind it, so it can be offered back to you later as a candidate rule. This is the frequent one — a reason is required on a rejection, so **every rejection spends** — and it is the one the loop learns from. It may also decide your reason was too situation-specific to generalise and propose nothing. |
 | **Finishing an essay** | Reading the finished prose for concepts and relationships you might want to add to the graph. Deferred through the whole loop deliberately, so it happens once over a finished essay rather than partially over every fragment. |
 | **Refreshing summaries** | Writing each essay's compressed summary — the few sentences every other essay's frame is built from. One call per essay whose text moved. |
 | **Closing a goal** | Reconstructing what you decided across the episode, so recurring patterns can be offered to you as candidate rules. |
+
+A plain acceptance costs nothing, with or without a reason: only a rejection or
+a reworded acceptance carries a correction, and a correction is what there is a
+principle to extract from.
 
 Two others sit next to the loop rather than inside it: the critique pass, which
 proposes line edits over one essay at a time, and illustration rendering.
@@ -908,7 +945,8 @@ Everything is in `authorlm/config.toml`, versioned with the code. Keys live in
 | Job | Model | Set in |
 |---|---|---|
 | Concept extraction, and the adjudication step that screens its candidates | `gemini/gemini-2.5-flash` | `[llm] model` — the default for anything without its own setting |
-| Episode analysis, belief distillation, guidance | `gemini/gemini-2.5-flash` | same default |
+| Turning a verdict's reason into a candidate rule (`record_review` → the belief distiller, on every explained rejection and every explained reword) | `gemini/gemini-2.5-flash` | same default |
+| Episode analysis, guidance | `gemini/gemini-2.5-flash` | same default |
 | Essay summaries | `anthropic/claude-sonnet-5` | `[critique] summarizer_model` |
 | The critique editor pass | `anthropic/claude-sonnet-5` | `[critique] editor_model` |
 | Illustration rendering | `openai/gpt-image-2`, 1536×1024 | `[illustrations] model`, `[illustrations] image_size` |
@@ -926,7 +964,10 @@ loudly rather than quietly degrading.
 
 Things that are true today and that you will meet:
 
-1. **Every command needs the manuscript name** in this workspace.
+1. **Every command needs the manuscript name** in this workspace, because it
+   holds more than one manuscript. Worth knowing if you ever read the design
+   documents: the simulated transcripts in `design-usecases.md` §5 leave it out
+   and **would fail exactly as typed**. Nothing else in the tree says so.
 2. **A lesson has to arrive on stdin.** Passing it as an argument silently drops
    it and then errors asking for stdin.
 3. **The claim-in-the-plan rule is not enforced by code.** A beat described only
@@ -935,7 +976,9 @@ Things that are true today and that you will meet:
    attribution.
 4. **Refreshing the summaries is not automatic.** It is needed both before a
    start that the gate refuses and after every finish, and it costs one call per
-   essay whose text moved (roughly twenty-four for the whole book).
+   essay whose text moved (roughly twenty-four for the whole book). It is also
+   the one step that **fails outright** with no model configured, rather than
+   skipping quietly — see §10.
 5. **Two candidate drafts per beat are not supported.** If you find yourself
    wishing for a second option, say so — that is the trigger for a deliberately
    deferred feature, and the count is the evidence for building it.

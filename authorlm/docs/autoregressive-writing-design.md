@@ -984,10 +984,18 @@ again. Its summary now describes neither disk nor anything else — `stale`, lou
 gates, remedied by `summarize rebuild`, which is exactly what `write complete` already tells the
 author to run.
 
-**Abandoned:** the restore writes the pinned text back byte for byte, so the hash round trip closes
-and the summary reads `fresh` again on the next context read (the drafting context is recomputed on
-every read, so the neighbour's next `write status` simply stops warning). An abandoned `--new`
-writeup deletes its file, which leaves the reading order and takes its `unwritten` entry with it.
+**Abandoned:** the restore writes the pinned text back byte for byte, so the **hash round trip
+closes** — the stored `source_hash` matches the restored text again, the entry stops reading `stale`,
+and both gates accept it with nothing to rebuild. It does not necessarily read `fresh`: the truncation
+upstream was a real change, so the neighbour is normally left `upstream_stale`, which is tolerated
+(its own text did not move, only its conditioning). The drafting context is recomputed on every read,
+so the neighbour's next `write status` simply stops warning. An abandoned `--new` writeup deletes its
+file, which leaves the reading order and takes its `unwritten` entry with it.
+
+*(Corrected 2026-08-29 during review: the section as first written said "reads `fresh` again", which
+the test E6 could not reproduce because the fixture is realistic — the upstream truncation leaves the
+restored neighbour `upstream_stale`. The test was right and this paragraph was wrong; the property
+that actually matters, and is now asserted, is the hash round trip plus both gates accepting.)*
 
 ### 14.6 What is deliberately not done
 
@@ -1000,6 +1008,20 @@ writeup deletes its file, which leaves the reading order and takes its `unwritte
   is the failure mode §13.3 exists to prevent.
 - **No summary rebuild at `write complete`** — unchanged from §13.4, and this section does not
   become a reason to add one.
+- **Four consumers are deliberately NOT blinded**, recorded here so they are not rediscovered later
+  as regressions of this change (review 2026-08-29). Each one is *about* what happened on disk, which
+  is exactly what the placeholder truthfully records:
+  - **the collected transition itself** — a truncation records a `rewrite` ("Rewrote N → 1
+    paragraph(s)"), and episode analysis quotes that transition in its OBSERVED CHANGES payload. That
+    is a record of an event, not the extractor being asked to mine a marker for concepts.
+  - **`sweeps.ontology`** and **`lenses.run_native`** — both read manuscript text directly. A
+    mid-rewrite file will read as a near-empty essay in their reports, which is what it is; neither
+    writes to the graph.
+  - **`collect`'s `extract_hint` threshold** — the truncation's paragraph delta counts toward the
+    "enough changed to be worth extracting" hint. Harmless: the hint only suggests running the
+    extractor, which now skips the file per file (§14.7's F1 correction).
+  What IS blinded is everything that would write a claim about the essay from those bytes: the
+  realization and primary-location scans, the prerequisite-gap walk, and the extractor.
 
 ### 14.7 One capture per invocation (2026-08-29, after a live incident)
 
@@ -1033,3 +1055,23 @@ hash the rebuild stores is the hash the in-flight logic looks for, and the entry
 Not done: any locking, and any re-read to *detect* that the manuscript moved mid-verb. The
 capture is a consistent view, not a transaction; a verb finishes against the manuscript it
 started with, and says so.
+
+### 14.8 The extraction guard was dead code (2026-08-29, review F1)
+
+Worth recording, because the shape of the mistake is reusable. §14.3 says the extractor is taught
+that a placeholder is not prose, and the code said so too — `if not text.strip() or
+is_placeholder(text)` in `extract_concepts`. It never fired once. Every payload `extraction.py`
+builds is a concatenation of `=== <name> ===` labelled chunks (`_manuscript_text`,
+`_section_payloads`), so a whole-string match against an assembled payload cannot succeed by
+construction. The guard read exactly like a guard, passed review, and sent the marker to the model.
+
+The fix is granularity, not logic: the check belongs where a single file's text is still a single
+file's text. `extraction.is_in_flight` now carries that reasoning in its docstring, and is applied in
+`_manuscript_text`'s loop, on the changed-sections units (a truncation IS a changed section, and its
+"sections" are the placeholder's own paragraphs), and on the explicit-files units before
+`_section_payloads` assembles them. The whole-payload check is gone; a pass whose only file was in
+flight now simply has no text and ends on the unchanged `if not text.strip()`.
+
+The test lesson is the sharper one: the original assertion — "no extraction payload in this scenario
+carries the marker" — passed against the broken code, because the scenario happened to run no
+extraction while a file was in flight. A guard's test has to make the guarded thing actually happen.
