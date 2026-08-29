@@ -309,7 +309,14 @@ def parse_reply(text: str) -> Draft | Blocked:
     lines = text.splitlines()
     at = _label_lines(text)
 
-    if "BLOCKED" in at:
+    # A refusal only when BLOCKED comes FIRST. Everything after the DRAFT
+    # line is manuscript text, and a beat is perfectly entitled to contain
+    # a line reading BLOCKED — a bare word on its own line is a plausible
+    # thing for prose to do. Reading that as a refusal would silently
+    # discard a good draft. Both readings stay fail-safe: a leading
+    # BLOCKED registers nothing, and a trailing one is prose the author
+    # still rules on.
+    if "BLOCKED" in at and at["BLOCKED"] < at.get("DRAFT", len(lines) + 1):
         body = _between(lines, at["BLOCKED"] + 1,
                         at.get("QUESTION", len(lines)))
         question = (_between(lines, at["QUESTION"] + 1, len(lines))

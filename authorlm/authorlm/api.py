@@ -1566,6 +1566,28 @@ def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
     return {"writeup_id": writeup["id"], "beat": beat, "guidance_id": row["id"]}
 
 
+def cache_cold(client, first_draft: bool, cache_read: int) -> bool:
+    """Whether this draft should print §4's loud zero-cache-reads warning.
+
+    The whole verification of the cache layer, in one predicate — no test
+    can watch `cache_control` in flight (the hermetic suite is a raw-HTTP
+    stub, the live-optional suite runs on the cheap tier), so the usage
+    line is the only instrument the author has, and this is what decides
+    whether it shouts.
+
+    All four conditions are load-bearing. Caching must be ON (`cache =
+    false` is a deliberate retreat, not a fault). It must not be the
+    writeup's FIRST draft (there is nothing yet to hit). The model must
+    actually advertise prompt caching, or the warning fires on every
+    offline run and trains the author to ignore the one time it matters.
+    And the read must be zero — a beat loop showing zero cache reads has
+    a silent invalidator and, per §4, should say so loudly."""
+    from . import llm as llm_mod
+
+    return bool(client.cache and not first_draft and cache_read == 0
+                and llm_mod.caching_available(client.model, client.provider))
+
+
 def write_draft(db: Database, manuscript: dict, config: dict,
                 prefix: str | None = None, dry_run: bool = False,
                 on_start=None) -> dict:
@@ -1632,14 +1654,7 @@ def write_draft(db: Database, manuscript: dict, config: dict,
              "cache_write": result.cache_write,
              "input_tokens": result.prompt_tokens,
              "output_tokens": result.completion_tokens}
-    # §4's verification clause: a beat loop showing zero cache reads has a
-    # silent invalidator and should say so loudly. Never on the first
-    # draft (nothing to hit), and never on a model that does not
-    # advertise caching — a warning that cries wolf on every offline run
-    # trains the author to ignore it.
-    usage["cache_cold"] = bool(
-        client.cache and not first_draft and result.cache_read == 0
-        and llm_mod.caching_available(client.model, client.provider))
+    usage["cache_cold"] = cache_cold(client, first_draft, result.cache_read)
     if isinstance(parsed, writing.Blocked):
         # §13.3 made mechanical: a beat that needs an ungrounded fact
         # becomes a question, never an invention. Nothing is registered
@@ -1647,6 +1662,19 @@ def write_draft(db: Database, manuscript: dict, config: dict,
         return {**info, "blocked": True, "reason": parsed.reason,
                 "question": parsed.question, "usage": usage}
 
+    # Registration is the last thing that can fail, so it goes first among
+    # the writes. Unmodified, unwrapped, un-parameterized: the row, the
+    # mandatory --why, supersede-on-redraft, the verdict evidence and the
+    # policy reinforcement are byte-for-byte what `write propose` makes.
+    proposal = write_propose(db, manuscript, text=parsed.text,
+                             explanation=parsed.why, prefix=prefix)
+
+    # Bookkeeping AFTER the row exists. Recording it first would leave a
+    # writeup claiming to have been drafted by a model on a beat that was
+    # never registered — a raced checkout, or any late refusal inside
+    # write_propose, and the metadata would be residue about work that
+    # did not happen. The model-change warning is unaffected: it was
+    # computed from the metadata as it stood before this call.
     meta["drafting_model"] = client.model
     models = meta.get("drafting_models") or []
     if client.model not in models:
@@ -1657,12 +1685,6 @@ def write_draft(db: Database, manuscript: dict, config: dict,
         beats.append(beat["n"])
     meta["drafting_beats"] = beats
     db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
-
-    # LAST. Unmodified, unwrapped, un-parameterized: the row, the
-    # mandatory --why, supersede-on-redraft, the verdict evidence and the
-    # policy reinforcement are byte-for-byte what `write propose` makes.
-    proposal = write_propose(db, manuscript, text=parsed.text,
-                             explanation=parsed.why, prefix=prefix)
     return {**info, "blocked": False, "why": parsed.why,
             "self_check": parsed.self_check, "draft": parsed.text,
             "guidance_id": proposal["guidance_id"], "usage": usage}
