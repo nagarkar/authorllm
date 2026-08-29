@@ -847,7 +847,7 @@ def _style_candidates(db: Database, manuscript_id: str,
         (manuscript_id,))]
     if not guides:
         return ("\n  No style guides exist yet — define one first: "
-                "style define <name>.")
+                "style guide <name>.")
     parts = ["\n  Guides on record: "
              + ", ".join(f"'{name}'" for name in guides) + "."]
     if placement and placement != sums.PLACEMENT_START:
