@@ -5,11 +5,6 @@
 [llm]
 enabled = true
 model = "gemini/gemini-2.5-flash"
-# Illustration rendering (authorlm illus render); text model above is unchanged.
-image_model = "openai/gpt-image-2"
-# Landscape 3:2 — the manuscript's ratified illustration shape. OpenAI's
-# image API defaults to a square without it.
-image_size = "1536x1024"
 
 # extraction_max_chars caps the manuscript text sent per extraction call.
 # Why it exists: cost control is half of it. The other half is extraction
@@ -19,6 +14,14 @@ image_size = "1536x1024"
 # It is not a model limit (Gemini 2.5 Flash accepts ~1M tokens).
 # Default: 24000 (characters, ~6k tokens).
 extraction_max_chars = 24000
+
+[illustrations]
+# Illustration rendering (authorlm illus render); text model above ([llm]
+# model) is unchanged — the image model is chosen independently.
+model = "openai/gpt-image-2"
+# Landscape 3:2 — the manuscript's ratified illustration shape. OpenAI's
+# image API defaults to a square without it.
+image_size = "1536x1024"
 
 [extraction]
 # Two-step extraction. On by default (TrackA/3) since pass 2 stopped

@@ -298,11 +298,28 @@ class LLMClient:
 DEFAULT_IMAGE_MODEL = "gemini/gemini-2.5-flash-image"
 
 
+def resolve_image_setting(config: dict, illus_key: str, llm_key: str,
+                          default):
+    """Precedence for an illustration-rendering setting: `[illustrations]`
+    is authoritative once a project has migrated to it; `[llm]` is the
+    fallback for configs that haven't; `default` covers configs with
+    neither. `illus_key`/`llm_key` differ because `[illustrations]` uses
+    its own short name (`model`) where `[llm]` used the historical
+    `image_model`/`image_size`. The single seam for this precedence —
+    every reader of the illustration model/size goes through it."""
+    illustrations = config.get("illustrations", {}) or {}
+    if illus_key in illustrations:
+        return illustrations[illus_key]
+    llm = config.get("llm", {}) or {}
+    return llm.get(llm_key, default)
+
+
 def generate_image(config: dict, prompt: str,
                    input_png: bytes | None = None) -> bytes:
     """One rendered PNG for an illustration slot. The model comes from
-    `[llm] image_model` (a litellm-style string, default gemini flash
-    image). gemini/* models call the Gemini REST API directly — the
+    `[illustrations] model` (a litellm-style string), falling back to
+    the legacy `[llm] image_model`, then the default gemini flash image
+    model. gemini/* models call the Gemini REST API directly — the
     multimodal generateContent endpoint supports image output and
     image-conditioned editing (`--from` continuity), which
     litellm.image_generation cannot express; every other model string
@@ -312,7 +329,8 @@ def generate_image(config: dict, prompt: str,
     from . import paths
 
     llm = config.get("llm", {}) or {}
-    model = llm.get("image_model", DEFAULT_IMAGE_MODEL)
+    model = resolve_image_setting(config, "model", "image_model",
+                                  DEFAULT_IMAGE_MODEL)
     # The image model is chosen independently of the text model, so its
     # key is resolved from ITS OWN vendor prefix — the text model's key
     # is the wrong key the moment the two vendors differ.
@@ -338,9 +356,10 @@ def generate_image(config: dict, prompt: str,
             "(pip install litellm)") from err
     litellm.suppress_debug_info = True
     # Aspect ratio is ratified style law, not a per-render choice; the
-    # OpenAI image API defaults to a square, so [llm] image_size carries
-    # the manuscript's shape (gpt-image-* landscape 3:2 = 1536x1024).
-    size = llm.get("image_size", "")
+    # OpenAI image API defaults to a square, so [illustrations] image_size
+    # (falling back to the legacy [llm] image_size) carries the
+    # manuscript's shape (gpt-image-* landscape 3:2 = 1536x1024).
+    size = resolve_image_setting(config, "image_size", "image_size", "")
     try:
         response = litellm.image_generation(
             model=model, prompt=prompt, timeout=timeout,
