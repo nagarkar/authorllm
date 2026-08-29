@@ -26,7 +26,7 @@ from . import proposals as prop
 from . import sessions as ses
 from .analysis import analyze_pending, find_precedents
 from .briefing import build_briefing
-from .db import Database, ko_fields, loads
+from .db import Database, ko_fields, loads, now_iso
 from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
                        compute_prerequisite_gaps, generate_guidance,
                        intent_coverage_notes)
@@ -54,7 +54,7 @@ __all__ = [
     "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
     "write_start", "write_plan", "write_status", "write_propose",
     "write_accept", "write_reject", "write_learn", "write_complete",
-    "write_abandon", "get_profile",
+    "write_abandon", "write_digest", "get_profile",
 ]
 
 
@@ -669,6 +669,22 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 
 BEAT_KIND = "beat"
 
+# The modeled-rewrite digest (UC-B, design §13.2): the four lists it may
+# carry, mapped to each list's own required text field. The digest is
+# METADATA, never a guidance kind — it is proposed by nobody, reviewed by
+# nobody, superseded by nobody, so GUIDANCE_KINDS stays untouched.
+DIGEST_LISTS = {"points": "claim", "examples": "example",
+                "references": "reference", "inconsistencies": "note"}
+# Provenance the verb writes and the skill may not forge. Accepted at the
+# top level (a re-submitted digest carries them) and always overwritten.
+DIGEST_PROVENANCE = ("source_version_id", "source_file", "recorded_at",
+                     "point_count")
+DIGEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+# Two values only. A third ("moved", "deferred") is where enum-shaped
+# schemas rot; the nuance belongs in the free-text reason, which is what
+# the "What Was Removed and Why" section quotes anyway.
+DISPOSITIONS = ("kept", "removed")
+
 
 def _resolve_relpath(manuscript: dict, query: str) -> str:
     from .docs import _match
@@ -677,6 +693,37 @@ def _resolve_relpath(manuscript: dict, query: str) -> str:
     candidates = iter_manuscript_paths(Path(manuscript["path"]))
     path = _match(candidates, query)
     return str(path.relative_to(Path(manuscript["path"])))
+
+
+def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
+    """`_resolve_relpath`, except that `--new` targets a file that does
+    NOT exist yet (design §13.1).
+
+    `docs._match` resolves by exact relpath else unique case-insensitive
+    substring — deliberately forgiving. If an unmatched name silently
+    meant "create it", every typo would become a new essay file plus an
+    active writeup plus a placement decision. So creation is explicit,
+    and a name that already resolves is refused rather than rewritten.
+    No disk write happens here."""
+    from .docs import doc_filename
+
+    if not new:
+        return _resolve_relpath(manuscript, query)
+    try:
+        rel = _resolve_relpath(manuscript, query)
+    except LookupError:
+        # No single existing file answers to this name — which is exactly
+        # what --new asserts. The name is normalized the way `doc add`
+        # normalizes it, so a file the loop creates is named like a file
+        # the author creates.
+        rel = doc_filename(query)
+        if (Path(manuscript["path"]) / rel).exists():
+            raise ValueError(
+                f"{rel} already exists — drop --new to rewrite it "
+                f"(fresh mode truncates and rebuilds, §9.4).") from None
+        return rel
+    raise ValueError(f"{rel} already exists — drop --new to rewrite it "
+                     f"(fresh mode truncates and rebuilds, §9.4).")
 
 
 def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
@@ -788,26 +835,60 @@ def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
 
 def write_start(db: Database, manuscript: dict, config: dict,
                 file: str, intent_prefix: str,
-                after: str | None = None) -> dict:
+                after: str | None = None, brief: str | None = None,
+                new: bool = False, style: str | None = None) -> dict:
     """Initiate a fresh-drafting writeup: gate, pin the current version as
     raw material, truncate the file, and collect the honest 'removed'
     transition. The old text is never at risk — it lives in the pinned
-    version and restores on abandon."""
+    version and restores on abandon.
+
+    With `new` the target does not exist yet (UC-A, design §13.1): the
+    file is created empty and `style` is attached to it — AFTER every
+    gate has passed, because a blocked start must leave the disk exactly
+    as it was (RISK K1). The pinned version therefore does not contain
+    the file at all, which is what makes `write abandon`'s restore target
+    (nonexistence) honest.
+
+    `brief` is the author's one paragraph. Required with `new`: a
+    brand-new file has no pinned raw material, so the brief is the only
+    essay-specific grounding the beats have."""
+    from . import styles as st
+
     mid = manuscript["id"]
-    relpath = _resolve_relpath(manuscript, file)
+    relpath = _resolve_or_new(manuscript, file, new)
     placement = _resolve_placement(manuscript, after)
+    brief = (brief or "").strip()
+    if style and not new:
+        raise ValueError(
+            f"--style is only for --new; an existing file's guide is "
+            f"attached with 'style attach {relpath} {style}'.")
     intent = _find_intent(db, manuscript, intent_prefix)
     if intent["status"] != "active":
         raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
-    attachment = db.one(
-        "SELECT * FROM style_attachments WHERE manuscript_id = ? AND file = ?",
-        (mid, relpath),
-    )
-    if not attachment:
-        raise ValueError(
-            f"{relpath} has no attached style guide — the effective guide is "
-            f"the drafting law. Attach one first: style attach {relpath} <guide>."
+    guide = None
+    if new:
+        # `style attach` cannot run first for a file that does not exist:
+        # attach_style -> _validate_file checks the name against disk, and
+        # that integrity rule is not weakened here. So the guide is named
+        # at start and validated before anything is created.
+        if not style:
+            raise ValueError(
+                f"{relpath} has no attached style guide — the effective "
+                f"guide is the drafting law. With --new, name it: "
+                f"--style <guide>.")
+        guide = st.get_guide(db, mid, style)
+        if not guide:
+            raise LookupError(f"no style guide named '{style}'")
+    else:
+        attachment = db.one(
+            "SELECT * FROM style_attachments WHERE manuscript_id = ? AND file = ?",
+            (mid, relpath),
         )
+        if not attachment:
+            raise ValueError(
+                f"{relpath} has no attached style guide — the effective guide is "
+                f"the drafting law. Attach one first: style attach {relpath} <guide>."
+            )
     _checkout_gate(db, manuscript, relpath)
     existing = db.one(
         "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
@@ -816,6 +897,31 @@ def write_start(db: Database, manuscript: dict, config: dict,
     )
     if existing:
         raise ValueError(f"writeup {existing['id']} is already active on {relpath}")
+    if new and not placement:
+        # A file that does not exist is not in toc.toml, so once created it
+        # is UNLISTED and summaries.before_after would refuse it — but with
+        # a message advising a toc.toml entry for a file that is not on
+        # disk. Say the true thing instead, and say it BEFORE the file is
+        # created (RISK K1).
+        from . import summaries as _sums
+
+        raise ValueError(
+            f"{relpath} does not exist yet, so it has no place in the "
+            f"reading order — say where it goes: --after <file it follows> "
+            f"| --after {_sums.PLACEMENT_START}.")
+    if new and not brief:
+        # LAST of the flag gates, deliberately. Every other refusal names a
+        # flag the author can add to the command they just typed; this one
+        # asks them to go and compose a paragraph. A gate parade typed at a
+        # terminal has no stdin at all, so checking the brief first would
+        # mask the placement and style refusals behind "give me a brief"
+        # and the author would discover them one round trip at a time
+        # (design §5.5, MT-5). Still before the pin: nothing has been
+        # written yet, so K1 is untouched by the move.
+        raise ValueError(
+            "write start --new requires the one-paragraph brief on stdin — "
+            "it is the only essay-specific ground a new file has "
+            "(design §13.1).")
     # The summary freshness gate (design §12.4 item 2), on the same
     # predicate the critique pass uses: the before/after summaries ARE the
     # drafting context now, so a missing or stale one is a lie about the
@@ -840,7 +946,11 @@ def write_start(db: Database, manuscript: dict, config: dict,
     )
     if source is None:
         raise LookupError("no collected version to pin — is the manuscript empty?")
+    # Create (--new) or truncate. Either way the file's pre-writeup state
+    # is already inside the pinned version above.
     (Path(manuscript["path"]) / relpath).write_text("", encoding="utf-8")
+    if new:
+        attach_style(db, manuscript, relpath, guide["name"])
     collect(db, manuscript, config, source="write-start")
 
     row = ko_fields("wu")
@@ -848,13 +958,17 @@ def write_start(db: Database, manuscript: dict, config: dict,
         manuscript_id=mid, intent_id=intent["id"], file=relpath, mode="fresh",
         status="active", source_version_id=source["id"], plan="[]",
         cursor=0, learnings="[]",
-        metadata=json.dumps({"next_n": 1, "placement": placement}),
+        metadata=json.dumps({"next_n": 1, "placement": placement,
+                             "created_file": bool(new),
+                             "brief": brief or None}),
     )
     db.insert("writeups", row)
     source_text = loads(source["files"], {}).get(relpath, "")
     return {"writeup": row, "intent": intent,
             "source_version_no": source["version_no"],
             "source_chars": len(source_text),
+            "created": bool(new), "brief": brief or None,
+            "style": guide["name"] if guide else None,
             "drafting_context": _drafting_context(db, manuscript, row)}
 
 
@@ -894,13 +1008,296 @@ def write_plan(db: Database, manuscript: dict, beats: list,
             "added": len(fresh), "plan": new_plan, "cursor": writeup["cursor"]}
 
 
+def _validate_digest(db: Database, manuscript: dict, payload) -> dict:
+    """The modeled-rewrite digest schema (design §13.2), validated
+    deterministically and ALL-OR-NOTHING (RISK K8: a digest that
+    half-persists on a mid-list error leaves the accounting silently
+    wrong). Returns the normalized digest — missing lists defaulted to
+    [], item order and unknown ITEM-level keys preserved verbatim, since
+    the skill may carry structure the CLI has no opinion about.
+
+    Unknown TOP-LEVEL keys are refused: a typo'd "referances" must not
+    silently discard the references."""
+    if not isinstance(payload, dict):
+        raise ValueError(
+            'the digest must be a JSON object with "points" (and optionally '
+            '"examples", "references", "inconsistencies")')
+    unknown = sorted(k for k in payload
+                     if k not in DIGEST_LISTS and k not in DIGEST_PROVENANCE)
+    if unknown:
+        raise ValueError(
+            f"unknown top-level key(s) in the digest: {', '.join(unknown)} — "
+            f"expected only: {', '.join(DIGEST_LISTS)}")
+
+    digest: dict = {}
+    owner: dict[str, str] = {}          # id -> the list it came from
+    for name, field in DIGEST_LISTS.items():
+        items = payload.get(name, [])
+        if name == "points":
+            if not isinstance(items, list) or not items:
+                raise ValueError(
+                    '"points" must be a non-empty array — a digest with no '
+                    "points cannot account for anything")
+        elif not isinstance(items, list):
+            raise ValueError(f'"{name}" must be an array')
+        normalized = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"{name}[{index}] must be a JSON object")
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not DIGEST_ID_RE.match(item_id):
+                raise ValueError(
+                    f'{name}[{index}] needs a string "id" matching '
+                    f"[A-Za-z0-9_.-] and 1-32 characters long "
+                    f"(got {item_id!r})")
+            if item_id in owner:
+                raise ValueError(
+                    f"id '{item_id}' is used twice ({owner[item_id]} and "
+                    f"{name}) — ids must be unique across the whole digest, "
+                    f"because the removal accounting references them")
+            owner[item_id] = name
+            text = item.get(field)
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(
+                    f'{name}[{index}] ({item_id}) needs a non-empty "{field}"')
+            normalized.append(dict(item))
+        digest[name] = normalized
+
+    point_ids = {item["id"] for item in digest["points"]}
+
+    def _check_refs(name: str, index: int, entry: dict, key: str) -> None:
+        item_id = entry["id"]
+        refs = entry.get(key)
+        if refs is None:
+            return
+        if not isinstance(refs, list):
+            raise ValueError(f'{name}[{index}] ({item_id}): "{key}" must be '
+                             f"an array of point ids")
+        for ref in refs:
+            if not isinstance(ref, str) or ref not in owner:
+                raise ValueError(
+                    f"{name}[{index}] ({item_id}) references '{ref}', which "
+                    f"is not in the digest — a dangling cross-reference "
+                    f"makes the accounting decorative")
+            if ref not in point_ids:
+                raise ValueError(
+                    f"{name}[{index}] ({item_id}) references '{ref}', which "
+                    f"is a {owner[ref]} entry — cross-references must name "
+                    f"point ids")
+
+    for name in ("examples", "references"):
+        for index, item in enumerate(digest[name]):
+            _check_refs(name, index, item, "serves")
+    for index, item in enumerate(digest["inconsistencies"]):
+        item_id = item["id"]
+        _check_refs("inconsistencies", index, item, "points")
+        with_file = item.get("with")
+        if not isinstance(with_file, str):
+            raise ValueError(
+                f'inconsistencies[{index}] ({item_id}) needs a string "with" '
+                f"— the file it contradicts, or \"\" for an internal one")
+        if with_file.strip():
+            # A contradiction "with an essay that does not exist" is not a
+            # finding, it is a typo.
+            try:
+                item["with"] = _resolve_relpath(manuscript, with_file)
+            except LookupError as err:
+                raise ValueError(
+                    f"inconsistencies[{index}] ({item_id}): {err}") from None
+    return digest
+
+
+def _accounting(writeup: dict) -> dict | None:
+    """kept / removed / unaccounted point ids for a writeup carrying a
+    digest, or None when it carries none. Shared by write_digest --show,
+    write_status and write_complete so the tally is spelled one way."""
+    meta = loads(writeup["metadata"], {})
+    digest = meta.get("digest")
+    if not digest:
+        return None
+    dispositions = meta.get("dispositions") or {}
+    ids = [item["id"] for item in digest.get("points", [])]
+    return {
+        "kept": [i for i in ids
+                 if (dispositions.get(i) or {}).get("disposition") == "kept"],
+        "removed": [i for i in ids
+                    if (dispositions.get(i) or {}).get("disposition") == "removed"],
+        "unaccounted": [i for i in ids if i not in dispositions],
+        "point_count": len(ids),
+        "claims": {item["id"]: item["claim"]
+                   for item in digest.get("points", [])},
+    }
+
+
+def _validate_dispositions(writeup: dict, digest: dict, payload) -> dict:
+    """Per-point dispositions (design §13.2). `removed` requires a reason
+    for the same reason `write reject` does: an unexplained removal
+    teaches nothing and cannot be written up."""
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError(
+            'expected a JSON object of {"<point id>": {"disposition": '
+            '"kept"|"removed", "reason": "…", "beat": n}}')
+    point_ids = {item["id"] for item in digest.get("points", [])}
+    other_ids = {item["id"] for name in ("examples", "references",
+                                         "inconsistencies")
+                 for item in digest.get(name, [])}
+    plan_ns = {beat.get("n") for beat in loads(writeup["plan"], [])}
+    clean: dict = {}
+    for point_id, record in payload.items():
+        if point_id not in point_ids:
+            if point_id in other_ids:
+                raise ValueError(
+                    f"'{point_id}' is not a point id — dispositions account "
+                    f"for points only")
+            raise ValueError(f"'{point_id}' is not a point in the stored "
+                             f"digest")
+        if not isinstance(record, dict):
+            raise ValueError(f"{point_id}: expected an object with "
+                             f'"disposition"')
+        disposition = record.get("disposition")
+        if disposition not in DISPOSITIONS:
+            raise ValueError(
+                f"{point_id}: disposition must be one of "
+                f"{', '.join(DISPOSITIONS)} (got {disposition!r})")
+        reason = record.get("reason")
+        reason = reason.strip() if isinstance(reason, str) else ""
+        if disposition == "removed" and not reason:
+            raise ValueError(
+                f"{point_id}: a removal needs a reason — an unexplained "
+                f"removal teaches nothing and cannot be written up in "
+                f"'What Was Removed and Why'")
+        entry = {"disposition": disposition}
+        if reason:
+            entry["reason"] = reason
+        beat = record.get("beat")
+        if beat is not None:
+            if isinstance(beat, bool) or not isinstance(beat, int) \
+                    or beat not in plan_ns:
+                raise ValueError(
+                    f"{point_id}: beat {beat!r} is not an n in this "
+                    f"writeup's plan")
+            entry["beat"] = beat
+        clean[point_id] = entry
+    return clean
+
+
+def write_digest(db: Database, manuscript: dict, payload=None,
+                 dispositions=None, prefix: str | None = None,
+                 replace: bool = False, show: bool = False) -> dict:
+    """The deterministic channel to the pinned original (UC-B).
+
+    Four shapes, one verb: bare it PRINTS the pinned source text (the file
+    on disk was truncated at start; the old essay lives in
+    `source_version_id`); with JSON on stdin it PERSISTS the digest; with
+    dispositions it MERGES per-point verdicts; with `show` it reports what
+    is stored. Refused outright on a writeup that created its file —
+    there is no source essay to digest."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    meta = loads(writeup["metadata"], {})
+    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
+                    (writeup["source_version_id"],))
+    source_text = (loads(source["files"], {}).get(writeup["file"], "")
+                   if source else "")
+    # Two conditions, two truths. Collapsing them into one message told a
+    # rewrite over a blank source that "this writeup created" its file,
+    # which it did not — a small lie about the writeup's own history, in
+    # the one message whose whole job is to say what kind of writeup this
+    # is. `created_file` is the discriminator, never emptiness.
+    if meta.get("created_file"):
+        raise ValueError(
+            f"this writeup created {writeup['file']}; there is no source "
+            f"essay to digest. A digest models a REWRITE of an existing "
+            f"essay (design §13.2).")
+    if not source_text.strip():
+        raise ValueError(
+            f"{writeup['file']}'s pinned source is empty; there is nothing "
+            f"to digest. A digest models a REWRITE of an existing essay "
+            f"(design §13.2).")
+
+    if show:
+        return {"mode": "show", "writeup_id": writeup["id"],
+                "file": writeup["file"], "digest": meta.get("digest"),
+                "accounting": _accounting(writeup)}
+
+    if dispositions is not None:
+        digest = meta.get("digest")
+        if not digest:
+            raise ValueError(
+                "no digest recorded yet — record it first: write digest "
+                "(JSON on stdin)")
+        clean = _validate_dispositions(writeup, digest, dispositions)
+        stored = meta.get("dispositions") or {}
+        # Merge, not replace, later wins — and report the overwrite. A
+        # re-recorded id is a real editorial change of mind, and hiding it
+        # would be dishonest.
+        overwritten = []
+        for point_id, entry in clean.items():
+            if point_id in stored and stored[point_id] != entry:
+                overwritten.append(
+                    f"{point_id}: {stored[point_id]['disposition']} → "
+                    f"{entry['disposition']}")
+            stored[point_id] = entry
+        meta["dispositions"] = stored
+        db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+        writeup["metadata"] = json.dumps(meta)
+        return {"mode": "dispositions", "writeup_id": writeup["id"],
+                "recorded": len(clean),
+                "kept": sum(1 for e in clean.values()
+                            if e["disposition"] == "kept"),
+                "removed": sum(1 for e in clean.values()
+                               if e["disposition"] == "removed"),
+                "overwritten": overwritten,
+                "accounting": _accounting(writeup)}
+
+    if payload is not None:
+        digest = _validate_digest(db, manuscript, payload)
+        existing = meta.get("digest")
+        if existing and not replace:
+            raise ValueError(
+                "a digest is already recorded for this writeup — pass "
+                "--replace to replace it")
+        if existing:
+            # RISK K7: --replace is the only way to lose recorded work.
+            recorded = meta.get("dispositions") or {}
+            new_ids = {item["id"] for item in digest["points"]}
+            lost = sorted(i for i in recorded if i not in new_ids)
+            if lost:
+                raise ValueError(
+                    f"refusing to replace: {', '.join(lost)} already have "
+                    f"recorded dispositions and are absent from the new "
+                    f"digest")
+        digest["source_version_id"] = writeup["source_version_id"]
+        digest["source_file"] = writeup["file"]
+        digest["recorded_at"] = now_iso()
+        digest["point_count"] = len(digest["points"])
+        meta["digest"] = digest
+        db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+        writeup["metadata"] = json.dumps(meta)
+        return {"mode": "recorded", "writeup_id": writeup["id"],
+                "digest": digest, "replaced": bool(existing),
+                "accounting": _accounting(writeup)}
+
+    return {"mode": "source", "writeup_id": writeup["id"],
+            "file": writeup["file"], "source_text": source_text,
+            "source_version_no": source["version_no"],
+            "source_chars": len(source_text)}
+
+
 def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
-    """The resume entry point: where the writeup stands, what's next."""
+    """The resume entry point: where the writeup stands, what's next.
+
+    The brief and the removal accounting are reprinted here on EVERY
+    resume, which is what makes the tally at `write complete` unsurprising
+    (design §13.2: an author who ignores it at completion has ignored it
+    repeatedly, deliberately)."""
     writeup = _writeup(db, manuscript, prefix)
     plan = loads(writeup["plan"], [])
     cursor = writeup["cursor"]
     current = plan[cursor] if cursor < len(plan) else None
     pending = _beat_proposal(db, writeup, current["n"]) if current else None
+    meta = loads(writeup["metadata"], {})
     return {
         "writeup": {k: writeup[k] for k in
                     ("id", "intent_id", "file", "mode", "status",
@@ -910,6 +1307,10 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "pending_proposal": dict(pending) if pending else None,
         "learnings": loads(writeup["learnings"], []),
         "tallies": _beat_tallies(db, writeup),
+        "brief": meta.get("brief"),
+        "created_file": bool(meta.get("created_file")),
+        "digest": meta.get("digest"),
+        "accounting": _accounting(writeup),
         "drafting_context": _status_drafting_context(db, manuscript, writeup),
     }
 
@@ -1040,10 +1441,52 @@ def write_complete(db: Database, manuscript: dict, config: dict,
                    prefix: str | None = None) -> dict:
     """Close the writeup: final collect, then the extraction pass that was
     deferred during the loop (per-beat collects are deterministic-only).
-    Intent completion stays a separate, conversational complete_intent."""
+    Intent completion stays a separate, conversational complete_intent.
+
+    Two things happen before that collect. A writeup that created its file
+    registers it in toc.toml at the declared placement — without it the
+    essay is finished, on disk, and structurally invisible, and the next
+    pass in its neighbourhood is refused for a file the author believes is
+    done. And a writeup carrying a digest gets its removal accounting
+    computed and PERSISTED, so the number is in history rather than only
+    in the author's scrollback. The accounting warns; it never blocks
+    (design §13.2)."""
+    from . import structure as struct
+
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    meta = loads(writeup["metadata"], {})
+    path = Path(manuscript["path"]) / writeup["file"]
+    placement = meta.get("placement")
+    toc_registered = None
+    toc_stanza = None
+    if (meta.get("created_file") and placement and path.exists()
+            and path.read_text(encoding="utf-8").strip()):
+        toc_path = Path(manuscript["path"]) / struct.TOC_FILENAME
+        toc_text = (toc_path.read_text(encoding="utf-8")
+                    if toc_path.exists() else "")
+        outcome = struct.insert_toc_entry(toc_text, writeup["file"], placement)
+        if outcome is None:
+            toc_registered = False
+            # No anchor found, so no parent to carry: the stanza the author
+            # pastes is the minimal honest one.
+            toc_stanza = f'[[chapter]]\nfile = "{writeup["file"]}"\n'
+        else:
+            new_text, toc_stanza = outcome
+            # The toc write must precede the collect below, so the
+            # structural change lands in the same version as the prose.
+            if new_text != toc_text:
+                toc_path.write_text(new_text, encoding="utf-8")
+            toc_registered = True
+    accounting = _accounting(writeup)
+    if accounting is not None:
+        meta["accounting_at_complete"] = {
+            "kept": len(accounting["kept"]),
+            "removed": len(accounting["removed"]),
+            "unaccounted": accounting["unaccounted"],
+        }
+        db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
     report = collect(db, manuscript, config, source="write-complete")
     extraction = None
     llm = LLMClient(config)
@@ -1066,33 +1509,77 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "beats_done": writeup["cursor"], "beats_unwritten": remaining,
             "tallies": _beat_tallies(db, writeup),
             "learnings": loads(writeup["learnings"], []),
+            "accounting": accounting, "toc_registered": toc_registered,
+            "toc_stanza": toc_stanza, "toc_placement": placement,
+            "summary_hint": writeup["file"],
             "collect": report, "extraction": extraction}
 
 
 def write_abandon(db: Database, manuscript: dict, config: dict,
                   prefix: str | None = None) -> dict:
     """Abandon the writeup and restore the file from the pinned source
-    version — a truncated file with a dead writeup is the worst end state."""
+    version — a truncated file with a dead writeup is the worst end state.
+
+    For a writeup that CREATED its file (UC-A) the restore target is
+    nonexistence, so the file is deleted. The pinned version does not
+    contain the file at all; without this branch the restore silently
+    did nothing and reported 'source version missing' — technically true,
+    entirely misleading, and it left the file behind."""
     # Snapshot whatever the author has on disk right now — even a
     # half-typed, never-collected draft — before it gets overwritten by
     # the restored source text below (BUG-2 / A1: a destructive write
     # must never be the first thing that observes the current state).
+    # RISK K2: this stays the FIRST statement. Deleting above it would
+    # take an author's uncollected text with no recovery point at all.
     collect(db, manuscript, config, source="pre-write-abandon")
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    path = Path(manuscript["path"]) / writeup["file"]
+    if loads(writeup["metadata"], {}).get("created_file"):
+        preserved = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        had_text = path.exists() and bool(
+            path.read_text(encoding="utf-8").strip())
+        path.unlink(missing_ok=True)
+        # "Restore to nonexistence" includes the attachment: `write start
+        # --new` wrote that style_attachments row itself, so unwinding the
+        # writeup unwrites it. Leaving it behind orphans a live reference
+        # to a file that is not on disk — the exact integrity rule
+        # api._validate_file exists to keep. ONLY for a created file; a
+        # rewrite's attachment predates the writeup and is not its to
+        # remove.
+        removed = db.conn.execute(
+            "DELETE FROM style_attachments WHERE manuscript_id = ? "
+            "AND file = ?", (manuscript["id"], writeup["file"])).rowcount
+        db.conn.commit()
+        # This collect records the file_removed transition, and any concept
+        # whose primary location was this file raises a `vanished` proposal.
+        # That noise is the honest result — the same noise §9.4 accepts for
+        # a truncate-and-rebuild.
+        report = collect(db, manuscript, config, source="write-abandon")
+        db.update("writeups", writeup["id"], {"status": "abandoned"})
+        return {"writeup_id": writeup["id"], "restored": False,
+                "deleted": True, "had_text": had_text,
+                "attachment_removed": bool(removed),
+                "preserved_in_version": (preserved["version_no"]
+                                         if preserved else None),
+                "file": writeup["file"], "collect": report}
     source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
                     (writeup["source_version_id"],))
     restored = False
     if source:
         content = loads(source["files"], {}).get(writeup["file"])
         if content is not None:
-            (Path(manuscript["path"]) / writeup["file"]).write_text(
-                content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
             restored = True
     report = collect(db, manuscript, config, source="write-abandon")
     db.update("writeups", writeup["id"], {"status": "abandoned"})
     return {"writeup_id": writeup["id"], "restored": restored,
+            "deleted": False, "had_text": False,
+            "attachment_removed": False,
+            "preserved_in_version": None, "file": writeup["file"],
             "collect": report}
 
 

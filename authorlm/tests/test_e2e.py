@@ -582,7 +582,13 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
     """Minimal OpenAI-compatible /chat/completions endpoint with canned
     replies keyed on the system prompt."""
 
+    # Every request the stub has served, ever. The write path's design
+    # invariant (§13, I4) is that the new verbs add NO model call, and
+    # the only way to assert "zero calls" is to count them.
+    REQUESTS = 0
+
     def do_POST(self):
+        StubLLMHandler.REQUESTS += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
@@ -1680,6 +1686,671 @@ def scenario_write_loop(root: Path) -> None:
         server.shutdown()
 
 
+# --- Scenario W2 fixtures (UC-A / UC-B, design-usecases §3) ---------------
+#
+# A separate workspace from Scenario W: UC-A needs a manuscript whose
+# toc.toml is committed and whose summaries are fresh, plus a NAME THAT IS
+# NOT ON DISK — Scenario W's workspace has an unlisted 03-bridge.md and a
+# half-finished toc by the time it ends, so the create-path gates could not
+# be asserted there without rewriting its state.
+
+TOC_W2 = ('# Table of contents — hand-maintained; this comment must survive.\n'
+          '\n'
+          '[[chapter]]\n'
+          'file = "01-choice.md"\n'
+          '\n'
+          '[[chapter]]\n'
+          'file = "02-essay.md"\n')
+
+BRIEF_A = ("A short essay placing attention beside choice: attention is the "
+           "faculty that makes a field visible before anything is chosen "
+           "within it.")
+
+NEW_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "claims attention precedes choice; no source beyond the brief"},
+    {"role": "close", "concepts": ["Field"], "budget": 60,
+     "notes": "claims the field is what attention makes visible"},
+])
+
+NEW_BEAT_1 = ("Attention is the faculty that makes a field visible before "
+              "anything within it is chosen.")
+NEW_BEAT_2 = ("What attention holds open, choice then cuts: the field is the "
+              "standing possibility attention keeps in view.")
+
+# UC-B: the digest of 02-essay.md's pinned original (ESSAY, above).
+DIGEST_JSON = json.dumps({
+    "points": [
+        {"id": "p1", "load_bearing": True, "where": "¶1",
+         "claim": "The old opening paragraph names the essay's ground."},
+        {"id": "p2", "where": "¶2",
+         "claim": "Fields have positions, and positions are distinctions."},
+        {"id": "p3", "where": "¶2",
+         "claim": "The essay states the choice/distinction pairing a "
+                  "third time."},
+    ],
+    "examples": [{"id": "x1", "example": "the morning decision",
+                  "serves": ["p1"], "where": "¶1"}],
+    "references": [{"id": "r1", "reference": "Chapter 1 — Choice",
+                    "kind": "internal", "serves": ["p2"]}],
+    "inconsistencies": [
+        {"id": "i1", "with": "01-choice.md", "points": ["p3"],
+         "note": "01-choice.md already owns the choice/distinction pairing"}],
+})
+
+REWRITE_BRIEF = ("Keep the field/position pairing and cut anything "
+                 "01-choice.md already owns. Open on the claim.")
+
+REWRITE_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "carries p1 — opens on the claim, not the ground"},
+    {"role": "development", "concepts": ["Field"], "budget": 80,
+     "notes": "carries p2 — the field and its positions"},
+    {"role": "apparatus", "budget": 80,
+     "notes": "the What Was Removed and Why section, drafted from the "
+              "recorded removals only"},
+])
+
+REWRITE_BEAT_1 = "The ground of this essay is stated first, not approached."
+REWRITE_BEAT_2 = ("A field is its positions; each position is a distinction "
+                  "already made.")
+REMOVAL_SECTION = """## **What Was Removed and Why**
+
+Two arguments from the earlier version of this essay are not here. The
+first duplicated the opening chapter's account of choice and distinction,
+which that chapter owns and states better. The second repeated it a third
+time, which bought emphasis at the cost of saying one thing twice."""
+
+
+def scenario_write_new_and_digest(root: Path) -> None:
+    """Scenario W2 — the two new author use cases on the beat loop:
+    UC-A (a new essay from a one-paragraph brief) and UC-B (a modeled
+    rewrite with a digest and removal accounting). Design:
+    .ai-productionization/authorllm/design-usecases.md §3."""
+    print("Scenario W2 — UC-A new essay from a brief; UC-B modeled rewrite")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "wn"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-essay.md", ESSAY)
+        write(ms / "toc.toml", TOC_W2)
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Write the essay on attention")
+        intent_id = out.split("[")[1].split("]")[0]
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "01-choice.md", "House")
+        run(ws, "style", "attach", "02-essay.md", "House")
+        run(ws, "summarize", "rebuild", "--all")
+
+        from authorlm.db import Database as _DB
+        from authorlm.db import loads as _loads
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+        _row = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")
+
+        # ---- A16-A26: the gate parade. Every refusal must leave the
+        # disk exactly as it was (RISK K1) — asserted as `not exists()`,
+        # never merely on the error text.
+        target = ms / "03-new.md"
+        gate_outs = []
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("A16 — --new without --after is refused with a message written "
+              "for a file that is not in the reading order at all, naming "
+              "both remedies",
+              "does not exist yet" in out
+              and "--after <file it follows>" in out
+              and "--after start" in out, out)
+        check("A16 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        gate_outs.append(out)
+        check("A17 — --new without a brief is refused, naming stdin and why "
+              "(a brand-new file has no pinned raw material at all)",
+              "brief" in out and "stdin" in out, out)
+        check("A17 — and nothing was created", not target.exists())
+
+        # F1 — the ORDER of the refusals, PINNED. With both the placement
+        # and the brief missing, the PLACEMENT refusal must win: that is
+        # the sequence the author signed off on (design §5.5 / MT-5), and
+        # a gate parade typed at a terminal never has stdin, so a
+        # brief-first order would mask every other refusal behind "give me
+        # a brief" and the author would fix them one round trip at a time.
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("F1 — placement and brief both missing: the PLACEMENT refusal "
+              "wins",
+              "does not exist yet" in out
+              and "--after <file it follows>" in out
+              and "one-paragraph brief" not in out, out)
+        check("F1 — and nothing was created", not target.exists())
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("F1 — style and brief both missing: the STYLE refusal wins",
+              "no attached style guide" in out
+              and "one-paragraph brief" not in out, out)
+        check("F1 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("A18 — --new without --style is refused by the style gate, "
+              "with the message naming the flag (style attach cannot run "
+              "first: _validate_file requires the file on disk)",
+              "no attached style guide" in out and "--style <guide>" in out, out)
+        check("A18 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "Nope", expect_exit=True)
+        gate_outs.append(out)
+        check("A19 — an unknown guide is refused before anything is created",
+              "no style guide named 'Nope'" in out, out)
+        check("A19 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "02-essay.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A20 — --new on a name that already resolves is refused "
+              "(docs._match is substring-based; a silent create-on-typo is "
+              "the failure mode --new exists to prevent)",
+              "already exists" in out and "drop --new" in out, out)
+        check("A20 — the existing essay still holds its text",
+              (ms / "02-essay.md").read_text() == ESSAY)
+
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        check("A21 — --style without --new is refused: one way to do each "
+              "thing",
+              "--style is only for --new" in out, out)
+
+        out = run_stdin(ws, "", "write", "start", "ghost.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("A22 — without --new an unmatched name is the unchanged "
+              "resolution error",
+              "no document matching 'ghost.md'" in out, out)
+
+        write(ms / "01-choice.md", CH1 + "\nA paragraph added after the "
+                                         "summary was built.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        gate_outs.append(out)
+        check("A23 — --new still honours the summary freshness gate over the "
+              "whole before/after context",
+              "stale summaries (text changed): 01-choice.md" in out, out)
+        check("A23 — and nothing was created", not target.exists())
+        write(ms / "01-choice.md", CH1)
+        run(ws, "collect")
+
+        _meta = json.loads(_row["metadata"] or "{}")
+        _meta["gdocs"] = {"03-new.md": {"doc_id": "stub", "checked_out": True}}
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A24 — --new still honours the Google-Docs checkout gate",
+              "checked out to Google Docs" in out, out)
+        check("A24 — and nothing was created", not target.exists())
+        _meta["gdocs"]["03-new.md"]["checked_out"] = False
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+
+        out = run(ws, "intent", "declare", "Abandoned side-quest")
+        dead_id = out.split("[")[1].split("]")[0]
+        run(ws, "intent", "abandon", dead_id, "--outcome", "changed plans")
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", dead_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A25 — --new still honours the active-intent gate",
+              "not active" in out, out)
+        check("A25 — and nothing was created", not target.exists())
+
+        check("A26 — none of the new refusals offers a --force escape hatch",
+              all("--force" not in o for o in gate_outs),
+              "\n---\n".join(gate_outs))
+
+        # ---- A1-A5: the create path itself.
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House")
+        check("A1 — --new creates the file empty and attaches the guide",
+              "Created 03-new.md (empty)" in out
+              and "style guide 'House' attached" in out, out)
+        check("A1 — the file is on disk and empty",
+              target.exists() and target.read_text() == "", out)
+        attachment = _db.one(
+            "SELECT sa.*, sg.name AS guide FROM style_attachments sa "
+            "JOIN style_guides sg ON sg.id = sa.guide_id WHERE sa.file = ?",
+            ("03-new.md",))
+        check("A1 — the attachment is an ordinary style_attachments row, "
+              "identical to one written by 'style attach'",
+              attachment is not None and attachment["guide"] == "House",
+              str(dict(attachment) if attachment else None))
+        check("A2 — the brief is echoed at start, verbatim",
+              "BRIEF" in out and BRIEF_A.split(":")[0] in out, out)
+        wu_row = _db.one("SELECT * FROM writeups WHERE file = '03-new.md'")
+        wu_meta = _loads(wu_row["metadata"], {})
+        check("A2 — the brief and the created_file flag are persisted on the "
+              "writeup (metadata JSON only — no schema change)",
+              wu_meta.get("brief") == BRIEF_A
+              and wu_meta.get("created_file") is True
+              and wu_meta.get("placement") == "01-choice.md", str(wu_meta))
+        check("A1 — the pin is the pre-writeup state, which does not contain "
+              "the file at all: that is what makes 'restore to nonexistence' "
+              "honest",
+              "abandon deletes 03-new.md" in out, out)
+        out_status = run_stdin(ws, "", "write", "status")
+        check("A3 — write status reprints the brief on resume",
+              "BRIEF" in out_status and BRIEF_A.split(":")[0] in out_status,
+              out_status)
+        head, tail = out.split("AFTER", 1)
+        check("A4 — the declared placement drives the split for a file that "
+              "did not exist: the essay it follows is settled context, the "
+              "one it now precedes is forward-reference material",
+              "placed after 01-choice.md" in out
+              and "[01-choice.md]" in head and "[02-essay.md]" in tail, out)
+        check("A5 — the created file needs no summary of its own: it is "
+              "excluded from its own before/after context, so the freshness "
+              "gate passes with every OTHER summary fresh",
+              "03-new.md" not in head.split("BEFORE", 1)[1], out)
+        check("I4 — write start --new, write status: zero LLM requests "
+              "(no llm.py call is added to the write path)",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+
+        # ---- B7: a digest models a REWRITE. A writeup that created its
+        # own file can never grow one, in any of the four shapes, so it can
+        # never be asked to account for points that do not exist.
+        for argv, label in (
+                (("write", "digest"), "bare"),
+                (("write", "digest", "--show"), "--show"),
+        ):
+            out = run_stdin(ws, "", *argv, expect_exit=True)
+            check(f"B7 — write digest ({label}) is refused on a writeup that "
+                  f"created its file",
+                  "there is no source essay to digest" in out
+                  and "03-new.md" in out, out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest", expect_exit=True)
+        check("B7 — and so is the JSON form",
+              "there is no source essay to digest" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B7 — and so is the --dispositions form",
+              "there is no source essay to digest" in out, out)
+
+        # ---- A11-A15: abandon deletes what the writeup created.
+        run_stdin(ws, NEW_PLAN, "write", "plan")
+        run_stdin(ws, NEW_BEAT_1, "write", "propose",
+                  "--why", "realizes Choice; carries the brief's first clause")
+        run_stdin(ws, "", "write", "accept")
+        check("A11 — the accepted beat landed in the created file",
+              NEW_BEAT_1 in target.read_text())
+        # RISK K2: the pre-collect must stay the FIRST statement in
+        # write_abandon. Text typed into the file and never collected has
+        # no other recovery point, and abandon is about to delete the file.
+        UNCOLLECTED = (NEW_BEAT_1 + "\n\nA half-typed sentence, never "
+                                    "collected, about to be deleted.")
+        target.write_text(UNCOLLECTED)
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, "", "write", "abandon")
+        check("A11 — abandon DELETES a file the writeup created, and says "
+              "why: the restore target is nonexistence",
+              "deleted" in out and "restore target is nonexistence" in out, out)
+        check("A11 — the file is gone from disk", not target.exists(), out)
+        check("I4 — write abandon makes zero LLM requests",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+        versions = _db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (_row["id"],))
+        check("A12 — the accepted prose is preserved in version history: the "
+              "essay is unpublished, not destroyed",
+              any(NEW_BEAT_1 in (_loads(v["files"], {}).get("03-new.md") or "")
+                  for v in versions))
+        check("A12 / K2 — the never-collected text is preserved too. This is "
+              "the order-swap regression: if the unlink ever moved above "
+              "write_abandon's pre-collect, this text would be gone with no "
+              "recovery point at all",
+              any(_loads(v["files"], {}).get("03-new.md") == UNCOLLECTED
+                  for v in versions))
+        check("A11 — abandon reports the version the text survives in",
+              "preserved in v" in out, out)
+        out = run(ws, "collect")
+        check("A13 — abandon is honest about the deletion: its own collect "
+              "already recorded the removal, so nothing is pending",
+              "No changes" in out, out)
+
+        # A15: the author deleted the file by hand first. Abandon must
+        # still close the writeup cleanly rather than traceback.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, BRIEF_A, "write", "start", "04-extra.md", "--new",
+                  "--intent", intent_id, "--after", "02-essay.md",
+                  "--style", "House")
+        (ms / "04-extra.md").unlink()
+        out = run_stdin(ws, "", "write", "abandon")
+        check("A15 — abandon on a created file the author already deleted "
+              "succeeds and still reports the deletion",
+              "deleted" in out and "04-extra.md" in out, out)
+        check("A15 — and the file is still absent",
+              not (ms / "04-extra.md").exists())
+
+        # ---- F5: "restore to nonexistence" includes the attachment the
+        # writeup itself wrote at start. Leaving it behind orphans a
+        # style_attachments row pointing at a file that is not on disk —
+        # the exact integrity rule api._validate_file exists to keep.
+        def _attachment(file: str):
+            return _db.one("SELECT * FROM style_attachments WHERE file = ?",
+                           (file,))
+
+        check("F5 — abandoning a CREATED writeup takes its style attachment "
+              "with the file: the writeup wrote that row at start, so "
+              "unwinding the writeup unwrites it",
+              _attachment("04-extra.md") is None and _attachment("03-new.md")
+              is None,
+              str([dict(_attachment(f)) if _attachment(f) else None
+                   for f in ("03-new.md", "04-extra.md")]))
+        # ...and a plain rewrite's PRE-EXISTING attachment is untouched: it
+        # was not the writeup's to remove.
+        before_attachment = dict(_attachment("02-essay.md"))
+        run_stdin(ws, "", "write", "start", "02-essay.md",
+                  "--intent", intent_id)
+        out = run_stdin(ws, "", "write", "abandon")
+        check("F5 — a plain rewrite's abandon restores the file and leaves "
+              "the attachment it did NOT create alone",
+              "file restored" in out
+              and _attachment("02-essay.md") is not None
+              and dict(_attachment("02-essay.md")) == before_attachment,
+              out)
+        check("F5 — and the rewrite's file came back",
+              (ms / "02-essay.md").read_text() == ESSAY)
+
+        # ---- A6-A9: the full UC-A loop through to completion.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                  "--intent", intent_id, "--after", "01-choice.md",
+                  "--style", "House")
+        run_stdin(ws, NEW_PLAN, "write", "plan")
+        run_stdin(ws, NEW_BEAT_1, "write", "propose", "--why", "opener")
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, NEW_BEAT_2, "write", "propose", "--why", "close")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("A6 — the UC-A loop completes",
+              "completed — 2 beat(s)" in out, out)
+        text = target.read_text()
+        check("A6 — the file holds both beats in order",
+              text.index(NEW_BEAT_1) < text.index(NEW_BEAT_2), text)
+        check("A7 — complete registers the essay in toc.toml at the declared "
+              "placement (without it the essay is finished, on disk, and "
+              "structurally invisible)",
+              "Registered 03-new.md in toc.toml after 01-choice.md" in out, out)
+        toc_now = (ms / "toc.toml").read_text()
+        check("A7 — the toc entry is there",
+              'file = "03-new.md"' in toc_now, toc_now)
+        check("A7 — the hand-written comment survived byte-for-byte (RISK "
+              "K3: a serialize_toc_tree round trip would have dropped it)",
+              "# Table of contents — hand-maintained; this comment must "
+              "survive." in toc_now, toc_now)
+        from authorlm.structure import reading_order as _reading_order
+        order, _unlisted = _reading_order(
+            {"toc.toml": toc_now, "01-choice.md": "", "02-essay.md": "",
+             "03-new.md": ""})
+        check("A7 — the reading order now places it between its neighbours",
+              order == ["01-choice.md", "03-new.md", "02-essay.md"],
+              str(order))
+        check("A8 — complete reminds that the summary is now missing/stale",
+              "summarize rebuild" in out, out)
+        check("B31 — a writeup with no digest gets no accounting block at all",
+              "UNACCOUNTED" not in out and "Removal accounting" not in out, out)
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("A9 — a registered new essay then blocks its neighbour's next "
+              "start until the summary is rebuilt: the toc entry is what "
+              "makes the hole visible instead of silent",
+              "missing summaries: 03-new.md" in out, out)
+        run(ws, "summarize", "rebuild", "--all")
+
+        # ---- F8: an essay placed with the `start` SENTINEL. "after start"
+        # is not a file name and reads as one; the sentinel is the one
+        # position `--after <file>` cannot express, and the report should
+        # say what actually happened.
+        run_stdin(ws, BRIEF_A, "write", "start", "00-front.md", "--new",
+                  "--intent", intent_id, "--after", "start",
+                  "--style", "House")
+        run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
+                  "write", "plan")
+        run_stdin(ws, "An opening beat, before everything else.",
+                  "write", "propose", "--why", "opens the book")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("F8 — the start sentinel reads as a position, not as a file "
+              "named 'start'",
+              "Registered 00-front.md in toc.toml at the start." in out
+              and "after start" not in out, out)
+        toc_now = (ms / "toc.toml").read_text()
+        order, _unlisted = _reading_order(
+            {"toc.toml": toc_now, "00-front.md": "", "01-choice.md": "",
+             "02-essay.md": "", "03-new.md": ""})
+        check("F8 — and it really does open the book",
+              order[0] == "00-front.md", str(order))
+        run(ws, "summarize", "rebuild", "--all")
+
+        # ---- UC-B: the modeled rewrite of 02-essay.md.
+        out = run(ws, "intent", "declare", "Rewrite the essay, same crux")
+        rewrite_id = out.split("[")[1].split("]")[0]
+        out = run_stdin(ws, REWRITE_BRIEF, "write", "start", "02-essay.md",
+                        "--intent", rewrite_id)
+        check("UC-B — a rewrite takes the brief too (the 'additional "
+              "guidance to retain key points, reorder for flow')",
+              "BRIEF" in out and "Keep the field/position pairing" in out, out)
+        check("UC-B — and start points at the pinned original",
+              "Raw material: write digest prints the pinned original." in out,
+              out)
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, "", "write", "digest")
+        check("B1 — bare write digest prints the pinned original verbatim, "
+              "under a header naming the version and char count",
+              "PINNED SOURCE — 02-essay.md" in out
+              and "The old opening paragraph, soon to be raw material." in out
+              and "(v" in out, out)
+        check("B1 — and the file on disk is still empty (the old essay lives "
+              "in the pinned version, never on disk)",
+              (ms / "02-essay.md").read_text() == "", out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest")
+        check("B2 — the digest persists and reports its counts",
+              "Digest recorded: 3 point(s), 1 example(s), 1 reference(s), "
+              "1 inconsistency(ies)." in out, out)
+        check("B2 — the inconsistencies print one per line: they are "
+              "findings the author must see",
+              "i1 · vs 01-choice.md" in out, out)
+        check("B2 — and the accounting starts at zero",
+              "Accounting: 0/3 points dispositioned." in out, out)
+        check("I4 — write digest (print and persist) makes zero LLM requests",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+        wu_b = _db.one("SELECT * FROM writeups WHERE file = '02-essay.md' "
+                       "AND status = 'active'")
+        check("I2 — the digest is NOT a guidance row: it is proposed by "
+              "nobody, reviewed by nobody, superseded by nobody",
+              _db.one("SELECT COUNT(*) AS n FROM guidance_history "
+                      "WHERE batch_id = ? AND kind != 'beat'",
+                      (wu_b["id"],))["n"] == 0)
+        out = run_stdin(ws, "", "write", "status")
+        check("B3 — the digest survives resume",
+              "Digest: 3 point(s), 1 example(s), 1 reference(s), "
+              "1 inconsistency(ies)." in out
+              and "UNACCOUNTED (p1, p2, p3)" in out, out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest", expect_exit=True)
+        check("B4 — a second digest without --replace is refused, naming "
+              "the flag",
+              "--replace" in out, out)
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, "", "write", "digest", "--show")
+        check("B6 — --show prints the stored digest and the tally",
+              '"p1"' in out and "3 UNACCOUNTED" in out, out)
+
+        # ---- B20-B27: dispositions.
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 1}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B25 — a beat that is not an n in this writeup's plan is "
+              "refused (there is no plan yet)",
+              "is not an n in this writeup's plan" in out, out)
+        run_stdin(ws, REWRITE_PLAN, "write", "plan")
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 99}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B25 — and so is a beat number outside the ratified plan",
+              "beat 99 is not an n in this writeup's plan" in out, out)
+        out = run_stdin(ws, '{"p2": {"disposition": "removed"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B21 — a removal with no reason is refused, on the same "
+              "principle as write reject --reason",
+              "a removal needs a reason" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "deferred"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B22 — an unknown disposition value is refused, naming the "
+              "two that exist",
+              "kept, removed" in out, out)
+        out = run_stdin(ws, '{"p9": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B23 — a disposition on an id the digest does not have is "
+              "refused, naming it",
+              "'p9' is not a point" in out, out)
+        out = run_stdin(ws, '{"x1": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B24 — a disposition on a non-point id is refused: the "
+              "accounting accounts for points",
+              "'x1' is not a point id" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 1}}',
+                        "write", "digest", "--dispositions")
+        check("B20 — dispositions record and tally",
+              "Dispositions recorded: 1 (1 kept, 0 removed)." in out
+              and "Accounting: 1 kept, 0 removed, 2 UNACCOUNTED (p2, p3)."
+              in out, out)
+        out = run_stdin(ws, json.dumps({
+            "p1": {"disposition": "removed",
+                   "reason": "changed my mind — it duplicates 01-choice.md"},
+            "p3": {"disposition": "removed",
+                   "reason": "duplicates 01-choice.md's choice/distinction "
+                             "pairing (i1); 01-choice.md owns it"}}),
+            "write", "digest", "--dispositions")
+        check("B26 — merge, not replace, and the change of mind is REPORTED "
+              "rather than hidden",
+              "Dispositions recorded: 2 (0 kept, 2 removed); 1 overwritten."
+              in out and "p1: kept → removed" in out, out)
+        check("B26 — both ids are present after the merge",
+              "Accounting: 0 kept, 2 removed, 1 UNACCOUNTED (p2)." in out, out)
+        # B5 / RISK K7: --replace is the only way to lose recorded work.
+        shrunk = json.loads(DIGEST_JSON)
+        shrunk["points"] = [p for p in shrunk["points"] if p["id"] != "p3"]
+        shrunk["inconsistencies"] = []
+        out = run_stdin(ws, json.dumps(shrunk), "write", "digest",
+                        "--replace", expect_exit=True)
+        check("B5 — --replace is refused when it would drop an id that "
+              "already carries a disposition",
+              "refusing to replace: p3" in out, out)
+        check("I4 — write digest --show / --dispositions / --replace and "
+              "write plan make zero LLM requests between them: the verbs are "
+              "deterministic state, gates and evidence, and every piece of "
+              "model work stays in the conversation",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+
+        # ---- the loop, ending in the authored removal section.
+        run_stdin(ws, REWRITE_BEAT_1, "write", "propose",
+                  "--why", "carries p1; realizes Choice")
+        run(ws, "guide")
+        out = run_stdin(ws, "", "write", "status")
+        check("I3 — a mid-writeup guidance run still cannot clobber a "
+              "pending beat, digest or no digest",
+              "Pending proposal" in out, out)
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, REWRITE_BEAT_2, "write", "propose",
+                  "--why", "carries p2; realizes Field")
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, REMOVAL_SECTION, "write", "propose",
+                  "--why", "the removal section; quotes the recorded reasons "
+                           "for p1 and p3; introduces no new claim")
+        run_stdin(ws, "", "write", "accept")
+
+        out = run_stdin(ws, "", "write", "complete")
+        check("B28 — complete WARNS and does not block on unaccounted "
+              "points: an unaccounted point is the same kind of open item "
+              "as an unwritten beat, and blocking would reward a fake 'kept'",
+              "Removal accounting: 0 point(s) kept, 2 removed, "
+              "1 UNACCOUNTED." in out
+              and "UNACCOUNTED — no disposition recorded" in out
+              and "p2" in out, out)
+        check("B28 — the warning names the id AND its claim, so the author "
+              "can act on it without going back to the digest",
+              "Fields have positions" in out, out)
+        wu_b = _db.one("SELECT * FROM writeups WHERE id = ?", (wu_b["id"],))
+        check("B28 — and the writeup is nonetheless completed",
+              wu_b["status"] == "completed", wu_b["status"])
+        check("B29 — the tally is persisted, not merely printed",
+              _loads(wu_b["metadata"], {}).get("accounting_at_complete")
+              == {"kept": 0, "removed": 2, "unaccounted": ["p2"]},
+              str(_loads(wu_b["metadata"], {}).get("accounting_at_complete")))
+        text = (ms / "02-essay.md").read_text()
+        check("B32 — the 'What Was Removed and Why' section is ordinary "
+              "authored prose, and being the last beat is what puts it last",
+              "## **What Was Removed and Why**" in text
+              and text.index("## **What Was Removed and Why**")
+              > text.index(REWRITE_BEAT_2), text)
+        rows = _db.all(
+            "SELECT batch_index, state FROM guidance_history "
+            "WHERE batch_id = ? ORDER BY batch_index, created_at",
+            (wu_b["id"],))
+        check("B32 / I5 — the verdict pathway is unchanged: the beat order "
+              "reconstructs from guidance_history by batch_id",
+              [(r["batch_index"], r["state"]) for r in rows]
+              == [(1, "accepted"), (2, "accepted"), (3, "accepted")],
+              str([(r["batch_index"], r["state"]) for r in rows]))
+
+        # ---- B30: fully accounted, no warning.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, "", "write", "start", "02-essay.md",
+                  "--intent", rewrite_id)
+        run_stdin(ws, json.dumps({"points": [
+            {"id": "q1", "claim": "the sole point of the second rewrite"}]}),
+            "write", "digest")
+        run_stdin(ws, json.dumps({"q1": {"disposition": "kept"}}),
+                  "write", "digest", "--dispositions")
+        run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
+                  "write", "plan")
+        run_stdin(ws, "A single beat for the second rewrite.",
+                  "write", "propose", "--why", "carries q1")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("B30 — a fully accounted rewrite reports 0 UNACCOUNTED and "
+              "prints no warning block",
+              "Removal accounting: 1 point(s) kept, 0 removed, "
+              "0 UNACCOUNTED." in out
+              and "UNACCOUNTED — no disposition recorded" not in out, out)
+
+        run(ws, "session", "end")
+    finally:
+        server.shutdown()
+
+
 def scenario_doc_comments(root: Path) -> None:
     """Doc-comments ingestion: quote location, verbatim storage, dedupe,
     and the resolve round-trip against a fake Drive service."""
@@ -1888,6 +2559,114 @@ def scenario_doc_comments(root: Path) -> None:
           str(pairs))
     check("parents_to_tree inverts tree_to_parents",
           parents_to_tree(pairs) == tree, str(parents_to_tree(pairs)))
+
+    # A10 — insert_toc_entry: the registration `write complete` performs for
+    # an essay the loop created. PURE TEXT INSERTION (RISK K3): a
+    # serialize_toc_tree round trip would silently drop hand comments and
+    # any attribute the serializer does not know about.
+    from authorlm.structure import insert_toc_entry
+    commented = ('# hand comment, must survive\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "a.md"\n'
+                 'illustrations = "3"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "b.md"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "c.md"\n'
+                 'parent = "b.md"\n')
+    inserted, stanza = insert_toc_entry(commented, "new.md", "c.md")
+    check("A10 — the stanza lands after the anchor and carries the anchor's "
+          "parent (structural depth is deterministic); it never guesses "
+          "matter or any other semantic attribute",
+          'file = "new.md"' in stanza and 'parent = "b.md"' in stanza
+          and "matter" not in stanza, stanza)
+    check("A10 — the insertion puts it in the right reading position",
+          [n for n, _ in parse_toc_tree(inserted)]
+          == ["a.md", "b.md", "c.md", "new.md"],
+          str(parse_toc_tree(inserted)))
+    check("A10 — the hand comment and the unknown attribute survive "
+          "byte-for-byte",
+          "# hand comment, must survive" in inserted
+          and 'illustrations = "3"' in inserted, inserted)
+    check("A10 — every line that was there before is still there, verbatim",
+          all(line in inserted.splitlines()
+              for line in commented.splitlines() if line.strip()),
+          inserted)
+    at_start, stanza = insert_toc_entry(commented, "new.md", "start")
+    check("A10 — the PLACEMENT_START sentinel inserts before the first "
+          "[[chapter]], and there is no anchor whose parent to carry",
+          [n for n, _ in parse_toc_tree(at_start)]
+          == ["new.md", "a.md", "b.md", "c.md"]
+          and "parent" not in stanza, at_start)
+    check("A10 — an anchor the toc does not name returns None: the caller "
+          "warns and prints the stanza rather than guessing a position",
+          insert_toc_entry(commented, "new.md", "nope.md") is None)
+    same, stanza = insert_toc_entry(commented, "a.md", "c.md")
+    check("A10 — registering a file the toc already lists is idempotent: "
+          "the text comes back unchanged",
+          same == commented and stanza == "", same)
+
+    # F3 — a comment sitting in the gap belongs to the table BELOW it. The
+    # walk-back to the insertion point must skip comment lines as well as
+    # blanks, or the new stanza lands between the comment and the table it
+    # annotates: the comment is silently re-attributed to the new essay,
+    # and the new stanza is glued to its neighbour with no blank line.
+    gap_comment = ('[[chapter]]\n'
+                   'file = "a.md"\n'
+                   '\n'
+                   '# this comment annotates b.md, not whatever precedes it\n'
+                   '[[chapter]]\n'
+                   'file = "b.md"\n')
+    inserted, _stanza = insert_toc_entry(gap_comment, "new.md", "a.md")
+    lines = inserted.splitlines()
+    b_at = lines.index('file = "b.md"')
+    comment_at = lines.index(
+        '# this comment annotates b.md, not whatever precedes it')
+    new_at = lines.index('file = "new.md"')
+    check("F3 — the comment stays with the table it annotates: the new "
+          "stanza goes ABOVE it, not between it and b.md",
+          new_at < comment_at < b_at, inserted)
+    check("F3 — and the new stanza is not glued to its neighbour: a blank "
+          "line separates it on both sides",
+          lines[new_at - 2].strip() == ""
+          and lines[new_at + 1].strip() == "", repr(lines))
+    check("F3 — the reading order is still right",
+          [n for n, _ in parse_toc_tree(inserted)]
+          == ["a.md", "new.md", "b.md"], str(parse_toc_tree(inserted)))
+    check("F3 — every original line survives verbatim",
+          all(line in lines
+              for line in gap_comment.splitlines() if line.strip()),
+          inserted)
+
+    # F4 — K3's purity is a claim about BYTES. A toc written on Windows (or
+    # round-tripped through a tool that writes CRLF) must not be silently
+    # relaid in LF: that is a rewrite of every line the insertion never
+    # touched, which is exactly what "never rewrites anything it did not
+    # add" forbids.
+    lf_result, lf_stanza = insert_toc_entry(commented, "new.md", "c.md")
+    crlf_result, crlf_stanza = insert_toc_entry(
+        commented.replace("\n", "\r\n"), "new.md", "c.md")
+    check("F4 — a CRLF toc comes back CRLF, with no lone LF anywhere",
+          "\r\n" in crlf_result
+          and crlf_result.replace("\r\n", "").count("\n") == 0,
+          repr(crlf_result))
+    check("F4 — and the stanza is spelled in the file's own line ending",
+          "\r\n" in crlf_stanza and "\r" not in lf_stanza,
+          repr(crlf_stanza))
+    check("F4 — the CRLF insertion is otherwise identical to the LF one, "
+          "so nothing but the separator differs",
+          crlf_result.replace("\r\n", "\n") == lf_result, repr(crlf_result))
+    check("F4 — an LF toc stays LF (no \\r introduced)",
+          "\r" not in lf_result, repr(lf_result))
+    no_trailing = commented.rstrip("\n")
+    grown, _s = insert_toc_entry(no_trailing, "new.md", "c.md")
+    check("F4 — a file with no trailing newline does not grow one: the "
+          "insertion adds its stanza and nothing else",
+          not grown.endswith("\n") and 'file = "new.md"' in grown,
+          repr(grown[-60:]))
 
     doc_tabs = [{"tabProperties": {"tabId": "t.a", "title": "a.md"},
                  "childTabs": [
@@ -2725,6 +3504,7 @@ def main_test() -> None:
         scenario_errors(root)
         scenario_llm_and_unregister(root)
         scenario_write_loop(root)
+        scenario_write_new_and_digest(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)

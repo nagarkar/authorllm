@@ -691,3 +691,190 @@ numbers plus a usably-close redraft is the strongest signal to greenlight
 (via `paragraph_coverage`) rather than a vague feeling, and the fix to try
 first is still inside the per-essay design (§12.3). No new schema, gate,
 or CLI verb needed to run this.
+
+## 13. Two author use cases on the loop — new essays and modeled rewrites (2026-08-29)
+
+Added by the use-case expansion pass, answering two requests from the author:
+write a new essay from a one-paragraph brief, and rewrite an existing essay as
+a *modeled* rewrite that accounts for every point in the original. This section
+is **additive** — nothing above is edited. Where a claim above would mislead a
+reader given what is built now, that is called out explicitly here rather than
+folded silently into the older text.
+
+Neither use case is a new mode. Both are `mode='fresh'` (§2), distinguished by
+what the writeup's metadata holds: a `brief` with `created_file` is a new
+essay; a `digest` is a modeled rewrite. Revision mode remains unbuilt (§11).
+Nothing here adds an LLM call to the write path: the conversational agent does
+all drafting, extraction, and accounting prose; the verbs stay deterministic
+state, gates, and evidence (§0's skill-mode statement, unchanged).
+
+### 13.1 UC-A — a new essay from a one-paragraph brief
+
+`write start` learns to target a file that does not exist yet:
+
+```
+write start <name>.md --new --intent <id> --after <file> --style <guide>
+                                                        (brief on stdin)
+```
+
+- **`--new` is explicit** because `docs._match` resolves by unique
+  case-insensitive substring: without the flag, a typo would silently become a
+  new essay. `--new` on a name that already resolves is refused.
+- **The brief travels on stdin and is required with `--new`**, for the same
+  reason `write plan` and `write learn` take stdin (prose in an argument is a
+  quoting disaster) and because a brand-new file has *no pinned raw material*.
+  The brief is the only essay-specific grounding the beats have; without it the
+  loop is asking a model to invent commitments, which is what §12.5's
+  experiment did. It is persisted in the writeup metadata and reprinted by
+  `write status`. The missing-brief refusal is the **last** of the flag
+  gates — after `--new` consistency, the intent, the style guide and the
+  placement, and before the summary-freshness gate. Every other refusal
+  names a flag the author can append to the command they just typed; this
+  one asks them to go and compose a paragraph, and a gate parade typed at
+  a terminal has no stdin at all, so checking it first would mask every
+  other refusal behind "give me a brief".
+- **"Proposed by the drafter loop" is conversational.** The skill may draft a
+  candidate brief; the author ratifies the wording; the ratified wording is
+  what reaches `write start`. No verb, and no LLM call in the write path.
+- **Placement is required**, and mostly already enforced: a file that does not
+  exist is unlisted once created, and §12.4 item 3's refusal covers unlisted
+  files. The refusal fires *before* the file is created, so a blocked start
+  still leaves the disk untouched.
+- **Style is attached at start with `--style`.** `style attach` cannot be run
+  first: `api._validate_file` requires the file on disk, deliberately (there is
+  no files table; integrity is enforced against disk at the point of entry).
+  The guide name is validated before anything is created; the attachment
+  written afterwards is an ordinary `style_attachments` row.
+- **The pin is the pre-writeup state, which does not contain the file.** That
+  is what makes the restore target honest: `write abandon` on a writeup that
+  created its file **deletes the file**. The pre-collect that already guards
+  BUG-2/A1 runs first, so whatever prose was in it survives in version history;
+  the subsequent collect records the removal, and any concept whose primary
+  location was that file raises a `vanished` proposal — the same honest noise a
+  truncate-and-rebuild produces (§9.4).
+- **`write complete` registers the toc entry.** A finished new essay with no
+  `toc.toml` entry can never be summarized in position, so the next
+  `critique run` or `write start` near it is refused for a file the author
+  believes is done. Completion therefore inserts the stanza textually after the
+  placement anchor (carrying the anchor's `parent`, never guessing `matter`),
+  preserving comments and unknown attributes; if the anchor cannot be found it
+  prints the stanza to paste and does not fail.
+
+### 13.2 UC-B — a modeled rewrite, with removal accounting
+
+A modeled rewrite is §9.4's fresh-mode-over-an-existing-file — already built —
+plus a digest, dispositions, and a report.
+
+**`write digest`** is the deterministic channel to the pinned original:
+
+- with no stdin it **prints** the pinned source text (the file on disk is
+  truncated; the old essay lives in `source_version_id`);
+- with JSON on stdin it **persists** a structured digest to the writeup
+  metadata: `points`, `examples`, `references`, `inconsistencies` (each
+  contradiction naming the TOC-earlier essay it conflicts with);
+- with `--dispositions` it **merges** per-point dispositions;
+- with `--show` it prints the stored digest and the accounting tally;
+- it is refused outright on a writeup that created its file — there is no
+  source essay to digest.
+
+Every item carries a **stable id**, unique across the whole digest, because the
+removal accounting references them. Cross-references (`serves`, `points`) must
+resolve to real point ids, and `inconsistencies[].with` must resolve to a real
+manuscript file; a dangling reference is refused rather than stored, since an
+accounting built on dangling ids is decorative. `--replace` is allowed but may
+not drop an id that already carries a disposition.
+
+The digest is produced by the skill and **reviewed by the author before it is
+persisted**. That review is what makes it evidence rather than a machine
+reading — the same principle as plan ratification (§13.3).
+
+**Dispositions** are `kept` or `removed`; `removed` requires a reason, for the
+same reason `write reject` requires one. Two values only — the nuance belongs
+in the free-text reason, which is what the removal section quotes. An optional
+`beat` links a kept point to the beat that carried it.
+
+**The "What Was Removed and Why" section is authored content**, drafted by the
+skill as the final beat(s) from the *recorded* reasons, accepted by the author
+like any beat, and therefore evidence like any beat. Its placement needs no
+machinery: the loop appends, so the last beat lands last, which is what "after
+the footnotes" means for an append-only loop (order any footnotes beat before
+it in the plan). Note that this section is ordinary manuscript prose — it will
+be collected, scanned, summarized, pushed, and exported. The durable record of
+the accounting is the writeup metadata, so deleting the section later loses
+nothing.
+
+**`write complete` reports, and does not block.** When a digest exists it
+cross-checks every point id against the recorded dispositions and prints
+kept / removed / **UNACCOUNTED** — the last loudly, with the ids and their
+claims — and persists the tally to the writeup metadata. It does not refuse.
+This follows §11's existing principle that "`write complete` does not require
+the plan to be exhausted — the author decides when done": an unaccounted point
+is the same kind of open editorial item as an unwritten beat. Blocking would
+also reward the cheapest escape — a bare `kept` on a point that was in fact
+dropped — converting a visible gap into an invisible lie. `write status` shows
+the same tally on every resume, so the report at completion is never the first
+time the author sees it.
+
+`write complete` deliberately does not check that the section exists in the
+file. That is content lint, and §11 is explicit that `write propose` carries
+none so the auditors have one home; the same holds here.
+
+### 13.3 "We cannot make things up" — where each beat's facts come from
+
+The author's constraint, verbatim, from the sitting that requested these use
+cases. It is a claim about permitted inputs, not a tone.
+
+A beat may be grounded **only** in: the author's brief; the drafting context's
+BEFORE block (§12.4 item 1); the concept graph's ratified notes; the effective
+style guide — and, for a modeled rewrite, the digest. The digest is the **sole
+authority on what the original said**: a point not in the digest is not in the
+original, even when a neighbour's AFTER summary appears to describe it (during
+a rewrite those summaries can still describe the *old* version — observed in
+the §12.5 runs). Reordering, compressing and sharpening are the point of a
+modeled rewrite and are fully permitted; adding a claim, an example, or a
+citation that is in neither the digest nor the brief is a new authorial
+commitment and belongs to the author.
+
+**Plan ratification is the guard against invented commitments.** §12.5's
+blind-redraft experiment had the style guide, the concept slice and the full
+before/after context — everything §12.4 shipped — and still invented an
+attribution, recording in its own notes: "I do not know the real essay's actual
+argument, so I built one and attributed the underlying thesis to Rieff." It
+happened because 2,244 words were requested in one shot: the gap between "a
+claim is needed here" and "I have no claim here" was closed at drafting time,
+silently. The beat plan moves that decision upstream of the prose. Therefore:
+
+- a beat spec's `notes` state **the claim the beat will make**, not merely its
+  rhetorical function;
+- every proper name, citation or quotation a beat will use is named in the spec
+  (or, in a rewrite, is a digest reference id) before it appears in prose;
+- `--why` on propose repeats the grounding by id;
+- a beat that discovers mid-draft that it needs an ungrounded fact triggers
+  `write plan --replace` or a question to the author — never an invention.
+
+### 13.4 What is still not built
+
+Unchanged from §11, and re-confirmed against these two use cases:
+
+- **Revision mode** — UC-B is specifically the rewrite case that does *not*
+  force it (§9.4). Seam and bridge writing (§10's first trial) is revision mode
+  under another name and waits with it.
+- **k-candidates (§9.3)** — still deliberately absent, but note that §10's
+  prediction ("expect k to matter for fresh drafting, not seams") now has its
+  test: UC-A is the purest fresh drafting the loop will see. Superseded
+  proposals carry no verdict today, so k is not free; it needs
+  `propose --alt` + `accept --pick` and a sibling-rejection path through
+  `record_review`.
+- **Essay merge / split** — a merge needs multiple pinned sources; the digest
+  above is per-writeup on purpose, and a `sources` list would be an additive
+  superset when the use case arrives.
+- **Modeling on a *different* essay** (`write digest --source <file>`) — the
+  same-file reading is what the removal-accounting requirement implies; the
+  cross-file reading waits for the author to ask for it.
+- **Summary rebuild at `write complete`** — completion reminds; it does not
+  rebuild. `rebuild_one` marks everything downstream `upstream_stale`, a side
+  effect completion was not asked for.
+- **`plan.draft_stubs`** is now the codebase's only ungated LLM drafting path
+  (no plan, no gates, no verdict, straight into `_drafts/`). It predates this
+  loop and should be retired rather than expanded; the supported path for
+  turning a plan item into prose is `write start`.

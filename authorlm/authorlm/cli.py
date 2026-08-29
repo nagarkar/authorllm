@@ -3040,6 +3040,35 @@ def _print_beat_spec(beat: dict, label: str = "Beat") -> None:
           (f": {beat['notes']}" if beat.get("notes") else ""))
 
 
+def _print_brief(brief: str | None) -> None:
+    if not brief:
+        return
+    print()
+    print(ui.bold("BRIEF — the author's, verbatim:"))
+    print(brief)
+
+
+def _digest_counts(digest: dict) -> str:
+    return (f"{len(digest.get('points', []))} point(s), "
+            f"{len(digest.get('examples', []))} example(s), "
+            f"{len(digest.get('references', []))} reference(s), "
+            f"{len(digest.get('inconsistencies', []))} inconsistency(ies)")
+
+
+def _print_accounting(accounting: dict | None) -> None:
+    """The running removal tally (design §13.2). Yellow whenever anything
+    is unaccounted, on every surface that shows it — the report at
+    `write complete` must never be the first time the author sees it."""
+    if not accounting:
+        return
+    unaccounted = accounting["unaccounted"]
+    line = (f"Accounting: {len(accounting['kept'])} kept, "
+            f"{len(accounting['removed'])} removed, "
+            f"{len(unaccounted)} UNACCOUNTED"
+            + (f" ({', '.join(unaccounted)})" if unaccounted else "") + ".")
+    print(ui.yellow(line) if unaccounted else line)
+
+
 def _print_drafting_context(text: str) -> None:
     """The L1 book-frame (summaries.drafting_context). Printed verbatim —
     it is the drafting payload, and the skill reads it out of this
@@ -3074,13 +3103,24 @@ def cmd_write(args):
                          "first (the writeup is bound to it)")
             result = api.write_start(db, manuscript, config,
                                      args.params[0], args.intent,
-                                     after=args.after)
+                                     after=args.after, brief=_stdin_text(),
+                                     new=args.new, style=args.style)
             w = result["writeup"]
             print(f"Writeup [{w['id'][:11]}] on {w['file']} "
                   f"(intent {result['intent']['id'][:11]}).")
-            print(f"Pinned v{result['source_version_no']} as raw material "
-                  f"({result['source_chars']} chars); file truncated.")
+            if result["created"]:
+                print(f"Created {w['file']} (empty); style guide "
+                      f"'{result['style']}' attached.")
+                print(f"Pinned v{result['source_version_no']} as the "
+                      f"pre-writeup state ({result['source_chars']} chars) — "
+                      f"abandon deletes {w['file']}.")
+            else:
+                print(f"Pinned v{result['source_version_no']} as raw material "
+                      f"({result['source_chars']} chars); file truncated.")
+            _print_brief(result["brief"])
             _print_drafting_context(result["drafting_context"])
+            if not result["created"] and result["source_chars"]:
+                print("Raw material: write digest prints the pinned original.")
             print("Next: ratify the beat plan — write plan (JSON on stdin).")
         elif args.action == "plan":
             raw = _stdin_text()
@@ -3115,7 +3155,77 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            _print_brief(result["brief"])
+            if result["digest"]:
+                print()
+                print(f"Digest: {_digest_counts(result['digest'])}.")
+            _print_accounting(result["accounting"])
             _print_drafting_context(result["drafting_context"])
+        elif args.action == "digest":
+            raw = _stdin_text()
+            if args.dispositions and args.show:
+                sys.exit("write digest: --dispositions and --show are "
+                         "different verbs — pick one")
+            payload = dispositions = None
+            if args.show:
+                if raw is not None:
+                    sys.exit("write digest --show takes no stdin — it prints "
+                             "what is already stored")
+            elif raw is not None:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as err:
+                    sys.exit(f"invalid digest JSON: {err}")
+                if args.dispositions:
+                    dispositions = parsed
+                else:
+                    payload = parsed
+            elif args.dispositions:
+                sys.exit("write digest --dispositions expects a JSON object "
+                         'of {"<point id>": {"disposition": …}} on stdin')
+            result = api.write_digest(db, manuscript, payload=payload,
+                                      dispositions=dispositions,
+                                      prefix=prefix, replace=args.replace,
+                                      show=args.show)
+            if result["mode"] == "source":
+                print(ui.bold(f"PINNED SOURCE — {result['file']} "
+                              f"(v{result['source_version_no']}, "
+                              f"{result['source_chars']} chars)"))
+                print()
+                print(result["source_text"])
+                print()
+                print("Next: extract the digest and have the author review "
+                      "it, then: write digest (JSON on stdin).")
+            elif result["mode"] == "recorded":
+                digest = result["digest"]
+                verb = "replaced" if result["replaced"] else "recorded"
+                print(f"Digest {verb}: {_digest_counts(digest)}.")
+                for item in digest["inconsistencies"]:
+                    against = (f"vs {item['with']}" if item.get("with")
+                               else "internal")
+                    print(ui.yellow(f"  {item['id']} · {against} — "
+                                    f"{item['note']}"))
+                accounted = (result["accounting"]["point_count"]
+                             - len(result["accounting"]["unaccounted"]))
+                print(f"Accounting: {accounted}/"
+                      f"{result['accounting']['point_count']} points "
+                      f"dispositioned.")
+            elif result["mode"] == "dispositions":
+                overwritten = (f"; {len(result['overwritten'])} overwritten"
+                               if result["overwritten"] else "")
+                print(f"Dispositions recorded: {result['recorded']} "
+                      f"({result['kept']} kept, {result['removed']} "
+                      f"removed){overwritten}.")
+                for change in result["overwritten"]:
+                    print(ui.dim(f"  {change} (overwritten)"))
+                _print_accounting(result["accounting"])
+            else:
+                if not result["digest"]:
+                    print("No digest recorded for this writeup yet — "
+                          "write digest (JSON on stdin).")
+                else:
+                    print(json.dumps(result["digest"], indent=2))
+                _print_accounting(result["accounting"])
         elif args.action == "propose":
             text = _stdin_text()
             result = api.write_propose(db, manuscript, text or "",
@@ -3164,14 +3274,63 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            accounting = result["accounting"]
+            if accounting:
+                unaccounted = accounting["unaccounted"]
+                headline = (f"Removal accounting: {len(accounting['kept'])} "
+                            f"point(s) kept, {len(accounting['removed'])} "
+                            f"removed, {len(unaccounted)} UNACCOUNTED.")
+                print(ui.yellow(headline) if unaccounted else headline)
+                if unaccounted:
+                    print(ui.yellow(
+                        "  UNACCOUNTED — no disposition recorded, and no "
+                        "'What Was Removed and Why' entry can be trusted "
+                        "while these are open:"))
+                    for point_id in unaccounted:
+                        claim = accounting["claims"].get(point_id, "")
+                        print(ui.yellow(f'    {point_id}  "{claim}"'))
+                    print(ui.yellow("  Record them: write digest "
+                                    "--dispositions  (JSON on stdin)."))
+            # `--after start` is a SENTINEL, not a file: "after start"
+            # reads as a file named start, which is the one thing the
+            # sentinel exists because there is no file for.
+            from . import summaries as _sums
+
+            at_start = result["toc_placement"] == _sums.PLACEMENT_START
+            where = ("at the start" if at_start
+                     else f"after {result['toc_placement']}")
+            if result["toc_registered"]:
+                print(f"Registered {result['summary_hint']} in toc.toml "
+                      f"{where}.")
+            elif result["toc_registered"] is False:
+                print(ui.yellow(
+                    f"could not place {result['summary_hint']} in toc.toml "
+                    f"automatically — add this stanza "
+                    + ("at the top, before the first [[chapter]]:" if at_start
+                       else f"after the {result['toc_placement']} entry:")))
+                print(result["toc_stanza"])
+            print(ui.dim(
+                f"{result['summary_hint']}'s summary is now stale — run "
+                f"'summarize rebuild' before the next writeup or critique "
+                f"pass on its neighbours."))
             print("Intent completion is separate: intent complete "
                   f"{result['intent_id'][:11]} (runs episode analysis).")
         elif args.action == "abandon":
             result = api.write_abandon(db, manuscript, config, prefix=prefix)
-            restored = ("file restored from the pinned source version"
-                        if result["restored"] else
-                        ui.yellow("source version missing — file NOT restored"))
-            print(f"Writeup [{result['writeup_id'][:11]}] abandoned; {restored}.")
+            if result["deleted"]:
+                print(f"Writeup [{result['writeup_id'][:11]}] abandoned; "
+                      f"{result['file']} deleted — the writeup created it, "
+                      f"so the restore target is nonexistence.")
+                if result["had_text"] and result["preserved_in_version"]:
+                    print(f"Its text is preserved in "
+                          f"v{result['preserved_in_version']} (nothing typed "
+                          f"into it was lost).")
+            else:
+                restored = ("file restored from the pinned source version"
+                            if result["restored"] else
+                            ui.yellow("source version missing — file NOT restored"))
+                print(f"Writeup [{result['writeup_id'][:11]}] abandoned; "
+                      f"{restored}.")
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
 
@@ -4916,9 +5075,22 @@ def build_parser() -> argparse.ArgumentParser:
              "(docs/autoregressive-writing-design.md)")
     p.add_argument("action",
                    choices=["start", "plan", "status", "propose", "accept",
-                            "reject", "learn", "complete", "abandon"])
+                            "reject", "learn", "complete", "abandon",
+                            "digest"])
     p.add_argument("params", nargs="*", help="start: <file>")
     p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--new", action="store_true",
+                   help="start: create <file>; it does not exist yet "
+                        "(requires --after and --style; the one-paragraph "
+                        "brief travels on stdin)")
+    p.add_argument("--style", metavar="GUIDE",
+                   help="start --new: the style guide to attach to the new "
+                        "file (style attach cannot run before the file exists)")
+    p.add_argument("--dispositions", action="store_true",
+                   help="digest: merge point dispositions (JSON on stdin)")
+    p.add_argument("--show", action="store_true",
+                   help="digest: print the stored digest and the accounting "
+                        "tally")
     p.add_argument("--after",
                    help="start: placement for an essay with no toc entry "
                         "yet — the file it follows, or 'start' to open the "
@@ -4930,7 +5102,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", help="reject: the author's why, verbatim "
                                     "(required); accept: optional")
     p.add_argument("--replace", action="store_true",
-                   help="plan: replace the remaining (unwritten) beats")
+                   help="plan: replace the remaining (unwritten) beats; "
+                        "digest: replace the stored digest")
     p.set_defaults(func=cmd_write)
 
     p = sub.add_parser("diff", help="colored diff between collected versions "

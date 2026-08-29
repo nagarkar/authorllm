@@ -560,6 +560,23 @@ def main_test() -> None:
         check("a file that is not on disk at all still raises LookupError "
               "with no placement (the unchanged path)",
               raised is not None and "never-existed.md" in raised, str(raised))
+        # UC-A exercises the same function from a new angle: `write start
+        # --new` runs the whole freshness gate BEFORE the file is created,
+        # so the target is not merely unlisted, it is not on disk. That
+        # works because `rest = [f for f in order if f != file]` never
+        # requires `file` to be in the reading order when a placement is
+        # given — and it is what lets a blocked start leave the disk
+        # untouched (design-usecases §1.1.5, RISK K1).
+        before, after = sums.before_after(db, manuscript, "never-existed.md",
+                                          placement="alpha.md")
+        check("WITH a placement, an essay that does not exist yet splits "
+              "the context correctly and appears in neither half — this is "
+              "what lets 'write start --new' gate before it creates",
+              [b["file"] for b in before] == ["title.md", "part1.md",
+                                              "alpha.md"]
+              and [a["file"] for a in after] == ["beta.md", "gamma.md",
+                                                 "delta.md"],
+              str(([b["file"] for b in before], [a["file"] for a in after])))
         ctx = sums.drafting_context(db, manuscript, "delta.md",
                                     placement="alpha.md")
         check("drafting_context carries the placement through, and says so "

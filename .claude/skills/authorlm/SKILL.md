@@ -89,9 +89,31 @@ record their reaction (with their reasoning verbatim) as evidence.
 
 ## The beat loop (`authorlm write` — beat-by-beat co-writing)
 When the author wants a chapter written or rewritten beat by beat (design:
-`docs/autoregressive-writing-design.md`), you draft; the CLI is the state
-machine and evidence channel. Run the verbs via Bash; prose and plan JSON
-travel over stdin (heredocs).
+`docs/autoregressive-writing-design.md`, §13 for the two use cases below),
+you draft; the CLI is the state machine and evidence channel. Run the verbs
+via Bash; prose and plan JSON travel over stdin (heredocs).
+
+**We cannot make things up.** This is the author's constraint, verbatim, and
+it is a rule about permitted INPUTS, not a tone. A beat may be grounded only
+in: (1) the author's brief; (2) the DRAFTING CONTEXT's BEFORE block; (3) the
+concept graph's ratified notes (`get_concepts file=…` then `name=…`); (4) the
+effective style guide (`get_style(file)`) — and, for a modeled rewrite, (5)
+the digest. Not permitted: your general knowledge of the topic; any citation,
+date, quotation or attribution not present in one of those; any anecdote
+presented as the author's; any claim about what another essay says beyond
+what its summary says. **A beat that needs a fact outside the five is not
+drafted — it becomes a question to the author, asked before `write propose`.**
+
+**Step 0 — which flow are you in?** Three, distinguished by one command:
+
+| Flow | Start command | Then |
+|---|---|---|
+| New essay from a brief (UC-A) | `write start <name>.md --new --intent <id> --after <file> --style <guide>` (brief on stdin) | straight to step 2 |
+| Modeled rewrite (UC-B) | `write start <file> --intent <id>` (optional brief on stdin) | step 1b first |
+| Plain rewrite | `write start <file> --intent <id>` | straight to step 2 |
+
+Do not infer the flow from context — ask which one it is if the author has
+not said.
 
 1. **Initiate.** The author supplies outline + placement; `declare_intent`
    first (conversationally, as usual), then
@@ -108,21 +130,76 @@ travel over stdin (heredocs).
    rebuild` first. It then pins the current file content as raw material
    and truncates the file — for a rewrite, the old essay arrives via the
    pinned source version, never from the live file.
+
+   **A NEW essay (UC-A) uses `--new`**, which creates the file:
+   `authorlm write start weil.md --new --intent <id> --after becker.md
+   --style "<guide>"` with the one-paragraph brief on stdin. `--new` is
+   required (name resolution is substring-based, so without it a typo
+   would silently become a new essay), `--after` is required (a file that
+   does not exist has no position to infer), and `--style` is required
+   (`style attach` cannot run before the file exists). **The brief is
+   REQUIRED with `--new` and travels on stdin**: a brand-new file has no
+   pinned raw material, so the brief is the only essay-specific ground the
+   beats have. You may DRAFT a candidate brief from the graph and the
+   drafting context and argue about it — but the author ratifies the
+   wording, and the ratified wording is what goes on stdin. There is no
+   `write brief` verb; the conversation is the ratification.
+   For a rewrite the brief is optional and is where "retain these key
+   points, reorder for flow" belongs.
+   **`write abandon` on a writeup that created its file DELETES the file**
+   (the restore target is nonexistence). Nothing typed into it is lost —
+   abandon snapshots first — but say so before running it.
+
    It prints the DRAFTING CONTEXT: the compressed summaries of the
    settled essays BEFORE this one (their concepts are available, do not
    re-introduce them) and the upcoming ones AFTER it (forward-reference
    only, never assume them). `authorlm write status` reprints it on
-   resume. Every line starting `!!` is a warning about the context
+   resume, along with the brief and (for a rewrite) the digest tally.
+   Every line starting `!!` is a warning about the context
    itself: `summary STALE / MISSING / DEPRECATED` means that entry is
    not trustworthy (rebuild before leaning on it), and `coverage
    INCOMPLETE` means the summary never cited some of its essay's
    paragraphs — informational, not a block, but treat that essay's
    context as possibly short a move.
+1b. **Digest — REWRITES ONLY (UC-B).** `authorlm write digest` with no
+   stdin prints the pinned original (the file on disk is truncated; the old
+   essay lives in the pinned version). Read it, then extract:
+   `points` / `examples` / `references` / `inconsistencies`, the last
+   naming the TOC-earlier essay each contradiction is with. Id conventions:
+   `p*` points, `x*` examples, `r*` references, `i*` inconsistencies; ids
+   must be unique across the whole digest, because the removal accounting
+   references them. **Present the digest in the conversation and have the
+   author correct it BEFORE persisting** — that review is what makes it
+   evidence rather than a machine reading. Then
+   `authorlm write digest < digest.json`. Replace with `--replace` (refused
+   if it would drop an id that already carries a disposition);
+   `--show` prints what is stored plus the tally.
+   **The digest is the SOLE authority on what the original said.** A point
+   not in the digest is not in the original — and a neighbour's AFTER
+   summary that appears to describe the essay you are rewriting is NOT
+   evidence about it (during a rewrite those summaries can still describe
+   the old version). Reordering, compressing, merging and sharpening the
+   digest's points is the *purpose* of a modeled rewrite and is fully
+   permitted; adding a point, example or citation that is in neither the
+   digest nor the brief is a new authorial commitment — take it to the
+   author, at plan time.
 2. **Plan.** Expand the outline into beat specs conversationally
    (`{"role", "concepts", "budget", "notes"}` each); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
    Amend later with `--replace` (written beats are kept; replacement beats
    get fresh `n`s automatically).
+   **Plan ratification is the fabrication guard, and it is a hard
+   requirement.** A beat spec's `notes` must state THE CLAIM THE BEAT WILL
+   MAKE, not merely its rhetorical function: `{"role": "development",
+   "notes": "transitional"}` is not ratifiable; `{"role": "development",
+   "concepts": ["Prohairesis"], "notes": "claims the Stoic boundary is
+   drawn too narrowly — grounds it in p6, no new attribution"}` is. Every
+   proper name, citation or quotation a beat will use is named in the spec
+   (or, in a rewrite, is a digest reference id) before it appears in prose.
+   For a rewrite, beat specs name the digest point ids they carry, and the
+   plan's ORDERING is where "reorder for better flow" happens. A beat that
+   discovers mid-draft that it needs an ungrounded fact triggers
+   `write plan --replace` or a question to the author — never an invention.
 3. **Propose.** Assemble the drafting machinery BEFORE every draft exactly
    as "Drafting on request" prescribes (style law, concept notes, policies,
    precedents), condition on the accepted text so far, the pinned raw
@@ -132,7 +209,9 @@ travel over stdin (heredocs).
    capitalized, length vs budget) before registering it:
    `authorlm write propose --why "<which concepts it realizes, which
    precedent it follows>"` with the draft on stdin. `--why` is mandatory —
-   verdict evidence hangs off it. Present the draft to the author WITH that
+   verdict evidence hangs off it. **Cite the grounding BY ID**: which
+   concepts it realizes, which digest points and examples it carries, which
+   precedent it follows. Present the draft to the author WITH that
    explanation.
 4. **Verdict.** Relay the author's reaction in their own words:
    - accept as-is → `authorlm write accept`
@@ -142,14 +221,48 @@ travel over stdin (heredocs).
      the reason is required; then redraft with it in context.
    Accept appends to the file, collects, records the review, and advances
    the cursor — never edit the manuscript file yourself during a writeup.
+4b. **Account — REWRITES ONLY (UC-B).** After each stretch of beats,
+   record what happened to the digest's points:
+   `authorlm write digest --dispositions` with
+   `{"p1": {"disposition": "kept", "beat": 3}, "p4": {"disposition":
+   "removed", "reason": "<the author's why>"}}` on stdin. Two values only,
+   `kept` or `removed`; **`removed` REQUIRES a reason** (same principle as
+   `write reject --reason`) and the nuance goes in the reason, which is
+   what the removal section quotes. Merging is by id and a change of mind
+   is reported, not hidden.
+   The **final beat(s) are the `## **What Was Removed and Why**` section**,
+   drafted from the RECORDED reasons — do not re-invent them at drafting
+   time; the judgments were made when they were recorded, and you write
+   only the connective prose. It goes last (order any footnotes beat before
+   it in the plan — the loop appends, so the last beat lands last), and it
+   is proposed and accepted like any other beat.
 5. **Learnings.** When a pattern recurs across verdicts (not on every
-   verdict), distill one line: `authorlm write learn "<lesson>"`, and honor
-   recorded learnings in subsequent drafts (`write status` shows them).
+   verdict), distill one line and send it on STDIN — `write learn` takes no
+   positional lesson (a positional after `-m` trips argparse's greedy
+   `nargs='*'`), so `authorlm write learn "<lesson>"` silently ignores the
+   argument and then refuses for want of stdin:
+
+   ```
+   authorlm write learn <<'EOF'
+   <the one-line lesson>
+   EOF
+   ```
+
+   Honor recorded learnings in subsequent drafts (`write status` shows them).
 6. **Complete / interrupt.** `authorlm write complete` closes the writeup
    and runs the deferred extraction pass; intent completion stays separate
    (`complete_intent`, which runs episode analysis). `write abandon`
-   restores the file from the pinned source. Resume any time from
-   `authorlm write status`.
+   restores the file from the pinned source — or DELETES it, if this
+   writeup created it. Resume any time from `authorlm write status`.
+   At completion, **read the report**: for a rewrite it prints
+   kept / removed / **UNACCOUNTED**, and an unaccounted point is a real gap
+   the author must close (`write digest --dispositions`), not a formality —
+   completion warns rather than blocking precisely so that the gap stays
+   visible instead of being papered over with a fake `kept`. For a created
+   essay it registers the toc.toml stanza; if it could not find the anchor
+   it prints the stanza to paste — do that, or the essay stays structurally
+   invisible. Then run `authorlm summarize rebuild`, which completion
+   reminds about and deliberately does not run itself.
 
 Doc-bridge round trips stay possible BETWEEN beats (push, hand-edit,
 pull) — but propose/accept are gated while the file is checked out, and
