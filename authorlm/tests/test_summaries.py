@@ -590,6 +590,259 @@ def main_test() -> None:
                   placement=sums.PLACEMENT_START))
         (ms / "delta.md").unlink()
 
+        print("in-flight context — parallel writeups (design §14):")
+        # A file with an ACTIVE writeup is not described by its bytes on
+        # disk: `write start` truncated it and left a placeholder there.
+        # What it contributes to every other essay's context is its
+        # PINNED text, out of the version the writeup pinned.
+        from authorlm import api as _api
+
+        # beta.md gets a paragraph count of its own (4), so a coverage
+        # note computed from the PINNED text cannot be mistaken for one
+        # computed from the placeholder (which has 2).
+        BETA_TEXT = ("# beta\n\nText of beta.\n\nA second paragraph.\n\n"
+                     "A third paragraph.\n")
+        (ms / "beta.md").write_text(BETA_TEXT)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+            sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        check("fixture: everything is fresh before any writeup opens",
+              all(r["state"] == "fresh" for r in sums.status(db, manuscript)),
+              str(sums.status(db, manuscript)))
+        api.define_style_guide(db, manuscript, "House")
+        api.attach_style(db, manuscript, "beta.md", "House")
+        intent = api.declare_intent(db, manuscript, "Rewrite beta")["intent"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            started = api.write_start(db, manuscript, config, "beta.md",
+                                      intent["id"][:8])
+        beta_wu = started["writeup"]["id"]
+
+        disk = dict(sums.units(manuscript))
+        ctx_texts = dict(sums.context_units(db, manuscript))
+        check("S10 — units() is still DISK truth: it returns the "
+              "placeholder the writeup left behind",
+              disk["beta.md"] == _api.PLACEHOLDER, repr(disk["beta.md"]))
+        check("S10 — context_units() is CONTEXT truth: the same file "
+              "contributes its PINNED pre-rewrite text instead. The two "
+              "must never quietly merge — that split is the whole design",
+              ctx_texts["beta.md"] == BETA_TEXT
+              and ctx_texts["beta.md"] != disk["beta.md"],
+              repr(ctx_texts["beta.md"]))
+
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("S1 — an in-flight file whose stored summary matches its "
+              "PINNED text reads 'rewriting', not 'stale' (which is what "
+              "blocked every other writeup)",
+              states["beta.md"] == "rewriting", str(states))
+        before, after = sums.before_after(db, manuscript, "gamma.md")
+        beta_entry = {e["file"]: e for e in before + after}["beta.md"]
+        check("S1 — and what is served is the PRE-REWRITE summary, flagged "
+              "as in flight",
+              beta_entry["state"] == "rewriting"
+              and beta_entry["in_flight"] is True
+              and "summary of beta.md" in (beta_entry["summary"] or ""),
+              str(beta_entry))
+
+        crit = _passes.summaries_ready(db, manuscript, "gamma.md")
+        draft = _passes.summaries_ready(db, manuscript, "gamma.md",
+                                        placement="alpha.md")
+        keys = ("ok", "missing", "stale", "deprecated", "inflight")
+        check("S2 — GATE PARITY: the drafting call shape (placement=…) and "
+              "the critique call shape return the identical verdict on the "
+              "same state. Both gates call this one predicate; two gates "
+              "disagreeing about one row is how this system tells lies",
+              {k: crit[k] for k in keys} == {k: draft[k] for k in keys}
+              and crit["ok"] and crit["inflight"] == ["beta.md"],
+              str(({k: crit[k] for k in keys}, {k: draft[k] for k in keys})))
+
+        ctx = sums.drafting_context(db, manuscript, "gamma.md")
+        check("S7 — the drafting context opens with the in-flight header, "
+              "naming the essay and saying plainly, in the author's own "
+              "words, that this is slightly suboptimal",
+              "1 essay in this context is being written right now" in ctx
+              and "beta.md — mid-rewrite" in ctx
+              and "slightly suboptimal" in ctx
+              and "will not be in their context either" in ctx, ctx)
+        beta_block = ctx.split("[beta.md] (rewriting)", 1)[1]
+        check("S7 — and the entry carries its OWN !! label, so a reader who "
+              "scrolls past the header still cannot mistake a pre-rewrite "
+              "summary for a current one",
+              "!! MID-REWRITE" in beta_block
+              and "PRE-REWRITE essay" in beta_block, ctx)
+
+        note = sums._coverage_note(beta_entry, ctx_texts["beta.md"])
+        check("S9 — coverage for a 'rewriting' entry is measured against "
+              "the PINNED paragraphs (4), not the placeholder's (2): "
+              "against the placeholder it would report a fiction",
+              note is not None and "¶1, ¶2, ¶3, ¶4 uncited" in note,
+              str(note))
+        check("S9 — and that is the note the rendered context carries",
+              "¶1, ¶2, ¶3, ¶4 uncited" in beta_block, ctx)
+
+        EchoSummarizer.calls.clear()
+        sums.rebuild_one(db, manuscript, "beta.md", llm)
+        prompt_user = EchoSummarizer.calls[-1]["user"]
+        body = prompt_user.split("THE UNIT: beta.md\n\n", 1)[1]
+        numbered, _npar = sums._numbered_paragraphs(BETA_TEXT)
+        check("S5 — a rebuild WHILE the file is in flight summarizes the "
+              "pinned text pulled from the database, never the placeholder "
+              "on disk. The refusal prints this remedy, so it has to work "
+              "— getting it wrong would store a confident summary of "
+              "nothing and mark it fresh",
+              body == numbered and _api.MARKER not in prompt_user, body)
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("S5 — and afterwards the entry settles at 'rewriting', NOT "
+              "'fresh': it may not pretend to describe the file on disk",
+              states["beta.md"] == "rewriting", str(states))
+        check("S5 — it is idempotent: the same rebuild lands on the same "
+              "state",
+              sums.rebuild_one(db, manuscript, "beta.md", llm) is not None
+              and {r["file"]: r["state"]
+                   for r in sums.status(db, manuscript)}["beta.md"]
+              == "rewriting")
+
+        db.conn.execute("DELETE FROM essay_summaries WHERE manuscript_id = ? "
+                        "AND file = 'beta.md'", (manuscript["id"],))
+        db.conn.commit()
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("S3 — in flight but with NO stored summary is still 'missing': "
+              "nothing corresponds to the pinned text, so there is nothing "
+              "honest to serve",
+              states["beta.md"] == "missing", str(states))
+        crit = _passes.summaries_ready(db, manuscript, "gamma.md")
+        draft = _passes.summaries_ready(db, manuscript, "gamma.md",
+                                        placement="alpha.md")
+        check("S3 — both gates still refuse it, identically",
+              not crit["ok"] and not draft["ok"]
+              and crit["missing"] == draft["missing"] == ["beta.md"]
+              and crit["inflight_refused"] == ["beta.md"],
+              str((crit["missing"], draft["missing"])))
+        msg = _passes.summaries_message(crit, "edit pass")
+        check("S3 — and the refusal says what the rebuild will actually "
+              "read, so its own remedy does not read as 'summarize the "
+              "placeholder'",
+              "beta.md is mid-rewrite" in msg
+              and "PRE-REWRITE text from the writeup's pinned version" in msg
+              and "not the placeholder on disk" in msg, msg)
+        sums.rebuild_one(db, manuscript, "beta.md", llm)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_abandon(db, manuscript, config, prefix=beta_wu[:8])
+        check("S4 fixture — abandon put the pinned text back byte for byte",
+              (ms / "beta.md").read_text() == BETA_TEXT,
+              repr((ms / "beta.md").read_text()))
+        BETA_EDITED = BETA_TEXT + "\nA fourth paragraph, typed before the "\
+                                  "writeup opened.\n"
+        (ms / "beta.md").write_text(BETA_EDITED)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+            api.write_start(db, manuscript, config, "beta.md",
+                            intent["id"][:8])
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        ready = _passes.summaries_ready(db, manuscript, "gamma.md")
+        check("S4 — in flight, but the stored summary matches neither disk "
+              "nor the pinned text: 'stale', and still refused by both "
+              "gates. In flight is not a licence to serve a lie",
+              states["beta.md"] == "stale" and not ready["ok"]
+              and ready["stale"] == ["beta.md"]
+              and "beta.md is mid-rewrite" in _passes.summaries_message(
+                  ready, "drafting pass"), str(states))
+        sums.rebuild_one(db, manuscript, "beta.md", llm)
+        check("S4 — and the printed remedy clears it, landing on "
+              "'rewriting'",
+              {r["file"]: r["state"]
+               for r in sums.status(db, manuscript)}["beta.md"] == "rewriting")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_start(db, manuscript, config, "epsilon.md",
+                            intent["id"][:8], after="alpha.md",
+                            brief="A new essay, written from nothing at all.",
+                            new=True, style="House")
+        check("S8 fixture — --new creates the file EMPTY: the placeholder "
+              "marks a TRUNCATION, and --new truncates nothing",
+              (ms / "epsilon.md").exists()
+              and (ms / "epsilon.md").read_text() == "")
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("S8 — a file a writeup is writing for the FIRST time reads "
+              "'unwritten'",
+              states["epsilon.md"] == "unwritten", str(states))
+        ready = _passes.summaries_ready(db, manuscript, "gamma.md")
+        check("S8 — and it no longer blocks every other writeup and every "
+              "critique run (regression: it used to read 'missing' and "
+              "refuse until the new essay was finished)",
+              ready["ok"] and "epsilon.md" not in ready["missing"],
+              str(ready))
+        ctx = sums.drafting_context(db, manuscript, "gamma.md")
+        eps_block = ctx.split("[epsilon.md] (unwritten)", 1)[1]
+        check("S8 — its entry says there is no pre-rewrite text, NOT 'run "
+              "summarize rebuild' — a rebuild cannot help here, and saying "
+              "so would be a lie",
+              "BEING WRITTEN FOR THE FIRST TIME" in eps_block
+              and "no pre-rewrite text" in eps_block
+              and "(no summary — run 'summarize rebuild')" not in eps_block,
+              ctx)
+
+        EchoSummarizer.calls.clear()
+        result = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        check("S6 — the full rebuild summarizes the in-flight REWRITE from "
+              "its pinned text and SKIPS the one that has none, reporting "
+              "it instead of quietly summarizing an empty file",
+              "beta.md" in result["built"]
+              and result["skipped_inflight"] == ["epsilon.md"]
+              and "epsilon.md" not in result["built"], str(result))
+        check("S6 — no summarizer call was ever made for it",
+              all(c["unit"] != "epsilon.md" for c in EchoSummarizer.calls),
+              str([c["unit"] for c in EchoSummarizer.calls]))
+        try:
+            sums.rebuild_one(db, manuscript, "epsilon.md", llm)
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("S6 — and the SINGULAR verb refuses it too: summarizing "
+              "nothing must not be reachable by either route",
+              raised is not None and "epsilon.md" in raised
+              and "no pre-rewrite text to summarize" in raised, str(raised))
+
+        (ms / "zeta.md").write_text("# zeta\n\nText of zeta.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+            sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        zeta_summary = sums.all_summaries(
+            db, manuscript["id"])["zeta.md"]["summary"]
+        (ms / "zeta.md").unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+        check("S11 fixture — the departed file's row is deprecated, not "
+              "deleted",
+              db.one("SELECT status FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = 'zeta.md'",
+                     (manuscript["id"],))["status"] == "deprecated")
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_start(db, manuscript, config, "zeta.md",
+                            intent["id"][:8], after="alpha.md",
+                            brief="A different essay that reuses the name.",
+                            new=True, style="House")
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("S11 — a recreated filename carrying a DEPRECATED row reads "
+              "'unwritten': unwritten outranks deprecated, because that row "
+              "summarizes a different essay that used to have this name",
+              states["zeta.md"] == "unwritten", str(states))
+        _b, aft = sums.before_after(db, manuscript, "alpha.md")
+        zeta_entry = {e["file"]: e for e in aft}["zeta.md"]
+        check("S11 — and that old summary is NOT served: serving it would "
+              "be the exact lie 'deprecated' exists to prevent",
+              zeta_entry["summary"] is None
+              and zeta_summary not in sums.drafting_context(
+                  db, manuscript, "alpha.md"), str(zeta_entry))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "status"])
+        check("the CLI renders both new states (a new state must not "
+              "KeyError the colour table)",
+              "rewriting" in buf.getvalue() and "unwritten" in buf.getvalue(),
+              buf.getvalue())
+
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
         check("the summarizer prompt is a checked-in file with the labeled "

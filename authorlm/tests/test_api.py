@@ -240,6 +240,11 @@ def check_extraction_failure_traced() -> None:
         declared = _api.declare_intent(db, manuscript, "Finish the draft")
         intent_id = declared["intent"]["id"]
         _api.write_start(db, manuscript, config, "01-draft.md", intent_id[:8])
+        # `write start` leaves the mid-rewrite placeholder, and completing
+        # on a placeholder-only file is refused (design §14.3). This test
+        # is about the extraction-failure swallow, so stand in for the
+        # accepted beat that would normally have replaced it.
+        (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
 
         _api.run_extraction = boom
         try:

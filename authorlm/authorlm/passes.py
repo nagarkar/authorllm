@@ -194,8 +194,18 @@ def summaries_ready(db: Database, manuscript: dict, file: str,
     missing = [e["file"] for e in entries if e["state"] == "missing"]
     stale = [e["file"] for e in entries if e["state"] == "stale"]
     deprecated = [e["file"] for e in entries if e["state"] == "deprecated"]
+    # In-flight entries (design §14.2) are ACCEPTED — `rewriting` serves
+    # the pre-rewrite summary, `unwritten` serves nothing and says so —
+    # but they are reported, because both callers must warn about them
+    # and one of them changes its refusal wording when a refused file is
+    # also in flight. Both gates read this one function, so they cannot
+    # drift apart about a row.
+    refused = set(missing) | set(stale) | set(deprecated)
+    inflight = [e["file"] for e in entries if e.get("in_flight")]
     return {"ok": not missing and not stale and not deprecated,
             "missing": missing, "stale": stale, "deprecated": deprecated,
+            "inflight": inflight,
+            "inflight_refused": [f for f in inflight if f in refused],
             "before": before, "after": after}
 
 
@@ -214,8 +224,18 @@ def summaries_message(ready: dict, pass_name: str) -> str:
     if ready["deprecated"]:
         parts.append("deprecated summaries (the essay left the toc and came "
                      f"back): {', '.join(ready['deprecated'])}")
-    return ("; ".join(parts) + " — run 'summarize rebuild' first "
-            f"(the {pass_name} will not read a lie about the text).")
+    message = ("; ".join(parts) + " — run 'summarize rebuild' first "
+               f"(the {pass_name} will not read a lie about the text).")
+    # Without this, "run summarize rebuild" reads, for a file that is
+    # mid-rewrite, like an instruction to summarize the placeholder. It
+    # does not: the rebuild reads the pinned version. Say so, or the
+    # remedy looks destructive and the author will not run it.
+    flying = ready.get("inflight_refused") or []
+    if flying:
+        message += (f" {', '.join(flying)} is mid-rewrite: the rebuild will "
+                    "summarize its PRE-REWRITE text from the writeup's "
+                    "pinned version, not the placeholder on disk.")
+    return message
 
 
 # ---------------------------------------------------- context package
@@ -249,6 +269,19 @@ def build_context(db: Database, manuscript: dict, file: str,
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
         raise RuntimeError(_gate_message(gate))
+    # The essay this pass would edit is itself mid-rewrite: what is on
+    # disk is the placeholder, not the essay, so the editor model would
+    # be handed a marker as "the text" and would propose edits to it.
+    # build_context mutates nothing, so the order here is free.
+    inflight_now = sums.inflight_sources(db, manuscript)
+    if file in inflight_now:
+        raise RuntimeError(
+            f"{file} is being rewritten right now by an active writeup — "
+            f"what is on disk is a placeholder, not the essay, so an edit "
+            f"pass over it would propose edits to a marker. Finish the "
+            f"writeup ('write complete') or put the old essay back "
+            f"('write abandon'). To refresh its summary from the pinned "
+            f"pre-rewrite text meanwhile: 'summarize rebuild {file}'.")
     ready = summaries_ready(db, manuscript, file)
     if not ready["ok"]:
         raise RuntimeError(summaries_message(ready, "edit pass"))
@@ -269,6 +302,7 @@ def build_context(db: Database, manuscript: dict, file: str,
         "style": render_style(db, manuscript["id"], file),
         "intents": intents, "beliefs": beliefs, "concepts": concepts,
         "before": ready["before"], "after": ready["after"],
+        "inflight": ready["inflight"],
         "learnings": learnings(db, pass_row),
         "gate": gate, "forced": force and not gate["clear"],
     }

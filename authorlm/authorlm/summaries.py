@@ -164,30 +164,110 @@ def all_summaries(db: Database, manuscript_id: str) -> dict[str, dict]:
         (manuscript_id,))}
 
 
-def _state(row, text: str) -> str:
-    """One unit's freshness. `deprecated` outranks the hash checks: the
-    row belongs to an essay that LEFT the toc (api._deprecate_departed_
-    summaries, commit 10497c9) and has come back. Its source_hash can
-    match by coincidence — the file returned unedited — but the DB says
-    it is not a live summary, so it must never read as `fresh`; it needs
-    a rebuild, which is also what resurrects it to 'current'."""
+# ------------------------------------------------- in-flight context
+#
+# design §14: a file with an ACTIVE writeup is not described by its bytes
+# on disk — `write start` truncated it and left a placeholder there. What
+# it contributes to everyone else's context is its PINNED text, the text
+# inside the version that writeup pinned. `units()` stays DISK truth (the
+# collector, the staleness marker and the editor's paragraph list all
+# want the bytes as they are); `context_units()` is CONTEXT truth, and
+# only the conditioning paths read it.
+
+# Distinguishes "not in flight" from "in flight with no pinned text".
+# A sentinel, not a truthiness test: a pinned text may legitimately be
+# "" (the file was empty when pinned), which must still read as in-flight.
+NOT_IN_FLIGHT = object()
+
+
+def inflight_sources(db: Database, manuscript: dict) -> dict[str, str | None]:
+    """{file: pinned text} for every file with an active writeup.
+
+    `None` means there IS an active writeup but no pre-rewrite text —
+    which happens for exactly one reason: the writeup CREATED the file
+    (`write start --new`), so the pinned version has no entry for it and
+    its pre-writeup state is nonexistence. (A pinned version that has
+    gone missing reads the same way, and honestly so: there is no
+    pre-rewrite text to be had.)"""
+    rows = db.all(
+        "SELECT w.file AS file, v.files AS files FROM writeups w "
+        "LEFT JOIN manuscript_versions v ON v.id = w.source_version_id "
+        "WHERE w.manuscript_id = ? AND w.status = 'active'",
+        (manuscript["id"],))
+    return {r["file"]: loads(r["files"], {}).get(r["file"]) for r in rows}
+
+
+def _context_units(db: Database, manuscript: dict
+                   ) -> tuple[dict[str, str], list[str], dict[str, str | None]]:
+    """`_units_and_unlisted` with the in-flight overlay applied, plus the
+    overlay itself. Insertion order is reading order, as on disk.
+
+    The hash comparison stays like-for-like at no cost: `manuscript_
+    versions.files` is written through `revisions.read_manuscript_files`
+    and `units()` reads through the same function, so both sides have
+    already been normalized identically."""
+    texts, unlisted = _units_and_unlisted(manuscript)
+    flight = inflight_sources(db, manuscript)
+    for file, pinned in flight.items():
+        if file in texts and pinned is not None:
+            texts[file] = pinned
+    return texts, unlisted, flight
+
+
+def context_units(db: Database, manuscript: dict) -> list[tuple[str, str]]:
+    """`units()`, but every in-flight file contributes its PINNED text
+    instead of the placeholder on disk. This is what every path that asks
+    "what does this essay SAY, for the purpose of conditioning something
+    else on it" must read."""
+    texts, _unlisted, _flight = _context_units(db, manuscript)
+    return list(texts.items())
+
+
+def _state(row, text: str, pinned=NOT_IN_FLIGHT) -> str:
+    """One unit's freshness (design §1.3 — the decision list, in order).
+
+    `unwritten` outranks everything, `deprecated` included: a filename
+    that was deleted, had its summary deprecated and has now been
+    recreated by `write start --new` still has a row on record, but that
+    row summarizes a DIFFERENT essay that used to have this name, and
+    serving it would be the exact lie `deprecated` exists to prevent.
+
+    `deprecated` outranks the hash checks: the row belongs to an essay
+    that LEFT the toc (api._deprecate_departed_summaries, commit 10497c9)
+    and has come back. Its source_hash can match by coincidence — the
+    file returned unedited — but the DB says it is not a live summary, so
+    it must never read as `fresh`; it needs a rebuild, which is also what
+    resurrects it to 'current'.
+
+    `rewriting` sits BELOW `stale` and ABOVE `upstream_stale`: the hash
+    check has already proved the stored summary matches the pinned text,
+    so `rewriting` is a statement about WHICH text the reader is getting,
+    not about freshness. missing/stale/deprecated still refuse while a
+    file is in flight — no stored summary corresponds to the pinned text,
+    so there is nothing honest to serve — but the printed remedy now
+    works (rebuild reads the pinned text, never the placeholder)."""
+    if pinned is None:
+        return "unwritten"
     if not row:
         return "missing"
     if row["status"] == "deprecated":
         return "deprecated"
     if row["source_hash"] != _hash(text):
         return "stale"
+    if pinned is not NOT_IN_FLIGHT:
+        return "rewriting"
     return "upstream_stale" if row["upstream_stale"] else "fresh"
 
 
 def status(db: Database, manuscript: dict) -> list[dict]:
     """Per-unit freshness in reading order: fresh | stale (text changed)
-    | upstream_stale | deprecated | missing."""
+    | upstream_stale | deprecated | missing | rewriting | unwritten."""
     have = all_summaries(db, manuscript["id"])
+    texts, _unlisted, flight = _context_units(db, manuscript)
     out = []
-    for file, text in units(manuscript):
+    for file, text in texts.items():
         row = have.get(file)
-        state = _state(row, text)
+        state = _state(row, text, flight.get(file, NOT_IN_FLIGHT))
         out.append({"file": file, "state": state,
                     "words": len(row["summary"].split()) if row else 0,
                     "created_at": row["created_at"] if row else None})
@@ -214,7 +294,7 @@ def before_after(db: Database, manuscript: dict, file: str,
     file whose placement actually matters. The position is not guessable,
     so it is asked for rather than assumed."""
     have = all_summaries(db, manuscript["id"])
-    texts, unlisted = _units_and_unlisted(manuscript)
+    texts, unlisted, flight = _context_units(db, manuscript)
     order = list(texts)
     if placement is None:
         if file not in order:
@@ -251,9 +331,15 @@ def before_after(db: Database, manuscript: dict, file: str,
 
     def entry(f):
         row = have.get(f)
-        state = _state(row, texts[f])
-        return {"file": f, "summary": row["summary"] if row else None,
-                "state": state}
+        pinned = flight.get(f, NOT_IN_FLIGHT)
+        state = _state(row, texts[f], pinned)
+        summary = row["summary"] if row else None
+        if state == "unwritten":
+            # Regardless of any row: whatever it summarizes, it is not
+            # this essay, which does not exist yet (design §1.3).
+            summary = None
+        return {"file": f, "summary": summary, "state": state,
+                "in_flight": pinned is not NOT_IN_FLIGHT}
 
     return ([entry(f) for f in before_files],
             [entry(f) for f in after_files])
@@ -275,15 +361,22 @@ AFTER_HEADER = (
 # branch in cli._print_drafting_context colours all of them.
 WARN_PREFIX = "!! "
 
-# The three states write_start REFUSES. write_status cannot refuse — it
-# is the resume entry point and must keep working — so it says so
-# loudly instead. Without this the untrustworthy entry was the QUIETER
-# one: its summary rendered as plain text and _coverage_note returned
-# None for it, so a mid-writeup collect could flip a neighbour stale and
-# the resume view would serve, unmarked, the exact lie the start gate
-# had refused. `upstream_stale` is deliberately absent: the gate
-# tolerates it (the text did not move, only the conditioning), and a
-# marker on everything marks nothing.
+# Every state whose entry the reader MUST NOT TAKE AT FACE VALUE. That
+# is the true invariant `!! ` marks — wider than "the three states
+# write_start refuses", which is what it used to be described as and
+# never quite was (_coverage_note has always marked entries the gates
+# accept). Three of these are refused by both gates; the two in-flight
+# states are accepted, and marked because the entry is served from
+# DIFFERENT BYTES than the file on disk.
+#
+# write_status cannot refuse — it is the resume entry point and must keep
+# working — so it says so loudly instead. Without this the untrustworthy
+# entry was the QUIETER one: its summary rendered as plain text and
+# _coverage_note returned None for it, so a mid-writeup collect could
+# flip a neighbour stale and the resume view would serve, unmarked, the
+# exact lie the start gate had refused. `upstream_stale` is deliberately
+# absent: the gate tolerates it (the text did not move, only the
+# conditioning), and a marker on everything marks nothing.
 STATE_WARNING = {
     "missing": "summary MISSING — this essay has no summary at all; run "
                "'summarize rebuild' before drafting against it.",
@@ -292,7 +385,65 @@ STATE_WARNING = {
              "'summarize rebuild'.",
     "deprecated": "summary DEPRECATED — this essay left the toc and came "
                   "back; run 'summarize rebuild' to resurrect it.",
+    "rewriting": "MID-REWRITE — a writeup is rewriting this essay right "
+                 "now. What follows is\n   the PRE-REWRITE essay, from "
+                 "that writeup's pinned source version, not\n   from the "
+                 "file on disk.",
+    "unwritten": "BEING WRITTEN FOR THE FIRST TIME — a writeup is drafting "
+                 "this essay now.\n   There is no earlier version to "
+                 "summarize, so nothing about it is in this\n   context, "
+                 "and it is not in toc.toml yet.",
 }
+
+# The per-state stand-in when there is no summary to print. The default
+# ("run 'summarize rebuild'") is a LIE for an unwritten essay: a rebuild
+# cannot help, because there is no pre-rewrite text to summarize.
+NO_SUMMARY = {
+    "unwritten": "(no pre-rewrite text — this essay did not exist when "
+                 "its writeup started)",
+}
+
+
+def inflight_warning(entries: list[dict]) -> str | None:
+    """The header block naming every essay in this context that another
+    writeup is writing right now — the author asked to be TOLD that
+    conditioning on pre-rewrite text is slightly suboptimal (design
+    §14.4). `None` when there is nothing to say.
+
+    There is no flag to turn this off, for parity with the summaries gate
+    itself: a warning the author can suppress is a warning that will be
+    off on the day it mattered."""
+    flying = [e for e in entries if e.get("in_flight")]
+    if not flying:
+        return None
+    if len(flying) == 1:
+        head = ("1 essay in this context is being written right now, in "
+                "another writeup:")
+    else:
+        head = (f"{len(flying)} essays in this context are being written "
+                "right now, in other writeups:")
+    lines = [head]
+    for e in flying:
+        if e["state"] == "unwritten":
+            lines += [
+                f"  {e['file']} — being written for the first time. There "
+                "is no earlier",
+                "    version, so nothing about it is in this context at all."]
+        else:
+            lines += [
+                f"  {e['file']} — mid-rewrite. What you get below is the "
+                "PRE-REWRITE essay,",
+                "    summarized from that writeup's pinned source version, "
+                "not from the file",
+                "    on disk (which currently holds a placeholder)."]
+    lines += [
+        "This is slightly suboptimal and it is worth knowing: whatever those",
+        "writeups change, this draft will not know about, and this draft's "
+        "essay",
+        "will not be in their context either. Finish or abandon them first "
+        "if that",
+        "matters more than starting now."]
+    return "\n".join(WARN_PREFIX + line for line in lines)
 
 
 # How many paragraph numbers a coverage note will spell out before it
@@ -319,7 +470,8 @@ def _coverage_note(entry: dict, text: str) -> str | None:
     still matches. Reported, never blocking — the same tolerance editing
     has, made impossible to miss."""
     if entry["summary"] is None or entry["state"] not in ("fresh",
-                                                          "upstream_stale"):
+                                                          "upstream_stale",
+                                                          "rewriting"):
         return None
     from .revisions import _paragraphs
 
@@ -352,7 +504,11 @@ def drafting_context(db: Database, manuscript: dict, file: str,
     entry is not committed yet still gets the right split, and is refused
     outright if it declares no placement at all."""
     before, after = before_after(db, manuscript, file, placement=placement)
-    texts = dict(units(manuscript))
+    # CONTEXT truth, not disk truth: the coverage note measures a stored
+    # summary against the paragraphs it summarizes, and for an in-flight
+    # file those are the pinned ones. Measured against the placeholder it
+    # would report a fictitious 100% miss.
+    texts = dict(context_units(db, manuscript))
 
     def block(entries: list[dict], header: str) -> list[str]:
         lines = [header]
@@ -367,8 +523,10 @@ def drafting_context(db: Database, manuscript: dict, file: str,
             note = _coverage_note(e, texts.get(e["file"], ""))
             if note:
                 lines.append(note)
-            lines.append(e["summary"] or
-                         "(no summary — run 'summarize rebuild')")
+            lines.append(e["summary"]
+                         or NO_SUMMARY.get(e["state"],
+                                           "(no summary — run 'summarize "
+                                           "rebuild')"))
         return lines
 
     if placement == PLACEMENT_START:
@@ -377,8 +535,10 @@ def drafting_context(db: Database, manuscript: dict, file: str,
         where = f"placed after {placement}"
     else:
         where = "in its committed toc position"
+    inflight = inflight_warning(before + after)
     return "\n".join(
         [f"DRAFTING CONTEXT — {file} ({where}).", ""]
+        + ([inflight, ""] if inflight else [])
         + block(before, BEFORE_HEADER) + [""]
         + block(after, AFTER_HEADER))
 
@@ -463,15 +623,28 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
     context (their text unchanged) rather than re-summarized — but a
     stale unit forces every unit AFTER it to rebuild too, since their
     conditioning changed (this is the one place cascade is correct:
-    the author asked for truth from scratch)."""
+    the author asked for truth from scratch).
+
+    Reads CONTEXT truth: an in-flight file is summarized from the PINNED
+    text pulled out of `manuscript_versions`, never from the placeholder
+    on disk — which is what makes the refusal's printed remedy actually
+    work. A file a writeup CREATED has no pre-rewrite text at all, so it
+    is skipped and reported rather than quietly summarized as empty."""
     have = all_summaries(db, manuscript["id"])
+    texts, _unlisted, flight = _context_units(db, manuscript)
     prior: list[tuple[str, str]] = []
-    built, reused = [], []
+    built, reused, skipped_inflight = [], [], []
     incomplete_coverage: dict[str, dict] = {}
     cascade = False
-    for file, text in units(manuscript):
+    for file, text in texts.items():
+        pinned = flight.get(file, NOT_IN_FLIGHT)
+        if pinned is None:
+            # `unwritten`: nothing to summarize, and nothing to condition
+            # anything else on either — so it does not join `prior`.
+            skipped_inflight.append(file)
+            continue
         row = have.get(file)
-        fresh = _state(row, text) == "fresh"
+        fresh = _state(row, text, pinned) == "fresh"
         if only_missing_or_stale and fresh and not cascade:
             prior.append((file, row["summary"]))
             reused.append(file)
@@ -486,6 +659,7 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
         if cov and not cov["complete"]:
             incomplete_coverage[file] = cov
     return {"built": built, "reused": reused,
+            "skipped_inflight": skipped_inflight,
             "incomplete_coverage": incomplete_coverage}
 
 
@@ -493,11 +667,23 @@ def rebuild_one(db: Database, manuscript: dict, file: str,
                 llm: LLMClient) -> dict:
     """Rebuild one unit's summary against the CURRENT prior summaries
     (the confirmation-gate rebuild), then mark everything downstream
-    upstream_stale — mark, don't cascade."""
-    order = [f for f, _ in units(manuscript)]
-    texts = dict(units(manuscript))
+    upstream_stale — mark, don't cascade.
+
+    Reads CONTEXT truth, as `rebuild` does. Silently summarizing an empty
+    file is the failure the in-flight states exist to prevent, so it must
+    not be reachable through the singular verb either: a file a writeup
+    CREATED raises rather than summarizing nothing."""
+    texts, _unlisted, flight = _context_units(db, manuscript)
+    order = list(texts)
     if file not in order:
         raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    if flight.get(file, NOT_IN_FLIGHT) is None:
+        raise LookupError(
+            f"'{file}' is being written for the first time by an active "
+            f"writeup — there is no pre-rewrite text to summarize, so a "
+            f"rebuild would summarize an empty file and store it as fresh. "
+            f"See 'write status'; its summary is built after "
+            f"'write complete'.")
     have = all_summaries(db, manuscript["id"])
     idx = order.index(file)
     prior = [(f, have[f]["summary"]) for f in order[:idx] if f in have]

@@ -88,6 +88,18 @@ def readiness(db: Database, manuscript: dict) -> dict:
          f"{len(intents)} active intent(s) still open"
          if intents else "none active")
 
+    # A file with an open writeup is mid-surgery: on disk it is a
+    # placeholder (or, for a created file, whatever beats have landed so
+    # far) and the essay is pinned in the database. Without this the
+    # checklist reported "ready" over a truncated essay.
+    open_writeups = db.all(
+        "SELECT file FROM writeups WHERE manuscript_id = ? "
+        "AND status = 'active' ORDER BY file", (mid,))
+    item("no open writeups", not open_writeups,
+         f"mid-rewrite (finish with 'write complete' or put back with "
+         f"'write abandon'): {', '.join(r['file'] for r in open_writeups)}"
+         if open_writeups else "no writeup is open")
+
     _, unlisted = reading_order(files)
     item("toc covers every file", not unlisted,
          f"unlisted (alphabetical fallback): {', '.join(unlisted)}"

@@ -661,6 +661,12 @@ def chapter_stats(text: str) -> dict:
     sentence length in words; AWL = average word length in characters;
     FRE = Flesch Reading Ease with a heuristic syllable count (treat as
     approximate; higher is easier, 60–70 is plain English)."""
+    from .api import is_placeholder
+
+    if is_placeholder(text):
+        # As for an empty file: a readability score for a mid-rewrite
+        # marker is noise in the manifest.
+        return {}
     prose = re.sub(r"^#.*$", "", text, flags=re.M)   # headings aren't prose
     words = re.findall(r"[A-Za-z'’]+", prose)
     if not words:
@@ -962,6 +968,21 @@ def critique_forms_pending(db: Database, manuscript_id: str,
     ) is not None
 
 
+def _refuse_mid_rewrite(relpath: str, text: str) -> None:
+    """A push makes the Doc the working copy (api._checkout_gate) — for a
+    file that has no text yet, the next pull would then be the authority
+    over an essay that lives only in the database."""
+    from .api import is_placeholder
+
+    if is_placeholder(text):
+        raise LookupError(
+            f"'{relpath}' is mid-rewrite: an active writeup holds it and "
+            f"the file is a placeholder, not the essay. Pushing would make "
+            f"the Doc the working copy for text that does not exist yet. "
+            f"Finish the writeup ('write complete') or put the old essay "
+            f"back ('write abandon') first.")
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None) -> dict:
@@ -972,6 +993,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
     # Critique pause: Doc holds <<old>>{{new}} / {{insert}} forms the
     # author may have post-edited; local still has OLD. open_threads
     # only sees author_comment rows, so without this gate a rebuild
@@ -2686,6 +2708,8 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     from .revisions import strip_embed_lines as _strip_embeds
 
     bridge = bridge or manuscript_bridge(manuscript)
+    _refuse_mid_rewrite(
+        relpath, (bridge.root / relpath).read_text(encoding="utf-8"))
     mid = manuscript["id"]
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})

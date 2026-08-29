@@ -621,7 +621,11 @@ def extract_concepts(
     else:
         text, truncated = _manuscript_text(manuscript, target,
                                            max_chars=max_chars)
-    if not text.strip():
+    # A mid-rewrite placeholder is not prose: mining it would bill an
+    # extraction pass over a marker and put it into proposal screening.
+    from .api import is_placeholder as _is_placeholder
+
+    if not text.strip() or _is_placeholder(text):
         return None
 
     if truncated and files and not edges_only:
@@ -661,8 +665,11 @@ def extract_concepts(
         }
         failed = False
         for name in selected:
-            if not (disk.get(name) or "").strip():
-                continue  # empty chapter — nothing to mine, not a failure
+            if (not (disk.get(name) or "").strip()
+                    or _is_placeholder(disk.get(name) or "")):
+                # empty chapter (or one held by an active writeup) —
+                # nothing to mine, not a failure
+                continue
             sub = extract_concepts(db, manuscript, llm, files=[name],
                                    aliases_only=aliases_only, _inventory=True)
             if sub is None or sub.get("incomplete"):
