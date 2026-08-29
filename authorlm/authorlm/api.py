@@ -54,7 +54,7 @@ __all__ = [
     "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
     "write_start", "write_plan", "write_status", "write_propose",
     "write_accept", "write_reject", "write_learn", "write_complete",
-    "write_abandon", "get_profile",
+    "write_abandon", "write_digest", "get_profile",
 ]
 
 
