@@ -546,7 +546,9 @@ def scan_illustrations(file: str | None = None,
     ratified illustration-placement law (criteria, pacing; front matter
     and per-guide exclusions apply). Proposals land in a STAGING table,
     never in text: present them to the author for triage. Returns
-    {files, calls, staged, dropped_unverifiable}."""
+    {files, calls, staged, dropped_unverifiable, prompt_files} —
+    prompt_files names the file(s) (authorlm/prompts/...) that shaped
+    this scan, so the author can go read them."""
     def run():
         from . import placement
 

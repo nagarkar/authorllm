@@ -132,10 +132,10 @@ REGISTRY: list[Prompt] = [
            file=None, module="sweeps.py:ONTOLOGY_SYSTEM"),
     Prompt("illus-placement", "illus scan; scan_illustrations",
            "spot-find illustration placements against ratified criteria",
-           file=None, module="placement.py:PLACEMENT_SYSTEM"),
+           file="illus-placement.md", module="placement.py:placement_system"),
     Prompt("illus-arbiter", "illus scan (revision judgement)",
            "judge whether an existing tag should be revised",
-           file=None, module="placement.py:ARBITER_SYSTEM"),
+           file="illus-arbiter.md", module="placement.py:arbiter_system"),
 ]
 
 

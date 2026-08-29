@@ -2214,6 +2214,10 @@ def _print_collect_report(report):
     for stale in report.get("suggestions_stale", []):
         print(ui.dim(f"Suggestion now moot (marked stale): "
                      f"{stale['suggestion']}"))
+    if report.get("summaries_deprecated"):
+        print(ui.dim(
+            "Essay summary(ies) deprecated (file left the toc; kept, "
+            "not deleted): " + ", ".join(report["summaries_deprecated"])))
     if report.get("illustrations"):
         ill = report["illustrations"]
         if ill.get("unrendered"):
@@ -2227,6 +2231,15 @@ def _print_collect_report(report):
             print(ui.dim(
                 "Orphaned illustration file(s) — no tag matches their "
                 "prompt any more: " + ", ".join(ill["orphaned"])))
+        if ill.get("malformed_refs"):
+            print(ui.yellow(
+                f"{len(ill['malformed_refs'])} illustration tag(s) carry "
+                "a malformed ⇢ ref (arrow present but not a valid "
+                "'name.md' reference) — read as plain inline text for "
+                "now; fix the ref or delete it:"))
+            for slot in ill["malformed_refs"]:
+                print(f"  • {slot['file']}:{slot['line']}  "
+                      f"[Illustration: {slot['prompt']}]")
         for fix in ill.get("excerpt_fixes", []):
             if fix.get("missing"):
                 print(ui.yellow(
@@ -2325,6 +2338,8 @@ def cmd_illus(args):
                                 files=[args.name] if args.name else None)
         print(f"Scanned {len(report['files'])} chapter(s) "
               f"({report['calls']} spot-finder call(s)).")
+        if report.get("prompt_files"):
+            print(ui.dim("Prompts: " + ", ".join(report["prompt_files"])))
         if report.get("skipped_at_budget"):
             print(ui.dim("At pacing budget (not scanned): "
                          + ", ".join(report["skipped_at_budget"])))

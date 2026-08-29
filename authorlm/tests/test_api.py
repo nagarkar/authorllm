@@ -1743,6 +1743,95 @@ def check_backup_on_active_session() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_summary_deprecation() -> None:
+    """Sponsor, verbatim: "If a essay is no longer present, it should
+    not be considered stale - it should have a 'deprecated' status or
+    similar (see other similar objects in the db and their status field
+    enums)." essay_summaries.status ('current' | 'deprecated') follows
+    the codebase's existing status-enum idiom (concept_nodes,
+    knowledge_proposals, doc_threads). Additive schema only (db.py); the
+    transition is triggered from collect() (api.py) — summaries.py
+    itself is untouched, since sums.status()/before_after() are already
+    driven off the CURRENT toc reading order and so structurally never
+    see a departed file's row (verified: the live '22 stale' figure was
+    already correct before this fix — this closes the latent hazard for
+    when a summary DOES outlive its file, never delete it, never let
+    it read as an ordinary live summary)."""
+    import hashlib
+
+    from authorlm import summaries as sums
+
+    def _hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-summary-deprecation-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        text_a = "# A\n\nFirst essay, about to be removed.\n"
+        text_b = "# B\n\nSecond essay, about to be edited.\n"
+        (ms / "01-a.md").write_text(text_a)
+        (ms / "02-b.md").write_text(text_b)
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.collect(db, manuscript, {})
+
+        def _insert_summary(file: str, text: str) -> dict:
+            row = ko_fields("es")
+            row.update(manuscript_id=manuscript["id"], file=file,
+                      summary=f"summary of {file}", source_hash=_hash(text),
+                      upstream_hash=_hash(""), upstream_stale=0)
+            db.insert("essay_summaries", row)
+            return row
+
+        row_a = _insert_summary("01-a.md", text_a)
+        row_b = _insert_summary("02-b.md", text_b)
+        check("a freshly-inserted summary defaults to status 'current' "
+              "(additive column, no back-compat break)",
+              db.one("SELECT status FROM essay_summaries WHERE id = ?",
+                     (row_a["id"],))["status"] == "current")
+
+        # B stays present but its text changes (a NORMAL stale summary —
+        # must be unaffected by deprecation). A is deleted outright — its
+        # file leaves the toc (no toc.toml here, so reading order is the
+        # alphabetical fallback over files actually on disk).
+        (ms / "02-b.md").write_text(text_b + "\nA new paragraph.\n")
+        (ms / "01-a.md").unlink()
+        report = api.collect(db, manuscript, {})
+
+        check("collect deprecates the departed file's summary and "
+              "reports the transition",
+              report.get("summaries_deprecated") == ["01-a.md"], str(report))
+        dep_row = db.one("SELECT * FROM essay_summaries WHERE id = ?",
+                         (row_a["id"],))
+        check("the deprecated summary is KEPT, never deleted — it is "
+              "the record of an essay that existed",
+              dep_row is not None and dep_row["status"] == "deprecated",
+              dict(dep_row) if dep_row else None)
+
+        states = {r["file"]: r for r in sums.status(db, manuscript)}
+        check("a deprecated summary drops out of the stale/status "
+              "listing entirely — it is no longer in the toc, so it "
+              "never again counts as stale",
+              "01-a.md" not in states, states)
+        check("a normal stale summary (file still present, text edited) "
+              "is unaffected: still reports 'stale', stays status "
+              "'current' — deprecation never touches it",
+              states.get("02-b.md", {}).get("state") == "stale"
+              and db.one("SELECT status FROM essay_summaries WHERE id = ?",
+                        (row_b["id"],))["status"] == "current",
+              states)
+
+        # Idempotent: nothing left to change, so the next collect is a
+        # no-op and never re-reports (or re-touches) the deprecation.
+        report2 = api.collect(db, manuscript, {})
+        check("re-collecting with nothing new doesn't re-report an "
+              "already-deprecated summary",
+              not report2.get("summaries_deprecated"), report2)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
 
 def main_test() -> None:
     check_broken_pipe()
@@ -1755,6 +1844,7 @@ def main_test() -> None:
     check_vanished_directory_guard()
     check_unregister_safety()
     check_backup_on_active_session()
+    check_summary_deprecation()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()
@@ -2563,6 +2653,33 @@ def main_test() -> None:
         check("editing the prompt un-renders the slot and orphans the file",
               rep["unrendered"][0]["prompt"] == "two turns, reworded"
               and rep["orphaned"] == [candidate], str(rep))
+
+        # A `⇢` present but not matching the ref grammar (e.g. it doesn't
+        # end in a bare 'name.md') must be reported loudly, never
+        # silently folded into the prompt text as if it were an ordinary
+        # undecorated description (it-d70ece778f55: a corrupted doc-pull
+        # round trip produced exactly this shape — an excerpt spliced to
+        # a stray '.md' name immediately followed by a '.png' name, with
+        # no whitespace, so the ref half fails _REF and used to vanish
+        # without a trace).
+        garbled = ("The interior of a temple ⇢ "
+                  "a-field-of-fallen.mda-square-temple-of.png")
+        tag = parse_tag(f"[Illustration: {garbled}]")
+        check("a malformed ⇢ ref is flagged, not silently swallowed",
+              tag["malformed_ref"] is True and tag["ref"] is None
+              and tag["prompt"] == garbled, str(tag))
+        check("a well-formed ⇢ ref is never flagged as malformed",
+              parse_tag("[Illustration: excerpt ⇢ some-file.md]")
+              ["malformed_ref"] is False)
+        check("a plain undecorated description is never flagged",
+              parse_tag("[Illustration: plain description]")
+              ["malformed_ref"] is False)
+        (scratch / "ch.md").write_text(f"# C\n\n[Illustration: {garbled}]\n")
+        rep = slot_report(scratch)
+        check("slot_report surfaces the malformed ref as its own signal",
+              rep["malformed_refs"] == [{"file": "ch.md", "line": 3,
+                                         "prompt": garbled}],
+              str(rep))
 
         dirty = ("Prose kept. ![][image1]\n\n"
                  "[image1]: <data:image/png;base64,abc>\n")

@@ -71,6 +71,10 @@ def readiness(db: Database, manuscript: dict) -> dict:
     item("no orphaned illustration files", not slots["orphaned"],
          f"{len(slots['orphaned'])} orphaned file(s) (prompt edited or "
          "removed)" if slots["orphaned"] else "none")
+    item("no malformed illustration refs", not slots["malformed_refs"],
+         f"{len(slots['malformed_refs'])} tag(s) carry a ⇢ that doesn't "
+         "resolve to a file — fix or delete the ref"
+         if slots["malformed_refs"] else "none")
 
     open_props = proposals.open_proposals(db, mid)
     item("proposals settled", not open_props,
