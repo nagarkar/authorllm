@@ -1000,3 +1000,36 @@ writeup deletes its file, which leaves the reading order and takes its `unwritte
   is the failure mode §13.3 exists to prevent.
 - **No summary rebuild at `write complete`** — unchanged from §13.4, and this section does not
   become a reason to add one.
+
+### 14.7 One capture per invocation (2026-08-29, after a live incident)
+
+The author hit the remaining half of this in a real session: an essay truncated by a
+parallel `write start` *just before* a rebuild read it. §14.2 answers that for a file that
+is already in flight — the rebuild summarizes the pinned version. What was still open is
+the window: a verb that reads the disk twice can have the manuscript change between the
+two reads, and the dangerous shape is a **gate and the thing it gates reading
+separately** — the gate passes on text A, a parallel session truncates an essay, and the
+context is assembled from text B, which is exactly the lie the gate exists to prevent,
+arriving with the gate's approval on it.
+
+So: **one capture per verb invocation, shared by the gate and by the assembly.**
+`summaries.capture()` names the snapshot; `before_after`, `drafting_context` and
+`passes.summaries_ready` accept one and pass it down, and take their own when it is
+omitted, so no existing caller changes. `api.write_start` took three captures (the gate,
+then the drafting context's two reads) and now takes one — the target file never appears
+in its own context, so the truncation the verb performs does not make the capture stale.
+`passes.build_context` took the gate's capture, a separate `units()` pass for the
+paragraph list the editor model edits, and a separate in-flight query; all three now read
+the one snapshot.
+
+`rebuild` already held a single snapshot taken before its first model call, and
+`rebuild_one`'s double read was collapsed by §14.2's rewrite; both now say so, because the
+property is invisible in the code and one refactor from being lost. The mid-run case
+closes cleanly: a file that becomes in-flight **after** the snapshot is summarized from
+its pre-truncation text, which is precisely the text that writeup went on to pin — so the
+hash the rebuild stores is the hash the in-flight logic looks for, and the entry lands on
+`rewriting` rather than `stale`.
+
+Not done: any locking, and any re-read to *detect* that the manuscript moved mid-verb. The
+capture is a consistent view, not a transaction; a verb finishes against the manuscript it
+started with, and says so.

@@ -1051,6 +1051,16 @@ The warning cannot be switched off. That is on purpose, and it is the same
 reasoning as the summary check: a warning you can silence is a warning that will
 be silenced on the day it mattered.
 
+**And the timing cannot bite you.** Refreshing the summaries takes minutes, and
+it is entirely possible for another session to clear an essay halfway through
+that run. It cannot corrupt anything: every essay is read into memory once,
+before the first call, and the whole run works from that one reading. An essay
+cleared underneath it is still summarized from the text that was there when the
+run began — which is exactly the text the other session pinned, so the two agree
+rather than disagreeing. The same rule holds for every check the system makes
+before letting you start: the text it approves is the text it then hands you,
+because it only looks once.
+
 <details>
 <summary><b>Under the hood</b></summary>
 
