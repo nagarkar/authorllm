@@ -121,6 +121,59 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_drafting_cache_layer() -> None:
+    """The `cache_control` layer, which NO end-to-end test can reach.
+
+    The hermetic suite runs against the OpenAI-compatible stub and the
+    live-optional suite runs on the cheap tier, so nothing exercises the
+    Anthropic block path in flight (design §6.2 says so plainly). Its
+    verification in production is the usage line — but the two mechanical
+    properties it rests on are unit-testable, and both were places where
+    the obvious implementation fails."""
+    import json
+
+    from authorlm import llm as llm_mod
+
+    messages = llm_mod._block_messages(["S"], ["A", "B", "C"], caching=True)
+    check("two of the four available breakpoints, both on the STABLE "
+          "layers: end of the system block and end of the first user block",
+          messages[0]["content"][0]["cache_control"]["ttl"] == "1h"
+          and messages[1]["content"][0]["cache_control"]["ttl"] == "1h"
+          and "cache_control" not in messages[1]["content"][1]
+          and "cache_control" not in messages[1]["content"][2],
+          json.dumps(messages))
+    check("four content blocks, always — so §4's 'a breakpoint looks back "
+          "at most 20 content blocks' is structural here, not a discipline",
+          len(messages[0]["content"]) + len(messages[1]["content"]) == 4,
+          json.dumps(messages))
+    off = llm_mod._block_messages(["S"], ["A", "B", "C"], caching=False)
+    check("[writing] cache = false is a clean kill switch — the same "
+          "blocks, no cache_control anywhere",
+          not any("cache_control" in b for m in off for b in m["content"]),
+          json.dumps(off))
+
+    client = llm_mod.LLMClient({"llm": {"cache_dir": "/tmp/authorlm-unit"}})
+    check("the record/replay key is computed over BLOCK TEXT ONLY: "
+          "toggling the cache must not re-record every replay fixture",
+          client._cache_path(messages) == client._cache_path(off),
+          f"{client._cache_path(messages)} vs {client._cache_path(off)}")
+    plain = [{"role": "system", "content": "S"},
+             {"role": "user", "content": "U"}]
+    check("...and stripping is a no-op for plain string content, so every "
+          "existing fixture keeps its hash",
+          llm_mod._without_cache_control(plain) is plain, "")
+
+    check("caching is attached only on the litellm ANTHROPIC path — the "
+          "raw-HTTP transport cannot express a content block, and it is "
+          "what every hermetic test uses",
+          llm_mod.caching_available("anthropic/claude-fable-5", "litellm")
+          and not llm_mod.caching_available("anthropic/claude-fable-5",
+                                            "openai")
+          and not llm_mod.caching_available("gemini/gemini-2.5-flash",
+                                            "litellm")
+          and not llm_mod.caching_available("stub-writer", "litellm"), "")
+
+
 def check_config_parity() -> None:
     """ORCH-3: api.load_config and cli._load_config must resolve the
     same config.
@@ -2458,6 +2511,7 @@ def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
+    check_drafting_cache_layer()
     check_extraction_failure_traced()
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
