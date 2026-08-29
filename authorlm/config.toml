@@ -20,6 +20,15 @@ image_size = "1536x1024"
 # Default: 24000 (characters, ~6k tokens).
 extraction_max_chars = 24000
 
+[critique]
+# Essay summaries and the critique editor pass run on Sonnet (author ruling
+# 2026-08-29): both read compressed context into editorial judgment, where
+# the stronger model earns its price. NOTE: requires ANTHROPIC_API_KEY in
+# .env (see VENDOR_KEY_ENV in llm.py) — absent the key these calls fail
+# loudly rather than degrade.
+summarizer_model = "anthropic/claude-sonnet-5"
+editor_model = "anthropic/claude-sonnet-5"
+
 [extraction]
 # Two-step extraction. On by default (TrackA/3) since pass 2 stopped
 # re-sending the full source text (TrackA/1) and its payload cap accounting
