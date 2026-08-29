@@ -26,9 +26,38 @@ from .llm import LLMClient
 PROMPT_PATH = Path(__file__).parent / "prompts" / "summarizer.md"
 DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
 
+# Target-length scaling (sponsor's ratio): a summary should run roughly
+# 1 word per 7.5-10 words of essay — 150-200 words for a ~1500-word essay,
+# 300-400 for a ~3000-word one. Floored so a short front-matter unit still
+# gets a real target instead of "0-0 words", capped so a single unit can't
+# blow the editor's working-memory budget the summaries exist to keep small.
+MIN_SUMMARY_WORDS = 40
+MAX_SUMMARY_WORDS = 500
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def target_length(text: str) -> tuple[int, int]:
+    """(low, high) word-count target for this unit's summary, scaled to
+    the unit's own word count. See the module-level ratio comment."""
+    n = len(text.split())
+    low = max(MIN_SUMMARY_WORDS, round(n / 10))
+    high = max(low + 10, round(n / 7.5))
+    high = min(high, MAX_SUMMARY_WORDS)
+    low = min(low, high - 10) if high - 10 >= MIN_SUMMARY_WORDS else MIN_SUMMARY_WORDS
+    return low, high
+
+
+def _numbered_paragraphs(text: str) -> tuple[str, int]:
+    """THE UNIT's body with each paragraph prefixed by its 1-based
+    number, so the prompt can require every paragraph be accounted for
+    in MOVES by number — no paragraph silently dropped."""
+    from .revisions import _paragraphs
+
+    paras = _paragraphs(text)
+    return "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paras, 1)), len(paras)
 
 
 def summarizer_prompt() -> str:
@@ -135,11 +164,17 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
                    prior: list[tuple[str, str]], llm: LLMClient) -> dict:
     """Write (or rewrite) one unit's summary conditioned on `prior`
     [(file, summary), …]. Returns the stored row."""
+    low, high = target_length(text)
+    numbered, n_paras = _numbered_paragraphs(text)
     user = (
         "PRIOR SUMMARIES (reading order):\n" + _prior_block(prior)
         + "\n\nCONCEPTS (author's ratified definitions):\n"
         + _concept_slice(db, manuscript, file)
-        + f"\n\nTHE UNIT: {file}\n\n{text}"
+        + f"\n\nTARGET LENGTH: {low}-{high} words "
+          f"(scaled to this unit's {len(text.split())} words)."
+        + f"\n\nPARAGRAPH COUNT: {n_paras} — every paragraph number below "
+          "must be cited at least once in MOVES."
+        + f"\n\nTHE UNIT: {file}\n\n{numbered}"
     )
     summary = llm.complete(summarizer_prompt(), user)
     if not summary:
