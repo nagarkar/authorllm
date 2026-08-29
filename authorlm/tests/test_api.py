@@ -6203,6 +6203,108 @@ def main_test() -> None:
               reply3 == "the reply" and len(calls3) == 1
               and sleeps3 == [1], (calls3, sleeps3))
 
+        # --- AE/key-by-model: api_key must track a LATER cross-vendor
+        # reassignment of .model (summarizer_llm/editor_llm build an
+        # LLMClient off [llm], then override .model to a [critique]
+        # summarizer_model/editor_model of a different vendor) — a key
+        # resolved once at __init__ time would keep naming the ORIGINAL
+        # vendor and hand the new vendor's API a foreign key.
+        with mock.patch.dict(os.environ,
+                             {"GEMINI_API_KEY": "gemini-sentinel",
+                              "ANTHROPIC_API_KEY": "anthropic-sentinel"}):
+            fake_key, calls_key = make_fake_litellm(set())
+            client_key = LLMClient({"llm": {
+                "enabled": True, "model": "gemini/gemini-2.5-flash"}})
+            with mock.patch.dict(sys.modules, {"litellm": fake_key}):
+                client_key.complete("sys", "usr")
+            check("api_key resolves to the model's vendor key at "
+                  "construction",
+                  calls_key[-1].get("api_key") == "gemini-sentinel",
+                  calls_key)
+
+            client_key.model = "anthropic/claude-sonnet-5"
+            with mock.patch.dict(sys.modules, {"litellm": fake_key}):
+                client_key.complete("sys", "usr")
+            check("...and re-resolves to the NEW vendor's key once "
+                  ".model is reassigned post-construction",
+                  calls_key[-1].get("api_key") == "anthropic-sentinel",
+                  calls_key)
+
+            client_key.model = "gemini/gemini-2.5-flash"
+            with mock.patch.dict(sys.modules, {"litellm": fake_key}):
+                client_key.complete("sys", "usr")
+            check("...and back again when .model reverts",
+                  calls_key[-1].get("api_key") == "gemini-sentinel",
+                  calls_key)
+
+        # (3) api_key_env still wins over the vendor-derived key, on
+        # BOTH transports, under the property.
+        with mock.patch.dict(os.environ,
+                             {"CUSTOM_PROXY_KEY": "proxy-sentinel",
+                              "GEMINI_API_KEY": "gemini-sentinel"}):
+            fake_env, calls_env = make_fake_litellm(set())
+            client_env = LLMClient({"llm": {
+                "enabled": True, "model": "gemini/gemini-2.5-flash",
+                "api_key_env": "CUSTOM_PROXY_KEY"}})
+            with mock.patch.dict(sys.modules, {"litellm": fake_env}):
+                client_env.complete("sys", "usr")
+            check("api_key_env overrides the vendor-derived key on the "
+                  "litellm path",
+                  calls_env[-1].get("api_key") == "proxy-sentinel",
+                  calls_env)
+
+            client_env_http = LLMClient({"llm": {
+                "enabled": True, "provider": "openai",
+                "model": "gpt-4o-mini", "api_key_env": "CUSTOM_PROXY_KEY"}})
+            seen = {}
+
+            class _OpenAIResp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self):
+                    return _rjson.dumps({
+                        "choices": [{"message": {"content": "ok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                    }).encode()
+
+            def fake_urlopen(request, timeout=None):
+                seen["authorization"] = request.get_header("Authorization")
+                return _OpenAIResp()
+
+            with mock.patch("urllib.request.urlopen", fake_urlopen):
+                client_env_http.complete("sys", "usr")
+            check("api_key_env still wins as the bearer token on the "
+                  "raw-HTTP path",
+                  seen.get("authorization") == "Bearer proxy-sentinel",
+                  seen)
+
+        # (4) The real-world path this bug broke: summarizer_llm building
+        # a client off [llm] (gemini) and overriding .model to a
+        # different-vendor [critique] summarizer_model (anthropic) — the
+        # stubbed call must receive the ANTHROPIC key, not the gemini one
+        # the client was constructed with.
+        from authorlm import summaries as summaries_mod
+
+        with mock.patch.dict(os.environ,
+                             {"GEMINI_API_KEY": "gemini-sentinel",
+                              "ANTHROPIC_API_KEY": "anthropic-sentinel"}):
+            fake_sum, calls_sum = make_fake_litellm(set())
+            sum_client = summaries_mod.summarizer_llm({
+                "llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"},
+                "critique": {"summarizer_model": "anthropic/claude-fable-5"},
+            })
+            with mock.patch.dict(sys.modules, {"litellm": fake_sum}):
+                sum_client.complete("sys", "usr")
+            check("summarizer_llm's cross-vendor override reaches the "
+                  "call with the OVERRIDE vendor's key",
+                  sum_client.model == "anthropic/claude-fable-5"
+                  and calls_sum[-1].get("api_key") == "anthropic-sentinel",
+                  calls_sum)
+
         def boom_main(argv):
             raise RuntimeError("network down")
 
