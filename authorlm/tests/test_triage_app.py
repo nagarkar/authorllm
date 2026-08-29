@@ -775,18 +775,57 @@ class HelpTabTest(unittest.TestCase):
         rejection into a candidate belief — and `--reason` is mandatory on
         a rejection, so every rejection spends. A reworded acceptance the
         author explains does the same. A tutorial that undercounts what an
-        instrument costs is the defect, not the wording."""
+        instrument costs is the defect, not the wording.
+
+        The count went to FIVE when `write draft` landed: drafting the beat
+        is now a model call, and it is the largest one the system makes.
+        The same rule that caught the three-moment count catches a stale
+        four."""
         text = self.DOC.read_text(encoding="utf-8")
         self.assertNotIn("Three moments", text,
                          "the three-moment count omits verdict distillation")
-        self.assertIn("Four moments call out to a model", text)
+        self.assertNotIn("Four moments", text,
+                         "the four-moment count omits beat drafting")
+        self.assertIn("Five moments call out to a model", text)
+        # The expensive one, named as such — an author who is not told
+        # which call dominates the bill cannot act on the total.
+        self.assertIn("Drafting each beat", text)
+        self.assertIn("the largest single call the system makes", text)
+        self.assertIn("[writing] model", text)
         # The frequent one, named as such and framed by its purpose.
         self.assertIn("Every rejection, and every reworded acceptance you "
                       "explain", text)
         self.assertIn("every rejection spends", text)
         # ...and the plain acceptance that does NOT spend, so the reader
-        # can tell the two apart.
-        self.assertIn("A plain acceptance costs nothing", text)
+        # can tell the two apart. It no longer costs "nothing" outright —
+        # the draft it accepts was already paid for — so the doc must say
+        # what it adds, not what it costs.
+        self.assertIn("A plain acceptance adds nothing on top of the draft",
+                      text)
+        self.assertIn("A rejection costs twice", text)
+
+    def test_the_doc_says_where_the_writing_comes_from(self):
+        """The tutorial's §0 told the author, in its own words, that the
+        drafting step 'has no model setting of its own: there is nothing to
+        configure, because the conversation is the drafting'. That was true
+        when written and became false the day `write draft` landed — and it
+        is the single most load-bearing sentence in the document, because
+        it is what the author reasons about cost, reproducibility and blame
+        from. A stale answer here is worse than no answer: it tells them to
+        look in the wrong place when a beat comes back wrong."""
+        text = self.DOC.read_text(encoding="utf-8")
+        for stale in ("there is nothing to configure",
+                      "because the conversation is the drafting",
+                      "the drafting step has no model setting",
+                      "nothing to set: the drafting is the conversation",
+                      "Drafting the beats costs nothing"):
+            self.assertNotIn(stale, text, f"{stale!r} is no longer true")
+        self.assertIn("Each beat is drafted by a model of its", text)
+        self.assertIn("authorlm/prompts/beat-draft.md", text)
+        # ...and the hand-drafting path is still named as legitimate, so
+        # the author is not left thinking they cannot ask for wording.
+        self.assertIn("The assistant still writes for you when you ask it to",
+                      text)
         # F3: the three end-of-essay calls do NOT degrade alike.
         self.assertIn("fails loudly", text)
         self.assertNotIn("all three still succeed", text)
