@@ -2586,6 +2586,33 @@ def scenario_doc_comments(root: Path) -> None:
               for line in gap_comment.splitlines() if line.strip()),
           inserted)
 
+    # F4 — K3's purity is a claim about BYTES. A toc written on Windows (or
+    # round-tripped through a tool that writes CRLF) must not be silently
+    # relaid in LF: that is a rewrite of every line the insertion never
+    # touched, which is exactly what "never rewrites anything it did not
+    # add" forbids.
+    lf_result, lf_stanza = insert_toc_entry(commented, "new.md", "c.md")
+    crlf_result, crlf_stanza = insert_toc_entry(
+        commented.replace("\n", "\r\n"), "new.md", "c.md")
+    check("F4 — a CRLF toc comes back CRLF, with no lone LF anywhere",
+          "\r\n" in crlf_result
+          and crlf_result.replace("\r\n", "").count("\n") == 0,
+          repr(crlf_result))
+    check("F4 — and the stanza is spelled in the file's own line ending",
+          "\r\n" in crlf_stanza and "\r" not in lf_stanza,
+          repr(crlf_stanza))
+    check("F4 — the CRLF insertion is otherwise identical to the LF one, "
+          "so nothing but the separator differs",
+          crlf_result.replace("\r\n", "\n") == lf_result, repr(crlf_result))
+    check("F4 — an LF toc stays LF (no \\r introduced)",
+          "\r" not in lf_result, repr(lf_result))
+    no_trailing = commented.rstrip("\n")
+    grown, _s = insert_toc_entry(no_trailing, "new.md", "c.md")
+    check("F4 — a file with no trailing newline does not grow one: the "
+          "insertion adds its stanza and nothing else",
+          not grown.endswith("\n") and 'file = "new.md"' in grown,
+          repr(grown[-60:]))
+
     doc_tabs = [{"tabProperties": {"tabId": "t.a", "title": "a.md"},
                  "childTabs": [
                      {"tabProperties": {"tabId": "t.s", "title": "scratch"},

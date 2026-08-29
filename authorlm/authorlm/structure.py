@@ -136,7 +136,14 @@ def insert_toc_entry(toc_text: str, file: str,
     deterministic — and nothing else. `matter` and the rest are semantic;
     the author sets them.
     """
-    lines = toc_text.splitlines()
+    # Split and re-join on the file's OWN dominant line ending. `splitlines`
+    # + `"\n".join` silently relaid a CRLF toc in LF, rewriting every line
+    # the insertion never touched — the exact thing K3's "never rewrites
+    # anything it did not add" forbids. split/join on one separator is
+    # lossless, trailing newline (or its absence) included.
+    crlf = toc_text.count("\r\n")
+    newline = "\r\n" if crlf > toc_text.count("\n") - crlf else "\n"
+    lines = toc_text.split(newline)
     already = _file_line_re(file)
     if any(already.match(line) for line in lines):
         return toc_text, ""            # idempotent
@@ -175,7 +182,8 @@ def insert_toc_entry(toc_text: str, file: str,
         block = [""] + stanza_lines
 
     new_lines = lines[:insert_at] + block + lines[insert_at:]
-    return "\n".join(new_lines) + "\n", "\n".join(stanza_lines) + "\n"
+    return (newline.join(new_lines),
+            newline.join(stanza_lines) + newline)
 
 
 def tree_to_parents(entries: list[tuple[str, int]]) -> list[tuple]:
