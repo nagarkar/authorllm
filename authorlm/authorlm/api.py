@@ -395,6 +395,24 @@ def list_intents(db: Database, manuscript: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- collect
 
+def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[str]:
+    """A summary whose file has left the toc is never deleted — it is
+    the record of an essay that existed — but it must not linger
+    ambiguously as if it were still live. `essay_summaries.status`
+    ('current' | 'deprecated') marks it so a future direct query of the
+    table (unlike sums.status()/before_after(), which are driven off
+    the CURRENT toc reading order and so already never see a departed
+    file's row) does not mistake it for a stale current summary.
+    Idempotent: only rows not already 'deprecated' are touched."""
+    current = {f for f, _ in sums.units(manuscript)}
+    deprecated = []
+    for file, row in sums.all_summaries(db, manuscript["id"]).items():
+        if file not in current and row["status"] != "deprecated":
+            db.update("essay_summaries", row["id"], {"status": "deprecated"})
+            deprecated.append(file)
+    return deprecated
+
+
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
             analyze: bool | None = None) -> dict:
@@ -443,6 +461,7 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     changed_files = sorted({t["location"].split("#", 1)[0] for t in transitions})
     sums.mark_changed(db, manuscript, changed_files)
+    deprecated_summaries = _deprecate_departed_summaries(db, manuscript, sums)
     vanished_proposals = []
     hypotheses_dropped = []
     for node in vanished:
@@ -514,6 +533,8 @@ def collect(db: Database, manuscript: dict, config: dict,
     )
     if staled:
         report["suggestions_stale"] = staled
+    if deprecated_summaries:
+        report["summaries_deprecated"] = deprecated_summaries
 
     # Illustration slots are a scan-derived registry; a collect is the
     # moment the author learns about unrendered tags ("new illustrations

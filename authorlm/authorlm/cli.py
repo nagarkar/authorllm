@@ -2195,6 +2195,10 @@ def _print_collect_report(report):
     for stale in report.get("suggestions_stale", []):
         print(ui.dim(f"Suggestion now moot (marked stale): "
                      f"{stale['suggestion']}"))
+    if report.get("summaries_deprecated"):
+        print(ui.dim(
+            "Essay summary(ies) deprecated (file left the toc; kept, "
+            "not deleted): " + ", ".join(report["summaries_deprecated"])))
     if report.get("illustrations"):
         ill = report["illustrations"]
         if ill.get("unrendered"):

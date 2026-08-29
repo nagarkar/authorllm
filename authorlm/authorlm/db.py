@@ -331,6 +331,12 @@ CREATE TABLE IF NOT EXISTS essay_summaries (
                                   -- conditioned on
     upstream_stale INTEGER NOT NULL DEFAULT 0,  -- tolerated by the edit pass;
                                   -- cleared by rebuild (mark, don't cascade)
+    status TEXT NOT NULL DEFAULT 'current',  -- current | deprecated (the
+                                  -- file left the toc — never deleted, the
+                                  -- record of an essay that existed; excluded
+                                  -- from stale counts and the edit pass's
+                                  -- prerequisites, both of which are driven
+                                  -- off the current toc reading order)
     UNIQUE (manuscript_id, file)
 );
 
@@ -499,6 +505,11 @@ class Database:
                 provenance_added = True
         if "scope" not in self._columns("declared_intents"):
             self.conn.execute("ALTER TABLE declared_intents ADD COLUMN scope TEXT")
+        if "status" not in self._columns("essay_summaries"):
+            self.conn.execute(
+                "ALTER TABLE essay_summaries ADD COLUMN status TEXT "
+                "NOT NULL DEFAULT 'current'"
+            )
         if provenance_added:
             self._backfill_provenance()
         if "comment_id" in self._columns("doc_threads"):
