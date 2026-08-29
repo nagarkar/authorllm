@@ -595,6 +595,13 @@ def _stub_draft_reply(user: str) -> str:
         return "WHY\n\nSELF-CHECK\nbeat spec: ok\n\nDRAFT\nSome prose."
     if "STUB-EMPTY-DRAFT" in user:
         return "WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\nDRAFT\n   \n  "
+    if "STUB-LABEL-IN-PROSE" in user:
+        # A beat whose PROSE contains a bare BLOCKED line. It is
+        # manuscript text, not a refusal — the label only refuses when it
+        # comes first.
+        return ("WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\n"
+                "DRAFT\nThe author's own word for the state was this:\n"
+                "BLOCKED\nand the sentence continues past it.")
     if "STUB-MARKERS" in user:
         return ("WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\n"
                 "DRAFT\nA beat carrying <<a reserved marker>> in its prose.")
@@ -625,6 +632,7 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         StubLLMHandler.REQUESTS += 1
+        finish = "stop"
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
@@ -639,6 +647,16 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            # A provider refusal and a truncation both arrive as HTTP 200
+            # with a body — the finish_reason is the ONLY thing that
+            # distinguishes them from a beat (design risk R-c: this
+            # manuscript is a plausible refusal target).
+            if "STUB-REFUSED" in user:
+                finish = "content_filter"
+            elif "STUB-TRUNCATED" in user:
+                finish = "length"
+            else:
+                finish = "stop"
             content = _stub_draft_reply(user)
         elif "sole task is to find aliasing statements" in system:
             content = json.dumps({
@@ -725,7 +743,8 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
         else:
             content = "A drafted bridge paragraph from the stub."
         payload = json.dumps({
-            "choices": [{"message": {"content": content}}],
+            "choices": [{"message": {"content": content},
+                         "finish_reason": finish}],
             "usage": {"prompt_tokens": 120, "completion_tokens": 45},
         }).encode()
         self.send_response(200)
@@ -2134,20 +2153,29 @@ def scenario_write_draft(root: Path) -> None:
               "LLM: 1 live call(s)" in out, out)
 
         # --- T7: every failure leaves nothing ------------------------------
+        # A provider refusal and a truncation both arrive as HTTP 200 with a
+        # body, so finish_reason is the only thing separating them from a
+        # beat — and they must not be mistaken for each other either: one
+        # says the model declined, the other says the ceiling was hit, and
+        # the remedies are nothing alike.
         failures = [
             ("STUB-500: provider error", "failed after 3 attempts"),
+            ("STUB-REFUSED: stop_reason refusal", "refused to answer"),
+            ("STUB-TRUNCATED: hit the ceiling", "before finishing"),
             ("STUB-NO-DRAFT: no draft line", "missing DRAFT"),
             ("STUB-EMPTY-WHY: empty why", "WHY is empty"),
             ("STUB-EMPTY-DRAFT: whitespace only",
              "nothing follows the DRAFT line"),
             ("STUB-MARKERS: reserved grammar", "reserved grammar"),
         ]
+        said: dict[str, str] = {}
         for notes, expected in failures:
             run_stdin(ws, json.dumps([{"role": "close",
                                        "concepts": ["Choice"],
                                        "budget": 60, "notes": notes}]),
                       "write", "plan", "--replace")
             out = run(ws, "write", "draft", expect_exit=True)
+            said[notes.split(":")[0]] = out
             check(f"a failed draft says what happened ({expected!r}) and "
                   f"leaves NO pending proposal — write_propose is the last "
                   f"statement of the success path",
@@ -2155,9 +2183,42 @@ def scenario_write_draft(root: Path) -> None:
                   and len(beat_rows()) == rows_before
                   and cursor() == cursor_before
                   and (ms / "02-essay.md").read_text() == disk_before, out)
+        check("a refusal and a truncation get DISTINCT messages: one names "
+              "stop_reason refusal, the other names the max_tokens ceiling "
+              "and says to raise it or narrow the beat's budget",
+              "refused to answer" in said["STUB-REFUSED"]
+              and "refused to answer" not in said["STUB-TRUNCATED"]
+              and "max_tokens" in said["STUB-TRUNCATED"]
+              and "truncated beat is not a short beat"
+              in said["STUB-TRUNCATED"]
+              and "max_tokens" not in said["STUB-REFUSED"],
+              said["STUB-REFUSED"] + "\n---\n" + said["STUB-TRUNCATED"])
         check("an unparseable reply also shows the first 400 characters of "
               "what came back, so the author can see it",
               "characters of what came back" in out, out)
+
+        # --- a BLOCKED line INSIDE the prose is prose, not a refusal ------
+        run_stdin(ws, json.dumps([{"role": "close", "concepts": ["Choice"],
+                                   "budget": 60,
+                                   "notes": "STUB-LABEL-IN-PROSE: the "
+                                            "label appears after DRAFT"}]),
+                  "write", "plan", "--replace")
+        out = run(ws, "write", "draft")
+        check("a bare BLOCKED line AFTER the DRAFT label is manuscript "
+              "text, not a refusal — everything after DRAFT is prose, and "
+              "reading a plausible bare word as a refusal would silently "
+              "discard a good draft",
+              "Draft registered" in out
+              and "nothing was registered" not in out
+              and "and the sentence continues past it." in out, out)
+        row = [r for r in beat_rows() if r["state"] == "proposed"][-1]
+        check("...and the BLOCKED line is registered as part of the beat, "
+              "verbatim",
+              "\nBLOCKED\n" in row["suggestion"]
+              and row["suggestion"].endswith("continues past it."),
+              row["suggestion"])
+        run_stdin(ws, "", "write", "reject", "--reason",
+                  "Not the close I wanted; back to the plan")
 
         # --- T10 (cont.): the checkout gate, and the end of the plan -------
         _row = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")

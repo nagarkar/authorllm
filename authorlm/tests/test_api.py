@@ -121,6 +121,180 @@ def check_broken_pipe() -> None:
                   "BrokenPipeError escaped main()")
 
 
+def check_drafting_key_gate() -> None:
+    """The writing key gate must resolve the key the same way the REQUEST
+    does, or a correctly configured proxy is refused for no reason.
+
+    `[llm] api_key_env` names the bearer token for an OpenAI-compatible
+    endpoint (a LiteLLM proxy, Ollama, LM Studio), and `vendor_key` gives
+    it precedence over the vendor convention — such endpoints use
+    arbitrary tokens no convention can derive. A gate that read
+    ANTHROPIC_API_KEY directly would refuse a working proxy the moment it
+    was pointed at an `anthropic/` model string, with a message telling
+    the author to set a variable their setup does not use."""
+    from authorlm import llm as llm_mod
+
+    config = {"llm": {"enabled": True, "provider": "openai",
+                      "api_key_env": "MY_PROXY_KEY"},
+              "writing": {"model": "anthropic/claude-fable-5"}}
+    prev = os.environ.pop("MY_PROXY_KEY", None)
+    try:
+        client = llm_mod.writing_llm(config)
+        refused = None
+        try:
+            client.require_writing_key()
+        except LookupError as err:
+            refused = str(err)
+        check("with no proxy token set, the key gate still refuses — and "
+              "names the variable the config actually uses, not the vendor "
+              "convention it does not",
+              refused and "MY_PROXY_KEY" in refused
+              and "ANTHROPIC_API_KEY" not in refused, str(refused))
+
+        os.environ["MY_PROXY_KEY"] = "a-proxy-bearer-token"
+        client = llm_mod.writing_llm(config)
+        client.require_writing_key()   # must NOT raise
+        check("an [llm] api_key_env proxy token SATISFIES the gate for an "
+              "anthropic/* writing model — the gate resolves the key "
+              "through vendor_key, exactly as the request does",
+              client.api_key == "a-proxy-bearer-token", client.api_key)
+    finally:
+        os.environ.pop("MY_PROXY_KEY", None)
+        if prev is not None:
+            os.environ["MY_PROXY_KEY"] = prev
+
+    check("a model whose vendor prefix this module does not know is never "
+          "refused — an unlisted prefix means 'let litellm resolve it', "
+          "which is correct for credential-file vendors",
+          llm_mod.writing_llm(
+              {"llm": {}, "writing": {"model": "vertex_ai/gemini-x"}}
+          ).require_writing_key() is None, "")
+
+
+def check_drafting_replay_needs_no_key() -> None:
+    """A REPLAYED draft needs no API key; a live one still does.
+
+    The record/replay suite's whole contract is that re-running it without
+    a key makes zero live calls and replays every fixture. A key gate that
+    fired before the replay check would have made the drafting path the
+    one thing in that suite nobody could run — the fixture would sit in
+    tests/llm_cache/ unreachable. So the gate sits after the cache hit and
+    before the request, and this pins both halves of that."""
+    import json as _json
+
+    from authorlm import llm as llm_mod
+
+    cache_root = Path(tempfile.mkdtemp(prefix="authorlm-replay-"))
+    prev = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        config = {"llm": {"enabled": True, "cache_dir": str(cache_root)},
+                  "writing": {"model": "anthropic/claude-fable-5"}}
+        blocks = (["SYSTEM BLOCK"], ["FRAME", "ACCEPTED", "BEAT"])
+
+        cold = llm_mod.writing_llm(config)
+        refused = None
+        try:
+            cold.draft(*blocks)
+        except LookupError as err:
+            refused = str(err)
+        check("with no fixture and no key, the drafting call refuses by "
+              "name before it ever reaches the provider",
+              refused and "ANTHROPIC_API_KEY" in refused, str(refused))
+
+        client = llm_mod.writing_llm(config)
+        messages = llm_mod._block_messages(
+            *blocks, llm_mod.caching_available(client.model, client.provider))
+        path = client._cache_path(messages)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({
+            "model": client.model,
+            "messages": llm_mod._without_cache_control(messages),
+            "response": "WHY\nx\n\nSELF-CHECK\ny\n\nDRAFT\nprose",
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 4100, "output_tokens": 320,
+                      "cache_read_tokens": 29880, "cache_write_tokens": 0},
+        }))
+        result = client.draft(*blocks)
+        check("...and with the fixture present the same call replays it, "
+              "with no key and no request",
+              result.text.endswith("prose") and result.cache_read == 29880
+              and client.live_calls == 0 and client.replays == 1, result.text)
+        line = client.stats_line()
+        check("a replayed draft still reports itself: the usage line names "
+              "the model and the replay. The spend figures stay ZERO — a "
+              "replay costs nothing now, and printing the recorded call's "
+              "tokens as this run's would misreport what was spent",
+              "model anthropic/claude-fable-5" in line
+              and "1 replayed from cache" in line
+              and "0 live call(s)" in line
+              and "cache 0 read / 0 written" in line, line)
+    finally:
+        shutil.rmtree(cache_root, ignore_errors=True)
+        if prev is not None:
+            os.environ["ANTHROPIC_API_KEY"] = prev
+
+
+def check_drafting_cache_warning() -> None:
+    """§4's zero-cache-reads warning, asserted POSITIVELY.
+
+    It is the cache layer's only production verification — nothing
+    exercises `cache_control` in flight — so the predicate that fires it
+    and the text it prints are both pinned here. Deleting either would
+    otherwise leave the whole caching feature unverified and the suite
+    still green."""
+    import io as _io
+
+    from authorlm import cli as cli_module
+
+    class _Client:
+        cache = True
+        model = "anthropic/claude-fable-5"
+        provider = "litellm"
+
+    client = _Client()
+    check("the warning FIRES on a caching-capable model that read zero "
+          "cached tokens on a draft that is not the writeup's first — a "
+          "beat loop showing zero cache reads has a silent invalidator",
+          api.cache_cold(client, first_draft=False, cache_read=0), "")
+    check("...and is silent on the writeup's FIRST draft (nothing to hit "
+          "yet), on a non-zero read, and when [writing] cache = false",
+          not api.cache_cold(client, first_draft=True, cache_read=0)
+          and not api.cache_cold(client, first_draft=False,
+                                 cache_read=29_880)
+          and not api.cache_cold(
+              type("C", (), {"cache": False, "model": client.model,
+                             "provider": "litellm"})(),
+              first_draft=False, cache_read=0), "")
+    check("...and never cries wolf on a model that does not advertise "
+          "prompt caching, which is every hermetic run",
+          not api.cache_cold(
+              type("C", (), {"cache": True, "model": "stub-writer",
+                             "provider": "openai"})(),
+              first_draft=False, cache_read=0), "")
+
+    buffer = _io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        cli_module._print_draft_usage(
+            {"line": "LLM: 1 live call(s) (30,412 in / 3,180 out tokens; "
+                     "cache 0 read / 0 written) — model "
+                     "anthropic/claude-fable-5",
+             "cache_cold": True})
+    shouted = buffer.getvalue()
+    check("the warning the author actually sees names the stable layers "
+          "and points at --dry-run, which is how the invalidator is found",
+          "0 tokens read on this beat" in shouted
+          and "STYLE LAW, DRAFTING CONTEXT, PLAN, CONCEPTS" in shouted
+          and "write draft --dry-run" in shouted
+          and shouted.count("!!") >= 4, shouted)
+    quiet = _io.StringIO()
+    with contextlib.redirect_stdout(quiet):
+        cli_module._print_draft_usage({"line": "LLM: 1 live call(s)",
+                                       "cache_cold": False})
+    check("...and a warm beat prints the usage line and nothing else",
+          "!!" not in quiet.getvalue()
+          and "LLM: 1 live call(s)" in quiet.getvalue(), quiet.getvalue())
+
+
 def check_drafting_cache_layer() -> None:
     """The `cache_control` layer, which NO end-to-end test can reach.
 
@@ -2511,6 +2685,9 @@ def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
+    check_drafting_key_gate()
+    check_drafting_replay_needs_no_key()
+    check_drafting_cache_warning()
     check_drafting_cache_layer()
     check_extraction_failure_traced()
     check_extraction_prompt_provenance()
