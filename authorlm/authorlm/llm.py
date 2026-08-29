@@ -99,11 +99,8 @@ class LLMClient:
         self.provider = llm.get("provider", "litellm")
         self.model = llm.get("model", DEFAULT_MODEL)
         self.base_url = llm.get("base_url", "http://localhost:4000/v1").rstrip("/")
-        # Keys come from the environment (.env loaded at config load),
-        # never from config.toml. On the litellm path this is only a
-        # courtesy override — litellm resolves the vendor's credentials
-        # itself; on the raw-HTTP path it is the bearer token.
-        self.api_key = vendor_key(self.model, llm)
+        # api_key is a property (below) — see its docstring for why it
+        # cannot be resolved once here and cached.
         self.timeout = llm.get("timeout_seconds", 120)
         # Cap on manuscript text sent per extraction call — cost control and
         # extraction quality (concept selection degrades on very long inputs).
@@ -119,6 +116,24 @@ class LLMClient:
         self.input_tokens = 0
         self.output_tokens = 0
         self.replays = 0
+
+    @property
+    def api_key(self) -> str:
+        """The vendor key for the CURRENT `self.model`, resolved fresh on
+        every access — never cached. AE/key-by-model: `summarizer_llm`
+        (summaries.py) and `editor_llm` (passes.py) construct an
+        LLMClient from `[llm]` and then reassign `.model` to a
+        cross-vendor `[critique]` override (e.g. `[llm] model` on Gemini,
+        `summarizer_model`/`editor_model` on Anthropic). A key resolved
+        once at __init__ time, before that reassignment, would keep
+        naming the ORIGINAL model's vendor — handing the new vendor's
+        API a foreign key (silent AuthenticationError on the litellm
+        path, a bad bearer token on the raw-HTTP path). Keys come from
+        the environment (.env loaded at config load), never from
+        config.toml. On the litellm path this is only a courtesy
+        override — litellm resolves the vendor's credentials itself; on
+        the raw-HTTP path it is the bearer token."""
+        return vendor_key(self.model, self.config.get("llm", {}))
 
     def stats_line(self) -> str | None:
         """One brief line of LLM usage for this step, or None if the LLM
