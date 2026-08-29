@@ -80,7 +80,7 @@ than no draft:
    endorsed; aliases are one concept). A definition is NEVER its own
    node: the kind `definition` is deprecated (2026-08-16) — "define X"
    means refine X's notes.
-3. Check validated policies (briefing / list_policies) that bear on
+3. Check validated policies (briefing / `list_beliefs`) that bear on
    ordering and placement; `get_guidance` precedents show how the author
    introduced similar concepts before. `get_plan` names what is unwritten.
 Present the draft as a suggestion for the author to place, edit, or
