@@ -2306,6 +2306,8 @@ def cmd_illus(args):
                                 files=[args.name] if args.name else None)
         print(f"Scanned {len(report['files'])} chapter(s) "
               f"({report['calls']} spot-finder call(s)).")
+        if report.get("prompt_files"):
+            print(ui.dim("Prompts: " + ", ".join(report["prompt_files"])))
         if report.get("skipped_at_budget"):
             print(ui.dim("At pacing budget (not scanned): "
                          + ", ".join(report["skipped_at_budget"])))

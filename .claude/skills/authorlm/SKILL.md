@@ -394,7 +394,12 @@ Where illustrations BELONG is its own law: aspect
 composed into render prompts. `authorlm illus scan [file]` (or the
 `scan_illustrations` MCP tool) runs a cheap-model pass per main-matter
 chapter and stages placement proposals — and description revisions for
-existing tags — in a table, NEVER in text or the Doc. The author
+existing tags — in a table, NEVER in text or the Doc. The spot-finder's
+own instructions are an editable file, `authorlm/prompts/illus-placement.md`
+(same as `extraction.md`/`adjudication.md` — not code); every scan
+reports which prompt file(s) shaped it (`prompt_files` on
+`scan_illustrations`; the CLI prints a `Prompts:` line), so surface that
+to the author when relevant. The author
 triages: `illus triage` lists numbered proposals; verdicts by
 `--accept-all-except N…`, `--accept N…`, `--revise N "desc"`,
 `--reject N --reason "…"` — or conversationally via

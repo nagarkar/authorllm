@@ -21,59 +21,28 @@ import json
 import re
 from pathlib import Path
 
+from . import prompt_registry
 from .db import Database, ko_fields, loads
 from .llm import LLMClient
 
-PLACEMENT_SYSTEM = """\
-You are the illustration spot-finder for a philosophy manuscript.
-You will receive one chapter and the author's ratified PLACEMENT LAW
-(criteria for when an image earns its place, pacing, and scope rules).
+# File-backed (prompt_registry.py "illus-placement" / "illus-arbiter") so
+# the author can read and edit them without a code change, same as
+# extraction.md / adjudication.md — see prompt_registry.py's module
+# docstring.
+_PLACEMENT_PROMPT_PATH = Path(__file__).parent / "prompts" / "illus-placement.md"
+_ARBITER_PROMPT_PATH = Path(__file__).parent / "prompts" / "illus-arbiter.md"
 
-Propose illustration placements ONLY where the law's criteria genuinely
-apply — an empty list is a good answer. Respect the pacing law given
-the chapter's word count and its existing illustrations. Where an
-EXISTING illustration tag's description could be materially improved,
-propose a revision instead of a new placement.
 
-You will also receive the IMAGE LAW the renders obey — every
-description you write must be renderable under it (in particular:
-no words, labels, or inscriptions inside the image unless that law
-explicitly permits them for this chapter).
+def placement_system() -> str:
+    return _PLACEMENT_PROMPT_PATH.read_text(encoding="utf-8")
 
-You will receive DESCRIPTION CRAFT rules — follow them literally
-when writing every description.
 
-You will receive a BUDGET: the maximum number of NEW placements for
-this chapter (revisions of existing tags are free). Order proposals
-strongest first — anything past the budget is discarded.
+def arbiter_system() -> str:
+    return _ARBITER_PROMPT_PATH.read_text(encoding="utf-8")
 
-Return JSON:
-{"proposals": [{
-  "anchor": "<the VERBATIM final sentence of the paragraph the
-              illustration should follow — copied exactly from the text>",
-  "description": "<the image description for the [Illustration: …] tag —
-                  concrete, visual, one or two clauses>",
-  "criterion": "<which numbered criterion of the law this invokes>",
-  "rationale": "<one line: why this spot, why this image>",
-  "revises": "<null for a new placement; for a revision, the existing
-              tag's current description copied exactly>"
-}]}
-"""
 
-ARBITER_SYSTEM = """\
-You are the placement arbiter for a philosophy manuscript's
-illustrations. You receive the ratified placement law and ALL staged
-placement proposals across chapters. Per the law, a recurring metaphor
-is concretized ONCE at its single strongest occurrence, and pacing is
-manuscript-wide — but each per-chapter scan ran blind to the others.
-
-Your ONLY job: find proposals that duplicate the same metaphor,
-diagram, or subject across chapters and keep the single strongest home
-for each; also cut proposals that plainly violate the law. Do not
-otherwise judge image quality — the author triages the survivors.
-
-Return JSON: {"cut": [{"id": "<proposal id>", "reason": "<one line>"}]}
-"""
+PLACEMENT_SYSTEM = placement_system()
+ARBITER_SYSTEM = arbiter_system()
 
 # Deterministic pacing ceiling: the ratified flex limit is 2 per 1,500
 # words, i.e. one per PACE_WORDS. Arithmetic, not model judgment.
@@ -220,7 +189,27 @@ def scan(db: Database, manuscript: dict, llm: LLMClient,
               "skipped_at_budget": skipped_budget}
     if staged:
         report["arbitration"] = arbitrate(db, manuscript, llm)
+    report["prompt_files"] = _prompt_locations(
+        calls > 0, bool((report.get("arbitration") or {}).get(
+            "arbiter_called")))
     return report
+
+
+def _prompt_locations(placement_called: bool, arbiter_called: bool) -> list[str]:
+    """`Prompt.location` (prompt_registry.py) of every prompt THIS scan
+    actually invoked — mirrors extraction.py's `_prompt_locations`:
+    derived from the registry, never a hardcoded filename, and reflects
+    what ran (not what merely could have run). `placement_called` is True
+    whenever at least one spot-finder call was made (`calls > 0`);
+    `arbiter_called` is True only when the arbitration pass actually
+    reached the model (see `arbitrate`'s `arbiter_called` flag) — with
+    fewer than two staged proposals, or no LLM, it never calls out."""
+    names = []
+    if placement_called:
+        names.append("illus-placement")
+    if arbiter_called:
+        names.append("illus-arbiter")
+    return [prompt_registry.by_name(name).location for name in names]
 
 
 def arbitrate(db: Database, manuscript: dict, llm: LLMClient) -> dict:
@@ -248,7 +237,7 @@ def arbitrate(db: Database, manuscript: dict, llm: LLMClient) -> dict:
     rows = open_proposals(db, mid)
     if len(rows) < 2 or not llm or not getattr(llm, "enabled", False):
         return {"guard_cut": guard_cut, "arbiter_cut": [],
-                "open": len(rows)}
+                "open": len(rows), "arbiter_called": False}
     law = placement_law(db, mid, rows[0]["file"])
     listing = "\n".join(
         f"- id {r['id']} | {r['file']} | criterion {r['criterion']} | "
@@ -268,7 +257,7 @@ def arbitrate(db: Database, manuscript: dict, llm: LLMClient) -> dict:
                        "reason": str(item.get("reason") or "")[:200]})})
         cut.append({"id": pid, "reason": item.get("reason")})
     return {"guard_cut": guard_cut, "arbiter_cut": cut,
-            "open": len(open_proposals(db, mid))}
+            "open": len(open_proposals(db, mid)), "arbiter_called": True}
 
 
 def _record_evidence(db: Database, manuscript: dict, row: dict,
