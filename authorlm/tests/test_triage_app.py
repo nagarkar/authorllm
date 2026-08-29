@@ -39,6 +39,7 @@ import contextlib
 import http.server
 import io
 import json
+import sys
 import tempfile
 import threading
 import unittest
@@ -48,12 +49,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from authorlm import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from authorlm import (  # noqa: E402
     api, cli, triage, triage_analysis, triage_rules, triage_server,
     triage_transport,
 )
-from authorlm.db import Database, ko_fields
-from authorlm.extraction import triage_feedback
+from authorlm.db import Database, ko_fields  # noqa: E402
+from authorlm.extraction import triage_feedback  # noqa: E402
 
 
 def manuscript_fixture(root: Path):
