@@ -44,6 +44,7 @@ fall back to evidence-based heuristics. Abstention stays a valid output
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -52,6 +53,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,6 +92,180 @@ def vendor_key(model: str, llm: dict) -> str:
 TEMPERATURE = 0.2
 RETRIES = 2  # transient-failure retries with exponential backoff (1s, 2s)
 
+# ------------------------------------------------------------ drafting path
+#
+# `[writing]` (config.toml) governs `authorlm write draft` — the one call in
+# this system that writes the author's prose (design-write-draft.md §2). It
+# deliberately does NOT fall back to `[llm] model`: see WRITING_ABSENT below.
+
+WRITING_DEFAULTS = {
+    "max_tokens": 8000,
+    "effort": "high",
+    "timeout_seconds": 600,
+    "cache": True,
+}
+
+
+class DraftError(RuntimeError):
+    """Any reason `draft()` produced no beat. Unlike `complete()`, which
+    returns None and lets the caller reason without the LLM, the drafting
+    path has nothing to fall back on: a silent None here means no beat and
+    a verb that printed a warning and did nothing (design §0 F1)."""
+
+
+class LLMUnavailable(DraftError):
+    """Disabled, unconfigured, or unreachable after retries — carrying the
+    provider's own last message."""
+
+
+class LLMRefused(DraftError):
+    """The model declined to answer (Anthropic `stop_reason: refusal`,
+    which litellm maps to `finish_reason: content_filter`). HTTP 200, so
+    it must never be mistaken for an empty beat (design risk R-c)."""
+
+
+class LLMTruncated(DraftError):
+    """The reply hit `max_tokens` (`finish_reason: length`). A truncated
+    beat is not a short beat — registering it would append half a
+    sentence to the manuscript."""
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    text: str
+    prompt_tokens: int          # NET of cached tokens — see draft()
+    completion_tokens: int
+    cache_read: int
+    cache_write: int
+    finish_reason: str
+    model: str
+
+
+WRITING_ABSENT = (
+    "no [writing] section in {config} — beat drafting needs its own model,\n"
+    "and it deliberately does not fall back to [llm] model (that is\n"
+    "'gemini/gemini-2.5-flash', which is not what you want writing your "
+    "prose).\nAdd:\n\n"
+    '    [writing]\n    model = "anthropic/claude-fable-5"\n\n'
+    "and put ANTHROPIC_API_KEY in the .env beside it. Or draft the beat\n"
+    "yourself and register it with 'write propose --why …', which still "
+    "works.")
+
+
+def writing_llm(config: dict) -> LLMClient:
+    """The drafting client: `[llm]`'s transport, `[writing]`'s model.
+
+    Constructs the ordinary client (provider, base_url, cache_dir all come
+    from `[llm]`) and then points it at the writing model, its own
+    timeout, and its own max_tokens/effort/cache knobs.
+
+    The key follows the MODEL, not the section: `LLMClient.api_key` is a
+    property resolving `vendor_key(self.model, …)` on every access, so
+    reassigning `.model` here is sufficient and the writing vendor's own
+    variable is what gets sent (llm.py's api_key docstring; the bug
+    `generate_image` avoided by resolving its own key).
+
+    Raises LookupError when `[writing]` is absent or its model empty. The
+    KEY refusal is not here: it lives in `draft()`, after the replay-cache
+    check, because a replayed draft needs no key at all (a recorded
+    fixture is the whole point of the record/replay suite). It still fires
+    before any live call."""
+    from . import paths
+
+    writing = config.get("writing", {}) or {}
+    model = (writing.get("model") or "").strip()
+    if not model:
+        raise LookupError(WRITING_ABSENT.format(config=paths.config_path()))
+    client = LLMClient(config)
+    client.model = model
+    client.timeout = writing.get("timeout_seconds",
+                                 WRITING_DEFAULTS["timeout_seconds"])
+    client.max_tokens = writing.get("max_tokens",
+                                    WRITING_DEFAULTS["max_tokens"])
+    client.effort = writing.get("effort", WRITING_DEFAULTS["effort"])
+    client.cache = bool(writing.get("cache", WRITING_DEFAULTS["cache"]))
+    return client
+
+
+def _without_cache_control(messages: list[dict]) -> list[dict]:
+    """`messages` with every block-level `cache_control` key removed.
+
+    The record/replay key is computed over the block TEXT only. Without
+    this, flipping `[writing] cache` would re-record every replay fixture
+    and §4's kill switch would be unusable in a test (design §5 change 4).
+    A no-op for plain string content, so existing fixtures keep their
+    hashes."""
+    if not any(isinstance(m.get("content"), list) for m in messages):
+        return messages
+    stripped = copy.deepcopy(messages)
+    for message in stripped:
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+    return stripped
+
+
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _block_messages(system_blocks: list[str], user_blocks: list[str],
+                    caching: bool) -> list[dict]:
+    """The four-block drafting payload as litellm messages.
+
+    Two of the four available breakpoints, both `ttl: 1h`, on the two
+    stable layers: the end of the system block (prompt file + style law)
+    and the end of the first user block (the chapter frame). The accepted
+    text and the beat-local layer follow uncached (design §4.1, D1 —
+    the rolling tail is reserved, not built).
+
+    Four content blocks in total, always, so §4's "a breakpoint looks
+    back at most 20 content blocks" is a structural guarantee here rather
+    than a discipline."""
+    system = [{"type": "text", "text": text} for text in system_blocks]
+    user = [{"type": "text", "text": text} for text in user_blocks]
+    if caching:
+        if system:
+            system[-1]["cache_control"] = dict(CACHE_CONTROL)
+        if user:
+            user[0]["cache_control"] = dict(CACHE_CONTROL)
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}]
+
+
+def _usage_int(holder, name: str) -> int:
+    """One usage counter off litellm's object (or a plain dict), 0 when
+    absent — every provider populates a different subset."""
+    if holder is None:
+        return 0
+    value = (holder.get(name) if isinstance(holder, dict)
+             else getattr(holder, name, 0))
+    return int(value or 0)
+
+
+def caching_available(model: str, provider: str) -> bool:
+    """Whether `cache_control` breakpoints are worth attaching.
+
+    Three conditions, all structural. The transport must be litellm (the
+    raw-HTTP path has no way to express a content block, and it is what
+    every hermetic test uses). The vendor must be anthropic — that is the
+    litellm surface whose block-level `cache_control` is copied verbatim
+    into the provider request. And the model's own cost map must
+    advertise prompt caching."""
+    if provider != "litellm" or vendor_of(model) != "anthropic":
+        return False
+    try:
+        import litellm
+        from litellm.utils import supports_prompt_caching
+
+        litellm.suppress_debug_info = True
+        return bool(supports_prompt_caching(model=model))
+    except Exception:
+        # An unknown model, or no litellm at all. Not an error: it means
+        # "no caching here", and drafting works without it.
+        return False
+
 
 class LLMClient:
     def __init__(self, config: dict):
@@ -116,6 +292,18 @@ class LLMClient:
         self.input_tokens = 0
         self.output_tokens = 0
         self.replays = 0
+        # Drafting path only (`draft()`), so the ordinary stats line is
+        # unchanged for every other caller. litellm's Anthropic transport
+        # folds cache tokens INTO prompt_tokens, so a perfectly cached
+        # beat would otherwise read as a full re-read (design §1.8).
+        self.draft_calls = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
+        # `[writing]` knobs, set by writing_llm(); harmless defaults here
+        # so a plain client never has to be special-cased.
+        self.max_tokens = WRITING_DEFAULTS["max_tokens"]
+        self.effort = WRITING_DEFAULTS["effort"]
+        self.cache = bool(WRITING_DEFAULTS["cache"])
 
     @property
     def api_key(self) -> str:
@@ -140,12 +328,21 @@ class LLMClient:
         was never consulted."""
         if not (self.live_calls or self.replays):
             return None
-        parts = [
-            f"LLM: {self.live_calls} live call(s) "
-            f"({self.input_tokens:,} in / {self.output_tokens:,} out tokens)"
-        ]
+        core = (f"LLM: {self.live_calls} live call(s) "
+                f"({self.input_tokens:,} in / {self.output_tokens:,} out "
+                f"tokens")
+        if self.draft_calls:
+            # Always printed on the drafting path, zeros included: §4's
+            # verification clause is only trustworthy if the author sees
+            # the number every time rather than only when it is good.
+            core += (f"; cache {self.cache_read_tokens:,} read / "
+                     f"{self.cache_write_tokens:,} written")
+        core += ")"
+        parts = [core]
         if self.replays:
             parts.append(f"{self.replays} replayed from cache")
+        if self.draft_calls:
+            parts.append(f"model {self.model}")
         return " — ".join(parts)
 
     def _record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
@@ -207,7 +404,8 @@ class LLMClient:
         if not self.cache_dir:
             return None
         payload = json.dumps(
-            {"model": self.model, "temperature": TEMPERATURE, "messages": messages},
+            {"model": self.model, "temperature": TEMPERATURE,
+             "messages": _without_cache_control(messages)},
             sort_keys=True,
         )
         digest = hashlib.sha256(payload.encode()).hexdigest()[:20]
@@ -230,6 +428,242 @@ class LLMClient:
         except json.JSONDecodeError:
             print("warning: LLM returned unparseable JSON; ignoring.", file=sys.stderr)
             return None
+
+    # ------------------------------------------------------------- drafting
+
+    def require_writing_key(self) -> None:
+        """Refuse a LIVE drafting call with no usable key, naming the exact
+        variable and the exact .env path.
+
+        The condition is resolved through `vendor_key` — the same resolver
+        the request itself uses — rather than by reading the vendor's
+        environment variable directly. `[llm] api_key_env` wins there (an
+        OpenAI-compatible proxy uses an arbitrary token no convention can
+        derive), so checking the vendor variable alone would falsely refuse
+        a perfectly configured proxy that had just been asked for an
+        `anthropic/` model string.
+
+        The guard still only fires for a vendor prefix this module knows:
+        an unlisted prefix means "let litellm resolve it", which is correct
+        for credential-file vendors (vertex_ai, bedrock)."""
+        from . import paths
+
+        llm_cfg = self.config.get("llm", {}) or {}
+        vendor_var = VENDOR_KEY_ENV.get(vendor_of(self.model), "")
+        if not vendor_var or vendor_key(self.model, llm_cfg):
+            return
+        named = llm_cfg.get("api_key_env") or vendor_var
+        raise LookupError(
+            f"[writing] model is '{self.model}', which needs {named} — it "
+            f"is not set. Add it to {paths.env_path()} (one variable per "
+            f"vendor; see VENDOR_KEY_ENV in llm.py).")
+
+    def draft(self, system_blocks: list[str], user_blocks: list[str], *,
+              max_tokens: int | None = None, effort: str | None = None,
+              cache: bool | None = None) -> DraftResult:
+        """One beat of the author's prose. Differs from `complete()` in
+        exactly four ways and no others (design §1.4):
+
+        - content BLOCKS rather than two strings, so `cache_control` has
+          somewhere to attach;
+        - `max_tokens`, `reasoning_effort` and `timeout` from `[writing]`;
+        - NO sampling parameter at all. The Claude 5 family accepts only
+          `temperature=1` and `[llm]`'s 0.2 is dropped rather than sent
+          (risk R-e: relying on the drop would also silently drop
+          `output_config` for a model whose map lacks it — so this path
+          never passes one);
+        - it RAISES instead of returning None, carrying the provider's
+          own last message (design §0 F1).
+
+        Everything else is reused: the retry/backoff loop, the
+        record/replay `cache_dir`, the usage accounting.
+
+        `prompt_tokens` on the result is NET of cached tokens: litellm's
+        Anthropic path sets prompt_tokens = raw + cache_creation +
+        cache_read, so reporting it raw would make a perfectly cached
+        beat look like a full re-read."""
+        if not self.enabled:
+            raise LLMUnavailable(
+                "the LLM is disabled ([llm] enabled = false) — beat drafting "
+                "is the one call that cannot degrade to a heuristic. Enable "
+                "it, or draft the beat yourself and register it with "
+                "'write propose --why …'.")
+        max_tokens = self.max_tokens if max_tokens is None else max_tokens
+        effort = self.effort if effort is None else effort
+        use_cache = self.cache if cache is None else cache
+        caching = bool(use_cache) and caching_available(self.model,
+                                                        self.provider)
+        if self.provider == "litellm":
+            messages = _block_messages(system_blocks, user_blocks, caching)
+        else:
+            # The raw-HTTP path has no way to express a content block, so
+            # the blocks flatten to two strings and no cache_control is
+            # emitted. This is what every hermetic test uses, which is why
+            # no test depends on caching being available.
+            messages = [
+                {"role": "system", "content": "\n\n".join(system_blocks)},
+                {"role": "user", "content": "\n\n".join(user_blocks)},
+            ]
+        cache_path = self._cache_path(messages)
+        if cache_path and cache_path.exists():
+            self.replays += 1
+            # A replayed draft still reports itself. Without this the
+            # usage line would drop its cache clause and its model name
+            # on exactly the runs the replay suite is made of, and the
+            # author would see a different report for the same work.
+            self.draft_calls += 1
+            stored = json.loads(cache_path.read_text())
+            usage = stored.get("usage", {})
+            return DraftResult(
+                text=stored["response"],
+                prompt_tokens=usage.get("input_tokens", 0),
+                completion_tokens=usage.get("output_tokens", 0),
+                cache_read=usage.get("cache_read_tokens", 0),
+                cache_write=usage.get("cache_write_tokens", 0),
+                finish_reason=stored.get("finish_reason", "stop"),
+                model=self.model)
+        # Past the replay cache, so this WILL be a live call. The key gate
+        # sits exactly here: a fixture needs no key, a request does.
+        self.require_writing_key()
+        if self.provider == "litellm":
+            text, raw_in, out, cache_read, cache_write, finish = \
+                self._draft_litellm(messages, max_tokens, effort)
+        else:
+            text, raw_in, out, cache_read, cache_write, finish = \
+                self._draft_openai(messages, max_tokens)
+        net_in = max(0, raw_in - cache_read - cache_write)
+        self.draft_calls += 1
+        self._record_usage(net_in, out)
+        self.cache_read_tokens += cache_read
+        self.cache_write_tokens += cache_write
+        if finish == "content_filter":
+            raise LLMRefused(
+                f"{self.model} refused to answer (stop_reason: refusal). "
+                f"Nothing was registered. The beat's subject matter, or the "
+                f"context around it, tripped the provider's own guard.")
+        if finish == "length":
+            raise LLMTruncated(
+                f"{self.model} hit the {max_tokens:,}-token ceiling before "
+                f"finishing (finish_reason: length). A truncated beat is not "
+                f"a short beat, so nothing was registered — raise "
+                f"[writing] max_tokens, or narrow the beat's budget.")
+        if not (text or "").strip():
+            raise LLMUnavailable(
+                f"{self.model} returned an empty reply (finish_reason: "
+                f"{finish}). Nothing was registered.")
+        if cache_path:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(
+                {
+                    "model": self.model,
+                    "temperature": TEMPERATURE,
+                    "messages": _without_cache_control(messages),
+                    "response": text,
+                    "finish_reason": finish,
+                    "usage": {
+                        "input_tokens": net_in,
+                        "output_tokens": out,
+                        "cache_read_tokens": cache_read,
+                        "cache_write_tokens": cache_write,
+                    },
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+            ))
+        return DraftResult(text=text, prompt_tokens=net_in,
+                           completion_tokens=out, cache_read=cache_read,
+                           cache_write=cache_write, finish_reason=finish,
+                           model=self.model)
+
+    def _draft_litellm(self, messages: list[dict], max_tokens: int,
+                       effort: str) -> tuple[str, int, int, int, int, str]:
+        try:
+            import litellm
+        except ImportError as err:
+            raise LLMUnavailable(
+                "provider 'litellm' is configured but the package is not "
+                "installed (pip install litellm)") from err
+        litellm.suppress_debug_info = True
+        last = ""
+        for attempt in range(RETRIES + 1):
+            try:
+                response = litellm.completion(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    # litellm emits BOTH thinking:{"type":"adaptive"} and
+                    # output_config:{"effort": …} for the Claude 5 family
+                    # from this one parameter. Never hand-roll
+                    # thinking:{"budget_tokens": N} — Fable 5 rejects it.
+                    **({"reasoning_effort": effort} if effort else {}),
+                    timeout=self.timeout,
+                    **({"api_key": self.api_key} if self.api_key else {}),
+                )
+                choice = response.choices[0]
+                usage = getattr(response, "usage", None)
+                details = getattr(usage, "prompt_tokens_details", None)
+                return (
+                    choice.message.content or "",
+                    _usage_int(usage, "prompt_tokens"),
+                    _usage_int(usage, "completion_tokens"),
+                    _usage_int(details, "cached_tokens"),
+                    _usage_int(details, "cache_creation_tokens"),
+                    getattr(choice, "finish_reason", "stop") or "stop",
+                )
+            except Exception as err:  # litellm raises provider-specific types
+                last = str(err).strip()
+                if attempt < RETRIES:
+                    delay = 2 ** attempt
+                    print(f"warning: drafting call failed ({last}); retrying "
+                          f"in {delay}s ({attempt + 1}/{RETRIES})…",
+                          file=sys.stderr)
+                    time.sleep(delay)
+                    continue
+        raise LLMUnavailable(
+            f"{self.model} failed after {RETRIES + 1} attempts: {last[:400]}")
+
+    def _draft_openai(self, messages: list[dict], max_tokens: int
+                      ) -> tuple[str, int, int, int, int, str]:
+        payload = {"model": self.model, "messages": messages,
+                   "max_tokens": max_tokens}
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                **({"Authorization": f"Bearer {self.api_key}"}
+                   if self.api_key else {}),
+            },
+        )
+        last = ""
+        for attempt in range(RETRIES + 1):
+            try:
+                with urllib.request.urlopen(request,
+                                            timeout=self.timeout) as response:
+                    body = json.loads(response.read().decode())
+                usage = body.get("usage", {})
+                choice = body["choices"][0]
+                details = usage.get("prompt_tokens_details", {}) or {}
+                return (
+                    choice["message"]["content"] or "",
+                    usage.get("prompt_tokens", 0) or 0,
+                    usage.get("completion_tokens", 0) or 0,
+                    details.get("cached_tokens", 0) or 0,
+                    details.get("cache_creation_tokens", 0) or 0,
+                    choice.get("finish_reason") or "stop",
+                )
+            except (urllib.error.URLError, KeyError, json.JSONDecodeError,
+                    TimeoutError) as err:
+                last = str(err).strip()
+                if attempt < RETRIES:
+                    delay = 2 ** attempt
+                    print(f"warning: drafting call failed ({last}); retrying "
+                          f"in {delay}s ({attempt + 1}/{RETRIES})…",
+                          file=sys.stderr)
+                    time.sleep(delay)
+                    continue
+        raise LLMUnavailable(
+            f"{self.model} failed after {RETRIES + 1} attempts: {last[:400]}")
 
     def _complete_litellm(self, messages: list[dict],
                           thinking_budget: int | None = None

@@ -323,16 +323,22 @@ Two things hold throughout, and neither is negotiable:
    essay. Anything a beat needs beyond those becomes a question to you, asked
    before the draft is written.
 
-**Where the writing itself comes from.** The beats are drafted in the
-conversation you are having — by the assistant, in front of you, from the
-materials above. That is why every draft arrives with its reasoning attached
-and why you can argue with it. It is also why the drafting step has no model
-setting of its own: there is nothing to configure, because the conversation is
-the drafting.
+**Where the writing itself comes from.** Each beat is drafted by a model of its
+own, from exactly the materials above and under a prompt you can read and edit
+(\`authorlm/prompts/beat-draft.md\`). Every draft still arrives with its reasoning
+attached, and you can still argue with it — the difference is that the same
+essay, drafted twice, is drafted the same way, and you can ask to see precisely
+what was sent. Section 10 says which model, and where it is set.
 
-Other moments in the workflow do call out to a model, each to do a specific job:
-finishing an essay, refreshing the summaries, closing a goal — and, the one that
-happens most often, **turning the reason you gave into a rule you might want.**
+The assistant still writes for you when you ask it to — a sentence you want
+harder, a beat you are dictating, or any stretch where the drafting model is
+unreachable. That prose goes into the essay by the same route and carries the
+same evidence. What it does not do is stand in for the drafting step by default.
+
+Other moments in the workflow also call out to a model, each to do a specific
+job: finishing an essay, refreshing the summaries, closing a goal — and, the one
+that happens most often, **turning the reason you gave into a rule you might
+want.**
 Every rejection you explain, and every reworded acceptance you explain, is read
 by a model that tries to state the principle behind it. Section 10 lists them
 all, says which model does which job, and says where each is configured.
@@ -540,14 +546,31 @@ Then the next beat. Accepting is the only thing that touches the file: your text
 is added, the revision is recorded, your verdict is stored as evidence, and the
 loop moves on — all at once.
 
+The draft itself comes from a named model under a prompt you can read and
+change, not from whatever the conversation happens to be doing. That matters for
+one reason: the same essay, drafted twice, is drafted the same way, and when a
+beat comes back wrong you can look at what was actually sent. One model drafts
+one essay — if that setting changes mid-essay you are told, loudly, because the
+voice will have a seam.
+
+**Sometimes it refuses**, and that is the feature working. A beat that cannot be
+written without a fact nobody gave it — an attribution, a date, a source — comes
+back as a question instead of an invention. Nothing is registered, nothing moves,
+and the question is for you. Usually the answer is a correction to that beat's
+plan. This is the one failure the whole loop exists to prevent, so when you see
+it, answer it rather than working around it.
+
 <details>
 <summary><b>Under the hood — the exact commands</b></summary>
 
 \`\`\`bash
-authorlm write propose --why "realizes Attention; opener per the plan; grounded \\
-    in the brief and kindness.md's hard floor — no source cited beyond Weil's \\
-    name" -m SMSTTD < /tmp/beat1.md
+authorlm write draft -m SMSTTD
 # → Beat [n=1 | opener | concepts: Attention | budget ~140]: …
+#   Drafting beat n=1 on anthropic/claude-fable-5 — this can take a minute…
+#   WHY …  SELF-CHECK …  DRAFT …
+#   Prompt: authorlm/prompts/beat-draft.md
+#   LLM: 1 live call(s) (4,102 in / 3,180 out tokens; cache 29,880 read /
+#        0 written) — model anthropic/claude-fable-5
 #   Draft registered [gd-77b0e4c1] — author verdict: accept / accept with
 #   reworded stdin / reject --reason.
 
@@ -555,8 +578,28 @@ authorlm write accept -m SMSTTD                        # as-is
 authorlm write accept -m SMSTTD < /tmp/reworded.md     # your wording wins
 authorlm write reject --reason "…" -m SMSTTD           # reason required
 \`\`\`
-A redraft supersedes the pending proposal — you never accumulate two live drafts
-for one beat.
+\`write draft\` gathers the whole payload itself — the style law, your validated
+rules, the drafting context, the brief, the digest, the plan, the notes for
+every concept the plan names, the essay so far, this beat's spec, the lessons and
+your last verdict — and registers the result through the ordinary path below.
+\`--dry-run\` prints that payload with a checksum per block and makes no call: it
+is how you audit what is being sent, and how a caching problem is found (compare
+the checksums across two beats; the block that moved is the culprit).
+
+A refusal prints \`BLOCKED\` and a question, registers nothing, and exits non-zero.
+
+\`\`\`bash
+authorlm write propose --why "realizes Attention; opener per the plan; grounded \\
+    in the brief and kindness.md's hard floor — no source cited beyond Weil's \\
+    name" -m SMSTTD < /tmp/beat1.md
+\`\`\`
+\`write propose\` is the hand-drafting path and is unchanged: it is what you use
+for a beat you dictated, for wording you asked for mid-beat, and whenever the
+drafting model is unconfigured or unreachable. \`--why\` is required either way —
+with \`write draft\` the model writes it, and your verdict is recorded against it.
+
+A redraft supersedes the pending proposal, from either entry point — you never
+accumulate two live drafts for one beat.
 </details>
 
 ### Step 5 — lessons, occasionally
@@ -1215,20 +1258,21 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 
 ## 10. What it costs, and which model does what
 
-Drafting the beats costs nothing beyond the conversation you are already having —
-it happens there, in front of you. Four moments call out to a model, each for a
-job worth naming:
+Five moments call out to a model, each for a job worth naming. The first is new,
+and it is the expensive one:
 
 | Moment | What the model is for |
 |---|---|
+| **Drafting each beat** | Writing the beat itself, from the whole assembled payload, under the prompt at \`authorlm/prompts/beat-draft.md\`. This is the largest single call the system makes and the one you pay most for — a rejected beat costs it again. Caching the stable half of the payload roughly halves a chapter's bill, and the usage line after every draft tells you whether the cache is actually working. |
 | **Every rejection, and every reworded acceptance you explain** | Reading the reason you gave and trying to state the principle behind it, so it can be offered back to you later as a candidate rule. This is the frequent one — a reason is required on a rejection, so **every rejection spends** — and it is the one the loop learns from. It may also decide your reason was too situation-specific to generalise and propose nothing. |
 | **Finishing an essay** | Reading the finished prose for concepts and relationships you might want to add to the graph. Deferred through the whole loop deliberately, so it happens once over a finished essay rather than partially over every fragment. |
 | **Refreshing summaries** | Writing each essay's compressed summary — the few sentences every other essay's frame is built from. One call per essay whose text moved. |
 | **Closing a goal** | Reconstructing what you decided across the episode, so recurring patterns can be offered to you as candidate rules. |
 
-A plain acceptance costs nothing, with or without a reason: only a rejection or
-a reworded acceptance carries a correction, and a correction is what there is a
-principle to extract from.
+A plain acceptance adds nothing on top of the draft you were already shown, with
+or without a reason: only a rejection or a reworded acceptance carries a
+correction, and a correction is what there is a principle to extract from.
+A rejection costs twice — once to read your reason, once to draft the beat again.
 
 Two others sit next to the loop rather than inside it: the critique pass, which
 proposes line edits over one essay at a time, and illustration rendering.
@@ -1247,7 +1291,16 @@ Everything is in \`authorlm/config.toml\`, versioned with the code. Keys live in
 | Essay summaries | \`anthropic/claude-sonnet-5\` | \`[critique] summarizer_model\` |
 | The critique editor pass | \`anthropic/claude-sonnet-5\` | \`[critique] editor_model\` |
 | Illustration rendering | \`openai/gpt-image-2\`, 1536×1024 | \`[illustrations] model\`, \`[illustrations] image_size\` |
-| **Drafting the beats** | — | **nothing to set: the drafting is the conversation** |
+| **Drafting the beats** | \`anthropic/claude-fable-5\` | \`[writing] model\` — plus \`max_tokens\`, \`effort\`, \`timeout_seconds\`, \`cache\` |
+
+\`[writing]\` deliberately does **not** fall back to \`[llm] model\`. Without the
+section, \`write draft\` refuses and prints the four lines to paste, rather than
+quietly writing your prose on the cheap default — a register you would blame on
+the loop rather than on a line of configuration you never wrote. The refusal
+names \`write propose\` as the way to keep working meanwhile. It needs
+\`ANTHROPIC_API_KEY\` in \`.env\`. \`cache = false\` turns prompt caching off if you
+ever need to bisect a problem; drafting still works, at roughly three times the
+input cost per chapter.
 
 The two Sonnet settings were an author ruling (2026-08-29): both read compressed
 context into editorial judgment, which is where the stronger model earns its
@@ -1273,9 +1326,9 @@ Things that are true today and that you will meet:
    attribution.
 4. **Refreshing the summaries is not automatic.** It is needed both before a
    start that the gate refuses and after every finish, and it costs one call per
-   essay whose text moved (roughly twenty-four for the whole book). It is also
-   the one step that **fails outright** with no model configured, rather than
-   skipping quietly — see §10.
+   essay whose text moved (roughly twenty-four for the whole book). Like beat
+   drafting, it **fails outright** with no model configured rather than skipping
+   quietly — those two are the only steps that do — see §10.
 5. **Two candidate drafts per beat are not supported.** If you find yourself
    wishing for a second option, say so — that is the trigger for a deliberately
    deferred feature, and the count is the evidence for building it.
@@ -1305,6 +1358,7 @@ authorlm write start <file> --intent <id>
 authorlm write plan [--replace]                        [JSON array on stdin]
 authorlm write status
 authorlm write digest [--replace | --dispositions | --show]  [JSON on stdin]
+authorlm write draft [--dry-run]                                   [no stdin]
 authorlm write propose --why "<grounding>"                    [draft on stdin]
 authorlm write accept [--reason "<why>"]            [reworded text on stdin]
 authorlm write reject --reason "<verbatim why>"
@@ -1328,7 +1382,8 @@ authorlm session start | session end
 \`write\` is CLI-only — there are no MCP tools for the beat loop, by design. The
 assistant runs these over Bash, with prose and JSON on stdin via heredocs. The
 verbs are the state machine and the evidence channel: they gate, record and
-collect, and the drafting happens in the conversation.
+collect. \`write draft\` is also the drafting call; \`write propose\` registers a
+beat drafted in the conversation instead, and both produce the same evidence.
 </details>
 `,lA=s((e=>{var t=p(),n=Symbol.for(`react.element`),r=Symbol.for(`react.fragment`),i=Object.prototype.hasOwnProperty,a=t.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentOwner,o={key:!0,ref:!0,__self:!0,__source:!0};function s(e,t,r){var s,c={},l=null,u=null;for(s in r!==void 0&&(l=``+r),t.key!==void 0&&(l=``+t.key),t.ref!==void 0&&(u=t.ref),t)i.call(t,s)&&!o.hasOwnProperty(s)&&(c[s]=t[s]);if(e&&e.defaultProps)for(s in t=e.defaultProps,t)c[s]===void 0&&(c[s]=t[s]);return{$$typeof:n,type:e,key:l,ref:u,props:c,_owner:a.current}}e.Fragment=r,e.jsx=s,e.jsxs=s})),$=s(((e,t)=>{t.exports=lA()}))();function uA(e,t){let n=[],r=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)/g,i=0,a,o=0;for(;(a=r.exec(e))!==null;){a.index>i&&n.push(e.slice(i,a.index));let r=a[0],s=`${t}-i${o++}`;r.startsWith("`")?n.push((0,$.jsx)(`code`,{children:r.slice(1,-1)},s)):r.startsWith(`**`)?n.push((0,$.jsx)(`strong`,{children:uA(r.slice(2,-2),s)},s)):n.push((0,$.jsx)(`em`,{children:uA(r.slice(1,-1),s)},s)),i=a.index+r.length}return i<e.length&&n.push(e.slice(i)),n}function dA(e){let t=e.trim().replace(/^\|/,``).replace(/\|$/,``),n=[],r=``;for(let e=0;e<t.length;e++){let i=t[e];if(i===`\\`&&t[e+1]===`|`){r+=`|`,e++;continue}if(i===`|`){n.push(r.trim()),r=``;continue}r+=i}return n.push(r.trim()),n}var fA=/^\|?[\s:|-]+\|[\s:|-]*$/;function pA(e){let t=e.replace(/\r\n/g,`
 `).split(`

@@ -579,6 +579,42 @@ def scenario_objection(root: Path) -> None:
     run(ws, "session", "end")
 
 
+def _stub_draft_reply(user: str) -> str:
+    """The canned `write draft` replies, one per shape the parser must
+    handle. The scenario selects a shape by putting a sentinel in the
+    beat spec's notes, which travels into block C."""
+    import re as _re
+
+    if "STUB-BLOCKED" in user:
+        return ("BLOCKED\nThe beat needs an attribution that is in neither "
+                "the brief nor the digest.\n\nQUESTION\nWhose account of "
+                "therapeutic culture did you have in mind here?")
+    if "STUB-NO-DRAFT" in user:
+        return "WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok"
+    if "STUB-EMPTY-WHY" in user:
+        return "WHY\n\nSELF-CHECK\nbeat spec: ok\n\nDRAFT\nSome prose."
+    if "STUB-EMPTY-DRAFT" in user:
+        return "WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\nDRAFT\n   \n  "
+    if "STUB-LABEL-IN-PROSE" in user:
+        # A beat whose PROSE contains a bare BLOCKED line. It is
+        # manuscript text, not a refusal — the label only refuses when it
+        # comes first.
+        return ("WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\n"
+                "DRAFT\nThe author's own word for the state was this:\n"
+                "BLOCKED\nand the sentence continues past it.")
+    if "STUB-MARKERS" in user:
+        return ("WHY\nI realize Choice.\n\nSELF-CHECK\nbeat spec: ok\n\n"
+                "DRAFT\nA beat carrying <<a reserved marker>> in its prose.")
+    match = _re.search(r'"n": (\d+)', user)
+    n = match.group(1) if match else "?"
+    return (f"WHY\nThe stub realizes the beat's concepts and follows the "
+            f"plan for n={n}.\n\n"
+            f"SELF-CHECK\nbeat spec: makes the claim\nstyle law: obeyed\n"
+            f"graph: the author's terms\ngrounding: nothing outside the "
+            f"payload\nbudget: within\n\n"
+            f"DRAFT\nThe stub's drafted prose for beat n={n}.")
+
+
 class StubLLMHandler(http.server.BaseHTTPRequestHandler):
     """Minimal OpenAI-compatible /chat/completions endpoint with canned
     replies keyed on the system prompt."""
@@ -596,11 +632,33 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         StubLLMHandler.REQUESTS += 1
+        finish = "stop"
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
         StubLLMHandler.PAYLOADS.append((system, user))
-        if "sole task is to find aliasing statements" in system:
+        if "You are drafting ONE beat" in system:
+            # `write draft` (design-write-draft.md). Keyed on the
+            # registered prompt's opening line; the failure shapes are
+            # keyed on sentinels the scenario plants in a beat spec, so
+            # every branch is reachable without a network or a key.
+            if "STUB-500" in user:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            # A provider refusal and a truncation both arrive as HTTP 200
+            # with a body — the finish_reason is the ONLY thing that
+            # distinguishes them from a beat (design risk R-c: this
+            # manuscript is a plausible refusal target).
+            if "STUB-REFUSED" in user:
+                finish = "content_filter"
+            elif "STUB-TRUNCATED" in user:
+                finish = "length"
+            else:
+                finish = "stop"
+            content = _stub_draft_reply(user)
+        elif "sole task is to find aliasing statements" in system:
             content = json.dumps({
                 "aliases": [
                     {"alias": "Distinction", "canonical": "Choice",
@@ -685,7 +743,8 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
         else:
             content = "A drafted bridge paragraph from the stub."
         payload = json.dumps({
-            "choices": [{"message": {"content": content}}],
+            "choices": [{"message": {"content": content},
+                         "finish_reason": finish}],
             "usage": {"prompt_tokens": 120, "completion_tokens": 45},
         }).encode()
         self.send_response(200)
@@ -1773,6 +1832,428 @@ Two arguments from the earlier version of this essay are not here. The
 first duplicated the opening chapter's account of choice and distinction,
 which that chapter owns and states better. The second repeated it a third
 time, which bought emphasis at the cost of saying one thing twice."""
+
+
+DRAFT_CONFIG_HEAD = (
+    "[llm]\nenabled = true\nprovider = \"openai\"\n"
+    "base_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"stub\"\n")
+
+
+def _draft_config(ws: Path, port: int, writing: str = "") -> None:
+    write(ws / ".authorlm" / "config.toml",
+          DRAFT_CONFIG_HEAD.format(port=port) + writing)
+
+
+def _block(out: str, name: str) -> str:
+    """One --dry-run block's text, by its header line."""
+    head = f"───── block {name} — "
+    body = out.split(head, 1)[1].split("\n", 1)[1]
+    return body.split("───── block ", 1)[0]
+
+
+def _block_hash(out: str, name: str) -> str:
+    return out.split(f"───── block {name} — ", 1)[1].split(
+        "sha256 ", 1)[1].split("\n", 1)[0].strip()
+
+
+def scenario_write_draft(root: Path) -> None:
+    print("Scenario WD — write draft (programmatic beat generation)")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "wd"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-essay.md", ESSAY)
+        _draft_config(ws, server.server_port)
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Rewrite the essay on Choice")
+        intent_id = out.split("[")[1].split("]")[0]
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "02-essay.md", "House")
+        run(ws, "style", "add", "register",
+            "Plain declarative sentences; no rhetorical questions.",
+            "--guide", "House")
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, "The essay is about the primacy of choice.",
+                  "write", "start", "02-essay.md", "--intent", intent_id)
+
+        from authorlm.db import Database as _DB
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+
+        def cursor() -> int:
+            return _db.one("SELECT * FROM writeups WHERE status = 'active'"
+                           )["cursor"]
+
+        def beat_rows() -> list:
+            wu = _db.one("SELECT * FROM writeups WHERE status = 'active'")
+            return [dict(r) for r in _db.all(
+                "SELECT * FROM guidance_history WHERE batch_id = ? "
+                "ORDER BY created_at, id", (wu["id"],))]
+
+        # --- T10: gate parity with propose, all before any model call ----
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("draft without a ratified plan refuses exactly as propose does "
+              "— plan ratification is the fabrication guard (design §13.3), "
+              "so drafting without one is impossible by construction",
+              "no ratified beat plan" in out, out)
+        check("...and it made no model call",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+
+        plan = json.dumps([
+            {"role": "opener", "concepts": ["Choice"], "budget": 60,
+             "notes": "open with the primal act"},
+            {"role": "development", "concepts": ["Distinction", "Choice"],
+             "budget": 80, "notes": "the visible form of the act"},
+            {"role": "close", "concepts": ["Ghostly Absent Concept"],
+             "budget": 60, "notes": "close on the field"},
+        ])
+        run_stdin(ws, plan, "write", "plan")
+
+        # --- T2: no [writing] section -------------------------------------
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("with no [writing] section the draft is REFUSED — it does not "
+              "fall back to [llm] model, and the refusal names the section, "
+              "the TOML to paste, and 'write propose' as the escape hatch",
+              "no [writing] section" in out
+              and 'model = "anthropic/claude-fable-5"' in out
+              and "write propose" in out
+              and "does not fall back to [llm] model" in out, out)
+        check("a refused draft costs nothing: no model call, no guidance "
+              "row, cursor unchanged",
+              StubLLMHandler.REQUESTS == before and not beat_rows()
+              and cursor() == 0,
+              f"{before} -> {StubLLMHandler.REQUESTS}; {beat_rows()}")
+        _draft_config(ws, server.server_port, '[writing]\nmodel = ""\n')
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("an empty [writing] model is the same refusal (a section that "
+              "is present but says nothing is not a configuration)",
+              "no [writing] section" in out, out)
+
+        # --- T9: the key refusal names the WRITING model's own vendor -----
+        _draft_config(ws, server.server_port,
+                      '[writing]\nmodel = "anthropic/claude-fable-5"\n')
+        assert not os.environ.get("ANTHROPIC_API_KEY")
+        os.environ["GEMINI_API_KEY"] = "not-the-right-vendor"
+        try:
+            before = StubLLMHandler.REQUESTS
+            out = run(ws, "write", "draft", expect_exit=True)
+        finally:
+            del os.environ["GEMINI_API_KEY"]
+        check("an anthropic writing model with no ANTHROPIC_API_KEY refuses "
+              "by name — and a GEMINI_API_KEY sitting in the environment "
+              "does NOT satisfy it (design F2: the key follows the model's "
+              "own vendor, not the [llm] section's)",
+              "ANTHROPIC_API_KEY" in out and "claude-fable-5" in out
+              and "GEMINI" not in out, out)
+        check("the key refusal also made no model call",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+
+        _draft_config(ws, server.server_port,
+                      '[writing]\nmodel = "stub-writer"\n')
+
+        # --- T1/T11: payload determinism, and the placeholder ------------
+        # Two validated beliefs whose CONFIDENCE order is the reverse of
+        # their STATEMENT order — the payload must print them by statement.
+        from authorlm.db import ko_fields as _ko
+
+        wu_id = _db.one("SELECT * FROM writeups WHERE status = 'active'")["id"]
+        mid = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")["id"]
+        for statement, confidence in (("Aardvark first, by statement.", 0.10),
+                                      ("Zebra last, by statement.", 0.90)):
+            row = _ko("bl")
+            row.update(manuscript_id=mid,
+                       statement=statement, status="validated",
+                       confidence=confidence, supporting=0, contradicting=0,
+                       outstanding_questions="[]")
+            _db.insert("editorial_beliefs", row)
+
+        before = StubLLMHandler.REQUESTS
+        first = run(ws, "write", "draft", "--dry-run")
+        second = run(ws, "write", "draft", "--dry-run")
+        check("--dry-run makes NO model call — it is the audit instrument, "
+              "not a cheap draft",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+        check("identical stored state gives a BYTE-IDENTICAL payload — the "
+              "requirement the whole cache design rests on (design §3)",
+              first == second, "")
+        frame = _block(first, "A")
+        check("validated beliefs are printed sorted by STATEMENT, and the "
+              "confidence number is not printed at all",
+              frame.index("Aardvark first") < frame.index("Zebra last")
+              and "0.9" not in frame and "confidence" not in frame,
+              frame[:600])
+        check("concept notes come from the PLAN's declared concepts, not "
+              "from the file slice (which is empty during a writeup), and a "
+              "name the graph does not have is shown rather than dropped",
+              "- Ghostly Absent Concept — (not in the graph)" in frame,
+              frame[:900])
+        law = _block(first, "S")
+        check("block S is the registered prompt file plus the effective "
+              "style law, in that order — the least volatile layer, and the "
+              "system message",
+              law.startswith("# Beat drafter")
+              and "STYLE LAW" in law
+              and "no rhetorical questions" in law, law[:300])
+        accepted = _block(first, "B")
+        check("the mid-rewrite PLACEHOLDER is never sent as prose: block B "
+              "renders '(nothing accepted yet)' and the marker text appears "
+              "NOWHERE in the payload",
+              "(nothing accepted yet)" in accepted
+              and _api.MARKER not in first, accepted)
+        beat_block = _block(first, "C")
+        check("block C carries this beat, the learnings, the last verdict "
+              "and the output contract",
+              '"n": 1' in beat_block and "LEARNINGS" in beat_block
+              and "LAST VERDICT" in beat_block
+              and "OUTPUT CONTRACT" in beat_block, beat_block[:400])
+
+        # F4's guard, as a test: confidence DRIFTS on every explained
+        # verdict. If the payload printed or sorted on it, block A would
+        # move between every pair of beats and forfeit the cache prefix.
+        _db.conn.execute("UPDATE editorial_beliefs SET confidence = 0.99 "
+                         "WHERE statement = 'Aardvark first, by statement.'")
+        _db.conn.commit()
+        third = run(ws, "write", "draft", "--dry-run")
+        check("a belief's confidence moving does NOT change block A's hash "
+              "— the silent cache invalidator, closed before it shipped "
+              "(design F4)",
+              _block_hash(third, "A") == _block_hash(first, "A"),
+              f"{_block_hash(first, 'A')} -> {_block_hash(third, 'A')}")
+        run_stdin(ws, json.dumps([
+            {"role": "opener", "concepts": ["Choice"], "budget": 60,
+             "notes": "open with the primal act"},
+            {"role": "development", "concepts": ["Distinction", "Choice"],
+             "budget": 80, "notes": "the visible form of the act"},
+            {"role": "close", "concepts": ["Choice"], "budget": 60,
+             "notes": "close on the field"},
+        ]), "write", "plan", "--replace")
+        fourth = run(ws, "write", "draft", "--dry-run")
+        check("a real state change — write plan --replace — DOES move block "
+              "A's hash: the payload tracks stored state, it is not frozen",
+              _block_hash(fourth, "A") != _block_hash(first, "A"), "")
+
+        # --- T3/T6: the draft registers, and the usage line reports -------
+        out = run(ws, "write", "draft")
+        check("the verb prints the beat spec, a before-the-call line naming "
+              "the model, the model's WHY, its SELF-CHECK, the prose, and "
+              "the prompt-file provenance",
+              "Drafting beat n=4 on stub-writer" in out
+              and "WHY" in out and "SELF-CHECK" in out
+              and "The stub's drafted prose for beat n=4." in out
+              and "authorlm/prompts/beat-draft.md" in out
+              and "Draft registered" in out, out)
+        check("the usage line reports live calls, in/out tokens, cache "
+              "read/write and the model — cache tokens are broken out "
+              "because litellm folds them into prompt_tokens (design F5)",
+              "LLM: 1 live call(s)" in out
+              and "cache 0 read / 0 written" in out
+              and "model stub-writer" in out, out)
+        check("the zero-cache-reads warning does NOT cry wolf on a model "
+              "that does not advertise prompt caching",
+              "0 tokens read on this beat" not in out, out)
+        rows = beat_rows()
+        check("the registered row is indistinguishable in shape from one "
+              "'write propose' makes: kind='beat', batch_id=writeup.id, "
+              "batch_index=beat.n, state='proposed', explanation non-empty",
+              len(rows) == 1 and rows[0]["kind"] == _api.BEAT_KIND
+              and rows[0]["batch_id"] == wu_id
+              and rows[0]["batch_index"] == 4
+              and rows[0]["state"] == "proposed"
+              and rows[0]["explanation"].strip(), json.dumps(rows, default=str))
+        check("the --why recorded IS the model's own WHY paragraph — the "
+              "evidence the verdict hangs off is the drafter's stated "
+              "grounding, exactly as when the skill drafts",
+              "for n=4" in rows[0]["explanation"], rows[0]["explanation"])
+        out = run_stdin(ws, "", "write", "accept")
+        check("the verdict path is untouched: accept appends, collects, "
+              "records the review and advances the cursor",
+              "n=4 accepted" in out and cursor() == 1
+              and "The stub's drafted prose for beat n=4."
+              in (ms / "02-essay.md").read_text(), out)
+        check("the accepted beat replaced the placeholder rather than "
+              "appending after it",
+              _api.MARKER not in (ms / "02-essay.md").read_text(),
+              (ms / "02-essay.md").read_text())
+
+        # --- T4: supersede on redraft, both entry points -------------------
+        run(ws, "write", "draft")
+        run(ws, "write", "draft")
+        rows = [r for r in beat_rows() if r["batch_index"] == 5]
+        check("a redraft supersedes the pending proposal through the "
+              "existing UPDATE — exactly one 'proposed', exactly one "
+              "'superseded'",
+              [r["state"] for r in rows].count("proposed") == 1
+              and [r["state"] for r in rows].count("superseded") == 1,
+              json.dumps([r["state"] for r in rows]))
+        run_stdin(ws, "A beat the author wrote by hand.", "write", "propose",
+                  "--why", "hand-drafted; the two entry points interchange")
+        rows = [r for r in beat_rows() if r["batch_index"] == 5]
+        check("'write propose' after 'write draft' supersedes the same way "
+              "— the two entry points are interchangeable",
+              [r["state"] for r in rows].count("proposed") == 1
+              and [r["state"] for r in rows].count("superseded") == 2,
+              json.dumps([r["state"] for r in rows]))
+        out = run_stdin(ws, "", "write", "accept")
+        check("accept takes the NEWEST proposal",
+              "n=5 accepted" in out
+              and "A beat the author wrote by hand."
+              in (ms / "02-essay.md").read_text(), out)
+
+        # --- T5: the model changed mid-writeup ----------------------------
+        out = run_stdin(ws, "", "write", "status")
+        check("write status shows what drafted this writeup",
+              "Drafted by stub-writer." in out, out)
+        _draft_config(ws, server.server_port,
+                      '[writing]\nmodel = "stub-writer-2"\n')
+        out = run(ws, "write", "draft")
+        check("a changed [writing] model warns LOUDLY, naming both models "
+              "and the beat where the seam falls",
+              "DRAFTING MODEL CHANGED" in out and "stub-writer," in out
+              and "stub-writer-2" in out and "seam at beat n=6" in out, out)
+        check("...and it does NOT block — the draft still registers",
+              "Draft registered" in out
+              and [r for r in beat_rows()
+                   if r["batch_index"] == 6 and r["state"] == "proposed"],
+              out)
+        out = run_stdin(ws, "", "write", "status")
+        check("the seam stays visible on every resume, not only in the "
+              "scrollback of the beat where it happened",
+              "MORE THAN ONE model" in out
+              and "stub-writer, stub-writer-2" in out, out)
+
+        # --- T8: BLOCKED leaves nothing ------------------------------------
+        run_stdin(ws, "", "write", "reject", "--reason",
+                  "Replanning — this beat needs a different claim")
+        run_stdin(ws, json.dumps([{"role": "close", "concepts": ["Choice"],
+                                   "budget": 60,
+                                   "notes": "STUB-BLOCKED: needs an "
+                                            "ungrounded attribution"}]),
+                  "write", "plan", "--replace")
+        rows_before = len(beat_rows())
+        cursor_before = cursor()
+        disk_before = (ms / "02-essay.md").read_text()
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("a BLOCKED reply is a legal refusal to invent: the question "
+              "is printed, NOTHING is registered, the cursor does not move "
+              "(design §13.3 made mechanical)",
+              "BLOCKED" in out and "QUESTION" in out
+              and "therapeutic culture" in out
+              and "nothing was registered" in out
+              and len(beat_rows()) == rows_before
+              and cursor() == cursor_before, out)
+        check("the BLOCKED path still reports its usage — the call happened "
+              "and was billed",
+              "LLM: 1 live call(s)" in out, out)
+
+        # --- T7: every failure leaves nothing ------------------------------
+        # A provider refusal and a truncation both arrive as HTTP 200 with a
+        # body, so finish_reason is the only thing separating them from a
+        # beat — and they must not be mistaken for each other either: one
+        # says the model declined, the other says the ceiling was hit, and
+        # the remedies are nothing alike.
+        failures = [
+            ("STUB-500: provider error", "failed after 3 attempts"),
+            ("STUB-REFUSED: stop_reason refusal", "refused to answer"),
+            ("STUB-TRUNCATED: hit the ceiling", "before finishing"),
+            ("STUB-NO-DRAFT: no draft line", "missing DRAFT"),
+            ("STUB-EMPTY-WHY: empty why", "WHY is empty"),
+            ("STUB-EMPTY-DRAFT: whitespace only",
+             "nothing follows the DRAFT line"),
+            ("STUB-MARKERS: reserved grammar", "reserved grammar"),
+        ]
+        said: dict[str, str] = {}
+        for notes, expected in failures:
+            run_stdin(ws, json.dumps([{"role": "close",
+                                       "concepts": ["Choice"],
+                                       "budget": 60, "notes": notes}]),
+                      "write", "plan", "--replace")
+            out = run(ws, "write", "draft", expect_exit=True)
+            said[notes.split(":")[0]] = out
+            check(f"a failed draft says what happened ({expected!r}) and "
+                  f"leaves NO pending proposal — write_propose is the last "
+                  f"statement of the success path",
+                  expected in out
+                  and len(beat_rows()) == rows_before
+                  and cursor() == cursor_before
+                  and (ms / "02-essay.md").read_text() == disk_before, out)
+        check("a refusal and a truncation get DISTINCT messages: one names "
+              "stop_reason refusal, the other names the max_tokens ceiling "
+              "and says to raise it or narrow the beat's budget",
+              "refused to answer" in said["STUB-REFUSED"]
+              and "refused to answer" not in said["STUB-TRUNCATED"]
+              and "max_tokens" in said["STUB-TRUNCATED"]
+              and "truncated beat is not a short beat"
+              in said["STUB-TRUNCATED"]
+              and "max_tokens" not in said["STUB-REFUSED"],
+              said["STUB-REFUSED"] + "\n---\n" + said["STUB-TRUNCATED"])
+        check("an unparseable reply also shows the first 400 characters of "
+              "what came back, so the author can see it",
+              "characters of what came back" in out, out)
+
+        # --- a BLOCKED line INSIDE the prose is prose, not a refusal ------
+        run_stdin(ws, json.dumps([{"role": "close", "concepts": ["Choice"],
+                                   "budget": 60,
+                                   "notes": "STUB-LABEL-IN-PROSE: the "
+                                            "label appears after DRAFT"}]),
+                  "write", "plan", "--replace")
+        out = run(ws, "write", "draft")
+        check("a bare BLOCKED line AFTER the DRAFT label is manuscript "
+              "text, not a refusal — everything after DRAFT is prose, and "
+              "reading a plausible bare word as a refusal would silently "
+              "discard a good draft",
+              "Draft registered" in out
+              and "nothing was registered" not in out
+              and "and the sentence continues past it." in out, out)
+        row = [r for r in beat_rows() if r["state"] == "proposed"][-1]
+        check("...and the BLOCKED line is registered as part of the beat, "
+              "verbatim",
+              "\nBLOCKED\n" in row["suggestion"]
+              and row["suggestion"].endswith("continues past it."),
+              row["suggestion"])
+        run_stdin(ws, "", "write", "reject", "--reason",
+                  "Not the close I wanted; back to the plan")
+
+        # --- T10 (cont.): the checkout gate, and the end of the plan -------
+        _row = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")
+        _meta = json.loads(_row["metadata"] or "{}")
+        _meta["gdocs"] = {"02-essay.md": {"doc_id": "stub",
+                                          "checked_out": True}}
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("draft while the file is checked out to Google Docs gives the "
+              "same refusal propose gives, BEFORE any call",
+              "checked out to Google Docs" in out
+              and StubLLMHandler.REQUESTS == before, out)
+        _meta["gdocs"]["02-essay.md"]["checked_out"] = False
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+
+        run_stdin(ws, json.dumps([{"role": "close", "concepts": ["Choice"],
+                                   "budget": 60, "notes": "close it out"}]),
+                  "write", "plan", "--replace")
+        run(ws, "write", "draft")
+        run_stdin(ws, "", "write", "accept")
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", expect_exit=True)
+        check("past the last beat the draft refuses with the existing "
+              "message, and makes no call",
+              "all planned beats are done" in out
+              and StubLLMHandler.REQUESTS == before, out)
+
+        out = run_stdin(ws, "", "write", "complete")
+        check("write complete reports what drafted the essay — a completed "
+              "essay's record should say what wrote it",
+              "MORE THAN ONE model" in out
+              and "stub-writer, stub-writer-2" in out, out)
+    finally:
+        server.shutdown()
 
 
 def scenario_write_new_and_digest(root: Path) -> None:
@@ -3900,6 +4381,7 @@ def main_test() -> None:
         scenario_errors(root)
         scenario_llm_and_unregister(root)
         scenario_write_loop(root)
+        scenario_write_draft(root)
         scenario_write_new_and_digest(root)
         scenario_parallel_writeups(root)
         scenario_doc_comments(root)

@@ -99,6 +99,18 @@ def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
     return output
 
 
+def run_stdin(workspace: Path, stdin_text: str, *argv: str,
+              expect_exit: bool = False) -> str:
+    """run() with stdin replaced — the write loop's brief and plan JSON
+    travel over stdin."""
+    old = sys.stdin
+    sys.stdin = io.StringIO(stdin_text)
+    try:
+        return run(workspace, *argv, expect_exit=expect_exit)
+    finally:
+        sys.stdin = old
+
+
 def check(label: str, condition: bool, context: str = "") -> None:
     global PASSED
     assert condition, f"FAIL: {label}\n{context}"
@@ -147,6 +159,18 @@ def main_test() -> None:
             "enabled = true\n"
             f'model = "{MODEL}"\n'
             f'cache_dir = "{CACHE_DIR}"\n'
+            # `write draft` deliberately does not fall back to [llm] model,
+            # so the writing section is explicit here too. It runs on the
+            # suite's own cheap MODEL rather than on Fable 5: the suite's
+            # contract is that anyone can re-record its fixtures, and
+            # billing a frontier model to re-record a plumbing test is not
+            # that. What this proves is assembly → call → parse → register
+            # against a real provider round trip; what it deliberately does
+            # not prove is the drafting model's quality.
+            "\n[writing]\n"
+            f'model = "{MODEL}"\n'
+            "max_tokens = 4000\n"
+            'effort = "low"\n'
         )
         # AUTHORLM_CONFIG defaults to /nonexistent (see the module-level
         # pin above); repoint it at this run's own workspace config so
@@ -223,6 +247,43 @@ def main_test() -> None:
         for line in out.splitlines():
             if line.strip().startswith(("•", "↳", "belief", "outcome")):
                 print(f"   {line}")
+
+        # --- write draft (live or replayed): the whole beat-drafting seam --
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "add", "register",
+            "Plain declarative English; no rhetorical questions.",
+            "--guide", "House")
+        run(ws, "style", "attach", "02-fields.md", "House")
+        run(ws, "summarize", "rebuild", "--all")
+        intent_id = run(ws, "intent", "declare",
+                        "Rewrite the fields essay").split("[")[1].split("]")[0]
+        run_stdin(ws, "The essay explains why a distinction opens a field.",
+                  "write", "start", "02-fields.md", "--intent", intent_id)
+        run_stdin(ws, json.dumps([
+            {"role": "opener", "concepts": ["Choice"], "budget": 60,
+             "notes": "claims a single distinction is inert on its own"},
+            {"role": "close", "concepts": ["Choice"], "budget": 60,
+             "notes": "claims the field is generative, not a container"},
+        ]), "write", "plan")
+        try:
+            out = run(ws, "write", "draft")
+        except AssertionError:
+            if key_available:
+                raise
+            print("SKIP: no beat-draft response in the replay cache and "
+                  "GEMINI_API_KEY is not set. Export the key once to record.")
+        else:
+            check("write draft parses the model's reply and registers the "
+                  "beat through the ordinary propose path",
+                  "WHY" in out and "SELF-CHECK" in out
+                  and "Draft registered" in out
+                  and "authorlm/prompts/beat-draft.md" in out, out)
+            out = run_stdin(ws, "", "write", "accept")
+            check("the drafted beat accepts and appends exactly as a "
+                  "hand-written one does",
+                  "accepted" in out
+                  and (ms / "02-fields.md").read_text().strip(), out)
+            run_stdin(ws, "", "write", "abandon")
 
         run(ws, "session", "end")
     finally:

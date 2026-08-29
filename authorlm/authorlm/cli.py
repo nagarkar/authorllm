@@ -3140,6 +3140,113 @@ def _print_drafting_context(text: str) -> None:
     print()
 
 
+def _print_drafting_models(models: list) -> None:
+    """What drafted this writeup. One name is the ordinary case; two or
+    more is the voice seam §8 warns about, and it stays visible on every
+    resume and at completion rather than only in the scrollback of the
+    beat where it happened."""
+    if not models:
+        return
+    if len(models) == 1:
+        print(ui.dim(f"Drafted by {models[0]}."))
+        return
+    print(ui.yellow("Drafted by MORE THAN ONE model — the voice has a seam: "
+                    + ", ".join(models) + "."))
+
+
+def _print_model_change(info: dict) -> None:
+    """One model drafts one writeup (design §8). It warns; it never
+    blocks — the author may have a reason (an outage, a deliberate
+    experiment), and an unblockable truth gets said loudly rather than
+    enforced quietly."""
+    if not info.get("model_changed_from"):
+        return
+    done = info.get("beats_drafted") or 0
+    print(ui.yellow(
+        f"!! DRAFTING MODEL CHANGED — {done} beat(s) of this writeup were "
+        f"drafted by\n"
+        f"!!   {info['model_changed_from']}, and this beat will be drafted "
+        f"by\n"
+        f"!!   {info['model']}. Two costs: the prompt cache is model-scoped, "
+        f"so the\n"
+        f"!!   stable layers are re-billed at write price from here on; and "
+        f"the essay's\n"
+        f"!!   voice will have a seam at beat n={info['beat']['n']}. Finish "
+        f"the writeup on one\n"
+        f"!!   model, or accept the seam deliberately."))
+
+
+def _print_draft_usage(usage: dict) -> None:
+    if usage.get("line"):
+        print(ui.dim(usage["line"]))
+    if usage.get("cache_cold"):
+        print(ui.yellow(
+            "!! cache: 0 tokens read on this beat, on a model that supports "
+            "prompt\n"
+            "!! caching. The stable layers (STYLE LAW, DRAFTING CONTEXT, "
+            "PLAN, CONCEPTS)\n"
+            "!! are being re-billed every beat — something in them changed "
+            "since the last\n"
+            "!! draft. Compare 'write draft --dry-run' block hashes across "
+            "two beats to find it."))
+
+
+def _write_draft(db, manuscript, config, prefix, dry_run: bool) -> None:
+    """`write draft` — the beat-drafting verb's whole surface."""
+    from .llm import DraftError
+
+    def announce(info: dict) -> None:
+        _print_beat_spec(info["beat"])
+        print(ui.dim(f"Drafting beat n={info['beat']['n']} on "
+                     f"{info['model']} — this can take a minute…"))
+        _print_model_change(info)
+
+    try:
+        result = api.write_draft(db, manuscript, config, prefix=prefix,
+                                 dry_run=dry_run, on_start=announce)
+    except DraftError as err:
+        # Nothing was registered: write_propose is the last statement of
+        # the success path, and every failure raises before it.
+        sys.exit(f"{err}")
+    if dry_run:
+        payload = result["payload"]
+        _print_beat_spec(result["beat"])
+        print(ui.dim(f"Payload for {result['model']} — no call made."))
+        for name, text in payload.blocks:
+            print()
+            print(ui.bold(f"───── block {name} — {len(text):,} chars — "
+                          f"sha256 {payload.hashes[name]}"))
+            print(text)
+        print()
+        print(ui.dim("Identical stored state gives byte-identical blocks S "
+                     "and A. A hash that moved between two beats IS the "
+                     "cache invalidator."))
+        return
+    if result["blocked"]:
+        print(ui.yellow(f"BLOCKED — {result['reason']}"))
+        if result["question"]:
+            print(ui.yellow(f"QUESTION — {result['question']}"))
+        _print_draft_usage(result["usage"])
+        sys.exit("nothing was registered and the cursor did not move — put "
+                 "the question to the author. The answer usually becomes "
+                 "'write plan --replace' on this beat.")
+    print()
+    print(ui.bold("WHY"))
+    print(result["why"])
+    print()
+    print(ui.bold("SELF-CHECK"))
+    print(result["self_check"])
+    print()
+    print(ui.bold("DRAFT"))
+    print(result["draft"])
+    print()
+    print(ui.dim(f"Prompt: {result['prompt_location']}"))
+    _print_draft_usage(result["usage"])
+    print(f"Draft registered [{result['guidance_id'][:11]}] — "
+          "author verdict: accept / accept with reworded stdin / "
+          "reject --reason.")
+
+
 def cmd_write(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -3206,6 +3313,7 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            _print_drafting_models(result["drafting_models"])
             _print_brief(result["brief"])
             if result["digest"]:
                 print()
@@ -3278,6 +3386,9 @@ def cmd_write(args):
                 else:
                     print(json.dumps(result["digest"], indent=2))
                 _print_accounting(result["accounting"])
+        elif args.action == "draft":
+            _write_draft(db, manuscript, config, prefix,
+                         dry_run=getattr(args, "dry_run", False))
         elif args.action == "propose":
             text = _stdin_text()
             result = api.write_propose(db, manuscript, text or "",
@@ -3327,6 +3438,7 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            _print_drafting_models(result["drafting_models"])
             accounting = result["accounting"]
             if accounting:
                 unaccounted = accounting["unaccounted"]
@@ -4955,7 +5067,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .prompt_registry import HELP_NOTE
     LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
                  "analyze", "lens", "sweep", "illus", "summarize", "doc",
-                 "belief", "critique", "triage-app"}
+                 "belief", "critique", "triage-app",
+                 # `write draft` is the write path's one LLM call.
+                 "write"}
 
     def add_parser(name, *a, **kw):
         kw.setdefault("parents", [common])
@@ -5124,12 +5238,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "write",
-        help="beat-by-beat co-writing loop: propose → author verdict → append "
+        help="beat-by-beat co-writing loop: draft → author verdict → append "
              "(docs/autoregressive-writing-design.md)")
     p.add_argument("action",
-                   choices=["start", "plan", "status", "propose", "accept",
-                            "reject", "learn", "complete", "abandon",
-                            "digest"])
+                   choices=["start", "plan", "status", "draft", "propose",
+                            "accept", "reject", "learn", "complete",
+                            "abandon", "digest"])
     p.add_argument("params", nargs="*", help="start: <file>")
     p.add_argument("--intent", help="start: intent id prefix (required)")
     p.add_argument("--new", action="store_true",
@@ -5159,6 +5273,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace", action="store_true",
                    help="plan: replace the remaining (unwritten) beats; "
                         "digest: replace the stored digest")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="draft: assemble and print the payload with a "
+                        "sha256 per block, and make NO model call — the way "
+                        "to audit what is sent and to find a silent cache "
+                        "invalidator between two beats")
     p.set_defaults(func=cmd_write)
 
     p = sub.add_parser("diff", help="colored diff between collected versions "

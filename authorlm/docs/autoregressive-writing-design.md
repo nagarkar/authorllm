@@ -1078,3 +1078,266 @@ flight now simply has no text and ends on the unchanged `if not text.strip()`.
 The test lesson is the sharper one: the original assertion — "no extraction payload in this scenario
 carries the marker" — passed against the broken code, because the scenario happened to run no
 extraction while a file was in flight. A guard's test has to make the guarded thing actually happen.
+
+## 15. `write draft` — beat generation as a verb (2026-08-29)
+
+Added by the programmatic-drafting pass, answering the author's question: "Why are the
+beats drafted in the chat — shouldn't that be a verb too, and a prompt to go with
+that? Otherwise we will not have reliable outputs, yes?" — and their ruling that
+followed it: implement a `[writing]` config section with Fable 5 as the preferred
+model for beat generation.
+
+This section is **additive** — nothing above is edited. But unlike §12, §13 and §14,
+this one contradicts standing statements in the older text, so §15.1 says exactly
+which, rather than leaving a reader to discover it.
+
+### 15.1 What this supersedes — the skill-mode paragraph, honestly
+
+Four statements above were true when written and are now false for the drafting call
+specifically. Each is superseded only in that scope; everything else about skill mode
+stands.
+
+1. **The execution-model paragraph at the top of this document** says the loop "runs
+   in skill mode — the conversational agent (Claude Code, under the authorlm skill) is
+   the drafting model and orchestrator", and that "the programmatic single-process
+   loop this document originally specified (§4's explicit cache mechanics, §8) remains
+   the spec for a *future* built version only." **The drafting model is no longer the
+   conversational agent by default.** `authorlm write draft` is the programmatic
+   drafting call, and §4 and §8 are the spec for something that now exists.
+   The agent remains the orchestrator, the interlocutor, and the author's counterpart
+   for everything conversational — plan ratification, digest review, brief drafting,
+   relaying verdicts. It also remains a legitimate drafter on request (§15.6). It is
+   no longer the *default* drafter.
+2. **§4's skill-mode assessment** — "none of the mechanics below need reimplementing
+   for the built loop", because "in skill mode the Claude Code conversation *is* the
+   transcript" and "the harness applies prompt caching to that prefix automatically."
+   That reasoning was correct for skill mode and does not transfer: `write draft`
+   sends its own request, so it must place its own breakpoints. §4's mechanics are
+   implemented, with the deviations §15.4 records.
+3. **§11's "deliberately not built" list** — "Programmatic cache layer (§4 mechanics,
+   §8): `llm.py` has no `cache_control`." It has it now, on the writing path only.
+   Every other call in the system still has none, and none of them needs it.
+4. **§13's framing** — "Nothing here adds an LLM call to the write path: the
+   conversational agent does all drafting … the verbs stay deterministic state, gates,
+   and evidence." The write path now has exactly one LLM call, in exactly one verb.
+   `start`, `plan`, `digest`, `propose`, `accept`, `reject`, `learn`, `abandon` remain
+   deterministic; `complete` keeps the extraction call it always had. The invariant
+   that actually mattered — **no verb decides anything about the manuscript without
+   the author** — is untouched: `write draft` produces a pending proposal and nothing
+   else. Common Core P3 quarantine holds exactly as before.
+
+What did NOT change, and is worth saying because a reader skimming the above will
+assume it did: the author's loop. Accept, reword-inline, reject-with-reason. Same
+verbs, same gates, same evidence rows, same review pathway, same policy reinforcement.
+The draft arrives from a different place; nothing downstream of it can tell.
+
+### 15.2 The verb
+
+`authorlm write draft [--writeup <prefix>] [--dry-run]`, no stdin. It gates (active
+writeup, not checked out, a ratified plan with a current beat, a configured
+`[writing]` model, an API key for that model's vendor), assembles the layered payload
+of §3 deterministically from stored state, renders the registered prompt
+`authorlm/prompts/beat-draft.md`, makes one call, self-checks inside that same call
+(§5 step 2), and registers the result **through the existing `write propose`** — so
+the guidance row, the mandatory `--why`, supersede-on-redraft, the verdict evidence
+and the policy reinforcement are byte-for-byte what they were.
+
+`write propose` is unchanged and remains fully supported. A beat drafted in
+conversation and registered by hand produces the same evidence it always did.
+
+The payload is assembled from: the effective style guide; validated beliefs; the
+drafting context (§12.4 item 1, with §14's in-flight warnings); the brief; the digest;
+the ratified plan; ratified concept notes for every concept the plan names; the
+accepted text so far, read from the file; and the current beat's spec, the learnings,
+and the author's last verdict verbatim. Note the graph slice: `scoped_concepts(file=)`
+is useless during a writeup — the file is truncated or a placeholder, so nothing
+matches — and the concept notes therefore come from the beat specs' declared
+`concepts`, which is another reason §13.3's plan-ratification requirement is load
+bearing rather than merely disciplined.
+
+`--dry-run` prints the payload and its per-block hashes and makes no call. It is how a
+silent cache invalidator is found, and how the author audits what is actually sent.
+
+### 15.3 `[writing]`, and why it does not fall back
+
+```toml
+[writing]
+model = "anthropic/claude-fable-5"   # required; NO fallback to [llm] model
+max_tokens = 8000                    # thinking + prose share this ceiling
+effort = "high"                      # §8's per-beat cost lever
+timeout_seconds = 600                # [llm]'s 120s fails every adaptive-thinking beat
+cache = true                         # §15.4's breakpoints; the kill switch
+```
+
+An absent `[writing]` section **refuses the draft** and prints the four lines to
+paste. It does not fall back to `[llm] model`, which is `gemini/gemini-2.5-flash`:
+falling back would put the manuscript's prose in a cheap-tier register, and the author
+would attribute the result to the loop rather than to a line of configuration they
+never wrote. §8 already ruled that drafting is intelligence-sensitive and that economy
+comes from caching and effort, not from a smaller model. The refusal names
+`write propose` as the escape hatch, so a missing section can never make the loop
+unusable.
+
+One drafting model per writeup (§8, because the cache is model-scoped and voice should
+not have a seam). The first draft records the model in the writeup's metadata; a
+different configured model on a later draft **warns loudly and proceeds** — the same
+report-don't-block rule §13.2 applies to the removal accounting.
+
+### 15.4 Caching, as built
+
+§4's reference layout, with two deviations recorded honestly.
+
+Breakpoints, `ttl: "1h"`, on the two stable layers: end of the system block (prompt
+file + style law) and end of the first user block (beliefs + drafting context + brief
++ digest + plan + concept notes). The accepted text and the beat-local layer follow
+uncached. Two of four breakpoints used.
+
+**Deviation 1: no rolling-tail breakpoint.** §4 specifies a third breakpoint on the
+most recently accepted turn. On this manuscript's measured payload it is worth about
+$1.10 on a 30-beat chapter — 11% of the available saving, for the only part of the
+layout where the 20-content-block lookback and per-beat invalidation become live
+concerns. Reserved, not refused; revisit if a measured chapter shows the tail
+dominating.
+
+**Deviation 2: no growing transcript.** §4 describes the multi-turn pattern, each beat
+appending an assistant and a user turn. `write draft` instead re-assembles the whole
+payload from stored state on every call. The cache economics are identical — the cache
+is a prefix match over rendered tokens, and the stable blocks are byte-identical either
+way — while re-assembly avoids storing assistant turns (persistence §11 declined) and
+avoids a second source of truth about accepted text competing with the file. It also
+makes a writeup resumed a week later produce the same payload it would have produced
+at beat 1, which a transcript cannot promise.
+
+Measured on this manuscript (24 essays; the drafting context alone is ~21.5K tokens,
+71% of the stable payload), a 30-beat chapter at 1.4 calls per beat over three
+sittings, on Fable 5 at $10/$50 per MTok with cache writes at $20 (1h) and reads at
+$1: **$20.62 uncached, $10.93 cached** — 68% off input spend, 47% off the total. The
+1h TTL pays for itself after 2.2 reads; a sitting makes about 14, which is §4's
+author-think-time argument confirmed rather than assumed.
+
+Every draft logs live calls, input and output tokens, and cache read/write tokens.
+A draft that is not the writeup's first, on a caching-capable model, that reads zero
+cached tokens prints a loud warning naming the stable layers and pointing at
+`--dry-run`: per §4, a beat loop showing zero cache reads has a silent invalidator and
+must say so. One such invalidator was found and closed during design: validated
+beliefs must be sorted by statement with no confidence printed, because confidence
+moves on every verdict and would have re-ordered the cached layer between every pair
+of beats.
+
+### 15.5 Failure is loud and leaves nothing
+
+`write propose` is the last statement of the success path. A disabled LLM, a missing
+key, a provider error after retries, a model refusal (`stop_reason: refusal`), a
+truncated reply, an unparseable reply, or an empty draft all raise before it. **No
+failed draft can leave a pending proposal**, and each failure says what happened and
+what to do about it.
+
+The model has a legal way to decline. §13.3 says a beat needing an ungrounded fact
+"becomes a question to the author, asked before `write propose`" — the prompt makes
+that a reply shape: `BLOCKED` plus `QUESTION`. Nothing is registered, the cursor does
+not move, and the question is printed. That is §12.5's observed failure — a model that
+invented an attribution rather than admitting it had none — given somewhere to go.
+
+### 15.6 What is deliberately not done
+
+- **k-candidates (§9.3)** — still absent, though `write draft` makes it nearly free
+  (the payload is assembled; a second call is one line). It still needs
+  `propose --alt` + `accept --pick` and a sibling-rejection path through
+  `record_review`, and there is still no data pressure. Unchanged from §13.4.
+- **Pre-warming (§4, §8)** — no `max_tokens: 0` request on resume. The first beat
+  after a break pays one cold write, a few seconds and about $0.60.
+- **Auditors as separate per-beat calls (§9.2)** — the self-check remains same-call,
+  and `write draft` enforces nothing about its content, exactly as `write propose`
+  enforces nothing. The auditors keep their one home.
+- **Caching anywhere else** — extraction, summaries, the critique editor and the
+  triage analyzer all keep `complete()` unchanged. Their payloads are not layered and
+  are not re-sent, so breakpoints would buy nothing.
+- **Automated coverage of the cache path** — the hermetic suite runs against the
+  OpenAI-compatible stub and the live-optional test runs on the cheap tier, so no test
+  exercises `cache_control`. The usage line is its only verification, which is why the
+  logging and the caching shipped together.
+- **`plan.draft_stubs`** — still the codebase's other ungated LLM drafting path, and
+  now with less excuse than ever: `write draft` is what it should have been. Retire it.
+
+### 15.7 Reconciliations recorded at implementation (2026-08-29)
+
+Dated notes, not silent edits to the text above. Each is a place where the design as
+written met the code as it actually landed.
+
+1. **D6 was already fixed on the base.** The design's change 24 (re-resolve `api_key`
+   after overriding `model`) landed at rc/25: `LLMClient.api_key` is now a *property*
+   resolving `vendor_key(self.model, …)` on every access. `writing_llm` therefore only
+   sets `.model`; there is nothing left to re-resolve, and the writing vendor's own
+   variable is what gets sent. The design's §5 change 1 is satisfied by construction.
+2. **The key gate fires only for a KNOWN vendor prefix, and resolves the key the way
+   the REQUEST does.** §1.1 gate 7 says "an API key resolves for the writing model's
+   own vendor". A model string with no vendor prefix (a proxy or a local endpoint) has
+   no environment variable to name, and `llm.py` already treats an unlisted prefix as
+   "let litellm resolve it" — so the refusal fires only when `VENDOR_KEY_ENV` knows the
+   prefix. What it then checks is `vendor_key(model, [llm])`, not the vendor variable
+   directly: `[llm] api_key_env` outranks the vendor convention there, because an
+   OpenAI-compatible proxy uses an arbitrary bearer token no convention can derive.
+   Reading the vendor variable directly refused a correctly configured proxy the moment
+   it was pointed at an `anthropic/*` model string, and told the author to set a
+   variable their setup does not use. The gate also runs *inside* `draft()`, after the
+   replay-cache check rather than before it — a replayed fixture needs no key, and a
+   gate in front of the cache would have made the drafting path the one thing in the
+   record/replay suite nobody could run. It is still strictly before any live call.
+3. **`cache_control` is gated on the anthropic vendor as well as on
+   `supports_prompt_caching`.** `supports_prompt_caching` is also true for
+   `gemini/gemini-2.5-flash`, which is the live-optional suite's model; attaching
+   Anthropic block grammar there would have exercised a path the design explicitly
+   does not claim. `caching_available()` requires litellm transport **and** an
+   `anthropic/` prefix **and** the cost-map flag.
+4. **The usage line's cache clause prints on every draft, zeros included.** §5 change 3
+   said the clause appears "when the counters are non-zero"; §6.1's T6 requires the
+   stub run to read `cache 0 read / 0 written`. The clause is therefore keyed on a
+   `draft_calls` counter, so every other caller's line is byte-for-byte unchanged and
+   the drafting line always reports the number §4 asks the author to watch.
+5. **`LAST VERDICT` reads the review, not the guidance state.** §1.3 named states
+   `reviewed`/`rejected`/`superseded`; the schema's actual verdict states are
+   `accepted`/`modified`/`rejected`, and the author's reason lives in
+   `editorial_reviews.explanation`. The block joins the two tables and prints
+   `<decision> on beat n=<k>: <reason verbatim>`, with no ids and no timestamps.
+6. **A `<<` or `>>` in the drafted prose is a parse failure.** §1.5 forbids the
+   markers in the prompt but did not say what to do when one arrives anyway. Since
+   `gdocs.diff_push` raises on any paragraph containing `<<`, a draft carrying one
+   would poison the next surgical Doc push — so the parser refuses it, nothing is
+   registered, and the message names the reason.
+7. **`--dry-run` runs every gate, including the `[writing]` ones.** §1.1 says every
+   gate runs before any model call and §1.3 says `--dry-run` makes none; the simplest
+   reading of both is that the gates are not skipped. A dry run on an unconfigured
+   `[writing]` therefore prints the same refusal a real draft would.
+8. **The seam is shown from `drafting_models`, and the warning counts
+   `drafting_beats`.** Both are writeup metadata (§1.7's "no schema change, no index").
+   `write status` and `write complete` print the list whenever it is non-empty, so a
+   two-model writeup announces its seam on every resume.
+
+### 15.8 Hardenings from review (2026-08-29)
+
+Four more, from the implementation review. Each closed a hole that the tests as
+first written did not discriminate.
+
+1. **`BLOCKED` refuses only when it LEADS.** The parser matched the label anywhere,
+   so a beat whose prose contained a bare `BLOCKED` line — a plausible thing for
+   prose to do — was read as a refusal and silently discarded. It is now a refusal
+   only when no `DRAFT` label precedes it. Both readings stay fail-safe: a leading
+   `BLOCKED` registers nothing, a trailing one is manuscript text the author still
+   rules on.
+2. **`drafting_model` is written AFTER `write_propose` returns.** Registration is the
+   last thing that can fail, so it goes first among the writes. Recording the model
+   before it would leave a writeup claiming to have been drafted by a model on a beat
+   that was never registered — residue about work that did not happen. The
+   model-change warning is unaffected: it is computed from the metadata as it stood
+   before the call.
+3. **The zero-cache-reads warning is asserted positively.** It was free to delete with
+   the suite still green, which left the caching feature's only production
+   verification itself unverified. The predicate is now `api.cache_cold`, named and
+   unit-tested in all four of its conditions, and the printed `!!` text is pinned by
+   driving `cli._print_draft_usage` directly.
+4. **`finish_reason` is tested, not merely implemented.** A provider refusal and a
+   truncation both arrive as HTTP 200 with a body; nothing but `finish_reason`
+   separates either from a beat. Both are now exercised through the stub and asserted
+   to leave no row, no cursor move and no file change — and to say *different* things,
+   because the remedies are nothing alike. With the classification removed, a refusal
+   registers silently as a beat, which is risk R-c happening.
