@@ -3541,6 +3541,76 @@ def main_test() -> None:
                   "pending margin thread" in str(err))
         (ms / "01-choice.md").write_text(original_local)
 
+        # X7-2 (diff_push parity): diff_push's own tab_markdown() helper
+        # split the master export using only mapped essay files + the
+        # manifest as boundaries and no order= — unlike pull_doc/reconcile,
+        # which include every live tab title (prompt tabs, the reserved
+        # 'illustrations' tab) with positional order. A tab that sits
+        # right after an essay in the export but isn't in that shrunken
+        # set is invisible as a boundary, so its heading and body get
+        # swallowed into the essay's own exported section.
+        from authorlm.gdocs import ILLUS_SENTINEL, ILLUS_TAB_TITLE, diff_push
+
+        docs2 = stub.state["docs"]["doc-2"]
+        choice_idx = next(i for i, t in enumerate(docs2)
+                          if t["title"] == "01-choice.md")
+        # Same parent as the essay tab itself (its containing manuscript
+        # tab) — 01-choice.md is nested, so a sibling placed elsewhere at
+        # root level (e.g. parent=None) would land after the WHOLE
+        # container's subtree in export order, not right after the essay.
+        choice_parent = docs2[choice_idx].get("parent")
+        stub.state["tab_counter"] += 1
+        illus_id = f"tab-{stub.state['tab_counter']}"
+        docs2.insert(choice_idx + 1, {"id": illus_id,
+                                      "title": ILLUS_TAB_TITLE,
+                                      "text": ILLUS_SENTINEL,
+                                      "parent": choice_parent})
+        stub.state["tab_counter"] += 1
+        prompt_id = f"tab-{stub.state['tab_counter']}"
+        docs2.insert(choice_idx + 2, {"id": prompt_id,
+                                      "title": "bleeding-prompt.md",
+                                      "text": "a prompt that must not bleed",
+                                      "parent": illus_id})
+        try:
+            pre_bleed_local = (ms / "01-choice.md").read_text()
+            (ms / "01-choice.md").write_text(
+                pre_bleed_local + "\nA note added near the boundary.\n")
+            try:
+                diff_push(db, manuscript, "01-choice.md", stub, stub)
+                bleed_survived, bleed_error = True, ""
+            except LookupError as err:
+                bleed_survived, bleed_error = False, str(err)
+            check("diff push of an essay immediately followed by another "
+                  "tab (an illustration prompt tab, here) survives the "
+                  "round trip instead of the adjacent tab's heading/body "
+                  "bleeding into this essay's exported section",
+                  bleed_survived, bleed_error)
+            if bleed_survived:
+                choice_tab_text = next(
+                    t["text"] for t in stub.state["docs"]["doc-2"]
+                    if t["title"] == "01-choice.md")
+                prompt_tab_text = next(
+                    t["text"] for t in stub.state["docs"]["doc-2"]
+                    if t["title"] == "bleeding-prompt.md")
+                check("the pushed essay tab carries the new local "
+                      "paragraph and nothing bled in from the adjacent "
+                      "prompt tab",
+                      "A note added near the boundary." in choice_tab_text
+                      and "bleeding-prompt.md" not in choice_tab_text
+                      and "a prompt that must not bleed"
+                      not in choice_tab_text,
+                      choice_tab_text)
+                check("the adjacent prompt tab's own content is untouched",
+                      prompt_tab_text == "a prompt that must not bleed",
+                      prompt_tab_text)
+            (ms / "01-choice.md").write_text(pre_bleed_local)
+        finally:
+            # Clean up the scratch tabs — a real 'illustrations' tab gets
+            # created for real later in this suite (push_prompt_tabs) and
+            # must not collide with this orphaned stand-in.
+            docs2[:] = [t for t in docs2
+                       if t["id"] not in (illus_id, prompt_id)]
+
         # Drive entity-encodes quotes and bodies; fetch unescapes them
         # (it-49edf0c323d1).
         from authorlm.gdocs import fetch_open_comments
