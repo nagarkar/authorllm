@@ -987,6 +987,32 @@ def write_plan(db: Database, manuscript: dict, beats: list,
     if plan and not replace:
         raise ValueError("a plan exists — pass --replace to amend the "
                          "remaining (unwritten) beats")
+    if replace:
+        # Replacement beats get FRESH n's, so a draft still pending on a
+        # beat about to be dropped would be orphaned: _beat_proposal
+        # could never match it again, `write status` would never show it,
+        # and it would count as 'proposed' in the tallies forever — while
+        # the author's reason for replanning, the highest-value evidence
+        # the loop can receive, went unrecorded (usability-analysis §2.7).
+        # Refuse and name both exits. Deliberately NOT auto-superseded:
+        # that would tidy the tally while still discarding the evidence.
+        dropped = [b.get("n") for b in plan[writeup["cursor"]:]
+                   if b.get("n") is not None]
+        stranded = [
+            row for row in db.all(
+                "SELECT * FROM guidance_history WHERE batch_id = ? "
+                "AND state = 'proposed'", (writeup["id"],))
+            if row["batch_index"] in dropped
+        ]
+        if stranded:
+            beats = ", ".join(f"n={row['batch_index']}" for row in stranded)
+            raise ValueError(
+                f"a draft is still awaiting your verdict on beat {beats} — "
+                f"replacing the plan would strand it as 'proposed' forever "
+                f"and lose the reason you are replanning for. Settle it "
+                f"first: 'write reject --reason \"<why the plan is wrong>\"' "
+                f"(that reason IS the evidence for the replan), or "
+                f"'write accept' to keep the draft.")
     meta = loads(writeup["metadata"], {})
     next_n = meta.get("next_n", 1)
     fresh = []

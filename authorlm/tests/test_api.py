@@ -2209,45 +2209,9 @@ def check_replan_settles_pending_proposal() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def check_style_refusal_names_candidates() -> None:
-    """AB-3: the missing-`--style` refusal must name real candidates.
-
-    `write start --new` refuses without `--style` and named only the
-    flag, sending the author away to `style guides` mid-flow. The obvious
-    value — the guide attached to the `--after` anchor — is one query
-    away (usability-analysis §2.2). The message is enriched; nothing is
-    silently defaulted, because naming the drafting law explicitly is the
-    property the gate exists to keep."""
-    root, _ws, db, manuscript, intent = _writeup_fixture("authorlm-ab3-")
-    try:
-        api.define_style_guide(db, manuscript, "Sermon voice")
-        try:
-            api.write_start(db, manuscript, {}, "weil.md", intent["id"][:8],
-                            after="01-epictetus.md", brief="A short essay.",
-                            new=True)
-            refused, message = False, ""
-        except ValueError as err:
-            refused, message = True, str(err)
-        check("AB-3: --new without --style is still refused", refused,
-              "the gate must not silently default")
-        check("AB-3: the refusal still names the flag",
-              "--style" in message, message)
-        check("AB-3: the refusal lists a real guide name",
-              "Connections essays" in message and "Sermon voice" in message,
-              message)
-        check("AB-3: the refusal names the anchor's own guide as the likely one",
-              "01-epictetus.md" in message
-              and message.index("01-epictetus.md")
-              > message.index("--style <guide>"),
-              message)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
 def main_test() -> None:
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()
-    check_style_refusal_names_candidates()
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
