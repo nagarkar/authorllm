@@ -2698,15 +2698,33 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     local_md = _strip_embeds(normalize_markdown(
         (bridge.root / relpath).read_text(encoding="utf-8")))
 
+    # Same boundary set and positional order pull_doc/reconcile use — every
+    # live tab title, not just mapped essay files, is a split boundary; a
+    # tab that follows this one in the export but isn't recognized would
+    # have its heading and body swallowed into this section instead
+    # (it-x7-2, diff_push parity). docs_service is required here (already
+    # used unconditionally below for paragraph reads and batchUpdate), so
+    # this is not best-effort the way pull_doc/reconcile's is.
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
+    tab_props: list[tuple[str, str]] = []
+    tab_doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+    known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
+    titles = {t for _, t in tab_props if t}
+    boundaries = known | titles
+    tab_order = [t for _, t in tab_props if t]
+
     def tab_markdown() -> str:
         data = service.files().export(
             fileId=master_id, mimeType=MARKDOWN_MIME).execute()
         whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
-        boundaries = {f for f, e in links.items()
-                      if not f.startswith("_") and isinstance(e, dict)
-                      and e.get("tab_id")} | {MANIFEST_TITLE}
         return normalize_markdown(
-            split_tabbed_export(whole, boundaries).get(relpath, ""))
+            split_tabbed_export(whole, boundaries, order=tab_order)
+            .get(relpath, ""))
 
     for attempt in (1, 2):
         tab_md = tab_markdown()
