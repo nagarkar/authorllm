@@ -145,6 +145,19 @@ def units(manuscript: dict) -> list[tuple[str, str]]:
     return ordered_items(files)
 
 
+def _units_and_unlisted(manuscript: dict) -> tuple[dict[str, str], list[str]]:
+    """`units()` as a dict, plus the files structure.reading_order had to
+    APPEND because toc.toml never mentions them. `units()` discards that
+    second element; before_after cannot afford to, because an appended
+    file's position is a fallback, not a declaration."""
+    from .revisions import read_manuscript_files
+    from .structure import reading_order
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    order, unlisted = reading_order(files)
+    return {name: files[name] for name in order if name in files}, unlisted
+
+
 def all_summaries(db: Database, manuscript_id: str) -> dict[str, dict]:
     return {r["file"]: dict(r) for r in db.all(
         "SELECT * FROM essay_summaries WHERE manuscript_id = ?",
@@ -191,17 +204,30 @@ def before_after(db: Database, manuscript: dict, file: str,
     `placement` overrides where `file` sits, for an essay whose toc entry
     is not committed yet (design §12.4 item 3). It is either
     PLACEMENT_START (the new essay opens the book) or the name of an
-    existing unit it follows. Without it, an essay missing from toc.toml
-    is not rejected but silently APPENDED to the reading order by
-    structure.reading_order — so the whole book reads as settled context
-    behind it and nothing as forward-reference material ahead, which is
-    §7's continuity contract exactly inverted."""
+    existing unit it follows.
+
+    An essay missing from toc.toml is REFUSED without one. It is not
+    absent from the reading order — structure.reading_order appends it —
+    but that appended position is a fallback, and taking it at face value
+    would put the whole book behind the new essay and nothing ahead of
+    it: §7's continuity contract exactly inverted, silently, for the one
+    file whose placement actually matters. The position is not guessable,
+    so it is asked for rather than assumed."""
     have = all_summaries(db, manuscript["id"])
-    texts = dict(units(manuscript))
+    texts, unlisted = _units_and_unlisted(manuscript)
     order = list(texts)
     if placement is None:
         if file not in order:
             raise LookupError(f"'{file}' is not in the manuscript's reading order")
+        if file in unlisted:
+            raise LookupError(
+                f"'{file}' has no toc.toml entry, so the reading order "
+                f"cannot say what is settled before it and what is still "
+                f"to come (unlisted files are appended to the end, which "
+                f"would read as 'the whole book is behind me'). Add it to "
+                f"toc.toml, or declare the placement for this writeup: "
+                f"write start {file} --after <file it follows>  |  "
+                f"--after {PLACEMENT_START}")
         idx = order.index(file)
         before_files, after_files = order[:idx], order[idx + 1:]
     else:
@@ -279,7 +305,8 @@ def drafting_context(db: Database, manuscript: dict, file: str,
     forfeited by a silent invalidator.
 
     `placement` is passed through to `before_after` — an essay whose toc
-    entry is not committed yet still gets the right split."""
+    entry is not committed yet still gets the right split, and is refused
+    outright if it declares no placement at all."""
     before, after = before_after(db, manuscript, file, placement=placement)
     texts = dict(units(manuscript))
 

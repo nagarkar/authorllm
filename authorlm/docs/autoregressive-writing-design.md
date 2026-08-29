@@ -636,6 +636,24 @@ connection identified in §12.2:
    *committed* TOC; a brand-new essay not yet placed raises `LookupError`
    from `before_after`. Fresh-drafting mode today covers rewrites of
    existing files (§9.4), not essays with no TOC entry yet.
+   **Correction, 2026-08-28 (the Z build pass): the premise above is
+   wrong, and the truth was worse.** An unplaced essay did *not* raise —
+   `structure.reading_order` **appends** an on-disk file that toc.toml
+   never mentions, so `before_after` returned the entire book as settled
+   context *before* it and nothing after: §7's continuity contract
+   exactly inverted, silently, for the one file whose placement actually
+   matters. `LookupError` was in practice unreachable from the write
+   path at all, because `write_start` resolves its argument through
+   `_resolve_relpath`, which only matches files that exist on disk.
+   What is built now: `before_after(..., placement=)` takes either the
+   name of the unit the essay follows or the `PLACEMENT_START` sentinel,
+   surfaced as `write start --after <file> | --after start` and
+   persisted in the writeup's metadata so `write status` recomputes the
+   same split on resume; and, with **no** placement, an unlisted essay
+   is **refused** — naming both remedies (a toc.toml entry, or
+   `--after`) — because an appended position is a fallback, not a
+   declaration, and guessing it silently is the bug this item exists to
+   close.
 4. **A decision on whether incomplete coverage should block drafting.**
    `paragraph_coverage` is informational-only by design for editing (an
    editor can still use a summary short one transitional paragraph). That

@@ -1578,21 +1578,45 @@ def scenario_write_loop(root: Path) -> None:
               "(BUG-2 / A1)", recovered)
 
         # --- placement: an essay with no toc entry yet (§12.4 item 3) -----
-        # 03-bridge.md sorts LAST alphabetically, so with no placement
-        # structure.reading_order would append it after 02-essay.md and the
-        # whole book would read as settled context behind it. Placed after
+        # A real toc.toml now names 01/02 only, so 03-bridge.md is genuinely
+        # UNLISTED: structure.reading_order appends it after 02-essay.md,
+        # which would read as "the whole book is behind me". Placed after
         # 01-choice.md instead, 02-essay.md is forward-reference material.
         run(ws, "collect")
         write(ms / "03-bridge.md", "# Bridge\n\nA new essay, unplaced.\n")
+        write(ms / "toc.toml",
+              '[[chapter]]\nfile = "01-choice.md"\n\n'
+              '[[chapter]]\nfile = "02-essay.md"\n')
         run(ws, "collect")
         run(ws, "style", "attach", "03-bridge.md", "House")
         run(ws, "summarize", "rebuild", "--all")
         out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("an essay with no toc.toml entry is REFUSED when it declares "
+              "no placement — appending it to the end is a fallback, not a "
+              "declaration, and taking it at face value inverts §7's "
+              "continuity contract silently",
+              "no toc.toml entry" in out and "--after start" in out
+              and "--after <file it follows>" in out, out)
+        check("that refusal, like the freshness gate, left the file "
+              "untouched",
+              (ms / "03-bridge.md").read_text() != "", "")
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "toc.toml",
+                        expect_exit=True)
+        check("--after a file that EXISTS but is not a content unit "
+              "(toc.toml is structure, not prose) is refused by the "
+              "PLACEMENT check itself, not merely by name resolution",
+              "placement 'toc.toml' is not in the manuscript's reading "
+              "order" in out
+              and (ms / "03-bridge.md").read_text() != "", out)
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
                         "--intent", intent_id, "--after", "nope.md",
                         expect_exit=True)
-        check("an unknown --after target is refused, and refused before "
-              "anything is truncated",
-              "nope.md" in out and (ms / "03-bridge.md").read_text() != "", out)
+        check("--after a name matching no file at all is refused by name "
+              "resolution, also before anything is truncated",
+              "no document matching 'nope.md'" in out
+              and (ms / "03-bridge.md").read_text() != "", out)
         out = run_stdin(ws, "", "write", "start", "03-bridge.md",
                         "--intent", intent_id, "--after", "01-choice.md")
         head, tail = out.split("AFTER", 1)

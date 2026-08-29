@@ -449,23 +449,31 @@ def main_test() -> None:
 
         print("placement-aware before_after (§12.4 item 3 — an essay with "
               "no toc entry yet):")
-        # What actually happens today, established before changing it: an
-        # on-disk file missing from toc.toml does NOT raise LookupError —
-        # structure.reading_order APPENDS unlisted files alphabetically, so
-        # it lands at the END of the reading order. The failure is silent
-        # misplacement, not an exception: everything reads as "before" it
-        # and nothing as "after", so §7's forward-reference contract is
-        # inverted for exactly the file being drafted.
+        # The design said an unplaced essay "raises LookupError from
+        # before_after". It did not: structure.reading_order APPENDS an
+        # on-disk file missing from toc.toml, so it landed at the END of
+        # the reading order and every other essay read as settled context
+        # behind it with nothing ahead — §7's forward-reference contract
+        # inverted, silently, for exactly the file being drafted. That
+        # silence is the bug; the position is not guessable, so it must be
+        # refused.
         (ms / "delta.md").write_text("# delta\n\nText of delta.\n")
         order_now = [f for f, _ in sums.units(manuscript)]
-        check("an unlisted-but-on-disk essay is appended to the reading "
-              "order, not rejected — LookupError is unreachable for it",
+        check("an unlisted-but-on-disk essay IS still appended to the "
+              "reading order (structure.reading_order is unchanged)",
               order_now[-1] == "delta.md" and len(order_now) == 6,
               str(order_now))
-        before, after = sums.before_after(db, manuscript, "delta.md")
-        check("...so with no placement it silently reads as the LAST essay: "
-              "every other essay 'before' it, nothing 'after'",
-              len(before) == 5 and after == [], str((len(before), after)))
+        try:
+            sums.before_after(db, manuscript, "delta.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("...but before_after REFUSES it with no placement rather "
+              "than silently treating it as the last essay, and names both "
+              "remedies (a toc entry, or --after)",
+              raised is not None and "no toc.toml entry" in raised
+              and "--after" in raised and "--after start" in raised,
+              str(raised))
         before, after = sums.before_after(db, manuscript, "delta.md",
                                           placement="alpha.md")
         check("placement=<existing file> splits the context as if delta sat "
