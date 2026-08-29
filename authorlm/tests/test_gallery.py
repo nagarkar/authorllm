@@ -48,6 +48,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 PASSED = 0
 ROOT = Path(__file__).resolve().parents[2]
 GALLERY_PATH = ROOT / "tools" / "gallery.py"
