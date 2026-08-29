@@ -1718,6 +1718,49 @@ NEW_BEAT_1 = ("Attention is the faculty that makes a field visible before "
 NEW_BEAT_2 = ("What attention holds open, choice then cuts: the field is the "
               "standing possibility attention keeps in view.")
 
+# UC-B: the digest of 02-essay.md's pinned original (ESSAY, above).
+DIGEST_JSON = json.dumps({
+    "points": [
+        {"id": "p1", "load_bearing": True, "where": "¶1",
+         "claim": "The old opening paragraph names the essay's ground."},
+        {"id": "p2", "where": "¶2",
+         "claim": "Fields have positions, and positions are distinctions."},
+        {"id": "p3", "where": "¶2",
+         "claim": "The essay states the choice/distinction pairing a "
+                  "third time."},
+    ],
+    "examples": [{"id": "x1", "example": "the morning decision",
+                  "serves": ["p1"], "where": "¶1"}],
+    "references": [{"id": "r1", "reference": "Chapter 1 — Choice",
+                    "kind": "internal", "serves": ["p2"]}],
+    "inconsistencies": [
+        {"id": "i1", "with": "01-choice.md", "points": ["p3"],
+         "note": "01-choice.md already owns the choice/distinction pairing"}],
+})
+
+REWRITE_BRIEF = ("Keep the field/position pairing and cut anything "
+                 "01-choice.md already owns. Open on the claim.")
+
+REWRITE_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "carries p1 — opens on the claim, not the ground"},
+    {"role": "development", "concepts": ["Field"], "budget": 80,
+     "notes": "carries p2 — the field and its positions"},
+    {"role": "apparatus", "budget": 80,
+     "notes": "the What Was Removed and Why section, drafted from the "
+              "recorded removals only"},
+])
+
+REWRITE_BEAT_1 = "The ground of this essay is stated first, not approached."
+REWRITE_BEAT_2 = ("A field is its positions; each position is a distinction "
+                  "already made.")
+REMOVAL_SECTION = """## **What Was Removed and Why**
+
+Two arguments from the earlier version of this essay are not here. The
+first duplicated the opening chapter's account of choice and distinction,
+which that chapter owns and states better. The second repeated it a third
+time, which bought emphasis at the cost of saying one thing twice."""
+
 
 def scenario_write_new_and_digest(root: Path) -> None:
     """Scenario W2 — the two new author use cases on the beat loop:
@@ -1908,6 +1951,313 @@ def scenario_write_new_and_digest(root: Path) -> None:
               "(no llm.py call is added to the write path)",
               StubLLMHandler.REQUESTS == before_requests,
               f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+
+        # ---- B7: a digest models a REWRITE. A writeup that created its
+        # own file can never grow one, in any of the four shapes, so it can
+        # never be asked to account for points that do not exist.
+        for argv, label in (
+                (("write", "digest"), "bare"),
+                (("write", "digest", "--show"), "--show"),
+        ):
+            out = run_stdin(ws, "", *argv, expect_exit=True)
+            check(f"B7 — write digest ({label}) is refused on a writeup that "
+                  f"created its file",
+                  "there is no source essay to digest" in out
+                  and "03-new.md" in out, out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest", expect_exit=True)
+        check("B7 — and so is the JSON form",
+              "there is no source essay to digest" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B7 — and so is the --dispositions form",
+              "there is no source essay to digest" in out, out)
+
+        # ---- A11-A15: abandon deletes what the writeup created.
+        run_stdin(ws, NEW_PLAN, "write", "plan")
+        run_stdin(ws, NEW_BEAT_1, "write", "propose",
+                  "--why", "realizes Choice; carries the brief's first clause")
+        run_stdin(ws, "", "write", "accept")
+        check("A11 — the accepted beat landed in the created file",
+              NEW_BEAT_1 in target.read_text())
+        # RISK K2: the pre-collect must stay the FIRST statement in
+        # write_abandon. Text typed into the file and never collected has
+        # no other recovery point, and abandon is about to delete the file.
+        UNCOLLECTED = (NEW_BEAT_1 + "\n\nA half-typed sentence, never "
+                                    "collected, about to be deleted.")
+        target.write_text(UNCOLLECTED)
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, "", "write", "abandon")
+        check("A11 — abandon DELETES a file the writeup created, and says "
+              "why: the restore target is nonexistence",
+              "deleted" in out and "restore target is nonexistence" in out, out)
+        check("A11 — the file is gone from disk", not target.exists(), out)
+        check("I4 — write abandon makes zero LLM requests",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+        versions = _db.all(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no", (_row["id"],))
+        check("A12 — the accepted prose is preserved in version history: the "
+              "essay is unpublished, not destroyed",
+              any(NEW_BEAT_1 in (_loads(v["files"], {}).get("03-new.md") or "")
+                  for v in versions))
+        check("A12 / K2 — the never-collected text is preserved too. This is "
+              "the order-swap regression: if the unlink ever moved above "
+              "write_abandon's pre-collect, this text would be gone with no "
+              "recovery point at all",
+              any(_loads(v["files"], {}).get("03-new.md") == UNCOLLECTED
+                  for v in versions))
+        check("A11 — abandon reports the version the text survives in",
+              "preserved in v" in out, out)
+        out = run(ws, "collect")
+        check("A13 — abandon is honest about the deletion: its own collect "
+              "already recorded the removal, so nothing is pending",
+              "No changes" in out, out)
+
+        # A15: the author deleted the file by hand first. Abandon must
+        # still close the writeup cleanly rather than traceback.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, BRIEF_A, "write", "start", "04-extra.md", "--new",
+                  "--intent", intent_id, "--after", "02-essay.md",
+                  "--style", "House")
+        (ms / "04-extra.md").unlink()
+        out = run_stdin(ws, "", "write", "abandon")
+        check("A15 — abandon on a created file the author already deleted "
+              "succeeds and still reports the deletion",
+              "deleted" in out and "04-extra.md" in out, out)
+        check("A15 — and the file is still absent",
+              not (ms / "04-extra.md").exists())
+
+        # ---- A6-A9: the full UC-A loop through to completion.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                  "--intent", intent_id, "--after", "01-choice.md",
+                  "--style", "House")
+        run_stdin(ws, NEW_PLAN, "write", "plan")
+        run_stdin(ws, NEW_BEAT_1, "write", "propose", "--why", "opener")
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, NEW_BEAT_2, "write", "propose", "--why", "close")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("A6 — the UC-A loop completes",
+              "completed — 2 beat(s)" in out, out)
+        text = target.read_text()
+        check("A6 — the file holds both beats in order",
+              text.index(NEW_BEAT_1) < text.index(NEW_BEAT_2), text)
+        check("A7 — complete registers the essay in toc.toml at the declared "
+              "placement (without it the essay is finished, on disk, and "
+              "structurally invisible)",
+              "Registered 03-new.md in toc.toml after 01-choice.md" in out, out)
+        toc_now = (ms / "toc.toml").read_text()
+        check("A7 — the toc entry is there",
+              'file = "03-new.md"' in toc_now, toc_now)
+        check("A7 — the hand-written comment survived byte-for-byte (RISK "
+              "K3: a serialize_toc_tree round trip would have dropped it)",
+              "# Table of contents — hand-maintained; this comment must "
+              "survive." in toc_now, toc_now)
+        from authorlm.structure import reading_order as _reading_order
+        order, _unlisted = _reading_order(
+            {"toc.toml": toc_now, "01-choice.md": "", "02-essay.md": "",
+             "03-new.md": ""})
+        check("A7 — the reading order now places it between its neighbours",
+              order == ["01-choice.md", "03-new.md", "02-essay.md"],
+              str(order))
+        check("A8 — complete reminds that the summary is now missing/stale",
+              "summarize rebuild" in out, out)
+        check("B31 — a writeup with no digest gets no accounting block at all",
+              "UNACCOUNTED" not in out and "Removal accounting" not in out, out)
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("A9 — a registered new essay then blocks its neighbour's next "
+              "start until the summary is rebuilt: the toc entry is what "
+              "makes the hole visible instead of silent",
+              "missing summaries: 03-new.md" in out, out)
+        run(ws, "summarize", "rebuild", "--all")
+
+        # ---- UC-B: the modeled rewrite of 02-essay.md.
+        out = run(ws, "intent", "declare", "Rewrite the essay, same crux")
+        rewrite_id = out.split("[")[1].split("]")[0]
+        out = run_stdin(ws, REWRITE_BRIEF, "write", "start", "02-essay.md",
+                        "--intent", rewrite_id)
+        check("UC-B — a rewrite takes the brief too (the 'additional "
+              "guidance to retain key points, reorder for flow')",
+              "BRIEF" in out and "Keep the field/position pairing" in out, out)
+        check("UC-B — and start points at the pinned original",
+              "Raw material: write digest prints the pinned original." in out,
+              out)
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, "", "write", "digest")
+        check("B1 — bare write digest prints the pinned original verbatim, "
+              "under a header naming the version and char count",
+              "PINNED SOURCE — 02-essay.md" in out
+              and "The old opening paragraph, soon to be raw material." in out
+              and "(v" in out, out)
+        check("B1 — and the file on disk is still empty (the old essay lives "
+              "in the pinned version, never on disk)",
+              (ms / "02-essay.md").read_text() == "", out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest")
+        check("B2 — the digest persists and reports its counts",
+              "Digest recorded: 3 point(s), 1 example(s), 1 reference(s), "
+              "1 inconsistency(ies)." in out, out)
+        check("B2 — the inconsistencies print one per line: they are "
+              "findings the author must see",
+              "i1 · vs 01-choice.md" in out, out)
+        check("B2 — and the accounting starts at zero",
+              "Accounting: 0/3 points dispositioned." in out, out)
+        check("I4 — write digest (print and persist) makes zero LLM requests",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+        wu_b = _db.one("SELECT * FROM writeups WHERE file = '02-essay.md' "
+                       "AND status = 'active'")
+        check("I2 — the digest is NOT a guidance row: it is proposed by "
+              "nobody, reviewed by nobody, superseded by nobody",
+              _db.one("SELECT COUNT(*) AS n FROM guidance_history "
+                      "WHERE batch_id = ? AND kind != 'beat'",
+                      (wu_b["id"],))["n"] == 0)
+        out = run_stdin(ws, "", "write", "status")
+        check("B3 — the digest survives resume",
+              "Digest: 3 point(s), 1 example(s), 1 reference(s), "
+              "1 inconsistency(ies)." in out
+              and "UNACCOUNTED (p1, p2, p3)" in out, out)
+        out = run_stdin(ws, DIGEST_JSON, "write", "digest", expect_exit=True)
+        check("B4 — a second digest without --replace is refused, naming "
+              "the flag",
+              "--replace" in out, out)
+        out = run_stdin(ws, "", "write", "digest", "--show")
+        check("B6 — --show prints the stored digest and the tally",
+              '"p1"' in out and "3 UNACCOUNTED" in out, out)
+
+        # ---- B20-B27: dispositions.
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 1}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B25 — a beat that is not an n in this writeup's plan is "
+              "refused (there is no plan yet)",
+              "is not an n in this writeup's plan" in out, out)
+        run_stdin(ws, REWRITE_PLAN, "write", "plan")
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 99}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B25 — and so is a beat number outside the ratified plan",
+              "beat 99 is not an n in this writeup's plan" in out, out)
+        out = run_stdin(ws, '{"p2": {"disposition": "removed"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B21 — a removal with no reason is refused, on the same "
+              "principle as write reject --reason",
+              "a removal needs a reason" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "deferred"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B22 — an unknown disposition value is refused, naming the "
+              "two that exist",
+              "kept, removed" in out, out)
+        out = run_stdin(ws, '{"p9": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B23 — a disposition on an id the digest does not have is "
+              "refused, naming it",
+              "'p9' is not a point" in out, out)
+        out = run_stdin(ws, '{"x1": {"disposition": "kept"}}',
+                        "write", "digest", "--dispositions", expect_exit=True)
+        check("B24 — a disposition on a non-point id is refused: the "
+              "accounting accounts for points",
+              "'x1' is not a point id" in out, out)
+        out = run_stdin(ws, '{"p1": {"disposition": "kept", "beat": 1}}',
+                        "write", "digest", "--dispositions")
+        check("B20 — dispositions record and tally",
+              "Dispositions recorded: 1 (1 kept, 0 removed)." in out
+              and "Accounting: 1 kept, 0 removed, 2 UNACCOUNTED (p2, p3)."
+              in out, out)
+        out = run_stdin(ws, json.dumps({
+            "p1": {"disposition": "removed",
+                   "reason": "changed my mind — it duplicates 01-choice.md"},
+            "p3": {"disposition": "removed",
+                   "reason": "duplicates 01-choice.md's choice/distinction "
+                             "pairing (i1); 01-choice.md owns it"}}),
+            "write", "digest", "--dispositions")
+        check("B26 — merge, not replace, and the change of mind is REPORTED "
+              "rather than hidden",
+              "Dispositions recorded: 2 (0 kept, 2 removed); 1 overwritten."
+              in out and "p1: kept → removed" in out, out)
+        check("B26 — both ids are present after the merge",
+              "Accounting: 0 kept, 2 removed, 1 UNACCOUNTED (p2)." in out, out)
+        # B5 / RISK K7: --replace is the only way to lose recorded work.
+        shrunk = json.loads(DIGEST_JSON)
+        shrunk["points"] = [p for p in shrunk["points"] if p["id"] != "p3"]
+        shrunk["inconsistencies"] = []
+        out = run_stdin(ws, json.dumps(shrunk), "write", "digest",
+                        "--replace", expect_exit=True)
+        check("B5 — --replace is refused when it would drop an id that "
+              "already carries a disposition",
+              "refusing to replace: p3" in out, out)
+
+        # ---- the loop, ending in the authored removal section.
+        run_stdin(ws, REWRITE_BEAT_1, "write", "propose",
+                  "--why", "carries p1; realizes Choice")
+        run(ws, "guide")
+        out = run_stdin(ws, "", "write", "status")
+        check("I3 — a mid-writeup guidance run still cannot clobber a "
+              "pending beat, digest or no digest",
+              "Pending proposal" in out, out)
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, REWRITE_BEAT_2, "write", "propose",
+                  "--why", "carries p2; realizes Field")
+        run_stdin(ws, "", "write", "accept")
+        run_stdin(ws, REMOVAL_SECTION, "write", "propose",
+                  "--why", "the removal section; quotes the recorded reasons "
+                           "for p1 and p3; introduces no new claim")
+        run_stdin(ws, "", "write", "accept")
+
+        out = run_stdin(ws, "", "write", "complete")
+        check("B28 — complete WARNS and does not block on unaccounted "
+              "points: an unaccounted point is the same kind of open item "
+              "as an unwritten beat, and blocking would reward a fake 'kept'",
+              "Removal accounting: 0 point(s) kept, 2 removed, "
+              "1 UNACCOUNTED." in out
+              and "UNACCOUNTED — no disposition recorded" in out
+              and "p2" in out, out)
+        check("B28 — the warning names the id AND its claim, so the author "
+              "can act on it without going back to the digest",
+              "Fields have positions" in out, out)
+        wu_b = _db.one("SELECT * FROM writeups WHERE id = ?", (wu_b["id"],))
+        check("B28 — and the writeup is nonetheless completed",
+              wu_b["status"] == "completed", wu_b["status"])
+        check("B29 — the tally is persisted, not merely printed",
+              _loads(wu_b["metadata"], {}).get("accounting_at_complete")
+              == {"kept": 0, "removed": 2, "unaccounted": ["p2"]},
+              str(_loads(wu_b["metadata"], {}).get("accounting_at_complete")))
+        text = (ms / "02-essay.md").read_text()
+        check("B32 — the 'What Was Removed and Why' section is ordinary "
+              "authored prose, and being the last beat is what puts it last",
+              "## **What Was Removed and Why**" in text
+              and text.index("## **What Was Removed and Why**")
+              > text.index(REWRITE_BEAT_2), text)
+        rows = _db.all(
+            "SELECT batch_index, state FROM guidance_history "
+            "WHERE batch_id = ? ORDER BY batch_index, created_at",
+            (wu_b["id"],))
+        check("B32 / I5 — the verdict pathway is unchanged: the beat order "
+              "reconstructs from guidance_history by batch_id",
+              [(r["batch_index"], r["state"]) for r in rows]
+              == [(1, "accepted"), (2, "accepted"), (3, "accepted")],
+              str([(r["batch_index"], r["state"]) for r in rows]))
+
+        # ---- B30: fully accounted, no warning.
+        run(ws, "summarize", "rebuild", "--all")
+        run_stdin(ws, "", "write", "start", "02-essay.md",
+                  "--intent", rewrite_id)
+        run_stdin(ws, json.dumps({"points": [
+            {"id": "q1", "claim": "the sole point of the second rewrite"}]}),
+            "write", "digest")
+        run_stdin(ws, json.dumps({"q1": {"disposition": "kept"}}),
+                  "write", "digest", "--dispositions")
+        run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
+                  "write", "plan")
+        run_stdin(ws, "A single beat for the second rewrite.",
+                  "write", "propose", "--why", "carries q1")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("B30 — a fully accounted rewrite reports 0 UNACCOUNTED and "
+              "prints no warning block",
+              "Removal accounting: 1 point(s) kept, 0 removed, "
+              "0 UNACCOUNTED." in out
+              and "UNACCOUNTED — no disposition recorded" not in out, out)
 
         run(ws, "session", "end")
     finally:
@@ -2122,6 +2472,55 @@ def scenario_doc_comments(root: Path) -> None:
           str(pairs))
     check("parents_to_tree inverts tree_to_parents",
           parents_to_tree(pairs) == tree, str(parents_to_tree(pairs)))
+
+    # A10 — insert_toc_entry: the registration `write complete` performs for
+    # an essay the loop created. PURE TEXT INSERTION (RISK K3): a
+    # serialize_toc_tree round trip would silently drop hand comments and
+    # any attribute the serializer does not know about.
+    from authorlm.structure import insert_toc_entry
+    commented = ('# hand comment, must survive\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "a.md"\n'
+                 'illustrations = "3"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "b.md"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "c.md"\n'
+                 'parent = "b.md"\n')
+    inserted, stanza = insert_toc_entry(commented, "new.md", "c.md")
+    check("A10 — the stanza lands after the anchor and carries the anchor's "
+          "parent (structural depth is deterministic); it never guesses "
+          "matter or any other semantic attribute",
+          'file = "new.md"' in stanza and 'parent = "b.md"' in stanza
+          and "matter" not in stanza, stanza)
+    check("A10 — the insertion puts it in the right reading position",
+          [n for n, _ in parse_toc_tree(inserted)]
+          == ["a.md", "b.md", "c.md", "new.md"],
+          str(parse_toc_tree(inserted)))
+    check("A10 — the hand comment and the unknown attribute survive "
+          "byte-for-byte",
+          "# hand comment, must survive" in inserted
+          and 'illustrations = "3"' in inserted, inserted)
+    check("A10 — every line that was there before is still there, verbatim",
+          all(line in inserted.splitlines()
+              for line in commented.splitlines() if line.strip()),
+          inserted)
+    at_start, stanza = insert_toc_entry(commented, "new.md", "start")
+    check("A10 — the PLACEMENT_START sentinel inserts before the first "
+          "[[chapter]], and there is no anchor whose parent to carry",
+          [n for n, _ in parse_toc_tree(at_start)]
+          == ["new.md", "a.md", "b.md", "c.md"]
+          and "parent" not in stanza, at_start)
+    check("A10 — an anchor the toc does not name returns None: the caller "
+          "warns and prints the stanza rather than guessing a position",
+          insert_toc_entry(commented, "new.md", "nope.md") is None)
+    same, stanza = insert_toc_entry(commented, "a.md", "c.md")
+    check("A10 — registering a file the toc already lists is idempotent: "
+          "the text comes back unchanged",
+          same == commented and stanza == "", same)
 
     doc_tabs = [{"tabProperties": {"tabId": "t.a", "title": "a.md"},
                  "childTabs": [

@@ -3274,14 +3274,54 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            accounting = result["accounting"]
+            if accounting:
+                unaccounted = accounting["unaccounted"]
+                headline = (f"Removal accounting: {len(accounting['kept'])} "
+                            f"point(s) kept, {len(accounting['removed'])} "
+                            f"removed, {len(unaccounted)} UNACCOUNTED.")
+                print(ui.yellow(headline) if unaccounted else headline)
+                if unaccounted:
+                    print(ui.yellow(
+                        "  UNACCOUNTED — no disposition recorded, and no "
+                        "'What Was Removed and Why' entry can be trusted "
+                        "while these are open:"))
+                    for point_id in unaccounted:
+                        claim = accounting["claims"].get(point_id, "")
+                        print(ui.yellow(f'    {point_id}  "{claim}"'))
+                    print(ui.yellow("  Record them: write digest "
+                                    "--dispositions  (JSON on stdin)."))
+            if result["toc_registered"]:
+                print(f"Registered {result['summary_hint']} in toc.toml "
+                      f"after {result['toc_placement']}.")
+            elif result["toc_registered"] is False:
+                print(ui.yellow(
+                    f"could not place {result['summary_hint']} in toc.toml "
+                    f"automatically — add this stanza after the "
+                    f"{result['toc_placement']} entry:"))
+                print(result["toc_stanza"])
+            print(ui.dim(
+                f"{result['summary_hint']}'s summary is now stale — run "
+                f"'summarize rebuild' before the next writeup or critique "
+                f"pass on its neighbours."))
             print("Intent completion is separate: intent complete "
                   f"{result['intent_id'][:11]} (runs episode analysis).")
         elif args.action == "abandon":
             result = api.write_abandon(db, manuscript, config, prefix=prefix)
-            restored = ("file restored from the pinned source version"
-                        if result["restored"] else
-                        ui.yellow("source version missing — file NOT restored"))
-            print(f"Writeup [{result['writeup_id'][:11]}] abandoned; {restored}.")
+            if result["deleted"]:
+                print(f"Writeup [{result['writeup_id'][:11]}] abandoned; "
+                      f"{result['file']} deleted — the writeup created it, "
+                      f"so the restore target is nonexistence.")
+                if result["had_text"] and result["preserved_in_version"]:
+                    print(f"Its text is preserved in "
+                          f"v{result['preserved_in_version']} (nothing typed "
+                          f"into it was lost).")
+            else:
+                restored = ("file restored from the pinned source version"
+                            if result["restored"] else
+                            ui.yellow("source version missing — file NOT restored"))
+                print(f"Writeup [{result['writeup_id'][:11]}] abandoned; "
+                      f"{restored}.")
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
 

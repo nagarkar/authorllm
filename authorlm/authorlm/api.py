@@ -1423,10 +1423,52 @@ def write_complete(db: Database, manuscript: dict, config: dict,
                    prefix: str | None = None) -> dict:
     """Close the writeup: final collect, then the extraction pass that was
     deferred during the loop (per-beat collects are deterministic-only).
-    Intent completion stays a separate, conversational complete_intent."""
+    Intent completion stays a separate, conversational complete_intent.
+
+    Two things happen before that collect. A writeup that created its file
+    registers it in toc.toml at the declared placement — without it the
+    essay is finished, on disk, and structurally invisible, and the next
+    pass in its neighbourhood is refused for a file the author believes is
+    done. And a writeup carrying a digest gets its removal accounting
+    computed and PERSISTED, so the number is in history rather than only
+    in the author's scrollback. The accounting warns; it never blocks
+    (design §13.2)."""
+    from . import structure as struct
+
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    meta = loads(writeup["metadata"], {})
+    path = Path(manuscript["path"]) / writeup["file"]
+    placement = meta.get("placement")
+    toc_registered = None
+    toc_stanza = None
+    if (meta.get("created_file") and placement and path.exists()
+            and path.read_text(encoding="utf-8").strip()):
+        toc_path = Path(manuscript["path"]) / struct.TOC_FILENAME
+        toc_text = (toc_path.read_text(encoding="utf-8")
+                    if toc_path.exists() else "")
+        outcome = struct.insert_toc_entry(toc_text, writeup["file"], placement)
+        if outcome is None:
+            toc_registered = False
+            # No anchor found, so no parent to carry: the stanza the author
+            # pastes is the minimal honest one.
+            toc_stanza = f'[[chapter]]\nfile = "{writeup["file"]}"\n'
+        else:
+            new_text, toc_stanza = outcome
+            # The toc write must precede the collect below, so the
+            # structural change lands in the same version as the prose.
+            if new_text != toc_text:
+                toc_path.write_text(new_text, encoding="utf-8")
+            toc_registered = True
+    accounting = _accounting(writeup)
+    if accounting is not None:
+        meta["accounting_at_complete"] = {
+            "kept": len(accounting["kept"]),
+            "removed": len(accounting["removed"]),
+            "unaccounted": accounting["unaccounted"],
+        }
+        db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
     report = collect(db, manuscript, config, source="write-complete")
     extraction = None
     llm = LLMClient(config)
@@ -1449,33 +1491,64 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "beats_done": writeup["cursor"], "beats_unwritten": remaining,
             "tallies": _beat_tallies(db, writeup),
             "learnings": loads(writeup["learnings"], []),
+            "accounting": accounting, "toc_registered": toc_registered,
+            "toc_stanza": toc_stanza, "toc_placement": placement,
+            "summary_hint": writeup["file"],
             "collect": report, "extraction": extraction}
 
 
 def write_abandon(db: Database, manuscript: dict, config: dict,
                   prefix: str | None = None) -> dict:
     """Abandon the writeup and restore the file from the pinned source
-    version — a truncated file with a dead writeup is the worst end state."""
+    version — a truncated file with a dead writeup is the worst end state.
+
+    For a writeup that CREATED its file (UC-A) the restore target is
+    nonexistence, so the file is deleted. The pinned version does not
+    contain the file at all; without this branch the restore silently
+    did nothing and reported 'source version missing' — technically true,
+    entirely misleading, and it left the file behind."""
     # Snapshot whatever the author has on disk right now — even a
     # half-typed, never-collected draft — before it gets overwritten by
     # the restored source text below (BUG-2 / A1: a destructive write
     # must never be the first thing that observes the current state).
+    # RISK K2: this stays the FIRST statement. Deleting above it would
+    # take an author's uncollected text with no recovery point at all.
     collect(db, manuscript, config, source="pre-write-abandon")
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    path = Path(manuscript["path"]) / writeup["file"]
+    if loads(writeup["metadata"], {}).get("created_file"):
+        preserved = db.one(
+            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        had_text = path.exists() and bool(
+            path.read_text(encoding="utf-8").strip())
+        path.unlink(missing_ok=True)
+        # This collect records the file_removed transition, and any concept
+        # whose primary location was this file raises a `vanished` proposal.
+        # That noise is the honest result — the same noise §9.4 accepts for
+        # a truncate-and-rebuild.
+        report = collect(db, manuscript, config, source="write-abandon")
+        db.update("writeups", writeup["id"], {"status": "abandoned"})
+        return {"writeup_id": writeup["id"], "restored": False,
+                "deleted": True, "had_text": had_text,
+                "preserved_in_version": (preserved["version_no"]
+                                         if preserved else None),
+                "file": writeup["file"], "collect": report}
     source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
                     (writeup["source_version_id"],))
     restored = False
     if source:
         content = loads(source["files"], {}).get(writeup["file"])
         if content is not None:
-            (Path(manuscript["path"]) / writeup["file"]).write_text(
-                content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
             restored = True
     report = collect(db, manuscript, config, source="write-abandon")
     db.update("writeups", writeup["id"], {"status": "abandoned"})
     return {"writeup_id": writeup["id"], "restored": restored,
+            "deleted": False, "had_text": False,
+            "preserved_in_version": None, "file": writeup["file"],
             "collect": report}
 
 
