@@ -5106,6 +5106,53 @@ def main_test() -> None:
               and "Renders lettering reliably" not in il.craft_text(
                   {"llm": {"image_model": "other/model"}},
                   workspace=str(root)))
+
+        # --- AD/illus-config: [illustrations] is authoritative for the
+        # illustration model/size, [llm] is the fallback for configs that
+        # haven't migrated, then the hardcoded default. One helper
+        # (llm.resolve_image_setting) is the single seam for this
+        # precedence; exercised directly (hermetic, no LLM calls) plus
+        # once through a real call site (illus.craft_text). ---
+        from authorlm.llm import DEFAULT_IMAGE_MODEL, resolve_image_setting
+
+        check("[illustrations] model wins over a different [llm] image_model",
+              resolve_image_setting(
+                  {"illustrations": {"model": "openai/gpt-image-2"},
+                   "llm": {"image_model": "gemini/other"}},
+                  "model", "image_model", DEFAULT_IMAGE_MODEL)
+              == "openai/gpt-image-2")
+        check("no [illustrations] section: [llm] image_model still used",
+              resolve_image_setting(
+                  {"llm": {"image_model": "gemini/other"}},
+                  "model", "image_model", DEFAULT_IMAGE_MODEL)
+              == "gemini/other")
+        check("neither section set: image_model falls back to the default",
+              resolve_image_setting({}, "model", "image_model",
+                                    DEFAULT_IMAGE_MODEL)
+              == DEFAULT_IMAGE_MODEL)
+        check("[illustrations] image_size wins over a different "
+              "[llm] image_size",
+              resolve_image_setting(
+                  {"illustrations": {"image_size": "1536x1024"},
+                   "llm": {"image_size": "1024x1024"}},
+                  "image_size", "image_size", "")
+              == "1536x1024")
+        check("no [illustrations] section: [llm] image_size still used",
+              resolve_image_setting(
+                  {"llm": {"image_size": "1024x1024"}},
+                  "image_size", "image_size", "")
+              == "1024x1024")
+        check("neither section set: image_size falls back to the "
+              "empty default",
+              resolve_image_setting({}, "image_size", "image_size", "")
+              == "")
+        check("craft file honors [illustrations] model over [llm] at a "
+              "real call site (illus.craft_text)",
+              "Renders lettering reliably" in il.craft_text(
+                  {"illustrations": {"model": "gpt-image-2"},
+                   "llm": {"image_model": "other/model"}},
+                  workspace=str(root)))
+
         api.collect(db, manuscript, {})
 
         # --- Doc mirror: the reserved 'illustrations' tab tree ---

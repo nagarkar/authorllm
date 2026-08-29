@@ -495,12 +495,14 @@ def craft_text(config: dict, workspace: str | None = None) -> str:
     and ignored so callers need not care."""
     from . import paths
 
+    from .llm import resolve_image_setting
+
     path = paths.craft_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_CRAFT, encoding="utf-8")
     text = path.read_text(encoding="utf-8")
-    model = (config.get("llm", {}) or {}).get("image_model", "")
+    model = resolve_image_setting(config, "model", "image_model", "")
     sections = re.split(r"(?m)^## Model:\s*", text)
     out = sections[0].rstrip()
     for section in sections[1:]:
@@ -723,7 +725,7 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     render; an existing embed is NEVER moved — that is `pick`'s job."""
     from datetime import datetime, timezone
 
-    from .llm import DEFAULT_IMAGE_MODEL, generate_image
+    from .llm import DEFAULT_IMAGE_MODEL, generate_image, resolve_image_setting
 
     generator = generator or (lambda prompt, input_png:
                               generate_image(config, prompt, input_png))
@@ -745,8 +747,8 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     next_n = max((int(c["n"]) for c in existing), default=0) + 1
     directory = root / ILLUS_DIR
     directory.mkdir(exist_ok=True)
-    model = (config.get("llm", {}) or {}).get("image_model",
-                                              DEFAULT_IMAGE_MODEL)
+    model = resolve_image_setting(config, "model", "image_model",
+                                  DEFAULT_IMAGE_MODEL)
     written = []
     for offset in range(count):
         img = generator(prompt, input_png)
