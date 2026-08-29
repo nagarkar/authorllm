@@ -2123,6 +2123,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
         check("B4 — a second digest without --replace is refused, naming "
               "the flag",
               "--replace" in out, out)
+        before_requests = StubLLMHandler.REQUESTS
         out = run_stdin(ws, "", "write", "digest", "--show")
         check("B6 — --show prints the stored digest and the tally",
               '"p1"' in out and "3 UNACCOUNTED" in out, out)
@@ -2186,6 +2187,12 @@ def scenario_write_new_and_digest(root: Path) -> None:
         check("B5 — --replace is refused when it would drop an id that "
               "already carries a disposition",
               "refusing to replace: p3" in out, out)
+        check("I4 — write digest --show / --dispositions / --replace and "
+              "write plan make zero LLM requests between them: the verbs are "
+              "deterministic state, gates and evidence, and every piece of "
+              "model work stays in the conversation",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
 
         # ---- the loop, ending in the authored removal section.
         run_stdin(ws, REWRITE_BEAT_1, "write", "propose",
