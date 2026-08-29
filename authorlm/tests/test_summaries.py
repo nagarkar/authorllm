@@ -146,6 +146,13 @@ def main_test() -> None:
                         "gamma.md"], str(order))
         check("everything is missing before the first build",
               all(r["state"] == "missing" for r in sums.status(db, manuscript)))
+        bare = sums.drafting_context(db, manuscript, "alpha.md")
+        check("with no summaries at all the drafting context still renders "
+              "(it is the resume view, never a gate) but every entry is "
+              "loudly marked, not quietly blank",
+              bare.count("!! summary MISSING") == 4
+              and bare.count("(no summary — run 'summarize rebuild')") == 4,
+              bare)
 
         print("full rebuild:")
         import tomllib
@@ -206,6 +213,48 @@ def main_test() -> None:
         check("a summary omitting a paragraph reports exactly which one",
               gappy["missing"] == [2] and gappy["out_of_range"] == []
               and not gappy["complete"], str(gappy))
+        # Z-M1: the form the REAL summarizer writes is a cross-bracket
+        # range, "[1]-[11]", not the in-bracket "[2-3]" the prompt's
+        # example shows. Parsing only the latter counted every interior
+        # paragraph as missing — the live rebuild reported 350+ missing
+        # across 18 of 24 essays where the truth is 11 of 1,138.
+        cross = sums.paragraph_coverage(
+            "MOVES: [1]-[4] set up the problem; [6] closes it.", 6)
+        check("a CROSS-BRACKET range counts every paragraph it spans, not "
+              "just its two endpoints",
+              cross["cited"] == [1, 2, 3, 4, 6] and cross["missing"] == [5]
+              and cross["out_of_range"] == [], str(cross))
+        check("an en-dash cross-bracket range, whitespace and all, parses too",
+              sums._cited_paragraphs("[2] – [5]") == {2, 3, 4, 5},
+              str(sums._cited_paragraphs("[2] – [5]")))
+        check("the in-bracket range form still parses (unchanged)",
+              sums._cited_paragraphs("[2-3]") == {2, 3})
+        check("a bare hyphenated number in prose is NOT a citation — the "
+              "brackets are what make it one",
+              sums._cited_paragraphs("the argument of 3-4 pages") == set(),
+              str(sums._cited_paragraphs("the argument of 3-4 pages")))
+        check("a range consumes both its brackets, so a citation right "
+              "after it is still read on its own",
+              sums._cited_paragraphs("[1]-[3], then [7]") == {1, 2, 3, 7},
+              str(sums._cited_paragraphs("[1]-[3], then [7]")))
+        # The flip side of parsing ranges: one malformed blanket range can
+        # now put ~100 out-of-range numbers into a coverage note, and that
+        # note goes verbatim into the drafting payload.
+        six_paras = "\n\n".join(f"Paragraph {i}." for i in range(1, 7))
+        blanket = sums._coverage_note(
+            {"summary": "MOVES: [1]-[100] covers the lot.", "state": "fresh"},
+            six_paras)
+        check("a malformed blanket range does not dump 94 numbers into the "
+              "drafting payload — the list is capped and says how many "
+              "more it is hiding",
+              blanket.count("¶") == sums.COVERAGE_LIST_CAP
+              and "…and 86 more" in blanket
+              and "the essay has 6 paragraph(s)" in blanket, blanket)
+        short = sums._coverage_note(
+            {"summary": "MOVES: [1] only.", "state": "fresh"}, six_paras)
+        check("a short list is NOT capped — no '…and N more' noise when "
+              "every number already fits",
+              "…and" not in short and short.count("¶") == 5, short)
         invented = sums.paragraph_coverage(
             "MOVES: [1] states the claim. [7] invents a paragraph.", 2)
         check("a citation past PARAGRAPH COUNT is reported as out-of-range "
@@ -235,6 +284,37 @@ def main_test() -> None:
               and [a["file"] for a in after] == ["beta.md", "gamma.md"]
               and all(b["state"] == "fresh" for b in before + after))
 
+        print("drafting context (§12.4 item 1 — the L1 glue) with LOUD "
+              "coverage reporting (item 4 — informational, never blocking):")
+        ctx = sums.drafting_context(db, manuscript, "alpha.md")
+        check("BEFORE holds the settled prefix in reading order and AFTER "
+              "the upcoming essays, each entry labeled with its file",
+              ctx.index("BEFORE") < ctx.index("[title.md]")
+              < ctx.index("[part1.md]") < ctx.index("AFTER")
+              < ctx.index("[beta.md]") < ctx.index("[gamma.md]"), ctx)
+        check("the essay being drafted is never an entry in its own context",
+              "[alpha.md]" not in ctx, ctx)
+        check("each entry carries its stored summary verbatim",
+              "summary of title.md conditioned on 0 prior" in ctx
+              and "summary of gamma.md conditioned on 4 prior" in ctx, ctx)
+        check("AFTER is marked as forward-reference material only (§7's "
+              "continuity contract), BEFORE as available",
+              "forward-reference" in ctx.split("AFTER", 1)[1]
+              and "AVAILABLE" in ctx.split("BEFORE", 1)[1].split("AFTER", 1)[0]
+              and "NOT available" in ctx.split("AFTER", 1)[1], ctx)
+        check("serialization is deterministic (§3: a silent invalidator "
+              "forfeits the cache economics) — two renders of unchanged "
+              "state are byte-identical, no timestamps, no run ids",
+              ctx == sums.drafting_context(db, manuscript, "alpha.md"), ctx)
+        check("incomplete paragraph coverage is reported LOUDLY per entry "
+              "(the echo stub cites no paragraph number at all)",
+              ctx.count("coverage INCOMPLETE") == 4
+              and ctx.count("¶1, ¶2 uncited") == 4, ctx)
+        check("...and it never blocks: the context still renders every "
+              "summary in full (item 4's default is informational)",
+              all(f"[{f}]" in ctx for f in
+                  ("title.md", "part1.md", "beta.md", "gamma.md")), ctx)
+
         print("mark, don't cascade:")
         calls_before_collect = len(EchoSummarizer.calls)
         (ms / "alpha.md").write_text("# alpha\n\nText of alpha, revised.\n")
@@ -252,6 +332,29 @@ def main_test() -> None:
               and states["gamma.md"] == "upstream_stale")
         check("upstream units are untouched",
               states["title.md"] == "fresh" and states["part1.md"] == "fresh")
+
+        print("...and the drafting context says so LOUDLY — the less "
+              "trustworthy entry must not be the quieter one:")
+        ctx = sums.drafting_context(db, manuscript, "gamma.md")
+        stale_block = ctx.split("[alpha.md]", 1)[1].split("[beta.md]", 1)[0]
+        check("a STALE entry — exactly what the write_start gate refuses — "
+              "carries a loud warning naming the fix",
+              "!! summary STALE" in stale_block
+              and "summarize rebuild" in stale_block, ctx)
+        check("...and its summary text is still rendered: loud, not "
+              "blocking (write status is the resume entry point)",
+              "summary of alpha.md conditioned on 2 prior" in stale_block,
+              ctx)
+        fresh_block = ctx.split("[title.md]", 1)[1].split("[part1.md]", 1)[0]
+        check("a FRESH entry carries no such warning — the marker means "
+              "something because it is not on everything",
+              "!! summary STALE" not in fresh_block
+              and "!! summary MISSING" not in fresh_block, ctx)
+        upstream_block = ctx.split("[beta.md]", 1)[1]
+        check("an UPSTREAM_STALE entry carries no warning either — the "
+              "gate tolerates it (its text did not move, only its "
+              "conditioning), so the context must not cry wolf",
+              "!! summary" not in upstream_block, ctx)
 
         print("rebuild_one (the confirmation-gate rebuild):")
         EchoSummarizer.calls.clear()
@@ -332,6 +435,143 @@ def main_test() -> None:
               "paragraph coverage incomplete" in buf.getvalue()
               and "missing paragraph(s) [1, 2]" in buf.getvalue(),
               buf.getvalue())
+
+        print("deprecated status (§12.4 item 5): a departed essay's summary "
+              "is respected as not-live, and RESURRECTED when the file "
+              "returns to the toc:")
+        from authorlm import passes as _passes
+        gamma_text = (ms / "gamma.md").read_text()
+        (ms / "gamma.md").unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+        row = db.one("SELECT status FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = 'gamma.md'",
+                     (manuscript["id"],))
+        check("a departed essay's summary is marked deprecated, never "
+              "deleted (commit 10497c9's semantics)",
+              row is not None and row["status"] == "deprecated",
+              str(dict(row)) if row else "no row")
+        # It comes back byte-identical, so `source_hash` still matches —
+        # the exact hazard: without status in the freshness computation the
+        # row would read 'fresh' and silently condition a drafting pass
+        # while the DB still says it is not a live summary.
+        (ms / "gamma.md").write_text(gamma_text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("a returned essay whose row is still deprecated reads "
+              "'deprecated', not 'fresh' — a matching source_hash must not "
+              "let a not-live row pass as a live summary",
+              states["gamma.md"] == "deprecated", str(states))
+        _b, after = sums.before_after(db, manuscript, "beta.md")
+        check("before_after (what the edit and drafting contexts read) "
+              "reports the deprecated state per entry",
+              {e["file"]: e["state"] for e in after}["gamma.md"]
+              == "deprecated", str(after))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "status"])
+        check("summarize status renders the deprecated state (a new state "
+              "must not KeyError the CLI's colour table)",
+              "deprecated" in buf.getvalue(), buf.getvalue())
+        dep_ctx = sums.drafting_context(db, manuscript, "beta.md")
+        check("the drafting context marks a DEPRECATED entry loudly too — "
+              "the third state the start gate refuses",
+              "!! summary DEPRECATED" in dep_ctx.split("[gamma.md]", 1)[1],
+              dep_ctx)
+        ready = _passes.summaries_ready(db, manuscript, "beta.md")
+        check("summaries_ready blocks on a deprecated summary exactly as "
+              "on a missing or stale one",
+              not ready["ok"] and ready["deprecated"] == ["gamma.md"],
+              str({k: v for k, v in ready.items()
+                   if k in ("ok", "missing", "stale", "deprecated")}))
+        EchoSummarizer.calls.clear()
+        resurrect = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        check("the incremental rebuild TARGETS the deprecated unit (it is "
+              "not fresh) instead of reusing it",
+              resurrect["built"] == ["gamma.md"], str(resurrect))
+        check("rebuilding the returned essay flips its row back to "
+              "'current' — the resurrect path",
+              db.one("SELECT status FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = 'gamma.md'",
+                     (manuscript["id"],))["status"] == "current")
+        check("...and it reads fresh again, so the gate clears",
+              {r["file"]: r["state"]
+               for r in sums.status(db, manuscript)}["gamma.md"] == "fresh"
+              and _passes.summaries_ready(db, manuscript, "beta.md")["ok"])
+
+        print("placement-aware before_after (§12.4 item 3 — an essay with "
+              "no toc entry yet):")
+        # The design said an unplaced essay "raises LookupError from
+        # before_after". It did not: structure.reading_order APPENDS an
+        # on-disk file missing from toc.toml, so it landed at the END of
+        # the reading order and every other essay read as settled context
+        # behind it with nothing ahead — §7's forward-reference contract
+        # inverted, silently, for exactly the file being drafted. That
+        # silence is the bug; the position is not guessable, so it must be
+        # refused.
+        (ms / "delta.md").write_text("# delta\n\nText of delta.\n")
+        order_now = [f for f, _ in sums.units(manuscript)]
+        check("an unlisted-but-on-disk essay IS still appended to the "
+              "reading order (structure.reading_order is unchanged)",
+              order_now[-1] == "delta.md" and len(order_now) == 6,
+              str(order_now))
+        try:
+            sums.before_after(db, manuscript, "delta.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("...but before_after REFUSES it with no placement rather "
+              "than silently treating it as the last essay, and names both "
+              "remedies (a toc entry, or --after)",
+              raised is not None and "no toc.toml entry" in raised
+              and "--after" in raised and "--after start" in raised,
+              str(raised))
+        before, after = sums.before_after(db, manuscript, "delta.md",
+                                          placement="alpha.md")
+        check("placement=<existing file> splits the context as if delta sat "
+              "immediately after that file",
+              [b["file"] for b in before] == ["title.md", "part1.md",
+                                              "alpha.md"]
+              and [a["file"] for a in after] == ["beta.md", "gamma.md"],
+              str(([b["file"] for b in before], [a["file"] for a in after])))
+        before, after = sums.before_after(db, manuscript, "delta.md",
+                                          placement=sums.PLACEMENT_START)
+        check("placement=PLACEMENT_START puts the new essay first — nothing "
+              "settled behind it, the whole book ahead as forward-reference "
+              "material",
+              before == []
+              and [a["file"] for a in after] == ["title.md", "part1.md",
+                                                 "alpha.md", "beta.md",
+                                                 "gamma.md"], str(after))
+        try:
+            sums.before_after(db, manuscript, "delta.md",
+                              placement="no-such-file.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("an unknown placement target is refused, never guessed at",
+              raised is not None and "no-such-file.md" in raised, str(raised))
+        try:
+            sums.before_after(db, manuscript, "never-existed.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("a file that is not on disk at all still raises LookupError "
+              "with no placement (the unchanged path)",
+              raised is not None and "never-existed.md" in raised, str(raised))
+        ctx = sums.drafting_context(db, manuscript, "delta.md",
+                                    placement="alpha.md")
+        check("drafting_context carries the placement through, and says so "
+              "in its header so the drafting model knows where it stands",
+              "placed after alpha.md" in ctx
+              and ctx.index("[alpha.md]") < ctx.index("AFTER")
+              < ctx.index("[beta.md]"), ctx)
+        check("PLACEMENT_START renders its own header",
+              "placed first" in sums.drafting_context(
+                  db, manuscript, "delta.md",
+                  placement=sums.PLACEMENT_START))
+        (ms / "delta.md").unlink()
 
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()

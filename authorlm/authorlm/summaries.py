@@ -35,6 +35,10 @@ DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
 MIN_SUMMARY_WORDS = 40
 MAX_SUMMARY_WORDS = 500
 
+# The sentinel placement for an essay that opens the book — the one
+# position `after=<file>` cannot name (design §12.4 item 3).
+PLACEMENT_START = "start"
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -61,16 +65,32 @@ def _numbered_paragraphs(text: str) -> tuple[str, int]:
     return "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paras, 1)), len(paras)
 
 
-_CITATION_RE = re.compile(r"\[(\d+)(?:-(\d+))?\]")
+# Two citation forms, and the CROSS-BRACKET one comes first on purpose.
+# The prompt's example shows "[2-3]", but what the real summarizer writes
+# is "[1]-[11]" — and reading that as two single citations counted every
+# paragraph between them as missing (the live rebuild reported 350+
+# uncited across 18 of 24 essays where the true figure was 11 of 1,138).
+# Alternation is tried left to right at each position, so a cross-bracket
+# range consumes both of its brackets and its endpoints are never also
+# read as singles. Dashes: hyphen, en-dash, em-dash, any surrounding
+# whitespace. Brackets are required either way — "3-4" in prose is prose.
+_CITATION_RE = re.compile(
+    r"\[(\d+)\]\s*[-–—]\s*\[(\d+)\]"
+    r"|\[(\d+)(?:\s*[-–—]\s*(\d+))?\]"
+)
 
 
 def _cited_paragraphs(summary: str) -> set[int]:
-    """Every paragraph number MOVES actually cited (single "[3]" or range
-    "[2-3]" — both forms the prompt's example uses collapse to the same
-    per-number set)."""
+    """Every paragraph number MOVES actually cited — single "[3]",
+    in-bracket range "[2-3]", or cross-bracket range "[2]-[3]" — all
+    collapsing to the same per-number set."""
     cited: set[int] = set()
-    for lo_s, hi_s in _CITATION_RE.findall(summary):
-        lo, hi = int(lo_s), int(hi_s) if hi_s else int(lo_s)
+    for m in _CITATION_RE.finditer(summary):
+        if m.group(1) is not None:
+            lo, hi = int(m.group(1)), int(m.group(2))
+        else:
+            lo = int(m.group(3))
+            hi = int(m.group(4)) if m.group(4) else lo
         if hi < lo:
             lo, hi = hi, lo
         cited.update(range(lo, hi + 1))
@@ -125,54 +145,242 @@ def units(manuscript: dict) -> list[tuple[str, str]]:
     return ordered_items(files)
 
 
+def _units_and_unlisted(manuscript: dict) -> tuple[dict[str, str], list[str]]:
+    """`units()` as a dict, plus the files structure.reading_order had to
+    APPEND because toc.toml never mentions them. `units()` discards that
+    second element; before_after cannot afford to, because an appended
+    file's position is a fallback, not a declaration."""
+    from .revisions import read_manuscript_files
+    from .structure import reading_order
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    order, unlisted = reading_order(files)
+    return {name: files[name] for name in order if name in files}, unlisted
+
+
 def all_summaries(db: Database, manuscript_id: str) -> dict[str, dict]:
     return {r["file"]: dict(r) for r in db.all(
         "SELECT * FROM essay_summaries WHERE manuscript_id = ?",
         (manuscript_id,))}
 
 
+def _state(row, text: str) -> str:
+    """One unit's freshness. `deprecated` outranks the hash checks: the
+    row belongs to an essay that LEFT the toc (api._deprecate_departed_
+    summaries, commit 10497c9) and has come back. Its source_hash can
+    match by coincidence — the file returned unedited — but the DB says
+    it is not a live summary, so it must never read as `fresh`; it needs
+    a rebuild, which is also what resurrects it to 'current'."""
+    if not row:
+        return "missing"
+    if row["status"] == "deprecated":
+        return "deprecated"
+    if row["source_hash"] != _hash(text):
+        return "stale"
+    return "upstream_stale" if row["upstream_stale"] else "fresh"
+
+
 def status(db: Database, manuscript: dict) -> list[dict]:
     """Per-unit freshness in reading order: fresh | stale (text changed)
-    | upstream_stale | missing."""
+    | upstream_stale | deprecated | missing."""
     have = all_summaries(db, manuscript["id"])
     out = []
     for file, text in units(manuscript):
         row = have.get(file)
-        if not row:
-            state = "missing"
-        elif row["source_hash"] != _hash(text):
-            state = "stale"
-        elif row["upstream_stale"]:
-            state = "upstream_stale"
-        else:
-            state = "fresh"
+        state = _state(row, text)
         out.append({"file": file, "state": state,
                     "words": len(row["summary"].split()) if row else 0,
                     "created_at": row["created_at"] if row else None})
     return out
 
 
-def before_after(db: Database, manuscript: dict,
-                 file: str) -> tuple[list[dict], list[dict]]:
+def before_after(db: Database, manuscript: dict, file: str,
+                 placement: str | None = None
+                 ) -> tuple[list[dict], list[dict]]:
     """Summaries of the units before and after `file` in reading order —
-    the edit pass's book-context. Each entry: {file, summary, state}."""
+    the edit pass's book-context, and (with `placement`) the drafting
+    pass's. Each entry: {file, summary, state}.
+
+    `placement` overrides where `file` sits, for an essay whose toc entry
+    is not committed yet (design §12.4 item 3). It is either
+    PLACEMENT_START (the new essay opens the book) or the name of an
+    existing unit it follows.
+
+    An essay missing from toc.toml is REFUSED without one. It is not
+    absent from the reading order — structure.reading_order appends it —
+    but that appended position is a fallback, and taking it at face value
+    would put the whole book behind the new essay and nothing ahead of
+    it: §7's continuity contract exactly inverted, silently, for the one
+    file whose placement actually matters. The position is not guessable,
+    so it is asked for rather than assumed."""
     have = all_summaries(db, manuscript["id"])
-    order = [f for f, _ in units(manuscript)]
-    if file not in order:
-        raise LookupError(f"'{file}' is not in the manuscript's reading order")
-    idx = order.index(file)
-    texts = dict(units(manuscript))
+    texts, unlisted = _units_and_unlisted(manuscript)
+    order = list(texts)
+    if placement is None:
+        if file not in order:
+            raise LookupError(f"'{file}' is not in the manuscript's reading order")
+        if file in unlisted:
+            # Both remedies, in the right order for BOTH callers. Every
+            # pass that reads this function needs the toc entry, so that
+            # goes first and unqualified; the --after flag exists only on
+            # 'write start', so it is marked as such rather than handed
+            # to a 'critique run' user as advice for a different verb.
+            raise LookupError(
+                f"'{file}' has no toc.toml entry, so the reading order "
+                f"cannot say what is settled before it and what is still "
+                f"to come (unlisted files are appended to the end, which "
+                f"would read as 'the whole book is behind me'). Add it to "
+                f"toc.toml — that is the fix for any pass. When STARTING "
+                f"A WRITEUP on it, 'authorlm write start {file}' can take "
+                f"the placement instead, for that writeup only: "
+                f"--after <file it follows>  |  --after {PLACEMENT_START}")
+        idx = order.index(file)
+        before_files, after_files = order[:idx], order[idx + 1:]
+    else:
+        rest = [f for f in order if f != file]
+        if placement == PLACEMENT_START:
+            before_files, after_files = [], rest
+        elif placement in rest:
+            cut = rest.index(placement) + 1
+            before_files, after_files = rest[:cut], rest[cut:]
+        else:
+            raise LookupError(
+                f"placement '{placement}' is not in the manuscript's reading "
+                f"order — name an existing unit to follow, or "
+                f"'{PLACEMENT_START}' to open the book")
 
     def entry(f):
         row = have.get(f)
-        if not row:
-            return {"file": f, "summary": None, "state": "missing"}
-        state = ("stale" if row["source_hash"] != _hash(texts[f])
-                 else "upstream_stale" if row["upstream_stale"] else "fresh")
-        return {"file": f, "summary": row["summary"], "state": state}
+        state = _state(row, texts[f])
+        return {"file": f, "summary": row["summary"] if row else None,
+                "state": state}
 
-    return ([entry(f) for f in order[:idx]],
-            [entry(f) for f in order[idx + 1:]])
+    return ([entry(f) for f in before_files],
+            [entry(f) for f in after_files])
+
+
+# --------------------------------------------------- drafting context
+
+BEFORE_HEADER = (
+    "BEFORE — settled context, in reading order. These essays are behind "
+    "the reader: their concepts are AVAILABLE (citable, buildable-upon "
+    "using the author's ratified definitions) and must not be "
+    "re-introduced.")
+AFTER_HEADER = (
+    "AFTER — upcoming essays. Their concepts are NOT available: a beat "
+    "that needs one must forward-reference it (\"as a later essay will "
+    "show\"), never assume it.")
+
+# Every line the reader must not skim past starts with this, so one
+# branch in cli._print_drafting_context colours all of them.
+WARN_PREFIX = "!! "
+
+# The three states write_start REFUSES. write_status cannot refuse — it
+# is the resume entry point and must keep working — so it says so
+# loudly instead. Without this the untrustworthy entry was the QUIETER
+# one: its summary rendered as plain text and _coverage_note returned
+# None for it, so a mid-writeup collect could flip a neighbour stale and
+# the resume view would serve, unmarked, the exact lie the start gate
+# had refused. `upstream_stale` is deliberately absent: the gate
+# tolerates it (the text did not move, only the conditioning), and a
+# marker on everything marks nothing.
+STATE_WARNING = {
+    "missing": "summary MISSING — this essay has no summary at all; run "
+               "'summarize rebuild' before drafting against it.",
+    "stale": "summary STALE — the essay's text changed after this summary "
+             "was written, so what follows is a lie about it; run "
+             "'summarize rebuild'.",
+    "deprecated": "summary DEPRECATED — this essay left the toc and came "
+                  "back; run 'summarize rebuild' to resurrect it.",
+}
+
+
+# How many paragraph numbers a coverage note will spell out before it
+# summarizes the rest. Since cross-bracket ranges parse (Z/M1), ONE
+# malformed blanket citation — "[1]-[100]" on a six-paragraph essay —
+# yields 94 out-of-range numbers, and this note goes verbatim into the
+# drafting payload. The count still tells the whole truth; only the
+# enumeration is bounded.
+COVERAGE_LIST_CAP = 8
+
+
+def _paragraph_list(numbers: list[int]) -> str:
+    head = ", ".join(f"¶{n}" for n in numbers[:COVERAGE_LIST_CAP])
+    rest = len(numbers) - COVERAGE_LIST_CAP
+    return head + (f" …and {rest} more" if rest > 0 else "")
+
+
+def _coverage_note(entry: dict, text: str) -> str | None:
+    """Item 4's loudness. Coverage is recomputed here rather than read
+    from a column (`essay_summaries` stores none — summarize_unit
+    computes it fresh too): the stored summary plus the essay's current
+    paragraph count is all `paragraph_coverage` needs, and it is only
+    trustworthy when the two actually correspond, i.e. when source_hash
+    still matches. Reported, never blocking — the same tolerance editing
+    has, made impossible to miss."""
+    if entry["summary"] is None or entry["state"] not in ("fresh",
+                                                          "upstream_stale"):
+        return None
+    from .revisions import _paragraphs
+
+    cov = paragraph_coverage(entry["summary"], len(_paragraphs(text)))
+    if cov["complete"]:
+        return None
+    bits = []
+    if cov["missing"]:
+        bits.append(_paragraph_list(cov["missing"]) + " uncited")
+    if cov["out_of_range"]:
+        bits.append(_paragraph_list(cov["out_of_range"])
+                    + f" cited but the essay has {cov['paragraph_count']} "
+                      "paragraph(s)")
+    return WARN_PREFIX + "coverage INCOMPLETE: " + "; ".join(bits)
+
+
+def drafting_context(db: Database, manuscript: dict, file: str,
+                     placement: str | None = None) -> str:
+    """The L1 book-frame for drafting `file`: the compressed summaries of
+    everything settled before it and everything still to come, as
+    deterministic text (design §12.4 item 1 — the glue `before_after`
+    was missing on the write path).
+
+    Serialization is deliberately stable: reading order, no timestamps,
+    no ids, no counts that drift — §3 requires L0/L1 to be
+    byte-identical across beats or the prompt-cache economics of §4 are
+    forfeited by a silent invalidator.
+
+    `placement` is passed through to `before_after` — an essay whose toc
+    entry is not committed yet still gets the right split, and is refused
+    outright if it declares no placement at all."""
+    before, after = before_after(db, manuscript, file, placement=placement)
+    texts = dict(units(manuscript))
+
+    def block(entries: list[dict], header: str) -> list[str]:
+        lines = [header]
+        if not entries:
+            lines += ["", "(none)"]
+            return lines
+        for e in entries:
+            lines += ["", f"[{e['file']}] ({e['state']})"]
+            warning = STATE_WARNING.get(e["state"])
+            if warning:
+                lines.append(WARN_PREFIX + warning)
+            note = _coverage_note(e, texts.get(e["file"], ""))
+            if note:
+                lines.append(note)
+            lines.append(e["summary"] or
+                         "(no summary — run 'summarize rebuild')")
+        return lines
+
+    if placement == PLACEMENT_START:
+        where = "placed first in the manuscript"
+    elif placement:
+        where = f"placed after {placement}"
+    else:
+        where = "in its committed toc position"
+    return "\n".join(
+        [f"DRAFTING CONTEXT — {file} ({where}).", ""]
+        + block(before, BEFORE_HEADER) + [""]
+        + block(after, AFTER_HEADER))
 
 
 # ------------------------------------------------------------- building
@@ -224,8 +432,13 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
     existing = db.one(
         "SELECT id FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
         (manuscript["id"], file))
+    # `status` is written explicitly, not left to the column default: a
+    # rebuild is exactly how a summary whose file LEFT the toc and came
+    # back is resurrected. Without this the row would stay 'deprecated'
+    # forever and never read as a live summary again.
     fields = {"summary": summary, "source_hash": _hash(text),
-              "upstream_hash": upstream_hash, "upstream_stale": 0}
+              "upstream_hash": upstream_hash, "upstream_stale": 0,
+              "status": "current"}
     if existing:
         db.update("essay_summaries", existing["id"], fields)
         row_id = existing["id"]
@@ -258,8 +471,7 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
     cascade = False
     for file, text in units(manuscript):
         row = have.get(file)
-        fresh = (row is not None and row["source_hash"] == _hash(text)
-                 and not row["upstream_stale"])
+        fresh = _state(row, text) == "fresh"
         if only_missing_or_stale and fresh and not cascade:
             prior.append((file, row["summary"]))
             reused.append(file)

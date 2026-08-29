@@ -608,6 +608,20 @@ worse:
   That is what "capture every paragraph" asked for; it does not require a
   paragraph to have its own summary row.
 
+**Addendum, 2026-08-28 (the Z build pass): read the coverage figure
+narrowly.** `paragraph_coverage` now parses the cross-bracket range the
+real summarizer actually writes (`[1]-[11]`, not just the prompt's
+in-bracket `[2-3]`) — before that fix the metric slandered its own
+summaries, reporting 350+ paragraphs uncited across 18 of 24 essays
+where the true figure is 11 of 1,138. But the corrected parser buys a
+weaker guarantee than it looks: a single blanket range like `[1]-[30]`
+satisfies `complete` on its own. So a complete reading means "no
+paragraph fell outside a cited span", **not** "every paragraph got its
+own move in MOVES". The drafting trial below should not over-trust the
+number — a high coverage rate is necessary, not sufficient, and the
+qualitative half of §12.5 (does the redraft miss anything load-bearing?)
+is what actually tests whether the compression holds.
+
 **This is a measurement gap, not an opinion gap.** `paragraph_coverage` is
 tested against stub responses (this remediation pass is barred from live
 billed LLM calls), so there is no real coverage rate yet against actual
@@ -636,6 +650,24 @@ connection identified in §12.2:
    *committed* TOC; a brand-new essay not yet placed raises `LookupError`
    from `before_after`. Fresh-drafting mode today covers rewrites of
    existing files (§9.4), not essays with no TOC entry yet.
+   **Correction, 2026-08-28 (the Z build pass): the premise above is
+   wrong, and the truth was worse.** An unplaced essay did *not* raise —
+   `structure.reading_order` **appends** an on-disk file that toc.toml
+   never mentions, so `before_after` returned the entire book as settled
+   context *before* it and nothing after: §7's continuity contract
+   exactly inverted, silently, for the one file whose placement actually
+   matters. `LookupError` was in practice unreachable from the write
+   path at all, because `write_start` resolves its argument through
+   `_resolve_relpath`, which only matches files that exist on disk.
+   What is built now: `before_after(..., placement=)` takes either the
+   name of the unit the essay follows or the `PLACEMENT_START` sentinel,
+   surfaced as `write start --after <file> | --after start` and
+   persisted in the writeup's metadata so `write status` recomputes the
+   same split on resume; and, with **no** placement, an unlisted essay
+   is **refused** — naming both remedies (a toc.toml entry, or
+   `--after`) — because an appended position is a fallback, not a
+   declaration, and guessing it silently is the bug this item exists to
+   close.
 4. **A decision on whether incomplete coverage should block drafting.**
    `paragraph_coverage` is informational-only by design for editing (an
    editor can still use a summary short one transitional paragraph). That

@@ -176,14 +176,46 @@ def preflight(db: Database, manuscript: dict, file: str,
     return {"clear": not any(blockers.values()), **blockers}
 
 
-def summaries_ready(db: Database, manuscript: dict, file: str) -> dict:
-    """Missing summaries or a stale (source_hash) one anywhere in the
-    before/after context blocks the run; upstream_stale is tolerated."""
-    before, after = sums.before_after(db, manuscript, file)
-    missing = [e["file"] for e in before + after if e["state"] == "missing"]
-    stale = [e["file"] for e in before + after if e["state"] == "stale"]
-    return {"ok": not missing and not stale, "missing": missing,
-            "stale": stale, "before": before, "after": after}
+def summaries_ready(db: Database, manuscript: dict, file: str,
+                    placement: str | None = None) -> dict:
+    """Missing summaries, a stale (source_hash) one, or a deprecated one
+    anywhere in the before/after context blocks the run; upstream_stale
+    is tolerated. A deprecated row belongs to an essay that left the toc
+    and returned (summaries._state): the DB says it is not a live
+    summary, so it is no more readable than a stale one.
+
+    `placement` is the drafting gate's case (design §12.4 item 3): the
+    context of an essay whose toc entry is not committed yet. It also
+    validates the placement, so `write start --after <nonsense>` is
+    refused here — before anything is truncated."""
+    before, after = sums.before_after(db, manuscript, file,
+                                      placement=placement)
+    entries = before + after
+    missing = [e["file"] for e in entries if e["state"] == "missing"]
+    stale = [e["file"] for e in entries if e["state"] == "stale"]
+    deprecated = [e["file"] for e in entries if e["state"] == "deprecated"]
+    return {"ok": not missing and not stale and not deprecated,
+            "missing": missing, "stale": stale, "deprecated": deprecated,
+            "before": before, "after": after}
+
+
+def summaries_message(ready: dict, pass_name: str) -> str:
+    """The precise refusal for a blocked `summaries_ready` — names every
+    offending file and the one command that fixes it. Shared so the
+    drafting gate (api.write_start) and the edit pass refuse in the same
+    words; there is no --force for either (a lie about the text is not
+    something an author can consent past)."""
+    parts = []
+    if ready["missing"]:
+        parts.append(f"missing summaries: {', '.join(ready['missing'])}")
+    if ready["stale"]:
+        parts.append("stale summaries (text changed): "
+                     f"{', '.join(ready['stale'])}")
+    if ready["deprecated"]:
+        parts.append("deprecated summaries (the essay left the toc and came "
+                     f"back): {', '.join(ready['deprecated'])}")
+    return ("; ".join(parts) + " — run 'summarize rebuild' first "
+            f"(the {pass_name} will not read a lie about the text).")
 
 
 # ---------------------------------------------------- context package
@@ -219,15 +251,7 @@ def build_context(db: Database, manuscript: dict, file: str,
         raise RuntimeError(_gate_message(gate))
     ready = summaries_ready(db, manuscript, file)
     if not ready["ok"]:
-        parts = []
-        if ready["missing"]:
-            parts.append(f"missing summaries: {', '.join(ready['missing'])}")
-        if ready["stale"]:
-            parts.append(f"stale summaries (text changed): "
-                         f"{', '.join(ready['stale'])}")
-        raise RuntimeError("; ".join(parts) + " — run 'summarize rebuild' "
-                           "first (the edit pass will not read a lie about "
-                           "the text).")
+        raise RuntimeError(summaries_message(ready, "edit pass"))
     texts = dict(sums.units(manuscript))
     if file not in texts:
         raise LookupError(f"'{file}' is not in the manuscript's reading order")

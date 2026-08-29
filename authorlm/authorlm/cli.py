@@ -1467,7 +1467,8 @@ def cmd_summarize(args):
         for r in rows:
             counts[r["state"]] = counts.get(r["state"], 0) + 1
             color = {"fresh": ui.green, "stale": ui.yellow,
-                     "upstream_stale": ui.dim, "missing": ui.yellow}[r["state"]]
+                     "upstream_stale": ui.dim, "missing": ui.yellow,
+                     "deprecated": ui.yellow}.get(r["state"], ui.yellow)
             words = f"  {r['words']}w" if r["words"] else ""
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
@@ -3039,6 +3040,26 @@ def _print_beat_spec(beat: dict, label: str = "Beat") -> None:
           (f": {beat['notes']}" if beat.get("notes") else ""))
 
 
+def _print_drafting_context(text: str) -> None:
+    """The L1 book-frame (summaries.drafting_context). Printed verbatim —
+    it is the drafting payload, and the skill reads it out of this
+    output. Every line the reader must not skim past (a stale, missing
+    or deprecated summary; a summary that quietly dropped a paragraph)
+    arrives already prefixed by summaries.WARN_PREFIX, so one branch
+    colours them all."""
+    from . import summaries as sums
+
+    print()
+    for line in text.splitlines():
+        if line.startswith(sums.WARN_PREFIX):
+            print(ui.yellow(line))
+        elif line.startswith(("DRAFTING CONTEXT", "BEFORE —", "AFTER —")):
+            print(ui.bold(line))
+        else:
+            print(line)
+    print()
+
+
 def cmd_write(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -3052,12 +3073,14 @@ def cmd_write(args):
                 sys.exit("write start requires --intent <id> — declare one "
                          "first (the writeup is bound to it)")
             result = api.write_start(db, manuscript, config,
-                                     args.params[0], args.intent)
+                                     args.params[0], args.intent,
+                                     after=args.after)
             w = result["writeup"]
             print(f"Writeup [{w['id'][:11]}] on {w['file']} "
                   f"(intent {result['intent']['id'][:11]}).")
             print(f"Pinned v{result['source_version_no']} as raw material "
                   f"({result['source_chars']} chars); file truncated.")
+            _print_drafting_context(result["drafting_context"])
             print("Next: ratify the beat plan — write plan (JSON on stdin).")
         elif args.action == "plan":
             raw = _stdin_text()
@@ -3092,6 +3115,7 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            _print_drafting_context(result["drafting_context"])
         elif args.action == "propose":
             text = _stdin_text()
             result = api.write_propose(db, manuscript, text or "",
@@ -4895,6 +4919,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "reject", "learn", "complete", "abandon"])
     p.add_argument("params", nargs="*", help="start: <file>")
     p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--after",
+                   help="start: placement for an essay with no toc entry "
+                        "yet — the file it follows, or 'start' to open the "
+                        "book. Without it the reading order's own position "
+                        "is used (unlisted files sort to the end)")
     p.add_argument("--writeup", help="writeup id prefix (default: the active writeup)")
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")

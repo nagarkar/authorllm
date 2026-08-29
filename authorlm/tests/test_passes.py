@@ -245,6 +245,40 @@ def main_test() -> None:
               "pass runs again",
               ctx_after_fix["after"][0]["state"] == "fresh")
 
+        print("an essay with no toc.toml entry (§12.4 item 3) — the edit "
+              "pass cannot place it either, so it refuses rather than "
+              "reading the whole book as settled context behind it:")
+        (ms / "zeta.md").write_text("# Zeta\n\nNobody put this in the toc.\n")
+        sums.rebuild(db, manuscript, sums.summarizer_llm(config))
+        try:
+            passes.build_context(db, manuscript, "zeta.md", p)
+            blocked, err_msg = False, ""
+        except LookupError as err:
+            blocked, err_msg = True, str(err)
+        check("build_context on the unlisted essay REFUSES — the appended "
+              "position is a fallback, not a declaration, and the edit "
+              "pass reads the same before/after split the drafting gate "
+              "does",
+              blocked and "no toc.toml entry" in err_msg, err_msg)
+        check("...naming the universally applicable remedy (a toc.toml "
+              "entry) FIRST, and marking the write-start remedy as "
+              "drafting-only — a critique-pass user must not be handed "
+              "advice for a different verb",
+              err_msg.index("Add it to toc.toml")
+              < err_msg.index("write start")
+              and "for that writeup only" in err_msg, err_msg)
+        ctx_listed = passes.build_context(db, manuscript, "alpha.md", p)
+        check("a LISTED essay still builds its context with the unlisted "
+              "file sitting on disk — the refusal is about the target, "
+              "not a manuscript-wide freeze",
+              [e["file"] for e in ctx_listed["before"]] == ["part.md"]
+              and [e["file"] for e in ctx_listed["after"]]
+              == ["beta.md", "zeta.md"],
+              str(([e["file"] for e in ctx_listed["before"]],
+                   [e["file"] for e in ctx_listed["after"]])))
+        (ms / "zeta.md").unlink()
+        sums.rebuild(db, manuscript, sums.summarizer_llm(config))
+
         # Force semantics: dirty gate + force → runs, but without the items.
         critique.import_manifest(db, mid, {
             "source": {"name": "Test Critic", "detail": "test"},

@@ -399,11 +399,17 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
     """A summary whose file has left the toc is never deleted — it is
     the record of an essay that existed — but it must not linger
     ambiguously as if it were still live. `essay_summaries.status`
-    ('current' | 'deprecated') marks it so a future direct query of the
-    table (unlike sums.status()/before_after(), which are driven off
-    the CURRENT toc reading order and so already never see a departed
-    file's row) does not mistake it for a stale current summary.
-    Idempotent: only rows not already 'deprecated' are touched."""
+    ('current' | 'deprecated') marks it so nothing mistakes it for a
+    stale current summary.
+
+    While the file stays gone, sums.status()/before_after() never see
+    the row at all: both are driven off the CURRENT toc reading order.
+    The mark earns its keep when the file COMES BACK — possibly
+    byte-identical, so its source_hash still matches. Both functions now
+    read this column (summaries._state) and report 'deprecated' rather
+    than 'fresh'; the drafting and edit gates refuse it, and a rebuild
+    resurrects it to 'current'. Idempotent: only rows not already
+    'deprecated' are touched."""
     current = {f for f, _ in sums.units(manuscript)}
     deprecated = []
     for file, row in sums.all_summaries(db, manuscript["id"]).items():
@@ -737,14 +743,59 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
     return {r["state"]: r["n"] for r in rows}
 
 
+def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
+    """The writeup's L1 book-frame (design §12.4 item 1): compressed
+    summaries of the settled essays before this one and the upcoming
+    ones after it. Recomputed on every read rather than stored — the
+    summaries themselves are the source of truth and a rebuild between
+    beats must show through. The declared placement, however, IS stored
+    (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
+    recomputes the same split without the author repeating the flag."""
+    from . import summaries as sums
+
+    placement = loads(writeup["metadata"], {}).get("placement")
+    return sums.drafting_context(db, manuscript, writeup["file"],
+                                 placement=placement)
+
+
+def _status_drafting_context(db: Database, manuscript: dict,
+                             writeup: dict) -> str:
+    """`write status` is the resume entry point, so it degrades rather
+    than dies: if the file (or the placement target) has left the disk,
+    the context is replaced by a one-line note and the plan, cursor,
+    pending proposal and tallies still render. write_start does NOT get
+    this treatment — its gate has already proved the context resolves."""
+    from . import summaries as sums
+
+    try:
+        return _drafting_context(db, manuscript, writeup)
+    except LookupError as err:
+        return (f"{sums.WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
+                f"Restore the file, or close the writeup with "
+                f"'write abandon' (it restores the pinned source version).")
+
+
+def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
+    """The `--after` argument as a placement for summaries.before_after:
+    the sentinel passes through, anything else resolves to a real
+    manuscript-relative path so the author can type a fragment."""
+    from . import summaries as sums
+
+    if not after or after == sums.PLACEMENT_START:
+        return after or None
+    return _resolve_relpath(manuscript, after)
+
+
 def write_start(db: Database, manuscript: dict, config: dict,
-                file: str, intent_prefix: str) -> dict:
+                file: str, intent_prefix: str,
+                after: str | None = None) -> dict:
     """Initiate a fresh-drafting writeup: gate, pin the current version as
     raw material, truncate the file, and collect the honest 'removed'
     transition. The old text is never at risk — it lives in the pinned
     version and restores on abandon."""
     mid = manuscript["id"]
     relpath = _resolve_relpath(manuscript, file)
+    placement = _resolve_placement(manuscript, after)
     intent = _find_intent(db, manuscript, intent_prefix)
     if intent["status"] != "active":
         raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
@@ -765,6 +816,18 @@ def write_start(db: Database, manuscript: dict, config: dict,
     )
     if existing:
         raise ValueError(f"writeup {existing['id']} is already active on {relpath}")
+    # The summary freshness gate (design §12.4 item 2), on the same
+    # predicate the critique pass uses: the before/after summaries ARE the
+    # drafting context now, so a missing or stale one is a lie about the
+    # text here exactly as it is there — and, as there, no --force. It runs
+    # LAST among the gates but still before the pin/truncate/collect
+    # sequence: a blocked start must leave the file untouched.
+    from . import passes
+
+    ready = passes.summaries_ready(db, manuscript, relpath,
+                                   placement=placement)
+    if not ready["ok"]:
+        raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
     ensure_session(db, manuscript)
     # Two collects: the first captures any uncollected edits so the pinned
@@ -785,13 +848,14 @@ def write_start(db: Database, manuscript: dict, config: dict,
         manuscript_id=mid, intent_id=intent["id"], file=relpath, mode="fresh",
         status="active", source_version_id=source["id"], plan="[]",
         cursor=0, learnings="[]",
-        metadata=json.dumps({"next_n": 1}),
+        metadata=json.dumps({"next_n": 1, "placement": placement}),
     )
     db.insert("writeups", row)
     source_text = loads(source["files"], {}).get(relpath, "")
     return {"writeup": row, "intent": intent,
             "source_version_no": source["version_no"],
-            "source_chars": len(source_text)}
+            "source_chars": len(source_text),
+            "drafting_context": _drafting_context(db, manuscript, row)}
 
 
 def write_plan(db: Database, manuscript: dict, beats: list,
@@ -846,6 +910,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "pending_proposal": dict(pending) if pending else None,
         "learnings": loads(writeup["learnings"], []),
         "tallies": _beat_tallies(db, writeup),
+        "drafting_context": _status_drafting_context(db, manuscript, writeup),
     }
 
 

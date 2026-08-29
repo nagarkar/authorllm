@@ -640,6 +640,12 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                 ],
                 "outcome": "Becoming developed through the sailing metaphor.",
             })
+        elif "editor's working memory" in system:
+            # The essay summarizer (authorlm/prompts/summarizer.md). Cites
+            # paragraph [1] only, so the drafting context's coverage
+            # reporting has something real to be loud about.
+            unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
+            content = f"MOVES: [1] the stub's canned summary of {unit}."
         elif "distill" in system.lower():
             # Stands in for semantic matching: if an equivalent belief is
             # already on the menu the stub MATCHes it (exercising the
@@ -1341,12 +1347,64 @@ def scenario_write_loop(root: Path) -> None:
         _meta["gdocs"]["02-essay.md"]["checked_out"] = False
         _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
 
+        # --- summary freshness gate (design §12.4 item 2) -----------------
+        # Once summaries are drafting input, a stale one is a lie about the
+        # text here exactly as it is in the critique pass — same predicate
+        # (passes.summaries_ready), same refusal, and no --force.
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked while a before/after summary is MISSING, "
+              "naming the file and the one command that fixes it",
+              "missing summaries: 01-choice.md" in out
+              and "summarize rebuild" in out
+              and "will not read a lie about the text" in out, out)
+        check("a blocked start leaves the manuscript file untouched — the "
+              "gate runs before the pin/truncate/collect sequence",
+              (ms / "02-essay.md").read_text() == ESSAY, "")
+        check("no --force escape hatch is offered (parity with the critique "
+              "pass, which offers none for summaries)",
+              "--force" not in out, out)
+        run(ws, "summarize", "rebuild", "--all")
+
+        # A summary that has gone stale blocks just as hard as a missing one.
+        write(ms / "01-choice.md", CH1 + "\nA paragraph added after the "
+                                         "summary was built.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked while a before/after summary is STALE "
+              "(the text moved under it)",
+              "stale summaries (text changed): 01-choice.md" in out, out)
+        check("the stale-blocked start also left the file untouched",
+              (ms / "02-essay.md").read_text() == ESSAY, "")
+        write(ms / "01-choice.md", CH1)
+        run(ws, "collect")
+
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id)
         check("writeup starts: pins the source and truncates",
               "Pinned v" in out and "truncated" in out, out)
         check("file is empty on disk after start",
               (ms / "02-essay.md").read_text() == "", out)
+        check("write start prints the L1 drafting context — the "
+              "before/after essay summaries the beat loop conditions on "
+              "(design §12.4 item 1; nothing on the write path read them "
+              "before)",
+              "DRAFTING CONTEXT — 02-essay.md" in out
+              and "BEFORE" in out and "AFTER" in out
+              and "[01-choice.md]" in out, out)
+        check("the printed context carries the real stored summary and its "
+              "freshness state, and reports incomplete paragraph coverage "
+              "LOUDLY (design §12.4 item 4's default: informational, never "
+              "blocking — the stub summary cites only ¶1 of three)",
+              "[01-choice.md] (fresh)" in out
+              and "the stub's canned summary of 01-choice.md" in out
+              and "coverage INCOMPLETE: ¶2, ¶3 uncited" in out, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("write status — the resume entry point — reprints it, "
+              "recomputed from the summaries as they stand now",
+              "DRAFTING CONTEXT — 02-essay.md" in out
+              and "[01-choice.md]" in out, out)
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id, expect_exit=True)
         check("second writeup on the same file blocked",
@@ -1481,6 +1539,16 @@ def scenario_write_loop(root: Path) -> None:
 
         # --- abandon restores the pinned source ----------------------------
         run(ws, "style", "attach", "01-choice.md", "House")
+        # The completed writeup rewrote 02-essay.md, so its summary is now
+        # stale — and 02-essay.md sits in 01-choice.md's AFTER block. The
+        # freshness gate (item 2) correctly refuses until it is rebuilt.
+        out = run_stdin(ws, "", "write", "start", "01-choice.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("a writeup's own output staling a NEIGHBOUR's summary blocks "
+              "the next writeup — the gate reads the whole before/after "
+              "context, not just what this writeup touched",
+              "stale summaries (text changed): 02-essay.md" in out, out)
+        run(ws, "summarize", "rebuild", "--all")
         run_stdin(ws, "", "write", "start", "01-choice.md",
                   "--intent", intent_id)
         check("second writeup truncated its file",
@@ -1508,6 +1576,75 @@ def scenario_write_loop(root: Path) -> None:
         check("abandon snapshots the uncollected draft into history "
               "before overwriting it with the restored content "
               "(BUG-2 / A1)", recovered)
+
+        # --- placement: an essay with no toc entry yet (§12.4 item 3) -----
+        # A real toc.toml now names 01/02 only, so 03-bridge.md is genuinely
+        # UNLISTED: structure.reading_order appends it after 02-essay.md,
+        # which would read as "the whole book is behind me". Placed after
+        # 01-choice.md instead, 02-essay.md is forward-reference material.
+        run(ws, "collect")
+        write(ms / "03-bridge.md", "# Bridge\n\nA new essay, unplaced.\n")
+        write(ms / "toc.toml",
+              '[[chapter]]\nfile = "01-choice.md"\n\n'
+              '[[chapter]]\nfile = "02-essay.md"\n')
+        run(ws, "collect")
+        run(ws, "style", "attach", "03-bridge.md", "House")
+        run(ws, "summarize", "rebuild", "--all")
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("an essay with no toc.toml entry is REFUSED when it declares "
+              "no placement — appending it to the end is a fallback, not a "
+              "declaration, and taking it at face value inverts §7's "
+              "continuity contract silently",
+              "no toc.toml entry" in out and "--after start" in out
+              and "--after <file it follows>" in out, out)
+        check("that refusal, like the freshness gate, left the file "
+              "untouched",
+              (ms / "03-bridge.md").read_text() != "", "")
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "toc.toml",
+                        expect_exit=True)
+        check("--after a file that EXISTS but is not a content unit "
+              "(toc.toml is structure, not prose) is refused by the "
+              "PLACEMENT check itself, not merely by name resolution",
+              "placement 'toc.toml' is not in the manuscript's reading "
+              "order" in out
+              and (ms / "03-bridge.md").read_text() != "", out)
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "nope.md",
+                        expect_exit=True)
+        check("--after a name matching no file at all is refused by name "
+              "resolution, also before anything is truncated",
+              "no document matching 'nope.md'" in out
+              and (ms / "03-bridge.md").read_text() != "", out)
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "01-choice.md")
+        head, tail = out.split("AFTER", 1)
+        check("--after places the new essay: the essay it follows is "
+              "settled context, the one it now precedes is forward-"
+              "reference material — not 'everything is behind me'",
+              "placed after 01-choice.md" in out
+              and "[01-choice.md]" in head and "[02-essay.md]" in tail, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("the placement is persisted, so write status recomputes the "
+              "same context on resume (a new process, no flag repeated)",
+              "placed after 01-choice.md" in out
+              and "[02-essay.md]" in out.split("AFTER", 1)[1], out)
+        # F3: the resume entry point degrades, it does not die, when the
+        # context can no longer be computed — here because the placement
+        # target left the disk. Everything else about the writeup must
+        # still render, or the author loses the way out (write abandon).
+        choice_text = (ms / "01-choice.md").read_text()
+        (ms / "01-choice.md").unlink()
+        out = run_stdin(ws, "", "write", "status")
+        check("write status survives a context it can no longer compute: a "
+              "one-line note replaces the block and points at write "
+              "abandon, and the writeup itself still renders",
+              "DRAFTING CONTEXT unavailable" in out
+              and "write abandon" in out
+              and "Writeup [" in out and "03-bridge.md" in out, out)
+        write(ms / "01-choice.md", choice_text)
+        run_stdin(ws, "", "write", "abandon")
 
         # --- profiles: declared context, observation-invisible ------------
         run(ws, "collect")  # settle any pending changes first
