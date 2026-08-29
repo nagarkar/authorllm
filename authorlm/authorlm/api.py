@@ -833,6 +833,35 @@ def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
     return _resolve_relpath(manuscript, after)
 
 
+def _style_candidates(db: Database, manuscript_id: str,
+                      placement: str | None) -> str:
+    """The tail of the missing-`--style` refusal: the guide names on
+    record, and — when the placement anchor has one attached — the guide
+    that anchor uses, which is almost always the answer. Read-only and
+    best-effort; a refusal must never fail while composing its own
+    message."""
+    from . import summaries as sums
+
+    guides = [row["name"] for row in db.all(
+        "SELECT name FROM style_guides WHERE manuscript_id = ? ORDER BY name",
+        (manuscript_id,))]
+    if not guides:
+        return ("\n  No style guides exist yet — define one first: "
+                "style define <name>.")
+    parts = ["\n  Guides on record: "
+             + ", ".join(f"'{name}'" for name in guides) + "."]
+    if placement and placement != sums.PLACEMENT_START:
+        anchor = db.one(
+            "SELECT sg.name AS name FROM style_attachments sa "
+            "JOIN style_guides sg ON sg.id = sa.guide_id "
+            "WHERE sa.manuscript_id = ? AND sa.file = ?",
+            (manuscript_id, placement))
+        if anchor:
+            parts.append(f"\n  {placement} uses '{anchor['name']}' — "
+                         f"likely the one you want.")
+    return "".join(parts)
+
+
 def write_start(db: Database, manuscript: dict, config: dict,
                 file: str, intent_prefix: str,
                 after: str | None = None, brief: str | None = None,
@@ -872,10 +901,17 @@ def write_start(db: Database, manuscript: dict, config: dict,
         # that integrity rule is not weakened here. So the guide is named
         # at start and validated before anything is created.
         if not style:
+            # Enrich the message; never silently default. The guide IS
+            # the drafting law, so attaching it stays the author's
+            # explicit act — but the refusal can at least stop sending
+            # them away to `style guides` mid-flow (usability-analysis
+            # §2.2): name the guides on record, and the anchor's own
+            # guide as the likely choice.
             raise ValueError(
                 f"{relpath} has no attached style guide — the effective "
                 f"guide is the drafting law. With --new, name it: "
-                f"--style <guide>.")
+                f"--style <guide>."
+                + _style_candidates(db, mid, placement))
         guide = st.get_guide(db, mid, style)
         if not guide:
             raise LookupError(f"no style guide named '{style}'")
