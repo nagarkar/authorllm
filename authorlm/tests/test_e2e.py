@@ -2163,11 +2163,14 @@ def scenario_transplant() -> None:
           all(("t.target" in json.dumps(r)) for r in reqs), str(reqs[:2]))
 
     # Index arithmetic: each insert lands exactly where the previous ended.
+    # Docs API indices are UTF-16 code units (same as transplant_requests).
+    from authorlm.gdocs import _utf16_len
+
     cursor = 1
     ordered = True
     for i in inserts:
         ordered = ordered and i["location"]["index"] == cursor
-        cursor += len(i["text"])
+        cursor += _utf16_len(i["text"])
     check("insert cursor arithmetic is gapless", ordered, str(inserts))
 
     heading = [r for r in reqs if "updateParagraphStyle" in r]

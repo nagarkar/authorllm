@@ -3400,6 +3400,42 @@ def main_test() -> None:
               and _utf16_len(emoji_old) == len(emoji_old) + 1,
               f"strike_end={strike_end} green_end={green_end}")
 
+        # transplant_requests must advance the Docs cursor in UTF-16 units
+        # too — otherwise a math-italic / emoji paragraph shifts every
+        # later insert into the previous paragraph's body.
+        from authorlm.gdocs import transplant_requests
+
+        math_n = "\U0001D45B"  # mathematical italic small n (non-BMP)
+        transplant_doc = {"body": {"content": [
+            {"paragraph": {"elements": [
+                {"textRun": {"content": f"Let {math_n} be given.\n",
+                             "textStyle": {}}},
+            ], "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}}},
+            {"paragraph": {"elements": [
+                {"textRun": {"content": "Then the claim holds.\n",
+                             "textStyle": {"italic": True}}},
+            ], "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}}},
+        ]}}
+        t_reqs = transplant_requests(transplant_doc, "tab-math")
+        t_inserts = [r["insertText"] for r in t_reqs if "insertText" in r]
+        first_len = _utf16_len(t_inserts[0]["text"])
+        check("transplant advances cursor by UTF-16 length after non-BMP text",
+              t_inserts[0]["location"]["index"] == 1
+              and first_len == len(t_inserts[0]["text"]) + 1
+              and t_inserts[1]["location"]["index"] == 1 + first_len,
+              str([(i["location"]["index"], _utf16_len(i["text"]),
+                    len(i["text"])) for i in t_inserts]))
+        italic_styles = [
+            r["updateTextStyle"] for r in t_reqs
+            if "updateTextStyle" in r
+            and r["updateTextStyle"]["textStyle"].get("italic") is True]
+        check("transplant run styles use UTF-16 endIndex after non-BMP prior text",
+              len(italic_styles) == 1
+              and italic_styles[0]["range"]["startIndex"] == 1 + first_len
+              and italic_styles[0]["range"]["endIndex"]
+              == 1 + first_len + _utf16_len(t_inserts[1]["text"]),
+              str(italic_styles))
+
         insert_reqs = _mark_insert_requests("tab-1", 5, "added")
         check("insert mark writes a green {{new}} paragraph at the boundary",
               insert_reqs[0]["insertText"]["text"] == "\n{{added}}"

@@ -165,11 +165,13 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
                 "fields": "bold,italic,underline"}}
 
         if any("horizontalRule" in e for e in paragraph.get("elements", [])):
+            rule = "---\n"
+            rule_len = _utf16_len(rule)
             requests.append({"insertText": {
                 "location": {"tabId": tab_id, "index": cursor},
-                "text": "---\n"}})
-            requests.append(reset_style(cursor, cursor + 4))
-            cursor += 4
+                "text": rule}})
+            requests.append(reset_style(cursor, cursor + rule_len))
+            cursor += rule_len
             continue
         if not text.strip():
             # Markdown's blank separator lines import as bare-newline
@@ -181,7 +183,10 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
         start = cursor
         requests.append({"insertText": {
             "location": {"tabId": tab_id, "index": start}, "text": text}})
-        cursor += len(text)
+        # Docs API indices are UTF-16 code units. Python len() undercounts
+        # non-BMP characters (math italic, emoji), so the next insert would
+        # land inside the previous paragraph and corrupt the tab.
+        cursor += _utf16_len(text)
         requests.append(reset_style(start, cursor))
         # Paragraph style is set EXPLICITLY for every paragraph, prose
         # included: inserted paragraphs inherit the residual paragraph's
@@ -195,6 +200,7 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
             "fields": "namedStyleType"}})
         offset = start
         for run_text, text_style in runs:
+            run_len = _utf16_len(run_text)
             fields = {k: True for k in ("bold", "italic", "underline")
                       if text_style.get(k)}
             link = text_style.get("link", {}).get("url")
@@ -204,10 +210,10 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
             if payload and run_text.strip():
                 requests.append({"updateTextStyle": {
                     "range": {"tabId": tab_id, "startIndex": offset,
-                              "endIndex": offset + len(run_text)},
+                              "endIndex": offset + run_len},
                     "textStyle": payload,
                     "fields": ",".join(sorted(payload))}})
-            offset += len(run_text)
+            offset += run_len
         if paragraph.get("bullet"):
             preset = ("NUMBERED_DECIMAL_ALPHA_ROMAN"
                       if numbered(paragraph["bullet"].get("listId"))
