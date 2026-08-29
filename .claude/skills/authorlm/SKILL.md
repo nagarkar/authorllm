@@ -95,10 +95,23 @@ travel over stdin (heredocs).
 
 1. **Initiate.** The author supplies outline + placement; `declare_intent`
    first (conversationally, as usual), then
-   `authorlm write start <file> --intent <id>`. The command gates on style
-   attachment and Google-Docs checkout, pins the current file content as
-   raw material, and truncates the file — for a rewrite, the old essay
-   arrives via the pinned source version, never from the live file.
+   `authorlm write start <file> --intent <id>`. For an essay with no
+   toc.toml entry yet, pass the placement: `--after <file it follows>` or
+   `--after start` (without it, an unlisted file sorts to the END of the
+   reading order and the whole book reads as settled context behind it).
+   The command gates on style attachment, Google-Docs checkout, and essay-
+   summary freshness — a missing or stale summary anywhere in the
+   before/after context refuses the start, with no `--force`; run
+   `authorlm summarize rebuild` first. It then pins the current file
+   content as raw material and truncates the file — for a rewrite, the old
+   essay arrives via the pinned source version, never from the live file.
+   It prints the DRAFTING CONTEXT: the compressed summaries of the settled
+   essays BEFORE this one (their concepts are available, do not
+   re-introduce them) and the upcoming ones AFTER it (forward-reference
+   only, never assume them). `authorlm write status` reprints it on
+   resume. An entry marked `coverage INCOMPLETE` means that summary never
+   cited some of its essay's paragraphs — it is informational, not a
+   block, but treat that essay's context as possibly short a move.
 2. **Plan.** Expand the outline into beat specs conversationally
    (`{"role", "concepts", "budget", "notes"}` each); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
@@ -106,8 +119,8 @@ travel over stdin (heredocs).
    get fresh `n`s automatically).
 3. **Propose.** Assemble the drafting machinery BEFORE every draft exactly
    as "Drafting on request" prescribes (style law, concept notes, policies,
-   precedents), condition on the accepted text so far plus the pinned raw
-   material, then SELF-CHECK the draft against the beat spec, the style
+   precedents), condition on the accepted text so far, the pinned raw
+   material, and step 1's DRAFTING CONTEXT, then SELF-CHECK the draft against the beat spec, the style
    guide, and the graph (no refuted position endorsed, terms of art
    capitalized, length vs budget) before registering it:
    `authorlm write propose --why "<which concepts it realizes, which
