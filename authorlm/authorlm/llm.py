@@ -165,21 +165,17 @@ def writing_llm(config: dict) -> LLMClient:
     variable is what gets sent (llm.py's api_key docstring; the bug
     `generate_image` avoided by resolving its own key).
 
-    Raises LookupError when `[writing]` is absent or its model empty, and
-    when the writing model's vendor has no key in the environment. Both
-    messages name the exact remedy."""
+    Raises LookupError when `[writing]` is absent or its model empty. The
+    KEY refusal is not here: it lives in `draft()`, after the replay-cache
+    check, because a replayed draft needs no key at all (a recorded
+    fixture is the whole point of the record/replay suite). It still fires
+    before any live call."""
     from . import paths
 
     writing = config.get("writing", {}) or {}
     model = (writing.get("model") or "").strip()
     if not model:
         raise LookupError(WRITING_ABSENT.format(config=paths.config_path()))
-    env_name = VENDOR_KEY_ENV.get(vendor_of(model), "")
-    if env_name and not os.environ.get(env_name):
-        raise LookupError(
-            f"[writing] model is '{model}', which needs {env_name} — it is "
-            f"not set. Add it to {paths.env_path()} (one variable per "
-            f"vendor; see VENDOR_KEY_ENV in llm.py).")
     client = LLMClient(config)
     client.model = model
     client.timeout = writing.get("timeout_seconds",
@@ -435,6 +431,33 @@ class LLMClient:
 
     # ------------------------------------------------------------- drafting
 
+    def require_writing_key(self) -> None:
+        """Refuse a LIVE drafting call with no usable key, naming the exact
+        variable and the exact .env path.
+
+        The condition is resolved through `vendor_key` — the same resolver
+        the request itself uses — rather than by reading the vendor's
+        environment variable directly. `[llm] api_key_env` wins there (an
+        OpenAI-compatible proxy uses an arbitrary token no convention can
+        derive), so checking the vendor variable alone would falsely refuse
+        a perfectly configured proxy that had just been asked for an
+        `anthropic/` model string.
+
+        The guard still only fires for a vendor prefix this module knows:
+        an unlisted prefix means "let litellm resolve it", which is correct
+        for credential-file vendors (vertex_ai, bedrock)."""
+        from . import paths
+
+        llm_cfg = self.config.get("llm", {}) or {}
+        vendor_var = VENDOR_KEY_ENV.get(vendor_of(self.model), "")
+        if not vendor_var or vendor_key(self.model, llm_cfg):
+            return
+        named = llm_cfg.get("api_key_env") or vendor_var
+        raise LookupError(
+            f"[writing] model is '{self.model}', which needs {named} — it "
+            f"is not set. Add it to {paths.env_path()} (one variable per "
+            f"vendor; see VENDOR_KEY_ENV in llm.py).")
+
     def draft(self, system_blocks: list[str], user_blocks: list[str], *,
               max_tokens: int | None = None, effort: str | None = None,
               cache: bool | None = None) -> DraftResult:
@@ -484,6 +507,11 @@ class LLMClient:
         cache_path = self._cache_path(messages)
         if cache_path and cache_path.exists():
             self.replays += 1
+            # A replayed draft still reports itself. Without this the
+            # usage line would drop its cache clause and its model name
+            # on exactly the runs the replay suite is made of, and the
+            # author would see a different report for the same work.
+            self.draft_calls += 1
             stored = json.loads(cache_path.read_text())
             usage = stored.get("usage", {})
             return DraftResult(
@@ -494,6 +522,9 @@ class LLMClient:
                 cache_write=usage.get("cache_write_tokens", 0),
                 finish_reason=stored.get("finish_reason", "stop"),
                 model=self.model)
+        # Past the replay cache, so this WILL be a live call. The key gate
+        # sits exactly here: a fixture needs no key, a request does.
+        self.require_writing_key()
         if self.provider == "litellm":
             text, raw_in, out, cache_read, cache_write, finish = \
                 self._draft_litellm(messages, max_tokens, effort)
