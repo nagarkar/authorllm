@@ -176,13 +176,20 @@ def preflight(db: Database, manuscript: dict, file: str,
     return {"clear": not any(blockers.values()), **blockers}
 
 
-def summaries_ready(db: Database, manuscript: dict, file: str) -> dict:
+def summaries_ready(db: Database, manuscript: dict, file: str,
+                    placement: str | None = None) -> dict:
     """Missing summaries, a stale (source_hash) one, or a deprecated one
     anywhere in the before/after context blocks the run; upstream_stale
     is tolerated. A deprecated row belongs to an essay that left the toc
     and returned (summaries._state): the DB says it is not a live
-    summary, so it is no more readable than a stale one."""
-    before, after = sums.before_after(db, manuscript, file)
+    summary, so it is no more readable than a stale one.
+
+    `placement` is the drafting gate's case (design §12.4 item 3): the
+    context of an essay whose toc entry is not committed yet. It also
+    validates the placement, so `write start --after <nonsense>` is
+    refused here — before anything is truncated."""
+    before, after = sums.before_after(db, manuscript, file,
+                                      placement=placement)
     entries = before + after
     missing = [e["file"] for e in entries if e["state"] == "missing"]
     stale = [e["file"] for e in entries if e["state"] == "stale"]

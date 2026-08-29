@@ -742,20 +742,37 @@ def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
     summaries of the settled essays before this one and the upcoming
     ones after it. Recomputed on every read rather than stored — the
     summaries themselves are the source of truth and a rebuild between
-    beats must show through."""
+    beats must show through. The declared placement, however, IS stored
+    (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
+    recomputes the same split without the author repeating the flag."""
     from . import summaries as sums
 
-    return sums.drafting_context(db, manuscript, writeup["file"])
+    placement = loads(writeup["metadata"], {}).get("placement")
+    return sums.drafting_context(db, manuscript, writeup["file"],
+                                 placement=placement)
+
+
+def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
+    """The `--after` argument as a placement for summaries.before_after:
+    the sentinel passes through, anything else resolves to a real
+    manuscript-relative path so the author can type a fragment."""
+    from . import summaries as sums
+
+    if not after or after == sums.PLACEMENT_START:
+        return after or None
+    return _resolve_relpath(manuscript, after)
 
 
 def write_start(db: Database, manuscript: dict, config: dict,
-                file: str, intent_prefix: str) -> dict:
+                file: str, intent_prefix: str,
+                after: str | None = None) -> dict:
     """Initiate a fresh-drafting writeup: gate, pin the current version as
     raw material, truncate the file, and collect the honest 'removed'
     transition. The old text is never at risk — it lives in the pinned
     version and restores on abandon."""
     mid = manuscript["id"]
     relpath = _resolve_relpath(manuscript, file)
+    placement = _resolve_placement(manuscript, after)
     intent = _find_intent(db, manuscript, intent_prefix)
     if intent["status"] != "active":
         raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
@@ -784,7 +801,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # sequence: a blocked start must leave the file untouched.
     from . import passes
 
-    ready = passes.summaries_ready(db, manuscript, relpath)
+    ready = passes.summaries_ready(db, manuscript, relpath,
+                                   placement=placement)
     if not ready["ok"]:
         raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
@@ -807,7 +825,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
         manuscript_id=mid, intent_id=intent["id"], file=relpath, mode="fresh",
         status="active", source_version_id=source["id"], plan="[]",
         cursor=0, learnings="[]",
-        metadata=json.dumps({"next_n": 1}),
+        metadata=json.dumps({"next_n": 1, "placement": placement}),
     )
     db.insert("writeups", row)
     source_text = loads(source["files"], {}).get(relpath, "")

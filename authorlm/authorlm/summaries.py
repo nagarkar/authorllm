@@ -35,6 +35,10 @@ DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
 MIN_SUMMARY_WORDS = 40
 MAX_SUMMARY_WORDS = 500
 
+# The sentinel placement for an essay that opens the book — the one
+# position `after=<file>` cannot name (design §12.4 item 3).
+PLACEMENT_START = "start"
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -161,16 +165,41 @@ def status(db: Database, manuscript: dict) -> list[dict]:
     return out
 
 
-def before_after(db: Database, manuscript: dict,
-                 file: str) -> tuple[list[dict], list[dict]]:
+def before_after(db: Database, manuscript: dict, file: str,
+                 placement: str | None = None
+                 ) -> tuple[list[dict], list[dict]]:
     """Summaries of the units before and after `file` in reading order —
-    the edit pass's book-context. Each entry: {file, summary, state}."""
+    the edit pass's book-context, and (with `placement`) the drafting
+    pass's. Each entry: {file, summary, state}.
+
+    `placement` overrides where `file` sits, for an essay whose toc entry
+    is not committed yet (design §12.4 item 3). It is either
+    PLACEMENT_START (the new essay opens the book) or the name of an
+    existing unit it follows. Without it, an essay missing from toc.toml
+    is not rejected but silently APPENDED to the reading order by
+    structure.reading_order — so the whole book reads as settled context
+    behind it and nothing as forward-reference material ahead, which is
+    §7's continuity contract exactly inverted."""
     have = all_summaries(db, manuscript["id"])
-    order = [f for f, _ in units(manuscript)]
-    if file not in order:
-        raise LookupError(f"'{file}' is not in the manuscript's reading order")
-    idx = order.index(file)
     texts = dict(units(manuscript))
+    order = list(texts)
+    if placement is None:
+        if file not in order:
+            raise LookupError(f"'{file}' is not in the manuscript's reading order")
+        idx = order.index(file)
+        before_files, after_files = order[:idx], order[idx + 1:]
+    else:
+        rest = [f for f in order if f != file]
+        if placement == PLACEMENT_START:
+            before_files, after_files = [], rest
+        elif placement in rest:
+            cut = rest.index(placement) + 1
+            before_files, after_files = rest[:cut], rest[cut:]
+        else:
+            raise LookupError(
+                f"placement '{placement}' is not in the manuscript's reading "
+                f"order — name an existing unit to follow, or "
+                f"'{PLACEMENT_START}' to open the book")
 
     def entry(f):
         row = have.get(f)
@@ -178,8 +207,8 @@ def before_after(db: Database, manuscript: dict,
         return {"file": f, "summary": row["summary"] if row else None,
                 "state": state}
 
-    return ([entry(f) for f in order[:idx]],
-            [entry(f) for f in order[idx + 1:]])
+    return ([entry(f) for f in before_files],
+            [entry(f) for f in after_files])
 
 
 # --------------------------------------------------- drafting context
@@ -221,7 +250,8 @@ def _coverage_note(entry: dict, text: str) -> str | None:
     return "coverage INCOMPLETE: " + "; ".join(bits)
 
 
-def drafting_context(db: Database, manuscript: dict, file: str) -> str:
+def drafting_context(db: Database, manuscript: dict, file: str,
+                     placement: str | None = None) -> str:
     """The L1 book-frame for drafting `file`: the compressed summaries of
     everything settled before it and everything still to come, as
     deterministic text (design §12.4 item 1 — the glue `before_after`
@@ -230,8 +260,11 @@ def drafting_context(db: Database, manuscript: dict, file: str) -> str:
     Serialization is deliberately stable: reading order, no timestamps,
     no ids, no counts that drift — §3 requires L0/L1 to be
     byte-identical across beats or the prompt-cache economics of §4 are
-    forfeited by a silent invalidator."""
-    before, after = before_after(db, manuscript, file)
+    forfeited by a silent invalidator.
+
+    `placement` is passed through to `before_after` — an essay whose toc
+    entry is not committed yet still gets the right split."""
+    before, after = before_after(db, manuscript, file, placement=placement)
     texts = dict(units(manuscript))
 
     def block(entries: list[dict], header: str) -> list[str]:
@@ -248,8 +281,14 @@ def drafting_context(db: Database, manuscript: dict, file: str) -> str:
                          "(no summary — run 'summarize rebuild')")
         return lines
 
+    if placement == PLACEMENT_START:
+        where = "placed first in the manuscript"
+    elif placement:
+        where = f"placed after {placement}"
+    else:
+        where = "in its committed toc position"
     return "\n".join(
-        [f"DRAFTING CONTEXT — {file} (in its committed toc position).", ""]
+        [f"DRAFTING CONTEXT — {file} ({where}).", ""]
         + block(before, BEFORE_HEADER) + [""]
         + block(after, AFTER_HEADER))
 

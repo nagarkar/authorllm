@@ -423,6 +423,71 @@ def main_test() -> None:
                for r in sums.status(db, manuscript)}["gamma.md"] == "fresh"
               and _passes.summaries_ready(db, manuscript, "beta.md")["ok"])
 
+        print("placement-aware before_after (§12.4 item 3 — an essay with "
+              "no toc entry yet):")
+        # What actually happens today, established before changing it: an
+        # on-disk file missing from toc.toml does NOT raise LookupError —
+        # structure.reading_order APPENDS unlisted files alphabetically, so
+        # it lands at the END of the reading order. The failure is silent
+        # misplacement, not an exception: everything reads as "before" it
+        # and nothing as "after", so §7's forward-reference contract is
+        # inverted for exactly the file being drafted.
+        (ms / "delta.md").write_text("# delta\n\nText of delta.\n")
+        order_now = [f for f, _ in sums.units(manuscript)]
+        check("an unlisted-but-on-disk essay is appended to the reading "
+              "order, not rejected — LookupError is unreachable for it",
+              order_now[-1] == "delta.md" and len(order_now) == 6,
+              str(order_now))
+        before, after = sums.before_after(db, manuscript, "delta.md")
+        check("...so with no placement it silently reads as the LAST essay: "
+              "every other essay 'before' it, nothing 'after'",
+              len(before) == 5 and after == [], str((len(before), after)))
+        before, after = sums.before_after(db, manuscript, "delta.md",
+                                          placement="alpha.md")
+        check("placement=<existing file> splits the context as if delta sat "
+              "immediately after that file",
+              [b["file"] for b in before] == ["title.md", "part1.md",
+                                              "alpha.md"]
+              and [a["file"] for a in after] == ["beta.md", "gamma.md"],
+              str(([b["file"] for b in before], [a["file"] for a in after])))
+        before, after = sums.before_after(db, manuscript, "delta.md",
+                                          placement=sums.PLACEMENT_START)
+        check("placement=PLACEMENT_START puts the new essay first — nothing "
+              "settled behind it, the whole book ahead as forward-reference "
+              "material",
+              before == []
+              and [a["file"] for a in after] == ["title.md", "part1.md",
+                                                 "alpha.md", "beta.md",
+                                                 "gamma.md"], str(after))
+        try:
+            sums.before_after(db, manuscript, "delta.md",
+                              placement="no-such-file.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("an unknown placement target is refused, never guessed at",
+              raised is not None and "no-such-file.md" in raised, str(raised))
+        try:
+            sums.before_after(db, manuscript, "never-existed.md")
+            raised = None
+        except LookupError as err:
+            raised = str(err)
+        check("a file that is not on disk at all still raises LookupError "
+              "with no placement (the unchanged path)",
+              raised is not None and "never-existed.md" in raised, str(raised))
+        ctx = sums.drafting_context(db, manuscript, "delta.md",
+                                    placement="alpha.md")
+        check("drafting_context carries the placement through, and says so "
+              "in its header so the drafting model knows where it stands",
+              "placed after alpha.md" in ctx
+              and ctx.index("[alpha.md]") < ctx.index("AFTER")
+              < ctx.index("[beta.md]"), ctx)
+        check("PLACEMENT_START renders its own header",
+              "placed first" in sums.drafting_context(
+                  db, manuscript, "delta.md",
+                  placement=sums.PLACEMENT_START))
+        (ms / "delta.md").unlink()
+
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
         check("the summarizer prompt is a checked-in file with the labeled "

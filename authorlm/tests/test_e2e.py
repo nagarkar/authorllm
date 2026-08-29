@@ -1577,6 +1577,37 @@ def scenario_write_loop(root: Path) -> None:
               "before overwriting it with the restored content "
               "(BUG-2 / A1)", recovered)
 
+        # --- placement: an essay with no toc entry yet (§12.4 item 3) -----
+        # 03-bridge.md sorts LAST alphabetically, so with no placement
+        # structure.reading_order would append it after 02-essay.md and the
+        # whole book would read as settled context behind it. Placed after
+        # 01-choice.md instead, 02-essay.md is forward-reference material.
+        run(ws, "collect")
+        write(ms / "03-bridge.md", "# Bridge\n\nA new essay, unplaced.\n")
+        run(ws, "collect")
+        run(ws, "style", "attach", "03-bridge.md", "House")
+        run(ws, "summarize", "rebuild", "--all")
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "nope.md",
+                        expect_exit=True)
+        check("an unknown --after target is refused, and refused before "
+              "anything is truncated",
+              "nope.md" in out and (ms / "03-bridge.md").read_text() != "", out)
+        out = run_stdin(ws, "", "write", "start", "03-bridge.md",
+                        "--intent", intent_id, "--after", "01-choice.md")
+        head, tail = out.split("AFTER", 1)
+        check("--after places the new essay: the essay it follows is "
+              "settled context, the one it now precedes is forward-"
+              "reference material — not 'everything is behind me'",
+              "placed after 01-choice.md" in out
+              and "[01-choice.md]" in head and "[02-essay.md]" in tail, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("the placement is persisted, so write status recomputes the "
+              "same context on resume (a new process, no flag repeated)",
+              "placed after 01-choice.md" in out
+              and "[02-essay.md]" in out.split("AFTER", 1)[1], out)
+        run_stdin(ws, "", "write", "abandon")
+
         # --- profiles: declared context, observation-invisible ------------
         run(ws, "collect")  # settle any pending changes first
         out = run_stdin(ws, "# Market\n\nRational seekers, audio-first.",

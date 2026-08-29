@@ -3069,7 +3069,8 @@ def cmd_write(args):
                 sys.exit("write start requires --intent <id> — declare one "
                          "first (the writeup is bound to it)")
             result = api.write_start(db, manuscript, config,
-                                     args.params[0], args.intent)
+                                     args.params[0], args.intent,
+                                     after=args.after)
             w = result["writeup"]
             print(f"Writeup [{w['id'][:11]}] on {w['file']} "
                   f"(intent {result['intent']['id'][:11]}).")
@@ -4914,6 +4915,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "reject", "learn", "complete", "abandon"])
     p.add_argument("params", nargs="*", help="start: <file>")
     p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--after",
+                   help="start: placement for an essay with no toc entry "
+                        "yet — the file it follows, or 'start' to open the "
+                        "book. Without it the reading order's own position "
+                        "is used (unlisted files sort to the end)")
     p.add_argument("--writeup", help="writeup id prefix (default: the active writeup)")
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")
