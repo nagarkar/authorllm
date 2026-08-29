@@ -582,7 +582,13 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
     """Minimal OpenAI-compatible /chat/completions endpoint with canned
     replies keyed on the system prompt."""
 
+    # Every request the stub has served, ever. The write path's design
+    # invariant (§13, I4) is that the new verbs add NO model call, and
+    # the only way to assert "zero calls" is to count them.
+    REQUESTS = 0
+
     def do_POST(self):
+        StubLLMHandler.REQUESTS += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
@@ -1680,6 +1686,234 @@ def scenario_write_loop(root: Path) -> None:
         server.shutdown()
 
 
+# --- Scenario W2 fixtures (UC-A / UC-B, design-usecases §3) ---------------
+#
+# A separate workspace from Scenario W: UC-A needs a manuscript whose
+# toc.toml is committed and whose summaries are fresh, plus a NAME THAT IS
+# NOT ON DISK — Scenario W's workspace has an unlisted 03-bridge.md and a
+# half-finished toc by the time it ends, so the create-path gates could not
+# be asserted there without rewriting its state.
+
+TOC_W2 = ('# Table of contents — hand-maintained; this comment must survive.\n'
+          '\n'
+          '[[chapter]]\n'
+          'file = "01-choice.md"\n'
+          '\n'
+          '[[chapter]]\n'
+          'file = "02-essay.md"\n')
+
+BRIEF_A = ("A short essay placing attention beside choice: attention is the "
+           "faculty that makes a field visible before anything is chosen "
+           "within it.")
+
+NEW_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "claims attention precedes choice; no source beyond the brief"},
+    {"role": "close", "concepts": ["Field"], "budget": 60,
+     "notes": "claims the field is what attention makes visible"},
+])
+
+NEW_BEAT_1 = ("Attention is the faculty that makes a field visible before "
+              "anything within it is chosen.")
+NEW_BEAT_2 = ("What attention holds open, choice then cuts: the field is the "
+              "standing possibility attention keeps in view.")
+
+
+def scenario_write_new_and_digest(root: Path) -> None:
+    """Scenario W2 — the two new author use cases on the beat loop:
+    UC-A (a new essay from a one-paragraph brief) and UC-B (a modeled
+    rewrite with a digest and removal accounting). Design:
+    .ai-productionization/authorllm/design-usecases.md §3."""
+    print("Scenario W2 — UC-A new essay from a brief; UC-B modeled rewrite")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "wn"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-essay.md", ESSAY)
+        write(ms / "toc.toml", TOC_W2)
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Write the essay on attention")
+        intent_id = out.split("[")[1].split("]")[0]
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "01-choice.md", "House")
+        run(ws, "style", "attach", "02-essay.md", "House")
+        run(ws, "summarize", "rebuild", "--all")
+
+        from authorlm.db import Database as _DB
+        from authorlm.db import loads as _loads
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+        _row = _db.one("SELECT * FROM manuscripts WHERE name = 'book'")
+
+        # ---- A16-A26: the gate parade. Every refusal must leave the
+        # disk exactly as it was (RISK K1) — asserted as `not exists()`,
+        # never merely on the error text.
+        target = ms / "03-new.md"
+        gate_outs = []
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("A16 — --new without --after is refused with a message written "
+              "for a file that is not in the reading order at all, naming "
+              "both remedies",
+              "does not exist yet" in out
+              and "--after <file it follows>" in out
+              and "--after start" in out, out)
+        check("A16 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        gate_outs.append(out)
+        check("A17 — --new without a brief is refused, naming stdin and why "
+              "(a brand-new file has no pinned raw material at all)",
+              "brief" in out and "stdin" in out, out)
+        check("A17 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("A18 — --new without --style is refused by the style gate, "
+              "with the message naming the flag (style attach cannot run "
+              "first: _validate_file requires the file on disk)",
+              "no attached style guide" in out and "--style <guide>" in out, out)
+        check("A18 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "Nope", expect_exit=True)
+        gate_outs.append(out)
+        check("A19 — an unknown guide is refused before anything is created",
+              "no style guide named 'Nope'" in out, out)
+        check("A19 — and nothing was created", not target.exists())
+
+        out = run_stdin(ws, BRIEF_A, "write", "start", "02-essay.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A20 — --new on a name that already resolves is refused "
+              "(docs._match is substring-based; a silent create-on-typo is "
+              "the failure mode --new exists to prevent)",
+              "already exists" in out and "drop --new" in out, out)
+        check("A20 — the existing essay still holds its text",
+              (ms / "02-essay.md").read_text() == ESSAY)
+
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        check("A21 — --style without --new is refused: one way to do each "
+              "thing",
+              "--style is only for --new" in out, out)
+
+        out = run_stdin(ws, "", "write", "start", "ghost.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("A22 — without --new an unmatched name is the unchanged "
+              "resolution error",
+              "no document matching 'ghost.md'" in out, out)
+
+        write(ms / "01-choice.md", CH1 + "\nA paragraph added after the "
+                                         "summary was built.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        gate_outs.append(out)
+        check("A23 — --new still honours the summary freshness gate over the "
+              "whole before/after context",
+              "stale summaries (text changed): 01-choice.md" in out, out)
+        check("A23 — and nothing was created", not target.exists())
+        write(ms / "01-choice.md", CH1)
+        run(ws, "collect")
+
+        _meta = json.loads(_row["metadata"] or "{}")
+        _meta["gdocs"] = {"03-new.md": {"doc_id": "stub", "checked_out": True}}
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A24 — --new still honours the Google-Docs checkout gate",
+              "checked out to Google Docs" in out, out)
+        check("A24 — and nothing was created", not target.exists())
+        _meta["gdocs"]["03-new.md"]["checked_out"] = False
+        _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
+
+        out = run(ws, "intent", "declare", "Abandoned side-quest")
+        dead_id = out.split("[")[1].split("]")[0]
+        run(ws, "intent", "abandon", dead_id, "--outcome", "changed plans")
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", dead_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("A25 — --new still honours the active-intent gate",
+              "not active" in out, out)
+        check("A25 — and nothing was created", not target.exists())
+
+        check("A26 — none of the new refusals offers a --force escape hatch",
+              all("--force" not in o for o in gate_outs),
+              "\n---\n".join(gate_outs))
+
+        # ---- A1-A5: the create path itself.
+        before_requests = StubLLMHandler.REQUESTS
+        out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House")
+        check("A1 — --new creates the file empty and attaches the guide",
+              "Created 03-new.md (empty)" in out
+              and "style guide 'House' attached" in out, out)
+        check("A1 — the file is on disk and empty",
+              target.exists() and target.read_text() == "", out)
+        attachment = _db.one(
+            "SELECT sa.*, sg.name AS guide FROM style_attachments sa "
+            "JOIN style_guides sg ON sg.id = sa.guide_id WHERE sa.file = ?",
+            ("03-new.md",))
+        check("A1 — the attachment is an ordinary style_attachments row, "
+              "identical to one written by 'style attach'",
+              attachment is not None and attachment["guide"] == "House",
+              str(dict(attachment) if attachment else None))
+        check("A2 — the brief is echoed at start, verbatim",
+              "BRIEF" in out and BRIEF_A.split(":")[0] in out, out)
+        wu_row = _db.one("SELECT * FROM writeups WHERE file = '03-new.md'")
+        wu_meta = _loads(wu_row["metadata"], {})
+        check("A2 — the brief and the created_file flag are persisted on the "
+              "writeup (metadata JSON only — no schema change)",
+              wu_meta.get("brief") == BRIEF_A
+              and wu_meta.get("created_file") is True
+              and wu_meta.get("placement") == "01-choice.md", str(wu_meta))
+        check("A1 — the pin is the pre-writeup state, which does not contain "
+              "the file at all: that is what makes 'restore to nonexistence' "
+              "honest",
+              "abandon deletes 03-new.md" in out, out)
+        out_status = run_stdin(ws, "", "write", "status")
+        check("A3 — write status reprints the brief on resume",
+              "BRIEF" in out_status and BRIEF_A.split(":")[0] in out_status,
+              out_status)
+        head, tail = out.split("AFTER", 1)
+        check("A4 — the declared placement drives the split for a file that "
+              "did not exist: the essay it follows is settled context, the "
+              "one it now precedes is forward-reference material",
+              "placed after 01-choice.md" in out
+              and "[01-choice.md]" in head and "[02-essay.md]" in tail, out)
+        check("A5 — the created file needs no summary of its own: it is "
+              "excluded from its own before/after context, so the freshness "
+              "gate passes with every OTHER summary fresh",
+              "03-new.md" not in head.split("BEFORE", 1)[1], out)
+        check("I4 — write start --new, write status: zero LLM requests "
+              "(no llm.py call is added to the write path)",
+              StubLLMHandler.REQUESTS == before_requests,
+              f"{before_requests} -> {StubLLMHandler.REQUESTS}")
+
+        run(ws, "session", "end")
+    finally:
+        server.shutdown()
+
+
 def scenario_doc_comments(root: Path) -> None:
     """Doc-comments ingestion: quote location, verbatim storage, dedupe,
     and the resolve round-trip against a fake Drive service."""
@@ -2725,6 +2959,7 @@ def main_test() -> None:
         scenario_errors(root)
         scenario_llm_and_unregister(root)
         scenario_write_loop(root)
+        scenario_write_new_and_digest(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)
