@@ -1021,7 +1021,10 @@ that actually matters, and is now asserted, is the hash round trip plus both gat
     "enough changed to be worth extracting" hint. Harmless: the hint only suggests running the
     extractor, which now skips the file per file (§14.7's F1 correction).
   What IS blinded is everything that would write a claim about the essay from those bytes: the
-  realization and primary-location scans, the prerequisite-gap walk, and the extractor.
+  realization and primary-location scans, the prerequisite-gap walk on **both sides of its
+  before/after delta** (every collect during a writeup has a before-version that already contains the
+  placeholder, so blinding one side would leave the marker deciding the subtraction), and the
+  extractor — on all three of its routes into a payload (§14.8).
 
 ### 14.7 One capture per invocation (2026-08-29, after a live incident)
 

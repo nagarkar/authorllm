@@ -469,8 +469,10 @@ def collect(db: Database, manuscript: dict, config: dict,
     # "safe" words is not a fix: the author owns the concept vocabulary
     # and can add the colliding word tomorrow. The version ROW is
     # untouched; only the scans' input is blinded.
-    _blind = {f: ("" if is_placeholder(t) else t)
-              for f, t in loads(version["files"], {}).items()}
+    def _blinded(files: dict) -> dict:
+        return {f: ("" if is_placeholder(t) else t) for f, t in files.items()}
+
+    _blind = _blinded(loads(version["files"], {}))
     _scan_version = {**dict(version), "files": json.dumps(_blind)}
     realized = cg.scan_realizations(db, mid, _scan_version)
     repointed, vanished = cg.rescan_primary_locations(db, mid, _scan_version)
@@ -510,14 +512,22 @@ def collect(db: Database, manuscript: dict, config: dict,
             new_paragraphs += len([p for p in re.split(r"\n\s*\n", text) if p.strip()])
     extract_hint = new_paragraphs >= 5 and LLMClient(config).enabled
 
+    # BOTH sides are blinded, for the same reason the concept scans are
+    # (`_blind`, above): this walks the same case-insensitive concept
+    # patterns over the same file texts, so an unblinded placeholder could
+    # close a prerequisite gap — "the concept now appears in this essay" —
+    # on the strength of a word inside a marker.
+    #
+    # `before` needs it as much as `after` does, and it is easy to miss:
+    # every collect DURING a writeup has a before-version that already
+    # contains the placeholder (the writeup's own start collect put it
+    # there). Blinding only one side would leave the marker deciding the
+    # DELTA — gaps_resolved and gaps_new are set differences of these two
+    # — which is the same defect wearing a subtraction sign.
     gaps_before = (
-        compute_prerequisite_gaps(db, mid, loads(before["files"], {})) if before else []
+        compute_prerequisite_gaps(db, mid, _blinded(loads(before["files"], {})))
+        if before else []
     )
-    # Blinded for the same reason the concept scans are (`_blind`, above):
-    # this walks the same case-insensitive concept patterns over the same
-    # file texts, so an unblinded placeholder could close a prerequisite
-    # gap — "the concept now appears in this essay" — on the strength of a
-    # word inside a marker.
     gaps_after = compute_prerequisite_gaps(db, mid, _blind)
     before_keys = {g["edge_id"] for g in gaps_before}
     after_keys = {g["edge_id"] for g in gaps_after}

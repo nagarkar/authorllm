@@ -2496,6 +2496,59 @@ def scenario_parallel_writeups(root: Path) -> None:
         # are `=== <name> ===` labelled concatenations, so a whole-payload
         # `is_placeholder` check can never fire — the guard has to be per
         # FILE or it is dead code that reads like a guard.
+        #
+        # There are THREE per-file guards, on three routes into
+        # `_section_payloads`, and each one has to be exercised on its own
+        # route: a guard nothing reaches is how F1 happened in the first
+        # place. This one is the INCREMENTAL route, which never touches
+        # `_manuscript_text` at all — it builds its units from the changed
+        # SECTIONS of each file, and a truncation is a changed file whose
+        # "sections" are the placeholder's own paragraphs.
+        mark = len(StubLLMHandler.PAYLOADS)
+        write(ms / "03-third.md", CH3 + "\nA paragraph added while the "
+                                        "other essay is mid-rewrite.\n")
+        run(ws, "collect")
+        out = run(ws, "extract")          # no --full: changed files only
+        incremental = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                       if "LOAD-BEARING units of thought" in s]
+        check("E9 — the INCREMENTAL path (changed sections, no --full) "
+              "drops the in-flight file and still mines the essay that "
+              "really changed. Its units never pass through "
+              "_manuscript_text, so guard 1 cannot cover it",
+              incremental and not any(_api.MARKER in u for u in incremental)
+              and any("mid-rewrite" in u for u in incremental),
+              next((u[:400] for u in incremental if _api.MARKER in u),
+                   f"{len(incremental)} payload(s)\n{out}"))
+
+        # And the BATCHING route: explicit files whose combined text
+        # exceeds one payload, which builds its units straight off disk.
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\nextraction_max_chars = 300\n")
+        write(ms / "03-third.md", CH3 + "\n" + ("\n".join(
+            f"## Section {n}\n\nA paragraph of real prose about "
+            f"trajectories, numbered {n}, long enough that the batching "
+            f"path has something to batch.\n" for n in range(1, 6))))
+        run(ws, "collect")
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = run(ws, "extract", "01-choice.md", "03-third.md")
+        batched = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                   if "LOAD-BEARING units of thought" in s]
+        check("E9 — the BATCHING path (explicit files over the payload "
+              "cap) drops it too, and still batches the essay that has "
+              "real text: more than one payload, none of them the marker",
+              len(batched) > 1 and not any(_api.MARKER in u for u in batched)
+              and any("trajectories" in u for u in batched),
+              next((u[:400] for u in batched if _api.MARKER in u),
+                   f"{len(batched)} payload(s)\n{out}"))
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        write(ms / "03-third.md", CH3)
+        run(ws, "collect")
+
         mark = len(StubLLMHandler.PAYLOADS)
         out = run(ws, "extract", "01-choice.md", "--full")
         check("E9 — extracting the in-flight file specifically mines "

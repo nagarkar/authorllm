@@ -2189,12 +2189,27 @@ def check_placeholder_reader_paths() -> None:
                 api.collect(db, manuscript, {}, source="test")
         finally:
             api.compute_prerequisite_gaps = real_gaps
+        # BOTH calls, not just the second. A collect during a writeup has
+        # a before-version that already holds the placeholder — the
+        # writeup's own start collect put it there — so blinding one side
+        # would leave the marker deciding the DELTA, which is the same
+        # defect wearing a subtraction sign.
         check("F6 — compute_prerequisite_gaps is handed the BLINDED file "
-              "map: an unblinded placeholder could close a prerequisite "
-              "gap on the strength of a word inside a marker",
-              seen and seen[-1].get("01-epictetus.md") == ""
+              "map on BOTH sides of the delta: an unblinded placeholder "
+              "could close a prerequisite gap on the strength of a word "
+              "inside a marker",
+              len(seen) == 2
+              and all(files.get("01-epictetus.md") == "" for files in seen)
               and "A new essay." in seen[-1].get("02-second.md", ""),
-              str({k: v[:40] for k, v in (seen[-1] if seen else {}).items()}))
+              str([{k: v[:40] for k, v in files.items()} for files in seen]))
+        prior_version = db.one(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1 OFFSET 1", (manuscript["id"],))
+        check("F6 — and the BEFORE version really did carry the "
+              "placeholder, so blinding both sides is not a vacuous pass",
+              prior_version is not None and api.is_placeholder(
+                  _json.loads(prior_version["files"]).get(
+                      "01-epictetus.md", "")))
 
         # --- RK6: two writeups make --writeup a constant companion, so it
         # takes the essay's name as well as an opaque id.

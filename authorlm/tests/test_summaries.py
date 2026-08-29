@@ -834,6 +834,19 @@ def main_test() -> None:
               zeta_entry["summary"] is None
               and zeta_summary not in sums.drafting_context(
                   db, manuscript, "alpha.md"), str(zeta_entry))
+        rows = {r["file"]: r for r in sums.status(db, manuscript)}
+        check("F11 — and status() reports NO word count for it either. A "
+              "count is a claim that a summary is being offered for this "
+              "essay; zeta.md's row is a real, non-empty summary of the "
+              "essay that used to have this name, so borrowing its length "
+              "would put a number beside an entry that serves nothing",
+              rows["zeta.md"]["state"] == "unwritten"
+              and rows["zeta.md"]["words"] == 0
+              and len(zeta_summary.split()) > 0,
+              str((rows["zeta.md"], zeta_summary)))
+        check("F11 — while a real entry still reports its length, so the "
+              "guard did not simply zero the column",
+              rows["alpha.md"]["words"] > 0, str(rows["alpha.md"]))
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
