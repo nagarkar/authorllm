@@ -62,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from authorlm import api as _api  # noqa: E402
 from authorlm.cli import main  # noqa: E402
 
 PASSED = 0
@@ -587,11 +588,18 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
     # the only way to assert "zero calls" is to count them.
     REQUESTS = 0
 
+    # Every (system, user) turn the stub has been sent. Counting calls
+    # proves "no new model call"; keeping the payloads proves what was —
+    # and was not — put in front of a model (Scenario W3/E9: the
+    # mid-rewrite marker must never be MINED AS PROSE).
+    PAYLOADS: list[tuple[str, str]] = []
+
     def do_POST(self):
         StubLLMHandler.REQUESTS += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        StubLLMHandler.PAYLOADS.append((system, user))
         if "sole task is to find aliasing statements" in system:
             content = json.dumps({
                 "aliases": [
@@ -1390,8 +1398,12 @@ def scenario_write_loop(root: Path) -> None:
                         "--intent", intent_id)
         check("writeup starts: pins the source and truncates",
               "Pinned v" in out and "truncated" in out, out)
-        check("file is empty on disk after start",
-              (ms / "02-essay.md").read_text() == "", out)
+        check("the truncated file holds the mid-rewrite PLACEHOLDER on disk "
+              "— byte for byte, nothing else — so another session that "
+              "opens it finds an explanation rather than a blank essay "
+              "(design §14.3)",
+              (ms / "02-essay.md").read_text() == _api.PLACEHOLDER,
+              repr((ms / "02-essay.md").read_text()))
         check("write start prints the L1 drafting context — the "
               "before/after essay summaries the beat loop conditions on "
               "(design §12.4 item 1; nothing on the write path read them "
@@ -1525,7 +1537,6 @@ def scenario_write_loop(root: Path) -> None:
                          (4, "accepted")], repr(states))
 
         # --- compact briefing stays bounded under a huge backlog -----------
-        from authorlm import api as _api
         fake_node = {"name": "N", "kind": "concept", "status": "declared",
                      "introduced_in": None, "notes": "", "aliases": "[]"}
         fake = {"since": "", "belief_changes": [], "new_beliefs": [],
@@ -1558,8 +1569,9 @@ def scenario_write_loop(root: Path) -> None:
         run(ws, "summarize", "rebuild", "--all")
         run_stdin(ws, "", "write", "start", "01-choice.md",
                   "--intent", intent_id)
-        check("second writeup truncated its file",
-              (ms / "01-choice.md").read_text() == "", "")
+        check("second writeup truncated its file, leaving the placeholder",
+              (ms / "01-choice.md").read_text() == _api.PLACEHOLDER,
+              repr((ms / "01-choice.md").read_text()))
 
         # BUG-2 / A1 regression: the author may type fresh draft text into
         # the truncated file before it is ever collected — write_abandon
@@ -2173,9 +2185,11 @@ def scenario_write_new_and_digest(root: Path) -> None:
               "PINNED SOURCE — 02-essay.md" in out
               and "The old opening paragraph, soon to be raw material." in out
               and "(v" in out, out)
-        check("B1 — and the file on disk is still empty (the old essay lives "
-              "in the pinned version, never on disk)",
-              (ms / "02-essay.md").read_text() == "", out)
+        check("B1 — and the file on disk still holds only the mid-rewrite "
+              "placeholder (the old essay lives in the pinned version, "
+              "never on disk)",
+              (ms / "02-essay.md").read_text() == _api.PLACEHOLDER,
+              repr((ms / "02-essay.md").read_text()))
         out = run_stdin(ws, DIGEST_JSON, "write", "digest")
         check("B2 — the digest persists and reports its counts",
               "Digest recorded: 3 point(s), 1 example(s), 1 reference(s), "
@@ -2348,6 +2362,387 @@ def scenario_write_new_and_digest(root: Path) -> None:
               and "UNACCOUNTED — no disposition recorded" not in out, out)
 
         run(ws, "session", "end")
+    finally:
+        server.shutdown()
+
+
+# --- Scenario W3 fixtures (parallel writeups, design §14) -----------------
+#
+# The author's own case: essay A comes AFTER essay B in reading order and
+# both rewrites are open at once. Before this design, `write start B` left
+# B empty on disk, B's stored summary read `stale`, and starting A was
+# refused — with a remedy (`summarize rebuild`) that would have summarized
+# the empty file and stored it as fresh.
+
+TOC_W3 = ('[[chapter]]\nfile = "01-choice.md"\n\n'
+          '[[chapter]]\nfile = "02-essay.md"\n\n'
+          '[[chapter]]\nfile = "03-third.md"\n\n'
+          '[[chapter]]\nfile = "04-unattached.md"\n')
+
+W3_PLAN = json.dumps([
+    {"role": "opener", "concepts": ["Choice"], "budget": 60,
+     "notes": "opens on the claim"},
+    {"role": "close", "concepts": ["Choice"], "budget": 60,
+     "notes": "closes on the same ground"},
+])
+W3_BEAT_1 = "Choice is the operation by which anything comes to be for us."
+W3_BEAT_2 = "To choose is to distinguish, and the distinction is the record."
+
+
+def scenario_parallel_writeups(root: Path) -> None:
+    """Scenario W3 — two writeups open at once (design §14). The pinned
+    version is the essay; the placeholder never reaches a finished one."""
+    print("Scenario W3 — parallel writeups, in-flight context")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "w3"
+        ms = ws / "manuscript"
+        write(ms / "01-choice.md", CH1)
+        write(ms / "02-essay.md", CH2)
+        write(ms / "03-third.md", CH3)
+        write(ms / "04-unattached.md",
+              "# Chapter 4 — Unattached\n\nThis chapter has no style "
+              "guide attached, deliberately.\n")
+        write(ms / "toc.toml", TOC_W3)
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        payload_mark = len(StubLLMHandler.PAYLOADS)
+        run(ws, "session", "start")
+        out = run(ws, "intent", "declare", "Rewrite two essays at once")
+        intent_id = out.split("[")[1].split("]")[0]
+        run(ws, "style", "guide", "House")
+        for name in ("01-choice.md", "02-essay.md", "03-third.md"):
+            run(ws, "style", "attach", name, "House")
+        run(ws, "summarize", "rebuild", "--all")
+
+        from authorlm import passes as _passes
+        from authorlm import summaries as _sums
+        from authorlm.db import Database as _DB
+        _db = _DB(ws / ".authorlm" / "authorlm.db")
+        _ms_row = dict(_db.one("SELECT * FROM manuscripts WHERE name = 'book'"))
+        # E9's tripwire: a concept whose NAME collides with the
+        # placeholder's own words. concepts._word_pattern is
+        # case-insensitive, so without the blinding in api.collect this
+        # would be marked realized in a truncated essay.
+        run(ws, "concept", "add", "Being", "--notes",
+            "the bare fact of a thing standing in the field")
+
+        # ---- E7: RISK K1, unchanged. Every refused start leaves the disk
+        # byte-identical — asserted on the BYTES, never on the error text,
+        # which is also what proves no placeholder is written by a
+        # refused start.
+        before_bytes = {name: (ms / name).read_bytes()
+                        for name in ("01-choice.md", "02-essay.md",
+                                     "03-third.md", "04-unattached.md")}
+        new_target = ms / "05-new.md"
+
+        out = run_stdin(ws, "A brief for an essay that is never created.",
+                        "write", "start", "05-new.md", "--new",
+                        "--intent", intent_id, "--after", "nonsense.md",
+                        "--style", "House", expect_exit=True)
+        check("E7 — a bad --after is refused", "nonsense.md" in out, out)
+        check("E7 — and nothing was created", not new_target.exists())
+
+        out = run_stdin(ws, "A brief.", "write", "start", "05-new.md",
+                        "--new", "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        check("E7 — --new with no placement is refused",
+              "does not exist yet" in out, out)
+        check("E7 — and nothing was created", not new_target.exists())
+
+        out = run_stdin(ws, "", "write", "start", "05-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        "--style", "House", expect_exit=True)
+        check("E7 — --new with no brief is refused",
+              "brief" in out and "stdin" in out, out)
+        check("E7 — and nothing was created", not new_target.exists())
+
+        out = run_stdin(ws, "", "write", "start", "04-unattached.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("E7 — a rewrite with no attached style guide is refused",
+              "no attached style guide" in out, out)
+        check("E7 — and EVERY existing file is byte-identical to before "
+              "the gate parade: a refused start writes no placeholder, "
+              "because the write still sits after the last refusal",
+              all((ms / name).read_bytes() == data
+                  for name, data in before_bytes.items()),
+              str({name: (ms / name).read_bytes()[:60]
+                   for name in before_bytes}))
+
+        # ---- E1: the author's exact scenario. B (earlier) first, then A.
+        out = run_stdin(ws, "", "write", "start", "01-choice.md",
+                        "--intent", intent_id)
+        b_id = out.split("[")[1].split("]")[0]
+        check("E4 — after write start the file is byte-equal to the "
+              "PLACEHOLDER, nothing else",
+              (ms / "01-choice.md").read_text() == _api.PLACEHOLDER,
+              repr((ms / "01-choice.md").read_text()))
+
+        being = _db.one("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+                        "AND name = 'Being'", (_ms_row["id"],))
+        check("E9 — the collect that recorded the truncation is BLIND to "
+              "the placeholder: 'Being' is not marked realized in a file "
+              "that holds only a marker, and its primary location is not "
+              "silently repointed there",
+              being["status"] == "declared"
+              and being["introduced_in"] is None, str(dict(being)))
+
+        # E9, the half that matters: an extraction that ACTUALLY RUNS
+        # while the file is mid-rewrite. The payloads this module builds
+        # are `=== <name> ===` labelled concatenations, so a whole-payload
+        # `is_placeholder` check can never fire — the guard has to be per
+        # FILE or it is dead code that reads like a guard.
+        #
+        # There are THREE per-file guards, on three routes into
+        # `_section_payloads`, and each one has to be exercised on its own
+        # route: a guard nothing reaches is how F1 happened in the first
+        # place. This one is the INCREMENTAL route, which never touches
+        # `_manuscript_text` at all — it builds its units from the changed
+        # SECTIONS of each file, and a truncation is a changed file whose
+        # "sections" are the placeholder's own paragraphs.
+        mark = len(StubLLMHandler.PAYLOADS)
+        write(ms / "03-third.md", CH3 + "\nA paragraph added while the "
+                                        "other essay is mid-rewrite.\n")
+        run(ws, "collect")
+        out = run(ws, "extract")          # no --full: changed files only
+        incremental = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                       if "LOAD-BEARING units of thought" in s]
+        check("E9 — the INCREMENTAL path (changed sections, no --full) "
+              "drops the in-flight file and still mines the essay that "
+              "really changed. Its units never pass through "
+              "_manuscript_text, so guard 1 cannot cover it",
+              incremental and not any(_api.MARKER in u for u in incremental)
+              and any("mid-rewrite" in u for u in incremental),
+              next((u[:400] for u in incremental if _api.MARKER in u),
+                   f"{len(incremental)} payload(s)\n{out}"))
+
+        # And the BATCHING route: explicit files whose combined text
+        # exceeds one payload, which builds its units straight off disk.
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\nextraction_max_chars = 300\n")
+        write(ms / "03-third.md", CH3 + "\n" + ("\n".join(
+            f"## Section {n}\n\nA paragraph of real prose about "
+            f"trajectories, numbered {n}, long enough that the batching "
+            f"path has something to batch.\n" for n in range(1, 6))))
+        run(ws, "collect")
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = run(ws, "extract", "01-choice.md", "03-third.md")
+        batched = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                   if "LOAD-BEARING units of thought" in s]
+        check("E9 — the BATCHING path (explicit files over the payload "
+              "cap) drops it too, and still batches the essay that has "
+              "real text: more than one payload, none of them the marker",
+              len(batched) > 1 and not any(_api.MARKER in u for u in batched)
+              and any("trajectories" in u for u in batched),
+              next((u[:400] for u in batched if _api.MARKER in u),
+                   f"{len(batched)} payload(s)\n{out}"))
+        write(ws / ".authorlm" / "config.toml",
+              "[llm]\nenabled = true\nprovider = \"openai\"\n"
+              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+              "model = \"stub\"\n")
+        write(ms / "03-third.md", CH3)
+        run(ws, "collect")
+
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = run(ws, "extract", "01-choice.md", "--full")
+        check("E9 — extracting the in-flight file specifically mines "
+              "NOTHING: it is dropped per file, so the payload is empty "
+              "and the pass ends rather than sending a marker to a model",
+              not [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                   if _api.MARKER in u],
+              next((u[:400] for s, u in StubLLMHandler.PAYLOADS[mark:]
+                    if _api.MARKER in u), out))
+
+        mark = len(StubLLMHandler.PAYLOADS)
+        write(ms / "03-third.md", CH3 + "\nA paragraph added during the "
+                                        "rewrite window.\n")
+        run(ws, "collect")
+        run(ws, "extract", "--full")
+        during = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
+                  if "LOAD-BEARING units of thought" in s]
+        check("E9 — and a FULL extraction during the window mines the "
+              "other essays and skips only the one in flight",
+              during and not any(_api.MARKER in u for u in during)
+              and any("trajectory" in u for u in during),
+              next((u[:400] for u in during if _api.MARKER in u),
+                   f"{len(during)} payload(s)"))
+        write(ms / "03-third.md", CH3)
+        run(ws, "collect")
+
+        out = run_stdin(ws, "", "write", "complete", "--writeup", b_id,
+                        expect_exit=True)
+        check("E5 — completing a writeup whose file is STILL only the "
+              "placeholder is refused, naming write abandon: recording a "
+              "marker as the finished essay would leave the real one only "
+              "in the database",
+              "placeholder" in out and "write abandon" in out, out)
+        check("E5 — and the file is unchanged",
+              (ms / "01-choice.md").read_text() == _api.PLACEHOLDER)
+
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id)
+        a_id = out.split("[")[1].split("]")[0]
+        check("E1 — a SECOND writeup, on a later essay, now starts while "
+              "the first is still open. Before this it was refused: the "
+              "truncated neighbour's summary read 'stale' and the gate "
+              "would not pass a lie about the text",
+              "Writeup [" in out and "02-essay.md" in out, out)
+        check("E1 — and its drafting context opens by naming the essay "
+              "that is being written right now, in the author's own terms",
+              "1 essay in this context is being written right now" in out
+              and "01-choice.md — mid-rewrite" in out
+              and "slightly suboptimal" in out, out)
+        check("E1 — the BEFORE entry serves the PRE-REWRITE summary, "
+              "loudly labelled, rather than refusing or serving nothing",
+              "[01-choice.md] (rewriting)" in out
+              and "MID-REWRITE" in out
+              and "canned summary of 01-choice.md" in out, out)
+
+        # ---- E6: abandon is a byte-for-byte round trip. Done here so the
+        # critique checks below have a target that is NOT itself in
+        # flight — an edit pass over an in-flight file is E3's refusal.
+        run_stdin(ws, "", "write", "abandon", "--writeup", a_id)
+        check("E6 — abandon restores the pinned text BYTE FOR BYTE, not "
+              "merely 'restored: True'",
+              (ms / "02-essay.md").read_text() == CH2,
+              repr((ms / "02-essay.md").read_text()))
+        _row_a = _sums.all_summaries(_db, _ms_row["id"])["02-essay.md"]
+        check("E6 — and the hash round trip CLOSES: the stored summary's "
+              "source_hash matches the restored text again, so the entry "
+              "stops reading 'stale' and both gates accept it with nothing "
+              "to rebuild (it is only upstream_stale, which is tolerated: "
+              "its own text did not move, its conditioning did)",
+              _row_a["source_hash"] == _sums._hash(CH2)
+              and {r["file"]: r["state"]
+                   for r in _sums.status(_db, _ms_row)}["02-essay.md"]
+              == "upstream_stale"
+              and _passes.summaries_ready(_db, _ms_row, "03-third.md")["ok"],
+              str(_sums.status(_db, _ms_row)))
+
+        # ---- E2: the critique side of the same context.
+        p = _passes.ensure_pass(_db, _ms_row["id"], _db.source("system"))
+        # P3 (sponsor addendum) — ONE capture per invocation, counted:
+        # the in-flight check, the summaries gate and the paragraph list
+        # the editor model edits must all read the same snapshot, or a
+        # parallel session can change an essay between the gate approving
+        # it and the context being assembled from it.
+        _real = {name: getattr(_sums, name)
+                 for name in ("_context_units", "units")}
+        _captures = []
+
+        def _counter(name):
+            def wrapper(*args, **kwargs):
+                _captures.append(name)
+                return _real[name](*args, **kwargs)
+            return wrapper
+
+        for _name in _real:
+            setattr(_sums, _name, _counter(_name))
+        try:
+            ctx = _passes.build_context(_db, _ms_row, "02-essay.md", p)
+        finally:
+            for _name, _fn in _real.items():
+                setattr(_sums, _name, _fn)
+        check("E2/P3 — build_context reads the manuscript from disk ONCE, "
+              "and the in-flight check, the summaries gate and the "
+              "paragraph list the editor model actually edits all read "
+              "that same snapshot. It used to take a separate pass for "
+              "the paragraphs, which is a window in which a parallel "
+              "session can change the essay AFTER the gate approved it",
+              _captures == ["_context_units"], str(_captures))
+        check("E2 — the edit pass over A PROCEEDS with B mid-rewrite, and "
+              "reports which essays are in flight",
+              ctx["inflight"] == ["01-choice.md"], str(ctx["inflight"]))
+        rendered = _passes.render_user_message(ctx)
+        before_block = rendered.split("BOOK CONTEXT — BEFORE", 1)[1] \
+            .split("BOOK CONTEXT — AFTER", 1)[0]
+        check("E2 — and the BEFORE block the editor model actually reads "
+              "carries B's PRE-REWRITE summary, not a placeholder and not "
+              "a blank",
+              "canned summary of 01-choice.md" in before_block,
+              before_block)
+        out = run(ws, "critique", "run", "02-essay.md", expect_exit=True)
+        check("E2 — the CLI says so too, before the model call (the run "
+              "then stops on the stub's non-contract reply, which is "
+              "beside the point here)",
+              "being written right now" in out and "01-choice.md" in out
+              and "PRE-REWRITE essay" in out
+              and "Slightly suboptimal" in out, out)
+
+        # ---- E3: and the pass over the in-flight file ITSELF is refused.
+        out = run(ws, "critique", "run", "01-choice.md", expect_exit=True)
+        check("E3 — an edit pass over the essay being rewritten is refused "
+              "outright: what is on disk is a marker, and the editor model "
+              "would propose edits to it. Both exits are named",
+              "being rewritten right now" in out
+              and "write complete" in out and "write abandon" in out, out)
+
+        # ---- E8: the export path, where being wrong is unrecoverable.
+        out = run(ws, "export", "md")
+        check("E8 — the export NAMES the mid-rewrite essay it omitted. It "
+              "used to drop a truncated essay in silence",
+              "01-choice.md: mid-rewrite" in out
+              and "omitted from the export" in out, out)
+        exported = next((ms / "_exports").glob("*.md")).read_text()
+        check("E8 — and the exported book contains neither the marker nor "
+              "the pre-rewrite text: a mid-rewrite essay is not shipped, "
+              "and a marker never reaches a reader",
+              _api.MARKER not in exported
+              and "Every act of thought begins with a choice" not in exported
+              and "a trajectory is the path actually taken" in exported,
+              exported[:400])
+
+        # ---- E4: the placeholder lifecycle, asserted as a PROPERTY at
+        # every stage rather than on one path.
+        run_stdin(ws, W3_PLAN, "write", "plan", "--writeup", b_id)
+        run_stdin(ws, W3_BEAT_1, "write", "propose", "--writeup", b_id,
+                  "--why", "opens on the claim, realizing Choice")
+        run_stdin(ws, "", "write", "accept", "--writeup", b_id)
+        text = (ms / "01-choice.md").read_text()
+        check("E4 — the FIRST accepted beat REPLACES the placeholder: the "
+              "file is the beat alone, with no marker prepended to it",
+              text == W3_BEAT_1 + "\n" and _api.MARKER not in text,
+              repr(text))
+        run_stdin(ws, W3_BEAT_2, "write", "propose", "--writeup", b_id,
+                  "--why", "closes on the same ground")
+        run_stdin(ws, "", "write", "accept", "--writeup", b_id)
+        text = (ms / "01-choice.md").read_text()
+        check("E4 — the second beat appends normally, and there is still "
+              "no marker",
+              W3_BEAT_1 in text and W3_BEAT_2 in text
+              and _api.MARKER not in text, repr(text))
+        out = run_stdin(ws, "", "write", "complete", "--writeup", b_id)
+        text = (ms / "01-choice.md").read_text()
+        check("E4 — and the finished essay does not contain it. Guaranteed "
+              "twice over: the first accept removed it, and complete is an "
+              "independent check",
+              "completed" in out and _api.MARKER not in text, repr(text))
+
+        # Every extraction call this scenario made, by its system prompt.
+        # (An episode-analysis payload legitimately quotes the truncation
+        # transition — that is a record of what happened on disk, not the
+        # extractor being asked to mine a marker for concepts.)
+        def _mined(since: int) -> list[str]:
+            return [user for system, user
+                    in StubLLMHandler.PAYLOADS[since:]
+                    if "LOAD-BEARING units of thought" in system
+                    or "ONLY relationships among the known concepts" in system
+                    or "sole task is to find aliasing statements" in system]
+
+        mined = _mined(payload_mark)
+        check("E9 — and no EXTRACTION payload in this scenario was ever "
+              "handed the marker as prose",
+              mined and not any(_api.MARKER in u for u in mined),
+              next((u[:400] for u in mined if _api.MARKER in u),
+                   f"{len(mined)} extraction payload(s)"))
+        check("E9 — and the run did extract, so that is not vacuous",
+              len(mined) >= 1, f"{len(mined)} extraction payload(s)")
     finally:
         server.shutdown()
 
@@ -3506,6 +3901,7 @@ def main_test() -> None:
         scenario_llm_and_unregister(root)
         scenario_write_loop(root)
         scenario_write_new_and_digest(root)
+        scenario_parallel_writeups(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)

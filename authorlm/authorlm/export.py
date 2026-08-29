@@ -187,9 +187,19 @@ def publish_markdown(manuscript: dict, variant: str,
         order = select_chapters(files, only)
     else:
         order, _unlisted = reading_order(files)
+    from .api import is_placeholder
+
     warnings: list[str] = []
     parts: list[str] = []
     for name in order:
+        if is_placeholder(files[name]):
+            # A mid-rewrite essay used to disappear from the exported
+            # book in SILENCE (the `if text:` below dropped the empty
+            # file). The marker must never reach a reader either, so it
+            # is still omitted — but named.
+            warnings.append(f"{name}: mid-rewrite (a writeup is open) — "
+                            "omitted from the export")
+            continue
         text = normalize_markdown(files[name]).rstrip("\n")
         if variant != "slots":
             raw = (root / name).read_text(encoding="utf-8")

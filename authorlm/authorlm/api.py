@@ -459,8 +459,23 @@ def collect(db: Database, manuscript: dict, config: dict,
         episode = ses.current_episode(db, mid, dict(session))
         ses.attach_transitions(db, episode, transitions)
         attached = True
-    realized = cg.scan_realizations(db, mid, version)
-    repointed, vanished = cg.rescan_primary_locations(db, mid, version)
+    # The concept scans are shown a BLINDED version: any file that holds
+    # only the mid-rewrite placeholder is presented as empty, exactly as
+    # it was before the placeholder existed. concepts._word_pattern is
+    # case-insensitive, so a concept named "Being" — entirely plausible
+    # in this manuscript — would otherwise match the placeholder's "being
+    # presently rewritten" and be marked realized with introduced_in
+    # pointing at a truncated file, silently rewriting the graph. Picking
+    # "safe" words is not a fix: the author owns the concept vocabulary
+    # and can add the colliding word tomorrow. The version ROW is
+    # untouched; only the scans' input is blinded.
+    def _blinded(files: dict) -> dict:
+        return {f: ("" if is_placeholder(t) else t) for f, t in files.items()}
+
+    _blind = _blinded(loads(version["files"], {}))
+    _scan_version = {**dict(version), "files": json.dumps(_blind)}
+    realized = cg.scan_realizations(db, mid, _scan_version)
+    repointed, vanished = cg.rescan_primary_locations(db, mid, _scan_version)
     # Summaries: mark, don't cascade. A changed unit's own row is already
     # stale by source_hash; downstream rows get the tolerated flag.
     from . import summaries as sums
@@ -497,10 +512,23 @@ def collect(db: Database, manuscript: dict, config: dict,
             new_paragraphs += len([p for p in re.split(r"\n\s*\n", text) if p.strip()])
     extract_hint = new_paragraphs >= 5 and LLMClient(config).enabled
 
+    # BOTH sides are blinded, for the same reason the concept scans are
+    # (`_blind`, above): this walks the same case-insensitive concept
+    # patterns over the same file texts, so an unblinded placeholder could
+    # close a prerequisite gap — "the concept now appears in this essay" —
+    # on the strength of a word inside a marker.
+    #
+    # `before` needs it as much as `after` does, and it is easy to miss:
+    # every collect DURING a writeup has a before-version that already
+    # contains the placeholder (the writeup's own start collect put it
+    # there). Blinding only one side would leave the marker deciding the
+    # DELTA — gaps_resolved and gaps_new are set differences of these two
+    # — which is the same defect wearing a subtraction sign.
     gaps_before = (
-        compute_prerequisite_gaps(db, mid, loads(before["files"], {})) if before else []
+        compute_prerequisite_gaps(db, mid, _blinded(loads(before["files"], {})))
+        if before else []
     )
-    gaps_after = compute_prerequisite_gaps(db, mid, loads(version["files"], {}))
+    gaps_after = compute_prerequisite_gaps(db, mid, _blind)
     before_keys = {g["edge_id"] for g in gaps_before}
     after_keys = {g["edge_id"] for g in gaps_after}
 
@@ -680,6 +708,52 @@ DIGEST_LISTS = {"points": "claim", "examples": "example",
 DIGEST_PROVENANCE = ("source_version_id", "source_file", "recorded_at",
                      "point_count")
 DIGEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+# The mid-rewrite placeholder (design §14.3). `write start` on an
+# EXISTING file leaves this where the essay was, instead of leaving the
+# file empty.
+#
+# Visible text, not an HTML comment: the one path where a hidden marker
+# fails is the one that matters. `export.publish_markdown` used to drop a
+# mid-rewrite essay from the exported book in silence, and an HTML
+# comment is stripped on the way to PDF/EPUB, so the hole would remain.
+# Visible text cannot be shipped by accident, only loudly. The author
+# also opens these files in Obsidian, where a comment is invisible.
+#
+# Bracketed `[AuthorLM: …]`, not the author's literal `<<…>>`: `<<` and
+# `>>` are reserved by the pending-change grammar (threads.PENDING,
+# gdocs.diff_push), so a literal `<<…>>` in a manuscript file would make
+# the next surgical push of it fail with a message about a margin thread
+# that does not exist. The author's WORDS are kept exactly.
+#
+# Deterministic by construction — no id, no timestamp, no file name — so
+# it is written once per writeup and never churns a version or
+# invalidates the prompt-cache prefix on its own.
+MARKER = "[AuthorLM: being presently rewritten]"
+
+PLACEHOLDER = (
+    MARKER + "\n"
+    "\n"
+    "This essay is mid-rewrite and is being drafted one beat at a time. The\n"
+    "previous text is not lost — it is pinned in the database. Run\n"
+    "`authorlm write status` to see the writeup, `authorlm write digest` to\n"
+    "print the pinned original, or `authorlm write abandon` to put the old\n"
+    "essay back. The first accepted beat replaces this placeholder, which is\n"
+    "never part of a finished essay.\n"
+)
+
+
+def is_placeholder(text: str) -> bool:
+    """Whole-file exact match (whitespace-tolerant at the edges). A file
+    the author has HAND-EDITED is not a placeholder — their text is never
+    silently discarded, which is the stronger rule."""
+    return text.strip() == PLACEHOLDER.strip()
+
+
+def marker_present(text: str) -> bool:
+    """The weaker check: the marker line survived inside a file that is
+    no longer just the placeholder. Warned about, never auto-repaired."""
+    return MARKER in text
 # Two values only. A third ("moved", "deferred") is where enum-shaped
 # schemas rot; the nuance belongs in the free-text reason, which is what
 # the "What Was Removed and Why" section quotes anyway.
@@ -727,17 +801,51 @@ def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
 
 
 def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
-    """The active writeup (or one matched by id prefix)."""
+    """The active writeup — matched by id prefix, or by FILE NAME.
+
+    Two writeups at once is now an ordinary way to work (design §14), and
+    it makes `--writeup` a constant companion. The author knows which
+    essay they mean; asking them to go and fetch an opaque `wu-…` id to
+    say so is friction for nothing. So the disambiguator also accepts the
+    file: exact relpath first, then a unique case-insensitive substring —
+    the same forgiveness `docs._match` gives every other file argument.
+
+    Id matching is tried FIRST and unchanged, so nothing that worked
+    before resolves differently now. Ambiguity is still refused rather
+    than guessed at, in both directions, and an id-shaped miss still
+    reports itself as one."""
     if prefix:
         rows = db.all(
             "SELECT * FROM writeups WHERE manuscript_id = ? AND id LIKE ?",
             (manuscript["id"], f"%{prefix}%"),
         )
-        if not rows:
-            raise LookupError(f"no writeup matching '{prefix}'")
         if len(rows) > 1:
             raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} writeups)")
-        return dict(rows[0])
+        if rows:
+            return dict(rows[0])
+        # Not an id. Try it as the essay's name, ACTIVE writeups first —
+        # a finished writeup on the same file must not shadow the open
+        # one the author is obviously talking about.
+        by_file = db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? "
+            "ORDER BY (status = 'active') DESC, created_at DESC",
+            (manuscript["id"],))
+        exact = [r for r in by_file if r["file"] == prefix]
+        hits = exact or [r for r in by_file
+                         if prefix.lower() in r["file"].lower()]
+        if not hits:
+            raise LookupError(
+                f"no writeup matching '{prefix}' — it is neither a writeup "
+                f"id prefix nor the name of a file with a writeup on it "
+                f"(open ones: "
+                f"{', '.join(r['file'] for r in by_file if r['status'] == 'active') or 'none'})")
+        names = {r["file"] for r in hits}
+        if len(names) > 1:
+            raise LookupError(
+                f"'{prefix}' is ambiguous — it matches "
+                f"{', '.join(sorted(names))}; name the file exactly, or "
+                f"pass the writeup id")
+        return dict(hits[0])
     rows = db.all(
         "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
         (manuscript["id"],),
@@ -746,7 +854,9 @@ def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
         raise LookupError("no active writeup — start one: write start <file> --intent <id>")
     if len(rows) > 1:
         files = ", ".join(r["file"] for r in rows)
-        raise LookupError(f"multiple active writeups ({files}) — pass --writeup")
+        raise LookupError(
+            f"multiple active writeups ({files}) — pass --writeup with the "
+            f"file name (e.g. --writeup {rows[0]['file']}) or a writeup id")
     return dict(rows[0])
 
 
@@ -790,19 +900,25 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
     return {r["state"]: r["n"] for r in rows}
 
 
-def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
+def _drafting_context(db: Database, manuscript: dict, writeup: dict,
+                      capture=None) -> str:
     """The writeup's L1 book-frame (design §12.4 item 1): compressed
     summaries of the settled essays before this one and the upcoming
     ones after it. Recomputed on every read rather than stored — the
     summaries themselves are the source of truth and a rebuild between
     beats must show through. The declared placement, however, IS stored
     (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
-    recomputes the same split without the author repeating the flag."""
+    recomputes the same split without the author repeating the flag.
+
+    `capture` is `write_start`'s own snapshot: the context it prints must
+    be the same text its gate just passed, not a second read that a
+    parallel session could have changed underneath it. Every other caller
+    (the resume view) is a fresh invocation and takes a fresh one."""
     from . import summaries as sums
 
     placement = loads(writeup["metadata"], {}).get("placement")
     return sums.drafting_context(db, manuscript, writeup["file"],
-                                 placement=placement)
+                                 placement=placement, capture=capture)
 
 
 def _status_drafting_context(db: Database, manuscript: dict,
@@ -965,9 +1081,19 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # LAST among the gates but still before the pin/truncate/collect
     # sequence: a blocked start must leave the file untouched.
     from . import passes
+    from . import summaries as _sums
 
+    # ONE capture for this invocation, shared by the gate below and by
+    # the drafting context printed at the end. Two reads would leave a
+    # window in which a parallel session truncates a neighbour AFTER the
+    # gate approved it and BEFORE the context was assembled from it — and
+    # the author would then be handed, as approved context, exactly the
+    # text the gate exists to refuse. The target file itself never
+    # appears in its own context, so the truncation this verb is about to
+    # perform does not make the capture stale.
+    capture = _sums.capture(db, manuscript)
     ready = passes.summaries_ready(db, manuscript, relpath,
-                                   placement=placement)
+                                   placement=placement, capture=capture)
     if not ready["ok"]:
         raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
@@ -984,7 +1110,18 @@ def write_start(db: Database, manuscript: dict, config: dict,
         raise LookupError("no collected version to pin — is the manuscript empty?")
     # Create (--new) or truncate. Either way the file's pre-writeup state
     # is already inside the pinned version above.
-    (Path(manuscript["path"]) / relpath).write_text("", encoding="utf-8")
+    #
+    # A truncation leaves the PLACEHOLDER, so another session reading this
+    # file mid-rewrite finds an explanation rather than a blank essay
+    # (design §14.3). A creation leaves it empty: the placeholder marks a
+    # truncation, `--new` truncates nothing, its restore target is
+    # nonexistence, and a created file's empty window is deliberately
+    # structurally invisible (K6). Other sessions see a created file
+    # through its `writeups` row instead, as the `unwritten` state.
+    #
+    # RISK K1: same statement, same position — after the last refusal.
+    (Path(manuscript["path"]) / relpath).write_text(
+        "" if new else PLACEHOLDER, encoding="utf-8")
     if new:
         attach_style(db, manuscript, relpath, guide["name"])
     collect(db, manuscript, config, source="write-start")
@@ -1005,7 +1142,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
-            "drafting_context": _drafting_context(db, manuscript, row)}
+            "drafting_context": _drafting_context(db, manuscript, row,
+                                                  capture=capture)}
 
 
 def write_plan(db: Database, manuscript: dict, beats: list,
@@ -1362,6 +1500,12 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
     current = plan[cursor] if cursor < len(plan) else None
     pending = _beat_proposal(db, writeup, current["n"]) if current else None
     meta = loads(writeup["metadata"], {})
+    # The resume view warns about a marker the author has edited around;
+    # it never repairs one. (A file that is STILL only the placeholder is
+    # the ordinary mid-rewrite state and is not flagged here — the
+    # drafting context already says the essay is in flight.)
+    _path = Path(manuscript["path"]) / writeup["file"]
+    _disk = _path.read_text(encoding="utf-8") if _path.exists() else ""
     return {
         "writeup": {k: writeup[k] for k in
                     ("id", "intent_id", "file", "mode", "status",
@@ -1374,6 +1518,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "brief": meta.get("brief"),
         "created_file": bool(meta.get("created_file")),
         "digest": meta.get("digest"),
+        "marker_present": marker_present(_disk) and not is_placeholder(_disk),
         "accounting": _accounting(writeup),
         "drafting_context": _status_drafting_context(db, manuscript, writeup),
     }
@@ -1437,6 +1582,12 @@ def write_accept(db: Database, manuscript: dict, config: dict,
 
     path = Path(manuscript["path"]) / writeup["file"]
     existing = path.read_text(encoding="utf-8")
+    if is_placeholder(existing):
+        # The FIRST accepted beat REPLACES the placeholder rather than
+        # appending after it. Without this the marker would be prepended
+        # to the essay and would ship — the "never in a finished essay"
+        # leak. (write_complete is the second, independent check.)
+        existing = ""
     prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
     path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
 
@@ -1522,6 +1673,24 @@ def write_complete(db: Database, manuscript: dict, config: dict,
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
     meta = loads(writeup["metadata"], {})
     path = Path(manuscript["path"]) / writeup["file"]
+    # BEFORE anything mutates. A file that is still ONLY the placeholder
+    # has had no beat accepted: completing here would record the marker
+    # as the finished essay, register a toc entry for it, and leave the
+    # author's real essay only in the database. That is structural
+    # integrity, not editorial judgment, so it refuses rather than warns
+    # (§13.2's report-don't-block is about unaccounted digest points).
+    # `write abandon` is what the author means when zero beats landed.
+    disk_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if is_placeholder(disk_text):
+        raise ValueError(
+            f"{writeup['file']} still holds only the mid-rewrite "
+            f"placeholder — no beat has been accepted, so completing would "
+            f"record the marker as the finished essay and leave the old one "
+            f"only in the database. Put the old essay back with "
+            f"'write abandon', or draft a beat first.")
+    # The weaker case: the author hand-edited around the marker. That is
+    # AUTHORED content, so it is reported and never silently removed.
+    marker_survives = marker_present(disk_text)
     placement = meta.get("placement")
     toc_registered = None
     toc_stanza = None
@@ -1575,6 +1744,7 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "learnings": loads(writeup["learnings"], []),
             "accounting": accounting, "toc_registered": toc_registered,
             "toc_stanza": toc_stanza, "toc_placement": placement,
+            "marker_present": marker_survives,
             "summary_hint": writeup["file"],
             "collect": report, "extraction": extraction}
 

@@ -878,3 +878,203 @@ Unchanged from §11, and re-confirmed against these two use cases:
   (no plan, no gates, no verdict, straight into `_drafts/`). It predates this
   loop and should be retired rather than expanded; the supported path for
   turning a plan item into prose is `write start`.
+
+## 14. Parallel writeups — in-flight context (2026-08-29)
+
+Added at the author's request after the first real sessions. Additive: nothing above is edited.
+
+Two writeups on two essays, at once, is already reachable — `write start` refuses only a second
+writeup on the *same* file, and `_writeup` asks for `--writeup` once more than one is active. The
+author's case: essay A comes after essay B in reading order, both rewrites are open, and A's
+drafting context has to say something about a B that is not there.
+
+### 14.1 What went wrong
+
+`write start` truncates its file, so a writeup on B leaves B empty on disk. Every context read is
+driven off disk, so B's stored summary stopped matching B's text and read as `stale` — and a stale
+summary is a lie about the text, which both gates refuse without a `--force`. Starting A was
+therefore blocked by B, and the refusal's own remedy — `summarize rebuild` — would have summarized
+the *empty file* and stored the result as fresh: a confident summary of nothing, which A would then
+have been conditioned on. The annoyance was the refusal; the defect was the remedy.
+
+The same fault had a second face. `structure.reading_order` appends an unlisted on-disk file, so a
+brand-new essay created by `write start --new` appeared in every other unit's AFTER block with no
+summary at all — `missing`, refused — and blocked every other writeup and every critique run until
+it was finished. Both are the same mistake: **an in-flight file was being judged by its disk state,
+which during a writeup is not a statement about the essay at all.**
+
+### 14.2 In-flight context: the pinned version is the essay
+
+A file with an active writeup contributes its **pinned** text to everyone else's context —
+`writeups.source_version_id` → `manuscript_versions.files` → that file's text — never the bytes on
+disk. The comparison is like with like at no cost: both the pinned version and `units()` read
+through `read_manuscript_files`, so both have already been normalized the same way.
+
+Two states join `fresh | stale | upstream_stale | deprecated | missing`:
+
+- **`rewriting`** — a stored summary matches the pinned text. That summary is served, loudly labelled
+  as the *pre-rewrite* essay.
+- **`unwritten`** — the writeup created the file, so there is no pre-rewrite text and nothing to
+  serve. It outranks even `deprecated`: a recreated filename's old summary describes a different
+  essay, and serving it would be exactly the lie `deprecated` exists to prevent.
+
+Both are **accepted by both gates**, which remain one predicate (`passes.summaries_ready`) with no
+second code path, because two gates disagreeing about one row is how this system tells lies. When no
+stored summary matches the pinned text the entry still reads `missing` / `stale` / `deprecated` and
+is still refused — there is nothing honest to serve — but now the printed remedy works:
+`summarize rebuild` summarizes the **pinned version's text pulled from the database**, never the
+placeholder. Afterwards the entry settles at `rewriting`, not `fresh`; it may not pretend to describe
+the file on disk. A `--new` file has no text to summarize at all, so the rebuild skips it and says so
+rather than quietly summarizing an empty file.
+
+The split this rests on is worth naming: `units()` stays **disk truth** — the collector, the
+staleness marker and the editor's paragraph list all want the bytes as they are — while
+`context_units()` is **context truth**, and only the conditioning paths use it.
+
+### 14.3 The placeholder
+
+`write start` on an existing file now leaves a deterministic placeholder instead of an empty file:
+the author's words, `being presently rewritten`, plus a short note pointing at `write status`,
+`write digest` and `write abandon`. It is visible text, not an HTML comment, because the one path
+where a hidden marker fails is the one that matters — an HTML comment is stripped on the way to a
+PDF, and a mid-rewrite essay would go on silently vanishing from the exported book. It is bracketed
+`[AuthorLM: …]` rather than `<<…>>` because `<<` and `>>` are reserved by the pending-change
+grammar, and a literal `<<…>>` in a file would make the next `diff push` of it fail with a message
+about a margin thread that does not exist.
+
+`write start --new` writes no placeholder. The placeholder marks a *truncation*, and creating a file
+truncates nothing; a created file's empty window is deliberately invisible (no toc entry at start),
+and other sessions see it through its `writeups` row as `unwritten`, which is the more reliable
+signal anyway.
+
+**A finished essay never contains it**, guaranteed twice over: the first accepted beat replaces it
+rather than appending after it, and `write complete` refuses outright on a file that is still only
+the placeholder — pointing at `write abandon`, which is what the author means when zero beats were
+accepted. If the author hand-edited around the marker, completion warns loudly and does not block;
+that is authored content, and §13.2's report-don't-block applies.
+
+Everything that observes prose is taught that a placeholder is not prose: the concept realization and
+primary-location scans are handed the file as empty (`concept_pattern` is case-insensitive, so a
+concept named "Being" would otherwise have been marked realized in a truncated essay, silently), the
+extractor's empty-chapter skip covers it, the export omits it **with a named warning** where it used
+to drop a truncated essay in silence, and `doc push` / `diff push` refuse it. The one thing that does
+change shape is the collected transition: a truncation now records a `rewrite` rather than a
+`delete`, which is the more truthful of the two.
+
+### 14.4 Being told
+
+There is no flag to turn this off. At `write start`, at `write status`, and inside the payload the
+skill reads, a context containing in-flight essays opens with a `!!` block naming each one and
+saying plainly what the author already suspected: conditioning on the pre-rewrite text is **slightly
+suboptimal** — whatever those rewrites change, this draft will not know about, and this draft will
+not be in their context either. `critique run` prints the same thing in its own words. Each entry
+carries its own `!!` label as well, so a reader who scrolls past the header still cannot mistake a
+pre-rewrite summary for a current one.
+
+This widens what `!!` means, from "the gate refuses this" to **"do not take this entry at face
+value"** — which is what it had already come to mean in practice, since the coverage note has always
+marked entries the gate accepts.
+
+### 14.5 When the other writeup ends
+
+Nothing new is built for this, because nothing is broken there.
+
+**Completed:** the writeup leaves `active`, so the file is no longer in flight and is judged by disk
+again. Its summary now describes neither disk nor anything else — `stale`, loudly, refused by both
+gates, remedied by `summarize rebuild`, which is exactly what `write complete` already tells the
+author to run.
+
+**Abandoned:** the restore writes the pinned text back byte for byte, so the **hash round trip
+closes** — the stored `source_hash` matches the restored text again, the entry stops reading `stale`,
+and both gates accept it with nothing to rebuild. It does not necessarily read `fresh`: the truncation
+upstream was a real change, so the neighbour is normally left `upstream_stale`, which is tolerated
+(its own text did not move, only its conditioning). The drafting context is recomputed on every read,
+so the neighbour's next `write status` simply stops warning. An abandoned `--new` writeup deletes its
+file, which leaves the reading order and takes its `unwritten` entry with it.
+
+*(Corrected 2026-08-29 during review: the section as first written said "reads `fresh` again", which
+the test E6 could not reproduce because the fixture is realistic — the upstream truncation leaves the
+restored neighbour `upstream_stale`. The test was right and this paragraph was wrong; the property
+that actually matters, and is now asserted, is the hash round trip plus both gates accepting.)*
+
+### 14.6 What is deliberately not done
+
+- **No schema change.** `writeups` and `essay_summaries` carry everything needed; in-flight is
+  derived from `status = 'active'`, and the pre-rewrite text is already pinned.
+- **No locking, no ordering, no queue.** Parallel writeups are not serialized and are not meant to
+  be; the author asked to be *told*, not stopped.
+- **No cross-writeup awareness inside a beat.** A draft is not shown what the other writeup is
+  producing. It could not be: those beats have no verdicts yet, and conditioning on unratified prose
+  is the failure mode §13.3 exists to prevent.
+- **No summary rebuild at `write complete`** — unchanged from §13.4, and this section does not
+  become a reason to add one.
+- **Four consumers are deliberately NOT blinded**, recorded here so they are not rediscovered later
+  as regressions of this change (review 2026-08-29). Each one is *about* what happened on disk, which
+  is exactly what the placeholder truthfully records:
+  - **the collected transition itself** — a truncation records a `rewrite` ("Rewrote N → 1
+    paragraph(s)"), and episode analysis quotes that transition in its OBSERVED CHANGES payload. That
+    is a record of an event, not the extractor being asked to mine a marker for concepts.
+  - **`sweeps.ontology`** and **`lenses.run_native`** — both read manuscript text directly. A
+    mid-rewrite file will read as a near-empty essay in their reports, which is what it is; neither
+    writes to the graph.
+  - **`collect`'s `extract_hint` threshold** — the truncation's paragraph delta counts toward the
+    "enough changed to be worth extracting" hint. Harmless: the hint only suggests running the
+    extractor, which now skips the file per file (§14.7's F1 correction).
+  What IS blinded is everything that would write a claim about the essay from those bytes: the
+  realization and primary-location scans, the prerequisite-gap walk on **both sides of its
+  before/after delta** (every collect during a writeup has a before-version that already contains the
+  placeholder, so blinding one side would leave the marker deciding the subtraction), and the
+  extractor — on all three of its routes into a payload (§14.8).
+
+### 14.7 One capture per invocation (2026-08-29, after a live incident)
+
+The author hit the remaining half of this in a real session: an essay truncated by a
+parallel `write start` *just before* a rebuild read it. §14.2 answers that for a file that
+is already in flight — the rebuild summarizes the pinned version. What was still open is
+the window: a verb that reads the disk twice can have the manuscript change between the
+two reads, and the dangerous shape is a **gate and the thing it gates reading
+separately** — the gate passes on text A, a parallel session truncates an essay, and the
+context is assembled from text B, which is exactly the lie the gate exists to prevent,
+arriving with the gate's approval on it.
+
+So: **one capture per verb invocation, shared by the gate and by the assembly.**
+`summaries.capture()` names the snapshot; `before_after`, `drafting_context` and
+`passes.summaries_ready` accept one and pass it down, and take their own when it is
+omitted, so no existing caller changes. `api.write_start` took three captures (the gate,
+then the drafting context's two reads) and now takes one — the target file never appears
+in its own context, so the truncation the verb performs does not make the capture stale.
+`passes.build_context` took the gate's capture, a separate `units()` pass for the
+paragraph list the editor model edits, and a separate in-flight query; all three now read
+the one snapshot.
+
+`rebuild` already held a single snapshot taken before its first model call, and
+`rebuild_one`'s double read was collapsed by §14.2's rewrite; both now say so, because the
+property is invisible in the code and one refactor from being lost. The mid-run case
+closes cleanly: a file that becomes in-flight **after** the snapshot is summarized from
+its pre-truncation text, which is precisely the text that writeup went on to pin — so the
+hash the rebuild stores is the hash the in-flight logic looks for, and the entry lands on
+`rewriting` rather than `stale`.
+
+Not done: any locking, and any re-read to *detect* that the manuscript moved mid-verb. The
+capture is a consistent view, not a transaction; a verb finishes against the manuscript it
+started with, and says so.
+
+### 14.8 The extraction guard was dead code (2026-08-29, review F1)
+
+Worth recording, because the shape of the mistake is reusable. §14.3 says the extractor is taught
+that a placeholder is not prose, and the code said so too — `if not text.strip() or
+is_placeholder(text)` in `extract_concepts`. It never fired once. Every payload `extraction.py`
+builds is a concatenation of `=== <name> ===` labelled chunks (`_manuscript_text`,
+`_section_payloads`), so a whole-string match against an assembled payload cannot succeed by
+construction. The guard read exactly like a guard, passed review, and sent the marker to the model.
+
+The fix is granularity, not logic: the check belongs where a single file's text is still a single
+file's text. `extraction.is_in_flight` now carries that reasoning in its docstring, and is applied in
+`_manuscript_text`'s loop, on the changed-sections units (a truncation IS a changed section, and its
+"sections" are the placeholder's own paragraphs), and on the explicit-files units before
+`_section_payloads` assembles them. The whole-payload check is gone; a pass whose only file was in
+flight now simply has no text and ends on the unchanged `if not text.strip()`.
+
+The test lesson is the sharper one: the original assertion — "no extraction payload in this scenario
+carries the marker" — passed against the broken code, because the scenario happened to run no
+extraction while a file was in flight. A guard's test has to make the guarded thing actually happen.

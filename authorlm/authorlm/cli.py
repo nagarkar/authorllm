@@ -940,6 +940,19 @@ def _critique_run(db: Database, manuscript: dict, args) -> None:
     if ctx["forced"]:
         print(ui.yellow("--force: running WITHOUT the unconfirmed items "
                         "(they are not in the pass)."))
+    # critique run prints no drafting context, so the in-flight warning
+    # that rides inside it for the write path needs its own line here.
+    if ctx.get("inflight"):
+        names = ", ".join(ctx["inflight"])
+        plural = ("essays in this pass's book context are"
+                  if len(ctx["inflight"]) > 1
+                  else "essay in this pass's book context is")
+        print(ui.yellow(
+            f"!! {len(ctx['inflight'])} {plural} being written right now, "
+            f"in another\n!! writeup: {names}. The BEFORE/AFTER summary you "
+            "are editing against is\n!! the PRE-REWRITE essay, taken from "
+            "that writeup's pinned source version.\n!! Slightly suboptimal: "
+            "this pass cannot see what that rewrite is doing."))
     llm = passes.editor_llm(config)
     if not llm.enabled:
         sys.exit("error: the LLM is disabled ([llm] enabled = false).")
@@ -1483,9 +1496,12 @@ def cmd_summarize(args):
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["state"]] = counts.get(r["state"], 0) + 1
+            # cyan for the in-flight states: notable, but not "you must
+            # act", which is what yellow means in this view.
             color = {"fresh": ui.green, "stale": ui.yellow,
                      "upstream_stale": ui.dim, "missing": ui.yellow,
-                     "deprecated": ui.yellow}.get(r["state"], ui.yellow)
+                     "deprecated": ui.yellow, "rewriting": ui.cyan,
+                     "unwritten": ui.cyan}.get(r["state"], ui.yellow)
             words = f"  {r['words']}w" if r["words"] else ""
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
@@ -1518,6 +1534,10 @@ def cmd_summarize(args):
             progress=lambda f: print(ui.dim(f"  summarizing {f}…")))
         print(ui.green(f"built {len(result['built'])}") + ui.dim(
             f", reused {len(result['reused'])} fresh"))
+        for f in result.get("skipped_inflight", []):
+            print(ui.cyan(
+                f"  skipped {f} — a writeup is writing it for the first "
+                "time, so there is no pre-rewrite text to summarize"))
         for f, cov in result.get("incomplete_coverage", {}).items():
             _print_coverage_note(f, cov)
     line = llm.stats_line()
@@ -3086,6 +3106,20 @@ def _print_accounting(accounting: dict | None) -> None:
     print(ui.yellow(line) if unaccounted else line)
 
 
+def _print_marker_warning(result: dict, file: str) -> None:
+    """The mid-rewrite marker survived inside text the author has edited.
+    Reported, never repaired: it is their file and their words now."""
+    from . import api
+
+    if not result.get("marker_present"):
+        return
+    print(ui.yellow(
+        f"{file} still contains the mid-rewrite marker "
+        f"'{api.MARKER}' inside text you have edited. It is never part of "
+        "a finished essay — delete that line before this essay is "
+        "published (nothing here will remove it for you)."))
+
+
 def _print_drafting_context(text: str) -> None:
     """The L1 book-frame (summaries.drafting_context). Printed verbatim —
     it is the drafting payload, and the skill reads it out of this
@@ -3177,6 +3211,7 @@ def cmd_write(args):
                 print()
                 print(f"Digest: {_digest_counts(result['digest'])}.")
             _print_accounting(result["accounting"])
+            _print_marker_warning(result, w["file"])
             _print_drafting_context(result["drafting_context"])
         elif args.action == "digest":
             raw = _stdin_text()
@@ -3286,6 +3321,7 @@ def cmd_write(args):
                          if result["beats_unwritten"] else "")
             print(f"Writeup [{result['writeup_id'][:11]}] completed — "
                   f"{result['beats_done']} beat(s){unwritten}.")
+            _print_marker_warning(result, result["summary_hint"])
             if result["tallies"]:
                 print("Verdicts: " + ", ".join(
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
@@ -5113,7 +5149,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "yet — the file it follows, or 'start' to open the "
                         "book. Without it the reading order's own position "
                         "is used (unlisted files sort to the end)")
-    p.add_argument("--writeup", help="writeup id prefix (default: the active writeup)")
+    p.add_argument("--writeup", help="which writeup: an id prefix or the "
+                                     "essay's file name (default: the active "
+                                     "writeup, when there is only one)")
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")
     p.add_argument("--reason", help="reject: the author's why, verbatim "

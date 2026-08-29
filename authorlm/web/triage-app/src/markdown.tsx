@@ -6,9 +6,13 @@
  * exactly what that document uses — headings, paragraphs, bullet and
  * numbered lists, fenced code blocks, block quotes, horizontal rules,
  * pipe tables, and the `<details>/<summary>` folds the tutorial wraps its
- * CLI track in. No dependency is added for it, and nothing is rendered
- * through `dangerouslySetInnerHTML`: every node below is built by hand,
- * so the document cannot inject markup into the app.
+ * command track in — rendered as REAL collapsible folds, because the
+ * document's whole arrangement is that the main flow reads as prose and
+ * the machinery is tucked away until asked for.
+ *
+ * No dependency is added for any of it, and nothing is rendered through
+ * `dangerouslySetInnerHTML`: every node below is built by hand, so the
+ * document cannot inject markup into the app.
  */
 import { Fragment, type ReactNode } from "react";
 
@@ -58,7 +62,12 @@ const TABLE_RULE = /^\|?[\s:|-]+\|[\s:|-]*$/;
 
 export function renderMarkdown(source: string): ReactNode[] {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const blocks: ReactNode[] = [];
+  const root: ReactNode[] = [];
+  // Blocks are appended to `current`, which is `root` at the top level and
+  // the open fold's own list inside a <details>. The stack keeps nesting
+  // honest and an unclosed fold recoverable.
+  let current: ReactNode[] = root;
+  const folds: { parent: ReactNode[]; summary: ReactNode | null }[] = [];
   let paragraph: string[] = [];
   let key = 0;
 
@@ -66,22 +75,44 @@ export function renderMarkdown(source: string): ReactNode[] {
     if (!paragraph.length) return;
     const text = paragraph.join(" ").trim();
     paragraph = [];
-    if (text) blocks.push(<p key={`p${key++}`}>{inline(text, `p${key}`)}</p>);
+    if (text) current.push(<p key={`p${key++}`}>{inline(text, `p${key}`)}</p>);
   };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
 
-    // The tutorial folds its CLI track into <details>; the tab shows those
-    // sections open, with the <summary> as a small lead-in.
-    if (trimmed === "<details>" || trimmed === "</details>") { flush(); continue; }
+    // The tutorial folds its command track into <details>, and the tab has
+    // to fold it too: rendering the tags away left every command expanded
+    // inline, which is the opposite of what the document is arranged to
+    // do. These become a real <details>, collapsed by default.
+    if (trimmed.startsWith("<details")) {
+      flush();
+      folds.push({ parent: current, summary: null });
+      current = [];
+      continue;
+    }
+    if (trimmed === "</details>") {
+      flush();
+      const fold = folds.pop();
+      if (!fold) continue;               // stray close: drop it, keep the prose
+      const body = current;
+      current = fold.parent;
+      current.push(
+        <details className="doc-fold" key={`d${key++}`}>
+          <summary>{fold.summary ?? "Under the hood"}</summary>
+          {body.map((block, index) => <Fragment key={index}>{block}</Fragment>)}
+        </details>);
+      continue;
+    }
     const summary = trimmed.match(/^<summary>(.*)<\/summary>$/);
     if (summary) {
       flush();
       const inner = summary[1].replace(/<\/?b>/g, "**");
-      blocks.push(<p className="doc-summary" key={`s${key++}`}>
-        {inline(inner, `s${key}`)}</p>);
+      const rendered = inline(inner, `s${key++}`);
+      if (folds.length) folds[folds.length - 1].summary = rendered;
+      // Outside a fold it is still a lead-in, as before.
+      else current.push(<p className="doc-summary" key={`s${key++}`}>{rendered}</p>);
       continue;
     }
 
@@ -93,7 +124,7 @@ export function renderMarkdown(source: string): ReactNode[] {
         body.push(lines[i]);
         i++;
       }
-      blocks.push(<pre key={`c${key++}`}><code>{body.join("\n")}</code></pre>);
+      current.push(<pre key={`c${key++}`}><code>{body.join("\n")}</code></pre>);
       continue;
     }
 
@@ -101,7 +132,7 @@ export function renderMarkdown(source: string): ReactNode[] {
 
     if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
       flush();
-      blocks.push(<hr key={`h${key++}`} />);
+      current.push(<hr key={`h${key++}`} />);
       continue;
     }
 
@@ -110,7 +141,7 @@ export function renderMarkdown(source: string): ReactNode[] {
       flush();
       const level = heading[1].length;
       const Tag = `h${Math.min(level + 1, 6)}` as "h2";
-      blocks.push(<Tag key={`t${key++}`}>{inline(heading[2], `t${key}`)}</Tag>);
+      current.push(<Tag key={`t${key++}`}>{inline(heading[2], `t${key}`)}</Tag>);
       continue;
     }
 
@@ -126,7 +157,7 @@ export function renderMarkdown(source: string): ReactNode[] {
       }
       i--;
       const tableKey = key++;
-      blocks.push(
+      current.push(
         <div className="doc-table" key={`tbl${tableKey}`}>
           <table>
             <thead><tr>{header.map((cell, c) =>
@@ -147,7 +178,7 @@ export function renderMarkdown(source: string): ReactNode[] {
         i++;
       }
       i--;
-      blocks.push(<blockquote key={`q${key++}`}>
+      current.push(<blockquote key={`q${key++}`}>
         {inline(body.join(" ").trim(), `q${key}`)}</blockquote>);
       continue;
     }
@@ -175,7 +206,7 @@ export function renderMarkdown(source: string): ReactNode[] {
       const listKey = key++;
       const children = items.map((item, n) =>
         <li key={n}>{inline(item, `li${listKey}-${n}`)}</li>);
-      blocks.push(ordered
+      current.push(ordered
         ? <ol key={`ol${listKey}`}>{children}</ol>
         : <ul key={`ul${listKey}`}>{children}</ul>);
       continue;
@@ -184,5 +215,16 @@ export function renderMarkdown(source: string): ReactNode[] {
     paragraph.push(trimmed);
   }
   flush();
-  return blocks.map((block, index) => <Fragment key={index}>{block}</Fragment>);
+  // An unclosed <details> must not swallow the rest of the document.
+  while (folds.length) {
+    const fold = folds.pop()!;
+    const body = current;
+    current = fold.parent;
+    current.push(
+      <details className="doc-fold" key={`d${key++}`}>
+        <summary>{fold.summary ?? "Under the hood"}</summary>
+        {body.map((block, index) => <Fragment key={index}>{block}</Fragment>)}
+      </details>);
+  }
+  return root.map((block, index) => <Fragment key={index}>{block}</Fragment>);
 }

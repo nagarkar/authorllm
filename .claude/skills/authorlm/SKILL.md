@@ -115,6 +115,24 @@ drafted — it becomes a question to the author, asked before `write propose`.**
 Do not infer the flow from context — ask which one it is if the author has
 not said.
 
+**When the author asks to rewrite an existing essay and has not said which
+kind, ASK ONCE, in author terms.** This is a real fork with different
+consequences, and it has been missed because it was put as jargon
+("full rewrite or modeled rewrite?") that read like a phrasing preference.
+Put it as the two things that will actually happen, one line each, with the
+recommendation attached — and NO verb or flag names in the question itself:
+
+> Two ways to do this:
+> - **I first extract every point, example, and reference from the current
+>   essay; you rule on what's kept or dropped, and the final essay accounts
+>   for anything removed.** (Recommended when the old content matters.)
+> - **The old essay is raw material; nothing is tracked point-by-point.**
+
+Recommend the first whenever the existing essay carries content the author
+would mind losing — which is the usual case for anything already drafted.
+Ask once, take the answer in whatever words it comes in, and proceed; do
+not re-ask at each beat.
+
 1. **Initiate.** The author supplies outline + placement; `declare_intent`
    first (conversationally, as usual), then
    `authorlm write start <file> --intent <id>`. For an essay with no
@@ -206,6 +224,33 @@ not said.
 2. **Plan.** Expand the outline into beat specs conversationally
    (`{"role", "concepts", "budget", "notes"}` each); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
+   **PRESENT the plan as a numbered READING, and say plainly what you are
+   asking for.** The author's words on the old presentation: *"This is
+   interesting but not clear what needs to be done."* Ratification is the
+   fabrication guard — the most important gate in this loop — and an
+   unclear ask gets a shrug instead of a ruling, which is the same as no
+   gate at all. Never show the JSON, and never present the plan as a
+   description you are merely narrating. One numbered entry per beat, four
+   things each, in plain words:
+   1. what the beat is FOR (its role, said as a job: "opens the essay",
+      "answers the objection", "closes on the ground it started from");
+   2. what it will CLAIM or COVER, in one sentence of ordinary English —
+      the claim itself, not "develops the argument";
+   3. which of the author's own points, examples and concepts it carries
+      (name them the way the author names them; in a rewrite, say which
+      point from the current essay each one is);
+   4. roughly how long it runs.
+
+   Then ask, in these terms:
+
+   > Approve as-is, or tell me in any words: reorder, strike a beat,
+   > change a budget, add a beat, or redirect one — I'll revise and
+   > re-present until you say it's right. Nothing is drafted until you
+   > approve.
+
+   Mean it: re-present the whole revised reading after every change rather
+   than patching one line, and do not run `write plan` until the author has
+   actually approved.
    Amend later with `--replace` (written beats are kept; replacement beats
    get fresh `n`s automatically).
    **Before `write plan --replace`, SETTLE any pending proposal** —

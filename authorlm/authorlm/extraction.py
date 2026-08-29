@@ -302,6 +302,22 @@ def triage_feedback(db: Database, manuscript_id: str) -> str:
     return "\n".join(sections) + learned
 
 
+def is_in_flight(text: str) -> bool:
+    """This file holds only the mid-rewrite placeholder, so it is not
+    prose and must not be mined.
+
+    PER FILE, never per payload. Every payload this module builds is a
+    concatenation of `=== <name> ===` labelled chunks, so a whole-string
+    `is_placeholder` test against an assembled payload can NEVER match —
+    it would be dead code that reads like a guard. The check belongs
+    where a single file's text is still a single file's text: inside
+    `_manuscript_text`'s loop, and on each unit before `_section_payloads`
+    assembles it."""
+    from .api import is_placeholder
+
+    return is_placeholder(text)
+
+
 def _manuscript_text(
     manuscript: dict, only: set[str] | None = None, max_chars: int = MAX_TEXT_CHARS
 ) -> tuple[str, bool]:
@@ -313,6 +329,8 @@ def _manuscript_text(
     parts = []
     for name, content in ordered_items(files):
         if only is not None and name not in only:
+            continue
+        if is_in_flight(content):
             continue
         parts.append(f"=== {name} ===\n{content}")
     text = "\n\n".join(parts)
@@ -604,6 +622,11 @@ def extract_concepts(
         for name in order:
             if name not in target or is_structural(name):
                 continue
+            if is_in_flight(new_files.get(name, "")):
+                # A truncation IS a changed section, and its "sections"
+                # are the placeholder's own paragraphs — which would sail
+                # past any whole-payload check.
+                continue
             delta = _changed_sections(old_files.get(name, ""),
                                       new_files.get(name, ""))
             if delta:
@@ -621,6 +644,9 @@ def extract_concepts(
     else:
         text, truncated = _manuscript_text(manuscript, target,
                                            max_chars=max_chars)
+    # An in-flight file has already been dropped PER FILE, above and
+    # below — so a payload that was nothing but a placeholder is now
+    # simply empty here, and this unchanged check ends the pass.
     if not text.strip():
         return None
 
@@ -629,7 +655,8 @@ def extract_concepts(
         # deliberate re-mine of metaphysic.md): batch their sections into
         # multiple passes rather than truncating the back half away.
         disk = read_manuscript_files(Path(manuscript["path"]))
-        units = [(n, disk[n]) for n in sorted(target or []) if n in disk]
+        units = [(n, disk[n]) for n in sorted(target or [])
+                 if n in disk and not is_in_flight(disk[n])]
         payloads = _section_payloads(units, max_chars)
         if len(payloads) > 1:
             return _passes(
@@ -661,8 +688,11 @@ def extract_concepts(
         }
         failed = False
         for name in selected:
-            if not (disk.get(name) or "").strip():
-                continue  # empty chapter — nothing to mine, not a failure
+            if (not (disk.get(name) or "").strip()
+                    or is_in_flight(disk.get(name) or "")):
+                # empty chapter (or one held by an active writeup) —
+                # nothing to mine, not a failure
+                continue
             sub = extract_concepts(db, manuscript, llm, files=[name],
                                    aliases_only=aliases_only, _inventory=True)
             if sub is None or sub.get("incomplete"):
