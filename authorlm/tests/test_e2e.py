@@ -640,6 +640,12 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                 ],
                 "outcome": "Becoming developed through the sailing metaphor.",
             })
+        elif "editor's working memory" in system:
+            # The essay summarizer (authorlm/prompts/summarizer.md). Cites
+            # paragraph [1] only, so the drafting context's coverage
+            # reporting has something real to be loud about.
+            unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
+            content = f"MOVES: [1] the stub's canned summary of {unit}."
         elif "distill" in system.lower():
             # Stands in for semantic matching: if an equivalent belief is
             # already on the menu the stub MATCHes it (exercising the
@@ -1341,6 +1347,39 @@ def scenario_write_loop(root: Path) -> None:
         _meta["gdocs"]["02-essay.md"]["checked_out"] = False
         _db.update("manuscripts", _row["id"], {"metadata": json.dumps(_meta)})
 
+        # --- summary freshness gate (design §12.4 item 2) -----------------
+        # Once summaries are drafting input, a stale one is a lie about the
+        # text here exactly as it is in the critique pass — same predicate
+        # (passes.summaries_ready), same refusal, and no --force.
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked while a before/after summary is MISSING, "
+              "naming the file and the one command that fixes it",
+              "missing summaries: 01-choice.md" in out
+              and "summarize rebuild" in out
+              and "will not read a lie about the text" in out, out)
+        check("a blocked start leaves the manuscript file untouched — the "
+              "gate runs before the pin/truncate/collect sequence",
+              (ms / "02-essay.md").read_text() == ESSAY, "")
+        check("no --force escape hatch is offered (parity with the critique "
+              "pass, which offers none for summaries)",
+              "--force" not in out, out)
+        run(ws, "summarize", "rebuild", "--all")
+
+        # A summary that has gone stale blocks just as hard as a missing one.
+        write(ms / "01-choice.md", CH1 + "\nA paragraph added after the "
+                                         "summary was built.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, "", "write", "start", "02-essay.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("start blocked while a before/after summary is STALE "
+              "(the text moved under it)",
+              "stale summaries (text changed): 01-choice.md" in out, out)
+        check("the stale-blocked start also left the file untouched",
+              (ms / "02-essay.md").read_text() == ESSAY, "")
+        write(ms / "01-choice.md", CH1)
+        run(ws, "collect")
+
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id)
         check("writeup starts: pins the source and truncates",
@@ -1354,6 +1393,13 @@ def scenario_write_loop(root: Path) -> None:
               "DRAFTING CONTEXT — 02-essay.md" in out
               and "BEFORE" in out and "AFTER" in out
               and "[01-choice.md]" in out, out)
+        check("the printed context carries the real stored summary and its "
+              "freshness state, and reports incomplete paragraph coverage "
+              "LOUDLY (design §12.4 item 4's default: informational, never "
+              "blocking — the stub summary cites only ¶1 of three)",
+              "[01-choice.md] (fresh)" in out
+              and "the stub's canned summary of 01-choice.md" in out
+              and "coverage INCOMPLETE: ¶2, ¶3 uncited" in out, out)
         out = run_stdin(ws, "", "write", "status")
         check("write status — the resume entry point — reprints it, "
               "recomputed from the summaries as they stand now",
@@ -1493,6 +1539,16 @@ def scenario_write_loop(root: Path) -> None:
 
         # --- abandon restores the pinned source ----------------------------
         run(ws, "style", "attach", "01-choice.md", "House")
+        # The completed writeup rewrote 02-essay.md, so its summary is now
+        # stale — and 02-essay.md sits in 01-choice.md's AFTER block. The
+        # freshness gate (item 2) correctly refuses until it is rebuilt.
+        out = run_stdin(ws, "", "write", "start", "01-choice.md",
+                        "--intent", intent_id, expect_exit=True)
+        check("a writeup's own output staling a NEIGHBOUR's summary blocks "
+              "the next writeup — the gate reads the whole before/after "
+              "context, not just what this writeup touched",
+              "stale summaries (text changed): 02-essay.md" in out, out)
+        run(ws, "summarize", "rebuild", "--all")
         run_stdin(ws, "", "write", "start", "01-choice.md",
                   "--intent", intent_id)
         check("second writeup truncated its file",

@@ -776,6 +776,17 @@ def write_start(db: Database, manuscript: dict, config: dict,
     )
     if existing:
         raise ValueError(f"writeup {existing['id']} is already active on {relpath}")
+    # The summary freshness gate (design §12.4 item 2), on the same
+    # predicate the critique pass uses: the before/after summaries ARE the
+    # drafting context now, so a missing or stale one is a lie about the
+    # text here exactly as it is there — and, as there, no --force. It runs
+    # LAST among the gates but still before the pin/truncate/collect
+    # sequence: a blocked start must leave the file untouched.
+    from . import passes
+
+    ready = passes.summaries_ready(db, manuscript, relpath)
+    if not ready["ok"]:
+        raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
     ensure_session(db, manuscript)
     # Two collects: the first captures any uncollected edits so the pinned
