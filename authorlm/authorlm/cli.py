@@ -1467,7 +1467,8 @@ def cmd_summarize(args):
         for r in rows:
             counts[r["state"]] = counts.get(r["state"], 0) + 1
             color = {"fresh": ui.green, "stale": ui.yellow,
-                     "upstream_stale": ui.dim, "missing": ui.yellow}[r["state"]]
+                     "upstream_stale": ui.dim, "missing": ui.yellow,
+                     "deprecated": ui.yellow}.get(r["state"], ui.yellow)
             words = f"  {r['words']}w" if r["words"] else ""
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))

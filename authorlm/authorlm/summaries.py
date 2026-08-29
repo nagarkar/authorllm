@@ -131,21 +131,30 @@ def all_summaries(db: Database, manuscript_id: str) -> dict[str, dict]:
         (manuscript_id,))}
 
 
+def _state(row, text: str) -> str:
+    """One unit's freshness. `deprecated` outranks the hash checks: the
+    row belongs to an essay that LEFT the toc (api._deprecate_departed_
+    summaries, commit 10497c9) and has come back. Its source_hash can
+    match by coincidence — the file returned unedited — but the DB says
+    it is not a live summary, so it must never read as `fresh`; it needs
+    a rebuild, which is also what resurrects it to 'current'."""
+    if not row:
+        return "missing"
+    if row["status"] == "deprecated":
+        return "deprecated"
+    if row["source_hash"] != _hash(text):
+        return "stale"
+    return "upstream_stale" if row["upstream_stale"] else "fresh"
+
+
 def status(db: Database, manuscript: dict) -> list[dict]:
     """Per-unit freshness in reading order: fresh | stale (text changed)
-    | upstream_stale | missing."""
+    | upstream_stale | deprecated | missing."""
     have = all_summaries(db, manuscript["id"])
     out = []
     for file, text in units(manuscript):
         row = have.get(file)
-        if not row:
-            state = "missing"
-        elif row["source_hash"] != _hash(text):
-            state = "stale"
-        elif row["upstream_stale"]:
-            state = "upstream_stale"
-        else:
-            state = "fresh"
+        state = _state(row, text)
         out.append({"file": file, "state": state,
                     "words": len(row["summary"].split()) if row else 0,
                     "created_at": row["created_at"] if row else None})
@@ -165,11 +174,9 @@ def before_after(db: Database, manuscript: dict,
 
     def entry(f):
         row = have.get(f)
-        if not row:
-            return {"file": f, "summary": None, "state": "missing"}
-        state = ("stale" if row["source_hash"] != _hash(texts[f])
-                 else "upstream_stale" if row["upstream_stale"] else "fresh")
-        return {"file": f, "summary": row["summary"], "state": state}
+        state = _state(row, texts[f])
+        return {"file": f, "summary": row["summary"] if row else None,
+                "state": state}
 
     return ([entry(f) for f in order[:idx]],
             [entry(f) for f in order[idx + 1:]])
@@ -224,8 +231,13 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
     existing = db.one(
         "SELECT id FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
         (manuscript["id"], file))
+    # `status` is written explicitly, not left to the column default: a
+    # rebuild is exactly how a summary whose file LEFT the toc and came
+    # back is resurrected. Without this the row would stay 'deprecated'
+    # forever and never read as a live summary again.
     fields = {"summary": summary, "source_hash": _hash(text),
-              "upstream_hash": upstream_hash, "upstream_stale": 0}
+              "upstream_hash": upstream_hash, "upstream_stale": 0,
+              "status": "current"}
     if existing:
         db.update("essay_summaries", existing["id"], fields)
         row_id = existing["id"]
@@ -258,8 +270,7 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
     cascade = False
     for file, text in units(manuscript):
         row = have.get(file)
-        fresh = (row is not None and row["source_hash"] == _hash(text)
-                 and not row["upstream_stale"])
+        fresh = _state(row, text) == "fresh"
         if only_missing_or_stale and fresh and not cascade:
             prior.append((file, row["summary"]))
             reused.append(file)

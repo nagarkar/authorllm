@@ -333,6 +333,65 @@ def main_test() -> None:
               and "missing paragraph(s) [1, 2]" in buf.getvalue(),
               buf.getvalue())
 
+        print("deprecated status (§12.4 item 5): a departed essay's summary "
+              "is respected as not-live, and RESURRECTED when the file "
+              "returns to the toc:")
+        from authorlm import passes as _passes
+        gamma_text = (ms / "gamma.md").read_text()
+        (ms / "gamma.md").unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+        row = db.one("SELECT status FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = 'gamma.md'",
+                     (manuscript["id"],))
+        check("a departed essay's summary is marked deprecated, never "
+              "deleted (commit 10497c9's semantics)",
+              row is not None and row["status"] == "deprecated",
+              str(dict(row)) if row else "no row")
+        # It comes back byte-identical, so `source_hash` still matches —
+        # the exact hazard: without status in the freshness computation the
+        # row would read 'fresh' and silently condition a drafting pass
+        # while the DB still says it is not a live summary.
+        (ms / "gamma.md").write_text(gamma_text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, config, source="test")
+        states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+        check("a returned essay whose row is still deprecated reads "
+              "'deprecated', not 'fresh' — a matching source_hash must not "
+              "let a not-live row pass as a live summary",
+              states["gamma.md"] == "deprecated", str(states))
+        _b, after = sums.before_after(db, manuscript, "beta.md")
+        check("before_after (what the edit and drafting contexts read) "
+              "reports the deprecated state per entry",
+              {e["file"]: e["state"] for e in after}["gamma.md"]
+              == "deprecated", str(after))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "status"])
+        check("summarize status renders the deprecated state (a new state "
+              "must not KeyError the CLI's colour table)",
+              "deprecated" in buf.getvalue(), buf.getvalue())
+        ready = _passes.summaries_ready(db, manuscript, "beta.md")
+        check("summaries_ready blocks on a deprecated summary exactly as "
+              "on a missing or stale one",
+              not ready["ok"] and ready["deprecated"] == ["gamma.md"],
+              str({k: v for k, v in ready.items()
+                   if k in ("ok", "missing", "stale", "deprecated")}))
+        EchoSummarizer.calls.clear()
+        resurrect = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        check("the incremental rebuild TARGETS the deprecated unit (it is "
+              "not fresh) instead of reusing it",
+              resurrect["built"] == ["gamma.md"], str(resurrect))
+        check("rebuilding the returned essay flips its row back to "
+              "'current' — the resurrect path",
+              db.one("SELECT status FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = 'gamma.md'",
+                     (manuscript["id"],))["status"] == "current")
+        check("...and it reads fresh again, so the gate clears",
+              {r["file"]: r["state"]
+               for r in sums.status(db, manuscript)}["gamma.md"] == "fresh"
+              and _passes.summaries_ready(db, manuscript, "beta.md")["ok"])
+
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
         check("the summarizer prompt is a checked-in file with the labeled "
