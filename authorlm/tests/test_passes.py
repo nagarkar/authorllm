@@ -219,6 +219,32 @@ def main_test() -> None:
         check("user message numbers paragraphs and carries the contract blocks",
               "[1] # Alpha" in msg and "=== INTENTS ===" in msg
               and "Tighten every essay" in msg and "Beta-only work" not in msg)
+
+        print("stale summary genuinely blocks the edit pass (source_hash "
+              "mismatch — 'a lie about the text' — not just a missing row):")
+        beta_row = db.one(
+            "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND "
+            "file = ?", (mid, "beta.md"))
+        db.update("essay_summaries", beta_row["id"], {"source_hash": "deadbeef"})
+        check("beta.md now reads stale by source_hash",
+              next(r for r in sums.status(db, manuscript) if r["file"] == "beta.md")
+              ["state"] == "stale")
+        try:
+            passes.build_context(db, manuscript, "alpha.md", p)
+            blocked, err_msg = False, ""
+        except RuntimeError as err:
+            blocked, err_msg = True, str(err)
+        check("build_context refuses to run: the guard is real, not "
+              "decorative — a stale summary in the before/after context "
+              "blocks the pass exactly as a missing one does",
+              blocked and "stale summaries" in err_msg and "beta.md" in err_msg,
+              err_msg)
+        sums.rebuild_one(db, manuscript, "beta.md", sums.summarizer_llm(config))
+        ctx_after_fix = passes.build_context(db, manuscript, "alpha.md", p)
+        check("once the stale summary is rebuilt, the guard clears and the "
+              "pass runs again",
+              ctx_after_fix["after"][0]["state"] == "fresh")
+
         # Force semantics: dirty gate + force → runs, but without the items.
         critique.import_manifest(db, mid, {
             "source": {"name": "Test Critic", "detail": "test"},

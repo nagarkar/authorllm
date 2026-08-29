@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
@@ -58,6 +59,43 @@ def _numbered_paragraphs(text: str) -> tuple[str, int]:
 
     paras = _paragraphs(text)
     return "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paras, 1)), len(paras)
+
+
+_CITATION_RE = re.compile(r"\[(\d+)(?:-(\d+))?\]")
+
+
+def _cited_paragraphs(summary: str) -> set[int]:
+    """Every paragraph number MOVES actually cited (single "[3]" or range
+    "[2-3]" — both forms the prompt's example uses collapse to the same
+    per-number set)."""
+    cited: set[int] = set()
+    for lo_s, hi_s in _CITATION_RE.findall(summary):
+        lo, hi = int(lo_s), int(hi_s) if hi_s else int(lo_s)
+        if hi < lo:
+            lo, hi = hi, lo
+        cited.update(range(lo, hi + 1))
+    return cited
+
+
+def paragraph_coverage(summary: str, n_paragraphs: int) -> dict:
+    """VERIFY, don't just request, that MOVES cited every paragraph
+    number 1..n_paragraphs at least once. Coverage is REPORTED, never
+    enforced here: a summary short one transitional paragraph is still
+    useful, so this never retries, fabricates, or blocks the rebuild —
+    it records exactly which paragraphs were missed (or, if the model
+    cited a number outside range, invented) so that's visible instead of
+    silently assumed. A summary with `complete: True` can stand in for
+    the essay as compressed context; one that isn't complete might have
+    quietly dropped a move, and now that's known rather than guessed."""
+    cited = _cited_paragraphs(summary)
+    expected = set(range(1, n_paragraphs + 1))
+    missing = sorted(expected - cited)
+    out_of_range = sorted(n for n in cited if n < 1 or n > n_paragraphs)
+    return {"paragraph_count": n_paragraphs,
+            "cited": sorted(cited & expected),
+            "missing": missing,
+            "out_of_range": out_of_range,
+            "complete": not missing and not out_of_range}
 
 
 def summarizer_prompt() -> str:
@@ -181,6 +219,7 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
         raise RuntimeError(f"summarizer returned nothing for {file} "
                            "(LLM disabled or call failed)")
     summary = summary.strip()
+    coverage = paragraph_coverage(summary, n_paras)
     upstream_hash = _hash("\n".join(s for _, s in prior))
     existing = db.one(
         "SELECT id FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
@@ -195,7 +234,12 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
         row.update(manuscript_id=manuscript["id"], file=file, **fields)
         db.insert("essay_summaries", row)
         row_id = row["id"]
-    return dict(db.one("SELECT * FROM essay_summaries WHERE id = ?", (row_id,)))
+    result = dict(db.one("SELECT * FROM essay_summaries WHERE id = ?", (row_id,)))
+    # Not persisted (essay_summaries stores no such column): computed fresh
+    # on every write so a caller can act on it immediately without a
+    # schema change.
+    result["paragraph_coverage"] = coverage
+    return result
 
 
 def rebuild(db: Database, manuscript: dict, llm: LLMClient,
@@ -210,6 +254,7 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
     have = all_summaries(db, manuscript["id"])
     prior: list[tuple[str, str]] = []
     built, reused = [], []
+    incomplete_coverage: dict[str, dict] = {}
     cascade = False
     for file, text in units(manuscript):
         row = have.get(file)
@@ -225,7 +270,11 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
         new = summarize_unit(db, manuscript, file, text, prior, llm)
         prior.append((file, new["summary"]))
         built.append(file)
-    return {"built": built, "reused": reused}
+        cov = new.get("paragraph_coverage")
+        if cov and not cov["complete"]:
+            incomplete_coverage[file] = cov
+    return {"built": built, "reused": reused,
+            "incomplete_coverage": incomplete_coverage}
 
 
 def rebuild_one(db: Database, manuscript: dict, file: str,

@@ -1199,8 +1199,9 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     llm = sums.summarizer_llm(config)
     if llm.enabled:
         try:
-            sums.rebuild_one(db, manuscript, file, llm)
+            new_row = sums.rebuild_one(db, manuscript, file, llm)
             print(ui.dim("summary rebuilt; downstream marked upstream_stale"))
+            _print_coverage_note(file, new_row.get("paragraph_coverage"))
         except Exception as err:  # noqa: BLE001
             print(ui.yellow(f"summary rebuild failed ({err}) — run "
                             f"'summarize rebuild {file}'"))
@@ -1440,6 +1441,21 @@ def _critique_triage(db: Database, manuscript: dict, args) -> None:
     print(f"\n{verdicts} verdict(s) recorded; {remaining} still proposed.")
 
 
+def _print_coverage_note(file: str, cov: dict | None) -> None:
+    """Report (never silently) when a rebuilt summary's MOVES didn't cite
+    every paragraph number, or cited one that doesn't exist — verified
+    coverage, not just requested."""
+    if not cov or cov["complete"]:
+        return
+    parts = []
+    if cov["missing"]:
+        parts.append(f"missing paragraph(s) {cov['missing']}")
+    if cov["out_of_range"]:
+        parts.append(f"cited out-of-range paragraph(s) {cov['out_of_range']}")
+    print(ui.yellow(f"  {file}: paragraph coverage incomplete — "
+                    + "; ".join(parts)))
+
+
 def cmd_summarize(args):
     from . import summaries as sums
 
@@ -1477,12 +1493,15 @@ def cmd_summarize(args):
         print(ui.green(f"rebuilt {args.file}") + ui.dim(
             f" ({len(row['summary'].split())} words); downstream summaries "
             "marked upstream_stale"))
+        _print_coverage_note(args.file, row.get("paragraph_coverage"))
     else:
         result = sums.rebuild(
             db, manuscript, llm, only_missing_or_stale=not args.all,
             progress=lambda f: print(ui.dim(f"  summarizing {f}…")))
         print(ui.green(f"built {len(result['built'])}") + ui.dim(
             f", reused {len(result['reused'])} fresh"))
+        for f, cov in result.get("incomplete_coverage", {}).items():
+            _print_coverage_note(f, cov)
     line = llm.stats_line()
     if line:
         print(ui.dim(line))

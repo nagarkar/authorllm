@@ -85,7 +85,7 @@ class EchoSummarizer(http.server.BaseHTTPRequestHandler):
                    else sum(1 for line in prior_block.splitlines()
                             if line.startswith("[") and line.endswith("]")))
         EchoSummarizer.calls.append({"unit": unit, "n_prior": n_prior,
-                                     "model": body.get("model")})
+                                     "model": body.get("model"), "user": user})
         self._reply(f"MOVES: summary of {unit} conditioned on {n_prior} prior.")
 
     def _reply(self, content: str) -> None:
@@ -161,7 +161,71 @@ def main_test() -> None:
         n_priors = [c["n_prior"] for c in EchoSummarizer.calls]
         check("each unit is conditioned on all prior summaries (autoregressive)",
               n_priors == [0, 1, 2, 3, 4], str(n_priors))
+        stored = sums.all_summaries(db, manuscript["id"])
+        check("upstream_hash actually reflects the prior-summary set each "
+              "unit was conditioned on — distinct per unit, not a constant "
+              "placeholder (it grows by one summary each step)",
+              len({stored[f]["upstream_hash"] for f in order}) == len(order),
+              str({f: stored[f]["upstream_hash"] for f in order}))
         check("all fresh after a full build",
+              all(r["state"] == "fresh" for r in sums.status(db, manuscript)))
+
+        print("length scaling (Task 1 — sponsor's ratio):")
+        check("a ~1500-word essay scales to ~150-200 words",
+              sums.target_length(" ".join(["w"] * 1500)) == (150, 200))
+        check("a ~3000-word essay scales to ~300-400 words — longer essay, "
+              "longer target",
+              sums.target_length(" ".join(["w"] * 3000)) == (300, 400))
+        check("a tiny unit is floored, not squeezed to ~0 words",
+              sums.target_length("one two three") == (40, 50))
+        check("a huge unit is capped, not left to grow unbounded",
+              sums.target_length(" ".join(["w"] * 20000))
+              == (sums.MAX_SUMMARY_WORDS - 10, sums.MAX_SUMMARY_WORDS))
+        check("every built unit's prompt carries its own TARGET LENGTH line",
+              all("TARGET LENGTH: 40-50 words" in c["user"]
+                  for c in EchoSummarizer.calls),
+              "\n".join(c["user"][:200] for c in EchoSummarizer.calls))
+
+        print("paragraph coverage (Task 1 — no paragraph silently dropped):")
+        check("every built unit's prompt numbers THE UNIT's paragraphs and "
+              "states the count, so MOVES can be required to cite each one",
+              all("PARAGRAPH COUNT: 2" in c["user"] and "[1] #" in c["user"]
+                  and "[2] Text of" in c["user"] for c in EchoSummarizer.calls),
+              "\n".join(c["user"] for c in EchoSummarizer.calls[:1]))
+
+        print("paragraph coverage is VERIFIED, not just requested "
+              "(sponsor addendum):")
+        full = sums.paragraph_coverage(
+            "MOVES: [1] states the claim; [2]-[3] develop it by example.", 3)
+        check("a summary citing every paragraph reports full coverage",
+              full == {"paragraph_count": 3, "cited": [1, 2, 3],
+                       "missing": [], "out_of_range": [], "complete": True},
+              str(full))
+        gappy = sums.paragraph_coverage(
+            "MOVES: [1] states the claim. [3] closes it.", 3)
+        check("a summary omitting a paragraph reports exactly which one",
+              gappy["missing"] == [2] and gappy["out_of_range"] == []
+              and not gappy["complete"], str(gappy))
+        invented = sums.paragraph_coverage(
+            "MOVES: [1] states the claim. [7] invents a paragraph.", 2)
+        check("a citation past PARAGRAPH COUNT is reported as out-of-range "
+              "(the model invented a paragraph), not silently accepted",
+              invented["out_of_range"] == [7] and invented["missing"] == [2]
+              and not invented["complete"], str(invented))
+        # The canned EchoSummarizer reply ("MOVES: summary of X conditioned
+        # on N prior.") cites no paragraph numbers at all — so a real
+        # rebuild against it must show every built unit as incomplete.
+        # This is the live plumbing (summarize_unit -> rebuild), not just
+        # the pure function above.
+        check("rebuild() surfaces incomplete coverage per file — reported, "
+              "never silently dropped and never blocking the rebuild",
+              set(result.get("incomplete_coverage", {})) == set(order)
+              and all(not cov["complete"] and cov["out_of_range"] == []
+                      and cov["missing"] == [1, 2]
+                      for cov in result["incomplete_coverage"].values()),
+              str(result.get("incomplete_coverage")))
+        check("coverage is reported, never enforced: an incomplete summary "
+              "is still stored and the unit still reads fresh",
               all(r["state"] == "fresh" for r in sums.status(db, manuscript)))
 
         print("before/after context:")
@@ -172,9 +236,14 @@ def main_test() -> None:
               and all(b["state"] == "fresh" for b in before + after))
 
         print("mark, don't cascade:")
+        calls_before_collect = len(EchoSummarizer.calls)
         (ms / "alpha.md").write_text("# alpha\n\nText of alpha, revised.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             api.collect(db, manuscript, config, source="test")
+        check("marking downstream stale makes NO summarizer call at all — "
+              "'does not cascade' means no rebuild happens, not just that "
+              "it happens later",
+              len(EchoSummarizer.calls) == calls_before_collect)
         states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
         check("the changed unit is stale by source_hash",
               states["alpha.md"] == "stale")
@@ -193,6 +262,28 @@ def main_test() -> None:
         check("it is fresh again; downstream stays upstream_stale",
               states["alpha.md"] == "fresh"
               and states["beta.md"] == "upstream_stale")
+        check("rebuild_one clears staleness for THAT essay only — units "
+              "further upstream are untouched, not just 'still fresh by "
+              "coincidence'",
+              states["title.md"] == "fresh" and states["part1.md"] == "fresh")
+
+        print("before_after / status report truthfully mid-cascade (a "
+              "genuinely partial rebuild — beta.md is not yet rebuilt):")
+        before, after = sums.before_after(db, manuscript, "gamma.md")
+        check("before gamma: alpha (just rebuilt) reads fresh, beta (not "
+              "yet touched) still reads upstream_stale — before_after is "
+              "not just 'all fresh' or 'all stale', it reflects the real "
+              "per-file state mid-cascade",
+              [b["file"] for b in before]
+              == ["title.md", "part1.md", "alpha.md", "beta.md"]
+              and {b["file"]: b["state"] for b in before}["alpha.md"] == "fresh"
+              and {b["file"]: b["state"] for b in before}["beta.md"]
+              == "upstream_stale",
+              str(before))
+        gamma_status = next(r for r in sums.status(db, manuscript)
+                            if r["file"] == "gamma.md")
+        check("status() agrees: gamma itself is upstream_stale mid-cascade",
+              gamma_status["state"] == "upstream_stale")
 
         print("incremental rebuild (default) cascades only from the first "
               "non-fresh unit:")
@@ -235,6 +326,12 @@ def main_test() -> None:
                 os.environ["AUTHORLM_CONFIG"] = prev_config
         check("summarize rebuild <file> reports the one-unit rebuild",
               "rebuilt gamma.md" in buf.getvalue())
+        check("summarize rebuild <file> also surfaces incomplete paragraph "
+              "coverage on the CLI (the echo stub cites no paragraph, so "
+              "this must fire)",
+              "paragraph coverage incomplete" in buf.getvalue()
+              and "missing paragraph(s) [1, 2]" in buf.getvalue(),
+              buf.getvalue())
 
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
