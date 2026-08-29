@@ -73,6 +73,31 @@ function shortLabel(row: TriageRow): string {
   return row.name || `${row.from_name} -${row.relation}-> ${row.to_name}`;
 }
 
+/**
+ * The Help tab's body. It reads no snapshot and makes no request — the
+ * tutorial is inlined at build time — which is what lets the boot-error
+ * screen offer it too, when the backend is exactly what is missing.
+ */
+function HelpDoc() {
+  return (
+    <section className="help-doc">
+      <span className="kicker">AUTHORLM / HELP</span>
+      <p className="help-doc-intro">
+        This is the workbench's help. It covers the beat loop end to end,
+        and it covers the three triage tabs beside it too: the concepts,
+        edges and proposals you rule on here are the same graph the beat
+        loop draws its grounding from, and the decisions you stage and
+        apply on those tabs are recorded as the same author evidence a
+        beat verdict is. Nothing on any tab — analysis, safe
+        recommendation or accepted beat — changes the manuscript or the
+        graph until you apply or accept it. The help button in the
+        masthead still explains the current tab's own verbs and analyzer.
+      </p>
+      <article className="help-doc-body">{renderMarkdown(tutorial)}</article>
+    </section>
+  );
+}
+
 function cardKicker(type: TriageType, row: any): string {
   if (type === "edges") return textValue(row.relation);
   return textValue(row.kind);
@@ -180,7 +205,22 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     return <div className="boot-screen"><span />Setting out the manuscript...</div>;
   }
   if (!snapshot) {
-    return <div className="boot-error">{error || "The Triage App could not load."}</div>;
+    // Help is most wanted when the backend is down, and it needs no
+    // backend: the tutorial is inlined at build time. The boot error
+    // stays on screen above it rather than being replaced by it.
+    return (
+      <main className="app-shell">
+        <div className={`boot-error ${helpTab ? "compact" : ""}`}>{error || "The Triage App could not load."}</div>
+        <nav className="tab-rail" aria-label="Help">
+          <button className={helpTab ? "active" : ""}
+                  onClick={() => setHelpTab((open) => !open)}>
+            <span>04</span>help
+          </button>
+          <div className="tab-rule" />
+        </nav>
+        {helpTab && <HelpDoc />}
+      </main>
+    );
   }
   const currentSnapshot = snapshot;
 
@@ -800,24 +840,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         {!helpTab && <div className="row-count"><strong>{filteredRows.length}</strong> shown / {snapshot.rows.length}</div>}
       </nav>
 
-      {helpTab && (
-        <section className="help-doc">
-          <span className="kicker">AUTHORLM / HELP</span>
-          <p className="help-doc-intro">
-            This is the workbench's help. It covers the beat loop end to end,
-            and it covers the three triage tabs beside it too: the concepts,
-            edges and proposals you rule on here are the same graph the beat
-            loop draws its grounding from, and the decisions you stage and
-            apply on those tabs are recorded as the same author evidence a
-            beat verdict is. Nothing on any tab — analysis, safe
-            recommendation or accepted beat — changes the manuscript or the
-            graph until you apply or accept it. The `?` button in the
-            masthead still explains the current tab's own verbs and
-            analyzer.
-          </p>
-          <article className="help-doc-body">{renderMarkdown(tutorial)}</article>
-        </section>
-      )}
+      {helpTab && <HelpDoc />}
       {!helpTab && <>
 
       {snapshot.incomplete_runs.length > 0 && !analysis && (

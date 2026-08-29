@@ -401,6 +401,10 @@ body::before {
 .boot-screen span { width: 32px; height: 32px; border: 2px solid var(--line); border-top-color: var(--orange); border-radius: 50%; animation: turn .8s linear infinite; }
 @keyframes turn { to { transform: rotate(360deg); } }
 
+/* The boot error yields most of its height once help is opened behind it:
+   the message stays on screen, the tutorial gets the viewport. */
+.boot-error.compact { min-height: 0; padding: 22px 26px; }
+
 /* Help tab — the canonical tutorial, rendered by src/markdown.tsx. */
 .help-doc { padding: 26px 26px 60px; background: var(--paper); }
 .help-doc-intro {

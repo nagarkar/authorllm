@@ -19,9 +19,16 @@ commands.
 Two things about that division are load-bearing and are not negotiable:
 
 1. **The verbs are the state machine and the evidence channel.** The agent does
-   the drafting; the CLI does the gating and the recording. There is no LLM call
-   anywhere inside `authorlm write` — if a beat is drafted, the agent drafted it
-   in the conversation.
+   the drafting; the CLI does the gating and the recording. **No drafting verb
+   makes an LLM call**: `write start`, `plan`, `propose`, `accept`, `reject` and
+   `learn` are pure gating, recording and deterministic collection — so if a
+   beat is drafted, the agent drafted it in the conversation, and no beat was
+   ever written by something you could not see happening.
+   One verb in the loop *does* spend. **`write complete` runs the
+   concept-extraction pass that was deferred through the whole loop** (it builds
+   an `LLMClient` and, when one is configured, calls it once); the per-beat
+   collects deliberately skip extraction so that spend lands once, at the end,
+   instead of on every accept. See §2.6 and §8.
 2. **Nothing machine-written enters the manuscript without your accept.** The
    loop appends only inside `write accept`. The agent never edits the essay file
    during a writeup, and there is no auto-accept anywhere in the system.
@@ -290,8 +297,13 @@ authorlm summarize rebuild -m SMSTTD          # ~1 cheap-tier call per stale uni
 authorlm intent complete di-4b7e1 -m SMSTTD   # separate — runs episode analysis
 ```
 
-The one thing worth hearing about aloud is the rebuild's spend, because it costs
-real model calls.
+Two of those three spend real model calls, and both are worth hearing about
+aloud: `write complete` runs the deferred concept-extraction pass (one call,
+when an LLM is configured — this is the only LLM call anywhere in the beat
+loop), and `summarize rebuild` costs roughly one cheap-tier call per stale unit.
+`intent complete` runs episode analysis, which spends too. If you are working
+with the LLM disabled, completion still succeeds; the extraction is simply
+skipped.
 
 `write complete` does **not** require the plan to be exhausted. You decide when
 it is done; unwritten beats are reported, not blocked.
@@ -712,12 +724,19 @@ Things that are true today and that you will meet:
 4. **`summarize rebuild` costs cheap-tier LLM calls** (one per stale unit, ~24
    for `--all`) and is needed both before a start that the gate refuses and
    after every completion. It is not automatic.
-5. **Two candidate drafts per beat are not supported.** If you find yourself
+5. **Finishing an essay spends, in three places.** The drafting verbs
+   (`start`, `plan`, `propose`, `accept`, `reject`, `learn`) make no LLM call at
+   all — but `write complete` runs the concept-extraction pass deferred through
+   the whole loop, `summarize rebuild` costs the calls in item 4, and
+   `intent complete` runs episode analysis. Each is skipped silently when no
+   LLM is configured, so a run with the LLM off finishes but learns nothing from
+   the prose. Only completion's own call is inside `authorlm write`.
+6. **Two candidate drafts per beat are not supported.** If you find yourself
    wishing you could see a second option, note it — that is the trigger for a
    deliberately deferred feature, and the count is the evidence for building it.
-6. **The removal section is real prose.** It gets summarized, exported and
+7. **The removal section is real prose.** It gets summarized, exported and
    pushed like anything else. Decide whether it ships.
-7. **`write plan --replace` still makes you resend the whole remaining plan** as
+8. **`write plan --replace` still makes you resend the whole remaining plan** as
    JSON. In conversation that is fine — you say "split beat 8 and drop beat 10"
    and the agent rebuilds it. Typed by hand it is unpleasant, but that is not
    the primary path.
