@@ -108,7 +108,7 @@ drafted — it becomes a question to the author, asked before `write propose`.**
 
 | Flow | Start command | Then |
 |---|---|---|
-| New essay from a brief (UC-A) | `write start <name>.md --new --after <file> --style <guide>` (brief on stdin) | straight to step 2 |
+| New essay from a brief (UC-A) | `write start <name>.md --new --intent <id> --after <file> --style <guide>` (brief on stdin) | straight to step 2 |
 | Modeled rewrite (UC-B) | `write start <file> --intent <id>` (optional brief on stdin) | step 1b first |
 | Plain rewrite | `write start <file> --intent <id>` | straight to step 2 |
 
