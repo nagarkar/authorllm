@@ -17,13 +17,22 @@ surface is to keep that evidence flowing while the author just talks.
    opening briefing, or at the first declared intent. This is the
    reinforcement channel: policy reminders only earn (or lose) the
    evidence that promotes or retires them when the author reacts, and a
-   session without a guidance review leaves every candidate frozen. Also
+   session without a guidance review leaves every candidate frozen.
+   Promotion is derived, not counted: a belief's supporting count comes
+   from distinct-session evidence only — machine-inferred evidence
+   (episode analysis, deterministic triage, extraction adjudication) may
+   seed a candidate belief but can never by itself validate one. Also
    run it whenever they ask what/how to write. Present suggestions *with
    their explanations* — the why matters more than the what — and
    surface policy reminders as direct questions ("does this rule of
    yours apply here?"), then record verdicts via `review_suggestion`.
    If it abstains, say so plainly; abstention is a valid answer, not a
-   failure.
+   failure. To curate a belief directly: `belief retire <id> --reason
+   "…"` bans the statement from ever re-seeding; `belief demote <id>
+   --reason "…"` (MCP `demote_belief`) is the lighter, reversible move
+   — sends a validated belief back to candidate so it may re-validate on
+   real evidence, for when the author no longer stands behind it without
+   banning it outright. A reason is required for both.
 3. When they react to a suggestion — in any wording — → `review_suggestion`.
    **Record their actual reasoning verbatim as `explanation`.** An explained
    rejection is the highest-value evidence the system can receive.
@@ -184,6 +193,14 @@ rapid CLI loop remains useful in a terminal:
   safe alias merges, retirements, and edge rejections; inspect the report, then
   add `--apply` only when the author asks to execute it. `--nodes` / `--edges`
   restrict the lane. These are system decisions, not author feedback.
+An extraction run (`authorlm extract` / `extract_concepts`) reports which
+prompt file(s) shaped it (`Prompts:` line / `prompt_files` — includes
+`adjudication.md` whenever the second pass ran, even when it ran and
+returned nothing usable, reported separately as an empty-adjudication
+note) and splits what it skipped into three counts, not one: malformed
+model output, an unknown relation (outside `VALID_RELATIONS` — the
+extractor's own policy, not a failure), and an unknown endpoint (named a
+concept not yet in the graph). Read these as three different signals.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.
@@ -218,7 +235,11 @@ pending counts (`critique_pending`) so the homework stays visible.
 Prerequisites: `authorlm summarize rebuild` once (the editor's working
 memory of the whole book; a stale summary blocks the run) and the essay's
 scope chain triaged (the preflight gate refuses otherwise; `--force` runs
-WITHOUT the unconfirmed items — never with them). Then, per essay:
+WITHOUT the unconfirmed items — never with them). Summary length scales
+to the unit (~1 word per 7.5–10 words of essay, floored at 40/capped at
+500) rather than a fixed range, and every paragraph is numbered in the
+prompt input and must be cited — `paragraph_coverage` reports (never
+blocks on) any left uncited or cited out of range. Then, per essay:
 1. `authorlm critique run <essay>` (shell; frontier `[critique]
    editor_model`) → stages paragraph-aligned proposals as critique threads
    and files non-paragraph suggestions as proposed system-sourced intents.
@@ -236,10 +257,16 @@ WITHOUT the unconfirmed items — never with them). Then, per essay:
 4. The pause: the author reads and post-edits the `{{new}}` halves in
    Docs. Their words win. Ordinary `doc pull` never touches these forms.
 5. `authorlm critique resolve <essay>` (shell, Drive; explicit ONLY) —
-   every remaining form's current `{{new}}` becomes final; applied
-   locally, tab stripped clean, proposal→final diffs recorded as evidence
-   (≥2 modified acceptances → pattern candidate through the distiller);
-   collect; the essay's summary is rebuilt; the cursor advances. The next
+   fetches the tab as markdown (same export path as `doc pull`) and
+   three-ways it against local on the pushed base hash: every remaining
+   form's current `{{new}}` becomes final and is applied locally
+   (proposal→final diffs recorded as evidence — ≥2 modified acceptances
+   → pattern candidate through the distiller); collect; the essay's
+   summary is rebuilt; the cursor advances. No push — the Doc tab keeps
+   its markers until the next ordinary `doc push` clears them. On a
+   genuine two-sided conflict (local AND the Doc both moved off the
+   agreed base independently) resolve REFUSES rather than guessing,
+   leaving the local file untouched and the thread `written`. The next
    essay runs only when the author says so.
    `critique rollback <essay>` restores the pin (verdicts stay as evidence).
 `critique status` shows the pass table; `critique show/reason/reopen`
@@ -348,6 +375,16 @@ discarded with a warning — edit the .md). `illus externalize
 deleting the `⇢ ref` moves it back inline. Collect offers
 externalization for descriptions over 50 words or rendered-and-stable
 ones; offers only — the author always pulls the trigger.
+**Recovery**: `_illustrations/prompts/*.md` — the canonical text for
+externalized descriptions — is snapshotted automatically before any
+`doc pull` or session-start reconcile overwrites it. `authorlm illus
+versions` lists the stored snapshots (version, timestamp, file count,
+what triggered it); `authorlm illus restore [--version N]` restores one
+(default: latest), printing the plan and an explicit overwrite warning
+before writing anything. Restore is ADDITIVE — it recovers what that
+snapshot held, never pruning prompt files created since. CLI only, no
+MCP tool.
+
 Candidates land in `_illustrations/` as
 `slug-deschash-stylehash-NN.{png,jpg}`; the embed line under the tag is
 derived machinery (observation-invisible, stripped on push, re-inserted
