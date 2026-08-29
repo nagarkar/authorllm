@@ -2053,6 +2053,36 @@ def scenario_write_new_and_digest(root: Path) -> None:
         check("A15 — and the file is still absent",
               not (ms / "04-extra.md").exists())
 
+        # ---- F5: "restore to nonexistence" includes the attachment the
+        # writeup itself wrote at start. Leaving it behind orphans a
+        # style_attachments row pointing at a file that is not on disk —
+        # the exact integrity rule api._validate_file exists to keep.
+        def _attachment(file: str):
+            return _db.one("SELECT * FROM style_attachments WHERE file = ?",
+                           (file,))
+
+        check("F5 — abandoning a CREATED writeup takes its style attachment "
+              "with the file: the writeup wrote that row at start, so "
+              "unwinding the writeup unwrites it",
+              _attachment("04-extra.md") is None and _attachment("03-new.md")
+              is None,
+              str([dict(_attachment(f)) if _attachment(f) else None
+                   for f in ("03-new.md", "04-extra.md")]))
+        # ...and a plain rewrite's PRE-EXISTING attachment is untouched: it
+        # was not the writeup's to remove.
+        before_attachment = dict(_attachment("02-essay.md"))
+        run_stdin(ws, "", "write", "start", "02-essay.md",
+                  "--intent", intent_id)
+        out = run_stdin(ws, "", "write", "abandon")
+        check("F5 — a plain rewrite's abandon restores the file and leaves "
+              "the attachment it did NOT create alone",
+              "file restored" in out
+              and _attachment("02-essay.md") is not None
+              and dict(_attachment("02-essay.md")) == before_attachment,
+              out)
+        check("F5 — and the rewrite's file came back",
+              (ms / "02-essay.md").read_text() == ESSAY)
+
         # ---- A6-A9: the full UC-A loop through to completion.
         run(ws, "summarize", "rebuild", "--all")
         run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",

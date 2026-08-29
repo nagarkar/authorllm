@@ -1543,6 +1543,17 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
         had_text = path.exists() and bool(
             path.read_text(encoding="utf-8").strip())
         path.unlink(missing_ok=True)
+        # "Restore to nonexistence" includes the attachment: `write start
+        # --new` wrote that style_attachments row itself, so unwinding the
+        # writeup unwrites it. Leaving it behind orphans a live reference
+        # to a file that is not on disk — the exact integrity rule
+        # api._validate_file exists to keep. ONLY for a created file; a
+        # rewrite's attachment predates the writeup and is not its to
+        # remove.
+        removed = db.conn.execute(
+            "DELETE FROM style_attachments WHERE manuscript_id = ? "
+            "AND file = ?", (manuscript["id"], writeup["file"])).rowcount
+        db.conn.commit()
         # This collect records the file_removed transition, and any concept
         # whose primary location was this file raises a `vanished` proposal.
         # That noise is the honest result — the same noise §9.4 accepts for
@@ -1551,6 +1562,7 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
         db.update("writeups", writeup["id"], {"status": "abandoned"})
         return {"writeup_id": writeup["id"], "restored": False,
                 "deleted": True, "had_text": had_text,
+                "attachment_removed": bool(removed),
                 "preserved_in_version": (preserved["version_no"]
                                          if preserved else None),
                 "file": writeup["file"], "collect": report}
@@ -1566,6 +1578,7 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
     db.update("writeups", writeup["id"], {"status": "abandoned"})
     return {"writeup_id": writeup["id"], "restored": restored,
             "deleted": False, "had_text": False,
+            "attachment_removed": False,
             "preserved_in_version": None, "file": writeup["file"],
             "collect": report}
 
