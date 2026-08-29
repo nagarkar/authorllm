@@ -160,10 +160,17 @@ def insert_toc_entry(toc_text: str, file: str,
         if parent:
             stanza_lines.append(f'parent = "{parent}"')
         # Forward to the start of the next chapter table (or EOF), then
-        # back over the blank lines that separate the tables, so the new
-        # stanza lands inside the gap rather than glued to a neighbour.
+        # back over everything that belongs to THAT table rather than to
+        # the anchor's: the blank lines that separate them, and any
+        # comment lines, which annotate the table below them. Stopping at
+        # a comment would drop the new stanza between the comment and the
+        # table it describes — silently re-attributing the comment to the
+        # new essay, and gluing the new stanza to its neighbour with no
+        # separator.
         insert_at = next((i for i in chapter_at if i > anchor_at), len(lines))
-        while insert_at > 0 and not lines[insert_at - 1].strip():
+        while insert_at > 0 and (not lines[insert_at - 1].strip()
+                                 or lines[insert_at - 1].lstrip()
+                                 .startswith("#")):
             insert_at -= 1
         block = [""] + stanza_lines
 

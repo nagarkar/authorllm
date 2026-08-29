@@ -2554,6 +2554,38 @@ def scenario_doc_comments(root: Path) -> None:
           "the text comes back unchanged",
           same == commented and stanza == "", same)
 
+    # F3 — a comment sitting in the gap belongs to the table BELOW it. The
+    # walk-back to the insertion point must skip comment lines as well as
+    # blanks, or the new stanza lands between the comment and the table it
+    # annotates: the comment is silently re-attributed to the new essay,
+    # and the new stanza is glued to its neighbour with no blank line.
+    gap_comment = ('[[chapter]]\n'
+                   'file = "a.md"\n'
+                   '\n'
+                   '# this comment annotates b.md, not whatever precedes it\n'
+                   '[[chapter]]\n'
+                   'file = "b.md"\n')
+    inserted, _stanza = insert_toc_entry(gap_comment, "new.md", "a.md")
+    lines = inserted.splitlines()
+    b_at = lines.index('file = "b.md"')
+    comment_at = lines.index(
+        '# this comment annotates b.md, not whatever precedes it')
+    new_at = lines.index('file = "new.md"')
+    check("F3 — the comment stays with the table it annotates: the new "
+          "stanza goes ABOVE it, not between it and b.md",
+          new_at < comment_at < b_at, inserted)
+    check("F3 — and the new stanza is not glued to its neighbour: a blank "
+          "line separates it on both sides",
+          lines[new_at - 2].strip() == ""
+          and lines[new_at + 1].strip() == "", repr(lines))
+    check("F3 — the reading order is still right",
+          [n for n, _ in parse_toc_tree(inserted)]
+          == ["a.md", "new.md", "b.md"], str(parse_toc_tree(inserted)))
+    check("F3 — every original line survives verbatim",
+          all(line in lines
+              for line in gap_comment.splitlines() if line.strip()),
+          inserted)
+
     doc_tabs = [{"tabProperties": {"tabId": "t.a", "title": "a.md"},
                  "childTabs": [
                      {"tabProperties": {"tabId": "t.s", "title": "scratch"},
