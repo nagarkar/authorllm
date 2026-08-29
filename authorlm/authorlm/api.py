@@ -858,11 +858,6 @@ def write_start(db: Database, manuscript: dict, config: dict,
     relpath = _resolve_or_new(manuscript, file, new)
     placement = _resolve_placement(manuscript, after)
     brief = (brief or "").strip()
-    if new and not brief:
-        raise ValueError(
-            "write start --new requires the one-paragraph brief on stdin — "
-            "it is the only essay-specific ground a new file has "
-            "(design §13.1).")
     if style and not new:
         raise ValueError(
             f"--style is only for --new; an existing file's guide is "
@@ -914,6 +909,19 @@ def write_start(db: Database, manuscript: dict, config: dict,
             f"{relpath} does not exist yet, so it has no place in the "
             f"reading order — say where it goes: --after <file it follows> "
             f"| --after {_sums.PLACEMENT_START}.")
+    if new and not brief:
+        # LAST of the flag gates, deliberately. Every other refusal names a
+        # flag the author can add to the command they just typed; this one
+        # asks them to go and compose a paragraph. A gate parade typed at a
+        # terminal has no stdin at all, so checking the brief first would
+        # mask the placement and style refusals behind "give me a brief"
+        # and the author would discover them one round trip at a time
+        # (design §5.5, MT-5). Still before the pin: nothing has been
+        # written yet, so K1 is untouched by the move.
+        raise ValueError(
+            "write start --new requires the one-paragraph brief on stdin — "
+            "it is the only essay-specific ground a new file has "
+            "(design §13.1).")
     # The summary freshness gate (design §12.4 item 2), on the same
     # predicate the critique pass uses: the before/after summaries ARE the
     # drafting context now, so a missing or stale one is a lie about the

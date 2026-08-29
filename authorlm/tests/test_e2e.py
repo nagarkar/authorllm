@@ -1821,6 +1821,31 @@ def scenario_write_new_and_digest(root: Path) -> None:
               "brief" in out and "stdin" in out, out)
         check("A17 — and nothing was created", not target.exists())
 
+        # F1 — the ORDER of the refusals, PINNED. With both the placement
+        # and the brief missing, the PLACEMENT refusal must win: that is
+        # the sequence the author signed off on (design §5.5 / MT-5), and
+        # a gate parade typed at a terminal never has stdin, so a
+        # brief-first order would mask every other refusal behind "give me
+        # a brief" and the author would fix them one round trip at a time.
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--style", "House",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("F1 — placement and brief both missing: the PLACEMENT refusal "
+              "wins",
+              "does not exist yet" in out
+              and "--after <file it follows>" in out
+              and "one-paragraph brief" not in out, out)
+        check("F1 — and nothing was created", not target.exists())
+        out = run_stdin(ws, "", "write", "start", "03-new.md", "--new",
+                        "--intent", intent_id, "--after", "01-choice.md",
+                        expect_exit=True)
+        gate_outs.append(out)
+        check("F1 — style and brief both missing: the STYLE refusal wins",
+              "no attached style guide" in out
+              and "one-paragraph brief" not in out, out)
+        check("F1 — and nothing was created", not target.exists())
+
         out = run_stdin(ws, BRIEF_A, "write", "start", "03-new.md", "--new",
                         "--intent", intent_id, "--after", "01-choice.md",
                         expect_exit=True)

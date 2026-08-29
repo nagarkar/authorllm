@@ -726,7 +726,13 @@ write start <name>.md --new --intent <id> --after <file> --style <guide>
   The brief is the only essay-specific grounding the beats have; without it the
   loop is asking a model to invent commitments, which is what §12.5's
   experiment did. It is persisted in the writeup metadata and reprinted by
-  `write status`.
+  `write status`. The missing-brief refusal is the **last** of the flag
+  gates — after `--new` consistency, the intent, the style guide and the
+  placement, and before the summary-freshness gate. Every other refusal
+  names a flag the author can append to the command they just typed; this
+  one asks them to go and compose a paragraph, and a gate parade typed at
+  a terminal has no stdin at all, so checking it first would mask every
+  other refusal behind "give me a brief".
 - **"Proposed by the drafter loop" is conversational.** The skill may draft a
   candidate brief; the author ratifies the wording; the ratified wording is
   what reaches `write start`. No verb, and no LLM call in the write path.
