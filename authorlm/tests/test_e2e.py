@@ -2543,7 +2543,35 @@ def scenario_parallel_writeups(root: Path) -> None:
 
         # ---- E2: the critique side of the same context.
         p = _passes.ensure_pass(_db, _ms_row["id"], _db.source("system"))
-        ctx = _passes.build_context(_db, _ms_row, "02-essay.md", p)
+        # P3 (sponsor addendum) — ONE capture per invocation, counted:
+        # the in-flight check, the summaries gate and the paragraph list
+        # the editor model edits must all read the same snapshot, or a
+        # parallel session can change an essay between the gate approving
+        # it and the context being assembled from it.
+        _real = {name: getattr(_sums, name)
+                 for name in ("_context_units", "units")}
+        _captures = []
+
+        def _counter(name):
+            def wrapper(*args, **kwargs):
+                _captures.append(name)
+                return _real[name](*args, **kwargs)
+            return wrapper
+
+        for _name in _real:
+            setattr(_sums, _name, _counter(_name))
+        try:
+            ctx = _passes.build_context(_db, _ms_row, "02-essay.md", p)
+        finally:
+            for _name, _fn in _real.items():
+                setattr(_sums, _name, _fn)
+        check("E2/P3 — build_context reads the manuscript from disk ONCE, "
+              "and the in-flight check, the summaries gate and the "
+              "paragraph list the editor model actually edits all read "
+              "that same snapshot. It used to take a separate pass for "
+              "the paragraphs, which is a window in which a parallel "
+              "session can change the essay AFTER the gate approved it",
+              _captures == ["_context_units"], str(_captures))
         check("E2 — the edit pass over A PROCEEDS with B mid-rewrite, and "
               "reports which essays are in flight",
               ctx["inflight"] == ["01-choice.md"], str(ctx["inflight"]))

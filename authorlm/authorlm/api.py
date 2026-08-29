@@ -849,19 +849,25 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
     return {r["state"]: r["n"] for r in rows}
 
 
-def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
+def _drafting_context(db: Database, manuscript: dict, writeup: dict,
+                      capture=None) -> str:
     """The writeup's L1 book-frame (design §12.4 item 1): compressed
     summaries of the settled essays before this one and the upcoming
     ones after it. Recomputed on every read rather than stored — the
     summaries themselves are the source of truth and a rebuild between
     beats must show through. The declared placement, however, IS stored
     (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
-    recomputes the same split without the author repeating the flag."""
+    recomputes the same split without the author repeating the flag.
+
+    `capture` is `write_start`'s own snapshot: the context it prints must
+    be the same text its gate just passed, not a second read that a
+    parallel session could have changed underneath it. Every other caller
+    (the resume view) is a fresh invocation and takes a fresh one."""
     from . import summaries as sums
 
     placement = loads(writeup["metadata"], {}).get("placement")
     return sums.drafting_context(db, manuscript, writeup["file"],
-                                 placement=placement)
+                                 placement=placement, capture=capture)
 
 
 def _status_drafting_context(db: Database, manuscript: dict,
@@ -1024,9 +1030,19 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # LAST among the gates but still before the pin/truncate/collect
     # sequence: a blocked start must leave the file untouched.
     from . import passes
+    from . import summaries as _sums
 
+    # ONE capture for this invocation, shared by the gate below and by
+    # the drafting context printed at the end. Two reads would leave a
+    # window in which a parallel session truncates a neighbour AFTER the
+    # gate approved it and BEFORE the context was assembled from it — and
+    # the author would then be handed, as approved context, exactly the
+    # text the gate exists to refuse. The target file itself never
+    # appears in its own context, so the truncation this verb is about to
+    # perform does not make the capture stale.
+    capture = _sums.capture(db, manuscript)
     ready = passes.summaries_ready(db, manuscript, relpath,
-                                   placement=placement)
+                                   placement=placement, capture=capture)
     if not ready["ok"]:
         raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
@@ -1075,7 +1091,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
-            "drafting_context": _drafting_context(db, manuscript, row)}
+            "drafting_context": _drafting_context(db, manuscript, row,
+                                                  capture=capture)}
 
 
 def write_plan(db: Database, manuscript: dict, beats: list,

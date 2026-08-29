@@ -843,6 +843,135 @@ def main_test() -> None:
               "rewriting" in buf.getvalue() and "unwritten" in buf.getvalue(),
               buf.getvalue())
 
+        print("parallel safety — ONE capture per invocation (sponsor "
+              "addendum, after a live incident):")
+        # The sponsor's ask, verbatim: "load up all the stale essays into
+        # memory at once, so if some other session messes with one in
+        # parallel, it is less likely to cause a problem like it did this
+        # time." The property already holds; these pin it, because it is
+        # invisible in the code and one refactor away from being lost.
+
+        # P1 — the rebuild snapshot. Mutate a LATER essay on disk while
+        # the pass is running; it must be summarized from the text the
+        # pass captured before its first model call, not from the bytes
+        # that landed underneath it mid-run.
+        api.attach_style(db, manuscript, "gamma.md", "House")
+        gamma_before = (ms / "gamma.md").read_text()
+        EchoSummarizer.calls.clear()
+        mutated = ["# gamma\n\nSomething another session wrote mid-rebuild.\n"]
+
+        def mutate_once(f):
+            if mutated:
+                (ms / "gamma.md").write_text(mutated.pop())
+
+        sums.rebuild(db, manuscript, llm, progress=mutate_once)
+        gamma_row = sums.all_summaries(db, manuscript["id"])["gamma.md"]
+        gamma_prompt = next(c["user"] for c in EchoSummarizer.calls
+                            if c["unit"] == "gamma.md")
+        check("P1 — a full rebuild summarizes the SNAPSHOT text it took "
+              "before its first call, not the bytes another session wrote "
+              "underneath it mid-run (a rebuild runs for minutes; a "
+              "per-unit re-read would summarize a truncation as an empty "
+              "essay and store it as fresh)",
+              "Something another session wrote" not in gamma_prompt
+              and "Text of gamma." in gamma_prompt, gamma_prompt)
+        check("P1 — and the stored source_hash is the hash of THAT text, "
+              "so the entry honestly reads 'stale' against the changed "
+              "disk rather than 'fresh' against a text it never read",
+              gamma_row["source_hash"] == sums._hash(gamma_before)
+              and {r["file"]: r["state"]
+                   for r in sums.status(db, manuscript)}["gamma.md"]
+              == "stale",
+              str((gamma_row["source_hash"], sums._hash(gamma_before))))
+        (ms / "gamma.md").write_text(gamma_before)
+
+        # P4 — the sponsor's actual incident: the later essay is not
+        # merely edited mid-run, it is TRUNCATED by a parallel
+        # `write start`. The snapshot holds its pre-truncation text, which
+        # is exactly the text that writeup pinned — so the hash stored by
+        # the rebuild is the hash the in-flight logic looks for.
+        gamma_intent = api.declare_intent(
+            db, manuscript, "Rewrite gamma in another session")["intent"]
+        started_mid = []
+
+        def start_writeup_once(f):
+            if f == "beta.md" and not started_mid:
+                started_mid.append(True)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    api.write_start(db, manuscript, config, "gamma.md",
+                                    gamma_intent["id"][:8])
+
+        EchoSummarizer.calls.clear()
+        sums.rebuild(db, manuscript, llm, progress=start_writeup_once)
+        check("P4 — a parallel `write start` that truncates a later essay "
+              "MID-RUN does not corrupt its summary: the snapshot's "
+              "pre-truncation text is what gets summarized, and the "
+              "placeholder never reaches the summarizer",
+              started_mid
+              and _api.MARKER not in next(
+                  c["user"] for c in EchoSummarizer.calls
+                  if c["unit"] == "gamma.md"),
+              str([c["unit"] for c in EchoSummarizer.calls]))
+        check("P4 — and the hash the rebuild stored is the hash the "
+              "in-flight logic looks for, so the entry lands on "
+              "'rewriting' rather than 'stale': the snapshot text and the "
+              "writeup's pinned text are the same text",
+              {r["file"]: r["state"]
+               for r in sums.status(db, manuscript)}["gamma.md"]
+              == "rewriting",
+              str(sums.status(db, manuscript)))
+
+        # P2 / P3 — one capture per invocation, counted. Invisible in the
+        # code, so it is pinned here: rebuild_one used to read the disk
+        # twice (once for the order, once for the texts), and write_start
+        # used to read it once for the gate and again for the context it
+        # printed — a window in which a parallel session could change an
+        # essay AFTER the gate approved it and BEFORE it was served.
+        def counting(target_module, name, shared=None):
+            real = getattr(target_module, name)
+            calls = shared if shared is not None else []
+
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return real(*args, **kwargs)
+
+            setattr(target_module, name, wrapper)
+            return calls, lambda: setattr(target_module, name, real)
+
+        # Both ways this module can read the reading order and its texts.
+        # (`_concept_slice`'s own read, inside summarize_unit, goes
+        # through neither and is not what is being counted.)
+        order_reads: list = []
+        _, restore_units = counting(sums, "units", order_reads)
+        _, restore_ctx = counting(sums, "_context_units", order_reads)
+        try:
+            sums.rebuild_one(db, manuscript, "alpha.md", llm)
+        finally:
+            restore_units()
+            restore_ctx()
+        check("P2 — rebuild_one captures the reading order and its texts "
+              "ONCE. It used to call units() twice, once for the order "
+              "and once for the texts: two disk passes a parallel writer "
+              "can interleave, and two chances for the order and the "
+              "texts to disagree about the same manuscript",
+              order_reads == ["_context_units"], str(order_reads))
+
+        api.attach_style(db, manuscript, "alpha.md", "House")
+        captures, restore = counting(sums, "_context_units", [])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                api.write_start(db, manuscript, config, "alpha.md",
+                                intent["id"][:8])
+        finally:
+            restore()
+        check("P3 — `write start` takes exactly ONE capture of the "
+              "manuscript's context text, shared by the freshness gate "
+              "and by the drafting context it prints. Two reads would let "
+              "a parallel session truncate a neighbour between the gate "
+              "approving it and the author being handed it as approved "
+              "context — the exact lie the gate exists to prevent",
+              len(captures) == 1, f"{len(captures)} captures")
+
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
         check("the summarizer prompt is a checked-in file with the labeled "

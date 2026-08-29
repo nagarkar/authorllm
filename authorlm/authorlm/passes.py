@@ -177,7 +177,7 @@ def preflight(db: Database, manuscript: dict, file: str,
 
 
 def summaries_ready(db: Database, manuscript: dict, file: str,
-                    placement: str | None = None) -> dict:
+                    placement: str | None = None, capture=None) -> dict:
     """Missing summaries, a stale (source_hash) one, or a deprecated one
     anywhere in the before/after context blocks the run; upstream_stale
     is tolerated. A deprecated row belongs to an essay that left the toc
@@ -187,9 +187,15 @@ def summaries_ready(db: Database, manuscript: dict, file: str,
     `placement` is the drafting gate's case (design §12.4 item 3): the
     context of an essay whose toc entry is not committed yet. It also
     validates the placement, so `write start --after <nonsense>` is
-    refused here — before anything is truncated."""
+    refused here — before anything is truncated.
+
+    `capture` is the caller's single snapshot of the manuscript's context
+    text (summaries.capture). Passing it is what makes the gate judge
+    EXACTLY the text the context assembled afterwards will carry — a
+    second read here could see a parallel session's truncation and open a
+    window between the two."""
     before, after = sums.before_after(db, manuscript, file,
-                                      placement=placement)
+                                      placement=placement, capture=capture)
     entries = before + after
     missing = [e["file"] for e in entries if e["state"] == "missing"]
     stale = [e["file"] for e in entries if e["state"] == "stale"]
@@ -269,11 +275,17 @@ def build_context(db: Database, manuscript: dict, file: str,
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
         raise RuntimeError(_gate_message(gate))
+    # ONE capture for this whole invocation: the in-flight check, the
+    # summaries gate, and the paragraph list the editor model actually
+    # edits all read it. Separate reads would let a parallel session
+    # change an essay between the gate passing and the context being
+    # built, which is precisely the lie the gate exists to prevent.
+    capture = sums.capture(db, manuscript)
+    texts, _unlisted, inflight_now = capture
     # The essay this pass would edit is itself mid-rewrite: what is on
     # disk is the placeholder, not the essay, so the editor model would
     # be handed a marker as "the text" and would propose edits to it.
     # build_context mutates nothing, so the order here is free.
-    inflight_now = sums.inflight_sources(db, manuscript)
     if file in inflight_now:
         raise RuntimeError(
             f"{file} is being rewritten right now by an active writeup — "
@@ -282,12 +294,13 @@ def build_context(db: Database, manuscript: dict, file: str,
             f"writeup ('write complete') or put the old essay back "
             f"('write abandon'). To refresh its summary from the pinned "
             f"pre-rewrite text meanwhile: 'summarize rebuild {file}'.")
-    ready = summaries_ready(db, manuscript, file)
+    ready = summaries_ready(db, manuscript, file, capture=capture)
     if not ready["ok"]:
         raise RuntimeError(summaries_message(ready, "edit pass"))
-    texts = dict(sums.units(manuscript))
     if file not in texts:
         raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    # Disk text for the target: the refusal above has already proved this
+    # file is not in flight, so the capture carries no overlay for it.
     paragraphs = paragraphs_of(texts[file])
     intents = intents_in_scope(db, manuscript, file, "active")
     beliefs = [dict(r) for r in db.all(

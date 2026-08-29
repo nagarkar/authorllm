@@ -223,6 +223,23 @@ def context_units(db: Database, manuscript: dict) -> list[tuple[str, str]]:
     return list(texts.items())
 
 
+def capture(db: Database, manuscript: dict):
+    """ONE snapshot of the manuscript's context text, to be shared by
+    every read inside a single verb invocation.
+
+    Another session can truncate an essay at any moment — that is the
+    whole point of §14 — so a verb that reads the disk twice can have the
+    manuscript change under it BETWEEN the two reads. The dangerous shape
+    is a gate and the thing it gates reading separately: the gate passes
+    on text A and the context is then assembled from text B, which is a
+    lie the gate specifically exists to prevent. So: capture once, hand
+    the capture to the gate AND to the assembly, and the gate judges
+    exactly the text the context will carry.
+
+    Opaque by intention — pass it along, do not unpack it at call sites."""
+    return _context_units(db, manuscript)
+
+
 def _state(row, text: str, pinned=NOT_IN_FLIGHT) -> str:
     """One unit's freshness (design §1.3 — the decision list, in order).
 
@@ -275,7 +292,7 @@ def status(db: Database, manuscript: dict) -> list[dict]:
 
 
 def before_after(db: Database, manuscript: dict, file: str,
-                 placement: str | None = None
+                 placement: str | None = None, capture=None
                  ) -> tuple[list[dict], list[dict]]:
     """Summaries of the units before and after `file` in reading order —
     the edit pass's book-context, and (with `placement`) the drafting
@@ -292,9 +309,13 @@ def before_after(db: Database, manuscript: dict, file: str,
     would put the whole book behind the new essay and nothing ahead of
     it: §7's continuity contract exactly inverted, silently, for the one
     file whose placement actually matters. The position is not guessable,
-    so it is asked for rather than assumed."""
+    so it is asked for rather than assumed.
+
+    `capture` is the caller's single snapshot (see `capture()`), so the
+    gate and the context assembly of one verb invocation judge and serve
+    the same bytes. Omitted, one is taken here."""
     have = all_summaries(db, manuscript["id"])
-    texts, unlisted, flight = _context_units(db, manuscript)
+    texts, unlisted, flight = capture or _context_units(db, manuscript)
     order = list(texts)
     if placement is None:
         if file not in order:
@@ -489,7 +510,7 @@ def _coverage_note(entry: dict, text: str) -> str | None:
 
 
 def drafting_context(db: Database, manuscript: dict, file: str,
-                     placement: str | None = None) -> str:
+                     placement: str | None = None, capture=None) -> str:
     """The L1 book-frame for drafting `file`: the compressed summaries of
     everything settled before it and everything still to come, as
     deterministic text (design §12.4 item 1 — the glue `before_after`
@@ -502,13 +523,19 @@ def drafting_context(db: Database, manuscript: dict, file: str,
 
     `placement` is passed through to `before_after` — an essay whose toc
     entry is not committed yet still gets the right split, and is refused
-    outright if it declares no placement at all."""
-    before, after = before_after(db, manuscript, file, placement=placement)
+    outright if it declares no placement at all.
+
+    ONE capture serves the entry states and the coverage notes — and,
+    when the caller passes its own, serves the gate that let this render
+    happen too."""
+    snapshot = capture or _context_units(db, manuscript)
+    before, after = before_after(db, manuscript, file, placement=placement,
+                                 capture=snapshot)
     # CONTEXT truth, not disk truth: the coverage note measures a stored
     # summary against the paragraphs it summarizes, and for an in-flight
     # file those are the pinned ones. Measured against the placeholder it
     # would report a fictitious 100% miss.
-    texts = dict(context_units(db, manuscript))
+    texts = snapshot[0]
 
     def block(entries: list[dict], header: str) -> list[str]:
         lines = [header]
@@ -629,7 +656,22 @@ def rebuild(db: Database, manuscript: dict, llm: LLMClient,
     text pulled out of `manuscript_versions`, never from the placeholder
     on disk — which is what makes the refusal's printed remedy actually
     work. A file a writeup CREATED has no pre-rewrite text at all, so it
-    is skipped and reported rather than quietly summarized as empty."""
+    is skipped and reported rather than quietly summarized as empty.
+
+    **ONE snapshot, taken before the first model call.** A full rebuild
+    runs for minutes, and another session can truncate an essay at any
+    point during it. Re-reading each unit as its turn came would let a
+    truncation land between the pass starting and that unit being read,
+    and the unit would then be summarized as EMPTY and stored as fresh —
+    the exact incident this design exists to prevent, wearing a
+    stopwatch. Every unit is summarized from the text captured here, and
+    the stored `source_hash` is the hash of THAT text.
+
+    A file that becomes in-flight mid-run is safe by the same token: the
+    snapshot holds its pre-truncation text, which is exactly the text the
+    writeup went on to pin — so the hash stored here is the hash the
+    in-flight logic looks for, and the entry settles at `rewriting`
+    rather than at `stale`."""
     have = all_summaries(db, manuscript["id"])
     texts, _unlisted, flight = _context_units(db, manuscript)
     prior: list[tuple[str, str]] = []
@@ -672,7 +714,12 @@ def rebuild_one(db: Database, manuscript: dict, file: str,
     Reads CONTEXT truth, as `rebuild` does. Silently summarizing an empty
     file is the failure the in-flight states exist to prevent, so it must
     not be reachable through the singular verb either: a file a writeup
-    CREATED raises rather than summarizing nothing."""
+    CREATED raises rather than summarizing nothing.
+
+    ONE capture, as in `rebuild`. This used to read the disk TWICE (once
+    for the order, once for the texts), which is two chances for a
+    parallel writer to interleave and for the order and the texts to
+    disagree about the same manuscript."""
     texts, _unlisted, flight = _context_units(db, manuscript)
     order = list(texts)
     if file not in order:
