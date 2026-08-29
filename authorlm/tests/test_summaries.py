@@ -206,6 +206,30 @@ def main_test() -> None:
         check("a summary omitting a paragraph reports exactly which one",
               gappy["missing"] == [2] and gappy["out_of_range"] == []
               and not gappy["complete"], str(gappy))
+        # Z-M1: the form the REAL summarizer writes is a cross-bracket
+        # range, "[1]-[11]", not the in-bracket "[2-3]" the prompt's
+        # example shows. Parsing only the latter counted every interior
+        # paragraph as missing — the live rebuild reported 350+ missing
+        # across 18 of 24 essays where the truth is 11 of 1,138.
+        cross = sums.paragraph_coverage(
+            "MOVES: [1]-[4] set up the problem; [6] closes it.", 6)
+        check("a CROSS-BRACKET range counts every paragraph it spans, not "
+              "just its two endpoints",
+              cross["cited"] == [1, 2, 3, 4, 6] and cross["missing"] == [5]
+              and cross["out_of_range"] == [], str(cross))
+        check("an en-dash cross-bracket range, whitespace and all, parses too",
+              sums._cited_paragraphs("[2] – [5]") == {2, 3, 4, 5},
+              str(sums._cited_paragraphs("[2] – [5]")))
+        check("the in-bracket range form still parses (unchanged)",
+              sums._cited_paragraphs("[2-3]") == {2, 3})
+        check("a bare hyphenated number in prose is NOT a citation — the "
+              "brackets are what make it one",
+              sums._cited_paragraphs("the argument of 3-4 pages") == set(),
+              str(sums._cited_paragraphs("the argument of 3-4 pages")))
+        check("a range consumes both its brackets, so a citation right "
+              "after it is still read on its own",
+              sums._cited_paragraphs("[1]-[3], then [7]") == {1, 2, 3, 7},
+              str(sums._cited_paragraphs("[1]-[3], then [7]")))
         invented = sums.paragraph_coverage(
             "MOVES: [1] states the claim. [7] invents a paragraph.", 2)
         check("a citation past PARAGRAPH COUNT is reported as out-of-range "

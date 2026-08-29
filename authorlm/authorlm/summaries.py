@@ -65,16 +65,32 @@ def _numbered_paragraphs(text: str) -> tuple[str, int]:
     return "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paras, 1)), len(paras)
 
 
-_CITATION_RE = re.compile(r"\[(\d+)(?:-(\d+))?\]")
+# Two citation forms, and the CROSS-BRACKET one comes first on purpose.
+# The prompt's example shows "[2-3]", but what the real summarizer writes
+# is "[1]-[11]" — and reading that as two single citations counted every
+# paragraph between them as missing (the live rebuild reported 350+
+# uncited across 18 of 24 essays where the true figure was 11 of 1,138).
+# Alternation is tried left to right at each position, so a cross-bracket
+# range consumes both of its brackets and its endpoints are never also
+# read as singles. Dashes: hyphen, en-dash, em-dash, any surrounding
+# whitespace. Brackets are required either way — "3-4" in prose is prose.
+_CITATION_RE = re.compile(
+    r"\[(\d+)\]\s*[-–—]\s*\[(\d+)\]"
+    r"|\[(\d+)(?:\s*[-–—]\s*(\d+))?\]"
+)
 
 
 def _cited_paragraphs(summary: str) -> set[int]:
-    """Every paragraph number MOVES actually cited (single "[3]" or range
-    "[2-3]" — both forms the prompt's example uses collapse to the same
-    per-number set)."""
+    """Every paragraph number MOVES actually cited — single "[3]",
+    in-bracket range "[2-3]", or cross-bracket range "[2]-[3]" — all
+    collapsing to the same per-number set."""
     cited: set[int] = set()
-    for lo_s, hi_s in _CITATION_RE.findall(summary):
-        lo, hi = int(lo_s), int(hi_s) if hi_s else int(lo_s)
+    for m in _CITATION_RE.finditer(summary):
+        if m.group(1) is not None:
+            lo, hi = int(m.group(1)), int(m.group(2))
+        else:
+            lo = int(m.group(3))
+            hi = int(m.group(4)) if m.group(4) else lo
         if hi < lo:
             lo, hi = hi, lo
         cited.update(range(lo, hi + 1))
