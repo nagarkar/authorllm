@@ -528,7 +528,8 @@ def collect(db: Database, manuscript: dict, config: dict,
         offers = externalize_offers(Path(manuscript["path"]))
     except OSError:
         slots, offers = None, []
-    if slots and (slots["unrendered"] or slots["orphaned"]):
+    if slots and (slots["unrendered"] or slots["orphaned"]
+                 or slots["malformed_refs"]):
         report["illustrations"] = slots
     if excerpt_fixes or offers:
         report.setdefault("illustrations", {})

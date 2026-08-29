@@ -52,9 +52,18 @@ PROMPTS_SUBDIR = "prompts"
 
 def parse_tag(line: str) -> dict | None:
     """The tag grammar. A slot is a full-line tag (trailing whitespace
-    tolerated); returns {prompt, caption, ref} or None. `prompt` is the
-    inline text — for a ref tag that is only the excerpt; resolution to
-    the full description happens in scan_text via the prompts map."""
+    tolerated); returns {prompt, caption, ref, malformed_ref} or None.
+    `prompt` is the inline text — for a ref tag that is only the
+    excerpt; resolution to the full description happens in scan_text
+    via the prompts map.
+
+    `malformed_ref` is True when a `⇢` is present but the text after it
+    does not match `_REF` (e.g. it doesn't end in a bare `.md` name —
+    the shape a corrupted doc-pull round trip can produce, it-d70ece778f55).
+    That case is NOT the same as "no ref": silently falling through to
+    treating the whole line as inline prompt text hides real damage, so
+    callers that report on slots must surface `malformed_ref` loudly
+    rather than let it read as an ordinary undecorated description."""
     m = _TAG.match(line.strip())
     if not m or not line.strip().startswith("["):
         return None
@@ -69,10 +78,12 @@ def parse_tag(line: str) -> dict | None:
     if rm:
         ref = rm.group("ref")
         body = body[: rm.start()]
+    malformed_ref = ref is None and "⇢" in body
     prompt = " ".join(body.split())
     if not prompt and not ref:
         return None
-    return {"prompt": prompt, "caption": caption, "ref": ref}
+    return {"prompt": prompt, "caption": caption, "ref": ref,
+            "malformed_ref": malformed_ref}
 
 
 # Preview embeds in prompt files: `![](../<candidate>)` lines at the end
@@ -514,8 +525,11 @@ def candidate_files(root: Path) -> list[dict]:
 
 def slot_report(root: Path) -> dict:
     """The scan-derived registry delta a collect surfaces: slots with no
-    rendered candidate ("new illustrations found"), and candidate files
-    whose prompt no longer exists anywhere (edited or deleted tags)."""
+    rendered candidate ("new illustrations found"), candidate files
+    whose prompt no longer exists anywhere (edited or deleted tags), and
+    tags carrying a malformed `⇢` ref (arrow present but not a valid
+    file reference — reported loudly rather than silently read as an
+    ordinary inline description; it-d70ece778f55)."""
     root = Path(root)
     slots = []
     prompts = load_prompts(root)
@@ -530,7 +544,12 @@ def slot_report(root: Path) -> dict:
     ]
     orphaned = [c["name"] for c in candidate_files(root)
                 if c["desc"] not in declared]
-    return {"unrendered": unrendered, "orphaned": orphaned}
+    malformed_refs = [
+        {"file": s["file"], "line": s["line"], "prompt": s["prompt"]}
+        for s in slots if s.get("malformed_ref")
+    ]
+    return {"unrendered": unrendered, "orphaned": orphaned,
+            "malformed_refs": malformed_refs}
 
 
 def strip_dangling(text: str) -> tuple[str, list[str]]:

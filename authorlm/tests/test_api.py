@@ -2564,6 +2564,33 @@ def main_test() -> None:
               rep["unrendered"][0]["prompt"] == "two turns, reworded"
               and rep["orphaned"] == [candidate], str(rep))
 
+        # A `⇢` present but not matching the ref grammar (e.g. it doesn't
+        # end in a bare 'name.md') must be reported loudly, never
+        # silently folded into the prompt text as if it were an ordinary
+        # undecorated description (it-d70ece778f55: a corrupted doc-pull
+        # round trip produced exactly this shape — an excerpt spliced to
+        # a stray '.md' name immediately followed by a '.png' name, with
+        # no whitespace, so the ref half fails _REF and used to vanish
+        # without a trace).
+        garbled = ("The interior of a temple ⇢ "
+                  "a-field-of-fallen.mda-square-temple-of.png")
+        tag = parse_tag(f"[Illustration: {garbled}]")
+        check("a malformed ⇢ ref is flagged, not silently swallowed",
+              tag["malformed_ref"] is True and tag["ref"] is None
+              and tag["prompt"] == garbled, str(tag))
+        check("a well-formed ⇢ ref is never flagged as malformed",
+              parse_tag("[Illustration: excerpt ⇢ some-file.md]")
+              ["malformed_ref"] is False)
+        check("a plain undecorated description is never flagged",
+              parse_tag("[Illustration: plain description]")
+              ["malformed_ref"] is False)
+        (scratch / "ch.md").write_text(f"# C\n\n[Illustration: {garbled}]\n")
+        rep = slot_report(scratch)
+        check("slot_report surfaces the malformed ref as its own signal",
+              rep["malformed_refs"] == [{"file": "ch.md", "line": 3,
+                                         "prompt": garbled}],
+              str(rep))
+
         dirty = ("Prose kept. ![][image1]\n\n"
                  "[image1]: <data:image/png;base64,abc>\n")
         clean, refs = strip_dangling(dirty)

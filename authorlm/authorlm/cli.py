@@ -2208,6 +2208,15 @@ def _print_collect_report(report):
             print(ui.dim(
                 "Orphaned illustration file(s) — no tag matches their "
                 "prompt any more: " + ", ".join(ill["orphaned"])))
+        if ill.get("malformed_refs"):
+            print(ui.yellow(
+                f"{len(ill['malformed_refs'])} illustration tag(s) carry "
+                "a malformed ⇢ ref (arrow present but not a valid "
+                "'name.md' reference) — read as plain inline text for "
+                "now; fix the ref or delete it:"))
+            for slot in ill["malformed_refs"]:
+                print(f"  • {slot['file']}:{slot['line']}  "
+                      f"[Illustration: {slot['prompt']}]")
         for fix in ill.get("excerpt_fixes", []):
             if fix.get("missing"):
                 print(ui.yellow(
