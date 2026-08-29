@@ -737,6 +737,17 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
     return {r["state"]: r["n"] for r in rows}
 
 
+def _drafting_context(db: Database, manuscript: dict, writeup: dict) -> str:
+    """The writeup's L1 book-frame (design §12.4 item 1): compressed
+    summaries of the settled essays before this one and the upcoming
+    ones after it. Recomputed on every read rather than stored — the
+    summaries themselves are the source of truth and a rebuild between
+    beats must show through."""
+    from . import summaries as sums
+
+    return sums.drafting_context(db, manuscript, writeup["file"])
+
+
 def write_start(db: Database, manuscript: dict, config: dict,
                 file: str, intent_prefix: str) -> dict:
     """Initiate a fresh-drafting writeup: gate, pin the current version as
@@ -791,7 +802,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
     source_text = loads(source["files"], {}).get(relpath, "")
     return {"writeup": row, "intent": intent,
             "source_version_no": source["version_no"],
-            "source_chars": len(source_text)}
+            "source_chars": len(source_text),
+            "drafting_context": _drafting_context(db, manuscript, row)}
 
 
 def write_plan(db: Database, manuscript: dict, beats: list,
@@ -846,6 +858,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "pending_proposal": dict(pending) if pending else None,
         "learnings": loads(writeup["learnings"], []),
         "tallies": _beat_tallies(db, writeup),
+        "drafting_context": _drafting_context(db, manuscript, writeup),
     }
 
 

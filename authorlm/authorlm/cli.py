@@ -3040,6 +3040,22 @@ def _print_beat_spec(beat: dict, label: str = "Beat") -> None:
           (f": {beat['notes']}" if beat.get("notes") else ""))
 
 
+def _print_drafting_context(text: str) -> None:
+    """The L1 book-frame (summaries.drafting_context). Printed verbatim —
+    it is the drafting payload, and the skill reads it out of this
+    output; the incomplete-coverage lines are highlighted so a summary
+    that quietly dropped a paragraph cannot be missed."""
+    print()
+    for line in text.splitlines():
+        if line.startswith("coverage INCOMPLETE"):
+            print(ui.yellow(line))
+        elif line.startswith(("DRAFTING CONTEXT", "BEFORE —", "AFTER —")):
+            print(ui.bold(line))
+        else:
+            print(line)
+    print()
+
+
 def cmd_write(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -3059,6 +3075,7 @@ def cmd_write(args):
                   f"(intent {result['intent']['id'][:11]}).")
             print(f"Pinned v{result['source_version_no']} as raw material "
                   f"({result['source_chars']} chars); file truncated.")
+            _print_drafting_context(result["drafting_context"])
             print("Next: ratify the beat plan — write plan (JSON on stdin).")
         elif args.action == "plan":
             raw = _stdin_text()
@@ -3093,6 +3110,7 @@ def cmd_write(args):
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
             for lesson in result["learnings"]:
                 print(ui.dim(f"  learning: {lesson}"))
+            _print_drafting_context(result["drafting_context"])
         elif args.action == "propose":
             text = _stdin_text()
             result = api.write_propose(db, manuscript, text or "",

@@ -182,6 +182,78 @@ def before_after(db: Database, manuscript: dict,
             [entry(f) for f in order[idx + 1:]])
 
 
+# --------------------------------------------------- drafting context
+
+BEFORE_HEADER = (
+    "BEFORE — settled context, in reading order. These essays are behind "
+    "the reader: their concepts are AVAILABLE (citable, buildable-upon "
+    "using the author's ratified definitions) and must not be "
+    "re-introduced.")
+AFTER_HEADER = (
+    "AFTER — upcoming essays. Their concepts are NOT available: a beat "
+    "that needs one must forward-reference it (\"as a later essay will "
+    "show\"), never assume it.")
+
+
+def _coverage_note(entry: dict, text: str) -> str | None:
+    """Item 4's loudness. Coverage is recomputed here rather than read
+    from a column (`essay_summaries` stores none — summarize_unit
+    computes it fresh too): the stored summary plus the essay's current
+    paragraph count is all `paragraph_coverage` needs, and it is only
+    trustworthy when the two actually correspond, i.e. when source_hash
+    still matches. Reported, never blocking — the same tolerance editing
+    has, made impossible to miss."""
+    if entry["summary"] is None or entry["state"] not in ("fresh",
+                                                          "upstream_stale"):
+        return None
+    from .revisions import _paragraphs
+
+    cov = paragraph_coverage(entry["summary"], len(_paragraphs(text)))
+    if cov["complete"]:
+        return None
+    bits = []
+    if cov["missing"]:
+        bits.append(", ".join(f"¶{n}" for n in cov["missing"]) + " uncited")
+    if cov["out_of_range"]:
+        bits.append(", ".join(f"¶{n}" for n in cov["out_of_range"])
+                    + f" cited but the essay has {cov['paragraph_count']} "
+                      "paragraph(s)")
+    return "coverage INCOMPLETE: " + "; ".join(bits)
+
+
+def drafting_context(db: Database, manuscript: dict, file: str) -> str:
+    """The L1 book-frame for drafting `file`: the compressed summaries of
+    everything settled before it and everything still to come, as
+    deterministic text (design §12.4 item 1 — the glue `before_after`
+    was missing on the write path).
+
+    Serialization is deliberately stable: reading order, no timestamps,
+    no ids, no counts that drift — §3 requires L0/L1 to be
+    byte-identical across beats or the prompt-cache economics of §4 are
+    forfeited by a silent invalidator."""
+    before, after = before_after(db, manuscript, file)
+    texts = dict(units(manuscript))
+
+    def block(entries: list[dict], header: str) -> list[str]:
+        lines = [header]
+        if not entries:
+            lines += ["", "(none)"]
+            return lines
+        for e in entries:
+            lines += ["", f"[{e['file']}] ({e['state']})"]
+            note = _coverage_note(e, texts.get(e["file"], ""))
+            if note:
+                lines.append(note)
+            lines.append(e["summary"] or
+                         "(no summary — run 'summarize rebuild')")
+        return lines
+
+    return "\n".join(
+        [f"DRAFTING CONTEXT — {file} (in its committed toc position).", ""]
+        + block(before, BEFORE_HEADER) + [""]
+        + block(after, AFTER_HEADER))
+
+
 # ------------------------------------------------------------- building
 
 def _concept_slice(db: Database, manuscript: dict, file: str) -> str:

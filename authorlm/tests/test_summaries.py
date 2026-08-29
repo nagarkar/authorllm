@@ -235,6 +235,37 @@ def main_test() -> None:
               and [a["file"] for a in after] == ["beta.md", "gamma.md"]
               and all(b["state"] == "fresh" for b in before + after))
 
+        print("drafting context (§12.4 item 1 — the L1 glue) with LOUD "
+              "coverage reporting (item 4 — informational, never blocking):")
+        ctx = sums.drafting_context(db, manuscript, "alpha.md")
+        check("BEFORE holds the settled prefix in reading order and AFTER "
+              "the upcoming essays, each entry labeled with its file",
+              ctx.index("BEFORE") < ctx.index("[title.md]")
+              < ctx.index("[part1.md]") < ctx.index("AFTER")
+              < ctx.index("[beta.md]") < ctx.index("[gamma.md]"), ctx)
+        check("the essay being drafted is never an entry in its own context",
+              "[alpha.md]" not in ctx, ctx)
+        check("each entry carries its stored summary verbatim",
+              "summary of title.md conditioned on 0 prior" in ctx
+              and "summary of gamma.md conditioned on 4 prior" in ctx, ctx)
+        check("AFTER is marked as forward-reference material only (§7's "
+              "continuity contract), BEFORE as available",
+              "forward-reference" in ctx.split("AFTER", 1)[1]
+              and "AVAILABLE" in ctx.split("BEFORE", 1)[1].split("AFTER", 1)[0]
+              and "NOT available" in ctx.split("AFTER", 1)[1], ctx)
+        check("serialization is deterministic (§3: a silent invalidator "
+              "forfeits the cache economics) — two renders of unchanged "
+              "state are byte-identical, no timestamps, no run ids",
+              ctx == sums.drafting_context(db, manuscript, "alpha.md"), ctx)
+        check("incomplete paragraph coverage is reported LOUDLY per entry "
+              "(the echo stub cites no paragraph number at all)",
+              ctx.count("coverage INCOMPLETE") == 4
+              and ctx.count("¶1, ¶2 uncited") == 4, ctx)
+        check("...and it never blocks: the context still renders every "
+              "summary in full (item 4's default is informational)",
+              all(f"[{f}]" in ctx for f in
+                  ("title.md", "part1.md", "beta.md", "gamma.md")), ctx)
+
         print("mark, don't cascade:")
         calls_before_collect = len(EchoSummarizer.calls)
         (ms / "alpha.md").write_text("# alpha\n\nText of alpha, revised.\n")

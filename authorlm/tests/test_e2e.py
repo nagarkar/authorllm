@@ -1347,6 +1347,18 @@ def scenario_write_loop(root: Path) -> None:
               "Pinned v" in out and "truncated" in out, out)
         check("file is empty on disk after start",
               (ms / "02-essay.md").read_text() == "", out)
+        check("write start prints the L1 drafting context — the "
+              "before/after essay summaries the beat loop conditions on "
+              "(design §12.4 item 1; nothing on the write path read them "
+              "before)",
+              "DRAFTING CONTEXT — 02-essay.md" in out
+              and "BEFORE" in out and "AFTER" in out
+              and "[01-choice.md]" in out, out)
+        out = run_stdin(ws, "", "write", "status")
+        check("write status — the resume entry point — reprints it, "
+              "recomputed from the summaries as they stand now",
+              "DRAFTING CONTEXT — 02-essay.md" in out
+              and "[01-choice.md]" in out, out)
         out = run_stdin(ws, "", "write", "start", "02-essay.md",
                         "--intent", intent_id, expect_exit=True)
         check("second writeup on the same file blocked",
