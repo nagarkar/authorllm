@@ -1866,6 +1866,7 @@ def check_digest_schema() -> None:
         (ms / "02-essay.md").write_text("# The Essay\n\nThe old opening "
                                         "paragraph, soon to be raw "
                                         "material.\n")
+        (ms / "03-blank.md").write_text("")
         config = api.load_config(str(ws))
         api.ensure_session(db, manuscript)
         api.collect(db, manuscript, config, source="test")
@@ -1979,6 +1980,48 @@ def check_digest_schema() -> None:
               "never trusted",
               digest["source_version_id"] != "forged-by-the-skill",
               str(digest))
+
+        # --- F2: the refusal tells the truth about WHICH case it is -----
+        # One message for two conditions was a small lie in the second
+        # case: a rewrite whose pinned source happens to be blank was told
+        # "this writeup created <file>", which it did not.
+        def _sibling(file: str, created: bool) -> dict:
+            row = _ko("wu")
+            row.update(
+                manuscript_id=manuscript["id"],
+                intent_id=intent["intent"]["id"], file=file, mode="fresh",
+                status="active", source_version_id=version["id"], plan="[]",
+                cursor=0, learnings="[]",
+                metadata=_json.dumps({"next_n": 1, "placement": None,
+                                      "created_file": created,
+                                      "brief": None}))
+            db.insert("writeups", row)
+            return row
+
+        created_wu = _sibling("02-essay.md", True)
+        try:
+            api.write_digest(db, manuscript, prefix=created_wu["id"])
+            check("F2 — a writeup that CREATED its file is refused", False,
+                  "no ValueError raised")
+        except ValueError as err:
+            check("F2 — a writeup that CREATED its file is refused as such, "
+                  "even though this pinned version does hold text for the "
+                  "name (created_file is the discriminator, not emptiness)",
+                  "this writeup created 02-essay.md" in str(err)
+                  and "there is no source essay to digest" in str(err),
+                  str(err))
+        blank_wu = _sibling("03-blank.md", False)
+        try:
+            api.write_digest(db, manuscript, prefix=blank_wu["id"])
+            check("F2 — a rewrite over a blank source is refused", False,
+                  "no ValueError raised")
+        except ValueError as err:
+            check("F2 — a rewrite whose pinned source is merely EMPTY is "
+                  "refused in its own words: it did not create anything, "
+                  "and saying so would be a small lie about its history",
+                  "03-blank.md's pinned source is empty" in str(err)
+                  and "nothing to digest" in str(err)
+                  and "this writeup created" not in str(err), str(err))
 
         # --- invariants -------------------------------------------------
         check("I1 — GUIDANCE_KINDS is untouched: the digest is metadata, "

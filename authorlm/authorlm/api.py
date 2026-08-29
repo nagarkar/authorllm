@@ -1200,11 +1200,21 @@ def write_digest(db: Database, manuscript: dict, payload=None,
                     (writeup["source_version_id"],))
     source_text = (loads(source["files"], {}).get(writeup["file"], "")
                    if source else "")
-    if meta.get("created_file") or not source_text.strip():
+    # Two conditions, two truths. Collapsing them into one message told a
+    # rewrite over a blank source that "this writeup created" its file,
+    # which it did not — a small lie about the writeup's own history, in
+    # the one message whose whole job is to say what kind of writeup this
+    # is. `created_file` is the discriminator, never emptiness.
+    if meta.get("created_file"):
         raise ValueError(
             f"this writeup created {writeup['file']}; there is no source "
             f"essay to digest. A digest models a REWRITE of an existing "
             f"essay (design §13.2).")
+    if not source_text.strip():
+        raise ValueError(
+            f"{writeup['file']}'s pinned source is empty; there is nothing "
+            f"to digest. A digest models a REWRITE of an existing essay "
+            f"(design §13.2).")
 
     if show:
         return {"mode": "show", "writeup_id": writeup["id"],
