@@ -489,3 +489,173 @@ behind each line.
 - **MCP write tools**: the loop is CLI-only by design — one call surface
   for the skill; improving the verbs improves every session without
   touching the skill.
+
+## 12. Essay-summary integration — recommendation and current state (2026-08-27)
+
+Added by the V/summary-scaling & V/summary-tests remediation pass
+(`authorlm/summaries.py`, `authorlm/prompts/summarizer.md`), answering a
+Sponsor request: whether per-paragraph summaries would beat per-essay ones,
+and what machinery is missing before an autoregressive-drafting trial. This
+section is **additive** — nothing above is edited. Where a claim above
+would mislead a reader given what's built now, that is called out
+explicitly below rather than folded silently into the older text.
+
+### 12.1 What changed under this document since 2026-08-02
+
+Four facts about the machinery this design depends on, or sits next to,
+changed since this document was last touched. None contradicts a specific
+claim above, but a reader relying on this doc as current should know:
+
+- **Essay summaries now scale to the unit's length**
+  (`summaries.target_length`): roughly n/10 to n/7.5 words, floored at 40,
+  capped at 500 — e.g. ~150-200 words for a 1500-word essay, ~300-400 for
+  a 3000-word one. Previously a fixed 150-250 words regardless of essay
+  length.
+- **Paragraph coverage in essay summaries is now VERIFIED, not merely
+  requested.** `summaries.paragraph_coverage` checks that every paragraph
+  a summary was asked to cite (numbered `[n]` markers in the prompt input)
+  was actually cited in the output, and reports `missing` /
+  `out_of_range` / `complete`. Informational only — it never blocks a
+  rebuild.
+- **`critique resolve` no longer reads the Doc destructively** (X7-1v2):
+  it exports the Doc tab as markdown and three-ways it against local,
+  refusing to guess and surfacing a genuine two-sided edit as a conflict
+  instead of silently resolving it. Relevant here because §5 step 6 and
+  the Doc-bridge description (§5, §7) both lean on Doc reads as trustworthy
+  raw material — that assumption is now a tested guarantee, not an
+  aspiration.
+- **Belief promotion is now gated on distinct-session, non-system
+  evidence** (INV-2): a machine-authored conjecture can seed a candidate
+  policy but can never validate one by itself. This bears directly on §3's
+  L0 layer ("validated policies in scope") and §6's "candidate-policy
+  seeding from rejection explanations" — the seeding path §6 describes was
+  always meant to feed *human* ratification; INV-2 is the enforcement of
+  exactly that boundary, not a new rule this design didn't anticipate.
+
+### 12.2 Is essay-summary compression already part of this loop? Corrected finding
+
+**No — precisely: the compressed-context machinery (`essay_summaries`,
+`summaries.py`) is wired into EDITING an essay and not into WRITING one.**
+(An earlier draft of this finding said summaries were "wired into
+nothing"; that was imprecise and the coordinator caught it — the corrected
+version below is the load-bearing claim of this section.)
+
+Verified against every consumer, not asserted:
+- `passes.py:182` (`summaries_ready`) calls `sums.before_after` and
+  **gates** the critique edit pass on it — a stale summary genuinely
+  blocks `build_context` (proven by regression test,
+  `tests/test_passes.py`). Essay summaries are load-bearing **for
+  editing**.
+- Every other production consumer of `summaries.py` — `mark_changed`,
+  `rebuild`, `rebuild_one`, `status`, `units` — writes or reports
+  summaries; none of them reads a summary *into* a decision about what to
+  draft.
+- The beat loop's drafting payload (§3's L1/L3 layers, assembled per §5
+  step 2 and `.claude/skills/authorlm/SKILL.md`'s "Propose" step — "style
+  law, concept notes, policies, precedents") consults none of
+  `essay_summaries`. `write_start` / `write_plan` / `write_propose` /
+  `write_accept` / `write_complete` (`api.py`) contain no reference to
+  `summaries.py`.
+
+This is smaller and more specific than "wired into nothing": the plumbing
+*pattern* a drafting loop would need — gate on freshness, read
+`before_after` for compressed prior-essay context — already exists and is
+tested in `passes.py`. It needs to be **followed into the write path, not
+invented.**
+
+One adjacent distinction worth being explicit about, since it is easy to
+conflate: §3's L2 "running digest" (accepted-text-so-far digest for the
+essay *currently being drafted*) is a different, still-unbuilt concept
+(§11: deliberately not built, skill mode holds full context instead) from
+`essay_summaries` (compressed context for *other* essays, built and used
+by editing). Neither is currently consumed by the write path; they solve
+different problems and neither should be assumed to stand in for the
+other.
+
+### 12.3 Would per-paragraph summaries be better? No.
+
+There are already two autoregressive chains in this codebase, at two
+different grains, and they should not be merged into one:
+
+- The **beat loop** is already autoregressive at the paragraph level,
+  conditioned on the *verbatim* accepted text so far (L2) — correct,
+  because while drafting an essay you want the real sentences, not a lossy
+  compression of them.
+- **Essay summaries** compress *other* essays, a book-level concern, not a
+  paragraph-level one.
+
+Per-paragraph summaries would serve both grains at once and serve each
+worse:
+- **They would cost more than they save.** At this manuscript's scale (24
+  essays, ~300 concepts, essays running ~1,400-4,500 words / ~10-30
+  paragraphs each — 400-600 paragraphs total), a "before/after" context
+  built from individual paragraph summaries would, by essay 20, be
+  summarizing 350+ paragraphs — plausibly more total tokens than the
+  ~150-500-word per-essay summaries this pass just made length-proportional.
+  The compression that makes "a few thousand tokens" (the module docstring's
+  own target) tractable comes specifically from summarizing at the essay
+  grain.
+- **Staleness tracking gets much harder for no real payoff.** The current
+  model works because `source_hash` is one hash of the whole essay and
+  `mark_changed` only reasons about file order. Paragraph summaries would
+  need the same freshness machinery *per paragraph*, and paragraph
+  boundaries shift on every edit — inserting one paragraph near the top
+  renumbers everything after it.
+- **The actual paragraph-level problem this task raised — "don't silently
+  drop a paragraph" — is already solved without a second summary tier.**
+  Numbered-paragraph citation plus `paragraph_coverage`'s verification
+  (§12.1) gives paragraph-level accountability *inside* one essay summary.
+  That is what "capture every paragraph" asked for; it does not require a
+  paragraph to have its own summary row.
+
+**This is a measurement gap, not an opinion gap.** `paragraph_coverage` is
+tested against stub responses (this remediation pass is barred from live
+billed LLM calls), so there is no real coverage rate yet against actual
+essays and a real model. If coverage against real essays turns out
+reliably complete, per-essay summaries with verified coverage are
+sufficient. If it turns out routinely incomplete even after prompting for
+it, that would be real evidence for finer grain — but the fix to try first
+is a bigger length budget or a stricter prompt, not a new schema and a
+second staleness state machine.
+
+### 12.4 What's missing before a drafting trial (dependency order)
+
+The beat loop itself (§11: writeups table, all six `write` verbs, the
+guidance-history evidence channel, the gates, skill alignment) is real,
+built, and should **not** be rebuilt. What's missing is specifically the
+connection identified in §12.2:
+
+1. **A function that turns `before_after(file)` into L1 text.** Nothing
+   calls it from the write path today (§12.2). Small — glue, not a new
+   subsystem — living near `summaries.py` or `passes.py`.
+2. **A freshness gate on `write_start`**, mirroring
+   `passes.summaries_ready`. If essay summaries become drafting input, a
+   stale one is a lie about the text there exactly as much as it is in the
+   critique pass.
+3. **A placement-aware `before_after`.** `sums.units()` reads the
+   *committed* TOC; a brand-new essay not yet placed raises `LookupError`
+   from `before_after`. Fresh-drafting mode today covers rewrites of
+   existing files (§9.4), not essays with no TOC entry yet.
+4. **A decision on whether incomplete coverage should block drafting.**
+   `paragraph_coverage` is informational-only by design for editing (an
+   editor can still use a summary short one transitional paragraph). That
+   tolerance may be wrong when a summary is the *only* thing the next
+   essay is conditioned on — a Sponsor judgment call, not a mechanical one.
+5. **Respect the concurrent `status` column** (deprecated essays, landing
+   from a parallel stream) in whatever eventually reads `essay_summaries`
+   for drafting context — check this dependency before building item 1.
+
+### 12.5 The smallest experiment
+
+Before building any of §12.4: run `summarize rebuild --all` once for real
+coverage numbers (≈24 cheap-tier calls — the first real measurement of
+§12.3's open question), then hand-assemble one existing essay's
+`before_after` summaries plus its concept slice and style guide, and ask
+for a from-scratch redraft with no peeking at the real text. Have the
+author judge it against the original: does it respect what came before,
+does it miss anything a human would consider load-bearing. Clean coverage
+numbers plus a usably-close redraft is the strongest signal to greenlight
+§12.4 items 1-2 for real; a traceable miss points at a specific paragraph
+(via `paragraph_coverage`) rather than a vague feeling, and the fix to try
+first is still inside the per-essay design (§12.3). No new schema, gate,
+or CLI verb needed to run this.
