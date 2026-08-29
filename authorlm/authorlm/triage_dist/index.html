@@ -297,73 +297,77 @@ Please report this to https://github.com/markedjs/marked.`,e){let e=`<p>An error
     `),a=!1),Object.assign(Object.assign({},e),{allowNegative:a})}function Fk(e){e=Pk(e),e.decimalSeparator,e.allowedDecimalSeparators,e.thousandsGroupStyle;var t=e.suffix,n=e.allowNegative,r=e.allowLeadingZeros,i=e.onKeyDown;i===void 0&&(i=QO);var a=e.onBlur;a===void 0&&(a=QO);var o=e.thousandSeparator,s=e.decimalScale,c=e.fixedDecimalScale,l=e.prefix;l===void 0&&(l=``);var u=e.defaultValue,d=e.value,f=e.valueIsNumericString,p=e.onValueChange,m=ZO(e,[`decimalSeparator`,`allowedDecimalSeparators`,`thousandsGroupStyle`,`suffix`,`allowNegative`,`allowLeadingZeros`,`onKeyDown`,`onBlur`,`thousandSeparator`,`decimalScale`,`fixedDecimalScale`,`prefix`,`defaultValue`,`value`,`valueIsNumericString`,`onValueChange`]),h=Ok(e),g=h.decimalSeparator,_=h.allowedDecimalSeparators,v=function(t){return Dk(t,e)},y=function(t,n){return Mk(t,n,e)},b=tk(d)?u:d,x=f??jk(b,l,t);tk(d)?tk(u)||(x||=typeof u==`number`):x||=typeof d==`number`;var S=function(e){return rk(e)?e:(typeof e==`number`&&(e=fk(e)),x&&typeof s==`number`?pk(e,s,!!c):e)},C=Ck(S(d),S(u),!!x,v,y,p),w=C[0],T=w.numAsString,E=w.formattedValue,D=C[1];return Object.assign(Object.assign({},m),{value:E,valueIsNumericString:!1,isValidInputCharacter:function(e){return e===g||ek(e)},isCharacterSame:function(e){var t=e.currentValue,n=e.lastValue,r=e.formattedValue,i=e.currentValueIndex,a=e.formattedValueIndex,o=t[i],u=r[a],f=zk(n,t).to,p=function(e){return y(e).indexOf(`.`)+l.length};return d===0&&c&&s&&t[f.start]===g&&p(t)<i&&p(r)>a?!1:i>=f.start&&i<f.end&&_&&_.includes(o)&&u===g?!0:o===u},onValueChange:D,format:v,removeFormatting:y,getCaretBoundary:function(t){return Nk(t,e)},onKeyDown:function(e){var t=e.target,r=e.key,a=t.selectionStart,u=t.selectionEnd,d=t.value;if(d===void 0&&(d=``),(r===`Backspace`||r===`Delete`)&&u<l.length&&d!==`-`){e.preventDefault();return}if(a!==u){i(e);return}r===`Backspace`&&d[0]===`-`&&a===l.length+1&&n&&mk(t,1),s&&c&&(r===`Backspace`&&d[a-1]===g?(mk(t,a-1),e.preventDefault()):r===`Delete`&&d[a]===g&&e.preventDefault()),_?.includes(r)&&d[a]===g&&mk(t,a+1);var f=o===!0?`,`:o;r===`Backspace`&&d[a-1]===f&&mk(t,a-1),r===`Delete`&&d[a]===f&&mk(t,a+1),i(e)},onBlur:function(t){var n=T;n.match(/\d/g)||(n=``),r||(n=lk(n)),c&&s&&(n=pk(n,s,c)),n!==T&&D({formattedValue:Dk(n,e),value:n,floatValue:parseFloat(n)},{event:t,source:Rk.event}),a(t)}})}function Ik(e){var t=Fk(e);return Lk.createElement(Ek,Object.assign({},t))}var Lk,Rk,zk,Bk,Vk=o((()=>{Lk=u(p()),(function(e){e.event=`event`,e.props=`prop`})(Rk||={}),zk=$O(function(e,t){for(var n=0,r=0,i=e.length,a=t.length;e[n]===t[n]&&n<i;)n++;for(;e[i-1-r]===t[a-1-r]&&a-r>n&&i-r>n;)r++;return{from:{start:n,end:i-r},to:{start:n,end:a-r}}}),Bk=function(e,t){var n=Math.min(e.selectionStart,t);return{from:{start:n,end:e.selectionEnd},to:{start:n,end:t}}}})),Hk=c({default:()=>Kk});function Uk(){return Intl.NumberFormat()?.formatToParts(1.1)?.find(e=>e.type===`decimal`)?.value??`.`}function Wk(){return Uk()===`.`?`,`:`.`}var Gk,Kk,qk=o((()=>{Gk=u(p(),1),XO(),Vk(),Kk=e=>{let{value:t,onChange:n,disabled:r,highlight:i,validatedSelection:a,fixedDecimals:o,allowNegative:s,thousandSeparator:c,decimalSeparator:l}=e,u=Gk.useRef();return Gk.useLayoutEffect(()=>{if(a!==void 0){let e=typeof a==`number`?[a,null]:a;u.current?.setSelectionRange(e[0],e[1])}},[a]),Gk.createElement(YO,null,Gk.createElement(Ik,{autoFocus:!0,getInputRef:u,className:`gdg-input`,onFocus:e=>e.target.setSelectionRange(i?0:e.target.value.length,e.target.value.length),disabled:r===!0,decimalScale:o,allowNegative:s,thousandSeparator:c??Wk(),decimalSeparator:l??Uk(),value:Object.is(t,-0)?`-`:t??``,onValueChange:n}))}}));Mb();var Jk=y.lazy(async()=>await Av(()=>Promise.resolve().then(()=>(qk(),Hk)),void 0,import.meta.url)),Yk={getAccessibilityString:e=>e.data?.toString()??``,kind:Y.Number,needsHover:!1,needsHoverPosition:!1,useLabel:!0,drawPrep:wC,draw:e=>kC(e,e.cell.displayData,e.cell.contentAlign),measure:(e,t,n)=>e.measureText(t.displayData).width+n.cellHorizontalPadding*2,onDelete:e=>({...e,data:void 0}),provideEditor:()=>e=>{let{isHighlighted:t,onChange:n,value:r,validatedSelection:i}=e;return y.createElement(y.Suspense,{fallback:null},y.createElement(Jk,{highlight:t,disabled:r.readonly===!0,value:r.data,fixedDecimals:r.fixedDecimals,allowNegative:r.allowNegative,thousandSeparator:r.thousandSeparator,decimalSeparator:r.decimalSeparator,validatedSelection:i,onChange:e=>n({...r,data:Number.isNaN(e.floatValue??0)?0:e.floatValue})}))},onPaste:(e,t,n)=>{let r=typeof n.rawValue==`number`?n.rawValue:Number.parseFloat(typeof n.rawValue==`string`?n.rawValue:e);if(!(Number.isNaN(r)||t.data===r))return{...t,data:r,displayData:n.formattedString??t.displayData}}};Mb();var Xk={getAccessibilityString:()=>``,measure:()=>108,kind:Y.Protected,needsHover:!1,needsHoverPosition:!1,draw:Zk,onPaste:()=>void 0};function Zk(e){let{ctx:t,theme:n,rect:r}=e,{x:i,y:a,height:o}=r;t.beginPath();let s=2.5,c=i+n.cellHorizontalPadding+s,l=a+o/2,u=Math.cos(xx(30))*s,d=Math.sin(xx(30))*s;for(let e=0;e<12;e++)t.moveTo(c,l-s),t.lineTo(c,l+s),t.moveTo(c+u,l-d),t.lineTo(c-u,l+d),t.moveTo(c-u,l-d),t.lineTo(c+u,l+d),c+=8;t.lineWidth=1.1,t.lineCap=`square`,t.strokeStyle=n.textLight,t.stroke()}Mb();var Qk={getAccessibilityString:e=>e.data?.toString()??``,kind:Y.RowID,needsHover:!1,needsHoverPosition:!1,drawPrep:(e,t)=>wC(e,t,e.theme.textLight),draw:e=>kC(e,e.cell.data,e.cell.contentAlign),measure:(e,t,n)=>e.measureText(t.data).width+n.cellHorizontalPadding*2,provideEditor:()=>e=>{let{isHighlighted:t,onChange:n,value:r,validatedSelection:i}=e;return y.createElement(MS,{highlight:t,autoFocus:r.readonly!==!0,disabled:r.readonly!==!1,value:r.data,validatedSelection:i,onChange:e=>n({...r,data:e.target.value})})},onPaste:()=>void 0};Mb(),VS();var $k={getAccessibilityString:e=>e.data?.toString()??``,kind:Y.Text,needsHover:e=>e.hoverEffect===!0,needsHoverPosition:!1,drawPrep:wC,useLabel:!0,draw:e=>{let{cell:t,hoverAmount:n,hyperWrapping:r,ctx:i,rect:a,theme:o,overrideCursor:s}=e,{displayData:c,contentAlign:l,hoverEffect:u,allowWrapping:d}=t;if(u===!0&&n>0){i.textBaseline=`alphabetic`;let e=o.cellHorizontalPadding,t=o.cellVerticalPadding,r=_C(c,i,o.baseFontFull,`alphabetic`),l=a.height-t,u=Math.min(l,r.actualBoundingBoxAscent*2.5);i.beginPath(),AC(i,a.x+e/2,a.y+(a.height-u)/2+1,r.width+e*3,u-1,o.roundingRadius??4),i.globalAlpha=n,i.fillStyle=FS(o.textDark,.1),i.fill(),i.globalAlpha=1,i.fillStyle=o.textDark,i.textBaseline=`middle`,s?.(`text`)}kC(e,c,l,d,r)},measure:(e,t,n)=>{let r=t.displayData.split(`
 `,t.allowWrapping===!0?void 0:1),i=0;for(let t of r)i=Math.max(i,e.measureText(t).width);return i+2*n.cellHorizontalPadding},onDelete:e=>({...e,data:``}),provideEditor:e=>({disablePadding:e.allowWrapping===!0,editor:t=>{let{isHighlighted:n,onChange:r,value:i,validatedSelection:a}=t;return y.createElement(MS,{style:e.allowWrapping===!0?{padding:`3px 8.5px`}:void 0,highlight:n,autoFocus:i.readonly!==!0,disabled:i.readonly===!0,altNewline:!0,value:i.data,validatedSelection:a,onChange:e=>r({...i,data:e.target.value})})}}),onPaste:(e,t,n)=>e===t.data?void 0:{...t,data:e,displayData:n.formattedString??t.displayData}};qb();var eA=Kb(`div`)({name:`UriOverlayEditorStyle`,class:`gdg-u1rrojo`,propsAsIs:!1}),tA=e=>{let{uri:t,onChange:n,forceEditMode:r,readonly:i,validatedSelection:a,preview:o}=e,[s,c]=y.useState(!i&&(t===``||r)),l=y.useCallback(()=>{c(!0)},[]);return s?y.createElement(MS,{validatedSelection:a,highlight:!0,autoFocus:!0,value:t,onChange:n}):y.createElement(eA,null,y.createElement(`a`,{className:`gdg-link-area`,href:t,target:`_blank`,rel:`noopener noreferrer`},o),!i&&y.createElement(`div`,{className:`gdg-edit-icon`,onClick:l},y.createElement(Ex,null)),y.createElement(`textarea`,{className:`gdg-input`,autoFocus:!0}))};Mb();function nA(e,t,n,r){let i=n.cellHorizontalPadding,a=t.height/2-e.actualBoundingBoxAscent/2,o=e.width,s=e.actualBoundingBoxAscent;return r===`right`?i=t.width-o-n.cellHorizontalPadding:r===`center`&&(i=t.width/2-o/2),{x:i,y:a,width:o,height:s}}var rA=[UO,qO,xO,TO,AO,FO,zO,HO,Yk,Xk,Qk,$k,{getAccessibilityString:e=>e.data?.toString()??``,kind:Y.Uri,needsHover:e=>e.hoverEffect===!0,needsHoverPosition:!0,useLabel:!0,drawPrep:wC,draw:e=>{let{cell:t,theme:n,overrideCursor:r,hoverX:i,hoverY:a,rect:o,ctx:s}=e,c=t.displayData??t.data,l=t.hoverEffect===!0;if(r!==void 0&&l&&i!==void 0&&a!==void 0){let{x:l,y:u,width:d,height:f}=nA(_C(c,s,n.baseFontFull),o,n,t.contentAlign);if(i>=l-4&&i<=l-4+d+8&&a>=u-4&&a<=u-4+f+8){let i=yC(s,n.baseFontFull);r(`pointer`);let a=u-i;s.beginPath(),s.moveTo(o.x+l,Math.floor(o.y+a+f+5)+.5),s.lineTo(o.x+l+d,Math.floor(o.y+a+f+5)+.5),s.strokeStyle=n.linkColor,s.stroke(),s.save(),s.fillStyle=e.cellFillColor,kC({...e,rect:{...o,x:o.x-1}},c,t.contentAlign),kC({...e,rect:{...o,x:o.x-2}},c,t.contentAlign),kC({...e,rect:{...o,x:o.x+1}},c,t.contentAlign),kC({...e,rect:{...o,x:o.x+2}},c,t.contentAlign),s.restore()}}s.fillStyle=l?n.linkColor:n.textDark,kC(e,c,t.contentAlign)},onClick:e=>{let{cell:t,bounds:n,posX:r,posY:i,theme:a}=e,o=t.displayData??t.data;if(t.hoverEffect!==!0||t.onClickUri===void 0)return;let s=vC(o,a.baseFontFull);if(s===void 0)return;let c=nA(s,n,a,t.contentAlign);Ww({x:c.x-4,y:c.y-4,width:c.width+8,height:c.height+8},r,i)&&t.onClickUri(e)},measure:(e,t,n)=>e.measureText(t.displayData??t.data).width+n.cellHorizontalPadding*2,onDelete:e=>({...e,data:``}),provideEditor:e=>t=>{let{onChange:n,value:r,forceEditMode:i,validatedSelection:a}=t;return y.createElement(tA,{forceEditMode:r.readonly!==!0&&(i||e.hoverEffect===!0&&e.onClickUri!==void 0),uri:r.data,preview:r.displayData??r.data,validatedSelection:a,readonly:r.readonly===!0,onChange:e=>n({...r,data:e.target.value})})},onPaste:(e,t,n)=>e===t.data?void 0:{...t,data:e,displayData:n.formattedString??t.displayData}}],iA=u(s(((e,t)=>{var n=gx(),r=Ey(),i=`Expected a function`;function a(e,t,a){var o=!0,s=!0;if(typeof e!=`function`)throw TypeError(i);return r(a)&&(o=`leading`in a?!!a.leading:o,s=`trailing`in a?!!a.trailing:s),n(e,t,{leading:o,maxWait:t,trailing:s})}t.exports=a}))(),1),aA=[],oA=class extends zC{imageLoaded=()=>void 0;loadedLocations=[];cache={};setCallback(e){this.imageLoaded=e}sendLoaded=(0,iA.default)(()=>{this.imageLoaded(new VC(this.loadedLocations)),this.loadedLocations=[]},20);clearOutOfWindow=()=>{let e=Object.keys(this.cache);for(let t of e){let e=this.cache[t],n=!1;for(let t=0;t<e.cells.length;t++){let r=e.cells[t];if(this.isInWindow(r)){n=!0;break}}n?e.cells=e.cells.filter(this.isInWindow):(e.cancel(),delete this.cache[t])}};loadImage(e,t,n,r){let i=!1,a=aA.pop()??new Image,o=!1,s={img:void 0,cells:[FC(t,n)],url:e,cancel:()=>{o||(o=!0,aA.length<12?aA.unshift(a):i||(a.src=``))}},c=new Promise(e=>a.addEventListener(`load`,()=>e(null)));requestAnimationFrame(async()=>{try{a.src=e,await c,await a.decode();let t=this.cache[r];if(t!==void 0&&!o){t.img=a;for(let e of t.cells)this.loadedLocations.push(RC(e));i=!0,this.sendLoaded()}}catch{s.cancel()}}),this.cache[r]=s}loadOrGetImage(e,t,n){let r=e,i=this.cache[r];if(i!==void 0){let e=FC(t,n);return i.cells.includes(e)||i.cells.push(e),i.img}this.loadImage(e,t,n,r)}},sA=y.forwardRef((e,t)=>{let n=y.useMemo(()=>({...Pw,...e.headerIcons}),[e.headerIcons]),r=y.useMemo(()=>e.imageWindowLoader??new oA,[e.imageWindowLoader]);return y.createElement(yO,{...e,renderers:rA,headerIcons:n,ref:t,imageWindowLoader:r})}),cA=`# Writing essays with the beat loop — a tutorial
 
-*For the author. Covers two workflows: writing a new essay from an idea (UC-A)
-and rewriting an existing essay by modeling the old one (UC-B). Every command
-and every quoted refusal is verified against \`authorlm/authorlm/cli.py\`
-(argparse) and \`authorlm/authorlm/api.py\` as they stand in this tree.*
+*For the author. Two ways of working are covered: writing a new essay from an
+idea, and rewriting an essay you already have. Everything in the main text is
+what you say and what you see. Every command sits in a collapsed box below the
+step it belongs to, so you can audit it, run it yourself, or check that nothing
+is being invented — and never have to read it if you would rather not.*
 
 ---
 
 ## 0. How to read this
 
-**The primary path is conversation.** You talk; the agent runs the verbs. You
-should never hand-author JSON, never memorize a flag, never type a heredoc.
-Every section below leads with *what you say* and *what you get back*, and then
-shows the machinery in a collapsed **Under the hood** block so you can audit it,
-run it yourself in a terminal, or check that the agent is not inventing
-commands.
+**You talk; the assistant does the rest.** You never hand-write JSON, never
+memorise a flag, never type a heredoc. Each section leads with the conversation
+— what you say, what comes back — and puts the machinery in a fold box marked
+**Under the hood**.
 
-Two things about that division are load-bearing and are not negotiable:
+Two things hold throughout, and neither is negotiable:
 
-1. **The verbs are the state machine and the evidence channel.** The agent does
-   the drafting; the CLI does the gating and the recording. **No drafting verb
-   makes an LLM call**: \`write start\`, \`plan\`, \`propose\`, \`accept\`, \`reject\` and
-   \`learn\` are pure gating, recording and deterministic collection — so if a
-   beat is drafted, the agent drafted it in the conversation, and no beat was
-   ever written by something you could not see happening.
-   One verb in the loop *does* spend. **\`write complete\` runs the
-   concept-extraction pass that was deferred through the whole loop** (it builds
-   an \`LLMClient\` and, when one is configured, calls it once); the per-beat
-   collects deliberately skip extraction so that spend lands once, at the end,
-   instead of on every accept. See §2.6 and §8.
-2. **Nothing machine-written enters the manuscript without your accept.** The
-   loop appends only inside \`write accept\`. The agent never edits the essay file
-   during a writeup, and there is no auto-accept anywhere in the system.
+1. **Nothing enters your manuscript without your yes.** The essay file grows one
+   accepted beat at a time, and only when you accept. There is no auto-accept
+   anywhere, and the assistant never edits the essay file behind your back.
+2. **Nothing can be made up.** A beat may stand only on your brief, on the
+   compressed summaries of the essays around it, on your own ratified concept
+   notes, on the style guide, and — in a rewrite — on the digest of the old
+   essay. Anything a beat needs beyond those becomes a question to you, asked
+   before the draft is written.
 
-**Workspace note — \`-m\` is not optional here.** This workspace holds more than
-one manuscript, so **every** command needs \`-m SMSTTD\`. It is a global flag, so
-it may sit anywhere on the line; this tutorial puts it last throughout. The
-simulated transcripts in \`design-usecases.md\` §5 omit it and would fail as
-typed. The agent adds it; if you are typing yourself, add it.
+**Where the writing itself comes from.** The beats are drafted in the
+conversation you are having — by the assistant, in front of you, from the
+materials above. That is why every draft arrives with its reasoning attached
+and why you can argue with it. It is also why the drafting step has no model
+setting of its own: there is nothing to configure, because the conversation is
+the drafting.
+
+Three moments in the workflow do call out to a model, each to do a specific job,
+each worth knowing about: finishing an essay, refreshing the summaries, and
+closing an intent. Section 10 says which model does which job and what each one
+is for.
+
+**One workspace note.** This workspace holds more than one manuscript, so every
+command carries the manuscript's name. The assistant adds it. If you are typing
+yourself, add it.
 
 ---
 
-## 1. Before you start — five prerequisites
+## 1. Before you start — five things that must be true
 
-You do not check these yourself. The agent does, and the loop refuses if any is
-missing. They are listed so the refusals make sense when they arrive.
+You do not check these. The system does, and it stops you if any is missing.
+They are listed so the refusals make sense when they arrive.
 
-| Prerequisite | Why it exists | What checks it |
-|---|---|---|
-| An **active intent** | The writeup binds to it, so the beats land inside an episode instead of the unattributed gap between sessions | \`write start --intent\` |
-| A **style guide** on the target file | The rendered effective guide *is* the drafting law | \`write start\` (or \`--style\` for a new file) |
-| **Fresh summaries** across the whole before/after context | Those summaries are the drafting context; a stale one is a lie about another essay's text | \`write start\`, via \`passes.summaries_ready\` |
-| The file **not checked out** to Google Docs | While checked out the Doc is the working copy; a local append would be silently discarded by the next pull | \`write start\`, \`write propose\`, \`write accept\` |
-| **No other active writeup** on the file | One loop per file | \`write start\` |
+| What must be true | Why |
+|---|---|
+| A **goal is open** for this piece of work | The essay's beats land inside a recorded stretch of work rather than in the gap between sessions |
+| The essay has a **style guide** attached | The rendered guide *is* the law the drafting follows |
+| The **summaries of the surrounding essays are current** | Those summaries are what the drafting is conditioned on; an out-of-date one is a false statement about another essay |
+| The essay is **not checked out to Google Docs** | While it is checked out the Doc is the working copy, and a local addition would be quietly thrown away by the next pull |
+| **No other writeup is open on this same file** | One loop per essay |
 
-There is **no \`--force\`** on the freshness gate and none on the checkout gate.
-That is deliberate: you cannot consent past a lie about the text.
+There is no override for the summary check and none for the checkout check.
+That is deliberate: you cannot consent past a false statement about your own
+text.
 
-A sixth, softer one: if the current session was opened on a previous day, the
-agent should offer once to close it and start fresh. Policy evidence only counts
-once per session, so a week-long session structurally caps what the loop can
-learn from your verdicts.
+A sixth, softer one: if the current work session was opened on a previous day,
+the assistant should offer once to close it and start fresh. Evidence from your
+verdicts is counted once per session, so a week-long session quietly caps what
+the system can learn from you.
 
 <details>
 <summary><b>Under the hood — checking the prerequisites yourself</b></summary>
 
 \`\`\`bash
-authorlm summarize status -m SMSTTD     # free, no LLM: fresh / stale / missing per essay
+authorlm summarize status -m SMSTTD     # free, no model call: current / stale / missing per essay
 authorlm style guides -m SMSTTD         # guide names and per-file attachments
 authorlm intent list -m SMSTTD          # active intents
 authorlm doc list -m SMSTTD             # link + checkout status
@@ -373,62 +377,40 @@ authorlm write status -m SMSTTD         # is a writeup already open?
 
 ---
 
-## 2. UC-A — write a new essay
+## 2. Writing a new essay
 
 ### Step 1 — say what you want, and settle the brief
 
 > **You:** "I want a short essay on Weil's attention, sitting after the Becker
 > essay in Connections."
 
-The agent reads the concept graph, the effective style guide and the drafting
-context, and comes back with a **candidate one-paragraph brief**, the placement
-it inferred, and the style guide it proposes:
+The assistant reads your concept graph, the style guide and the surrounding
+essays, and comes back with a **candidate one-paragraph brief**, the position it
+inferred, and the style guide it proposes:
 
-> **Agent:** "After \`becker.md\`, so \`'Connections essays'\` — that's what
-> \`becker.md\` itself uses. Here's a draft brief: …"
+> **Assistant:** "After the Becker essay, so the Connections guide — that's what
+> Becker itself uses. Here's a draft brief: …"
 
 Both of those are proposals you say yes or no to, not questions you have to
-answer from memory. The guide is never chosen silently — the attachment is
-drafting law, so it is named out loud and you agree to it — but you should never
-have to go and look it up.
+answer from memory. The guide is never chosen silently — it is the law the
+drafting follows, so it is named out loud and you agree to it — but you should
+never have to go and look it up.
 
 Then you argue with the brief's wording until it is yours.
 
-This paragraph matters more than it looks. A brand-new file has no pinned raw
-material — no old text to model. The brief is the *only* essay-specific ground
-every beat is allowed to stand on. It is stored verbatim on the writeup and
-reprinted on every resume.
+That paragraph matters more than it looks. A brand-new essay has no old text to
+model, so the brief is the *only* ground specific to this essay that every beat
+is allowed to stand on. It is kept verbatim and read back to you every time you
+come back to the work.
 
 > **You:** "Closer. Cut 'faculty' — say 'attention is what makes the hard floor
 > visible'. Otherwise yes."
 
-There is no \`write brief\` verb. The conversation *is* the ratification.
-
-### Step 2 — the agent starts the writeup, and shows you the frame
-
-The agent declares the intent, then starts. What comes back has three parts:
-
-- a line confirming the file was created empty with the guide attached, and —
-  read this one — **\`Pinned v418 as the pre-writeup state (0 chars) — abandon
-  deletes weil.md.\`**
-- **BRIEF — the author's, verbatim** — your paragraph, read back to you.
-- **DRAFTING CONTEXT** — a \`BEFORE\` block (every settled essay ahead of your
-  placement, compressed; their concepts are *available* and must not be
-  re-introduced) and an \`AFTER\` block (upcoming essays; their concepts are *not*
-  available — a beat that needs one must forward-reference it).
-
-**Read any line starting \`!!\`.** They are printed in yellow and they are the
-only warnings in this output:
-
-- \`!! summary STALE / MISSING / DEPRECATED\` — that entry is not trustworthy.
-  (At start this cannot happen; the gate refused it. It *can* appear later, on
-  resume — see §6.)
-- \`!! coverage INCOMPLETE: ¶14 uncited\` — that essay's summary never cited some
-  of its own paragraphs. Informational, not a block: treat that neighbour's
-  context as possibly short a move.
+There is no separate step for ratifying it. The conversation *is* the
+ratification.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact command</b></summary>
 
 \`\`\`bash
 authorlm intent declare "Write the essay on Weil's attention" -m SMSTTD
@@ -444,84 +426,119 @@ EOF
 
 Four things are required together and only together with \`--new\`:
 
-- \`--new\` — because name resolution is substring-based; without the flag a typo
-  would silently become a new essay. \`--new\` on a name that already resolves is
+- \`--new\` — name resolution is substring-based, so without the flag a typo would
+  silently become a new essay. \`--new\` on a name that already resolves is
   refused.
 - \`--after <file>\` or \`--after start\` — a file that does not exist has no
-  position to infer. Without it, an unlisted file would sort to the *end* of the
-  reading order and the entire book would read as settled context behind it.
+  position to infer. Without it an unlisted file sorts to the *end* of the
+  reading order and the entire book reads as settled context behind it.
 - \`--style "<guide>"\` — \`style attach\` cannot run before the file exists, so the
   guide is named here and validated before anything is created. Forget it and
-  the refusal now lists the guides on record *and* names the guide \`--after\`'s
-  anchor uses, so the lookup happens in the message rather than in another
-  command.
-- **the brief on stdin** — required with \`--new\`.
+  the refusal lists the guides on record *and* names the guide the \`--after\`
+  anchor uses.
+- **the brief on stdin.**
 
 Every gate runs before any write. A blocked start leaves the disk byte-identical.
 </details>
 
-### Step 3 — ratify the beat plan
+### Step 2 — the frame you are handed
 
-The agent expands the brief into leaf beats and shows them to you. This is the
-single most important thing you do in the whole loop.
+What comes back has three parts:
 
-**Plan ratification is the fabrication guard.** A beat spec's notes must state
-*the claim the beat will make*, not its rhetorical function. This is not
-pedantry — it is the fix for a measured failure. In the §12.5 blind-redraft
-experiment the model had the style guide, the concept slice and the full
-before/after context, was asked for 2,244 words in one shot, and invented an
-attribution to Rieff, recording in its own notes: *"I do not know the real
+- a line confirming the file was created and the guide attached, and — read this
+  one — a note that abandoning this piece of work will **delete** the new file
+  again (nothing typed into it is lost; see §9).
+- **your brief**, verbatim.
+- the **frame**: everything settled *before* this essay in the book, compressed
+  to a few sentences each (those concepts are available to you and must not be
+  re-introduced), and everything still to come *after* it (those concepts are
+  not available yet — a beat that needs one has to point forward to it).
+
+**Read any line starting \`!!\`.** They are printed in yellow and they are the
+only warnings in that output:
+
+- a summary marked **stale, missing or deprecated** — that entry is not
+  trustworthy. It cannot happen when you start; it can appear later, when you
+  come back (§8).
+- **coverage incomplete** — that essay's summary never mentioned some of its own
+  paragraphs. Informational, not a block: treat that neighbour as possibly short
+  a move.
+- **an essay being written right now, in another writeup** — see §7.
+
+### Step 3 — ratify the plan
+
+The assistant turns the brief into a handful of beats and reads them back to
+you. This is the single most important thing you do in the whole loop.
+
+**Plan ratification is the fabrication guard.** What each beat is for is not
+enough; what each beat will *claim* is the thing you are ruling on. That is not
+pedantry — it is the fix for a measured failure. In one experiment the model was
+given the style guide, the concept notes and the full surrounding context, asked
+for two thousand words in one shot, and invented an attribution to a scholar it
+had never been given, recording in its own notes: *"I do not know the real
 essay's actual argument, so I built one."* The gap between "a claim is needed
-here" and "I have no claim here" got closed silently, at drafting time. The plan
+here" and "I have no claim here" got closed silently, while drafting. The plan
 moves that decision upstream, where you can see it.
 
-So refuse a beat that says \`"notes": "transitional"\`. Accept one that says:
+So you are read a numbered plan, one entry per beat, four things each:
 
-> \`{"role": "development", "concepts": ["Hard floor", "Suffering"], "budget":
-> 220, "notes": "claims affliction is what remains when another's kindness
-> removes the floor; builds on kindness.md, cites nothing new"}\`
+1. **what the beat is for** — said as a job: opens the essay, answers the
+   objection, closes on the ground it started from;
+2. **what it will claim**, in one sentence of ordinary English — the claim
+   itself, not "develops the argument";
+3. **which of your points, examples and concepts it carries** — by your own
+   names for them; in a rewrite, which point from the current essay each one is;
+4. **roughly how long it runs.**
 
-**Every proper name, citation or quotation a beat will use is named in the spec
-before it appears in prose.** If it is not in the ratified plan, it does not
-belong in the draft.
+And then you are asked, in these words:
 
-The agent will show the beats back as a numbered list, not as JSON. You reply in
-words: "beat 2 is doing two jobs, split it", "drop the Weil biography line".
+> Approve as-is, or tell me in any words: reorder, strike a beat, change a
+> budget, add a beat, or redirect one — I'll revise and re-present until you say
+> it's right. Nothing is drafted until you approve.
+
+Take that literally. Reply in plain words — "beat 2 is doing two jobs, split
+it", "drop the biography line", "make beat 4 shorter" — and the whole revised
+plan is read back to you again. Nothing is drafted until you say yes.
+
+**Every proper name, citation or quotation a beat will use is named in the plan
+before it appears in prose.** If it is not in the plan you approved, it does not
+belong in the draft. Refuse a beat whose description is only "transitional".
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact command</b></summary>
 
 \`\`\`bash
 authorlm write plan -m SMSTTD < /tmp/weil-plan.json
 # → Plan ratified: 3 beat(s) ahead.
 #     • [n=1 | opener | concepts: Attention | budget ~140]: claims attention is …
 \`\`\`
-Amend later with \`--replace\`: written beats are kept, the remainder is replaced,
-and replacement beats get fresh \`n\`s automatically so recorded verdicts cannot
-be corrupted. Running \`write plan\` again *without* \`--replace\` is refused with a
-message naming the flag. See §3.7 for what \`--replace\` now insists on first.
+Each beat is \`{"role", "concepts", "budget", "notes"}\`. Amend later with
+\`--replace\`: written beats are kept, the remainder is replaced, and replacement
+beats get fresh numbers automatically so recorded verdicts cannot be corrupted.
+Running \`write plan\` again *without* \`--replace\` is refused with a message
+naming the flag. See §3.7 for what \`--replace\` insists on first.
 
-Note: the CLI validates that the plan is a non-empty array of objects. It does
-**not** check that \`notes\` states a claim — it cannot. That guard is yours.
+The CLI validates that the plan is a non-empty array of objects. It does **not**
+check that the notes state a claim — it cannot. That guard is yours.
 </details>
 
-### Step 4 — the beat loop
+### Step 4 — the beats
 
 Per beat, twice:
 
-**The agent proposes.** You are shown the draft *with its grounding* — which
-concepts it realizes, which precedent it follows, and (in a rewrite) which
-digest points it carries, by id. That explanation is mandatory at the tool
-level; a draft without one cannot be registered.
+**You are shown a draft with its reasoning** — which concepts it realizes, which
+precedent it follows, and, in a rewrite, which points of the old essay it
+carries. That explanation is required: a draft without one cannot even be
+registered.
 
 **You give a verdict.** Three shapes, in plain words — see §4.
 
-Then the next beat. Accept is the only thing that touches the file: it appends
-the accepted text, collects the revision, records the verdict as evidence, and
-advances the cursor, atomically.
+Then the next beat. Accepting is the only thing that touches the file: your text
+is added, the revision is recorded, your verdict is stored as evidence, and the
+loop moves on — all at once.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact commands</b></summary>
 
 \`\`\`bash
 authorlm write propose --why "realizes Attention; opener per the plan; grounded \\
@@ -539,20 +556,20 @@ A redraft supersedes the pending proposal — you never accumulate two live draf
 for one beat.
 </details>
 
-### Step 5 — learnings (occasional)
+### Step 5 — lessons, occasionally
 
-When a pattern recurs *across* verdicts — not on every verdict — the agent
-distills one line and records it. It rides forward in the drafting context and
-\`write status\` reprints it. Learnings are session-local scaffolding, not memory:
-they never write to the style or policy stores. Recurring ones get promoted
-through the ordinary ratification path at episode analysis.
+When a pattern recurs *across* your verdicts — not on every verdict — the
+assistant distils one line and records it. It rides forward into every later
+draft in this piece of work, and is read back to you whenever you return.
+Lessons are scaffolding for the session, not memory: they never write to your
+style or policy stores on their own. The ones that keep recurring are promoted
+later, through the ordinary ratification you already do.
 
-You should see this surfaced to you unprompted when it happens ("you have
-stripped an unnamed source twice now — shall I stop proposing them?"), not
-discovered later.
+You should hear about this when it happens — "you have stripped an unnamed
+source twice now, shall I stop proposing them?" — not discover it afterwards.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact command</b></summary>
 
 \`write learn\` is **stdin only**. \`authorlm write learn "lesson"\` silently drops
 the argument and then errors for want of stdin — a known footgun.
@@ -564,82 +581,113 @@ EOF
 \`\`\`
 </details>
 
-### Step 6 — complete
+### Step 6 — finishing
 
 > **You:** "That's the essay."
 
-That sentence is the consent, and the agent should act on it rather than ask you
-again. It runs completion, the rebuild and the intent close in sequence and
-reports back in a couple of sentences; it *offers* \`session end\` rather than
-requiring it.
+That sentence is the consent, and the assistant should act on it rather than ask
+you again. It finishes the essay, refreshes the summaries and closes the goal,
+then reports back in a couple of sentences. Ending the work session is offered,
+not required.
 
-Completion closes the writeup, runs the concept-extraction pass that was
-deferred during the loop, and — for a created file — **inserts the toc.toml
-stanza** at your declared placement, carrying the anchor's \`parent\`. Without
-that stanza the essay is finished, on disk, and structurally invisible: it can
-never be summarized in position, and the next \`critique run\` or \`write start\`
-near it is refused for a file you believe is done.
+Finishing does three things worth knowing:
 
-If the anchor cannot be found, completion prints the exact stanza and does not
-fail. Paste it (or have the agent paste it) — do not skip it.
+- **It mines the finished prose for concepts.** This is a model call, and it is
+  the one the whole loop has been saving up for: the per-beat steps deliberately
+  skip it so the reading happens once, over the finished essay, instead of
+  partially over every fragment. What it finds arrives as proposals for you to
+  rule on, never as facts.
+- **For a new essay, it registers the essay in the table of contents** at the
+  position you declared. Without that entry the essay is finished, on disk, and
+  structurally invisible — it can never be summarized in position, and the next
+  piece of work near it would be refused for a file you believe is done. If the
+  anchor cannot be found, the exact lines to paste are printed and nothing
+  fails. Paste them; do not skip it.
+- **It tells you the essay's own summary is now out of date** and leaves the
+  refresh to you (or to the assistant). It does not refresh automatically,
+  because refreshing one summary marks everything downstream of it as needing
+  attention, and that is not a side effect finishing should have.
 
-Completion also reminds you that the summary is now stale. It deliberately does
-not rebuild: \`rebuild_one\` marks everything downstream \`upstream_stale\`, a side
-effect completion was not asked for. The three commands that follow are the
-agent's to run, not yours to remember:
+You decide when an essay is done. Beats you planned and never wrote are
+reported, not enforced.
+
+<details>
+<summary><b>Under the hood — the three commands, and what each spends</b></summary>
 
 \`\`\`bash
 authorlm write complete -m SMSTTD
-authorlm summarize rebuild -m SMSTTD          # ~1 cheap-tier call per stale unit
+authorlm summarize rebuild -m SMSTTD          # one summarizer call per stale unit
 authorlm intent complete di-4b7e1 -m SMSTTD   # separate — runs episode analysis
 \`\`\`
 
-Two of those three spend real model calls, and both are worth hearing about
-aloud: \`write complete\` runs the deferred concept-extraction pass (one call,
-when an LLM is configured — this is the only LLM call anywhere in the beat
-loop), and \`summarize rebuild\` costs roughly one cheap-tier call per stale unit.
-\`intent complete\` runs episode analysis, which spends too. If you are working
-with the LLM disabled, completion still succeeds; the extraction is simply
-skipped.
-
-\`write complete\` does **not** require the plan to be exhausted. You decide when
-it is done; unwritten beats are reported, not blocked.
+All three make model calls, each for its own purpose: completion runs the
+deferred concept-extraction pass (one call, plus one adjudication call when
+two-step extraction is on); the rebuild writes one fresh summary per essay whose
+text moved; \`intent complete\` reconstructs what you decided across the episode.
+Completion's is the only one inside \`authorlm write\`. With no model configured
+all three still succeed and simply learn nothing from the prose.
+</details>
 
 ---
 
-## 3. UC-B — rewrite an essay by modeling the old one
+## 3. Rewriting an essay you already have
 
-Everything in §2 applies. Three things are added: a **digest** of the original,
-**dispositions** on every point in it, and a **What Was Removed and Why** section.
+Everything in §2 applies. Three things are added: a **reading of the old essay**,
+a **ruling on each part of it**, and a closing section that accounts for whatever
+was dropped.
 
-### Step 1 — start (and say what to retain)
+### Step 1 — which kind of rewrite
+
+Before anything else you should be asked one question, once, in these terms:
+
+> Two ways to do this:
+> - **I first extract every point, example, and reference from the current
+>   essay; you rule on what's kept or dropped, and the final essay accounts for
+>   anything removed.** (Recommended when the old content matters.)
+> - **The old essay is raw material; nothing is tracked point-by-point.**
+
+That is a real fork, not a phrasing preference, which is why it is put to you in
+those words rather than by name. The first is the right default whenever the old
+essay carries anything you would mind losing — which is nearly always, for
+anything already drafted. The second is right when you are starting over and the
+old text is just a quarry.
+
+The rest of this section describes the first. If you pick the second, skip
+steps 2, 4b and 5 and follow §2 exactly.
+
+### Step 2 — say what to keep
 
 > **You:** "The Epictetus essay needs a rework. Keep the prohairesis/Dharma
 > comparison and the divergence on the scope of choice. Move the biography down
-> — open on the claim, not the man. Cut anything discernment.md already owns."
+> — open on the claim, not the man. Cut anything the discernment essay already
+> owns."
 
 That is the brief. In a rewrite it is optional, and this is exactly where it
 earns its keep: "retain these points, reorder for flow" belongs here and nowhere
 else.
 
-**What \`write start\` does to the file: it truncates it.** The old essay is not
-lost — it is pinned as \`source_version_id\` before the truncation, and it is the
-only copy the loop will read. From this moment the file on disk is empty and
-grows one accepted beat at a time.
+**What happens to the file: it is cleared.** The old essay is not lost — it is
+pinned in the database first, and that pinned copy is the only one the work will
+read from here on. In its place the file gets a short visible note saying the
+essay is mid-rewrite and how to get the old one back, so that opening the file
+in Obsidian shows you an explanation rather than a blank page. That note is
+never part of a finished essay: your first accepted beat replaces it outright,
+and finishing is refused outright if it is still the only thing there.
 
-A second safety net costs one command and is worth taking, because
-\`authorlm/manuscripts/\` is gitignored — there is no git history for the prose:
+A second safety net costs one command and is worth taking, because the
+manuscript directory is not under version control — there is no git history for
+the prose:
 
 \`\`\`bash
 cp authorlm/manuscripts/SMSTTD/epictetus.md \\
    authorlm/manuscripts/SMSTTD/_drafts/epictetus.pre-rework.md
 \`\`\`
 
-\`_drafts/\` is invisible to observation (directories starting with \`_\` are
-skipped), so the copy costs the concept graph nothing.
+\`_drafts/\` is invisible to the system, so the copy costs your concept graph
+nothing.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact command</b></summary>
 
 \`\`\`bash
 authorlm intent declare "Rewrite the Epictetus essay: same crux, better flow" -m SMSTTD
@@ -652,45 +700,41 @@ No \`--new\`, no \`--style\` (the file already has an attachment — \`--style\`
 \`--new\` is refused), no \`--after\` unless the essay has no toc entry.
 </details>
 
-### Step 2 — the digest, and your review of it
+### Step 3 — the reading of the old essay, and your corrections
 
-The agent reads the pinned original back and extracts four lists:
+The assistant reads the pinned original back and pulls out four lists: every
+**claim** it made, every **example**, every **reference** or attribution, and
+every **inconsistency** — each of those naming the earlier essay it conflicts
+with.
 
-- **points** (\`p1\`, \`p2\`, …) — every claim the original made
-- **examples** (\`x1\`, …) — with the point ids each serves
-- **references** (\`r1\`, …) — epigraphs, citations, attributions
-- **inconsistencies** (\`i1\`, …) — each naming the TOC-**earlier** essay it
-  contradicts
+**You will never be shown the raw data.** You are read a numbered account, in the
+old essay's own order, one sentence per claim, with each claim's example or
+citation attached to it rather than listed off separately. Then — and only then
+— the two or three the assistant is least sure of, plus every claimed
+inconsistency, are put to you explicitly by number. You correct it in words, by
+number.
 
-**You will never be shown the JSON.** The agent reads the digest back to you as
-a numbered prose reading, in the original's own order, one sentence per point,
-with each point's example or reference attached to it rather than listed
-separately. Then — and only then — it puts the two or three it is least sure
-about, plus every claimed inconsistency, to you explicitly by number. You
-correct it in words, by number; the agent re-composes the payload.
+That order is deliberate. **You correct the reading before it is recorded**, and
+that correction is the entire reason it counts as your judgment rather than a
+machine's. Eighteen lines of data get rubber-stamped, and a rubber-stamped
+reading is exactly the machine reading the correction exists to prevent. Expect
+to move things: a "claim" that was really two, an "inconsistency" that is not
+one.
 
-That order is deliberate. **You correct the digest before it is persisted**, and
-that review is the entire reason the digest counts as evidence rather than a
-machine reading — the same principle as plan ratification. Shown as eighteen
-lines of data it gets rubber-stamped, which produces exactly the machine reading
-the review exists to prevent. Expect to move things: a "point" that was really
-two, an "inconsistency" that is not one.
+Once recorded, it becomes law in a specific and useful way:
 
-Once persisted, the digest becomes law in a specific and useful way:
+> **The recorded reading is the sole authority on what the original said.**
+> Anything not in it is not in the original.
 
-> **The digest is the sole authority on what the original said.** A point not in
-> the digest is not in the original.
+That has a sharp consequence. During a rewrite, the compressed summaries of
+*neighbouring* essays can still describe the **old** version of the essay you are
+rewriting. Under this rule that leak is inert: nothing may be "retained" on the
+strength of a neighbour's description of the essay being rewritten.
 
-This has a sharp consequence. During a rewrite, the compressed summaries of
-*neighbouring* essays can still describe the **old** version of the essay you
-are rewriting — this was observed in the §12.5 runs. Under this rule that leak
-is inert: the agent may not "retain" a point on the strength of a neighbour's
-description of the essay currently being rewritten.
-
-Reordering, compressing, merging and sharpening the digest's points is the
-*purpose* of a modeled rewrite and is fully permitted. Adding a point, example
-or citation that is in neither the digest nor the brief is a new authorial
-commitment — it comes to you, at plan time.
+Reordering, compressing, merging and sharpening what the old essay said is the
+*purpose* of this kind of rewrite and is fully permitted. Adding a claim, example
+or citation that is in neither the reading nor the brief is a new commitment of
+yours — it comes to you, at plan time.
 
 <details>
 <summary><b>Under the hood — four shapes, one verb</b></summary>
@@ -702,10 +746,12 @@ authorlm write digest --replace -m SMSTTD < d.json   # replaces
 authorlm write digest --dispositions -m SMSTTD < d.json
 authorlm write digest --show -m SMSTTD               # stored digest + tally
 \`\`\`
-Ids must be unique across the *whole* digest, and cross-references (\`serves\`,
-\`points\`) must resolve to real point ids; \`inconsistencies[].with\` must name a
-real manuscript file. A dangling reference is refused rather than stored —
-an accounting built on dangling ids is decorative. Validation is all-or-nothing.
+The four lists are \`points\` (\`p1\`, …), \`examples\` (\`x1\`, …), \`references\`
+(\`r1\`, …) and \`inconsistencies\` (\`i1\`, …). Ids must be unique across the *whole*
+digest, and cross-references (\`serves\`, \`points\`) must resolve to real point
+ids; \`inconsistencies[].with\` must name a real manuscript file. A dangling
+reference is refused rather than stored — an accounting built on dangling ids is
+decorative. Validation is all-or-nothing.
 
 \`--replace\` may not drop an id that already carries a disposition; it names the
 offenders and refuses.
@@ -714,38 +760,36 @@ offenders and refuses.
 no source essay to digest."
 </details>
 
-### Step 3 — plan, with point ids
+### Step 4 — plan, carrying the old essay's points
 
-Same ratification as UC-A, plus: **each beat names the digest point ids it
-carries**, and the plan's *ordering* is where "reorder for better flow"
-actually happens. Order any footnotes beat **before** the removal beat — the
-loop appends, so the last beat lands last, and that is all "after the footnotes"
-means here.
+Same ratification as §2.3, plus: **each beat names which of the old essay's
+points it carries**, and the plan's *ordering* is where "reorder for better flow"
+actually happens. Put any footnotes beat *before* the closing accounting beat —
+beats are added in order, so the last one planned lands last.
 
-### Step 4 — beats, then account for what happened
+### Step 5 — the beats, then account for what happened
 
-Run the beat loop exactly as in §2.4. After each stretch of beats, the digest's
-points have to be accounted for. There are two values and only two:
+Run the beats exactly as in §2.4. After each stretch, every point of the old
+essay has to be accounted for. There are two answers and only two:
 
-- **kept** — optionally with the beat number that carried it. **You are not
-  asked for these.** The ratified plan already names the point ids per beat, the
-  \`--why\` on each proposal repeats them by id, and accept records which beat
-  landed — so the agent derives the whole \`kept\` half and records it. It reports
-  the result in one line ("p1, p3, p7 kept across beats 2–4") so you can
-  contradict it, and that is the only attention it should cost you.
+- **kept** — **you are not asked for these.** The plan you approved already names
+  which points each beat carries, every draft repeats them, and accepting records
+  which beat landed — so the whole "kept" half is derived for you and recorded.
+  It is stated back to you in one line ("p1, p3, p7 kept across beats 2–4") so
+  you can contradict it, and that is the only attention it should cost you.
 - **removed** — **a reason is required**, in your words, and this is the half
-  that actually comes to you. Same principle as \`write reject --reason\`: an
-  unexplained removal teaches nothing and cannot be written up. The nuance goes
-  in the reason, because the reason is what the removal section will quote.
+  that actually comes to you, one at a time. Same principle as an explained
+  rejection: an unexplained removal teaches nothing and cannot be written up.
+  The nuance goes in the reason, because the reason is what the closing section
+  will quote.
 
-There is no third value. "Moved", "deferred", "merged into p3" all belong in the
-reason text.
+There is no third answer. "Moved", "deferred", "merged into p3" all belong in the
+reason.
 
-Changing your mind is allowed and is *reported*, not hidden:
-\`p4: removed → kept (overwritten)\`.
+Changing your mind is allowed and is *reported*, not hidden.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact command</b></summary>
 
 \`\`\`bash
 authorlm write digest --dispositions -m SMSTTD <<'EOF'
@@ -758,22 +802,20 @@ EOF
 \`\`\`
 </details>
 
-### Step 5 — the What Was Removed and Why section
+### Step 6 — the section that accounts for what was dropped
 
-The final beat (or two) is the section itself, headed
-\`## **What Was Removed and Why**\`.
+The final beat, or two, is the section itself, headed **What Was Removed and
+Why**.
 
-It is **drafted from the recorded reasons** — the agent writes only the
-connective prose. The judgments were made when they were recorded; they are not
-re-invented at drafting time. It is proposed and accepted like any other beat,
-so it is evidence like any other beat.
+It is **written from the reasons you already gave** — only the connective prose
+is new. The judgments were made when you made them; they are not re-invented at
+drafting time. It is proposed and accepted like any other beat.
 
-It is ordinary manuscript prose: it will be collected, scanned for concept
-realizations, summarized, pushed to Docs and exported. If you later decide it
-should not ship, delete it — the durable record of the accounting is the writeup
-metadata, not the prose.
+It is ordinary manuscript prose: it will be collected, scanned, summarized,
+pushed to Docs and exported like anything else. If you later decide it should not
+ship, delete it — the durable record is kept separately from the prose.
 
-### Step 6 — complete, and the accounting report
+### Step 7 — finishing, and the tally
 
 \`\`\`
 Removal accounting: 5 point(s) kept, 2 removed, 2 UNACCOUNTED.
@@ -784,31 +826,30 @@ Removal accounting: 5 point(s) kept, 2 removed, 2 UNACCOUNTED.
   Record them: write digest --dispositions  (JSON on stdin).
 \`\`\`
 
-**It warns; it does not block.** Completion succeeds with points unaccounted,
+**It warns; it does not stop you.** Finishing succeeds with points unaccounted,
 by design, and the reasoning is worth knowing because you may want to overturn
 it:
 
 - An unaccounted point is the same kind of open item as an unwritten beat, and
-  \`write complete\` already refuses to require an exhausted plan.
-- Blocking would reward the cheapest escape — a bare \`kept\` on a point that was
-  in fact dropped — converting a visible gap into an invisible lie.
-- The tally is not a one-shot: \`write status\` prints it on *every* resume. An
-  author who ignores it at completion has ignored it repeatedly.
+  finishing already does not require every planned beat to be written.
+- Stopping you would reward the cheapest escape — marking a dropped point as
+  kept — turning a visible gap into an invisible lie.
+- The tally is not a one-shot: it is printed every single time you come back. An
+  author who ignores it at the end has ignored it repeatedly.
 
-Completion also does **not** check that the removal section exists in the file.
-That would be content lint, and \`write propose\` deliberately carries none so the
-auditors have one home.
+Nor is there any check that the removal section actually exists in the file. That
+would be a judgment about content, and content judgment lives with the critique
+pass, not here.
 
-### Step 7 — changing the plan mid-rewrite
+### Step 8 — changing the plan mid-rewrite
 
-Say beat 7's draft is wrong in a way that means the *plan* is wrong, not the
-prose. The remedy is \`write plan --replace\`, which keeps the beats already
-written and renumbers the rest — replacement beats get fresh \`n\`s, which is
-precisely what makes it impossible for a replan to corrupt a recorded verdict.
-Accepted text is never at risk.
+Say a beat's draft is wrong in a way that means the *plan* is wrong, not the
+prose. The remedy keeps the beats already written and replans the rest;
+replacement beats are renumbered, which is precisely what makes it impossible for
+a replan to corrupt a verdict you already gave. Accepted text is never at risk.
 
-**Settle the pending draft first.** \`write plan --replace\` refuses while a draft
-awaits your verdict:
+**Settle the pending draft first.** Replanning is refused while a draft awaits
+your verdict:
 
 \`\`\`
 a draft is still awaiting your verdict on beat n=7 — replacing the plan would
@@ -817,88 +858,224 @@ Settle it first: 'write reject --reason "<why the plan is wrong>"' (that reason
 IS the evidence for the replan), or 'write accept' to keep the draft.
 \`\`\`
 
-Almost always the right exit is the reject, because the sentence you would type
-into \`--reason\` is the reason you are replanning at all — and that is the single
-most valuable thing the loop can record. The refusal exists because the old
-behaviour silently orphaned that draft: it vanished from \`write status\`, counted
-as \`proposed\` in every tally forever, and took your reason with it.
+Almost always the right exit is the rejection, because the sentence you would
+give as the reason *is* the reason you are replanning at all — and that is the
+single most valuable thing the loop can record. The refusal exists because the
+old behaviour silently orphaned that draft: it vanished from view, counted in
+every tally forever, and took your reason with it.
 
 ---
 
-## 4. The verdict vocabulary
+## 4. Saying yes, no, and "almost"
 
-Three shapes. Say them in plain words; the agent maps them.
+Three shapes. Say them in plain words.
 
 | You say | Recorded as | What happens |
 |---|---|---|
-| "yes, that's it" | \`accepted\` | draft appended verbatim, collected, cursor advances |
-| "almost — make it *this*" (you give the text) | \`modified\` | **your** text is appended; the draft→final diff is kept as evidence |
-| "no, because …" | \`rejected\` | nothing is appended, the cursor does **not** move, your reason is stored verbatim, the agent redrafts with it in context |
+| "yes, that's it" | accepted | the draft is added verbatim, and the loop moves on |
+| "almost — make it *this*" (you give the text) | modified | **your** text is added; the difference between the draft and your wording is kept as evidence |
+| "no, because …" | rejected | nothing is added, the beat does **not** advance, your reason is stored word for word, and the redraft is written with it in view |
 
-**Why the reason on a rejection matters.** It is the highest-value evidence the
-system can receive. A bare "no" teaches nothing; "you cited *Gravity and Grace*
+**Why the reason on a rejection matters.** It is the highest-value thing the
+system can be told. A bare "no" teaches nothing; "you cited *Gravity and Grace*
 — the plan said no citation beyond her name and I meant it" teaches a rule, and
-you will see it come back as a seeded candidate belief:
+you will see it come back:
 
 \`\`\`
 Beat n=1 rejected — reason recorded verbatim. Redraft with the reason in context.
 Seeded candidate belief: Do not introduce a source the ratified plan did not name.
 \`\`\`
 
-A candidate belief is not a rule yet. It becomes one only on independent
-evidence from distinct sessions — a machine-authored conjecture can seed a
-candidate but can never validate one.
+A candidate belief is not a rule yet. It becomes one only on independent evidence
+from separate sessions — a machine-authored conjecture can seed a candidate but
+can never validate one.
 
-\`--reason\` is required at the tool level on reject. On accept it is optional but
-welcome: an explained *acceptance* is evidence too. If you accept bare, the
-agent is instructed to ask once — gently, once, never during bulk work — whether
-there was anything behind it. "Just record it" ends the asking.
+A reason is required on a rejection. On an acceptance it is optional but welcome:
+an explained *yes* is evidence too. If you accept bare, you should be asked once
+— gently, once, never during bulk work — whether there was anything behind it.
+"Just record it" ends the asking.
 
-**A reword is not a lesser accept.** It is the richest signal in the loop: the
-diff between what was proposed and what you wrote is exactly the shape of the
-correction. Reword freely.
+**A reword is not a lesser yes.** It is the richest signal in the loop: the
+difference between what was proposed and what you wrote is exactly the shape of
+the correction. Reword freely.
 
 ---
 
-## 5. Gate refusals — what each one means
+## 5. When it says no
 
-Every refusal names its remedy. None of them writes anything; a blocked start
-leaves the disk byte-identical.
+Every refusal names its remedy, and none of them writes anything: a blocked start
+leaves your files byte for byte as they were. What can stop you, in plain terms:
+
+- **The new essay has no position in the book.** Say where it goes — after some
+  essay, or at the very start.
+- **No style guide is attached.** The message lists the guides on record and, if
+  it can tell, names the one the neighbouring essay uses.
+- **The name already exists** (you meant a rewrite), or **does not exist** (you
+  meant a new essay), or is a typo.
+- **A new essay has no brief yet.** This one fires last on purpose: every other
+  refusal names something you can add to the line you just typed, and this one
+  sends you away to compose a paragraph.
+- **A summary somewhere in the surrounding context is out of date.** Refresh the
+  summaries. There is no override, because that summary is what the drafting
+  would be conditioned on.
+- **The file is checked out to Google Docs.** Pull it back first.
+- **A writeup is already open on that essay.** Resume it, or put the old essay
+  back.
+- **You planned twice**, or **proposed before planning**, or **gave a verdict
+  with nothing pending** — each says exactly which.
+- **A draft is still awaiting your verdict** and you tried to replan. Settle it
+  first, ideally by rejecting with the reason that made you replan (§3.8).
+- **The essay you asked to critique is mid-rewrite.** An edit pass over it would
+  be editing a placeholder. Finish the rewrite or put the old essay back.
+
+**One rough edge, honestly.** Typing a new-essay start yourself at a terminal,
+you can hit four of these one at a time — position, then guide, then guide-exists,
+then brief. The ordering is deliberate but the experience is a parade. In
+conversation all four are pre-checked, so you see at most one round trip.
+
+<details>
+<summary><b>Under the hood — the messages, verbatim</b></summary>
 
 | Refusal (abridged) | What to do |
 |---|---|
-| \`weil.md does not exist yet, so it has no place in the reading order — say where it goes: --after <file it follows> \\| --after start\` | Say where in the book it goes. \`--after start\` opens the book. |
-| \`weil.md has no attached style guide … With --new, name it: --style <guide>.\` — followed by \`Guides on record: …\` and, when \`--after\` names an anchor with an attachment, \`becker.md uses 'Connections essays' — likely the one you want.\` | Pick from the names in the message. Nothing is ever defaulted for you: the guide is drafting law, so attaching it stays your explicit act. |
+| \`weil.md does not exist yet, so it has no place in the reading order — say where it goes: --after <file it follows> \\| --after start\` | \`--after start\` opens the book. |
+| \`weil.md has no attached style guide … With --new, name it: --style <guide>.\` — followed by \`Guides on record: …\` and, when \`--after\` names an anchor with an attachment, \`becker.md uses 'Connections essays' — likely the one you want.\` | Pick from the names in the message. Nothing is defaulted for you. |
 | \`no style guide named 'Nope'\` | Typo, or the guide does not exist yet (\`style guide <name>\` creates one). |
-| \`becker.md already exists — drop --new to rewrite it\` | You meant a rewrite, or you fat-fingered the name. |
+| \`becker.md already exists — drop --new to rewrite it\` | You meant a rewrite. |
 | \`--style is only for --new; an existing file's guide is attached with 'style attach becker.md …'\` | One way to do each thing. |
-| \`write start --new requires the one-paragraph brief on stdin\` | Compose the brief. This gate fires **last** among the flag gates on purpose: every other refusal names a flag you can append to the command you just typed, but this one sends you away to write a paragraph, and it would otherwise mask all the others. |
+| \`write start --new requires the one-paragraph brief on stdin\` | Compose the brief. |
 | \`missing/stale/deprecated summaries: … — run 'summarize rebuild' first (the drafting pass will not read a lie about the text)\` | Run \`summarize rebuild\`. No \`--force\` exists. |
 | \`epictetus.md is checked out to Google Docs — the Doc is the working copy. Run 'doc pull epictetus.md' first.\` | Pull first. Fires on start, propose and accept. |
 | \`writeup wu-… is already active on epictetus.md\` | Resume it (\`write status\`) or abandon it. |
 | \`a plan exists — pass --replace to amend the remaining (unwritten) beats\` | You planned twice. |
-| \`a draft is still awaiting your verdict on beat n=7 — … Settle it first: 'write reject --reason "…"' … or 'write accept' …\` | Reject the pending draft with the reason that made you replan (see §3.7), or accept it. |
+| \`a draft is still awaiting your verdict on beat n=7 — … Settle it first: 'write reject --reason "…"' … or 'write accept' …\` | Reject with the reason that made you replan, or accept. |
 | \`no ratified beat plan — set one: write plan (JSON on stdin)\` | You proposed before planning. |
 | \`nothing proposed for beat 3 — write propose first\` | You gave a verdict with no draft pending. |
 | \`--why is required: which concepts this draft realizes, which precedent it follows\` | Verdict evidence hangs off it. |
 | \`--reason is required: the author's why, verbatim\` | On reject, always. |
-| \`a digest is already recorded for this writeup — pass --replace\` | And \`--replace\` will still refuse to drop ids that carry dispositions. |
+| \`a digest is already recorded for this writeup — pass --replace\` | And \`--replace\` still refuses to drop ids carrying dispositions. |
 | \`this writeup created weil.md; there is no source essay to digest.\` | Digests model rewrites only. |
+| \`epictetus.md still holds only the mid-rewrite placeholder — … Put the old essay back with 'write abandon', or draft a beat first.\` | You finished before accepting anything. |
+| \`epictetus.md is being rewritten right now by an active writeup — … Finish the writeup ('write complete') or put the old essay back ('write abandon').\` | A critique pass over a mid-rewrite essay. |
 | \`all planned beats are done — write complete (or extend the plan: write plan --replace)\` | Either finish or plan more. |
-
-**Rough edge, honestly.** Typing \`write start --new\` yourself at a terminal, you
-can hit four of these one at a time — placement, then style, then guide-exists,
-then brief. The ordering is deliberate (see the brief row above) but the
-experience is a parade. In conversation the agent should pre-check all four
-before running anything, so you see at most one round trip.
+</details>
 
 ---
 
-## 6. Resume after an interruption
+## 6. Sessions, intents, writeups — who owns what
 
-**The briefing tells you a writeup is open.** Since an open writeup means the
-essay is *truncated on disk and half-rebuilt*, that is manuscript state, not
-knowledge, and it is printed first and in yellow:
+Three words get used constantly and mean three different things. They nest, and
+knowing how they nest removes most of the confusion about what to restart and
+what to leave alone.
+
+**A session is the ambient stretch of work.** It starts by itself the moment you
+do anything, and it closes by itself when you have been away long enough. It is
+the container for everything below. **You never need to restart it**, and
+restarting it mid-work is the one thing that actively costs you: evidence from
+your verdicts is counted once per session, so chopping a session in half is the
+only way to lose what the system learned. The only good reason to close one is
+that it was opened on a previous day.
+
+**An intent is a goal you declared.** "Rewrite the Epictetus essay." "Write the
+Weil essay." Several can be open at once, and they are closed one at a time when
+the goal is met — closing one is what triggers the reconstruction of what you
+decided while pursuing it.
+
+**A writeup is one essay being written or rewritten, beat by beat.** It belongs
+to exactly one intent. It holds the pinned original, the plan you approved, the
+running verdicts, the lessons, and the accounting. It survives everything:
+closing your laptop, days away, a crashed terminal. You come back and it is
+exactly where you left it, with the frame recomputed fresh.
+
+So: **two parallel rewrites are two intents, each with its own writeup, all
+inside one session.** Nothing needs restarting, nothing needs closing first, and
+the session is not a thing you manage.
+
+<details>
+<summary><b>Under the hood</b></summary>
+
+A session is a \`sessions\` row, auto-created by \`ensure_session\` on any state
+change and retroactively closed once it exceeds \`idle_hours\`. An intent is a
+\`declared_intents\` row (\`declare\` / \`complete\` / \`abandon\`); \`intent complete\`
+runs episode analysis. A writeup is a \`writeups\` row bound to one intent by
+\`intent_id\`, holding \`source_version_id\` (the pinned original), \`plan\`,
+\`cursor\`, \`learnings\` and its metadata. With more than one open, every \`write\`
+verb wants \`--writeup <id-prefix>\` rather than guessing.
+</details>
+
+---
+
+## 7. Two essays at once
+
+You can have two rewrites going at the same time, and nothing stops you. There
+is one thing worth understanding about it, in the same terms you put it in
+yourself: **it is slightly suboptimal, and you should know that it is.**
+
+Here is why. While an essay is being rewritten, its file on disk holds a short
+visible note saying so rather than the essay. Every other essay's frame is built
+from the essays around it — so what should the *second* rewrite be told about
+the first?
+
+The answer is: **the version from before the rewrite started**, pulled out of the
+database, never the placeholder on disk. That is the honest thing to serve, and
+it is the useful one. But it is a version of the essay that is on its way out,
+and you are told so, at the top of the frame and again on the entry itself:
+
+\`\`\`
+!! 1 essay in this context is being written right now, in another writeup:
+!!   01-choice.md — mid-rewrite. What you get below is the PRE-REWRITE essay,
+!!     summarized from that writeup's pinned source version, not from the file
+!!     on disk (which currently holds a placeholder).
+!! This is slightly suboptimal and it is worth knowing: whatever those
+!! writeups change, this draft will not know about, and this draft's essay
+!! will not be in their context either. Finish or abandon them first if that
+!! matters more than starting now.
+\`\`\`
+
+That is the whole trade. Each rewrite is drafted against the other's *old*
+version, and neither can see what the other is currently doing. If that matters
+for the pair of essays in front of you — if one is being rewritten precisely
+because of what the other is becoming — finish one first. If it does not, carry
+on; you have been told.
+
+Two smaller things follow from the same rule:
+
+- **A brand-new essay in flight contributes nothing** rather than blocking
+  everything. There is no earlier version of it to summarize, so its entry says
+  exactly that instead of pretending or refusing.
+- **A critique pass will not run over an essay that is mid-rewrite.** What is on
+  disk is the placeholder, so the edits would be edits to a note. Finish the
+  rewrite, or put the old essay back, and then run it.
+
+The warning cannot be switched off. That is on purpose, and it is the same
+reasoning as the summary check: a warning you can silence is a warning that will
+be silenced on the day it mattered.
+
+<details>
+<summary><b>Under the hood</b></summary>
+
+An in-flight file contributes its **pinned** text — \`writeups.source_version_id\`
+→ \`manuscript_versions.files\` → that file's text — to everyone else's context.
+Two states join the freshness list: \`rewriting\` (a stored summary matches the
+pinned text; served, labelled) and \`unwritten\` (the writeup created the file, so
+there is nothing to serve). Both are accepted by the drafting gate and the
+critique gate, which remain one predicate.
+
+\`summarize rebuild\` on an in-flight file summarizes the **pinned** text, not the
+placeholder — so the remedy the refusals print actually works — and the entry
+settles at \`rewriting\` afterwards, never \`fresh\`. A file created by
+\`write start --new\` has no pre-rewrite text at all: the full rebuild skips it and
+says so, and the single-file rebuild refuses. Design: §14 of
+\`docs/autoregressive-writing-design.md\`.
+</details>
+
+---
+
+## 8. Coming back after a break
+
+**You are told, without having to ask.** An open writeup means the essay is
+mid-surgery on disk, so it is manuscript state, not knowledge, and it is printed
+first and in yellow whenever you open a conversation or ask for a briefing:
 
 \`\`\`
 Open writeups — these files are truncated on disk and rebuilding one accepted
@@ -907,43 +1084,33 @@ beat at a time:
   → resume: write status   ·   restore the old text: write abandon
 \`\`\`
 
-It reaches every surface that serves the briefing: \`authorlm briefing\`, the
-session-open briefing, and the MCP \`get_briefing\` the agent calls when a
-conversation opens. So the ordinary act of coming back — open a conversation,
-get the briefing — is now enough to learn that \`epictetus.md\` is mid-surgery.
-You no longer have to know to ask.
+**Then one command reprints everything the loop knows:**
 
-**\`write status\` is still the resume entry point.** One command reprints
-everything the loop knows:
-
-- which writeup, which file, \`beat 4/6\`, and the current beat's full spec
-- whether a proposal is **pending a verdict** (with its id)
-- the verdict tallies and every recorded learning
+- which essay, how far along, and the current beat's full description
+- whether a draft is **waiting on your verdict**
+- the tally of your verdicts, and every lesson recorded
 - your **brief**, verbatim
-- for a rewrite: the digest counts and the running **accounting** tally —
-  yellow whenever anything is UNACCOUNTED
-- the full **DRAFTING CONTEXT**, recomputed live
+- for a rewrite: the reading of the old essay and the running accounting —
+  yellow whenever anything is unaccounted for
+- the full **frame**, recomputed live
 
-That last point matters after a long gap. The context is not stored — it is
-rebuilt from the current summaries on every read, so if a neighbouring essay
-changed while you were away, the resume view says so with a yellow
-\`!! summary STALE\` line rather than silently serving you the lie the start gate
-had refused. **Read the \`!!\` lines before accepting anything on resume.**
-\`write status\` cannot refuse — it is the resume entry point and must keep
-working — so it warns loudly instead.
+That last point matters after a long gap. The frame is not stored — it is rebuilt
+from the current summaries every time you look, so if a neighbouring essay
+changed while you were away, the resume view says so in yellow rather than
+quietly serving you the false statement the start gate would have refused.
+**Read the \`!!\` lines before accepting anything on resume.** The resume view
+cannot refuse — it has to keep working — so it warns loudly instead.
 
-One thing \`write status\` will not do for you: **a pending proposal survives
-indefinitely, and accepting it after a long gap accepts a draft conditioned on
-the world as it was.** If the context moved, have the agent re-propose rather
-than accepting the stale draft. (The rule is explicit for Google Docs round
-trips; it applies just as well to a week of elapsed time.)
+One thing it will not do for you: **a pending draft survives indefinitely, and
+accepting it after a long gap accepts something written against the world as it
+was.** If the context moved, ask for a redraft rather than accepting the stale
+one.
 
-If the file has left the disk entirely, \`write status\` degrades rather than
-dying: it replaces the context with a one-line note and still shows the plan,
-cursor, pending proposal and tallies.
+If the file has left the disk entirely, the resume view degrades rather than
+dying: the frame is replaced by a one-line note and everything else still shows.
 
 <details>
-<summary><b>Under the hood</b></summary>
+<summary><b>Under the hood — the exact commands</b></summary>
 
 \`\`\`bash
 authorlm briefing -m SMSTTD
@@ -952,28 +1119,27 @@ authorlm write status --writeup wu-3d80b -m SMSTTD    # a specific writeup
 authorlm write digest --show -m SMSTTD                # re-read the stored digest
 authorlm write digest -m SMSTTD                       # re-read the pinned original
 \`\`\`
-With several writeups open, the \`write\` verbs refuse ambiguously (\`multiple
+With several writeups open the \`write\` verbs refuse ambiguously (\`multiple
 active writeups (a.md, b.md) — pass --writeup\`) rather than guessing. The
 briefing lists them all.
 </details>
 
 ---
 
-## 7. Bailing out
+## 9. Bailing out
 
-\`authorlm write abandon\` ends the writeup. What it does depends on which flow
-you are in, and the difference is severe enough to be worth stating plainly.
+Abandoning ends the piece of work. What it does depends on which kind you are in,
+and the difference is severe enough to state plainly.
 
-**Rewrite (UC-B, or any writeup on a file that already existed):** the file is
-restored from the pinned source version. The old essay comes back exactly as it
-was.
+**Rewriting an existing essay:** the file is restored from the pinned copy,
+exactly as it was, byte for byte.
 
 \`\`\`
 Writeup [wu-3d80b6e2] abandoned; file restored from the pinned source version.
 \`\`\`
 
-**New essay (UC-A):** the restore target is *nonexistence*, so **the file is
-deleted**, and the style attachment the writeup created is removed with it.
+**A new essay:** the thing to restore it to is *nonexistence*, so **the file is
+deleted**, and the style attachment created along with it is removed too.
 
 \`\`\`
 Writeup [wu-9c2f4a1b] abandoned; weil.md deleted — the writeup created it, so
@@ -981,19 +1147,18 @@ the restore target is nonexistence.
 Its text is preserved in v421 (nothing typed into it was lost).
 \`\`\`
 
-**Nothing you wrote is destroyed.** Abandon takes a snapshot *first* — that
-collect is the recovery point, and it captures even half-typed text you never
-collected. The version number in the second line is where the prose lives. The
-version history then honestly reads create → beats → remove: the prose is
-unpublished, not erased.
+**Nothing you wrote is destroyed.** A snapshot is taken *first* — that snapshot
+is the recovery point, and it captures even half-typed text that was never
+recorded. The version number in the second line is where the prose lives. The
+history then honestly reads create → beats → remove: the prose is unpublished,
+not erased.
 
-The agent is instructed to tell you the file will be deleted before running it.
-There is no confirmation prompt in the CLI itself, so if you are typing it
-yourself, be sure which flow you are in.
+You should be told the file will be deleted before it happens. There is no
+confirmation prompt in the command itself, so if you are typing it yourself, be
+sure which kind you are in.
 
-Expect some honest noise afterwards: any concept whose primary location was the
-deleted file raises a \`vanished\` proposal. That is the same noise a
-truncate-and-rebuild produces, and it wants triaging, not fixing.
+Expect some honest noise afterwards: any concept whose home was the deleted file
+raises a question for you to settle. That wants triaging, not fixing.
 
 <details>
 <summary><b>Under the hood — recovering the text</b></summary>
@@ -1006,45 +1171,78 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 
 ---
 
-## 8. Rough edges, stated plainly
+## 10. What it costs, and which model does what
 
-Things that are true today and that you will meet:
+Drafting the beats costs nothing beyond the conversation you are already having —
+it happens there, in front of you. Three moments call out to a model, each for a
+job worth naming:
 
-1. **Every command needs \`-m SMSTTD\`** in this workspace, and none of the
-   simulated transcripts in the design doc show it.
-2. **\`write learn "lesson"\` silently ignores the argument** and then errors
-   asking for stdin. The lesson must arrive on stdin.
-3. **The claim-in-the-notes rule is not enforced by code.** \`write plan\` accepts
-   \`{"role": "development", "notes": "transitional"}\` without complaint. The
-   guard is entirely your ratification. This is the one place where slackness
-   costs you a fabricated attribution.
-4. **\`summarize rebuild\` costs cheap-tier LLM calls** (one per stale unit, ~24
-   for \`--all\`) and is needed both before a start that the gate refuses and
-   after every completion. It is not automatic.
-5. **Finishing an essay spends, in three places.** The drafting verbs
-   (\`start\`, \`plan\`, \`propose\`, \`accept\`, \`reject\`, \`learn\`) make no LLM call at
-   all — but \`write complete\` runs the concept-extraction pass deferred through
-   the whole loop, \`summarize rebuild\` costs the calls in item 4, and
-   \`intent complete\` runs episode analysis. Each is skipped silently when no
-   LLM is configured, so a run with the LLM off finishes but learns nothing from
-   the prose. Only completion's own call is inside \`authorlm write\`.
-6. **Two candidate drafts per beat are not supported.** If you find yourself
-   wishing you could see a second option, note it — that is the trigger for a
-   deliberately deferred feature, and the count is the evidence for building it.
-7. **The removal section is real prose.** It gets summarized, exported and
-   pushed like anything else. Decide whether it ships.
-8. **\`write plan --replace\` still makes you resend the whole remaining plan** as
-   JSON. In conversation that is fine — you say "split beat 8 and drop beat 10"
-   and the agent rebuilds it. Typed by hand it is unpleasant, but that is not
-   the primary path.
+| Moment | What the model is for |
+|---|---|
+| **Finishing an essay** | Reading the finished prose for concepts and relationships you might want to add to the graph. Deferred through the whole loop deliberately, so it happens once over a finished essay rather than partially over every fragment. |
+| **Refreshing summaries** | Writing each essay's compressed summary — the few sentences every other essay's frame is built from. One call per essay whose text moved. |
+| **Closing a goal** | Reconstructing what you decided across the episode, so recurring patterns can be offered to you as candidate rules. |
 
-Two entries that used to live on this list are now fixed, and are described
-above instead: an open writeup is announced by the briefing (§6), and
-\`write plan --replace\` refuses rather than orphaning a pending draft (§3.7).
+Two others sit next to the loop rather than inside it: the critique pass, which
+proposes line edits over one essay at a time, and illustration rendering.
+
+<details>
+<summary><b>Under the hood — which model, and where it is set</b></summary>
+
+Everything is in \`authorlm/config.toml\`, versioned with the code. Keys live in
+\`.env\` beside it.
+
+| Job | Model | Set in |
+|---|---|---|
+| Concept extraction, and the adjudication step that screens its candidates | \`gemini/gemini-2.5-flash\` | \`[llm] model\` — the default for anything without its own setting |
+| Episode analysis, belief distillation, guidance | \`gemini/gemini-2.5-flash\` | same default |
+| Essay summaries | \`anthropic/claude-sonnet-5\` | \`[critique] summarizer_model\` |
+| The critique editor pass | \`anthropic/claude-sonnet-5\` | \`[critique] editor_model\` |
+| Illustration rendering | \`openai/gpt-image-2\`, 1536×1024 | \`[illustrations] model\`, \`[illustrations] image_size\` |
+| **Drafting the beats** | — | **nothing to set: the drafting is the conversation** |
+
+The two Sonnet settings were an author ruling (2026-08-29): both read compressed
+context into editorial judgment, which is where the stronger model earns its
+price. They require \`ANTHROPIC_API_KEY\` in \`.env\`; without it those calls fail
+loudly rather than quietly degrading.
+</details>
 
 ---
 
-## 9. Command reference (verified against argparse)
+## 11. Rough edges, stated plainly
+
+Things that are true today and that you will meet:
+
+1. **Every command needs the manuscript name** in this workspace.
+2. **A lesson has to arrive on stdin.** Passing it as an argument silently drops
+   it and then errors asking for stdin.
+3. **The claim-in-the-plan rule is not enforced by code.** A beat described only
+   as "transitional" is accepted without complaint. The guard is entirely your
+   ratification, and this is the one place where slackness costs you a fabricated
+   attribution.
+4. **Refreshing the summaries is not automatic.** It is needed both before a
+   start that the gate refuses and after every finish, and it costs one call per
+   essay whose text moved (roughly twenty-four for the whole book).
+5. **Two candidate drafts per beat are not supported.** If you find yourself
+   wishing for a second option, say so — that is the trigger for a deliberately
+   deferred feature, and the count is the evidence for building it.
+6. **The removal section is real prose.** It gets summarized, exported and pushed
+   like anything else. Decide whether it ships.
+7. **Replanning still resends the whole remaining plan.** In conversation that is
+   fine — you say "split beat 8 and drop beat 10" and it is rebuilt. Typed by
+   hand it is unpleasant, but that is not the primary path.
+8. **Two parallel rewrites each see the other's old version** (§7). Told, not
+   fixed — fixing it would mean drafting against beats you have not ruled on yet.
+
+Entries that used to live on this list and are now fixed, described above
+instead: an open writeup announces itself in the briefing (§8), replanning
+refuses rather than orphaning a pending draft (§3.8), and a mid-rewrite essay
+leaves a visible explanation in place of a blank file (§3.2).
+
+---
+
+<details>
+<summary><b>Command reference (verified against argparse)</b></summary>
 
 All take \`-m <manuscript>\` and an optional \`--writeup <id-prefix>\`.
 
@@ -1075,7 +1273,10 @@ authorlm session start | session end
 \`\`\`
 
 \`write\` is CLI-only — there are no MCP tools for the beat loop, by design. The
-agent runs these over Bash, with prose and JSON on stdin via heredocs.
+assistant runs these over Bash, with prose and JSON on stdin via heredocs. The
+verbs are the state machine and the evidence channel: they gate, record and
+collect, and the drafting happens in the conversation.
+</details>
 `,lA=s((e=>{var t=p(),n=Symbol.for(`react.element`),r=Symbol.for(`react.fragment`),i=Object.prototype.hasOwnProperty,a=t.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentOwner,o={key:!0,ref:!0,__self:!0,__source:!0};function s(e,t,r){var s,c={},l=null,u=null;for(s in r!==void 0&&(l=``+r),t.key!==void 0&&(l=``+t.key),t.ref!==void 0&&(u=t.ref),t)i.call(t,s)&&!o.hasOwnProperty(s)&&(c[s]=t[s]);if(e&&e.defaultProps)for(s in t=e.defaultProps,t)c[s]===void 0&&(c[s]=t[s]);return{$$typeof:n,type:e,key:l,ref:u,props:c,_owner:a.current}}e.Fragment=r,e.jsx=s,e.jsxs=s})),$=s(((e,t)=>{t.exports=lA()}))();function uA(e,t){let n=[],r=/(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)/g,i=0,a,o=0;for(;(a=r.exec(e))!==null;){a.index>i&&n.push(e.slice(i,a.index));let r=a[0],s=`${t}-i${o++}`;r.startsWith("`")?n.push((0,$.jsx)(`code`,{children:r.slice(1,-1)},s)):r.startsWith(`**`)?n.push((0,$.jsx)(`strong`,{children:uA(r.slice(2,-2),s)},s)):n.push((0,$.jsx)(`em`,{children:uA(r.slice(1,-1),s)},s)),i=a.index+r.length}return i<e.length&&n.push(e.slice(i)),n}function dA(e){let t=e.trim().replace(/^\|/,``).replace(/\|$/,``),n=[],r=``;for(let e=0;e<t.length;e++){let i=t[e];if(i===`\\`&&t[e+1]===`|`){r+=`|`,e++;continue}if(i===`|`){n.push(r.trim()),r=``;continue}r+=i}return n.push(r.trim()),n}var fA=/^\|?[\s:|-]+\|[\s:|-]*$/;function pA(e){let t=e.replace(/\r\n/g,`
 `).split(`
 `),n=[],r=[],i=0,a=()=>{if(!r.length)return;let e=r.join(` `).trim();r=[],e&&n.push((0,$.jsx)(`p`,{children:uA(e,`p${i}`)},`p${i++}`))};for(let e=0;e<t.length;e++){let o=t[e].trim();if(o===`<details>`||o===`</details>`){a();continue}let s=o.match(/^<summary>(.*)<\/summary>$/);if(s){a();let e=s[1].replace(/<\/?b>/g,`**`);n.push((0,$.jsx)(`p`,{className:`doc-summary`,children:uA(e,`s${i}`)},`s${i++}`));continue}if(o.startsWith("```")){a();let r=[];for(e++;e<t.length&&!t[e].trim().startsWith("```");)r.push(t[e]),e++;n.push((0,$.jsx)(`pre`,{children:(0,$.jsx)(`code`,{children:r.join(`

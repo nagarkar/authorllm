@@ -39,6 +39,7 @@ import contextlib
 import http.server
 import io
 import json
+import re
 import sys
 import tempfile
 import threading
@@ -668,6 +669,77 @@ class HelpTabTest(unittest.TestCase):
         # whole document was inlined, not just its title.
         self.assertTrue("Plan ratification is the fabrication guard" in built,
                         "only part of the tutorial reached the dist")
+        # Two more, further apart in the document and from the sections
+        # the author asked for by name, so a partial inline is caught
+        # wherever it truncates.
+        self.assertTrue("Sessions, intents, writeups — who owns what" in built,
+                        "the ownership section did not reach the dist")
+        self.assertTrue("Two essays at once" in built,
+                        "the parallel-writeups section did not reach the dist")
+
+    def _narrative(self) -> str:
+        """The tutorial's MAIN FLOW: everything outside a `<details>` fold
+        and outside a fenced block. Fenced blocks are excluded because
+        they quote program output verbatim, which is precisely 'what the
+        author SEES' and belongs in the main flow."""
+        out, depth, fenced = [], 0, False
+        for line in self.DOC.read_text(encoding="utf-8").splitlines():
+            if line.startswith("```"):
+                fenced = not fenced
+                continue
+            if line.strip().startswith("<details"):
+                depth += 1
+            if depth == 0 and not fenced:
+                out.append(line)
+            if line.strip().startswith("</details>"):
+                depth = max(0, depth - 1)
+        return "\n".join(out)
+
+    def test_the_tutorial_keeps_the_machinery_out_of_the_main_flow(self):
+        """The author's audience rule: the main flow is what they SAY and
+        SEE, in layperson terms; every command lives in a collapsed
+        `<details>` box below the step it belongs to. Checked structurally
+        rather than by eye, because prose is the one thing that rots back
+        toward jargon on every edit."""
+        body = self._narrative()
+        for pattern, token in (
+                (r"\bauthorlm \w", "authorlm <verb>"),
+                (r"(?<![\w-])--[a-z]", "a --flag"),
+                (r"\bwrite (start|plan|propose|accept|reject|complete"
+                 r"|abandon|status|digest|learn)\b", "a write verb"),
+                (r"\bsummarize (rebuild|status|show)\b", "a summarize verb"),
+                (r"\bintent (declare|complete|list|abandon)\b",
+                 "an intent verb"),
+                # "style guide" is ordinary English and stays; `style
+                # attach` is the verb.
+                (r"\bstyle attach\b", "a style verb")):
+            hit = re.search(pattern, body)
+            self.assertIsNone(
+                hit,
+                f"{token} appears in the tutorial's MAIN FLOW "
+                f"({hit.group(0)!r} at ...{body[max(0, hit.start() - 70):hit.end() + 40]!r}) "
+                f"— commands and flags belong inside an 'Under the hood' "
+                f"<details> box" if hit else "")
+        self.assertGreater(
+            self.DOC.read_text(encoding="utf-8").count("<summary>"), 10,
+            "the tutorial lost its Under-the-hood boxes")
+
+    def test_llm_mentions_are_framed_by_purpose(self):
+        """The author's second audience rule: a model call is described by
+        the JOB it does ('a model call happens here, to do X'), never by
+        mechanism-negation ('no drafting verb makes an LLM call'), which
+        told them nothing they could use."""
+        text = self.DOC.read_text(encoding="utf-8")
+        for banned in ("No drafting verb makes an LLM call",
+                       "makes no LLM call",
+                       "zero LLM"):
+            self.assertNotIn(banned, text,
+                             f"{banned!r}: mechanism-negation, not purpose")
+        # ...and the three spending moments are still named truthfully.
+        for claim in ("Reading the finished prose for concepts",
+                      "Writing each essay's compressed summary",
+                      "anthropic/claude-sonnet-5"):
+            self.assertIn(claim, text)
 
     def test_built_dist_carries_the_help_tab_itself(self):
         built = self.DIST.read_text(encoding="utf-8")
