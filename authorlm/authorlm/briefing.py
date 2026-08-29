@@ -122,6 +122,44 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         )
     ]
 
+    # An active writeup means the essay is TRUNCATED on disk and being
+    # rebuilt one accepted beat at a time (design §13.1). Until this was
+    # added, `writeups` was known only to db/api/cli-write, so the
+    # briefing — the author's front door — was silent about it, and an
+    # author returning after a week could act on a wrong belief about
+    # their own manuscript (usability-analysis §2.3). Read-only: one
+    # query plus the pending-draft lookup, nothing downstream changes.
+    active_writeups = []
+    for writeup in db.all(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active' "
+        "ORDER BY created_at",
+        (manuscript_id,),
+    ):
+        plan = loads(writeup["plan"], [])
+        cursor = writeup["cursor"]
+        current = plan[cursor] if cursor < len(plan) else None
+        pending = db.one(
+            "SELECT id FROM guidance_history WHERE batch_id = ? "
+            "AND batch_index = ? AND state = 'proposed' LIMIT 1",
+            (writeup["id"], current["n"]),
+        ) if current else None
+        if not plan:
+            progress = "no ratified beat plan yet"
+        elif current is None:
+            progress = f"all {len(plan)} planned beats done"
+        else:
+            progress = f"beat {cursor + 1} of {len(plan)}"
+        active_writeups.append({
+            "id": writeup["id"],
+            "file": writeup["file"],
+            "intent_id": writeup["intent_id"],
+            "cursor": cursor,
+            "plan_len": len(plan),
+            "progress": progress,
+            "proposal_pending": bool(pending),
+            "resume": "write status",
+        })
+
     focus_areas = unrealized_with_dependents(db, manuscript_id)
 
     # TOC completeness: the reading order is only authoritative when every
@@ -184,6 +222,7 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
         "contradictions": contradictions,
         "outstanding_questions": outstanding_questions,
         "active_intents": active_intents,
+        "active_writeups": active_writeups,
         "focus_areas": focus_areas,
         "toc_unlisted": toc_unlisted,
         # Learning velocity (§24.4): understanding gained, not words written.

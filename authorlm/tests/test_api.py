@@ -2047,7 +2047,207 @@ def check_digest_schema() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
+    """A workspace with one essay, a guide attached to it and an active
+    intent — the minimum a writeup needs. Returns (root, ws, db,
+    manuscript, intent)."""
+    import io
+
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / filename).write_text("# Epictetus\n\nThe old essay stands here.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    api.define_style_guide(db, manuscript, "Connections essays")
+    api.attach_style(db, manuscript, filename, "Connections essays")
+    intent = api.declare_intent(db, manuscript, "Rework the Epictetus essay")["intent"]
+    return root, ws, db, manuscript, intent
+
+
+def check_briefing_active_writeups() -> None:
+    """AB-1: an essay truncated mid-writeup must surface at the system's
+    front door.
+
+    `build_briefing` knew nothing of the `writeups` table, so
+    `get_briefing`, its compact MCP projection and the CLI briefing were
+    all silent while the file sat truncated on disk and half-rebuilt. An
+    author returning after a week and opening a conversation got a normal
+    briefing with no signal that the essay was mid-surgery — the one
+    failure mode that leaves them holding a false belief about their own
+    manuscript (usability-analysis §2.3 / ranked concern #1)."""
+    import io
+
+    from authorlm import briefing as briefing_module
+
+    root, ws, db, manuscript, intent = _writeup_fixture("authorlm-ab1-")
+    try:
+        quiet = briefing_module.build_briefing(db, manuscript["id"])
+        check("AB-1: build_briefing carries an active_writeups key",
+              "active_writeups" in quiet, str(sorted(quiet)))
+        check("AB-1: with nothing open, active_writeups is empty",
+              quiet.get("active_writeups") == [],
+              str(quiet.get("active_writeups")))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "briefing"])
+        check("AB-1: a briefing with no open writeup never mentions writeups",
+              "writeup" not in buf.getvalue().lower(), buf.getvalue())
+
+        api.write_start(db, manuscript, {}, "01-epictetus.md",
+                        intent["id"][:8])
+        api.write_plan(db, manuscript, [
+            {"role": "opener", "notes": "claims the crux is prohairesis"},
+            {"role": "development", "notes": "claims the scope diverges"},
+        ])
+        live = briefing_module.build_briefing(db, manuscript["id"])
+        rows = live["active_writeups"]
+        check("AB-1: the open writeup reaches the briefing", len(rows) == 1,
+              str(rows))
+        entry = rows[0] if rows else {}
+        check("AB-1: the entry names file, intent, progress and resume hint",
+              entry.get("file") == "01-epictetus.md"
+              and entry.get("intent_id") == intent["id"]
+              and entry.get("progress") == "beat 1 of 2"
+              and entry.get("plan_len") == 2
+              and entry.get("cursor") == 0
+              and entry.get("proposal_pending") is False
+              and entry.get("resume") == "write status",
+              str(entry))
+
+        api.write_propose(db, manuscript, "The crux is prohairesis.",
+                          "realizes the crux; opener per the plan")
+        pending = briefing_module.build_briefing(
+            db, manuscript["id"])["active_writeups"][0]
+        check("AB-1: a draft awaiting a verdict shows as pending",
+              pending.get("proposal_pending") is True, str(pending))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "briefing"])
+        rendered = buf.getvalue()
+        check("AB-1: the CLI briefing names the truncated file",
+              "01-epictetus.md" in rendered, rendered)
+        check("AB-1: the CLI briefing names the resume verb",
+              "write status" in rendered, rendered)
+
+        # The MCP surface serializes build_briefing's dict — but through
+        # compact_briefing, which projects a hand-listed set of keys. A
+        # key added to build_briefing alone would never reach the agent.
+        full = api.get_briefing(db, manuscript)
+        check("AB-1: api.get_briefing (MCP verbose=True) carries it",
+              len(full.get("active_writeups", [])) == 1,
+              str(full.get("active_writeups")))
+        compact = api.compact_briefing(full)
+        check("AB-1: compact_briefing (the MCP default) carries it too",
+              [w["file"] for w in compact.get("active_writeups", [])]
+              == ["01-epictetus.md"],
+              str(compact.get("active_writeups")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_replan_settles_pending_proposal() -> None:
+    """AB-2: `write plan --replace` must refuse while a draft is pending.
+
+    `write_plan(replace=True)` assigns FRESH `n`s to the replacement
+    beats, so a proposal pending on the beat at the cursor was orphaned:
+    `_beat_proposal` could never find it again, it never surfaced in
+    `write status`, it counted as `proposed` in `_beat_tallies` forever,
+    and the author's reason for replanning — the highest-value evidence
+    in the loop — was never recorded (usability-analysis §2.7, §3.3).
+
+    The fix refuses and names both exits. It does NOT auto-supersede:
+    silently marking the row `superseded` would tidy the tally while
+    still discarding the evidence."""
+    root, _ws, db, manuscript, intent = _writeup_fixture("authorlm-ab2-")
+    try:
+        api.write_start(db, manuscript, {}, "01-epictetus.md",
+                        intent["id"][:8])
+        api.write_plan(db, manuscript, [
+            {"role": "opener", "notes": "claims the crux is prohairesis"},
+            {"role": "close", "notes": "claims the divergence is scope"},
+        ])
+        api.write_propose(db, manuscript, "The crux is prohairesis.",
+                          "realizes the crux; opener per the plan")
+        try:
+            api.write_plan(db, manuscript,
+                           [{"role": "opener", "notes": "claims it differently"}],
+                           replace=True)
+            refused, message = False, ""
+        except ValueError as err:
+            refused, message = True, str(err)
+        check("AB-2: --replace is refused while a draft awaits a verdict",
+              refused, "the pending proposal was orphaned instead")
+        check("AB-2: the refusal names the reject exit and the reason it wants",
+              "write reject" in message and "--reason" in message, message)
+        check("AB-2: the refusal names the accept exit too",
+              "write accept" in message, message)
+        check("AB-2: the pending row is left untouched, not superseded",
+              db.one("SELECT COUNT(*) AS n FROM guidance_history "
+                     "WHERE batch_id = ? AND state = 'proposed'",
+                     (api._writeup(db, manuscript)["id"],))["n"] == 1,
+              "a refusal must not mutate evidence")
+
+        api.write_reject(db, manuscript,
+                         "the whole frame is wrong — the crux is not "
+                         "prohairesis but the scope of assent")
+        result = api.write_plan(
+            db, manuscript,
+            [{"role": "opener", "notes": "claims the crux is assent"}],
+            replace=True)
+        check("AB-2: once the draft is rejected, --replace succeeds",
+              result["added"] == 1 and result["kept"] == 0, str(result))
+        tallies = api._beat_tallies(db, api._writeup(db, manuscript))
+        check("AB-2: the replan leaves no row stranded as 'proposed'",
+              tallies.get("proposed", 0) == 0, str(tallies))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_style_refusal_names_candidates() -> None:
+    """AB-3: the missing-`--style` refusal must name real candidates.
+
+    `write start --new` refuses without `--style` and named only the
+    flag, sending the author away to `style guides` mid-flow. The obvious
+    value — the guide attached to the `--after` anchor — is one query
+    away (usability-analysis §2.2). The message is enriched; nothing is
+    silently defaulted, because naming the drafting law explicitly is the
+    property the gate exists to keep."""
+    root, _ws, db, manuscript, intent = _writeup_fixture("authorlm-ab3-")
+    try:
+        api.define_style_guide(db, manuscript, "Sermon voice")
+        try:
+            api.write_start(db, manuscript, {}, "weil.md", intent["id"][:8],
+                            after="01-epictetus.md", brief="A short essay.",
+                            new=True)
+            refused, message = False, ""
+        except ValueError as err:
+            refused, message = True, str(err)
+        check("AB-3: --new without --style is still refused", refused,
+              "the gate must not silently default")
+        check("AB-3: the refusal still names the flag",
+              "--style" in message, message)
+        check("AB-3: the refusal lists a real guide name",
+              "Connections essays" in message and "Sermon voice" in message,
+              message)
+        check("AB-3: the refusal names the anchor's own guide as the likely one",
+              "01-epictetus.md" in message
+              and message.index("01-epictetus.md")
+              > message.index("--style <guide>"),
+              message)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_briefing_active_writeups()
+    check_replan_settles_pending_proposal()
+    check_style_refusal_names_candidates()
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()

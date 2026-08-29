@@ -2402,6 +2402,9 @@ def compact_briefing(briefing: dict) -> dict:
         {"id": i["id"], "statement": i["statement"], "status": i["status"]}
         for i in briefing["active_intents"]
     ]
+    # Small and always whole: an open writeup means a truncated file, and
+    # a count would be useless — the agent needs the name to say it aloud.
+    out["active_writeups"] = briefing["active_writeups"]
     out["focus_areas"] = _head(
         [{"name": f["node"]["name"],
           "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
