@@ -1269,11 +1269,20 @@ written met the code as it actually landed.
    resolving `vendor_key(self.model, …)` on every access. `writing_llm` therefore only
    sets `.model`; there is nothing left to re-resolve, and the writing vendor's own
    variable is what gets sent. The design's §5 change 1 is satisfied by construction.
-2. **The key gate fires only for a KNOWN vendor prefix.** §1.1 gate 7 says "an API key
-   resolves for the writing model's own vendor". A model string with no vendor prefix
-   (a proxy or a local endpoint) has no environment variable to name, and `llm.py`
-   already treats an unlisted prefix as "let litellm resolve it". So the refusal fires
-   when `VENDOR_KEY_ENV` knows the prefix and the variable is unset, and not otherwise.
+2. **The key gate fires only for a KNOWN vendor prefix, and resolves the key the way
+   the REQUEST does.** §1.1 gate 7 says "an API key resolves for the writing model's
+   own vendor". A model string with no vendor prefix (a proxy or a local endpoint) has
+   no environment variable to name, and `llm.py` already treats an unlisted prefix as
+   "let litellm resolve it" — so the refusal fires only when `VENDOR_KEY_ENV` knows the
+   prefix. What it then checks is `vendor_key(model, [llm])`, not the vendor variable
+   directly: `[llm] api_key_env` outranks the vendor convention there, because an
+   OpenAI-compatible proxy uses an arbitrary bearer token no convention can derive.
+   Reading the vendor variable directly refused a correctly configured proxy the moment
+   it was pointed at an `anthropic/*` model string, and told the author to set a
+   variable their setup does not use. The gate also runs *inside* `draft()`, after the
+   replay-cache check rather than before it — a replayed fixture needs no key, and a
+   gate in front of the cache would have made the drafting path the one thing in the
+   record/replay suite nobody could run. It is still strictly before any live call.
 3. **`cache_control` is gated on the anthropic vendor as well as on
    `supports_prompt_caching`.** `supports_prompt_caching` is also true for
    `gemini/gemini-2.5-flash`, which is the live-optional suite's model; attaching
@@ -1303,3 +1312,32 @@ written met the code as it actually landed.
    `drafting_beats`.** Both are writeup metadata (§1.7's "no schema change, no index").
    `write status` and `write complete` print the list whenever it is non-empty, so a
    two-model writeup announces its seam on every resume.
+
+### 15.8 Hardenings from review (2026-08-29)
+
+Four more, from the implementation review. Each closed a hole that the tests as
+first written did not discriminate.
+
+1. **`BLOCKED` refuses only when it LEADS.** The parser matched the label anywhere,
+   so a beat whose prose contained a bare `BLOCKED` line — a plausible thing for
+   prose to do — was read as a refusal and silently discarded. It is now a refusal
+   only when no `DRAFT` label precedes it. Both readings stay fail-safe: a leading
+   `BLOCKED` registers nothing, a trailing one is manuscript text the author still
+   rules on.
+2. **`drafting_model` is written AFTER `write_propose` returns.** Registration is the
+   last thing that can fail, so it goes first among the writes. Recording the model
+   before it would leave a writeup claiming to have been drafted by a model on a beat
+   that was never registered — residue about work that did not happen. The
+   model-change warning is unaffected: it is computed from the metadata as it stood
+   before the call.
+3. **The zero-cache-reads warning is asserted positively.** It was free to delete with
+   the suite still green, which left the caching feature's only production
+   verification itself unverified. The predicate is now `api.cache_cold`, named and
+   unit-tested in all four of its conditions, and the printed `!!` text is pinned by
+   driving `cli._print_draft_usage` directly.
+4. **`finish_reason` is tested, not merely implemented.** A provider refusal and a
+   truncation both arrive as HTTP 200 with a body; nothing but `finish_reason`
+   separates either from a beat. Both are now exercised through the stub and asserted
+   to leave no row, no cursor move and no file change — and to say *different* things,
+   because the remedies are nothing alike. With the classification removed, a refusal
+   registers silently as a beat, which is risk R-c happening.
