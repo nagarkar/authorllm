@@ -237,6 +237,24 @@ def main_test() -> None:
               "after it is still read on its own",
               sums._cited_paragraphs("[1]-[3], then [7]") == {1, 2, 3, 7},
               str(sums._cited_paragraphs("[1]-[3], then [7]")))
+        # The flip side of parsing ranges: one malformed blanket range can
+        # now put ~100 out-of-range numbers into a coverage note, and that
+        # note goes verbatim into the drafting payload.
+        six_paras = "\n\n".join(f"Paragraph {i}." for i in range(1, 7))
+        blanket = sums._coverage_note(
+            {"summary": "MOVES: [1]-[100] covers the lot.", "state": "fresh"},
+            six_paras)
+        check("a malformed blanket range does not dump 94 numbers into the "
+              "drafting payload — the list is capped and says how many "
+              "more it is hiding",
+              blanket.count("¶") == sums.COVERAGE_LIST_CAP
+              and "…and 86 more" in blanket
+              and "the essay has 6 paragraph(s)" in blanket, blanket)
+        short = sums._coverage_note(
+            {"summary": "MOVES: [1] only.", "state": "fresh"}, six_paras)
+        check("a short list is NOT capped — no '…and N more' noise when "
+              "every number already fits",
+              "…and" not in short and short.count("¶") == 5, short)
         invented = sums.paragraph_coverage(
             "MOVES: [1] states the claim. [7] invents a paragraph.", 2)
         check("a citation past PARAGRAPH COUNT is reported as out-of-range "

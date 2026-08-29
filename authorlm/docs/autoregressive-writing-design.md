@@ -608,6 +608,20 @@ worse:
   That is what "capture every paragraph" asked for; it does not require a
   paragraph to have its own summary row.
 
+**Addendum, 2026-08-28 (the Z build pass): read the coverage figure
+narrowly.** `paragraph_coverage` now parses the cross-bracket range the
+real summarizer actually writes (`[1]-[11]`, not just the prompt's
+in-bracket `[2-3]`) — before that fix the metric slandered its own
+summaries, reporting 350+ paragraphs uncited across 18 of 24 essays
+where the true figure is 11 of 1,138. But the corrected parser buys a
+weaker guarantee than it looks: a single blanket range like `[1]-[30]`
+satisfies `complete` on its own. So a complete reading means "no
+paragraph fell outside a cited span", **not** "every paragraph got its
+own move in MOVES". The drafting trial below should not over-trust the
+number — a high coverage rate is necessary, not sufficient, and the
+qualitative half of §12.5 (does the redraft miss anything load-bearing?)
+is what actually tests whether the compression holds.
+
 **This is a measurement gap, not an opinion gap.** `paragraph_coverage` is
 tested against stub responses (this remediation pass is barred from live
 billed LLM calls), so there is no real coverage rate yet against actual

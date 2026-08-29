@@ -220,14 +220,20 @@ def before_after(db: Database, manuscript: dict, file: str,
         if file not in order:
             raise LookupError(f"'{file}' is not in the manuscript's reading order")
         if file in unlisted:
+            # Both remedies, in the right order for BOTH callers. Every
+            # pass that reads this function needs the toc entry, so that
+            # goes first and unqualified; the --after flag exists only on
+            # 'write start', so it is marked as such rather than handed
+            # to a 'critique run' user as advice for a different verb.
             raise LookupError(
                 f"'{file}' has no toc.toml entry, so the reading order "
                 f"cannot say what is settled before it and what is still "
                 f"to come (unlisted files are appended to the end, which "
                 f"would read as 'the whole book is behind me'). Add it to "
-                f"toc.toml, or declare the placement for this writeup: "
-                f"write start {file} --after <file it follows>  |  "
-                f"--after {PLACEMENT_START}")
+                f"toc.toml — that is the fix for any pass. When STARTING "
+                f"A WRITEUP on it, 'authorlm write start {file}' can take "
+                f"the placement instead, for that writeup only: "
+                f"--after <file it follows>  |  --after {PLACEMENT_START}")
         idx = order.index(file)
         before_files, after_files = order[:idx], order[idx + 1:]
     else:
@@ -289,6 +295,21 @@ STATE_WARNING = {
 }
 
 
+# How many paragraph numbers a coverage note will spell out before it
+# summarizes the rest. Since cross-bracket ranges parse (Z/M1), ONE
+# malformed blanket citation — "[1]-[100]" on a six-paragraph essay —
+# yields 94 out-of-range numbers, and this note goes verbatim into the
+# drafting payload. The count still tells the whole truth; only the
+# enumeration is bounded.
+COVERAGE_LIST_CAP = 8
+
+
+def _paragraph_list(numbers: list[int]) -> str:
+    head = ", ".join(f"¶{n}" for n in numbers[:COVERAGE_LIST_CAP])
+    rest = len(numbers) - COVERAGE_LIST_CAP
+    return head + (f" …and {rest} more" if rest > 0 else "")
+
+
 def _coverage_note(entry: dict, text: str) -> str | None:
     """Item 4's loudness. Coverage is recomputed here rather than read
     from a column (`essay_summaries` stores none — summarize_unit
@@ -307,9 +328,9 @@ def _coverage_note(entry: dict, text: str) -> str | None:
         return None
     bits = []
     if cov["missing"]:
-        bits.append(", ".join(f"¶{n}" for n in cov["missing"]) + " uncited")
+        bits.append(_paragraph_list(cov["missing"]) + " uncited")
     if cov["out_of_range"]:
-        bits.append(", ".join(f"¶{n}" for n in cov["out_of_range"])
+        bits.append(_paragraph_list(cov["out_of_range"])
                     + f" cited but the essay has {cov['paragraph_count']} "
                       "paragraph(s)")
     return WARN_PREFIX + "coverage INCOMPLETE: " + "; ".join(bits)
