@@ -1531,6 +1531,7 @@ def scenario_write_loop(root: Path) -> None:
         fake = {"since": "", "belief_changes": [], "new_beliefs": [],
                 "realized_concepts": [], "contradictions": [],
                 "outstanding_questions": [], "active_intents": [],
+                "active_writeups": [],
                 "focus_areas": [], "toc_unlisted": [], "learning_velocity": {},
                 "proposals": [],
                 "unconfirmed_concepts": [dict(fake_node, name=f"N{i}")

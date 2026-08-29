@@ -637,6 +637,46 @@ class TriageAppTest(unittest.TestCase):
         self.assertEqual(row["analysis"]["state"], "outdated")
 
 
+class HelpTabTest(unittest.TestCase):
+    """AB-6: the triage app's Help tab renders the canonical tutorial.
+
+    The tab imports `docs/writing-essays-tutorial.md` at build time
+    (vite `?raw`), so there is exactly one copy of the document and the
+    tab cannot drift from it. These checks are string checks against the
+    doc and the built single-file bundle — no browser, no npm."""
+
+    REPO = Path(__file__).resolve().parent.parent
+    DOC = REPO / "docs" / "writing-essays-tutorial.md"
+    DIST = REPO / "authorlm" / "triage_dist" / "index.html"
+    TITLE = "Writing essays with the beat loop — a tutorial"
+
+    def test_canonical_tutorial_exists_and_is_substantial(self):
+        self.assertTrue(self.DOC.is_file(), f"missing {self.DOC}")
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertGreater(len(text), 4000, "the tutorial is a stub")
+        self.assertIn(self.TITLE, text)
+
+    def test_built_dist_carries_the_tutorial(self):
+        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        built = self.DIST.read_text(encoding="utf-8")
+        # `assertTrue`, not `assertIn`: the haystack is an 800 kB
+        # single-file bundle and assertIn would print all of it.
+        self.assertTrue(self.TITLE in built,
+                        "the dist was not rebuilt after the doc changed "
+                        "(cd web/triage-app && npm run build)")
+        # A distinctive line from deep inside the tutorial: proves the
+        # whole document was inlined, not just its title.
+        self.assertTrue("Plan ratification is the fabrication guard" in built,
+                        "only part of the tutorial reached the dist")
+
+    def test_built_dist_carries_the_help_tab_itself(self):
+        built = self.DIST.read_text(encoding="utf-8")
+        self.assertTrue("help-doc" in built,
+                        "the Help tab's markup is missing from the dist")
+        self.assertTrue("AUTHORLM / HELP" in built,
+                        "the Help tab's kicker is missing from the dist")
+
+
 class TriageServerWireContractTest(unittest.TestCase):
     """T3 (risk-register §3): triage_server.make_handler had zero test
     references anywhere in the suite. Pins the actual HTTP wire contract a

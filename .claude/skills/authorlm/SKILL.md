@@ -137,7 +137,16 @@ not said.
    required (name resolution is substring-based, so without it a typo
    would silently become a new essay), `--after` is required (a file that
    does not exist has no position to infer), and `--style` is required
-   (`style attach` cannot run before the file exists). **The brief is
+   (`style attach` cannot run before the file exists).
+   **PROPOSE the style guide; do not ask an open question.** Before the
+   start command, run `authorlm style guides`, read the placement
+   anchor's attachment, and put it to the author in the same breath as
+   the placement — "after becker.md, so 'Connections essays' — yes?" —
+   naming the other guides on record if the answer is not obvious. Never
+   ask "which style guide?" with no candidates, and never guess silently:
+   the attachment is drafting law and naming it is the author's explicit
+   act. (The refusal names the candidates too, but the author should not
+   have to see a refusal to learn them.) **The brief is
    REQUIRED with `--new` and travels on stdin**: a brand-new file has no
    pinned raw material, so the brief is the only essay-specific ground the
    beats have. You may DRAFT a candidate brief from the graph and the
@@ -170,7 +179,18 @@ not said.
    must be unique across the whole digest, because the removal accounting
    references them. **Present the digest in the conversation and have the
    author correct it BEFORE persisting** — that review is what makes it
-   evidence rather than a machine reading. Then
+   evidence rather than a machine reading.
+   **Present it as a numbered prose READING, never as JSON and never as a
+   flat wall of items.** The author never sees the payload. Read the
+   points back in the original's own order, numbered, each in one
+   sentence with its example or reference attached to it rather than
+   listed separately. Then, after the reading, put the two or three you
+   are least confident about and every claimed inconsistency to the
+   author explicitly by number — those are where their ruling changes the
+   outcome ("does discernment.md really own p6?"). Take corrections by
+   number, in words; you re-compose the JSON. A digest of ~18 items shown
+   as data gets rubber-stamped, and a rubber-stamped digest is exactly
+   the machine reading the review exists to prevent. Then
    `authorlm write digest < digest.json`. Replace with `--replace` (refused
    if it would drop an id that already carries a disposition);
    `--show` prints what is stored plus the tally.
@@ -188,6 +208,15 @@ not said.
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
    Amend later with `--replace` (written beats are kept; replacement beats
    get fresh `n`s automatically).
+   **Before `write plan --replace`, SETTLE any pending proposal** —
+   normally `write reject --reason "<why the plan is wrong>"`, because
+   that reason is precisely the evidence the replan exists to record.
+   Replacement beats get fresh `n`s, so a draft left pending on a dropped
+   beat would be stranded as `proposed` forever, invisible to
+   `write status` and permanently skewing the tallies. The verb now
+   refuses the replace and names both exits (reject with a reason, or
+   accept the draft first) — treat the refusal as a reminder, not a
+   surprise, and never reach for `write accept` merely to clear it.
    **Plan ratification is the fabrication guard, and it is a hard
    requirement.** A beat spec's `notes` must state THE CLAIM THE BEAT WILL
    MAKE, not merely its rhetorical function: `{"role": "development",
@@ -230,6 +259,20 @@ not said.
    `write reject --reason`) and the nuance goes in the reason, which is
    what the removal section quotes. Merging is by id and a change of mind
    is reported, not hidden.
+   **You DERIVE the `kept` half yourself and record it without asking.**
+   The ratified plan names the point ids per beat, `--why` repeats them by
+   id, and accept records which beat landed — so every `kept` (with its
+   `beat`) is already determined, and pulling the author into a JSON
+   accounting step for it is the highest-frequency non-judgment
+   interruption in the whole workflow. **Bring the author ONLY the
+   removals**, one at a time, in words: a point that is in the digest and
+   in no accepted beat is a removal awaiting their ruling, and the reason
+   is theirs and required. State the derived `kept` set in one line
+   BEFORE you run `write digest --dispositions` ("p1, p3, p7 kept across
+   beats 2-4 — recording that"), in the same turn and without asking a
+   question: shown before recorded, so a wrong derivation is contradicted
+   while it is still a sentence rather than after it is evidence. Do not
+   ask them to compose it, and do not make them answer to proceed.
    The **final beat(s) are the `## **What Was Removed and Why**` section**,
    drafted from the RECORDED reasons — do not re-invent them at drafting
    time; the judgments were made when they were recorded, and you write
@@ -249,7 +292,15 @@ not said.
    ```
 
    Honor recorded learnings in subsequent drafts (`write status` shows them).
-6. **Complete / interrupt.** `authorlm write complete` closes the writeup
+6. **Complete / interrupt.** When the author accepts the last beat, or
+   says the essay is done, **that IS the consent — proceed and report**.
+   Do not ask a confirming question whose answer they have already given
+   ("shall I complete the writeup?"): run `authorlm write complete`, then
+   `authorlm summarize rebuild` (mention the spend — roughly one
+   cheap-tier call per stale unit), then `complete_intent`, and report the
+   accounting tally and the episode analysis in a sentence or two.
+   `close_session` is OFFERED, not required.
+   `authorlm write complete` closes the writeup
    and runs the deferred extraction pass; intent completion stays separate
    (`complete_intent`, which runs episode analysis). `write abandon`
    restores the file from the pinned source — or DELETES it, if this

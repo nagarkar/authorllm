@@ -401,6 +401,83 @@ body::before {
 .boot-screen span { width: 32px; height: 32px; border: 2px solid var(--line); border-top-color: var(--orange); border-radius: 50%; animation: turn .8s linear infinite; }
 @keyframes turn { to { transform: rotate(360deg); } }
 
+/* The boot error yields most of its height once help is opened behind it:
+   the message stays on screen, the tutorial gets the viewport. */
+.boot-error.compact { min-height: 0; padding: 22px 26px; }
+
+/* Help tab — the canonical tutorial, rendered by src/markdown.tsx. */
+.help-doc { padding: 26px 26px 60px; background: var(--paper); }
+.help-doc-intro {
+  max-width: 74ch;
+  margin: 10px 0 4px;
+  color: #5a5147;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.help-doc-body { display: block; max-width: 74ch; }
+.help-doc-body h2, .help-doc-body h3, .help-doc-body h4,
+.help-doc-body h5, .help-doc-body h6 {
+  margin: 30px 0 10px;
+  font-family: "Iowan Old Style", "Baskerville", serif;
+  font-weight: 500;
+  letter-spacing: -.02em;
+}
+.help-doc-body h2 { font-size: 30px; }
+.help-doc-body h3 { font-size: 22px; }
+.help-doc-body h4 { font-size: 17px; }
+.help-doc-body h5, .help-doc-body h6 { font-size: 14px; }
+.help-doc-body p, .help-doc-body li { color: #5a5147; font-size: 14px; line-height: 1.62; }
+.help-doc-body ul, .help-doc-body ol { padding-left: 22px; }
+.help-doc-body li { margin: 5px 0; }
+.help-doc-body hr { margin: 32px 0; border: 0; border-top: 1px solid var(--line); }
+.help-doc-body code {
+  padding: 1px 4px;
+  background: var(--paper-deep);
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+.help-doc-body pre {
+  overflow-x: auto;
+  margin: 14px 0;
+  padding: 13px 16px;
+  border-left: 3px solid var(--orange);
+  background: #f6efe3;
+}
+.help-doc-body pre code { padding: 0; background: none; line-height: 1.5; }
+.help-doc-body blockquote {
+  margin: 14px 0;
+  padding: 10px 16px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+  font-family: "Iowan Old Style", serif;
+  font-size: 16px;
+}
+.help-doc-body .doc-summary {
+  margin: 20px 0 6px;
+  color: var(--orange-dark);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.doc-table { overflow-x: auto; margin: 14px 0; }
+.doc-table table { border-collapse: collapse; width: 100%; }
+.doc-table th, .doc-table td {
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--line);
+  color: #5a5147;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  vertical-align: top;
+}
+.doc-table th {
+  color: var(--ink);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
 @media (max-width: 1050px) {
   .control-deck, .selection-bar { align-items: stretch; flex-direction: column; }
   .analysis-actions, .verb-tools { justify-content: flex-start; flex-wrap: wrap; }
@@ -552,6 +629,8 @@ body::before {
   }
   .triage-card footer strong { color: var(--orange-dark); }
   .panel, .modal-card { padding: 26px 20px; box-shadow: 6px 6px 0 rgba(40,35,29,.2); }
+  .help-doc { padding: 16px 14px 44px; }
+  .help-doc-body h2 { font-size: 24px; }
   .run-banner, .progress-strip { align-items: flex-start; padding: 12px 16px; flex-wrap: wrap; }
   .progress-track { order: 3; flex-basis: 100%; }
 }

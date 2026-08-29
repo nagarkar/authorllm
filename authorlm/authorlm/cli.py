@@ -483,6 +483,7 @@ def _print_briefing(db: Database, manuscript: dict):
         briefing["realized_concepts"], briefing["unconfirmed_concepts"],
         briefing["inferred_edges"], briefing["outstanding_questions"],
         briefing["focus_areas"], briefing["active_intents"],
+        briefing["active_writeups"],
     ])
     if fresh and empty:
         print(ui.dim("First session — nothing learned yet."))
@@ -490,6 +491,22 @@ def _print_briefing(db: Database, manuscript: dict):
         print(ui.dim("First look at this manuscript."))
     else:
         print(ui.dim(f"Since your last session ({briefing['since'][:16].replace('T', ' ')} UTC)."))
+
+    if briefing["active_writeups"]:
+        # First, and yellow: the file named here is truncated on disk and
+        # half-rebuilt. Everything else in the briefing is knowledge; this
+        # is the state of the manuscript itself.
+        print(ui.yellow("\nOpen writeups — these files are truncated on disk "
+                        "and rebuilding one accepted beat at a time:"))
+        for writeup in briefing["active_writeups"]:
+            pending = (" · a draft awaits your verdict"
+                       if writeup["proposal_pending"] else "")
+            print(f"  • {ui.bold(writeup['file'])} — {writeup['progress']}"
+                  f"{pending} "
+                  + ui.dim(f"[{writeup['id'][:8]} · intent "
+                           f"{writeup['intent_id'][:8]}]"))
+        print(ui.dim("  → resume: write status   ·   "
+                     "restore the old text: write abandon"))
 
     if briefing["belief_changes"]:
         print(ui.bold("\nBeliefs strengthened/weakened:"))

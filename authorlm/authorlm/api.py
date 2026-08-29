@@ -833,6 +833,35 @@ def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
     return _resolve_relpath(manuscript, after)
 
 
+def _style_candidates(db: Database, manuscript_id: str,
+                      placement: str | None) -> str:
+    """The tail of the missing-`--style` refusal: the guide names on
+    record, and — when the placement anchor has one attached — the guide
+    that anchor uses, which is almost always the answer. Read-only and
+    best-effort; a refusal must never fail while composing its own
+    message."""
+    from . import summaries as sums
+
+    guides = [row["name"] for row in db.all(
+        "SELECT name FROM style_guides WHERE manuscript_id = ? ORDER BY name",
+        (manuscript_id,))]
+    if not guides:
+        return ("\n  No style guides exist yet — define one first: "
+                "style guide <name>.")
+    parts = ["\n  Guides on record: "
+             + ", ".join(f"'{name}'" for name in guides) + "."]
+    if placement and placement != sums.PLACEMENT_START:
+        anchor = db.one(
+            "SELECT sg.name AS name FROM style_attachments sa "
+            "JOIN style_guides sg ON sg.id = sa.guide_id "
+            "WHERE sa.manuscript_id = ? AND sa.file = ?",
+            (manuscript_id, placement))
+        if anchor:
+            parts.append(f"\n  {placement} uses '{anchor['name']}' — "
+                         f"likely the one you want.")
+    return "".join(parts)
+
+
 def write_start(db: Database, manuscript: dict, config: dict,
                 file: str, intent_prefix: str,
                 after: str | None = None, brief: str | None = None,
@@ -872,10 +901,17 @@ def write_start(db: Database, manuscript: dict, config: dict,
         # that integrity rule is not weakened here. So the guide is named
         # at start and validated before anything is created.
         if not style:
+            # Enrich the message; never silently default. The guide IS
+            # the drafting law, so attaching it stays the author's
+            # explicit act — but the refusal can at least stop sending
+            # them away to `style guides` mid-flow (usability-analysis
+            # §2.2): name the guides on record, and the anchor's own
+            # guide as the likely choice.
             raise ValueError(
                 f"{relpath} has no attached style guide — the effective "
                 f"guide is the drafting law. With --new, name it: "
-                f"--style <guide>.")
+                f"--style <guide>."
+                + _style_candidates(db, mid, placement))
         guide = st.get_guide(db, mid, style)
         if not guide:
             raise LookupError(f"no style guide named '{style}'")
@@ -987,6 +1023,34 @@ def write_plan(db: Database, manuscript: dict, beats: list,
     if plan and not replace:
         raise ValueError("a plan exists — pass --replace to amend the "
                          "remaining (unwritten) beats")
+    if replace:
+        # Replacement beats get FRESH n's, so a draft still pending on a
+        # beat about to be dropped would be orphaned: _beat_proposal
+        # could never match it again, `write status` would never show it,
+        # and it would count as 'proposed' in the tallies forever — while
+        # the author's reason for replanning, the highest-value evidence
+        # the loop can receive, went unrecorded (usability-analysis §2.7).
+        # Refuse and name both exits. Deliberately NOT auto-superseded:
+        # that would tidy the tally while still discarding the evidence.
+        dropped = [b.get("n") for b in plan[writeup["cursor"]:]
+                   if b.get("n") is not None]
+        stranded = [
+            row for row in db.all(
+                "SELECT * FROM guidance_history WHERE batch_id = ? "
+                "AND state = 'proposed'", (writeup["id"],))
+            if row["batch_index"] in dropped
+        ]
+        if stranded:
+            stranded_beats = ", ".join(
+                f"n={row['batch_index']}" for row in stranded)
+            raise ValueError(
+                f"a draft is still awaiting your verdict on beat "
+                f"{stranded_beats} — "
+                f"replacing the plan would strand it as 'proposed' forever "
+                f"and lose the reason you are replanning for. Settle it "
+                f"first: 'write reject --reason \"<why the plan is wrong>\"' "
+                f"(that reason IS the evidence for the replan), or "
+                f"'write accept' to keep the draft.")
     meta = loads(writeup["metadata"], {})
     next_n = meta.get("next_n", 1)
     fresh = []
@@ -2402,6 +2466,9 @@ def compact_briefing(briefing: dict) -> dict:
         {"id": i["id"], "statement": i["statement"], "status": i["status"]}
         for i in briefing["active_intents"]
     ]
+    # Small and always whole: an open writeup means a truncated file, and
+    # a count would be useless — the agent needs the name to say it aloud.
+    out["active_writeups"] = briefing["active_writeups"]
     out["focus_areas"] = _head(
         [{"name": f["node"]["name"],
           "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
