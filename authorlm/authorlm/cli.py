@@ -3291,14 +3291,23 @@ def cmd_write(args):
                         print(ui.yellow(f'    {point_id}  "{claim}"'))
                     print(ui.yellow("  Record them: write digest "
                                     "--dispositions  (JSON on stdin)."))
+            # `--after start` is a SENTINEL, not a file: "after start"
+            # reads as a file named start, which is the one thing the
+            # sentinel exists because there is no file for.
+            from . import summaries as _sums
+
+            at_start = result["toc_placement"] == _sums.PLACEMENT_START
+            where = ("at the start" if at_start
+                     else f"after {result['toc_placement']}")
             if result["toc_registered"]:
                 print(f"Registered {result['summary_hint']} in toc.toml "
-                      f"after {result['toc_placement']}.")
+                      f"{where}.")
             elif result["toc_registered"] is False:
                 print(ui.yellow(
                     f"could not place {result['summary_hint']} in toc.toml "
-                    f"automatically — add this stanza after the "
-                    f"{result['toc_placement']} entry:"))
+                    f"automatically — add this stanza "
+                    + ("at the top, before the first [[chapter]]:" if at_start
+                       else f"after the {result['toc_placement']} entry:")))
                 print(result["toc_stanza"])
             print(ui.dim(
                 f"{result['summary_hint']}'s summary is now stale — run "

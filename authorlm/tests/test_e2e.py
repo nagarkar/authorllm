@@ -2129,6 +2129,31 @@ def scenario_write_new_and_digest(root: Path) -> None:
               "missing summaries: 03-new.md" in out, out)
         run(ws, "summarize", "rebuild", "--all")
 
+        # ---- F8: an essay placed with the `start` SENTINEL. "after start"
+        # is not a file name and reads as one; the sentinel is the one
+        # position `--after <file>` cannot express, and the report should
+        # say what actually happened.
+        run_stdin(ws, BRIEF_A, "write", "start", "00-front.md", "--new",
+                  "--intent", intent_id, "--after", "start",
+                  "--style", "House")
+        run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
+                  "write", "plan")
+        run_stdin(ws, "An opening beat, before everything else.",
+                  "write", "propose", "--why", "opens the book")
+        run_stdin(ws, "", "write", "accept")
+        out = run_stdin(ws, "", "write", "complete")
+        check("F8 — the start sentinel reads as a position, not as a file "
+              "named 'start'",
+              "Registered 00-front.md in toc.toml at the start." in out
+              and "after start" not in out, out)
+        toc_now = (ms / "toc.toml").read_text()
+        order, _unlisted = _reading_order(
+            {"toc.toml": toc_now, "00-front.md": "", "01-choice.md": "",
+             "02-essay.md": "", "03-new.md": ""})
+        check("F8 — and it really does open the book",
+              order[0] == "00-front.md", str(order))
+        run(ws, "summarize", "rebuild", "--all")
+
         # ---- UC-B: the modeled rewrite of 02-essay.md.
         out = run(ws, "intent", "declare", "Rewrite the essay, same crux")
         rewrite_id = out.split("[")[1].split("]")[0]
