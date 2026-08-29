@@ -6112,6 +6112,97 @@ def main_test() -> None:
             check("gemini HTTPError is not retried as a transient stall",
                   http_calls["n"] == 1 and "500" in str(err), str(err))
 
+        # --- AE/temp-compat: Claude 5 family rejects temperature != 1 ---
+        # litellm.completion() raises UnsupportedParamsError for these
+        # models with the fixed message "...To drop unsupported params,
+        # set `litellm.drop_params = True`." — that rejection is
+        # deterministic (identical retry => identical failure), so the fix
+        # must resolve it before the call, not by catching-and-retrying.
+        # This fake stands in for the real litellm module (litellm itself
+        # isn't a hermetic-test dependency); it reproduces exactly the one
+        # behavior under test — real litellm's own drop_params contract —
+        # via the SAME module attribute (`drop_params`) our code sets.
+        from authorlm.llm import LLMClient
+
+        class FakeUnsupportedParamsError(Exception):
+            pass
+
+        def make_fake_litellm(no_temp_models, fail_times=0,
+                              transient_exc=None):
+            calls = []
+            state = {"raises_left": fail_times}
+            module = types.SimpleNamespace(
+                suppress_debug_info=False, drop_params=False,
+                UnsupportedParamsError=FakeUnsupportedParamsError)
+
+            def completion(model, messages, timeout=None, **kwargs):
+                if transient_exc is not None and state["raises_left"] > 0:
+                    state["raises_left"] -= 1
+                    raise transient_exc
+                if ("temperature" in kwargs and model in no_temp_models
+                        and kwargs["temperature"] != 1):
+                    if not module.drop_params:
+                        raise FakeUnsupportedParamsError(
+                            f"{model} does not support temperature="
+                            f"{kwargs['temperature']}. Only temperature=1 "
+                            "is supported. To drop unsupported params, "
+                            "set `litellm.drop_params = True`.")
+                    kwargs = {k: v for k, v in kwargs.items()
+                             if k != "temperature"}
+                calls.append({"model": model, **kwargs})
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="the reply"))],
+                    usage=types.SimpleNamespace(prompt_tokens=11,
+                                                completion_tokens=7))
+
+            module.completion = completion
+            return module, calls
+
+        # (1) A temperature-rejecting model still gets called correctly —
+        # one call, no wasted backoff retry.
+        fake1, calls1 = make_fake_litellm({"anthropic/claude-sonnet-5"})
+        sleeps1 = []
+        client1 = LLMClient({"llm": {"enabled": True,
+                                     "model": "anthropic/claude-sonnet-5"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake1}), \
+                mock.patch("authorlm.llm.time.sleep", sleeps1.append):
+            reply1 = client1.complete("sys", "usr")
+        check("a temperature-rejecting model (Claude 5 family) still "
+              "returns a reply",
+              reply1 == "the reply", (reply1, calls1))
+        check("...in one call, without burning the transient-failure "
+              "backoff",
+              len(calls1) == 1 and not sleeps1, (calls1, sleeps1))
+        check("litellm.drop_params is set so the param is shed before the "
+              "call, not caught after it fails",
+              fake1.drop_params is True)
+
+        # (2) A model that DOES accept temperature still receives it.
+        fake2, calls2 = make_fake_litellm({"anthropic/claude-sonnet-5"})
+        client2 = LLMClient({"llm": {"enabled": True,
+                                     "model": "gemini/gemini-2.5-flash"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake2}):
+            reply2 = client2.complete("sys", "usr")
+        check("a model that accepts temperature still receives it",
+              reply2 == "the reply" and calls2[0].get("temperature") == 0.2,
+              calls2)
+
+        # (3) A genuine transient failure (not a param-support rejection)
+        # still gets the existing backoff retries.
+        fake3, calls3 = make_fake_litellm(
+            set(), fail_times=1, transient_exc=ConnectionError("stalled"))
+        sleeps3 = []
+        client3 = LLMClient({"llm": {"enabled": True,
+                                     "model": "gemini/gemini-2.5-flash"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake3}), \
+                mock.patch("authorlm.llm.time.sleep", sleeps3.append):
+            reply3 = client3.complete("sys", "usr")
+        check("a genuine transient failure still retries with backoff "
+              "and eventually succeeds",
+              reply3 == "the reply" and len(calls3) == 1
+              and sleeps3 == [1], (calls3, sleeps3))
+
         def boom_main(argv):
             raise RuntimeError("network down")
 
