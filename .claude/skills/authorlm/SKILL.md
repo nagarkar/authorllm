@@ -237,8 +237,18 @@ not said.
    it in the plan — the loop appends, so the last beat lands last), and it
    is proposed and accepted like any other beat.
 5. **Learnings.** When a pattern recurs across verdicts (not on every
-   verdict), distill one line: `authorlm write learn "<lesson>"`, and honor
-   recorded learnings in subsequent drafts (`write status` shows them).
+   verdict), distill one line and send it on STDIN — `write learn` takes no
+   positional lesson (a positional after `-m` trips argparse's greedy
+   `nargs='*'`), so `authorlm write learn "<lesson>"` silently ignores the
+   argument and then refuses for want of stdin:
+
+   ```
+   authorlm write learn <<'EOF'
+   <the one-line lesson>
+   EOF
+   ```
+
+   Honor recorded learnings in subsequent drafts (`write status` shows them).
 6. **Complete / interrupt.** `authorlm write complete` closes the writeup
    and runs the deferred extraction pass; intent completion stays separate
    (`complete_intent`, which runs episode analysis). `write abandon`
