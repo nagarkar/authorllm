@@ -1491,3 +1491,14 @@ recommendations):
   essays, four over a single transitional paragraph; coverage is span
   membership, not a quality guarantee. Staleness — an actual lie about
   the text — already blocks.
+
+### 15.14 The committed triage dist can no longer go stale unnoticed (2026-08-29)
+
+AK: `authorlm/triage_dist/index.html` inlines `docs/writing-essays-tutorial.md`
+(vite `?raw` import) as a committed build product, so HelpTabTest's
+line-pinned tripwires could still pass against a stale dist if a rewrite
+happened to keep those exact lines. `vite.config.ts`'s `tutorial-checksum`
+plugin now hashes the doc's raw bytes at build time and stamps
+`<!-- tutorial-sha256:<hex> -->` into the emitted HTML; `HelpTabTest`
+recomputes the same hash from the doc and asserts an exact match, making any
+doc edit without a rebuild a structural test failure.
