@@ -411,14 +411,24 @@ def new_id(prefix: str) -> str:
 
 
 def ko_fields(prefix: str) -> dict[str, Any]:
-    """Fresh KnowledgeObject base fields."""
+    """Fresh KnowledgeObject base fields.
+
+    This is the single constructor of the KnowledgeObject base for every
+    table in the schema, so it is also the single client-provenance stamp
+    site: every row born after this change carries the join key naming
+    the chat that produced it, with zero call-site edits and nothing to
+    drift when a table is added (design §5.1). ~70 bytes and one dict
+    lookup per row; it gates nothing, and an unresolved client
+    contributes an empty `{}`, exactly as before."""
+    from . import clients
+
     return {
         "id": new_id(prefix),
         "version": 1,
         "created_at": now_iso(),
         "created_by": getpass.getuser(),
         "schema_version": SCHEMA_VERSION,
-        "metadata": "{}",
+        "metadata": json.dumps(clients.row_stamp()),
     }
 
 
