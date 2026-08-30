@@ -1473,3 +1473,21 @@ line and omits it.
 still unconditional. The registry now says the same thing about the drafting
 model declaratively; a test asserts the two never disagree rather than making
 either derive from the other.
+
+### 15.13 Standing defaults ratified (2026-08-30)
+
+Two open Sponsor questions are closed as RATIFIED DEFAULTS, no longer
+pending rulings (author: "Adopt", 2026-08-30, on the orchestrator's
+recommendations):
+
+- **Unaccounted digest points at `write complete` WARN and never block**
+  (§13's Q1). Rationale ratified with it: a block can be satisfied by a
+  lazy `kept` on a dropped point — it converts a visible gap into an
+  invisible lie; the warning names every unaccounted id; completion
+  remains the author's call. MT-4 remains the standing way to revisit
+  with evidence.
+- **Incomplete paragraph coverage WARNS and never blocks drafting**
+  (§12.4 item 4). Measured basis: blocking would have stopped 5 of 24
+  essays, four over a single transitional paragraph; coverage is span
+  membership, not a quality guarantee. Staleness — an actual lie about
+  the text — already blocks.
