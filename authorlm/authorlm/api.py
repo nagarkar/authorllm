@@ -4064,6 +4064,28 @@ def _run_tallies(threads: list[dict]) -> dict:
     }
 
 
+def _other_active_filters(db: Database, manuscript_id: str, rel: str,
+                          name: str) -> str | None:
+    """The warning a run's CREATION carries when another filter already
+    has an active run on this file.
+
+    Warn, never refuse: two filters on one essay is legitimate work, and
+    refusing would be the machine deciding the author's order (§15.19
+    rule 3 — invalidate loudly, never silently). Their staged edits CAN
+    collide on one unit; whichever settles second then hits
+    `compose_marked_text`'s drift check and refuses loudly, which is a
+    safe failure rather than a silent wrong answer."""
+    others = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' AND filter != ?", (manuscript_id, rel, name))]
+    if not others:
+        return None
+    return (f"{', '.join(r['filter'] for r in others)} already has an "
+            f"active run on {rel}. Two filters on one essay is fine, but "
+            f"their edits can collide on the same unit — whichever settles "
+            f"second will refuse on the drift check.")
+
+
 def filter_add(manuscript: dict, name: str, text: str) -> dict:
     from . import filters as flt
 
@@ -4105,6 +4127,16 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
 
     units = passes.paragraphs_of(text)
     run = _active_filter_run(db, mid, name, rel)
+    if run is None and meta["class"] == "global":
+        # BEFORE the row is created, deliberately: a global run whose
+        # registry has never been written is not a run that has stalled,
+        # it is a run that has not begun, and leaving a half-made row
+        # behind would make `filter status` report one that does not
+        # exist.
+        raise ValueError(
+            f"'{name}' is a GLOBAL filter: every unit is judged against a "
+            f"frozen registry read from the whole essay, and there is no "
+            f"run yet. Run 'filter prelude {name} {rel}' first.")
     if run is not None and again:
         raise ValueError(
             f"a run of '{name}' on {rel} is already active (cursor at "
@@ -4127,22 +4159,9 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
                         f"{t['accepted']} accepted / {t['rejected']} "
                         f"rejected). Nothing has changed since. To look "
                         f"anyway: --again")
-        others = [dict(r) for r in db.all(
-            "SELECT * FROM filter_runs WHERE manuscript_id = ? AND "
-            "file = ? AND status = 'active' AND filter != ?",
-            (mid, rel, name))]
-        if others:
-            # Warn, never refuse: two filters on one essay is legitimate
-            # work, and refusing would be the machine deciding the
-            # author's order (§15.19 rule 3 — invalidate loudly, never
-            # silently). Their staged edits CAN collide on one unit; the
-            # second settle then hits compose_marked_text's drift check
-            # and refuses loudly, which is a safe failure.
-            warnings.append(
-                f"{', '.join(r['filter'] for r in others)} already has an "
-                f"active run on {rel}. Two filters on one essay is fine, "
-                f"but their edits can collide on the same unit — whichever "
-                f"settles second will refuse on the drift check.")
+        collision = _other_active_filters(db, mid, rel, name)
+        if collision:
+            warnings.append(collision)
         # `class` is a reserved word, so the column is set by
         # subscript rather than as a keyword — and it is FROZEN here:
         # editing _filters/<name>.md mid-run cannot change a live run's
@@ -4248,7 +4267,11 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             "its carried STATE, not a frozen registry.")
     units = passes.paragraphs_of(text)
     run = _active_filter_run(db, mid, name, rel)
+    warnings: list[str] = []
     if run is None:
+        collision = _other_active_filters(db, mid, rel, name)
+        if collision:
+            warnings.append(collision)
         row = ko_fields("fr")
         row.update(manuscript_id=mid, filter=name, file=rel,
                    source_version_id=_latest_version_id(db, mid),
@@ -4270,7 +4293,7 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),
-            "registry": None, "native": False}
+            "registry": None, "native": False, "warnings": warnings}
     if reply is not None:
         registry = fg.parse_prelude(fg.reply_json(reply))
     elif native:

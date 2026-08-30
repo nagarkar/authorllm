@@ -3288,6 +3288,7 @@ def cmd_filter(args):
                 db, manuscript, config, args.name, args.file,
                 replace=args.replace, native=args.native,
                 reply=_stdin_text())
+            _print_filter_warnings(result.get("warnings"))
             if result["registry"] is None:
                 print(ui.dim(f"Prelude payload for {result['file']} "
                              f"({result['unit_count']} units) — no call "

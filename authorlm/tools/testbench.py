@@ -44,6 +44,7 @@ checks land here as named checks rather than as one-off scripts.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -358,7 +359,18 @@ FENCE_RE = re.compile(r"\A(?P<fence>```+|~~~+)")
 # A markdown line that is NOT plain paragraph prose. Up to three leading
 # spaces still counts as the same block (four makes it a code block,
 # handled separately).
-BLOCK_RE = re.compile(r"\A {0,3}(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||<)")
+# A line that markdown renders as something OTHER than paragraph prose:
+# heading, blockquote, list item, table row, or an HTML block.
+#
+# The HTML case requires a plausible tag start (`<` then a letter, `!`,
+# `/` or `?`), not a bare `<`. CommonMark's HTML-block rules need a tag
+# name too, so a line opening `<<old>>{{new}}` — the pending-change form
+# the filter pass writes into a local file — is an ordinary paragraph
+# and renders as visible text with the angle brackets escaped. Matching a
+# bare `<` classified that form as invisible machinery, which is the
+# exact opposite of what it is and of what `--check filter` must assert.
+BLOCK_RE = re.compile(
+    r"\A {0,3}(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||<[a-zA-Z!/?])")
 
 
 def front_matter(text: str) -> str:
@@ -722,8 +734,267 @@ def check_intent_scope(workspace: Path, manuscript_dir: Path) -> int:
     return report.failed
 
 
+
+# ------------------------------------------------------ --check filter
+
+# A trivial SEQUENTIAL filter, constant text owned by this script — never
+# the author's own `_filters/`, which this check must not touch.
+TB_FILTER = "tb-dupes"
+TB_FILTER_TEXT = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n'
+    "---\n\n"
+    "# Test-bench duplicate words\n\n"
+    "A filter owned by tools/testbench.py. Flag a word used again too "
+    "soon and propose the wording that removes the repetition without "
+    "removing anything else. Change nothing else in the unit.\n")
+
+
+def _echo_of(paragraph: str) -> str:
+    return " ".join(paragraph.split()[:5])
+
+
+def _units_of(text: str) -> list[str]:
+    from authorlm.passes import paragraphs_of
+
+    return paragraphs_of(text)
+
+
+def _tb_reply(units: list[str], replaces: dict[int, str],
+              echo_override: dict[int, str] | None = None) -> str:
+    entries = []
+    for n, unit in enumerate(units, 1):
+        echo = (echo_override or {}).get(n, _echo_of(unit))
+        if n in replaces:
+            entries.append({"n": n, "echo": echo, "action": "replace",
+                            "new": replaces[n],
+                            "why": "the bench's constant reason"})
+        else:
+            entries.append({"n": n, "echo": echo, "action": "keep"})
+    return json.dumps({"units": entries,
+                       "state": "bench ledger: one line, constant"})
+
+
+def _filter_rows(db: Database, manuscript: dict) -> list[dict]:
+    return [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'filter' AND file = ? ORDER BY origin_id",
+        (manuscript["id"], TARGET))]
+
+
+def _active_run(db: Database, manuscript: dict) -> dict | None:
+    row = db.one(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+        (manuscript["id"], TARGET))
+    return dict(row) if row else None
+
+
+def check_filter(workspace: Path, manuscript_dir: Path, *,
+                 _corrupt=None) -> int:
+    """a filter pass runs, stages, marks and settles with ZERO model calls.
+
+    Drives the real CLI against the real database in the shape `--check
+    placeholder` established: a try/finally that rolls back and restores,
+    byte-for-byte assertions, provider keys scrubbed from every
+    subprocess, and the bench name re-asserted before each mutating step.
+
+    `_corrupt` is a test seam and nothing else: a callable applied to the
+    marked file's text, used by the hermetic suite to prove this check
+    DISCRIMINATES — forms hidden inside an HTML comment must make the
+    visibility assertions FAIL. Production has no caller for it."""
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    active = db.one(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active'", (manuscript["id"], TARGET))
+    if active:
+        raise BenchRefusal(
+            f"writeup [{active['id'][:11]}] is already active on {TARGET} "
+            f"— a filter refuses to run on a file a writeup holds, and "
+            f"this check would just be asserting that. Settle it first: "
+            f"'authorlm -m {BENCH} write abandon --writeup {TARGET}'.")
+    if _active_run(db, manuscript):
+        raise BenchRefusal(
+            f"a filter run is already active on {TARGET}. This check "
+            f"would fight it for the file. Settle it ('authorlm -m "
+            f"{BENCH} filter settle {TARGET}') or drop it ('… filter "
+            f"abandon {TARGET}') first.")
+
+    original = target.read_bytes()
+    report = _Report()
+    started = False
+    try:
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "add", TB_FILTER,
+            stdin_text=TB_FILTER_TEXT, scrub_keys=True)
+
+        # --- 1. the payload: zero calls, four blocks, stable prefix ----
+        _guard(db, manuscript_dir)
+        out1 = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                   TARGET, stdin_text="", scrub_keys=True)
+        started = True
+        out2 = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                   TARGET, stdin_text="", scrub_keys=True)
+        report("filter run made NO live model call — it passes with the "
+               "provider keys scrubbed out of the environment",
+               "live call" not in (out1 + out2), out1[-400:])
+        report("it printed all four blocks with their hashes",
+               all(f"───── block {b} — " in out1 for b in "SABC"),
+               out1[:400])
+        report("a second invocation's blocks S and A hash EXACTLY the "
+               "same — identical stored state, byte-identical prefix",
+               _hash_of(out1, "S") == _hash_of(out2, "S")
+               and _hash_of(out1, "A") == _hash_of(out2, "A"),
+               f"S {_hash_of(out1, 'S')} / {_hash_of(out2, 'S')}; "
+               f"A {_hash_of(out1, 'A')} / {_hash_of(out2, 'A')}")
+
+        units = _units_of(target.read_text(encoding="utf-8"))
+        rewritten = ("The ground is what the figure came out of. It has "
+                     "no shape of its own, which is why it is so easy to "
+                     "mistake for nothing at all.")
+
+        # --- 2. a wrong echo: refused, and NOTHING in the database -----
+        _guard(db, manuscript_dir)
+        bad = _tb_reply(units, {2: rewritten},
+                        echo_override={2: "Not the echo at all"})
+        out = cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+                  stdin_text=bad, scrub_keys=True, allow_fail=True)
+        report("a deliberately wrong echo refuses the whole reply",
+               "echo mismatch" in out, out)
+        run_row = _active_run(db, manuscript)
+        report("...and the refusal is asserted ON THE DATABASE: no "
+               "doc_threads row exists and the run cursor is still 0",
+               not _filter_rows(db, manuscript)
+               and run_row is not None and run_row["cursor"] == 0,
+               f"{len(_filter_rows(db, manuscript))} rows, cursor "
+               f"{run_row['cursor'] if run_row else '?'}")
+
+        # --- 3. a valid reply: old comes from DISK, not from the reply -
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+            stdin_text=_tb_reply(units, {2: rewritten}), scrub_keys=True)
+        rows = _filter_rows(db, manuscript)
+        disk_units = _units_of(target.read_text(encoding="utf-8"))
+        report("proposed_old equals the paragraph READ FROM DISK, byte "
+               "for byte — the harness supplies it, never the reply",
+               len(rows) == 1 and rows[0]["proposed_old"] == disk_units[1],
+               repr(rows[0]["proposed_old"][:80]) if rows else "no rows")
+
+        # --- 4. verdicts: evidence with no episode, reason verbatim ----
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "triage", TARGET,
+            "--accept", "1", scrub_keys=True)
+        ev = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' ORDER BY created_at DESC "
+            "LIMIT 1", (manuscript["id"],))]
+        report("the verdict is a filter_edit evidence row with "
+               "episode_id IS NULL — hygiene is never filed against a goal",
+               ev and ev[0]["episode_id"] is None, ev[:1])
+
+        # --- 5. the pause: the form is VISIBLE markdown on disk --------
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "settle", TARGET, "--pause",
+            stdin_text="", scrub_keys=True)
+        if _corrupt is not None:
+            target.write_text(_corrupt(target.read_text(encoding="utf-8")),
+                              encoding="utf-8")
+        marked = target.read_text(encoding="utf-8")
+        form = f"<<{disk_units[1]}>>{{{{{rewritten}}}}}"
+        report("the file on disk holds the <<old>>{{new}} form",
+               form in marked, marked[:300])
+        report("the form is NOT inside an HTML comment (the one place a "
+               "reader would never show it)",
+               "<<" not in html_comments(marked), html_comments(marked))
+        report("the form is NOT inside YAML front matter",
+               "<<" not in front_matter(marked), front_matter(marked))
+        report("the form is NOT inside a code fence or an indented code "
+               "block", "<<" not in code_blocks(marked),
+               code_blocks(marked))
+        report("the form survives the strip and renders as a plain "
+               "paragraph — this is what makes it visible in Obsidian",
+               any("<<" in ln for ln in paragraph_lines(marked)),
+               visible_body(marked)[:300])
+
+        # --- 6. the canonicalization, LIVE ----------------------------
+        from authorlm.revisions import read_manuscript_files
+
+        observed = read_manuscript_files(manuscript_dir).get(TARGET, "")
+        report("while marked, every read path still reports the essay's "
+               "ORIGINAL text byte for byte — the canonicalization "
+               "property, asserted live and not only in the suite",
+               observed == original.decode("utf-8"), repr(observed[:160]))
+        status_out = cli(workspace, "-m", BENCH, "summarize", "status",
+                         stdin_text="", scrub_keys=True, allow_fail=True)
+        report("...and 'summarize status' does not report the marked "
+               "essay as changed under it",
+               "<<" not in status_out, status_out[:400])
+
+        # --- 7. finalize: the exact expected bytes --------------------
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+            stdin_text="", scrub_keys=True)
+        final = target.read_text(encoding="utf-8")
+        expected = original.decode("utf-8").replace(disk_units[1],
+                                                    rewritten)
+        report("the finalized text is exactly the original with that one "
+               "unit replaced — byte for byte",
+               final == expected, repr(final[:200]))
+
+        # --- 8. M1: the identical-text refusal fires and names the run -
+        _guard(db, manuscript_dir)
+        out = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                  TARGET, stdin_text="", scrub_keys=True, allow_fail=True)
+        report("re-running on the settled text refuses and names the "
+               "prior run and its tallies",
+               "already ran on this exact text" in out and "--again" in out,
+               out)
+    finally:
+        if started:
+            _guard(db, manuscript_dir)
+            out = cli(workspace, "-m", BENCH, "filter", "rollback", TARGET,
+                      stdin_text="", scrub_keys=True, allow_fail=True)
+            print(out.strip())
+            if target.read_bytes() != original:
+                target.write_bytes(original)
+            report("filter rollback restored the essay byte for byte",
+                   target.read_bytes() == original,
+                   f"{len(original)} bytes before, "
+                   f"{len(target.read_bytes())} after")
+            for run_row in db.all(
+                    "SELECT * FROM filter_runs WHERE manuscript_id = ? "
+                    "AND file = ? AND status = 'active'",
+                    (manuscript["id"], TARGET)):
+                cli(workspace, "-m", BENCH, "filter", "abandon", TARGET,
+                    stdin_text="", scrub_keys=True, allow_fail=True)
+                break
+        artifact = manuscript_dir / "_filters" / f"{TB_FILTER}.md"
+        if artifact.exists():
+            artifact.unlink()
+    return report.failed
+
+
+def _hash_of(out: str, name: str) -> str:
+    marker = f"───── block {name} — "
+    if marker not in out:
+        return f"(no block {name})"
+    return out.split(marker, 1)[1].split("sha256 ", 1)[1].split(
+        "\n", 1)[0].strip()
+
+
 CHECKS = {"placeholder": check_placeholder,
-          "intent-scope": check_intent_scope}
+          "intent-scope": check_intent_scope,
+          "filter": check_filter}
 
 
 # ------------------------------------------------------------------ main
