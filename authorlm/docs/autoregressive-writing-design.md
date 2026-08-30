@@ -1341,3 +1341,17 @@ first written did not discriminate.
    to leave no row, no cursor move and no file change — and to say *different* things,
    because the remedies are nothing alike. With the classification removed, a refusal
    registers silently as a beat, which is risk R-c happening.
+
+### 15.9 `plan.draft_stubs` retired (2026-08-29)
+
+§13.4 and §15.6 each flagged `plan.draft_stubs` as the codebase's other ungated
+LLM drafting path and said it should go. It is now removed, sponsor-ruled: the
+cheap `[llm]`-model stub drafter that wrote opening passages straight into
+`_drafts/` with no plan, no gates, no verdict, and no style law. `write start`
++ `write draft` (§15) is the supported path from a plan item to prose, and has
+been since this section's own §15.1. Removed with it: the `OPENING_DRAFT_SYSTEM`
+prompt constant, the `plan --draft` CLI flag, `api.get_plan`'s `draft=`
+parameter, and the MCP `get_plan` tool's `draft=` parameter. `plan.build_plan`
+(deterministic placement) is untouched, and so is the generic underscore-dir
+observation-ignore behavior that `_drafts/` happened to rely on — that
+mechanism is not specific to this feature and stays.

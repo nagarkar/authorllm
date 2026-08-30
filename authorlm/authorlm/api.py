@@ -2519,16 +2519,12 @@ def _contradict_folding_belief(db: Database, row: dict, action: str) -> dict:
 
 # ----------------------------------------------------------------- others
 
-def get_plan(db: Database, manuscript: dict, llm: LLMClient | None = None,
-             draft: bool = False) -> dict:
+def get_plan(db: Database, manuscript: dict) -> dict:
     """The writing plan: placements for unrealized concepts from the graph
-    and TOC order; optionally drafts stubs into _drafts/ (Level 2)."""
-    from .plan import build_plan, draft_stubs
+    and TOC order."""
+    from .plan import build_plan
 
-    result = build_plan(db, manuscript)
-    if draft and llm and llm.enabled and result["items"]:
-        result["drafts"] = draft_stubs(db, manuscript, llm, result["items"])
-    return result
+    return build_plan(db, manuscript)
 
 
 def get_profile(manuscript: dict, key: str | None = None) -> dict:

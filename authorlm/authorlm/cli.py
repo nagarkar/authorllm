@@ -4453,8 +4453,7 @@ def cmd_plan(args):
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    llm = LLMClient(_load_config(args))
-    result = api.get_plan(db, manuscript, llm=llm, draft=args.draft)
+    result = api.get_plan(db, manuscript)
     if not result["items"]:
         print("Nothing to plan — every non-reference concept is realized. "
               "Declare new concepts or intents to grow the plan.")
@@ -4474,15 +4473,6 @@ def cmd_plan(args):
     if result["toc_unlisted"]:
         print(ui.yellow("\nNote: files missing from toc.toml: "
                         + ", ".join(result["toc_unlisted"])))
-    if args.draft:
-        for draft in result.get("drafts", []):
-            print(ui.green(f"\nDraft stub written: {draft['path']}"))
-        if not result.get("drafts"):
-            print(ui.dim("\n(no drafts produced — LLM unavailable?)"))
-    else:
-        print(ui.dim("\n→ 'plan --draft' writes opening stubs for the top "
-                     "items into _drafts/ (never touches the manuscript)."))
-    _report_llm(llm)
 
 
 def cmd_proposal(args):
@@ -5580,8 +5570,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("plan",
                        help="writing plan: what to write next and where it "
                             "belongs (graph + TOC placement)")
-    p.add_argument("--draft", action="store_true",
-                   help="LLM-draft opening stubs for the top items into _drafts/")
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("proposal",

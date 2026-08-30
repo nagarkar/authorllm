@@ -124,9 +124,6 @@ REGISTRY: list[Prompt] = [
     Prompt("guidance-draft", "guide; get_guidance",
            "draft a bridge paragraph for a guidance suggestion",
            file=None, module="guidance.py:BRIDGE_DRAFT_SYSTEM"),
-    Prompt("plan-draft", "get_plan",
-           "draft an opening passage for a plan item",
-           file=None, module="plan.py:OPENING_DRAFT_SYSTEM"),
     Prompt("lens", "analyze --lens; analyze_episodes",
            "run a reflective-analysis lens over the record (this preamble "
            "+ the author's _lenses/<name>.md file)",
