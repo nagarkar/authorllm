@@ -386,9 +386,29 @@ def complete_intent(db: Database, manuscript: dict, prefix: str,
     intent = _find_intent(db, manuscript, prefix)
     if intent["status"] != "active":
         raise ValueError(f"intent is already {intent['status']}")
+    # Q4: closing an intent closes every open episode for it, and a
+    # frozen member whose intent completes becomes a stale_member on
+    # every open writeup that ratified it. One query stops the author
+    # discovering that one `write status` at a time. A warning: the
+    # completion is theirs to make.
+    held = _writeups_holding(db, manuscript, intent["id"])
     ses.complete_intent(db, intent, outcome)
     analysis = analyze_pending(db, manuscript, llm) if llm and llm.enabled else []
-    return {"intent": intent, "analysis": analysis}
+    return {"intent": intent, "analysis": analysis, "held_by": held}
+
+
+def _writeups_holding(db: Database, manuscript: dict, intent_id: str) -> list:
+    """Active writeups carrying this intent as a ratified member."""
+    out = []
+    for row in db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
+            (manuscript["id"],)):
+        block = loads(row["metadata"], {}).get("intents") or {}
+        if (block.get("state") == "frozen"
+                and any(m["id"] == intent_id
+                        for m in block.get("members") or [])):
+            out.append({"writeup": row["id"], "file": row["file"]})
+    return out
 
 
 def abandon_intent(db: Database, manuscript: dict, prefix: str,

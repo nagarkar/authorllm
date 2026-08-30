@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from authorlm import paths  # noqa: E402
 from authorlm import summaries as sums  # noqa: E402
 from authorlm.api import MARKER, PLACEHOLDER  # noqa: E402
-from authorlm.db import Database  # noqa: E402
+from authorlm.db import Database, loads  # noqa: E402
 from authorlm.llm import VENDOR_KEY_ENV  # noqa: E402
 
 # ------------------------------------------------------------ constants
@@ -71,6 +71,11 @@ BENCH_INTENT = "Test bench: exercise the write path against fixed text."
 # summary-freshness gate is exercised rather than skirted.
 TARGET = "02-ground.md"
 
+# `01-figure.md` is a PART OPENER: the other two hang off it. That parent
+# chain is what gives the bench a `chapter` tier at all — without it
+# `scope_chain` is [file, None] and no chapter-scoped intent can ever be
+# derived, so `--check intent-scope` would miss the middle tier entirely.
+# Zero new files, zero new summaries, reading order unchanged.
 TOC = """# Reading order for the test bench (see tools/testbench.py).
 
 [[chapter]]
@@ -78,9 +83,11 @@ file = "01-figure.md"
 
 [[chapter]]
 file = "02-ground.md"
+parent = "01-figure.md"
 
 [[chapter]]
 file = "03-frame.md"
+parent = "01-figure.md"
 """
 
 ESSAYS = {
@@ -115,6 +122,12 @@ of the composition; the rest is arrangement.
 }
 
 FILES = [*ESSAYS, "toc.toml"]
+# Every committed bench file, keyed the way `setup`'s drift check needs
+# it. `ESSAYS` alone was not enough: `setup()` writes only MISSING files,
+# so an existing bench kept its old toc.toml silently and a check that
+# depends on the parent chain would fail with a confusing chapter-tier
+# miss (design-intent-scope RISK R-e).
+FILE_TEXT = {**ESSAYS, "toc.toml": TOC}
 
 PROJECT = paths.project_dir()
 
@@ -171,12 +184,17 @@ def _guard(db: Database, manuscript_dir: Path) -> dict:
 # ------------------------------------------------------- driving the CLI
 
 def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
-        allow_fail: bool = False) -> str:
+        allow_fail: bool = False, stdin_text: str | None = None) -> str:
     """One real `authorlm` invocation, in its own process.
 
     A subprocess and not an in-process `cli.main()` call for two reasons:
     it is the surface the author actually types, and it is the only way
-    to hand a command an environment with no provider keys in it at all."""
+    to hand a command an environment with no provider keys in it at all.
+
+    `stdin_text` is for the verbs whose payload travels on stdin (the
+    beat plan). Without it stdin is DEVNULL, which is what every other
+    call wants: a command that silently read the operator's terminal
+    would hang the check."""
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(PROJECT), env.get("PYTHONPATH", "")) if p)
@@ -189,7 +207,9 @@ def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
     argv = ("--workspace", str(workspace), *argv)
     proc = subprocess.run(
         [sys.executable, str(PROJECT / "main.py"), *argv],
-        cwd=str(PROJECT), env=env, stdin=subprocess.DEVNULL,
+        cwd=str(PROJECT), env=env,
+        **({"input": stdin_text} if stdin_text is not None
+           else {"stdin": subprocess.DEVNULL}),
         capture_output=True, text=True)
     out = proc.stdout + proc.stderr
     if proc.returncode and not allow_fail:
@@ -224,9 +244,10 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     db = _open(workspace)
     row = _bench_row(db)
     missing_files = [f for f in FILES if not (manuscript_dir / f).exists()]
-    drifted = [f for f in ESSAYS
+    drifted = [f for f in FILE_TEXT
                if (manuscript_dir / f).exists()
-               and (manuscript_dir / f).read_text(encoding="utf-8") != ESSAYS[f]]
+               and (manuscript_dir / f).read_text(encoding="utf-8")
+               != FILE_TEXT[f]]
 
     todo: list[str] = []
     if missing_files:
@@ -274,8 +295,8 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     if missing_files:
         manuscript_dir.mkdir(parents=True, exist_ok=True)
         for name in missing_files:
-            body = TOC if name == "toc.toml" else ESSAYS[name]
-            (manuscript_dir / name).write_text(body, encoding="utf-8")
+            (manuscript_dir / name).write_text(FILE_TEXT[name],
+                                               encoding="utf-8")
         print(f"wrote {', '.join(missing_files)}")
         done += 1
 
@@ -533,7 +554,176 @@ def check_placeholder(workspace: Path, manuscript_dir: Path, *,
     return report.failed
 
 
-CHECKS = {"placeholder": check_placeholder}
+SCOPE_INTENTS = {
+    "file": "Bench scope check: rewrite 02-ground.md itself.",
+    "chapter": "Bench scope check: tighten every essay under the figure.",
+    "manuscript": "Bench scope check: a standing rule for the whole bench.",
+    "late": "Bench scope check: a goal declared after ratification.",
+}
+SCOPE_PLAN = ('[{"role":"opener","concepts":[],"budget":60},'
+              ' {"role":"close","concepts":[],"budget":60}]')
+
+
+def _intent_ids(db: Database, manuscript: dict) -> dict:
+    """The bench's scope-check intents, by their statement."""
+    found = {}
+    for key, statement in SCOPE_INTENTS.items():
+        row = db.one(
+            "SELECT * FROM declared_intents WHERE manuscript_id = ? "
+            "AND statement = ? AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (manuscript["id"], statement))
+        if row:
+            found[key] = dict(row)
+    return found
+
+
+def _stored_intents(db: Database, manuscript: dict) -> dict:
+    row = db.one("SELECT metadata FROM writeups WHERE manuscript_id = ? "
+                 "AND file = ? AND status = 'active'",
+                 (manuscript["id"], TARGET))
+    return (loads(row["metadata"] if row else None, {})
+            .get("intents") or {})
+
+
+def check_intent_scope(workspace: Path, manuscript_dir: Path) -> int:
+    """a rewrite derives every intent whose scope covers the essay.
+
+    Drives the real CLI over the real database: three intents at the
+    three tiers, `write start` with NO --intent, the freeze at `write
+    plan`, and the newly-in-scope flag. Zero model calls — the whole
+    derive → freeze → flag cycle is deterministic, and the only
+    model-calling step on the bench is summary building in --setup, which
+    this check does not touch."""
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    toc = (manuscript_dir / "toc.toml").read_text(encoding="utf-8")
+    if f'parent = "{sorted(ESSAYS)[0]}"' not in toc:
+        raise BenchRefusal(
+            f"{manuscript_dir / 'toc.toml'} has no parent chain, so no "
+            f"chapter-scoped intent can be derived. The script is the "
+            f"source of truth: delete that file and re-run --setup.")
+    active = db.one(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active'", (manuscript["id"], TARGET))
+    if active:
+        raise BenchRefusal(
+            f"writeup [{active['id'][:11]}] is already active on {TARGET}. "
+            f"This check would fight it for the file. Settle it first — "
+            f"'authorlm -m {BENCH} write abandon --writeup {TARGET}' if it "
+            f"is a leftover.")
+
+    original = target.read_bytes()
+    report = _Report()
+    started = False
+    try:
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["file"], "--scope", TARGET, scrub_keys=True)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["chapter"], "--chapter", sorted(ESSAYS)[0],
+            scrub_keys=True)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["manuscript"], "--book-wide", scrub_keys=True)
+        ids = _intent_ids(db, manuscript)
+        report("all three intents were declared, one per tier",
+               set(ids) == {"file", "chapter", "manuscript"},
+               f"found {sorted(ids)}")
+
+        _guard(db, manuscript_dir)
+        start_out = cli(workspace, "-m", BENCH, "write", "start", TARGET,
+                        scrub_keys=True)
+        started = True
+        report("write start with NO --intent derives the set rather than "
+               "refusing for a missing flag",
+               "Intents in scope" in start_out, start_out)
+        for tier in ("file", "chapter", "manuscript"):
+            report(f"the {tier}-scoped intent is derived, and labelled "
+                   f"{tier}",
+                   any(line.strip().startswith(tier)
+                       and ids.get(tier, {}).get("id", "?")[:8] in line
+                       for line in start_out.splitlines()),
+                   start_out)
+        report("the file-scoped intent is the primary — most specific tier "
+               "wins, and the writeup's episode hangs off it",
+               any("← primary" in line
+                   and ids["file"]["id"][:8] in line
+                   for line in start_out.splitlines()),
+               start_out)
+
+        _guard(db, manuscript_dir)
+        plan_out = cli(workspace, "-m", BENCH, "write", "plan",
+                       "--writeup", TARGET, scrub_keys=True,
+                       stdin_text=SCOPE_PLAN)
+        # NOT an exact count: this is the author's live bench and any
+        # other book-wide intent they have open is legitimately derived
+        # too. What must be true is that the set is frozen and that all
+        # three tiers of THIS check are in it.
+        report("write plan RATIFIES the set and prints it above the beats",
+               "FROZEN" in plan_out
+               and all(ids[t]["id"][:8] in plan_out
+                       for t in ("file", "chapter", "manuscript")),
+               plan_out)
+        block = _stored_intents(db, manuscript)
+        frozen_ids = {m["id"] for m in block.get("members") or []}
+        report("and the stored state really is 'frozen', with a stamp",
+               block.get("state") == "frozen" and block.get("frozen_at"),
+               str(block))
+
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "intent", "declare", SCOPE_INTENTS["late"],
+            "--scope", TARGET, scrub_keys=True)
+        late = _intent_ids(db, manuscript).get("late") or {}
+        status_out = cli(workspace, "-m", BENCH, "write", "status",
+                         "--writeup", TARGET, scrub_keys=True)
+        report("an intent declared AFTER ratification is reported as newly "
+               "in scope",
+               "newly in scope since ratification" in status_out
+               and late.get("id", "?")[:8] in status_out, status_out)
+        members = {m["id"] for m in
+                   _stored_intents(db, manuscript).get("members") or []}
+        report("...and it did NOT join: the ratified member list is exactly "
+               "what was frozen, and the new intent is not in it",
+               members == frozen_ids and late.get("id") not in members,
+               str(sorted(m[:8] for m in members)))
+        report("no live model call anywhere in the check",
+               "live call" not in (start_out + plan_out + status_out),
+               start_out + plan_out + status_out)
+    finally:
+        if started:
+            _guard(db, manuscript_dir)
+            abandon_out = cli(workspace, "-m", BENCH, "write", "abandon",
+                              "--writeup", TARGET, scrub_keys=True,
+                              allow_fail=True)
+            print(abandon_out.strip())
+            report("write abandon restored the essay byte for byte",
+                   target.read_bytes() == original,
+                   f"{len(original)} bytes before, "
+                   f"{len(target.read_bytes())} after")
+        # The bench must be idempotent for the next run: every intent
+        # this check declared is abandoned, whatever else happened.
+        for intent in _intent_ids(db, manuscript).values():
+            _guard(db, manuscript_dir)
+            cli(workspace, "-m", BENCH, "intent", "abandon",
+                intent["id"][:11], "--outcome", "bench check finished",
+                scrub_keys=True, allow_fail=True)
+        left = _intent_ids(db, manuscript)
+        report("the check left no bench intents behind", not left,
+               str(sorted(left)))
+    return report.failed
+
+
+CHECKS = {"placeholder": check_placeholder,
+          "intent-scope": check_intent_scope}
 
 
 # ------------------------------------------------------------------ main

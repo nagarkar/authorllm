@@ -5039,9 +5039,12 @@ def scenario_testbench(root: Path) -> None:
         check("--setup writes the three bench essays and a toc from the "
               "constants in the script (manuscripts/ is gitignored, so the "
               "script is the source of truth)",
-              all((msdir / f).read_text() == (tb.TOC if f == "toc.toml"
-                                              else tb.ESSAYS[f])
+              all((msdir / f).read_text() == tb.FILE_TEXT[f]
                   for f in tb.FILES), sorted(p.name for p in msdir.iterdir()))
+        check("the bench toc carries a real PARENT CHAIN, which is what "
+              "gives it a chapter tier at all",
+              'parent = "01-figure.md"' in (msdir / "toc.toml").read_text(),
+              (msdir / "toc.toml").read_text())
         check("--setup builds the summaries and prints the cost line — the "
               "one place the bench spends money",
               "built 3" in out and "LLM: 3 live call(s)" in out, out)
@@ -5085,6 +5088,35 @@ def scenario_testbench(root: Path) -> None:
               "with no keys at all",
               StubLLMHandler.REQUESTS == before,
               f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- the intent-scope check ----------------------------------------
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "intent-scope")
+        check("the intent-scope check passes on a healthy bench",
+              "all assertions passed" in out and "FAIL" not in out, out)
+        check("it drives the real derivation: start with NO --intent, all "
+              "three tiers labelled, the file-scoped one primary",
+              "derives the set rather than refusing" in out
+              and "labelled file" in out and "labelled chapter" in out
+              and "labelled manuscript" in out
+              and "the file-scoped intent is the primary" in out, out)
+        check("it proves the freeze at write plan, in the output AND in the "
+              "stored state",
+              "RATIFIES the set" in out and "really is 'frozen'" in out, out)
+        check("it proves an intent declared after ratification is flagged "
+              "and does NOT join",
+              "newly in scope" in out and "did NOT join" in out, out)
+        check("the check restores the essay and leaves no intents behind, "
+              "so the bench is idempotent for the next run",
+              (msdir / tb.TARGET).read_bytes() == original
+              and "left no bench intents behind" in out
+              and "FAIL" not in out, out)
+        check("ZERO live model calls: the whole derive → freeze → flag "
+              "cycle is deterministic",
+              StubLLMHandler.REQUESTS == before,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+        check("--list-checks names it",
+              "intent-scope" in bench("--list-checks"), "")
 
         # --- the check must DISCRIMINATE ------------------------------------
         # A visibility test that passes on a HIDDEN marker is worse than no

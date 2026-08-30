@@ -46,7 +46,7 @@ than a conversation you would have to reconstruct.
 There is also a mode where a pinned model drafts each beat instead, for a
 strictly reproducible draft. It **bills the Anthropic API per beat**, it is
 opt-in, and it is switched off in the configuration — deliberately, at your
-instruction (2026-08-30). Section 10 says what turning it back on would cost and
+instruction (2026-08-30). Section 11 says what turning it back on would cost and
 where the switch is.
 
 Other moments in the workflow also call out to a model, each to do a specific
@@ -54,7 +54,7 @@ job: finishing an essay, refreshing the summaries, closing a goal — and, the o
 that happens most often, **turning the reason you gave into a rule you might
 want.**
 Every rejection you explain, and every reworded acceptance you explain, is read
-by a model that tries to state the principle behind it. Section 10 lists them
+by a model that tries to state the principle behind it. Section 11 lists them
 all, says which model does which job, and says where each is configured.
 
 **One workspace note.** This workspace holds more than one manuscript, so every
@@ -170,7 +170,7 @@ What comes back has three parts:
 
 - a line confirming the file was created and the guide attached, and — read this
   one — a note that abandoning this piece of work will **delete** the new file
-  again (nothing typed into it is lost; see §9).
+  again (nothing typed into it is lost; see §10).
 - **your brief**, verbatim.
 - the **frame**: everything settled *before* this essay in the book, compressed
   to a few sentences each (those concepts are available to you and must not be
@@ -182,7 +182,7 @@ only warnings in that output:
 
 - a summary marked **stale, missing or deprecated** — that entry is not
   trustworthy. It cannot happen when you start; it can appear later, when you
-  come back (§8).
+  come back (§9).
 - **coverage incomplete** — that essay's summary never mentioned some of its own
   paragraphs. Informational, not a block: treat that neighbour as possibly short
   a move.
@@ -321,7 +321,7 @@ payload to the pinned `[writing]` model, which writes the WHY, the SELF-CHECK
 and the prose itself and registers them through `write propose`'s path. It bills
 the Anthropic API per beat. As shipped there is no `[writing]` section, so it
 refuses and prints the TOML to paste; the restore recipe is also in
-`authorlm/config.toml`'s own comments, and §10 says what it would cost. Only
+`authorlm/config.toml`'s own comments, and §11 says what it would cost. Only
 that mode can answer `BLOCKED` in the machine's own voice — but the same rule
 binds the conversational draft, which asks you the question instead of inventing
 the fact.
@@ -777,8 +777,27 @@ Weil essay." Several can be open at once, and they are closed one at a time when
 the goal is met — closing one is what triggers the reconstruction of what you
 decided while pursuing it.
 
-**A writeup is one essay being written or rewritten, beat by beat.** It belongs
-to exactly one intent. It holds the pinned original, the plan you approved, the
+**An intent also has a place.** When you declare one, say where it applies: just
+this essay, the whole part, or the whole book. That is not bookkeeping — it is
+what decides which of your goals a rewrite serves. Say nothing and the goal is
+book-wide, which means it rides along with *every* rewrite you ever start, so it
+is worth saying.
+
+**A rewrite serves every goal whose place covers its essay.** If you have a goal
+for the Epictetus essay, a goal for the whole of Part II, and a standing rule
+about the whole book, then rewriting Epictetus serves all three, and the drafter
+is told about all three. You do not have to name any of them; the system works
+them out and shows you the list before anything else happens. If something on it
+does not belong, say so and it comes off.
+
+**One of them is the primary.** The most specific one wins — this essay beats
+this part beats the whole book — and the primary is the goal your verdicts and
+your changes are recorded against. Only one, deliberately: an afternoon's work
+should not be counted twice. If two goals are equally specific the system will
+not guess; it prints both and asks you which.
+
+**A writeup is one essay being written or rewritten, beat by beat.** It serves
+the goals above, and the primary among them is the one it is bound to. It holds the pinned original, the plan you approved, the
 running verdicts, the lessons, and the accounting. It survives everything:
 closing your laptop, days away, a crashed terminal. You come back and it is
 exactly where you left it, with the frame recomputed fresh.
@@ -796,10 +815,14 @@ change and retroactively closed once it exceeds `idle_hours`. The dedup above is
 `(session_id or evidence id, target)` — so same session AND same target
 collapses, and nothing else does; a beat's `target` is its own draft text, so two
 beats never collide. An intent is a
-`declared_intents` row (`declare` / `complete` / `abandon`); `intent complete`
-runs episode analysis. A writeup is a `writeups` row bound to one intent by
-`intent_id`, holding `source_version_id` (the pinned original), `plan`,
-`cursor`, `learnings` and its metadata. With more than one open, every `write`
+`declared_intents` row (`declare` / `complete` / `abandon`), carrying a `scope`:
+a filename, a toc part opener, or NULL for book-wide. `intent declare --scope
+<file> | --chapter <opener> | --book-wide` sets it; `intent scope <id> …` moves
+it later. `intent complete` runs episode analysis. A writeup is a `writeups` row
+whose `intent_id` holds the PRIMARY, with the whole member set — each record
+freezing the intent's id, tier, scope and statement at ratification — in
+`metadata.intents`; it also holds `source_version_id` (the pinned original),
+`plan`, `cursor`, `learnings` and its other metadata. With more than one open, every `write`
 verb wants `--writeup <id-prefix>` rather than guessing.
 </details>
 
@@ -881,7 +904,89 @@ says so, and the single-file rebuild refuses. Design: §14 of
 
 ---
 
-## 8. Coming back after a break
+## 8. Your goals, and which ones a rewrite serves
+
+You do not name a goal when you start a rewrite. You are shown the ones that
+already apply.
+
+**Say where a goal lives when you declare it.** Just this essay, the whole part,
+or the whole book — in whatever words. Say nothing and it is book-wide, which
+means it will ride along with every rewrite you ever start; the assistant will
+ask you once rather than guess.
+
+> **You:** I want to cut the Rank inheritance in the Becker essay down to one
+> paragraph.
+>
+> **Assistant:** Just that essay, or everywhere Rank comes up?
+>
+> **You:** Just that essay.
+>
+> **Assistant:** Recorded, scoped to becker.md.
+
+**When you start the rewrite, you are shown the list.** Not asked to build it —
+shown it, grouped by how specific each goal is, with the primary marked:
+
+> **You:** Let's rewrite becker.md.
+>
+> **Assistant:** Started, and the old text is pinned. Three of your goals cover
+> this essay — the Becker rewrite itself, the Part II tightening, and the
+> standing rule about thinkers' names carrying arguments. The Becker one is the
+> primary, so the work gets recorded against it. Anything there that shouldn't
+> be?
+>
+> **You:** The Part II one, leave it. The other two are right.
+>
+> **Assistant:** Dropped. Two goals on this rewrite.
+
+**Approving the plan is what settles it.** The same "yes" that ratifies the beat
+plan ratifies the list of goals — you see both together, and there is no second
+confirmation to give. After that the list is fixed: a goal you declare halfway
+through the rewrite is *reported* to you, never quietly added, and you say
+whether it joins.
+
+**If two goals are equally specific, you pick.** Two goals both about becker.md
+and nothing separates them — the system will not choose, because the choice
+decides where every verdict and every change gets filed and it cannot be undone
+later. It prints both and waits.
+
+**At the end you get a line per goal.** Served, deferred (with the reason you
+gave), or not served at all. The last one is a warning and never a refusal: the
+essay is finished when you say it is.
+
+> **Assistant:** Becker essay completed, six beats. The Becker rewrite and the
+> Part II tightening are both served. The thinkers'-names rule you deferred —
+> "this essay barely names anyone" — is recorded that way. Closing the goals
+> themselves is separate, whenever you want to.
+
+<details>
+<summary><b>Under the hood</b></summary>
+
+```bash
+authorlm intent declare "Cut the Rank inheritance down" --scope becker.md -m SMSTTD
+authorlm intent declare "Tighten Part II" --chapter part-ii.md -m SMSTTD
+authorlm intent scope di-4b7e1 --scope becker.md -m SMSTTD   # move one later
+authorlm intent scope --triage -m SMSTTD                     # the one-time sitting
+
+authorlm write start becker.md -m SMSTTD          # no --intent: the set is derived
+authorlm write intents --remove di-9a02f -m SMSTTD          # before the plan
+authorlm write intents --primary di-4b7e1 -m SMSTTD
+authorlm write intents --add di-c4410 -m SMSTTD             # after: an explicit join
+authorlm write intents --defer di-31cc8 --reason "…" -m SMSTTD
+authorlm write intents --ignore di-c4410 -m SMSTTD
+```
+
+Derivation is `passes.intents_in_scope(file, 'active')` over the toc parent
+chain, persisted as PROPOSED in `writeups.metadata.intents` and frozen at
+`write plan`. The most specific tier is primary and per-beat transitions attach
+to its episode ONLY — no fan-out, and no schema change:
+`writeups.intent_id` still holds the primary. A beat spec may carry
+`"intents": ["di-…"]` to say it serves only those; an untagged beat serves every
+member. Design: §15.17 of `docs/autoregressive-writing-design.md`.
+</details>
+
+---
+
+## 9. Coming back after a break
 
 **You are told, without having to ask.** An open writeup means the essay is
 mid-surgery on disk, so it is manuscript state, not knowledge, and it is printed
@@ -936,7 +1041,7 @@ briefing lists them all.
 
 ---
 
-## 9. Bailing out
+## 10. Bailing out
 
 Abandoning ends the piece of work. What it does depends on which kind you are in,
 and the difference is severe enough to state plainly.
@@ -981,7 +1086,7 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 
 ---
 
-## 10. What it costs, and which model does what
+## 11. What it costs, and which model does what
 
 Four moments call out to a model, each for a job worth naming. **Drafting the
 beats is not one of them** — the beats are written in this conversation, and
@@ -1071,12 +1176,12 @@ it: assembling and printing the payload costs nothing, so it works whether or no
 the billed mode is on, and it is what the conversational drafting reads.
 
 Without any model configured at all, the summary rebuild fails loudly rather
-than quietly degrading — see §11's fourth entry.
+than quietly degrading — see §12's fourth entry.
 </details>
 
 ---
 
-## 11. Rough edges, stated plainly
+## 12. Rough edges, stated plainly
 
 Things that are true today and that you will meet:
 
@@ -1107,7 +1212,7 @@ Things that are true today and that you will meet:
    fixed — fixing it would mean drafting against beats you have not ruled on yet.
 
 Entries that used to live on this list and are now fixed, described above
-instead: an open writeup announces itself in the briefing (§8), replanning
+instead: an open writeup announces itself in the briefing (§9), replanning
 refuses rather than orphaning a pending draft (§3.8), and a mid-rewrite essay
 leaves a visible explanation in place of a blank file (§3.2).
 

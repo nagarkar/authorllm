@@ -876,8 +876,14 @@ def cmd_intent(args):
         intent = _find_by_prefix(db, "declared_intents", args.id, manuscript["id"])
         if intent["status"] != "active":
             sys.exit(f"error: intent is already {intent['status']}.")
+        held = api._writeups_holding(db, manuscript, intent["id"])
         ses.complete_intent(db, intent, args.outcome)
         print(f"Intent completed: {intent['statement']}")
+        for entry in held:
+            print(ui.yellow(
+                f"  note: writeup [{entry['writeup'][:11]}] on "
+                f"{entry['file']} ratified this intent and is still open — "
+                f"'write status' will now report it as a stale member."))
         if args.outcome:
             print(f"Outcome: {args.outcome}")
         _analyze_closed_episodes(db, manuscript, args)
