@@ -126,6 +126,59 @@ perf_log = true
 # aggregate already counts it; this is the detail — when, and under whom.
 slow_ms = 100
 
+[usage]
+# The always-on usage ledger (Sponsor ruling 2026-08-30: "it would be
+# good to track usage so if you ever want to take this to commercial
+# stage, we can have that ready-made"). Every model call folds its tokens
+# into an in-memory aggregate; ONE JSON line per CLI process / MCP tool
+# call then lands in <workspace>/.authorlm/logs/usage.jsonl beside
+# trace.jsonl and db-perf.jsonl, carrying per (purpose | model)
+# {n, in, out, cache r/w, est_cost} plus the client provenance join key
+# (§15.15). Read it with `authorlm usage [--days N] [--by …]`.
+#
+# Costs are ESTIMATES from litellm's public price list — not your
+# invoice. A model litellm does not price records tokens and a null cost,
+# never a guess. Set false to disable: no recorder is held and the cost
+# is one identity test per LLM call. Every write is best-effort and
+# swallows its own failures — a usage log must never break a collect.
+ledger = true
+
+# A single call estimated above this writes its own immediate line,
+# tagged "expensive": true. The aggregate already counts it; this is the
+# detail — when, under which chat, and for what.
+expensive_usd = 0.50
+
+# Chat-side consumption: the Claude Code session transcript, parsed
+# incrementally (byte-offset checkpoint per session, so each sweep reads
+# only new bytes; counts only, never content). This is SUBSCRIPTION
+# consumption, not billing — the report never puts a dollar figure on it.
+chat = true
+sweep_interval_seconds = 300
+
+# transcript_roots — the escape hatch for a machine that keeps
+# transcripts outside the engine's own declared root, and the ONLY way a
+# path outside it is ever read. Absent by default.
+# transcript_roots = ["~/somewhere-else/projects/*"]
+
+# [budget] — DELIBERATELY ABSENT. Sponsor ruling 2026-08-30: "For now we
+# don't need to cut off the usage when the budget has reached, but it
+# would be good to track usage so if you ever want to take this to
+# commercial stage, we can have that ready-made."
+#
+# The seam is BUILT and TESTED; it is this section's absence that keeps
+# it dormant, the same way the absent [writing] section is what keeps
+# billed beat drafting off. To turn on WARNINGS (no call is ever
+# refused), restore:
+#
+#   [budget]
+#   api_dollars_per_day = 5.00
+#   warn_at = 0.8
+#
+# `enforce = true` additionally makes budget.gate() REFUSE calls past the
+# cap. It is implemented and tested and NO shipped configuration sets it;
+# turning it on is a deliberate act with a deliberate consequence, and a
+# refused call means a verb that did not run.
+
 [gdocs]
 # OAuth installed-app client for the Google Docs bridge (doc push/pull).
 client_secret = "/Users/nagarkar/workspace/repos/authorllm/authorlm/client_secret_936657761738-gbalhjavi216muq9ruikmtvu1mtudrpn.apps.googleusercontent.com.json"

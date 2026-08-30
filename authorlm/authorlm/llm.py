@@ -380,6 +380,7 @@ def writing_llm(config: dict) -> LLMClient:
         raise LookupError(WRITING_ABSENT.format(config=paths.config_path()))
     client = LLMClient(config)
     client.model = model
+    client.purpose = "writing"
     client.timeout = writing.get("timeout_seconds",
                                  WRITING_DEFAULTS["timeout_seconds"])
     client.max_tokens = writing.get("max_tokens",
@@ -486,6 +487,14 @@ class LLMClient:
         self.enabled = bool(llm.get("enabled"))
         self.provider = llm.get("provider", "litellm")
         self.model = llm.get("model", DEFAULT_MODEL)
+        # WHICH CONFIG SECTION CHOSE THIS MODEL — the usage ledger's
+        # aggregation key beside `model`, and the answer to "why am I
+        # paying for Luna", which `model` alone cannot give once two
+        # sections name the same string. A plain attribute, not a property:
+        # unlike `api_key` and `profile()` it does not have to track a
+        # `.model` reassignment — it IS the record of who did the
+        # reassigning. Each factory below sets it beside its `.model` line.
+        self.purpose = "llm"
         self.base_url = llm.get("base_url", "http://localhost:4000/v1").rstrip("/")
         # api_key is a property (below) — see its docstring for why it
         # cannot be resolved once here and cached.
@@ -604,10 +613,28 @@ class LLMClient:
             parts.append(f"model {self.model}")
         return " — ".join(parts)
 
-    def _record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int,
+                      cache_read: int = 0, cache_write: int = 0) -> None:
+        """THE seam. It sits BELOW `stats_line()`, below `_report_llm`,
+        below the CLI and below the MCP server, which is the whole reason
+        the usage ledger is small and also its coverage argument: the two
+        paths the spend audit found invisible — auto-collect extraction
+        and the entire MCP surface — reach the ledger anyway, because they
+        reach `complete_json` → `complete` → here like everything else.
+        Sixteen of the seventeen audited call sites are covered with no
+        call-site edit; `generate_image` is not a client and calls
+        `usage.record_image` itself."""
+        from . import usage
+
         self.live_calls += 1
         self.input_tokens += prompt_tokens
         self.output_tokens += completion_tokens
+        self.cache_read_tokens += cache_read
+        self.cache_write_tokens += cache_write
+        usage.record(purpose=self.purpose, model=self.model,
+                     input_tokens=prompt_tokens,
+                     output_tokens=completion_tokens,
+                     cache_read=cache_read, cache_write=cache_write)
 
     def complete(self, system: str, user: str,
                  thinking_budget: int | None = None) -> str | None:
@@ -624,6 +651,13 @@ class LLMClient:
         plain-OpenAI path ignores it."""
         if not self.enabled:
             return None
+        # The enforcement seam, at the top of a transport-entering path,
+        # before any cache check and before any request is built. Returns
+        # None — i.e. permits — on every shipped configuration; see
+        # budget.gate's docstring.
+        from . import budget, usage
+
+        budget.gate(self.purpose, self.model)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -638,6 +672,10 @@ class LLMClient:
         cache_path = self._cache_path(messages, self.temperature)
         if cache_path and cache_path.exists():
             self.replays += 1
+            # Served from the record/replay cache: it did NOT spend, and
+            # "what did the replay cache save me" is the only positive
+            # number the ledger's report has.
+            usage.record_replay()
             return json.loads(cache_path.read_text())["response"]
         if self.provider == "litellm":
             result = self._complete_litellm(messages,
@@ -766,6 +804,9 @@ class LLMClient:
                 "is the one call that cannot degrade to a heuristic. Enable "
                 "it, or draft the beat yourself and register it with "
                 "'write propose --why …'.")
+        from . import budget, usage
+
+        budget.gate(self.purpose, self.model)
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
         effort = self.effort if effort is None else effort
         use_cache = self.cache if cache is None else cache
@@ -793,6 +834,7 @@ class LLMClient:
         cache_path = self._cache_path(messages, TEMPERATURE)
         if cache_path and cache_path.exists():
             self.replays += 1
+            usage.record_replay()
             # A replayed draft still reports itself. Without this the
             # usage line would drop its cache clause and its model name
             # on exactly the runs the replay suite is made of, and the
@@ -819,9 +861,11 @@ class LLMClient:
                 self._draft_openai(messages, max_tokens)
         net_in = max(0, raw_in - cache_read - cache_write)
         self.draft_calls += 1
-        self._record_usage(net_in, out)
-        self.cache_read_tokens += cache_read
-        self.cache_write_tokens += cache_write
+        # The two cache counters moved INTO the call (AP): the ledger sees
+        # them without a second seam, and for the drafting path they are
+        # the majority of the volume — `cache_creation_input_token_cost`
+        # for claude-fable-5 is HIGHER than the input rate.
+        self._record_usage(net_in, out, cache_read, cache_write)
         if finish == "content_filter":
             raise LLMRefused(
                 f"{self.model} refused to answer (stop_reason: refusal). "
@@ -1151,11 +1195,14 @@ def generate_image(config: dict, prompt: str,
     routes through litellm.image_generation. Unlike completions there is
     no silent degradation: rendering is an explicit act, so failures
     raise RuntimeError with a readable message."""
-    from . import paths
+    from . import budget, paths, usage
 
     llm = config.get("llm", {}) or {}
     model = resolve_image_setting(config, "model", "image_model",
                                   DEFAULT_IMAGE_MODEL)
+    # The third enforcement seam, after model resolution and before the
+    # key check. Permits on every shipped configuration.
+    budget.gate("illustrations", model)
     # The image model is chosen independently of the text model, so its
     # key is resolved from ITS OWN vendor prefix — the text model's key
     # is the wrong key the moment the two vendors differ.
@@ -1166,8 +1213,10 @@ def generate_image(config: dict, prompt: str,
             raise RuntimeError(
                 "no API key for image generation — set GEMINI_API_KEY in "
                 f"{paths.env_path()}")
-        return _gemini_image(model.split("/", 1)[1], prompt, input_png,
-                             key, timeout)
+        png = _gemini_image(model.split("/", 1)[1], prompt, input_png,
+                            key, timeout)
+        usage.record_image(purpose="illustrations", model=model, images=1)
+        return png
     if input_png is not None:
         raise RuntimeError(
             f"--from (image-conditioned render) needs a gemini/* image "
@@ -1201,6 +1250,12 @@ def generate_image(config: dict, prompt: str,
     if not b64:
         raise RuntimeError(f"image model '{model}' returned no image data")
     import base64
+    # The 17th audited call site: `generate_image` is not an LLMClient, so
+    # it records itself, once, on success. `est_cost` is NULL for image
+    # renders — get_model_info gives per-image-TOKEN rates and no flat
+    # per-image price, and the API returns no image-token count, so the
+    # line carries a count instead of a number we cannot derive.
+    usage.record_image(purpose="illustrations", model=model, images=1)
     return base64.b64decode(b64)
 
 

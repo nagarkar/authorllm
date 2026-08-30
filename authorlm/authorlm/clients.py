@@ -359,6 +359,340 @@ class SimpleAdapter:
                       transcript_hint=marker.get("transcript_hint"))
 
 
+# ------------------------------------------- the usage capability (§3.1)
+
+
+class UsageCapable(Protocol):
+    """OPTIONAL. An adapter that can measure what a chat session consumed.
+
+    An adapter without this method is complete and correct; provenance has
+    never depended on it and does not now. `hasattr(adapter, "usage")` is
+    the whole feature test — no registry, no flag, no base class — which
+    is why `UsageReadingAdapter` is a SUBCLASS rather than a
+    `SimpleAdapter` carrying a nullable field."""
+
+    def usage(self, client: "Client", checkpoint: dict | None, *,
+              allow_recompute: bool = True,
+              extra_roots: tuple[str, ...] = ()
+              ) -> "tuple[ChatUsage, dict] | None": ...
+
+
+@dataclass(frozen=True)
+class ChatUsage:
+    """Counts only. Never text, never a path."""
+
+    models: dict            # model -> [n, in, out, cache_read, cache_write]
+    messages: int
+    sidechain: int
+    bytes_read: int
+    restart: bool = False
+    dedup_warning: bool = False
+
+
+# A duplicate whose partner is more than this many DISTINCT message ids
+# back AND on the far side of a sweep boundary is counted twice. The
+# repeats measured on the real corpus are adjacent — one id re-emitted a
+# handful of lines apart as its turn is updated — so this window covers a
+# boundary landing inside such a group with enormous margin; on the
+# measured corpus the uncovered case is zero occurrences. ~20 KB/session.
+SEEN_RING = 512
+
+
+def _four(usage: Any) -> tuple[int, int, int, int]:
+    """The four counters, coerced.
+
+    ALL FOUR are required. On a cached turn the uncached prompt is nearly
+    empty — a real observed row reads `input_tokens: 2` beside
+    `cache_creation_input_tokens: 24652` — so a parser reading only
+    input/output measures essentially nothing.
+
+    Transcripts are DATA. A value that is not a number (including one
+    shaped like an instruction) coerces to 0, silently, and the sweep
+    continues."""
+    out = []
+    for key in ("input_tokens", "output_tokens",
+                "cache_read_input_tokens", "cache_creation_input_tokens"):
+        try:
+            value = usage.get(key)
+            out.append(int(value) if isinstance(value, (int, float)) else 0)
+        except Exception:
+            out.append(0)
+    return (out[0], out[1], out[2], out[3])
+
+
+@dataclass(frozen=True)
+class JsonlTranscriptUsage:
+    """Reusable incremental JSONL usage reader.
+
+    The engine supplies the predicates; the sweep machinery — byte
+    offset, the trailing partial line, the dedup ring, discontinuity and
+    the checkpoint — is shared and engine-agnostic, so a third engine
+    whose transcript is JSONL-with-usage-per-turn is a DATA ENTRY, not a
+    subsystem.
+
+    **ONLY add a row for a contract that has been VERIFIED by reading a
+    real transcript.** This inherits `MODEL_PROFILES`' standing rule, and
+    it is stronger here: a wrong `MODEL_PROFILES` row produces a visible
+    400, while a wrong transcript predicate produces a plausible number
+    nobody can tell is wrong."""
+
+    is_turn: Callable[[dict], bool]
+    turn_id: Callable[[dict], Any]
+    model_of: Callable[[dict], Any]      # None => skip this line
+    counters: Callable[[dict], tuple] = lambda d: _four(
+        (d.get("message") or {}).get("usage") or {})
+    is_sidechain: Callable[[dict], bool] = lambda d: bool(d.get("isSidechain"))
+    # Directory globs for the keyed single-match lookup (§3.2 layer 2).
+    roots: tuple[str, ...] = ()
+
+    # -- the parse -------------------------------------------------------
+
+    def fold(self, text: str, seen: list, models: dict) -> tuple[int, int, int]:
+        """Fold every usage-bearing line in `text` into `models`.
+
+        Returns `(distinct_messages, sidechain, lines_with_usage)`.
+        Malformed lines, non-dict lines, unknown `type`s and lines with no
+        usable id are skipped SILENTLY — that is the whole of the error
+        policy."""
+        ring = set(seen)
+        messages = sidechain = bearing = 0
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            try:
+                if not self.is_turn(data):
+                    continue
+                bearing += 1
+                ident = self.turn_id(data)
+                if not isinstance(ident, str) or not ident:
+                    continue
+                if ident in ring:
+                    # THE ONE THAT MATTERS. The same message.id is written
+                    # up to six times with a byte-identical usage object;
+                    # corpus-wide that is a 2.05x overcount for a parser
+                    # that sums lines. Dedup on the id is the difference
+                    # between a number and a fiction.
+                    continue
+                model = self.model_of(data)
+                if not isinstance(model, str) or not model:
+                    continue
+                counts = self.counters(data)
+            except Exception:
+                continue
+            ring.add(ident)
+            seen.append(ident)
+            if len(seen) > SEEN_RING:
+                dropped = seen[:-SEEN_RING]
+                del seen[:-SEEN_RING]
+                ring.difference_update(dropped)
+            row = models.get(model)
+            if row is None:
+                models[model] = [1, counts[0], counts[1], counts[2], counts[3]]
+            else:
+                row[0] += 1
+                for i in range(4):
+                    row[i + 1] += counts[i]
+            messages += 1
+            try:
+                if self.is_sidechain(data):
+                    sidechain += 1
+            except Exception:
+                pass
+        return messages, sidechain, bearing
+
+    # -- the sweep -------------------------------------------------------
+
+    def sweep(self, path: Path, checkpoint: dict | None, *,
+              engine: str, session_id: str,
+              allow_recompute: bool = True) -> tuple[ChatUsage, dict] | None:
+        """One incremental pass. Returns `(ChatUsage, new_checkpoint)`, or
+        `None` when it cannot honestly measure."""
+        try:
+            stat = path.stat()
+        except Exception:
+            return None
+        base = checkpoint if isinstance(checkpoint, dict) else {}
+        offset = int(base.get("offset") or 0)
+        inode = base.get("inode")
+        totals = base.get("totals") if isinstance(base.get("totals"),
+                                                  dict) else {}
+        seen = list(base.get("seen") or [])[-SEEN_RING:]
+        partial = str(base.get("partial") or "")
+        restart = False
+
+        if (inode is not None and int(inode) != int(stat.st_ino)) \
+                or stat.st_size < offset:
+            if not allow_recompute:
+                # The SessionEnd path takes the `restart` loss rather than
+                # risk the hook's documented 1.5 s shared budget on a full
+                # file read. The next opportunistic sweep of this session
+                # covers it — the checkpoint is left untouched here, so
+                # that sweep still sees the discontinuity.
+                return None
+            restart = True
+            offset, seen, partial = 0, [], ""
+
+        if not restart and stat.st_size == offset:
+            # The common case, and it costs one `stat`.
+            fresh = dict(base)
+            fresh["updated_at"] = _now()
+            return (ChatUsage(models={}, messages=0, sidechain=0,
+                              bytes_read=0), fresh)
+        try:
+            # BINARY. The checkpoint's offset is a BYTE offset (`st_size`),
+            # and a text-mode seek takes an opaque cookie, not a byte
+            # count — decoding after the split is what keeps the two from
+            # drifting apart on a non-ASCII transcript.
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                raw = handle.read()
+        except Exception:
+            return None
+        consumed = len(raw)
+        # A transcript is appended to WHILE we read it: the trailing
+        # fragment is carried, not parsed, so half a JSON object is never
+        # a parse error, let alone a dropped turn. Split in BYTES and
+        # decode after, so a fragment torn mid-UTF-8-sequence rejoins its
+        # other half intact instead of becoming two replacement chars.
+        blob = partial.encode("latin-1", errors="replace") + raw
+        if blob.endswith(b"\n"):
+            complete, new_partial = blob, b""
+        else:
+            complete, _, new_partial = blob.rpartition(b"\n")
+        models: dict = {}
+        messages, sidechain, bearing = self.fold(
+            complete.decode("utf-8", errors="replace"), seen, models)
+
+        cumulative = {"messages": int(totals.get("messages") or 0),
+                      "in": int(totals.get("in") or 0),
+                      "out": int(totals.get("out") or 0),
+                      "cache_read": int(totals.get("cache_read") or 0),
+                      "cache_write": int(totals.get("cache_write") or 0)}
+        summed = [sum(r[i] for r in models.values()) for i in range(5)]
+        if restart:
+            # Recomputed from byte 0 with the WHOLE id set in memory, so
+            # this cumulative is exact. The delta against the stored
+            # cumulative is clamped at >= 0 per counter: a rewound session
+            # legitimately loses turns, and the report says `restart`
+            # rather than pretending the arithmetic was clean.
+            recomputed = {"messages": messages, "in": summed[1],
+                          "out": summed[2], "cache_read": summed[3],
+                          "cache_write": summed[4]}
+            scale = _clamped_delta(recomputed, cumulative)
+            models = _scale_models(models, recomputed, scale)
+            messages = scale["messages"]
+            cumulative = recomputed
+        else:
+            cumulative["messages"] += messages
+            for i, name in enumerate(("in", "out", "cache_read",
+                                      "cache_write")):
+                cumulative[name] += summed[i + 1]
+
+        fresh = {"engine": engine, "session": session_id,
+                 "path": str(path), "inode": int(stat.st_ino),
+                 # The byte we actually consumed to — NOT the stat'd size,
+                 # which the writer may already have moved past.
+                 "offset": offset + consumed,
+                 "partial": new_partial.decode("latin-1"),
+                 "seen": seen[-SEEN_RING:], "totals": cumulative,
+                 "updated_at": _now()}
+        return (ChatUsage(models=models, messages=messages,
+                          sidechain=sidechain, bytes_read=consumed,
+                          restart=restart,
+                          dedup_warning=messages > bearing), fresh)
+
+
+def _clamped_delta(recomputed: dict, stored: dict) -> dict:
+    return {k: max(0, recomputed.get(k, 0) - stored.get(k, 0))
+            for k in recomputed}
+
+
+def _scale_models(models: dict, recomputed: dict, delta: dict) -> dict:
+    """On the discontinuity path the per-model breakdown is of the WHOLE
+    file, but the line must carry the clamped delta. When the delta is the
+    whole file (a replaced file with no stored history) the breakdown
+    passes through; when it is smaller, the models dict is dropped rather
+    than apportioned — inventing a per-model split of a clamped total
+    would be a guess, and the totals are what the report sums."""
+    if all(delta.get(k, 0) == recomputed.get(k, 0) for k in recomputed):
+        return models
+    if not any(delta.values()):
+        return {}
+    return {"(recomputed)": [delta["messages"], delta["in"], delta["out"],
+                             delta["cache_read"], delta["cache_write"]]}
+
+
+@dataclass(frozen=True)
+class UsageReadingAdapter(SimpleAdapter):
+    """A `SimpleAdapter` that ALSO knows how to read its engine's
+    transcript.
+
+    `reader_factory` is called lazily so the engine's own module owns its
+    transcript knowledge without this module importing it at load time."""
+
+    reader_factory: Callable[[], JsonlTranscriptUsage | None] | None = None
+    locator: Callable[..., Path | None] | None = None
+
+    def usage(self, client: Client, checkpoint: dict | None, *,
+              allow_recompute: bool = True,
+              extra_roots: tuple[str, ...] = ()
+              ) -> tuple[ChatUsage, dict] | None:
+        if self.reader_factory is None or self.locator is None:
+            return None
+        reader = self.reader_factory()
+        if reader is None:
+            return None
+        roots = tuple(reader.roots) + tuple(extra_roots)
+        path = self.locator(client, roots)
+        if path is None:
+            return None
+        session_id = str(getattr(client, "session_id", "") or "")
+        return reader.sweep(path, checkpoint, engine=self.engine,
+                            session_id=session_id,
+                            allow_recompute=allow_recompute)
+
+
+def locate_by_session(client: Client, roots: tuple[str, ...]) -> Path | None:
+    """The transcript-locating ladder (§3.2), in order, stopping at the
+    first that answers.
+
+    1. `client.transcript_hint` — written by the SessionStart hook into
+       the marker. This is the path.
+    2. A KEYED SINGLE-MATCH lookup: glob `<root>/<session_id>.jsonl` and
+       accept only if exactly one file matches. Deliberately NOT a direct
+       construction from the cwd-to-dashes rule, which is undocumented and
+       would be a guess ABOUT A RULE; a glob keyed on an id we already
+       know is the standard `read_marker` holds itself to. Two matches
+       means two projects have a session by that id and we cannot tell
+       which is ours — so it DECLINES, which is the ambient layer's
+       refusal in a new place, for the same reason.
+    3. Otherwise `None`."""
+    hint = getattr(client, "transcript_hint", None)
+    if isinstance(hint, str) and hint:
+        candidate = Path(hint).expanduser()
+        if candidate.is_file():
+            return candidate
+    session_id = str(getattr(client, "session_id", "") or "")
+    if not session_id or "/" in session_id or "\\" in session_id:
+        return None
+    matches: list[Path] = []
+    for root in roots:
+        try:
+            base = Path(root).expanduser()
+            matches.extend(p for p in base.parent.glob(
+                f"{base.name}/{session_id}.jsonl") if p.is_file())
+        except Exception:
+            continue
+    unique = sorted({str(p) for p in matches})
+    return Path(unique[0]) if len(unique) == 1 else None
+
+
 @dataclass(frozen=True)
 class McpStdioAdapter:
     """Last-resort *engine identification* for a chat engine we do not
@@ -385,7 +719,19 @@ CLAUDE_CODE_SETUP = (
     "ENRICHES — a chat without it is still attributed exactly."
 )
 
-CLAUDE_CODE = SimpleAdapter(
+def _claude_code_reader() -> JsonlTranscriptUsage | None:
+    """Resolved lazily, so the engine's transcript contract lives in the
+    engine's own module (`adapters/claude_code.py`) without this module
+    importing it at load time."""
+    try:
+        from .adapters.claude_code import CLAUDE_CODE_USAGE
+
+        return CLAUDE_CODE_USAGE
+    except Exception:
+        return None
+
+
+CLAUDE_CODE = UsageReadingAdapter(
     name="claude-code",
     engine="claude-code",
     # CLAUDECODE=1 is the DOCUMENTED gate, set in both Bash-tool
@@ -396,6 +742,8 @@ CLAUDE_CODE = SimpleAdapter(
     host_keys=("CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID"),
     label_keys=("AI_AGENT",),
     setup=CLAUDE_CODE_SETUP,
+    reader_factory=_claude_code_reader,
+    locator=locate_by_session,
 )
 
 MCP_STDIO = McpStdioAdapter()
@@ -405,6 +753,16 @@ MCP_STDIO = McpStdioAdapter()
 # engine's server falls through to `mcp-stdio` — which therefore stays
 # last, always.
 ADAPTERS: tuple[Adapter, ...] = (CLAUDE_CODE, MCP_STDIO)
+
+
+def adapter_for_engine(engine: str) -> Any:
+    """The adapter that owns an engine, or `None`. An engine with no
+    adapter, or an adapter with no `usage` method, is reported by
+    `authorlm usage` as UNMEASURABLE rather than as zero."""
+    for adapter in ADAPTERS:
+        if getattr(adapter, "engine", None) == engine:
+            return adapter
+    return None
 
 
 # ------------------------------------------------------------ resolution

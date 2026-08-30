@@ -75,7 +75,9 @@ def _llm(config: dict[str, Any], profile: dict[str, Any]) -> LLMClient:
     effective = json.loads(json.dumps(config))
     if profile.get("model"):
         effective.setdefault("llm", {})["model"] = profile["model"]
-    return LLMClient(effective)
+    client = LLMClient(effective)
+    client.purpose = "triage"               # the usage ledger's key (AP)
+    return client
 
 
 def _reuse_context(db: Database, manuscript_id: str,
