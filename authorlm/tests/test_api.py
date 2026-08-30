@@ -16,6 +16,12 @@ import os
 # billed model calls — and asserts against whatever they return.
 os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+# And pin client provenance OFF. The suites run INSIDE a Claude Code
+# Bash call, so CLAUDE_CODE_SESSION_ID is in their own environment and
+# the claude-code adapter would stamp the developer's live chat into
+# every fixture row — tests passing for the wrong reason. Same failure
+# mode as a leaked config, so it gets the same treatment: pin it.
+os.environ["AUTHORLM_CLIENT"] = "none"
 
 def _assert_offline() -> None:
     """Fail loudly if the real project config or .env leaks into a test.
@@ -36,6 +42,14 @@ def _assert_offline() -> None:
     leaked = [v for v in _paths_vendor_vars() if _os.environ.get(v)]
     assert not leaked, f"test isolation broken: vendor keys in env: {leaked}"
 
+    from authorlm import clients as _clients
+
+    detected = _clients.current()
+    assert detected.engine == "unknown" and detected.precision == "none", (
+        f"test isolation broken: client provenance detected "
+        f"{detected.engine}/{detected.session_id} — the suite is stamping "
+        f"the developer's live chat into fixture rows")
+
 
 def _paths_vendor_vars() -> list:
     from authorlm.llm import VENDOR_KEY_ENV
@@ -45,6 +59,8 @@ def _paths_vendor_vars() -> list:
 
 
 import contextlib
+import io
+import json
 import shutil
 import sys
 import tempfile
@@ -3018,7 +3034,497 @@ def check_style_refusal_names_candidates() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _client_ctx(env: dict, workspace, surface: str = "cli", now=None):
+    """A resolution context built from a FAKE environment and a FAKE
+    workspace. Never `os.environ` — the suite runs inside a Claude Code
+    Bash call and would otherwise be asking about the developer's own
+    live chat (R-5)."""
+    from authorlm import clients
+
+    return clients.Context(env=env, surface=surface, workspace=Path(workspace),
+                           now=now or clients._now())
+
+
+def _write_test_marker(clients_mod, workspace, session_id, *, engine="claude-code",
+                       host_pid=None, age_hours=0.0, **extra):
+    from datetime import datetime, timedelta, timezone
+
+    stamp = (datetime.now(timezone.utc)
+             - timedelta(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    data = {"engine": engine, "session_id": session_id,
+            "host_pid": os.getpid() if host_pid is None else host_pid,
+            "updated_at": stamp, "started_at": stamp}
+    data.update(extra)
+    return clients_mod.write_marker_file(workspace, data)
+
+
+def check_client_resolution() -> None:
+    """The layered resolver: override, adapters, ambient, nothing.
+
+    Every case drives `clients.current(Context(...))` with an injected
+    env and an injected workspace. What is pinned here is the
+    PRECEDENCE, not any one variable name — `CLAUDE_CODE_SESSION_ID` is
+    undocumented and can vanish, and when it does the fix should be a
+    one-line adapter edit, not a test rewrite (R-1)."""
+    from authorlm import clients
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-clients-"))
+    try:
+        # --- 1. the explicit override wins, in both spellings, and off. ---
+        ws = root / "override"
+        loud = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "live-chat-id"}
+        packed = clients.current(_client_ctx(
+            {**loud, "AUTHORLM_CLIENT": "claude-code:pinned-id:a label"}, ws))
+        check("AUTHORLM_CLIENT beats a present CLAUDE_CODE_SESSION_ID",
+              (packed.session_id, packed.precision, packed.adapter)
+              == ("pinned-id", "exact", "env"),
+              f"{packed}")
+        check("the packed override carries its label",
+              packed.label == "a label" and packed.engine == "claude-code")
+        as_json = clients.current(_client_ctx(
+            {**loud, "AUTHORLM_CLIENT":
+             '{"engine": "athena", "session": "conv-9", "label": "Athena"}'},
+            ws))
+        check("AUTHORLM_CLIENT also accepts JSON",
+              (as_json.engine, as_json.session_id, as_json.label)
+              == ("athena", "conv-9", "Athena"), f"{as_json}")
+        off = clients.current(_client_ctx(
+            {**loud, "AUTHORLM_CLIENT": "none"}, ws))
+        check("AUTHORLM_CLIENT=none disables detection entirely",
+              (off.engine, off.session_id, off.precision)
+              == ("unknown", None, "none"), f"{off}")
+
+        # --- 2. Branch A: the session id travels with the invocation. ---
+        ws = root / "branch-a"
+        branch_a = clients.current(_client_ctx(
+            {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "a1ea8c70-cafe",
+             "AI_AGENT": "claude-code_2-1-246_agent"}, ws))
+        check("Branch A resolves the chat session exactly",
+              (branch_a.engine, branch_a.session_id, branch_a.precision,
+               branch_a.adapter)
+              == ("claude-code", "a1ea8c70-cafe", "exact", "claude-code"),
+              f"{branch_a}")
+        check("with no hook installed the adapter is still exact, "
+              "labelled from AI_AGENT",
+              branch_a.label == "claude-code_2-1-246_agent"
+              and branch_a.transcript_hint is None)
+
+        # --- 3. Branch B: no session id, host pid → marker → session. ---
+        ws = root / "branch-b"
+        _write_test_marker(clients, ws, "b-session-id", host_pid=999,
+                           label="Claude Code (hooked)",
+                           transcript_hint="/tmp/transcripts/b.jsonl")
+        branch_b = clients.current(_client_ctx(
+            {"CLAUDECODE": "1",
+             "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/cc-socks/999.sock"}, ws))
+        check("Branch B maps the host pid to the session through the marker",
+              (branch_b.session_id, branch_b.precision)
+              == ("b-session-id", "exact"), f"{branch_b}")
+        check("Branch B still picks up the marker's enrichment",
+              branch_b.transcript_hint == "/tmp/transcripts/b.jsonl")
+
+        # --- 4. the documented gate, and the mcp-stdio fallthrough. ---
+        ws = root / "gate"
+        bare = clients.CLAUDE_CODE.detect(_client_ctx(
+            {"CLAUDE_CODE_SESSION_ID": "orphan"}, ws))
+        check("CLAUDECODE absent → the claude-code adapter declines",
+              bare is None)
+        as_mcp = clients.current(_client_ctx({}, ws, surface="mcp"))
+        check("an unrecognised engine's stdio server is exact but anonymous",
+              (as_mcp.engine, as_mcp.session_id, as_mcp.precision)
+              == ("mcp-stdio", clients.CONNECTION_ID, "exact"), f"{as_mcp}")
+        as_cli = clients.current(_client_ctx({}, ws, surface="cli"))
+        check("a bare CLI run with nothing to go on is unknown/none",
+              (as_cli.engine, as_cli.precision) == ("unknown", "none"))
+
+        # --- 5. ambient, one live marker. ---
+        ws = root / "ambient-one"
+        _write_test_marker(clients, ws, "ambient-solo", label="Solo chat")
+        solo = clients.current(_client_ctx({}, ws))
+        check("one live marker is named, and honestly marked ambient",
+              (solo.engine, solo.session_id, solo.precision, solo.adapter)
+              == ("claude-code", "ambient-solo", "ambient", "ambient"),
+              f"{solo}")
+
+        # --- 6. the refusal: two live markers name no session at all. ---
+        ws = root / "ambient-two"
+        _write_test_marker(clients, ws, "chat-one")
+        _write_test_marker(clients, ws, "chat-two")
+        both = clients.current(_client_ctx({}, ws))
+        check("two live clients → the ambient layer refuses to name one",
+              both.session_id is None and both.precision == "ambient",
+              f"{both}")
+        check("the refusal records the count instead of guessing",
+              both.note == "2 live clients — session not claimed"
+              and both.engine == "claude-code", f"{both.note}")
+
+        # --- 7. staleness: age and a dead host pid both disqualify. ---
+        ws = root / "stale"
+        _write_test_marker(clients, ws, "too-old", age_hours=30)
+        _write_test_marker(clients, ws, "dead-host", host_pid=999999)
+        _write_test_marker(clients, ws, "still-here")
+        survivor = clients.current(_client_ctx({}, ws))
+        check("a 30-hour-old marker and a dead host pid are both ignored",
+              survivor.session_id == "still-here"
+              and survivor.precision == "ambient", f"{survivor}")
+        check("the stale pair did not trip the two-live refusal",
+              survivor.note is None)
+
+        # --- 8. a broken marker directory is silent, never an exception. ---
+        ws = root / "broken"
+        check("an absent clients/ directory reads as empty",
+              clients.current(_client_ctx({}, ws)).engine == "unknown")
+        clients.clients_dir(ws).mkdir(parents=True)
+        (clients.clients_dir(ws) / "garbage.json").write_text("{not json")
+        check("malformed marker JSON is skipped, not raised",
+              clients.current(_client_ctx({}, ws)).precision == "none")
+        _write_test_marker(clients, ws, "good-one")
+        check("a good marker beside a malformed one still resolves",
+              clients.current(_client_ctx({}, ws)).session_id == "good-one")
+
+        # --- 14/15. the hook verb, through the CLI, on stdin. ---
+        ws = root / "hook"
+        ws.mkdir(parents=True, exist_ok=True)
+
+        def hook(payload_text: str, *flags) -> None:
+            stream = io.StringIO(payload_text)
+            prev_stdin = sys.stdin
+            sys.stdin = stream
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    cli_main(["--workspace", str(ws), "client-hook", *flags])
+            finally:
+                sys.stdin = prev_stdin
+            check_hook_silent.append(out.getvalue())
+
+        check_hook_silent: list = []
+        hook(json.dumps({
+            "session_id": "hooked-session", "source": "startup",
+            "transcript_path": "/tmp/projects/hooked-session.jsonl",
+            "cwd": "/tmp/project"}))
+        marker = clients.read_marker(ws, "claude-code", "hooked-session")
+        check("a SessionStart payload writes the marker with its fields",
+              marker is not None
+              and marker["transcript_hint"]
+              == "/tmp/projects/hooked-session.jsonl"
+              and marker["source"] == "startup"
+              and marker["cwd"] == "/tmp/project", f"{marker}")
+        check("the hook prints nothing to stdout "
+              "(a SessionStart's stdout reaches the model)",
+              check_hook_silent == [""], f"{check_hook_silent}")
+
+        hook(json.dumps({"session_id": "second-session", "source": "startup"}))
+        files = sorted(p.name for p in clients.clients_dir(ws).glob("*.json"))
+        check("two SessionStarts write two files, neither clobbered",
+              files == ["claude-code-hooked-session.json",
+                        "claude-code-second-session.json"], f"{files}")
+        check("the first marker survived the second write",
+              (clients.read_marker(ws, "claude-code", "hooked-session") or {})
+              .get("transcript_hint")
+              == "/tmp/projects/hooked-session.jsonl")
+
+        hook(json.dumps({"session_id": "hooked-session", "reason": "clear"}),
+             "--end")
+        check("a SessionEnd payload removes its own marker, and only its own",
+              clients.read_marker(ws, "claude-code", "hooked-session") is None
+              and clients.read_marker(ws, "claude-code", "second-session")
+              is not None)
+
+        before = sorted(p.name for p in clients.clients_dir(ws).glob("*.json"))
+        hook("{ this is not json")
+        after = sorted(p.name for p in clients.clients_dir(ws).glob("*.json"))
+        check("malformed hook input exits 0 and writes nothing",
+              before == after, f"{before} → {after}")
+
+        snippet = io.StringIO()
+        with contextlib.redirect_stdout(snippet):
+            cli_main(["--workspace", str(ws), "client-hook", "--print-setup"])
+        check("--print-setup prints a registerable hook snippet",
+              "SessionStart" in snippet.getvalue()
+              and "authorlm client-hook" in snippet.getvalue())
+
+        # --- 16. the tracelog's optional client field. ---
+        from authorlm import tracelog
+
+        ws = root / "trace"
+        tracelog.record("provenance", surface="cli", workspace=str(ws),
+                        client={"engine": "claude-code", "session": "t-1",
+                                "precision": "exact"})
+        tracelog.record("status", surface="cli", workspace=str(ws))
+        lines = [json.loads(x) for x in
+                 (tracelog.log_dir(str(ws)) / "trace.jsonl")
+                 .read_text().splitlines()]
+        check("the trace line carries the client when it is known",
+              lines[0]["client"] == {"engine": "claude-code", "session": "t-1",
+                                     "precision": "exact"})
+        check("the trace line omits the key entirely when it is not",
+              "client" not in lines[1], f"{lines[1]}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _as_client(packed: str):
+    """Pretend, for the duration of the block, that this process was
+    launched by a particular chat. Goes through `AUTHORLM_CLIENT`, which
+    is the documented override, so the stamp sites are exercised through
+    the same path a real invocation uses."""
+    from authorlm import clients
+
+    previous = os.environ.get("AUTHORLM_CLIENT")
+    os.environ["AUTHORLM_CLIENT"] = packed
+    try:
+        yield clients.current()
+    finally:
+        if previous is None:
+            os.environ.pop("AUTHORLM_CLIENT", None)
+        else:
+            os.environ["AUTHORLM_CLIENT"] = previous
+
+
+def check_client_stamps() -> None:
+    """The stamp sites: every row at birth, the session's rich list, the
+    writeup's touched-by list — and the ordering hazard the touched-by
+    list would otherwise walk into."""
+    from authorlm import clients
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-stamp-"))
+    try:
+        # --- 9. the birth stamp, and its deliberate empty case. ---
+        empty = loads(ko_fields("t")["metadata"], None)
+        check("with detection off a fresh row is born with a bare {} — "
+              "an absent stamp must read exactly like a pre-stamp row",
+              empty == {}, f"{empty}")
+        with _as_client("claude-code:stamp-a:Chat A"):
+            stamped = loads(ko_fields("t")["metadata"], None)
+        check("every row is born carrying the join key",
+              stamped == {"client": {"engine": "claude-code",
+                                     "session": "stamp-a",
+                                     "precision": "exact"}}, f"{stamped}")
+
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-choice.md").write_text("# Opening\n\nEvery act begins.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            db = api.open_db(str(ws))
+            manuscript = api.register_manuscript(db, "book", str(ms))
+
+        # --- 10. the session's client list is a LIST. ---
+        with _as_client("claude-code:sess-a:Chat A"):
+            first, created = api.ensure_session(db, manuscript)
+        check("ensure_session opens lazily and records the chat", created)
+        with _as_client("claude-code:sess-b:Chat B"):
+            second, created_again = api.ensure_session(db, manuscript)
+        check("a second chat joins the SAME AuthorLM session",
+              not created_again and second["id"] == first["id"])
+        entries = loads(second["metadata"], {})["clients"]
+        check("both chats are recorded, deduped by (engine, session)",
+              [e["session"] for e in entries] == ["sess-a", "sess-b"],
+              f"{entries}")
+        check("the rich payload lives here, not on every row",
+              entries[0]["label"] == "Chat A"
+              and entries[0]["adapter"] == "env"
+              and "first_seen" in entries[0] and "last_seen" in entries[0])
+        was = entries[0]["last_seen"]
+        with _as_client("claude-code:sess-a:Chat A"):
+            third, _ = api.ensure_session(db, manuscript)
+        again = loads(third["metadata"], {})["clients"]
+        check("a returning chat advances last_seen and adds no second entry",
+              len(again) == 2 and again[0]["last_seen"] > was,
+              f"{again[0]['last_seen']} vs {was}")
+
+        # --- 11. the writeup touched-by list, and the clobber regression. ---
+        intent = api.declare_intent(db, manuscript, "Introduce gravity")
+        with _as_client("claude-code:wu-a:Chat A"):
+            fields = ko_fields("wu")
+            fields.update(manuscript_id=manuscript["id"],
+                          intent_id=intent["intent"]["id"],
+                          file="02-gravity.md")
+            writeup_id = db.insert("writeups", fields)
+        born = loads(db.one("SELECT metadata FROM writeups WHERE id = ?",
+                            (writeup_id,))["metadata"], {})
+        check("the writeup was born stamped with the chat that opened it",
+              born == {"client": {"engine": "claude-code", "session": "wu-a",
+                                  "precision": "exact"}}, f"{born}")
+
+        def resolve(packed: str, verb: str) -> dict:
+            with _as_client(packed):
+                clients.configure(verb=verb)
+                return api._writeup(db, manuscript, writeup_id)
+
+        for verb in ("write status", "write plan", "write status"):
+            resolve("claude-code:wu-a:Chat A", verb)   # "status" twice: dedup
+        for verb in ("write draft", "write accept"):
+            row = resolve("claude-code:wu-b:Chat B", verb)
+        touched = loads(row["metadata"], {})["clients"]
+        check("each chat gets exactly one entry, in the order it arrived",
+              [e["session"] for e in touched] == ["wu-a", "wu-b"], f"{touched}")
+        check("the verb trail is recorded and deduped",
+              touched[0]["verbs"] == ["write status", "write plan"],
+              f"{touched[0]}")
+        check("the second chat's own verbs are its own",
+              touched[1]["verbs"] == ["write draft", "write accept"])
+
+        # The hazard, asserted directly. Every one of `_writeup`'s callers
+        # loads the metadata it just returned, mutates it, and dumps it
+        # back. If the touch ran after that load — or if the pre-touch row
+        # were returned — this dump would silently drop the clients list.
+        stale_carrier = resolve("claude-code:wu-c:Chat C", "write complete")
+        meta = loads(stale_carrier["metadata"], {})
+        meta["some_later_key"] = "written by the verb after _writeup returned"
+        db.update("writeups", writeup_id, {"metadata": json.dumps(meta)})
+        after = loads(db.one("SELECT metadata FROM writeups WHERE id = ?",
+                             (writeup_id,))["metadata"], {})
+        check("a verb's own read-modify-write does NOT drop the clients list",
+              [e["session"] for e in after.get("clients", [])]
+              == ["wu-a", "wu-b", "wu-c"], f"{after.get('clients')}")
+        check("and the verb's own key landed alongside it",
+              after.get("some_later_key")
+              == "written by the verb after _writeup returned")
+    finally:
+        clients.configure(verb="")
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_provenance_verb() -> None:
+    """`authorlm provenance` — the payoff verb. Read-only, and honest
+    about the rows that predate the stamp."""
+    from authorlm import clients
+    from authorlm.db import Database, ko_fields as ko
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-prov-"))
+    try:
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        db = Database(ws / ".authorlm" / "authorlm.db")
+        old = "2026-08-01T09:14:02.000000Z"          # predates STAMPING_SINCE
+        chat_a = {"engine": "claude-code", "session": "a1ea8c70",
+                  "precision": "exact"}
+        chat_b = {"engine": "claude-code", "session": "f4342d91",
+                  "precision": "exact"}
+
+        def row(prefix, table, **fields):
+            base = ko(prefix)
+            base["created_at"] = old
+            base.update(fields)
+            db.insert(table, base)
+            return base["id"]
+
+        ms_id = row("ms", "manuscripts", name="book", path=str(ws / "m"))
+        session_id = row("s", "sessions", manuscript_id=ms_id, started_at=old,
+                         metadata=json.dumps({"clients": [
+                             {**chat_a, "adapter": "claude-code",
+                              "label": "Claude Code 2.1.246 (claude-desktop)",
+                              "transcript_hint": "/tmp/projects/a1ea8c70.jsonl",
+                              "first_seen": old, "last_seen": old},
+                             {**chat_b, "adapter": "claude-code",
+                              "label": "Claude Code 2.1.247 (claude-desktop)",
+                              "first_seen": old, "last_seen": old}]}))
+        intent_id = row("di", "declared_intents", manuscript_id=ms_id,
+                        session_id=session_id, statement="Introduce gravity",
+                        status="active",
+                        metadata=json.dumps({"client": chat_a}))
+        writeup_id = row("wu", "writeups", manuscript_id=ms_id,
+                         intent_id=intent_id, file="09-gravity.md",
+                         status="completed",
+                         metadata=json.dumps({
+                             "client": chat_a,
+                             "clients": [
+                                 {**chat_a, "first": old, "last": old,
+                                  "verbs": ["start", "plan", "draft"]},
+                                 {**chat_b, "first": old, "last": old,
+                                  "verbs": ["draft", "accept"]}]}))
+        beat_one = row("gd", "guidance_history", manuscript_id=ms_id,
+                       session_id=session_id, intent_id=intent_id,
+                       batch_id=writeup_id, batch_index=1, kind="beat",
+                       suggestion="s", explanation="e", state="accepted",
+                       metadata=json.dumps({"client": chat_a,
+                                            "accepted_by": chat_a}))
+        beat_four = row("gd", "guidance_history", manuscript_id=ms_id,
+                        session_id=session_id, intent_id=intent_id,
+                        batch_id=writeup_id, batch_index=4, kind="beat",
+                        suggestion="s", explanation="e", state="accepted",
+                        metadata=json.dumps({"client": chat_a}))
+        row("rv", "editorial_reviews", manuscript_id=ms_id,
+            guidance_id=beat_four, decision="accepted", explanation="",
+            metadata=json.dumps({"client": chat_b}))
+
+        def run(*argv) -> str:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli_main(["--workspace", str(ws), "provenance", *argv])
+            return out.getvalue()
+
+        # --- 12. the object view. ---
+        text = run(writeup_id[:7])
+        check("provenance names both chats that touched the writeup",
+              "claude-code/a1ea8c70" in text
+              and "claude-code/f4342d91" in text, text)
+        check("it reaches the rich payload by joining on (engine, session)",
+              "Claude Code 2.1.246 (claude-desktop)" in text
+              and "/tmp/projects/a1ea8c70.jsonl" in text, text)
+        check("it renders the verb trail it recorded",
+              "start, plan, draft" in text, text)
+        check("a beat drafted by one chat and settled by another is marked",
+              "←" in text and "a beat drafted by one chat" in text, text)
+        check("a beat settled by its own proposer is not marked",
+              text.count("←") == 2, text)      # the flag and the legend
+        check("a pre-stamp row prints the backfill footnote, "
+              "rather than rendering as unknown",
+              f"rows created before {clients.STAMPING_SINCE}" in text
+              and "timestamp correlation only" in text, text)
+        check("the footnote keeps the pre-provenance method that still works",
+              "the filename is the session" in text
+              and "~/.claude/projects/" in text, text)
+
+        # --- 13. the inversion. ---
+        inverted = run("--client", "a1ea8c70")
+        check("--client inverts: what did this chat touch",
+              f"writeup    {writeup_id[:8]}" in inverted
+              and f"intent     {intent_id[:8]}" in inverted, inverted)
+        check("the inversion names the chat's sessions and transcript",
+              session_id in inverted
+              and "/tmp/projects/a1ea8c70.jsonl" in inverted, inverted)
+        check("an unknown client id returns cleanly, without an exception",
+              "No client matching" in run("--client", "no-such-chat"))
+        check("no argument lists the known clients, newest first",
+              "claude-code/a1ea8c70" in run() and "claude-code/f4342d91" in run())
+
+        # Bare CLI use never opens an AuthorLM session, so a chat can have
+        # a row stamp and no rich payload anywhere. It must still be
+        # listed and still be invertible, or a terminal-only workspace
+        # would report no clients while every row named one.
+        cli_only = {"engine": "claude-code", "session": "c11a0nly",
+                    "precision": "exact"}
+        row("di", "declared_intents", manuscript_id=ms_id,
+            statement="Typed at a terminal", status="active",
+            metadata=json.dumps({"client": cli_only}))
+        check("a chat known only from row stamps is still listed",
+              "claude-code/c11a0nly" in run("--clients"), run("--clients"))
+        check("and is still invertible",
+              "intent" in run("--client", "c11a0nly"))
+        from authorlm.cli import _client_name
+
+        check("an ambient claim renders with a ~, and an unclaimed one says so",
+              _client_name({"engine": "claude-code", "session": "f4342d91",
+                            "precision": "ambient"}) == "~claude-code/f4342d91"
+              and _client_name({"engine": "claude-code", "session": None,
+                                "precision": "ambient"})
+              == "~claude-code/(unclaimed)")
+
+        untouched = loads(db.one("SELECT metadata FROM writeups WHERE id = ?",
+                                 (writeup_id,))["metadata"], {})
+        check("provenance wrote nothing — it is safe to run mid-flight",
+              untouched["clients"][0]["verbs"] == ["start", "plan", "draft"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_client_resolution()
+    check_client_stamps()
+    check_provenance_verb()
     check_placeholder_reader_paths()
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()
@@ -3200,9 +3706,12 @@ def main_test() -> None:
         check("resolve_file rejects foreign paths",
               api.resolve_file(db, "/tmp/nowhere.md") is None)
 
-        session, created = api.ensure_session(db, manuscript, client_id="mcp-test123")
-        check("ensure_session lazily opens and stamps client id", created
-              and "mcp-test123" in (session["metadata"] or ""))
+        with _as_client("mcp-stdio:mcp-test123:stdio MCP connection"):
+            session, created = api.ensure_session(db, manuscript)
+        recorded = loads(session["metadata"], {}).get("clients") or []
+        check("ensure_session lazily opens and records the speaking chat",
+              created and [e["session"] for e in recorded] == ["mcp-test123"],
+              f"{recorded}")
         session2, created2 = api.ensure_session(db, manuscript)
         check("ensure_session reuses the active session",
               not created2 and session2["id"] == session["id"])

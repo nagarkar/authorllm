@@ -28,7 +28,7 @@ def log_dir(workspace: str | None = None) -> Path:
 def record(verb: str, *, surface: str, workspace: str | None = None,
            action: str | None = None, manuscript: str | None = None,
            duration_ms: int | None = None, ok: bool = True,
-           error: str | None = None) -> None:
+           error: str | None = None, client: dict | None = None) -> None:
     try:
         directory = log_dir(workspace)
         directory.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,21 @@ def record(verb: str, *, surface: str, workspace: str | None = None,
         entry["ok"] = ok
         if error:
             entry["error"] = error[:500]
+        # The trace log is the TIMELINE; row metadata is the join key.
+        # Together they answer "which client did what, when, to this
+        # object" with no schema change and no index. Resolved here so
+        # every caller gets it from one edit; omitted entirely when
+        # unknown, so old lines and unattributed ones read alike.
+        if client is None:
+            try:
+                from . import clients
+
+                found = clients.current()
+                client = found.key() if found.precision != "none" else None
+            except Exception:
+                client = None
+        if client:
+            entry["client"] = client
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
     except Exception:

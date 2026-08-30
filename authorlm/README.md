@@ -448,6 +448,71 @@ whenever you want the next run to see current telemetry:
 cp ~/.authorlm/logs/trace.jsonl authorlm/_diagnostics/trace.jsonl
 ```
 
+## Client provenance — which chat did this
+
+`source_id` records *whose judgment* originated a knowledge object. This
+records *which conversation* the author was having when it was born — a
+different question, and one that only matters once several chats share
+one workspace, which they now do.
+
+Every row created from 2026-08-30 carries a small stamp in its metadata:
+`{"client": {"engine", "session", "precision"}}`. The reconstruction
+payload — label, start time, transcript path — is written once per client
+per AuthorLM session, on the session row. A writeup also keeps a
+touched-by list, so a writeup resumed by a second chat shows the seam.
+Nothing gates on any of it, and no verb errors if it is missing.
+
+```bash
+authorlm provenance wu-3f0c          # which chats touched this object
+authorlm provenance --client a1ea8c7 # invert: what did this chat touch
+authorlm provenance --clients        # every chat we have seen
+```
+
+`precision` says what the claim is worth. `exact` means the identity
+travelled with the invocation. `ambient` means it was inferred from
+workspace state and may misattribute when several chats are open — and
+when two are live at once the resolver **declines to name one at all**
+rather than guess.
+
+**Turning it off.** `AUTHORLM_CLIENT=none` disables detection entirely;
+the test suites set it, and so can you. Session ids and transcript paths
+are machine-local personal data, so if you share a database backup, that
+is the switch. `AUTHORLM_CLIENT=engine:session:label` (or a JSON object)
+forces a specific identity instead.
+
+**The hook is optional.** On Claude Code the chat is attributed *exactly*
+with no hook at all — `CLAUDE_CODE_SESSION_ID` reaches both Bash-tool
+subprocesses and stdio MCP servers. The `SessionStart` / `SessionEnd`
+hooks only add the label, the start time and the transcript path (and are
+the fallback if that undocumented variable ever disappears). Hooks
+execute code, so nothing is installed for you — print the snippet and
+paste it yourself:
+
+```bash
+authorlm client-hook --print-setup
+```
+
+Put it in this repo's `.claude/settings.json` (committable; binds every
+chat started in this project) or in `~/.claude/settings.json` (all
+projects, personal, not committable).
+
+**Rows older than the stamp.** Nothing is backfilled — correlating old
+rows to old transcripts by timestamp is a confident guess across parallel
+chats, which is exactly the failure this exists to prevent, so
+`provenance` prints a footnote instead. The pre-provenance method still
+works, and is exact when it hits: Claude Code stores one JSONL per
+session at `~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/<session_id>.jsonl`,
+and AuthorLM ids appear verbatim in tool results, so grep the transcripts
+for the id — the filename *is* the session id:
+
+```bash
+grep -l 'wu-3f0c9a12e4b7' ~/.claude/projects/-Users-you-repos-authorllm/*.jsonl
+```
+
+It is silent when the transcript has been deleted or the work was done
+from the bare CLI. That is the whole technique, and the stamp does not
+replace it.
+
 ## Data
 
 Everything lives in `.authorlm/authorlm.db` (SQLite). Historical objects —

@@ -18,6 +18,12 @@ import os
 # billed model calls — and asserts against whatever they return.
 os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+# And pin client provenance OFF. The suites run INSIDE a Claude Code
+# Bash call, so CLAUDE_CODE_SESSION_ID is in their own environment and
+# the claude-code adapter would stamp the developer's live chat into
+# every fixture row — tests passing for the wrong reason. Same failure
+# mode as a leaked config, so it gets the same treatment: pin it.
+os.environ["AUTHORLM_CLIENT"] = "none"
 
 def _assert_offline() -> None:
     """Fail loudly if the real project config or .env leaks into a test.

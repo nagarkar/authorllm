@@ -30,7 +30,7 @@ authorlm = "authorlm.cli:main"
 authorlm-mcp = "authorlm.mcp_server:main"
 
 [tool.setuptools]
-packages = ["authorlm"]
+packages = ["authorlm", "authorlm.adapters"]
 
 [tool.setuptools.package-data]
 authorlm = [
@@ -39,3 +39,4 @@ authorlm = [
     "triage_profiles/*.json",
     "triage_dist/*.html",
 ]
+"authorlm.adapters" = ["*.json"]
