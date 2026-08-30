@@ -6286,6 +6286,41 @@ def scenario_filter(root: Path) -> None:
               "does not block", "still carries the mid-rewrite marker"
               in out and "───── block S — " in out, out[:600])
         run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+
+        # --- filter status: the class drift and the orphaned mark ------
+        run(ws, "filter", "run", "duplicate-words", "01-open.md")
+        run_stdin(ws, SEQ_FILTER.replace('class = "sequential"',
+                                         'class = "global"'),
+                  "filter", "add", "duplicate-words")
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status reports a run whose ARTIFACT class changed "
+              "under it, and says the run will finish as what it started "
+              "— the class is frozen so a mid-run edit cannot change a "
+              "live run's mechanics",
+              "the artifact's class is now 'global'" in out
+              and "will finish as one" in out, out)
+        run_stdin(ws, SEQ_FILTER, "filter", "add", "duplicate-words")
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # A crash between "compose" and "write threads" leaves a marked
+        # file with no written rows. The bytes fully describe that state,
+        # so `filter status` can find it and `filter unmark` can undo it.
+        orphan = (ms / "01-open.md")
+        kept = orphan.read_bytes()
+        first = _filter_units(orphan.read_text())[0]
+        orphan.write_text(orphan.read_text().replace(
+            first, f"<<{first}>>{{{{An orphaned proposal.}}}}"))
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status detects an ORPHANED mark — pending forms on "
+              "disk with no matching staged edit — and names the two-line "
+              "recovery",
+              "carries pending forms on disk with no matching staged edit"
+              in out and "filter unmark 01-open.md" in out, out)
+        run(ws, "filter", "unmark", "01-open.md")
+        check("filter unmark recovers it byte for byte, with no run row "
+              "and no thread to consult — the state was fully described "
+              "by the bytes",
+              orphan.read_bytes() == kept, orphan.read_text()[:200])
     finally:
         server.shutdown()
 
