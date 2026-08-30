@@ -4419,6 +4419,198 @@ def scenario_ephemeral_history() -> None:
           f"history length {readline.get_current_history_length()} != {base}")
 
 
+def _load_testbench():
+    """tools/testbench.py as a module. `tools/` is a directory of scripts,
+    not a package, so it is loaded by path rather than imported — the same
+    file the operator runs, with no packaging invented for the test."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "testbench.py"
+    spec = importlib.util.spec_from_file_location("testbench", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def scenario_testbench(root: Path) -> None:
+    """The live test bench (tools/testbench.py), driven hermetically.
+
+    The bench itself exists to run against ~/.authorlm; this scenario
+    proves the DRIVER — setup idempotence, the placeholder check, and
+    above all that the visibility assertions DISCRIMINATE — against a
+    temp workspace and the stub model server, so the suite never opens
+    the author's database and never spends a live call."""
+    import subprocess
+
+    print("Scenario TB — the live test bench, driven against a temp workspace")
+    tb = _load_testbench()
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "tb"
+        msdir = root / "tb-manuscripts" / tb.BENCH
+        cfg = ws / ".authorlm" / "config.toml"
+        write(cfg, "[llm]\nenabled = true\nprovider = \"openai\"\n"
+                   f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+                   "model = \"stub\"\n")
+        env = dict(os.environ)
+        env["AUTHORLM_CONFIG"] = str(cfg)
+        env["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+        def bench(*argv, expect_exit: int = 0) -> str:
+            proc = subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).resolve().parent.parent / "tools"
+                     / "testbench.py"),
+                 "--workspace", str(ws), "--manuscript-dir", str(msdir),
+                 *argv],
+                env=env, capture_output=True, text=True)
+            out = proc.stdout + proc.stderr
+            assert proc.returncode == expect_exit, (
+                f"testbench {argv} exited {proc.returncode}, expected "
+                f"{expect_exit}\n{out}")
+            return out
+
+        # --- the safety rail, before anything exists ---------------------
+        proc = subprocess.run(
+            [sys.executable,
+             str(Path(__file__).resolve().parent.parent / "tools"
+                 / "testbench.py"),
+             "--workspace", str(ws),
+             "--manuscript-dir", str(root / "tb-manuscripts" / "smsttd"),
+             "--setup"],
+            env=env, capture_output=True, text=True)
+        check("the bench refuses any directory not named 'testbench' — the "
+              "name is the rail, and it is a constant, not a flag",
+              proc.returncode == 2
+              and "must be named 'testbench'" in proc.stderr,
+              proc.stdout + proc.stderr)
+        check("the refusal wrote nothing", not (root / "tb-manuscripts"
+                                                / "smsttd").exists())
+
+        # --- setup -------------------------------------------------------
+        before = StubLLMHandler.REQUESTS
+        out = bench("--setup")
+        check("--setup prints what it will create BEFORE creating it",
+              "--setup will, in" in out
+              and "register the manuscript 'testbench'" in out
+              and "the ONLY step that calls a model" in out, out)
+        check("--setup writes the three bench essays and a toc from the "
+              "constants in the script (manuscripts/ is gitignored, so the "
+              "script is the source of truth)",
+              all((msdir / f).read_text() == (tb.TOC if f == "toc.toml"
+                                              else tb.ESSAYS[f])
+                  for f in tb.FILES), sorted(p.name for p in msdir.iterdir()))
+        check("--setup builds the summaries and prints the cost line — the "
+              "one place the bench spends money",
+              "built 3" in out and "LLM: 3 live call(s)" in out, out)
+        check("exactly three model calls: one summary per essay, and no "
+              "concept extraction (init runs --no-extract)",
+              StubLLMHandler.REQUESTS - before == 3,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- idempotence --------------------------------------------------
+        before = StubLLMHandler.REQUESTS
+        out = bench("--setup")
+        check("a second --setup on a healthy bench is a no-op that SAYS so",
+              "is healthy" in out and "Nothing to do" in out
+              and "will, in" not in out, out)
+        check("the no-op run spends nothing",
+              StubLLMHandler.REQUESTS == before,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- the Sponsor's check -------------------------------------------
+        original = (msdir / tb.TARGET).read_bytes()
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "placeholder")
+        check("the placeholder check passes on a healthy bench",
+              "all assertions passed" in out and "FAIL" not in out, out)
+        check("it asserts the on-disk file is EXACTLY the placeholder",
+              "byte for byte" in out, out)
+        check("it asserts the marker is visible markdown — not an HTML "
+              "comment, not front matter, not a code fence, and a plain "
+              "paragraph in the rendered body",
+              "NOT inside an HTML comment" in out
+              and "NOT inside YAML front matter" in out
+              and "NOT inside a code fence" in out
+              and "renders as a plain paragraph" in out, out)
+        check("it asserts write abandon restored the essay byte for byte",
+              "restored the essay byte for byte" in out, out)
+        check("the check leaves the bench exactly as it found it",
+              (msdir / tb.TARGET).read_bytes() == original,
+              (msdir / tb.TARGET).read_text())
+        check("ZERO live model calls during the check — it runs with the "
+              "provider keys scrubbed out of the environment and passes "
+              "with no keys at all",
+              StubLLMHandler.REQUESTS == before,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- the check must DISCRIMINATE ------------------------------------
+        # A visibility test that passes on a HIDDEN marker is worse than no
+        # test: it would have signed off on exactly the failure the Sponsor
+        # asked about. So the same check is run against a bench whose file
+        # has been rewritten, after `write start`, into an HTML comment.
+        _pin_config(ws)
+        before = StubLLMHandler.REQUESTS
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed = tb.check_placeholder(
+                ws, msdir, _corrupt=lambda t: "<!--\n" + t + "\n-->\n")
+        negative = buffer.getvalue()
+        check("the check FAILS when the marker is hidden inside an HTML "
+              "comment — the discrimination the whole test rests on",
+              failed >= 1, negative)
+        check("and it fails on the VISIBILITY assertions by name, not "
+              "merely on the byte-equality one",
+              "FAIL: the marker is NOT inside an HTML comment" in negative
+              and "FAIL: the marker survives the strip" in negative, negative)
+        check("the try/finally holds: a failed check still abandons the "
+              "writeup and restores the essay byte for byte",
+              (msdir / tb.TARGET).read_bytes() == original
+              and "ok: write abandon restored" in negative, negative)
+        check("the discriminating run spent nothing either",
+              StubLLMHandler.REQUESTS == before,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # The other two hiding places, at the level of the parser itself.
+        hidden_front = f"---\ntitle: x\nmarker: {tb.MARKER}\n---\n\nProse.\n"
+        hidden_fence = f"Prose.\n\n```\n{tb.MARKER}\n```\n"
+        check("front matter hides a marker from the rendered body",
+              tb.MARKER not in tb.visible_body(hidden_front)
+              and tb.MARKER in tb.front_matter(hidden_front), hidden_front)
+        check("a code fence hides a marker from the rendered body",
+              tb.MARKER not in tb.visible_body(hidden_fence)
+              and tb.MARKER in tb.code_blocks(hidden_fence), hidden_fence)
+        check("a heading or a list item is visible but is NOT a plain "
+              "paragraph — the parser distinguishes the two",
+              not any(tb.MARKER in ln
+                      for ln in tb.paragraph_lines(f"# {tb.MARKER}\n"))
+              and any(tb.MARKER in ln
+                      for ln in tb.paragraph_lines(f"{tb.MARKER}\n")), "")
+        check("an UNTERMINATED HTML comment swallows the rest of the file, "
+              "and the parser knows it",
+              tb.MARKER not in tb.visible_body(f"<!--\nnote\n{tb.MARKER}\n"),
+              "")
+
+        # --- refusal: a writeup is already active on the bench file ---------
+        out = run(ws, "-m", tb.BENCH, "intent", "declare", "A second intent")
+        intent_id = out.split("[")[1].split("]")[0]
+        run_stdin(ws, "", "-m", tb.BENCH, "write", "start", tb.TARGET,
+                  "--intent", intent_id)
+        out = bench("--check", "placeholder", expect_exit=2)
+        check("the check refuses to run while a writeup is already active "
+              "on the bench file, naming the writeup and the way out",
+              "already active on" in out and "write abandon --writeup" in out,
+              out)
+        run_stdin(ws, "", "-m", tb.BENCH, "write", "abandon",
+                  "--writeup", tb.TARGET)
+        check("and the bench is checkable again once it is settled",
+              "all assertions passed"
+              in bench("--check", "placeholder"), "")
+    finally:
+        server.shutdown()
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
     try:
@@ -4438,6 +4630,7 @@ def main_test() -> None:
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)
+        scenario_testbench(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
