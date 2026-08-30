@@ -1436,8 +1436,21 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         print(ui.dim(f"  «{gdocs.clamp(d['proposal'])}» → "
                      f"«{gdocs.clamp(d['final'])}»"))
     # Collect, then rebuild this essay's summary at the gate.
+    #
+    # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
+    # critique-resolve row). `episode=None` means "the session's most
+    # recently created open episode, whatever goal it belongs to", so
+    # this collect used to file the settle's transitions against
+    # whichever intent happened to be open — making a completion report
+    # say a substantive goal was served by an edit sweep. Settling
+    # staged edits is hygiene, not goal-work: the version history, the
+    # `critique_edit` evidence rows and the pass row are the complete
+    # record. The pre-resolve collect above stays AMBIENT, deliberately:
+    # it snapshots the author's own uncollected local edits, which
+    # predate this verb, exactly as `write_start`'s first collect does.
     with contextlib.redirect_stdout(io.StringIO()):
-        api.collect(db, manuscript, config, source="critique-resolve")
+        api.collect(db, manuscript, config, source="critique-resolve",
+                    episode=api.NO_EPISODE)
     llm = sums.summarizer_llm(config)
     if llm.enabled:
         try:

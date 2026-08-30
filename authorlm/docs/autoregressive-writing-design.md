@@ -1780,6 +1780,27 @@ why:
 | `write_reject` | no collect; its `record_review` is **routed to the primary**. |
 | `write_complete` | **routed to the primary.** Usually a no-op, but a doc pull or a hand edit between the last accepted beat and the completion makes it a real collect with real transitions. |
 | `write_abandon`, both collects | **excluded, deliberately.** They record the pre-abandon snapshot (RISK K2) and the restore — the unwinding of the writeup, not work done under its goal. |
+| `_critique_resolve_essay`, collect 1 (`pre-critique-resolve`) | **ambient, by declaration.** It snapshots the author's own uncollected local edits, which PREDATE this verb — the same reasoning as `write_start`'s first collect. |
+| `_critique_resolve_essay`, collect 2 (`critique-resolve`) | **NO episode** (`api.NO_EPISODE`). Added 2026-08-30 (AQ). |
+
+**The table was incomplete outside the write path too, and that omission
+also had teeth (2026-08-30).** `_critique_resolve_essay` runs two collects and
+neither was ruled on here. The second — the one that records the settle's own
+change to the essay — was ambient, so *every critique-pass resolve attached its
+transitions to whichever episode happened to be open*: this section's own bug,
+living on in the critique pass, one file away from where it was fixed. Settling
+staged edits is **hygiene, not goal-work**. Neither home was right: filing it
+against the open goal makes a completion report say that goal was served by an
+edit sweep, and opening an episode for it would be the grouping object this
+section refused. So it attaches to none, through a new `api.NO_EPISODE`
+sentinel — `episode=None` already means *ambient*, so saying "attach to
+nothing" needed a third value that is neither a row nor `None`. The version
+history, the `critique_edit` evidence rows (which have always carried
+`episode_id = NULL`) and the pass row are the complete record, and explained
+rejections still reach belief learning because that path runs off the evidence
+stream and the author's words, never off an episode. The filter pass (§15.20)
+files its own settle the same way, for the same reason and through the same
+sentinel.
 
 Naming only the two verbs that run every beat was an omission in this text
 rather than a decision, and the omission had teeth: the truncation is the

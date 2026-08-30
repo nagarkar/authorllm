@@ -899,6 +899,78 @@ def main_test() -> None:
         check("critique resolve snapshots the uncollected local edit into "
               "history before overwriting the file (BUG-2 / A1)", recovered)
 
+        # --- Scenario 4 (AQ, the §15.17 mis-attribution family living on
+        # in the critique pass): a resolve run while a parallel writeup's
+        # goal has an open episode must attach its transitions to NO
+        # episode. `collect(episode=None)` means AMBIENT — the session's
+        # most recently created open episode, whatever goal it belongs to
+        # — so before the fix every critique-pass resolve filed its
+        # transitions against whichever intent happened to be open, and
+        # §15.17's completion analysis would report that goal as served
+        # by an edit sweep it had nothing to do with. Settling an edit is
+        # hygiene, not goal-work (filter-pass design §1.8).
+        db4, ms4, msdir4, mid4, pristine4 = _resolve_fixture("resolve-ws-4")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(root / "resolve-ws-4"),
+                      "session", "start"])
+            cli_main(["--workspace", str(root / "resolve-ws-4"),
+                      "intent", "declare",
+                      "Rewrite Solo to foreground the refrain"])
+        open_before = {
+            r["id"]: r["transition_ids"] for r in db4.all(
+                "SELECT id, transition_ids FROM editorial_episodes "
+                "WHERE manuscript_id = ? AND status = 'open'", (mid4,))}
+        check("the fixture really does have an open episode for a goal "
+              "to be mis-attributed TO — a guard whose test cannot make "
+              "the guarded thing happen proves nothing (§14.8)",
+              len(open_before) >= 1, open_before)
+        _stage_written(db4, mid4, "RESOLVED PARAGRAPH TEXT.")
+        doc_text_4 = pristine4.replace(
+            "Original paragraph text.",
+            "<<Original paragraph text.>>{{RESOLVED PARAGRAPH TEXT.}}")
+        fake4 = _ResolveDocFake([("solo.md", doc_text_4)])
+        _orig4 = (_gdocs_mod.get_service, _gdocs_mod.get_docs_service)
+        _gdocs_mod.get_service = lambda *a, **k: fake4
+        _gdocs_mod.get_docs_service = lambda *a, **k: fake4
+        try:
+            args4 = argparse.Namespace(target="solo.md", workspace=str(
+                root / "resolve-ws-4"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(db4, ms4, args4)
+        finally:
+            _gdocs_mod.get_service, _gdocs_mod.get_docs_service = _orig4
+        check("the resolve really did change the essay — otherwise there "
+              "would be no transitions to mis-attribute",
+              "RESOLVED PARAGRAPH TEXT." in
+              (msdir4 / "solo.md").read_text(),
+              (msdir4 / "solo.md").read_text())
+        open_after = {
+            r["id"]: r["transition_ids"] for r in db4.all(
+                "SELECT id, transition_ids FROM editorial_episodes "
+                "WHERE manuscript_id = ?", (mid4,))}
+        grew = {eid: (open_before[eid], open_after[eid])
+                for eid in open_before
+                if open_after.get(eid) != open_before[eid]}
+        check("critique resolve attaches its transitions to NO episode: "
+              "every episode open when it ran carries exactly the "
+              "transitions it carried before (AQ, §15.17's family)",
+              not grew, grew)
+        born = set(open_after) - set(open_before)
+        check("...and it opened no new episode to file them under either "
+              "— filing under a fresh episode would be the grouping "
+              "object §15.17 refused, wearing a new hat",
+              not any(loads(db4.one(
+                  "SELECT transition_ids FROM editorial_episodes "
+                  "WHERE id = ?", (eid,))["transition_ids"], [])
+                  for eid in born),
+              sorted(born))
+        settle_ts = [dict(r) for r in db4.all(
+            "SELECT * FROM editorial_transitions WHERE manuscript_id = ? "
+            "AND detail LIKE '%RESOLVED PARAGRAPH TEXT%'", (mid4,))]
+        check("the transitions themselves DO exist — the version history "
+              "is the complete record, and nothing was suppressed to "
+              "make the attribution assertion pass",
+              len(settle_ts) >= 1, settle_ts)
 
         print("recovery: doc pull snapshots uncollected edits before "
               "overwriting (BUG-1 / A2):")

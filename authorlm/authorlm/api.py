@@ -657,7 +657,7 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None, episode: dict | None = None) -> dict:
+            analyze: bool | None = None, episode=None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -669,7 +669,16 @@ def collect(db: Database, manuscript: dict, config: dict,
     before the parameter existed. The beat loop passes the PRIMARY
     intent's episode instead: with two writeups open at once, the default
     attached both writeups' beats to whichever intent was declared last
-    (design-intent-scope §0.3)."""
+    (design-intent-scope §0.3).
+
+    `episode=NO_EPISODE` is the third case and it is not the same as
+    `None`: it attaches the transitions to NOTHING. A settle that is
+    hygiene rather than goal-work — a filter pass, a critique-pass
+    resolve — has no goal to be filed under, and filing it under the
+    open episode of whatever the author happened to be doing would make
+    §15.17's completion analysis report that goal as served by an edit
+    sweep. Refusing to guess is the doctrine (§15.19 rule 2); this is
+    that refusal made mechanical."""
     mid = manuscript["id"]
     if auto:
         flagged = massive_deletions(db, manuscript)
@@ -699,7 +708,15 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     transitions = detect_transitions(db, mid, dict(before) if before else None, version)
     attached = False
-    if episode is not None:
+    if episode is NO_EPISODE:
+        # Filed under NO goal, deliberately (filter-pass design §1.8).
+        # `episode=None` means AMBIENT — the session's most recently
+        # created open episode, whatever goal it belongs to — which is
+        # §15.17's mis-attribution. Hygiene work has no goal to be filed
+        # under, so it is filed under none: the version history, the
+        # evidence rows and the run row are the complete record.
+        episode = None
+    elif episode is not None:
         ses.attach_transitions(db, episode, transitions)
         attached = True
     elif session:
@@ -943,6 +960,16 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 # belief reinforcement, and explanation-seeding — unchanged.
 
 BEAT_KIND = "beat"
+
+# The third value of `collect(episode=…)` (filter-pass design §1.8).
+#
+# `None` already means AMBIENT — attach to the session's most recently
+# created open episode — so there was no way to say "attach to nothing"
+# without inventing a value that is neither a row nor None. A sentinel
+# object is that value: it can never collide with an episode dict, it
+# cannot be produced by a database read, and `is` comparison makes the
+# branch unmistakable at the call site.
+NO_EPISODE = object()
 
 # The modeled-rewrite digest (UC-B, design §13.2): the four lists it may
 # carry, mapped to each list's own required text field. The digest is
