@@ -371,6 +371,231 @@ def check_drafting_cache_layer() -> None:
           and not llm_mod.caching_available("stub-writer", "litellm"), "")
 
 
+def check_parse_reply() -> None:
+    """`writing.parse_reply` — the only parser that turns a model reply
+    into a registered beat (design-write-draft §1.5).
+
+    Scenario WD covers these shapes through a stub LLM + CLI, but the
+    parser itself is pure and the AF review fix ("BLOCKED only when it
+    leads") is exactly the class of regression a hermetic unit check
+    catches without standing up a server. A slip here either invents a
+    refusal from manuscript prose or silently drops a good draft."""
+    from authorlm import writing as wr
+
+    draft = wr.parse_reply(
+        "WHY\nI realize Choice.\n\nSELF-CHECK\nok\n\nDRAFT\nThe opening.\n")
+    check("a well-formed reply yields Draft with why / self-check / text",
+          isinstance(draft, wr.Draft)
+          and draft.why == "I realize Choice."
+          and draft.self_check == "ok"
+          and draft.text == "The opening.", str(draft))
+
+    blocked = wr.parse_reply(
+        "BLOCKED\nNeeds an attribution.\nQUESTION\nWhere is the source?")
+    check("a leading BLOCKED is a legal refusal, carrying reason + question",
+          isinstance(blocked, wr.Blocked)
+          and blocked.reason == "Needs an attribution."
+          and blocked.question == "Where is the source?", str(blocked))
+
+    bare = wr.parse_reply("BLOCKED\nCannot ground this beat.")
+    check("BLOCKED without QUESTION still refuses (empty question)",
+          isinstance(bare, wr.Blocked) and bare.reason == "Cannot ground "
+          "this beat." and bare.question == "", str(bare))
+
+    prose = wr.parse_reply(
+        "WHY\nI realize Choice.\n\nSELF-CHECK\nok\n\n"
+        "DRAFT\nThe claim stands.\nBLOCKED\nand the sentence continues.")
+    check("a bare BLOCKED line AFTER DRAFT is manuscript prose, not a "
+          "refusal — reading it as one would silently discard a good draft "
+          "(AF review-1)",
+          isinstance(prose, wr.Draft)
+          and "\nBLOCKED\n" in prose.text
+          and "sentence continues" in prose.text, str(prose))
+
+    try:
+        wr.parse_reply("SELF-CHECK\nok\n\nDRAFT\nprose")
+        check("missing WHY raises ReplyError naming the gap", False)
+    except wr.ReplyError as err:
+        check("missing WHY raises ReplyError naming the gap",
+              "missing WHY" in str(err) and "no BLOCKED" in str(err),
+              str(err))
+
+    try:
+        wr.parse_reply(
+            "SELF-CHECK\nok\n\nWHY\nreason\n\nDRAFT\nprose")
+        check("out-of-order labels raise ReplyError", False)
+    except wr.ReplyError as err:
+        check("out-of-order labels raise ReplyError",
+              "out of order" in str(err), str(err))
+
+    try:
+        wr.parse_reply("WHY\n\nSELF-CHECK\nok\n\nDRAFT\nprose")
+        check("empty WHY is refused — verdict evidence hangs off it", False)
+    except wr.ReplyError as err:
+        check("empty WHY is refused — verdict evidence hangs off it",
+              "WHY is empty" in str(err), str(err))
+
+    try:
+        wr.parse_reply("WHY\nreason\n\nSELF-CHECK\nok\n\nDRAFT\n")
+        check("nothing after DRAFT is refused", False)
+    except wr.ReplyError as err:
+        check("nothing after DRAFT is refused",
+              "nothing follows the DRAFT line" in str(err), str(err))
+
+    try:
+        wr.parse_reply(
+            "WHY\nreason\n\nSELF-CHECK\nok\n\n"
+            "DRAFT\nA beat carrying <<a reserved marker>>.")
+        check("<< >> in the draft is refused (Doc bridge reserved grammar)",
+              False)
+    except wr.ReplyError as err:
+        check("<< >> in the draft is refused (Doc bridge reserved grammar)",
+              "<<" in str(err) and "Nothing was registered" in str(err),
+              str(err))
+
+    crlf = wr.parse_reply(
+        "WHY\r\nreason\r\n\r\nSELF-CHECK\r\nok\r\n\r\nDRAFT\r\nprose\r\n")
+    check("CRLF replies normalize before label scan",
+          isinstance(crlf, wr.Draft) and crlf.text == "prose", str(crlf))
+
+
+def check_plan_concepts_cache_keys() -> None:
+    """`_plan_concepts` — the sort/dedupe that keeps block A cache-stable.
+
+    Concept names come from the WHOLE plan (not this beat), de-duplicated
+    case-insensitively and sorted by name. Sorting by beat order, or
+    keeping duplicates that differ only in case, would silently re-bill
+    the cached prefix between beats (writing.py F3/F4)."""
+    from authorlm import writing as wr
+
+    names = wr._plan_concepts([
+        {"role": "opener", "concepts": ["Choice", "distinction"]},
+        {"role": "close", "concepts": ["Distinction", "Choice", "  "]},
+        {"role": "aside", "concepts": None},
+        "not-a-dict",
+        {"role": "ghost", "concepts": ["Ghostly Absent Concept"]},
+    ])
+    check("plan concepts are the UNION across every beat, case-folded "
+          "deduped, sorted by the folded key, preserving first spelling",
+          names == ["Choice", "distinction", "Ghostly Absent Concept"],
+          str(names))
+    check("an empty / missing concepts list contributes nothing",
+          wr._plan_concepts([{"role": "x"}, {"concepts": []}]) == [])
+    check("_section prints (none) for blank bodies so shape never "
+          "disappears between beats",
+          wr._section("BRIEF", "  ") == "BRIEF\n(none)\n"
+          and wr._section("BRIEF", "text") == "BRIEF\ntext\n")
+
+
+def check_select_chapters() -> None:
+    """`structure.select_chapters` — the part-build selector export uses.
+
+    Naming a parent must pull its TOC descendants; a typo must raise with
+    the real chapter list. Silent wrong-chapter exports are the blast
+    radius."""
+    from authorlm import structure as st
+
+    files = {
+        "toc.toml": (
+            "[[chapter]]\nfile = \"front.md\"\nmatter = \"front\"\n\n"
+            "[[chapter]]\nfile = \"part.md\"\n\n"
+            "[[chapter]]\nfile = \"child-a.md\"\nparent = \"part.md\"\n\n"
+            "[[chapter]]\nfile = \"child-b.md\"\nparent = \"part.md\"\n\n"
+            "[[chapter]]\nfile = \"solo.md\"\n"
+        ),
+        "front.md": "# F\n",
+        "part.md": "# P\n",
+        "child-a.md": "# A\n",
+        "child-b.md": "# B\n",
+        "solo.md": "# S\n",
+        "orphan.md": "# O\n",
+    }
+    check("toc.toml is structural, not content",
+          st.is_structural("toc.toml") and not st.is_structural("part.md"))
+    content = st.content_files(files)
+    check("content_files drops toc.toml and keeps every prose file",
+          "toc.toml" not in content and set(content) == {
+              "front.md", "part.md", "child-a.md", "child-b.md",
+              "solo.md", "orphan.md"})
+
+    selected = st.select_chapters(files, ["part"])
+    check("naming a parent (stem ok without .md) selects it and its "
+          "deeper descendants, in reading order",
+          selected == ["part.md", "child-a.md", "child-b.md"],
+          str(selected))
+    check("a leaf selects only itself",
+          st.select_chapters(files, ["solo.md"]) == ["solo.md"])
+    check("multiple names union in reading order, not request order",
+          st.select_chapters(files, ["solo", "front"])
+          == ["front.md", "solo.md"])
+    try:
+        st.select_chapters(files, ["nope"])
+        check("unknown chapter raises LookupError naming real options", False)
+    except LookupError as err:
+        check("unknown chapter raises LookupError naming real options",
+              "no such chapter 'nope'" in str(err)
+              and "part.md" in str(err), str(err))
+
+
+def check_write_complete_placeholder_gate() -> None:
+    """`write_complete` must refuse a file that is still ONLY the marker.
+
+    Completing here would record the placeholder as the finished essay,
+    register a toc entry for it, and leave the real prose only in the
+    database. Structural integrity, not editorial judgment — so it
+    refuses rather than warns. Scenario W covers abandon restore; this
+    pins the complete-side twin."""
+    import io as _io
+
+    root, ws, db, manuscript, intent = _writeup_fixture("authorlm-wc-ph-")
+    try:
+        with contextlib.redirect_stdout(_io.StringIO()):
+            api.write_start(db, manuscript, {}, "01-epictetus.md",
+                            intent["id"][:8])
+        path = Path(manuscript["path"]) / "01-epictetus.md"
+        check("fixture is mid-rewrite before complete",
+              api.is_placeholder(path.read_text(encoding="utf-8")))
+        try:
+            api.write_complete(db, manuscript, {})
+            check("write_complete refuses a placeholder-only file", False)
+        except ValueError as err:
+            check("write_complete refuses a placeholder-only file, naming "
+                  "abandon and draft as the exits",
+                  "still holds only the mid-rewrite placeholder" in str(err)
+                  and "write abandon" in str(err)
+                  and "draft a beat" in str(err), str(err))
+        wu = db.one("SELECT * FROM writeups WHERE status = 'active'")
+        check("...and the writeup stays active (the refusal is not a "
+              "partial complete)",
+              wu is not None and wu["file"] == "01-epictetus.md",
+              str(wu))
+        check("...and the placeholder is still on disk — nothing was "
+              "registered as finished prose",
+              api.is_placeholder(path.read_text(encoding="utf-8")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_export_filename_sanitization() -> None:
+    """`export.export_filename` — the whole-manuscript export path.
+
+    Distinct from selection_slug (open PR #38); this is the title→.md
+    sanitizer. Unsafe path characters must not leak into `_exports/`."""
+    from authorlm.export import export_filename
+
+    check("a plain title becomes <title>.md",
+          export_filename("My Book") == "My Book.md")
+    check("path-unsafe characters are replaced, not passed through",
+          export_filename('A/B:C*?"<>|#Z') == "A-B-C-------Z.md",
+          export_filename('A/B:C*?"<>|#Z'))
+    try:
+        export_filename("   ")
+        check("an empty title after strip is refused", False)
+    except ValueError as err:
+        check("an empty title after strip is refused",
+              "empty manuscript name" in str(err), str(err))
+
+
 def check_model_profiles() -> None:
     """AI: MODEL_PROFILES — the adapter surface above LiteLLM.
 
@@ -3801,6 +4026,11 @@ def main_test() -> None:
     check_drafting_replay_needs_no_key()
     check_drafting_cache_warning()
     check_drafting_cache_layer()
+    check_parse_reply()
+    check_plan_concepts_cache_keys()
+    check_select_chapters()
+    check_write_complete_placeholder_gate()
+    check_export_filename_sanitization()
     check_model_profiles()
     check_extraction_failure_traced()
     check_extraction_prompt_provenance()
