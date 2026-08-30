@@ -13,12 +13,12 @@ Workspace override: AUTHORLM_WORKSPACE env var (default: ~/.authorlm).
 from __future__ import annotations
 
 import os
-import uuid
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from . import api
+from . import clients
 from . import critique
 from . import triage_transport
 from .db import loads as _loads
@@ -57,7 +57,10 @@ mcp = FastMCP(
     ),
 )
 
-CONNECTION_ID = f"mcp-{uuid.uuid4().hex[:12]}"
+# Unchanged in shape (`mcp-<uuid12>`), but owned by `clients` now, so
+# the `mcp-stdio` adapter can supply it through the normal resolution
+# path instead of `ensure_session` taking it as an argument.
+CONNECTION_ID = clients.CONNECTION_ID
 _WORKSPACE = os.environ.get("AUTHORLM_WORKSPACE")
 
 
@@ -81,6 +84,10 @@ def _guard(fn) -> dict[str, Any]:
 
     # The calling @mcp.tool() function's name is the verb being traced.
     verb = sys._getframe(1).f_code.co_name
+    # Resolve the client ONCE for this tool call, and tell `clients` which
+    # verb it is, so the writeup touched-by trail can name it without
+    # sniffing the call stack.
+    clients.configure(surface="mcp", workspace=_WORKSPACE, verb=verb)
     t0 = time.monotonic()
     try:
         result = {"ok": True, "result": fn()}
@@ -207,7 +214,7 @@ def declare_intent(statement: str, manuscript: str | None = None) -> dict:
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
-        session, created = api.ensure_session(db, ms, client_id=CONNECTION_ID)
+        session, created = api.ensure_session(db, ms)
         result = api.declare_intent(db, ms, statement)
         result["session_opened"] = created
         return result
@@ -497,7 +504,7 @@ def collect_revision(manuscript: str | None = None,
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
-        api.ensure_session(db, ms, client_id=CONNECTION_ID)
+        api.ensure_session(db, ms)
         report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
         return report if verbose else api.compact_collect(report)
     return _guard(run)
@@ -645,7 +652,7 @@ def get_guidance(manuscript: str | None = None) -> dict:
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
-        session, _ = api.ensure_session(db, ms, client_id=CONNECTION_ID)
+        session, _ = api.ensure_session(db, ms)
         return api.guide(db, ms, session, llm=_llm(),
                          config=api.load_config(_WORKSPACE))
     return _guard(run)
@@ -663,7 +670,7 @@ def review_suggestion(index: int, decision: str,
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
-        session, _ = api.ensure_session(db, ms, client_id=CONNECTION_ID)
+        session, _ = api.ensure_session(db, ms)
         return api.review(db, ms, session, index, decision, explanation, llm=_llm())
     return _guard(run)
 

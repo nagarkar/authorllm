@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import clients
 from . import concepts as cg
 from . import beliefs as bel
 from . import proposals as prop
@@ -251,21 +252,22 @@ def status(db: Database, manuscript: dict) -> dict:
     }
 
 
-def ensure_session(db: Database, manuscript: dict,
-                   client_id: str | None = None) -> tuple[dict, bool]:
+def ensure_session(db: Database, manuscript: dict) -> tuple[dict, bool]:
     """Active session, creating one lazily if needed (conversational
-    surfaces bind on first substantive call). `client_id` is stamped into
-    the session metadata for the audit trail."""
+    surfaces bind on first substantive call).
+
+    The chat that is speaking is resolved internally (`clients.current()`)
+    and appended to `metadata.clients`. A LIST, not a single id: an
+    AuthorLM session is a shared ambient work period, so several chats
+    legitimately share one, and the old single `client_session` string
+    could only ever record the first. This is where the reconstruction
+    payload lives — label, start time, transcript path — one copy per
+    client per session rather than one per row."""
     session = ses.active_session(db, manuscript["id"])
     if session:
-        return dict(session), False
+        return clients.record_session_client(db, session), False
     session = ses.start_session(db, manuscript["id"])
-    if client_id:
-        meta = loads(session["metadata"], {})
-        meta["client_session"] = client_id
-        db.update("sessions", session["id"], {"metadata": json.dumps(meta)})
-        session = {**session, "metadata": json.dumps(meta)}
-    return session, True
+    return clients.record_session_client(db, session), True
 
 
 def close_session(db: Database, manuscript: dict, ended_at: str | None = None) -> dict:
@@ -801,6 +803,23 @@ def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
                      f"(fresh mode truncates and rebuilds, §9.4).")
 
 
+def _touched(db: Database, row: dict) -> dict:
+    """Record the touching chat on the writeup and return the POST-touch
+    row. Both halves are load-bearing.
+
+    Every one of `_writeup`'s ten callers does
+    `meta = loads(writeup["metadata"], {})` after `_writeup` returns, and
+    later dumps that dict back with `db.update`. If the touch ran after
+    the caller's load — or if we handed back the pre-touch row — the
+    caller's stale `meta` would silently clobber the clients list on its
+    next write. Touching first, and re-reading, makes the existing
+    read-modify-write sequence correct with no edits to any of the ten
+    verbs."""
+    clients.touch(db, "writeups", row, verb=clients.current_verb())
+    fresh = db.one("SELECT * FROM writeups WHERE id = ?", (row["id"],))
+    return dict(fresh) if fresh is not None else row
+
+
 def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
     """The active writeup — matched by id prefix, or by FILE NAME.
 
@@ -823,7 +842,7 @@ def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
         if len(rows) > 1:
             raise LookupError(f"'{prefix}' is ambiguous ({len(rows)} writeups)")
         if rows:
-            return dict(rows[0])
+            return _touched(db, dict(rows[0]))
         # Not an id. Try it as the essay's name, ACTIVE writeups first —
         # a finished writeup on the same file must not shadow the open
         # one the author is obviously talking about.
@@ -846,7 +865,7 @@ def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
                 f"'{prefix}' is ambiguous — it matches "
                 f"{', '.join(sorted(names))}; name the file exactly, or "
                 f"pass the writeup id")
-        return dict(hits[0])
+        return _touched(db, dict(hits[0]))
     rows = db.all(
         "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
         (manuscript["id"],),
@@ -858,7 +877,7 @@ def _writeup(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
         raise LookupError(
             f"multiple active writeups ({files}) — pass --writeup with the "
             f"file name (e.g. --writeup {rows[0]['file']}) or a writeup id")
-    return dict(rows[0])
+    return _touched(db, dict(rows[0]))
 
 
 def _checkout_gate(db: Database, manuscript: dict, relpath: str) -> None:
@@ -1745,6 +1764,11 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     if decision == "modified":
         meta = loads(proposal["metadata"], {})
         meta["accepted_text"] = accepted
+        # The beat's birth stamp names the chat that PROPOSED it; this
+        # names the one that accepted it. When they differ — the resumable
+        # writeup case — that seam is the thing the author most wants to
+        # see, and it is one line.
+        meta["accepted_by"] = clients.current().key()
         db.update("guidance_history", proposal["id"],
                   {"metadata": json.dumps(meta)})
     episode = ses.current_episode(db, manuscript["id"], session)
