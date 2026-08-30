@@ -12,6 +12,16 @@ model = "gemini/gemini-2.5-flash"
 # system's default, or "vendor-default" to send NO temperature parameter
 # at all — some models (the Claude 5 family, GPT-5.6 Luna below) reject
 # any value but 1 and need the parameter left out entirely, not set to 1.
+#
+# KNOWN MODELS ARE SHAPED AUTOMATICALLY. llm.py's MODEL_PROFILES table
+# records the verified contract of each model this project uses, and the
+# request is shaped from it before every call: a model the table knows
+# rejects `temperature` never receives one, whatever is written here (if
+# a number is set for such a model, the client says so in one line and
+# omits it anyway). "vendor-default" remains for models the registry
+# doesn't know yet — and for those, a provider's own rejection still
+# self-corrects once and prints the instruction to add the row.
+#
 # [critique] (below) can override this per-purpose the same way. There is
 # no general parameter passthrough (top_p, penalties, ...) — add another
 # purpose-specific knob like this one only when a purpose needs it, the
@@ -52,6 +62,10 @@ extraction_max_chars = 24000
 # instead of relying on that retry every single call. Resolution order
 # (resolve_temperature, llm.py): this section's own value wins, then
 # [llm]'s, then the 0.2 constant when neither is set.
+#
+# Luna now also has a MODEL_PROFILES row (llm.py), so the omission no
+# longer depends on this line being right: the line and the registry
+# agree, and the registry wins if they ever stop agreeing.
 #
 # Activated 2026-08-30 after the AE-3 merge + orchestrator live acceptance.
 summarizer_model = "openai/gpt-5.6-luna"

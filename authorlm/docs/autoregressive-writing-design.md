@@ -1419,3 +1419,57 @@ no Anthropic-billed path returns, and the AH-3 guard is unchanged by it.
 
 `.claude/skills/authorlm/SKILL.md` §"The beat loop" and
 `docs/writing-essays-tutorial.md` §0, §2.4, §10 and §11 are aligned to this.
+
+### 15.11 Model profiles — the adapter surface above LiteLLM (2026-08-31)
+
+Sponsor ruling, on the retry-without-temperature safety net that made GPT-5.6
+Luna work: *"This is not ok. We need adapters for the different models."*
+
+The net was resilience standing in for knowledge. A model whose contract we
+already knew was still being told at 400-time, once per process, what a table
+could have said before the first call — and the two live failures that produced
+it (Claude 5's `temperature != 1`, then Luna's server-side version of the same
+rule) were both facts, not accidents.
+
+**LiteLLM stays.** It is the transport and the translation layer, and nothing
+here replaces it or adds per-provider classes. What is added is a thin
+AuthorLM-owned table above it — `MODEL_PROFILES` in `llm.py`, beside
+`VENDOR_KEY_ENV`, which is the same kind of lookup (model string → the contract
+that model imposes on our request). Each row says three things: whether
+`temperature` may be sent at all, whether `reasoning_effort` may, and whether
+block-level `cache_control` is worth attaching. Matching is by prefix with the
+longest match winning, so a dated release inherits its family's row.
+
+**Rows are verified, never guessed.** The Claude 5 family (sonnet-5, fable-5,
+opus-5) is `vendor-default-only`, which litellm's own map confirms
+(`supports_sampling_params = false`); `claude-haiku-4-5` carries no such flag and
+therefore keeps its temperature — the family is enumerated rather than globbed
+precisely because `claude-haiku-4-5` and `claude-haiku-5` would be swept the
+wrong way by any `claude-*-5` pattern. Luna is `vendor-default-only` from the
+live failure of 2026-08-30. The gemini 2.5 family takes temperature, as it always
+has. `gpt-5.6-sol` and `-terra` get **no row**: nobody has run them here, and a
+guess in this table is worse than an admission.
+
+**An unknown model is never refused.** It gets `UNKNOWN_PROFILE`, which is
+field-for-field what this module did before the table existed, plus one quiet
+line saying there is no profile and that a rejection will self-correct once. The
+retry net is still there and still saves that call — **but firing it is now an
+alarm**: the warning names `MODEL_PROFILES`, the file, and the value to write,
+because the net firing means the registry has a gap and the message is the
+maintenance instruction. `drop_params`-suppressed drops stay invisible by
+construction (litellm offers no callback when it silently sheds a param); the
+answer to those is a row, which is what the table is for.
+
+**Nothing about the shipped configuration changed.** Gemini keeps its 0.2, Luna
+keeps sending nothing, `[writing]` is still absent, every cache key and replay
+fixture is byte-identical, and `caching_available` returns the same four answers
+the cache-layer suite pins (§15.4) — an anthropic model with no row still falls
+back to litellm's cost map, so the table added knowledge without moving behavior.
+What did change is the direction of authority: config can no longer force a
+parameter a known model rejects, and when config tries, the client says so in one
+line and omits it.
+
+`draft()`'s "no sampling parameter at all" (§15.4, risk R-e) is untouched and
+still unconditional. The registry now says the same thing about the drafting
+model declaratively; a test asserts the two never disagree rather than making
+either derive from the other.
