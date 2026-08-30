@@ -463,13 +463,21 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
     check("[writing] is absent, so `write draft` (no --dry-run) refuses "
           "and no beat can bill the API by accident",
           "writing" not in config, str(sorted(config)))
-    check("the [critique] Sonnet overrides are gone, so summaries and the "
-          "critique editor run on the [llm] default",
-          not (config.get("critique", {}) or {}).get("summarizer_model")
-          and not (config.get("critique", {}) or {}).get("editor_model"),
-          str(config.get("critique")))
-    check("...and the [llm] default they fall back to is itself not an "
-          "anthropic model",
+    # NOT "the [critique] section is absent": the ruling was about the
+    # ANTHROPIC bill, not about the section. A non-Anthropic override is
+    # free to come back (and one is: `summarizer_model` on an openai model,
+    # cheaper than the [llm] default). What must not come back is a Sonnet
+    # override — either key naming an anthropic model.
+    critique = config.get("critique", {}) or {}
+    check("neither [critique] model key names an anthropic model — the two "
+          "Sonnet overrides of 2026-08-29 are what the ruling took out, "
+          "and a cheaper override in their place is not a regression",
+          not any(str(critique.get(k, "")).strip().lower().startswith(
+              "anthropic/")
+              for k in ("summarizer_model", "editor_model")),
+          str(critique))
+    check("...and the [llm] default those keys fall back to is itself not "
+          "an anthropic model",
           not (config.get("llm", {}) or {}).get("model", "").startswith(
               "anthropic/"), str(config.get("llm")))
 

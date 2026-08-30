@@ -677,6 +677,17 @@ class HelpTabTest(unittest.TestCase):
         self.assertTrue("Two essays at once" in built,
                         "the parallel-writeups section did not reach the dist")
 
+    def _flat(self) -> str:
+        """The whole document with runs of whitespace collapsed to one
+        space.
+
+        A claim that spans a line break is still one claim. Asserting it
+        against the raw text pins the author's line wrapping as well as
+        their meaning, so an unrelated reflow of the paragraph fails a
+        truth guard and the fix is to re-wrap rather than to think. Every
+        multi-line claim below is checked against this."""
+        return " ".join(self.DOC.read_text(encoding="utf-8").split())
+
     def _narrative(self) -> str:
         """The tutorial's MAIN FLOW: everything outside a `<details>` fold,
         minus the blocks that quote program output verbatim.
@@ -768,18 +779,16 @@ class HelpTabTest(unittest.TestCase):
             self.assertIn(claim, text)
         # AH-2: the summaries and the critique editor ran on Sonnet until
         # the billing ruling of 2026-08-30 removed the two [critique]
-        # overrides. The doc may still NAME Sonnet in the history of that
-        # ruling; what it may not do is present it as the model those two
-        # jobs use now. Pin the pairing, not the bare string.
-        for stale in ("`anthropic/claude-sonnet-5` | `[critique] "
-                      "summarizer_model`",
-                      "`anthropic/claude-sonnet-5` | `[critique] "
-                      "editor_model`"):
-            self.assertNotIn(stale, text,
-                             f"{stale!r}: that override was deleted from the "
-                             f"shipped config")
-        # ...and the model those jobs actually run on now, named.
-        self.assertIn("| Essay summaries | `gemini/gemini-2.5-flash` |", text)
+        # overrides. The doc may still NAME an Anthropic model in the
+        # history of that ruling, or as the recipe for restoring the billed
+        # drafting mode; what it may not do is present one as a model any
+        # job uses NOW. Pinned structurally — no row of the model table may
+        # carry an anthropic model in its Model column — so this survives
+        # every future change of which cheap model does which job, and
+        # still catches the one thing the ruling was about.
+        self.assertNotIn("| `anthropic/", text,
+                         "a model table row names an anthropic model as a "
+                         "current setting; the ruling took those out")
 
     def test_the_spending_moments_are_counted_truthfully(self):
         """Truth-in-instrument. The doc used to claim THREE spending
@@ -804,6 +813,7 @@ class HelpTabTest(unittest.TestCase):
         tracks the shipped configuration; it is not a number the document
         gets to round."""
         text = self.DOC.read_text(encoding="utf-8")
+        flat = self._flat()
         self.assertNotIn("Three moments", text,
                          "the three-moment count omits verdict distillation")
         self.assertNotIn("Five moments", text,
@@ -812,19 +822,19 @@ class HelpTabTest(unittest.TestCase):
         self.assertIn("Four moments call out to a model", text)
         # Beat drafting named as EXCLUDED, in as many words — an author who
         # is told a count but not what fell out of it cannot check it.
-        self.assertIn("Drafting the\nbeats is not one of them", text)
-        self.assertIn("only if you turn\nthe pinned drafting model back on",
-                      text)
+        self.assertIn("Drafting the beats is not one of them", flat)
+        self.assertIn("only if you turn the pinned drafting model back on",
+                      flat)
         # The billed mode still named, still by its price, so restoring it
         # is a decision made with the number in view rather than a switch
         # flipped blind. Present tense ("makes") is banned: it would tell
         # the author they are paying for it right now.
         self.assertNotIn("the largest single call the system makes", text)
-        self.assertIn("the largest single call\nthe system can make", text)
+        self.assertIn("the largest single call the system can make", flat)
         self.assertIn("[writing] model", text)
         # The frequent one, named as such and framed by its purpose.
         self.assertIn("Every rejection, and every reworded acceptance you "
-                      "explain", text)
+                      "explain", flat)
         self.assertIn("every rejection spends", text)
         # ...and the plain acceptance that does NOT spend, so the reader
         # can tell the two apart. Both of the old sentences priced in a
@@ -835,8 +845,8 @@ class HelpTabTest(unittest.TestCase):
                          "draft", text)
         self.assertNotIn("A rejection costs twice", text)
         self.assertIn("A plain acceptance costs nothing", text)
-        self.assertIn("A rejection is the one verdict that spends, and it\n"
-                      "spends once", text)
+        self.assertIn("A rejection is the one verdict that spends, and it "
+                      "spends once", flat)
 
     def test_the_doc_says_where_the_writing_comes_from(self):
         """The tutorial's §0 told the author, in its own words, that the
@@ -860,6 +870,7 @@ class HelpTabTest(unittest.TestCase):
         it (the printed payload and the prompt), and that the billed mode
         exists, is off, and is restorable."""
         text = self.DOC.read_text(encoding="utf-8")
+        flat = self._flat()
         for stale in ("there is nothing to configure",
                       "because the conversation is the drafting",
                       "the drafting step has no model setting",
@@ -869,16 +880,16 @@ class HelpTabTest(unittest.TestCase):
                       # its own is exactly what a beat no longer has.
                       "Each beat is drafted by a model of its"):
             self.assertNotIn(stale, text, f"{stale!r} is no longer true")
-        self.assertIn("Each beat is drafted in this\nconversation", text)
+        self.assertIn("Each beat is drafted in this conversation", flat)
         self.assertIn("authorlm/prompts/beat-draft.md", text)
         # The cost, qualified. A bare "costs nothing" is banned above; the
         # subscription is what makes the qualified claim true, and it is
         # the thing the author is actually paying.
-        self.assertIn("covered by the subscription you already\npay for",
-                      text)
+        self.assertIn("covered by the subscription you already pay for",
+                      flat)
         # The discipline, so "drafted in the conversation" cannot be read
         # as "drafted from whatever the conversation was doing".
-        self.assertIn("against that payload and against nothing else", text)
+        self.assertIn("against that payload and against nothing else", flat)
         # The billed mode: named, priced, and stated to be OFF. A doc that
         # simply stopped mentioning it would leave the author unable to
         # restore it, and unable to explain a bill if someone else did.

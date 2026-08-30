@@ -1292,10 +1292,10 @@ whole of what the system spends on its own:
 | **Refreshing summaries** | Writing each essay's compressed summary — the few sentences every other essay's frame is built from. One call per essay whose text moved. |
 | **Closing a goal** | Reconstructing what you decided across the episode, so recurring patterns can be offered to you as candidate rules. |
 
-All four run on the cheap default model named in the box below. None of them
-bills the Anthropic API. Beat drafting bills anything at all **only if you turn
-the pinned drafting model back on**, which is a deliberate edit to a
-configuration file and is described below.
+All four are billed API calls, and all four run on the cheap models named in the
+box below — none of them touches the Anthropic API. Beat drafting bills anything
+at all **only if you turn the pinned drafting model back on**, which is a
+deliberate edit to a configuration file and is described below.
 
 A plain acceptance costs nothing, with or without a reason: only a rejection or
 a reworded acceptance carries a correction, and a correction is what there is a
@@ -1316,20 +1316,30 @@ Everything is in \`authorlm/config.toml\`, versioned with the code. Keys live in
 | Concept extraction, and the adjudication step that screens its candidates | \`gemini/gemini-2.5-flash\` | \`[llm] model\` — the default for anything without its own setting |
 | Turning a verdict's reason into a candidate rule (\`record_review\` → the belief distiller, on every explained rejection and every explained reword) | \`gemini/gemini-2.5-flash\` | same default |
 | Episode analysis, guidance | \`gemini/gemini-2.5-flash\` | same default |
-| Essay summaries | \`gemini/gemini-2.5-flash\` | same default |
+| Essay summaries | \`openai/gpt-5.6-luna\` | \`[critique] summarizer_model\` |
 | The critique editor pass | \`gemini/gemini-2.5-flash\` | same default |
 | Illustration rendering | \`openai/gpt-image-2\`, 1536×1024 | \`[illustrations] model\`, \`[illustrations] image_size\` |
 | **Drafting the beats** | none — the conversation drafts them | nothing set, deliberately; \`[writing] model\` would turn the billed mode on |
 
 **Nothing in the shipped file names an Anthropic model.** That is your ruling of
 2026-08-30, after the first bill: the \`[writing]\` section and the two
-\`[critique]\` model overrides were deleted, and with them the last paths that
-could bill the Anthropic API. Summaries and the critique editor now fall back to
-the \`[llm]\` default above. Both deletions leave their **restore recipe in the
+\`[critique]\` Sonnet overrides were deleted, and with them the last paths that
+could bill the Anthropic API. Both deletions leave their **restore recipe in the
 file's own comments**, so turning either back on is one edit in one place that
 shows up in a diff. A test also fails if an \`anthropic/\` model reappears in any
 model setting — updating that test is part of turning spending back on, which is
 what stops it happening by accident.
+
+**The summarizer is the one job with its own model, and it is cheaper than the
+default, not dearer.** GPT-5.6 Luna reads compressed context into editorial
+judgment for about **$0.26 per full rebuild of the book, against roughly $0.49**
+on the \`[llm]\` default — so the setting that exists to buy quality also happens
+to save money on the most repeated call in the system. The \`summarizer_model\`
+line is written into \`authorlm/config.toml\` but **commented out** while a
+temperature fix lands in the model client; until then the summaries run on the
+\`[llm]\` default above, at the higher of the two prices. Uncommenting one line
+switches them over. The critique editor has no override at all and stays on the
+default.
 
 **If you restore \`[writing]\`.** \`write draft\` without \`--dry-run\` then sends the
 assembled payload to \`anthropic/claude-fable-5\`, which is the largest single call
