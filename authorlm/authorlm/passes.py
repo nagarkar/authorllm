@@ -576,19 +576,37 @@ def stage(db: Database, manuscript: dict, pass_row: dict, file: str,
 
 
 def staged_threads(db: Database, manuscript_id: str, file: str,
-                   states=("proposed", "accepted", "rejected")) -> list[dict]:
+                   states=("proposed", "accepted", "rejected"),
+                   origin_type: str = "critique") -> list[dict]:
+    """Staged edits for one file, by PRODUCER (filter-pass design §2.2).
+
+    `origin_type` defaults to today's literal, so every existing caller
+    is byte-for-byte unchanged. It is the one origin-aware line in the
+    settle flow: `compose_marked_text`, `final_text_from_marked` and
+    `verdict` read only thread fields and never the producer."""
     rows = db.all(
         "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
-        "origin_type = 'critique' AND file = ? AND state IN (%s) "
+        "origin_type = ? AND file = ? AND state IN (%s) "
         "ORDER BY created_at, id" % ",".join("?" * len(states)),
-        (manuscript_id, file, *states))
+        (manuscript_id, origin_type, file, *states))
     return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------- verdicts
 
 def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
-                   signal: str, explanation: str | None = None) -> None:
+                   signal: str, explanation: str | None = None,
+                   evidence_type: str = "critique_edit") -> None:
+    """One edit verdict as evidence. `episode_id=None` is the door's
+    standing precedent and not an oversight: an edit verdict is evidence
+    with no episode, because an episode records work in service of a
+    declared GOAL and a hygiene verdict serves none (filter-pass §1.8).
+
+    `evidence_type` names the producer — `critique_edit` or
+    `filter_edit` — and defaults to today's literal, so no existing
+    caller changes. Explained rejections still reach belief learning
+    either way: that path runs off the evidence stream and the author's
+    words, never off an episode."""
     from .gdocs import clamp
 
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '(insertion)')}»"
@@ -600,7 +618,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
         target += f" — {explanation}"
     ev = ko_fields("ev")
     ev.update(manuscript_id=manuscript_id, episode_id=None,
-              evidence_type="critique_edit", signal=signal,
+              evidence_type=evidence_type, signal=signal,
               target=target[:400], supports_belief=None, weight="high")
     if explanation:
         ev["metadata"] = json.dumps({"explanation": explanation})
@@ -608,27 +626,34 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
 
 
 def verdict(db: Database, manuscript_id: str, thread: dict, decision: str,
-            text: str | None = None) -> dict:
+            text: str | None = None,
+            evidence_type: str = "critique_edit") -> dict:
     """accept | reject (text = author's reason) | revise (text = author's
     wording) | undo (back to proposed). Verdicts are recorded only —
-    nothing touches file or Doc until diff-write. Undo is free."""
+    nothing touches file or Doc until diff-write. Undo is free.
+
+    `evidence_type` is passed straight down to `_edit_evidence`; it
+    defaults to today's literal, so the critique pass is unchanged."""
     if decision == "undo":
         meta = loads(thread.get("metadata"), {}) or {}
         original = meta.get("original_new", thread["proposed_new"])
         db.update("doc_threads", thread["id"],
                   {"state": "proposed", "proposed_new": original})
-        _edit_evidence(db, manuscript_id, thread, "undone")
+        _edit_evidence(db, manuscript_id, thread, "undone",
+                       evidence_type=evidence_type)
         return {"state": "proposed"}
     if thread["state"] not in ("proposed", "accepted", "rejected"):
         raise ValueError(f"thread is {thread['state']} — verdicts apply "
                          "only before diff-write")
     if decision == "accept":
         db.update("doc_threads", thread["id"], {"state": "accepted"})
-        _edit_evidence(db, manuscript_id, thread, "accepted")
+        _edit_evidence(db, manuscript_id, thread, "accepted",
+                       evidence_type=evidence_type)
         return {"state": "accepted"}
     if decision == "reject":
         db.update("doc_threads", thread["id"], {"state": "rejected"})
-        _edit_evidence(db, manuscript_id, thread, "rejected", text)
+        _edit_evidence(db, manuscript_id, thread, "rejected", text,
+                       evidence_type=evidence_type)
         return {"state": "rejected"}
     if decision == "revise":
         if not text:
@@ -637,7 +662,8 @@ def verdict(db: Database, manuscript_id: str, thread: dict, decision: str,
                   {"state": "accepted", "proposed_new": text})
         fresh = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
                             (thread["id"],)))
-        _edit_evidence(db, manuscript_id, fresh, "revised")
+        _edit_evidence(db, manuscript_id, fresh, "revised",
+                       evidence_type=evidence_type)
         return {"state": "accepted"}
     raise ValueError(f"unknown decision '{decision}'")
 
@@ -680,13 +706,21 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
 
 
 def final_text_from_marked(marked: str,
-                           written: list[dict] | None = None
+                           written: list[dict] | None = None,
+                           kinds: tuple[str, ...] = ("replace", "insert")
                            ) -> tuple[str, list[dict]]:
-    """Resolve: critique-written forms keep their CURRENT {{new}} half
-    (author post-edits win); any other pending form on the tab (e.g. an
-    open margin-thread proposal) collapses to OLD so resolve never
-    silently approves foreign grammar. Returns (final_text, critique_forms)."""
-    forms = th.pending_forms(marked)
+    """Resolve: written forms keep their CURRENT {{new}} half (author
+    post-edits win); any other pending form on the tab (e.g. an open
+    margin-thread proposal) collapses to OLD so resolve never silently
+    approves foreign grammar. Returns (final_text, matched_forms).
+
+    `kinds` restricts which forms are CONSIDERED, and defaults to both,
+    so the critique pass is unchanged. The local settle transport passes
+    `("replace",)`: a filter never stages an insertion, and an unmatched
+    insertion form collapses to its old half — which for an insertion is
+    the empty string — so leaving bare `{{…}}` in scope would delete a
+    `{{title}}` the author wrote (filter-pass design §2.3)."""
+    forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
     if not written:
         # No written threads: keep old for every form (nothing to approve).
         return th.strip_pending(marked)[0], []
@@ -716,11 +750,17 @@ def final_text_from_marked(marked: str,
 
 
 def record_resolution(db: Database, manuscript_id: str, file: str,
-                      forms: list[dict]) -> list[dict]:
+                      forms: list[dict],
+                      origin_type: str = "critique",
+                      evidence_type: str = "critique_edit") -> list[dict]:
     """Match the resolved forms back to their threads by proposal text;
     record proposal→final diffs as evidence; close the threads. Returns
-    the modified-acceptance diffs (the learnings duty's feedstock)."""
-    threads = staged_threads(db, manuscript_id, file, states=("written",))
+    the modified-acceptance diffs (the learnings duty's feedstock).
+
+    Origin-agnostic apart from the `staged_threads` call it makes: both
+    parameters default to today's values (filter-pass design §2.2)."""
+    threads = staged_threads(db, manuscript_id, file, states=("written",),
+                             origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
     # Replaces match by their verbatim OLD half (law). Insertions have no
@@ -748,14 +788,17 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
             db.update("doc_threads", match["id"],
                       {"metadata": json.dumps(meta)})
             fresh["metadata"] = json.dumps(meta)
-            _edit_evidence(db, manuscript_id, fresh, "revised")
+            _edit_evidence(db, manuscript_id, fresh, "revised",
+                           evidence_type=evidence_type)
             diffs.append({"file": file, "proposal": proposed,
                           "final": form["new"]})
         else:
             db.update("doc_threads", match["id"], {"state": "cleaned"})
-            _edit_evidence(db, manuscript_id, match, "resolved")
+            _edit_evidence(db, manuscript_id, match, "resolved",
+                           evidence_type=evidence_type)
     for t in unmatched:
         # The author deleted the form outright during the pause: a decline.
         db.update("doc_threads", t["id"], {"state": "declined"})
-        _edit_evidence(db, manuscript_id, t, "declined")
+        _edit_evidence(db, manuscript_id, t, "declined",
+                       evidence_type=evidence_type)
     return diffs

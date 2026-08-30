@@ -97,7 +97,38 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
                   f"replacement characters in place of the invalid bytes",
                   file=sys.stderr)
             text = path.read_text(encoding="utf-8", errors="replace")
-        files[rel] = strip_embed_lines(text)
+        # A file carrying a `<<old>>{{new}}` form is mid-settle. The
+        # ratified law (threads.py's docstring) is that the canonical
+        # text of a pending form is its OLD half: content changes at
+        # approval, not at proposal. That law has always been applied to
+        # text arriving from a Doc; the filter pass's local settle
+        # transport makes the same forms reachable on DISK, and the same
+        # law must govern them or every observer in the system reads a
+        # proposal as prose — collect would record markers into version
+        # history, the extractor would mine them, the summarizer would
+        # summarize them, the realization scan would match inside them,
+        # `export` would ship them, and a lens would report on them.
+        #
+        # Beside `strip_embed_lines`, deliberately: this seam has never
+        # returned the bytes on disk. It already drops illustration
+        # embed lines because they are local derived machinery that the
+        # observed manuscript must not contain. A pending form is the
+        # same kind of thing by a different road — machinery the author
+        # can see, which is not yet part of the essay.
+        #
+        # `strip_replacements`, NOT `strip_pending`. The Doc
+        # canonicalizer also deletes a bare `{{…}}`, because in a Doc tab
+        # nothing put one there but AuthorLM and it is a critique-pass
+        # insertion. In a LOCAL file the opposite holds: `{{title}}` in a
+        # template, `{{a, b}}` in set notation, a Handlebars sample in an
+        # essay about templating are all the author's own prose, and the
+        # broad strip deleted every one of them from everything the
+        # system observes — silently, since nothing was left to warn
+        # about. The narrow function is a true no-op on text carrying no
+        # `<<old>>{{new}}` form, which is what makes it safe here
+        # unconditionally (filter-pass design §2.3).
+        from . import threads as _threads
+        files[rel] = _threads.strip_replacements(strip_embed_lines(text))[0]
     return files
 
 

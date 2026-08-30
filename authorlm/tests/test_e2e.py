@@ -5330,6 +5330,7 @@ def scenario_testbench(root: Path) -> None:
         check("--list-checks names it",
               "intent-scope" in bench("--list-checks"), "")
 
+
         # --- the check must DISCRIMINATE ------------------------------------
         # A visibility test that passes on a HIDDEN marker is worse than no
         # test: it would have signed off on exactly the failure the Sponsor
@@ -5392,6 +5393,1044 @@ def scenario_testbench(root: Path) -> None:
         check("and the bench is checkable again once it is settled",
               "all assertions passed"
               in bench("--check", "placeholder"), "")
+
+        # --- the filter check ----------------------------------------------
+        # LAST, deliberately: it settles the essay and rebuilds its
+        # summary, which leaves that summary stale against the text the
+        # rollback puts back. Every check above needs a fresh summary to
+        # get past the drafting gate, so this one runs after them.
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "filter")
+        check("the filter check passes on a healthy bench",
+              "all assertions passed" in out and "FAIL" not in out, out)
+        check("it proves the payload is deterministic and made no call",
+              "made NO live model call" in out
+              and "byte-identical prefix" in out, out)
+        check("it asserts the ECHO refusal ON THE DATABASE — no thread "
+              "row, cursor still 0 — rather than on the message alone",
+              "asserted ON THE DATABASE" in out, out)
+        check("it asserts proposed_old came from DISK, not from the reply",
+              "READ FROM DISK" in out, out)
+        check("it asserts the verdict evidence carries no episode",
+              "episode_id IS NULL" in out, out)
+        check("it asserts the marked form is VISIBLE markdown — the same "
+              "four hiding places --check placeholder tests, and for the "
+              "same reason: the author reads this in Obsidian",
+              "NOT inside an HTML comment" in out
+              and "NOT inside YAML front matter" in out
+              and "NOT inside a code fence" in out
+              and "renders as a plain paragraph" in out, out)
+        check("it asserts the canonicalization LIVE: while marked, every "
+              "read path still reports the original text",
+              "ORIGINAL text byte for byte" in out, out)
+        check("it asserts the finalized bytes and the identical-text "
+              "refusal",
+              "exactly the original with that one unit replaced" in out
+              and "refuses and names the prior run" in out, out)
+        check("the check leaves the bench exactly as it found it",
+              (msdir / tb.TARGET).read_bytes() == original,
+              (msdir / tb.TARGET).read_text())
+        check("and it removes the filter artifact it created — the "
+              "author's own _filters/ is never touched",
+              not (msdir / "_filters" / "tb-dupes.md").exists())
+        check("the ONLY model call in the whole filter check is the "
+              "settle's summary rebuild — the filter path itself makes "
+              "none, which is the design's claim stated exactly rather "
+              "than loosely. On the author's own bench the keys are "
+              "scrubbed, so that one call fails and the settle warns "
+              "soft: zero live spend there, one stub call here",
+              StubLLMHandler.REQUESTS - before == 1,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+        check("--list-checks names it",
+              "filter " in bench("--list-checks"), "")
+
+        # The filter check must DISCRIMINATE too: a visibility assertion
+        # that passes on a HIDDEN form would sign off on exactly the
+        # failure it exists to catch (§14.8).
+        _pin_config(ws)
+        before = StubLLMHandler.REQUESTS
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed = tb.check_filter(
+                ws, msdir, _corrupt=lambda x: "<!--\n" + x + "\n-->\n")
+        negative = buffer.getvalue()
+        check("the filter check FAILS when the marked forms are hidden "
+              "inside an HTML comment",
+              failed >= 1, negative)
+        check("and it fails on the VISIBILITY assertions by name",
+              "FAIL: the form is NOT inside an HTML comment" in negative
+              and "FAIL: the form survives the strip" in negative, negative)
+        check("the try/finally holds: a failed filter check still rolls "
+              "back and restores the essay byte for byte",
+              (msdir / tb.TARGET).read_bytes() == original
+              and "restored the essay byte for byte" in negative, negative)
+        check("the discriminating run spends no more than that one "
+              "rebuild either",
+              StubLLMHandler.REQUESTS - before <= 1,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+    finally:
+        server.shutdown()
+
+
+
+# ==================================================================
+# Scenario F — the filter pass (docs/filter-pass-design.md §7.1)
+#
+# Zero model calls except the ONE summary rebuild each settle makes, and
+# every one of those is asserted against the stub's own counter rather
+# than assumed.
+# ==================================================================
+
+FILTER_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Moreover the wall stands. Moreover it stands again, and the wall is "
+    "what the Dead cannot pass.",
+    "The ground is what the figure was taken out of. It has no shape of "
+    "its own, which is why it is so easy to mistake for nothing at all.",
+    "Moreover the ledger counts. The ledger counts, and the ledger counts "
+    "again, and nothing in it is an accusation.",
+    "Fire is what the Qualities do to a life. It is always the agent and "
+    "never a thing a person holds.",
+    "A frame does not add anything to what it surrounds. It subtracts "
+    "everything else, and the subtraction is felt as emphasis.",
+    "Every ground was once a figure and will be again. The two are two "
+    "offices, not two kinds of thing.",
+    "And so the wall is not stone. And so it is not anything a hand could "
+    "test by pushing.",
+    "The count itself is neutral. Neither friend nor accuser, only the "
+    "count, kept where a life can read it.",
+    "Choosing the edge is the whole of the composition. The rest is "
+    "arrangement, and arrangement is not composition.",
+    "A listener cannot look back. They hold about one sentence in mind at "
+    "a time, and everything else follows from that.",
+    "The Test is not a test. The capitalization does all the work on the "
+    "page and none of it aloud.",
+    "There is no such thing as a background. There is only what is not, "
+    "at this moment, being attended to.",
+    "The wall stands where it stood. Nothing has moved it and nothing "
+    "will, which is the whole of the difficulty.",
+]) + "\n"
+
+SEQ_FILTER = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n---\n\n'
+    "# Duplicate words and phrases\n\n"
+    "Flag a word or phrase used again too soon, and propose the wording "
+    "that removes the repetition without removing anything else.\n")
+
+GLOBAL_FILTER = (
+    '---\nclass = "global"\n'
+    'state = "not used — the registry is this filter\'s coordination object"\n'
+    "---\n\n"
+    "# Metaphor consistency\n\n"
+    "The book's figures are a system, not decoration. Return a registry "
+    "naming every motif family and what it is doing HERE.\n")
+
+
+def _filter_units(text: str) -> list[str]:
+    from authorlm.passes import paragraphs_of
+
+    return paragraphs_of(text)
+
+
+def _filter_reply(units, window, replaces=None, state="ledger: (empty)",
+                  echo_override=None, drop=None, extra=None):
+    """A contract-valid reply for `window`, with named perturbations.
+
+    Every anchoring test differs from the valid reply in exactly one
+    respect, which is what makes each refusal attributable."""
+    from authorlm.passes import echo_of
+
+    replaces = replaces or {}
+    entries = []
+    for n in range(window[0], window[1] + 1):
+        if drop is not None and n == drop:
+            continue
+        echo = echo_of(units[n - 1])
+        if echo_override and n in echo_override:
+            echo = echo_override[n]
+        if n in replaces:
+            entries.append({"n": n, "echo": echo, "action": "replace",
+                            "new": replaces[n], "why": "the stub's reason",
+                            "ref": "moreover"})
+        else:
+            entries.append({"n": n, "echo": echo, "action": "keep"})
+    if extra:
+        entries.extend(extra)
+    body = {"units": entries}
+    if state is not None:
+        body["state"] = state
+    return json.dumps(body)
+
+
+def api_filter_edit_count(db, mid: str, file: str) -> int:
+    return db.one(
+        "SELECT COUNT(*) AS n FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = 'filter' AND file = ? AND state = 'proposed'",
+        (mid, file))["n"]
+
+
+def scenario_filter(root: Path) -> None:
+    print("Scenario FP — the filter pass, unit by unit (design §7.1's Scenario F)")
+    import authorlm.gdocs as _gd
+    from authorlm import api as _fapi
+    from authorlm.db import Database as _DB, loads as _loads
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "flt"
+        ms = ws / "manuscript"
+        write(ms / "01-open.md", CH1)
+        write(ms / "02-wall.md", FILTER_ESSAY)
+        write(ms / "03-close.md", CH3)
+        _draft_config(ws, server.server_port)
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        # A declared goal with an OPEN episode, from the start: the
+        # settle's attribution assertions are worthless unless there is
+        # something for the settle to be mis-attributed TO (§14.8).
+        run(ws, "intent", "declare", "Foreground the wall as a refrain")
+        db = _DB(ws / ".authorlm" / "authorlm.db")
+        manuscript = _fapi.get_manuscript(db)
+        mid = manuscript["id"]
+        run(ws, "collect")
+        units = _filter_units(FILTER_ESSAY)
+        check("the bench essay really has the units the window tests need",
+              len(units) == 14, len(units))
+
+        # ---------------- F1-F6: the artifact and its class -----------
+        out = run_stdin(ws, SEQ_FILTER, "filter", "add", "duplicate-words")
+        check("F1 filter add writes the artifact and reports its class",
+              "_filters/duplicate-words.md" in out
+              and "class = sequential" in out, out)
+        artifact = (ms / "_filters" / "duplicate-words.md").read_text()
+        check("F1 the artifact round-trips verbatim",
+              artifact == SEQ_FILTER.strip() + "\n", repr(artifact[:80]))
+
+        out = run_stdin(ws, '---\nstate = "x"\n---\n\n# No class\n\nBody.\n',
+                        "filter", "add", "no-class", expect_exit=True)
+        check("F2 front matter with no class is refused, naming BOTH legal "
+              "values — a filter is never silently defaulted into a class",
+              "'sequential'" in out and "'global'" in out, out)
+        check("F2 and the refused artifact was never written",
+              not (ms / "_filters" / "no-class.md").exists())
+
+        out = run_stdin(ws, '---\nclass = "wholefile"\n---\n\n# X\n\nBody.\n',
+                        "filter", "add", "bad-class", expect_exit=True)
+        check("F3 an unknown class is refused, naming both legal values "
+              "and saying a third class is code, not configuration",
+              "wholefile" in out and "'sequential'" in out
+              and "'global'" in out and "is code" in out, out)
+
+        out = run_stdin(ws, '---\nclass = "sequential"\nklass = "x"\n---\n\n'
+                        "# X\n\nBody.\n", "filter", "add", "typo",
+                        expect_exit=True)
+        check("F4 an unknown front-matter key is refused BY NAME, at the "
+              "moment it is written rather than at the first run",
+              "klass" in out, out)
+
+        out = run_stdin(ws, SEQ_FILTER, "filter", "add", "Not A Slug",
+                        expect_exit=True)
+        check("F5 a name failing the kebab-case rule is refused",
+              "kebab-case" in out, out)
+
+        run_stdin(ws, GLOBAL_FILTER, "filter", "add", "metaphor")
+        out = run(ws, "filter", "list")
+        check("F6 filter list prints each artifact's first PROSE line as "
+              "its summary, with its class — and the front matter never "
+              "appears in it",
+              "duplicate-words [sequential]: Duplicate words and phrases"
+              in out and "metaphor [global]: Metaphor consistency" in out
+              and "class =" not in out, out)
+
+        # ---------------- F7-F12: payload and determinism -------------
+        before = StubLLMHandler.REQUESTS
+        out1 = run(ws, "filter", "run", "duplicate-words", "02-wall.md")
+        check("F7 filter run makes ZERO model calls — the default, and "
+              "the opposite of write draft's",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+        check("F7 and it prints all four blocks with their hashes",
+              all(f"───── block {b} — " in out1 for b in "SABC"), out1)
+        check("F7 the output says the polarity inversion out loud",
+              "opposite of 'write draft'" in out1, out1)
+        out2 = run(ws, "filter", "run", "duplicate-words", "02-wall.md")
+        dry = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--dry-run")
+        check("--dry-run is a SILENT NO-OP alias, kept for muscle memory "
+              "from `write draft`: identical output, and still no call",
+              _block_hash(dry, "S") == _block_hash(out2, "S")
+              and _block_hash(dry, "C") == _block_hash(out2, "C")
+              and StubLLMHandler.REQUESTS == before,
+              f"{_block_hash(dry, 'C')} vs {_block_hash(out2, 'C')}")
+        check("F8 two consecutive runs with no state change produce "
+              "BYTE-IDENTICAL blocks S and A (the write path's "
+              "silent-invalidator check, reused)",
+              _block_hash(out1, "S") == _block_hash(out2, "S")
+              and _block_hash(out1, "A") == _block_hash(out2, "A"),
+              f"S {_block_hash(out1, 'S')} vs {_block_hash(out2, 'S')}; "
+              f"A {_block_hash(out1, 'A')} vs {_block_hash(out2, 'A')}")
+        check("F10 an absent section renders (none) rather than "
+              "disappearing — the block's shape never changes",
+              "FILTER STATE (carry it forward and return its updated "
+              "value)\n(none)" in _block(out1, "C"), _block(out1, "C"))
+        check("F12 a SEQUENTIAL run's block A carries no MOTIF REGISTRY "
+              "and no whole-essay pin — class resolution is observable in "
+              "the bytes, not just in the code",
+              "MOTIF REGISTRY" not in _block(out1, "A")
+              and "THE ESSAY —" not in _block(out1, "A"),
+              _block(out1, "A"))
+
+        out = run(ws, "filter", "run", "metaphor", "02-wall.md",
+                  expect_exit=True)
+        check("F11 a global filter refuses before its prelude and names "
+              "the verb that supplies one",
+              "filter prelude metaphor 02-wall.md" in out, out)
+        # run_stdin with an empty payload: `filter prelude` reads the
+        # registry off stdin when one is piped in, the same idiom
+        # `lens add` and `write plan` use, so a harness that leaves stdin
+        # an open pipe would otherwise block here.
+        pre = run_stdin(ws, "", "filter", "prelude", "metaphor",
+                        "02-wall.md")
+        check("F11 the prelude payload is printed with no call made",
+              "no call made" in pre and "THE PRELUDE" in pre, pre)
+        run_stdin(ws, json.dumps({"registry": "wall — the limit of a life "
+                                              "lived without the Test."}),
+                  "filter", "prelude", "metaphor", "02-wall.md")
+        g1 = run(ws, "filter", "run", "metaphor", "02-wall.md")
+        g2 = run(ws, "filter", "run", "metaphor", "02-wall.md")
+        check("F11 after the prelude every unit payload carries the SAME "
+              "registry bytes — it is frozen for the life of the run",
+              _block_hash(g1, "A") == _block_hash(g2, "A")
+              and "wall — the limit of a life" in _block(g1, "A"),
+              _block_hash(g1, "A"))
+        check("F12 a GLOBAL run's payload carries no FILTERED PREFIX "
+              "content, and says why in as many words",
+              "not applicable" in _block(g1, "B")
+              and "MOTIF REGISTRY" in _block(g1, "A"), _block(g1, "B"))
+        run(ws, "filter", "abandon", "metaphor", "02-wall.md")
+
+        # ------------- F13-F21: anchoring refusal, nothing staged -----
+        def staged_now() -> int:
+            return len(db.all(
+                "SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
+                "origin_type = 'filter' AND file = '02-wall.md'", (mid,)))
+
+        def cursor_now() -> int:
+            return db.one(
+                "SELECT cursor FROM filter_runs WHERE manuscript_id = ? "
+                "AND filter = 'duplicate-words' AND status = 'active'",
+                (mid,))["cursor"]
+
+        window = (1, 14)
+        for label, reply, needle in [
+            ("F13 an echo mismatch on ONE unit refuses the WHOLE reply",
+             _filter_reply(units, window,
+                           echo_override={7: "Not the real echo at all"}),
+             "echo mismatch"),
+            # A NEAR MISS, not a wild one: the real echo with a single
+            # word changed. This is the case a well-meaning fuzzy
+            # matcher would wave through, and the whole anchoring law is
+            # that there is no fuzzy match and no closest paragraph. A
+            # casefold-prefix or edit-distance matcher passes every
+            # other test in this loop and fails only this one.
+            ("the anchoring law admits NO fuzzy match: the real echo "
+             "with one word changed is still refused, and the expected "
+             "and received echoes are both printed",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:4] + ["stone"])}),
+             "echo mismatch"),
+            ("...and a case-only difference is refused too",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:5]).upper()}),
+             "echo mismatch"),
+            ("F14 a missing unit entry refuses the whole reply, naming "
+             "the missing n",
+             _filter_reply(units, window, drop=9), "missing n=9"),
+            ("F15 an n outside the window refuses",
+             _filter_reply(units, window,
+                           extra=[{"n": 99, "echo": "x", "action": "keep"}]),
+             "not in this window: n=99"),
+            ("F16 a replacement containing '<<' refuses, naming the marker",
+             _filter_reply(units, window,
+                           replaces={4: "The ledger <<counts>> once."}),
+             "'<<'"),
+            ("F16 likewise '{{'",
+             _filter_reply(units, window,
+                           replaces={4: "The ledger {{counts}} once."}),
+             "'{{'"),
+            ("F17 an empty replacement refuses — 'delete this paragraph' "
+             "is not a filter's judgment to make",
+             _filter_reply(units, window, replaces={4: "   "}),
+             "not a filter's judgment"),
+            ("F19 action 'insert' is refused, saying a filter never ADDS "
+             "a unit",
+             json.dumps({"units": [
+                 {"n": n, "echo": " ".join(units[n - 1].split()[:5]),
+                  "action": "insert" if n == 4 else "keep"}
+                 for n in range(1, 15)], "state": "x"}),
+             "never ADDS a unit"),
+            ("a sequential reply with no state refuses — the next window "
+             "is conditioned on it",
+             _filter_reply(units, window, state=None),
+             "must return its updated `state`"),
+            ("the 4,000-character state cap refuses rather than "
+             "truncating: a silently truncated ledger lies",
+             _filter_reply(units, window, state="x" * 4001),
+             "over the 4,000 cap"),
+        ]:
+            out = run_stdin(ws, reply, "filter", "record", "02-wall.md",
+                            expect_exit=True)
+            check(label, needle in out, out)
+            check(f"...{label.split()[0]}: nothing was staged and the "
+                  f"cursor did not move",
+                  staged_now() == 0 and cursor_now() == 0,
+                  f"{staged_now()} staged, cursor {cursor_now()}")
+
+        # F18 / F21: the two entries that are NOT refusals.
+        out = run_stdin(
+            ws, _filter_reply(units, window, replaces={
+                6: units[5],                      # F18: new == old
+                2: "The wall stands. It stands again, and the wall is what "
+                   "the Dead cannot pass.",
+                4: "The ledger counts.\n\nNothing in it is an accusation.",
+            }),
+            "filter", "record", "02-wall.md")
+        check("F18 a replace whose text equals the unit is silently a "
+              "KEEP and stages nothing", staged_now() == 2,
+              f"{staged_now()} staged")
+        check("F21 a replacement containing a blank line IS accepted",
+              "2 proposal(s)" in out, out)
+
+        # ---------------- F22-F27: the door ---------------------------
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' ORDER BY origin_id", (mid,))]
+        run_row = dict(db.one(
+            "SELECT * FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'duplicate-words' AND status = 'active'", (mid,)))
+        check("F22 a staged filter edit's proposed_old is BYTE-EQUAL to "
+              "the source unit — read from the file, never from the reply",
+              [r["proposed_old"] for r in rows] == [units[1], units[3]],
+              [r["proposed_old"][:40] for r in rows])
+        check("F22 and its origin_id is the shared {owner}:{file}:{ordinal}"
+              " shape",
+              [r["origin_id"] for r in rows]
+              == [f"{run_row['id']}:02-wall.md:1",
+                  f"{run_row['id']}:02-wall.md:2"],
+              [r["origin_id"] for r in rows])
+        from authorlm import passes as _passes
+        check("F23 passes.staged_threads with the DEFAULT origin_type "
+              "does not return filter rows — the critique pass cannot see "
+              "them and its own tests are untouched",
+              _passes.staged_threads(db, mid, "02-wall.md") == [])
+
+        out = run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+            4: "The ledger counts.\n\nNothing in it is an accusation.",
+        }), "filter", "record", "02-wall.md")
+        after = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' ORDER BY origin_id", (mid,))]
+        check("F27 a re-run over the same units REPLACES the same "
+              "origin_id rows in place rather than colliding on the "
+              "UNIQUE constraint",
+              len(after) == 2
+              and [r["id"] for r in after] == [r["id"] for r in rows],
+              [r["origin_id"] for r in after])
+
+        # A re-record with FEWER proposals must SUPERSEDE, not accumulate.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+        }), "filter", "record", "02-wall.md")
+        open_after = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'proposed' "
+            "ORDER BY origin_id", (mid,))]
+        check("re-recording a window with FEWER proposals SUPERSEDES the "
+              "ones it dropped: the reply is the authoritative answer for "
+              "its window, so an ordinal it did not reach is a proposal "
+              "that no longer exists. Left standing, the stale row would "
+              "appear in the next `filter edits` list under a number the "
+              "author reads as current, and could be accepted into a "
+              "settle it was never part of",
+              len(open_after) == 1
+              and open_after[0]["proposed_old"] == units[1],
+              [(r["origin_id"], r["state"], r["proposed_old"][:30])
+               for r in open_after])
+        withdrawn = db.all(
+            "SELECT origin_id FROM doc_threads WHERE manuscript_id = ? "
+            "AND origin_type = 'filter' AND state = 'withdrawn'", (mid,))
+        check("...and the dropped one is WITHDRAWN rather than deleted — "
+              "the row is history, and origin_id is UNIQUE",
+              len(withdrawn) == 1, [r["origin_id"] for r in withdrawn])
+        # Put the two-proposal state back for the triage that follows.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+            4: "The ledger counts.\n\nNothing in it is an accusation.",
+        }), "filter", "record", "02-wall.md")
+
+        beliefs_before = db.one(
+            "SELECT COUNT(*) AS n FROM editorial_beliefs WHERE "
+            "manuscript_id = ?", (mid,))["n"]
+        # Reject the EARLIER proposal (unit 2) and accept the later one
+        # (unit 4), so that §1.3's derived falsified-prefix warning has
+        # downstream work to name. A rejection with nothing after it
+        # would make that assertion pass vacuously.
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "2",
+            "--reject", "1", "--reason",
+            "the repetition there is the point — it is a refrain")
+        ev = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' ORDER BY created_at", (mid,))]
+        check("F24 triage verdicts write evidence rows with "
+              "evidence_type='filter_edit'", len(ev) == 2, len(ev))
+        check("F24 ...and EVERY one carries episode_id IS NULL: hygiene "
+              "work is never filed against a declared goal",
+              all(r["episode_id"] is None for r in ev),
+              [r["episode_id"] for r in ev])
+        rejected = next(r for r in ev if r["signal"] == "rejected")
+        check("F25 the explained rejection reaches the belief machinery — "
+              "asserted positively, not assumed. That path runs off the "
+              "evidence stream and the author's WORDS, not off an episode",
+              _loads(rejected["metadata"], {}).get("explanation")
+              == "the repetition there is the point — it is a refrain"
+              and db.one("SELECT COUNT(*) AS n FROM editorial_beliefs "
+                         "WHERE manuscript_id = ?", (mid,))["n"]
+              >= beliefs_before,
+              rejected["metadata"])
+        check("the author's reason is ALSO kept on the thread verbatim — "
+              "that is what block A's PRIOR RUNS section renders",
+              any("refrain" in (_loads(r["metadata"], {}) or {}).get(
+                  "author_reason", "") for r in db.all(
+                      "SELECT metadata FROM doc_threads WHERE "
+                      "manuscript_id = ? AND origin_type = 'filter'",
+                      (mid,))))
+
+        # ---------------- F26 + the settle ----------------------------
+        episodes_before = {r["id"]: r["transition_ids"] for r in db.all(
+            "SELECT id, transition_ids FROM editorial_episodes WHERE "
+            "manuscript_id = ?", (mid,))}
+        check("there IS an open episode for the settle to be "
+              "mis-attributed to (§14.8: make the guarded thing happen)",
+              any(r["status"] == "open" for r in db.all(
+                  "SELECT status FROM editorial_episodes WHERE "
+                  "manuscript_id = ?", (mid,))))
+        calls_before = StubLLMHandler.REQUESTS
+        out = run(ws, "filter", "settle", "02-wall.md")
+        settled_text = (ms / "02-wall.md").read_text()
+        check("the settle applied the one accepted edit — and F21's "
+              "blank-line replacement resolved to TWO paragraphs, which "
+              "is the whole reason a split is allowed",
+              "The ledger counts.\n\nNothing in it is an accusation."
+              in settled_text
+              and "Moreover the wall stands" in settled_text,
+              settled_text[:300])
+        check("the settle's ONE model call is the summary rebuild, and it "
+              "is the only call the whole chat-mode path makes",
+              StubLLMHandler.REQUESTS == calls_before + 1,
+              f"{calls_before} -> {StubLLMHandler.REQUESTS}")
+        episodes_after = {r["id"]: r["transition_ids"] for r in db.all(
+            "SELECT id, transition_ids FROM editorial_episodes WHERE "
+            "manuscript_id = ?", (mid,))}
+        grew = {k: (episodes_before[k], episodes_after[k])
+                for k in episodes_before
+                if episodes_after.get(k) != episodes_before[k]}
+        check("F26 the settle's collect attaches its transitions to NO "
+              "episode: every open episode's transition_ids is unchanged "
+              "across the settle",
+              not grew, grew)
+        check("F26 ...and no NEW episode was opened to hold them either",
+              not any(_loads(episodes_after[k], []) for k in
+                      set(episodes_after) - set(episodes_before)),
+              sorted(set(episodes_after) - set(episodes_before)))
+        check("the settle says the attribution out loud, once",
+              out.count("filed against any of your goals") == 1, out)
+        check("F42 rejecting unit 2 prints the downstream list and the "
+              "--from remedy — derived, never stored, and deliberately "
+              "not automatic: re-running the tail would discard the "
+              "author's verdicts on those units",
+              "n=2 rejected" in out and "Units 4" in out
+              and "may have assumed it" in out
+              and "--from 2" in out, out)
+        check("F42 ...and it re-ran nothing: the run is settled, not "
+              "reopened",
+              db.one("SELECT status FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'duplicate-words' AND "
+                     "file = '02-wall.md' ORDER BY created_at DESC LIMIT 1",
+                     (mid,))["status"] == "settled")
+
+        # ---------------- F37-F40: approximate idempotency ------------
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  expect_exit=True)
+        check("F37 M1: a settled run on this exact text refuses and names "
+              "the prior run and its tallies",
+              "already ran on this exact text" in out
+              and "1 accepted / 1 rejected" in out and "--again" in out, out)
+        again = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                    "--again")
+        check("F38 --again proceeds, and block A carries the prior run's "
+              "rejection reason VERBATIM — M2, in the CACHED layer",
+              "the repetition there is the point — it is a refrain"
+              in _block(again, "A"), _block(again, "A"))
+        check("F39 the prior run's STATE is NOT carried into the new "
+              "run's payload — a prior ledger described a prior text, and "
+              "re-loading it would make run two condition on a fiction",
+              "FILTER STATE (carry it forward and return its updated "
+              "value)\n(none)" in _block(again, "C"), _block(again, "C"))
+        check("F40 the PRIOR RUNS block excludes the CURRENT run",
+              _block(again, "A").count("proposed,") == 1,
+              _block(again, "A"))
+
+        # Departure #3, pinned directly. A settled run's rejected
+        # proposal must not appear in the NEW run's triage list: it lives
+        # in PRIOR RUNS above, where its reason is law, and listing it
+        # here would let `--accept 1` resurrect the very thing the author
+        # refused — into a settle it was never part of.
+        settled_rejection = dict(db.one(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'rejected' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,)))
+        check("the settled run's rejected proposal is still ON RECORD — "
+              "it is evidence, and nothing withdrew it",
+              settled_rejection["state"] == "rejected",
+              settled_rejection["origin_id"])
+        now_units = _filter_units((ms / "02-wall.md").read_text())
+        run_stdin(ws, _filter_reply(now_units, (1, len(now_units)),
+                                    replaces={6: "A brand-new proposal on "
+                                                 "an entirely different "
+                                                 "unit."}),
+                  "filter", "record", "02-wall.md")
+        listed = run(ws, "filter", "edits", "02-wall.md")
+        check("...and it is NOT in the new run's numbered triage list",
+              "A brand-new proposal" in listed
+              and settled_rejection["proposed_new"][:40] not in listed
+              and listed.count("¶") == 1, listed)
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        fresh_state = db.one(
+            "SELECT state FROM doc_threads WHERE id = ?",
+            (settled_rejection["id"],))["state"]
+        check("...so `--accept 1` targets the NEW run's proposal and "
+              "leaves the settled rejection exactly as the author left "
+              "it (departure #3)",
+              fresh_state == "rejected"
+              and db.one("SELECT state FROM doc_threads WHERE "
+                         "manuscript_id = ? AND origin_type = 'filter' AND "
+                         "proposed_new LIKE 'A brand-new proposal%'",
+                         (mid,))["state"] == "accepted",
+              fresh_state)
+
+        # ---------------- F41/F43: warn, never block ------------------
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+        fresh = _filter_units((ms / "02-wall.md").read_text())
+        w1 = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                 "--again", "--window", "5")
+        out = run_stdin(ws, _filter_reply(fresh, (1, 5), replaces={
+            2: "The wall stands once, and the Dead cannot pass it."}),
+            "filter", "record", "02-wall.md")
+        check("a windowed run reports what is left",
+              f"{len(fresh) - 5} unit(s) left" in out, out)
+        w2 = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                 "--window", "5")
+        check("F9 recording a window changes blocks B and C and leaves S "
+              "and A BYTE IDENTICAL — the two cached layers survive the "
+              "window boundary, which is the whole point of the ordering",
+              _block_hash(w1, "S") == _block_hash(w2, "S")
+              and _block_hash(w1, "A") == _block_hash(w2, "A")
+              and _block_hash(w1, "B") != _block_hash(w2, "B")
+              and _block_hash(w1, "C") != _block_hash(w2, "C"),
+              f"S {_block_hash(w1, 'S')}/{_block_hash(w2, 'S')} "
+              f"A {_block_hash(w1, 'A')}/{_block_hash(w2, 'A')} "
+              f"B {_block_hash(w1, 'B')}/{_block_hash(w2, 'B')}")
+        check("F9 ...and block B carries the run's OWN version of the "
+              "units before the window, not the original — conditioning "
+              "on the run's proposed prefix is what makes the pass "
+              "autoregressive rather than N independent judgments",
+              "The wall stands once, and the Dead cannot pass it."
+              in _block(w2, "B")
+              and "Moreover the wall stands" not in _block(w2, "B"),
+              _block(w2, "B"))
+        check("F9 ...and the carried STATE is rendered into block C for "
+              "the next window",
+              "ledger: (empty)" in _block(w2, "C"), _block(w2, "C"))
+        # Back to the one-window shape the F41 assertion below is about:
+        # this run must settle having covered only units 1-5.
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+            "--from", "1", "--window", "5")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        out = run(ws, "filter", "settle", "02-wall.md")
+        check(f"F41 a run that covered 5 of {len(fresh)} units settles, "
+              f"WARNS naming the uncovered range, and does not refuse — "
+              f"completion is the author's call, exactly as an unwritten "
+              f"beat and an unaccounted digest point are (§15.13)",
+              f"units 6–{len(fresh)} of {len(fresh)} were never processed"
+              in out and "ordinary open state" in out, out)
+
+        # ---------------- F28-F36: the local transport ----------------
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now = _filter_units((ms / "02-wall.md").read_text())
+        original = (ms / "02-wall.md").read_bytes()
+        run_stdin(ws, _filter_reply(now, (1, len(now)), replaces={
+            4: "The ledger counts, and nothing in it is an accusation.",
+            8: "And so the wall is not stone, nor anything a hand could "
+               "test by pushing.",
+        }), "filter", "record", "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1", "2")
+        out = run(ws, "filter", "settle", "02-wall.md", "--pause")
+        marked = (ms / "02-wall.md").read_text()
+        check("F28 --pause writes MARKED text: the file's bytes carry "
+              "the <<old>>{{new}} form for every accepted edit, with the "
+              "OLD half byte-equal to the unit it replaces",
+              all(f"<<{now[n - 1]}>>{{{{" in marked for n in (4, 8))
+              and marked.count("<<") == 2, marked[:400])
+        check("F28 the form is a PLAIN paragraph in the file — visible in "
+              "Obsidian, which is the whole argument for a local "
+              "transport rather than a hidden marker",
+              any(ln.startswith("<<") for ln in marked.split("\n")),
+              marked[:400])
+        from authorlm.revisions import read_manuscript_files as _rmf
+        check("F29 while marked, read_manuscript_files returns the "
+              "ORIGINAL text byte for byte — the canonicalization "
+              "property, and the check that discriminates step 4",
+              _rmf(ms)["02-wall.md"] == original.decode(),
+              repr(_rmf(ms)["02-wall.md"][:120]))
+        versions_before = db.one(
+            "SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+            "manuscript_id = ?", (mid,))["n"]
+        run(ws, "collect")
+        check("F30 while marked, collect records NO new version and no "
+              "transition — a marker can never enter version history",
+              db.one("SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+                     "manuscript_id = ?", (mid,))["n"] == versions_before
+              and not db.all("SELECT id FROM editorial_transitions WHERE "
+                             "manuscript_id = ? AND detail LIKE '%<<%'",
+                             (mid,)))
+        check("F31b the pre-existing embed-line stripping is not "
+              "displaced by the new pending-form stripping",
+              "![](" not in _rmf(ms)["02-wall.md"])
+        # F31 (a) and (b): both push guards, separately, no network.
+        meta = _gd._mapping(db, manuscript)
+        links = meta.setdefault("gdocs", {})
+        links["_master_id"] = "doc-fake"
+        links["02-wall.md"] = {"tab_id": "tab-1", "checked_out": False}
+        _gd._save_mapping(db, manuscript, meta)
+        raised_a = None
+        try:
+            _gd.push_doc(db, manuscript, "02-wall.md", service=None,
+                         docs_service=None)
+        except LookupError as err:
+            raised_a = str(err)
+        check("F31(a) with the run row present, forms_pending refuses the "
+              "push and names 'filter settle'",
+              raised_a is not None and "filter pending forms" in raised_a
+              and "filter settle 02-wall.md" in raised_a, raised_a)
+        written_ids = [r["id"] for r in db.all(
+            "SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'written'", (mid,))]
+        for tid in written_ids:
+            db.conn.execute("UPDATE doc_threads SET state = 'stale' "
+                            "WHERE id = ?", (tid,))
+        db.conn.commit()
+        raised_b = None
+        try:
+            _gd.push_doc(db, manuscript, "02-wall.md", service=None,
+                         docs_service=None)
+        except LookupError as err:
+            raised_b = str(err)
+        check("F31(b) with the run's threads gone from under it, the "
+              "BYTE-level is_marked check still refuses and names "
+              "'filter unmark' — asserting only (a) would leave this "
+              "guard free to delete with the suite green",
+              raised_b is not None and "mid-settle" in raised_b
+              and "filter unmark 02-wall.md" in raised_b, raised_b)
+        for tid in written_ids:
+            db.conn.execute("UPDATE doc_threads SET state = 'written' "
+                            "WHERE id = ?", (tid,))
+        db.conn.commit()
+        # F32/F33: the author post-edits one {{new}} half during the
+        # pause. F34: they delete the OTHER form outright, which is how a
+        # rejection made in the file itself reads.
+        edited = marked.replace(
+            "{{The ledger counts, and nothing in it is an accusation.}}",
+            "{{The ledger counts. Nothing in it accuses.}}")
+        form8 = f"<<{now[7]}>>{{{{And so the wall is not stone, nor " \
+                f"anything a hand could test by pushing.}}}}"
+        check("the second form is in the file to be deleted (§14.8)",
+              form8 in edited, edited[:600])
+        (ms / "02-wall.md").write_text(edited.replace(form8, now[7]))
+        out = run(ws, "filter", "settle", "02-wall.md")
+        final = (ms / "02-wall.md").read_text()
+        check("F32 the finalized text carries the author's post-edit, not "
+              "the proposal — their words win",
+              "The ledger counts. Nothing in it accuses." in final
+              and "<<" not in final and "{{" not in final, final[:300])
+        check("F33 the post-edited half records a REVISED evidence row "
+              "carrying the proposal→final pair",
+              "modified" in out.lower() or "→" in out, out)
+        revised = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' AND signal = 'revised'", (mid,))]
+        check("F33 ...and it is a filter_edit row with no episode",
+              revised and all(r["episode_id"] is None for r in revised),
+              len(revised))
+        declined = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' AND signal = 'declined'",
+            (mid,))]
+        check("F34 a form DELETED outright during the pause records a "
+              "declined verdict — the author rejecting in the file is "
+              "still a verdict, and it is still evidence",
+              len(declined) == 1
+              and declined[0]["episode_id"] is None, len(declined))
+        check("F34 ...and that unit kept its original text",
+              now[7] in final and "nor anything a hand" not in final,
+              final[:600])
+
+        # F35: unmark restores the original bytes.
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now2 = _filter_units((ms / "02-wall.md").read_text())
+        before_unmark = (ms / "02-wall.md").read_bytes()
+        run_stdin(ws, _filter_reply(now2, (1, len(now2)), replaces={
+            2: "The wall stands, and the Dead cannot pass it."}),
+            "filter", "record", "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        run(ws, "filter", "settle", "02-wall.md", "--pause")
+        out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
+        check("filter rollback REFUSES on a marked file, naming both "
+              "exits — a rollback mid-pause destroys post-edits the "
+              "author may already have made, with nothing left to "
+              "recover them from",
+              "mid-settle" in out and "filter settle 02-wall.md" in out
+              and "filter unmark 02-wall.md" in out, out)
+        check("...and it left the marked bytes untouched",
+              "<<" in (ms / "02-wall.md").read_text())
+        out = run(ws, "filter", "unmark", "02-wall.md")
+        check("F35 filter unmark restores the original text BYTE FOR BYTE "
+              "and returns the forms to ACCEPTED — it undoes the marking, "
+              "never the triage; the author chooses whether the verdicts "
+              "then apply, reopen, or go",
+              (ms / "02-wall.md").read_bytes() == before_unmark
+              and "1 form(s) returned to 'accepted'" in out, out)
+        check("...so the verdicts really did survive the recovery",
+              db.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                     "manuscript_id = ? AND origin_type = 'filter' AND "
+                     "state = 'accepted'", (mid,))["n"] == 1)
+
+        # F36: rollback restores the pin and keeps the verdicts.
+        ev_before = db.one(
+            "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'filter_edit'", (mid,))["n"]
+        run(ws, "filter", "settle", "02-wall.md")
+        changed = (ms / "02-wall.md").read_bytes()
+        pin = dict(db.one(
+            "SELECT source_version_id FROM filter_runs WHERE "
+            "manuscript_id = ? AND file = '02-wall.md' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,)))
+        pinned_text = _loads(db.one(
+            "SELECT files FROM manuscript_versions WHERE id = ?",
+            (pin["source_version_id"],))["files"], {})["02-wall.md"]
+        out = run(ws, "filter", "rollback", "02-wall.md")
+        check("F36 filter rollback restores the run's PINNED version, "
+              "byte for byte",
+              (ms / "02-wall.md").read_bytes() != changed
+              and (ms / "02-wall.md").read_text() == pinned_text,
+              (ms / "02-wall.md").read_text()[:200])
+        check("F36 ...and the verdicts STAY as evidence: putting text "
+              "back does not un-record what the author decided",
+              db.one("SELECT COUNT(*) AS n FROM evidence WHERE "
+                     "manuscript_id = ? AND evidence_type = 'filter_edit'",
+                     (mid,))["n"] >= ev_before, ev_before)
+
+        # ---------------- F43: the prompt-fault warning ---------------
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        many = _filter_units((ms / "02-wall.md").read_text())
+        out = run_stdin(ws, _filter_reply(many, (1, len(many)), replaces={
+            n: f"A rewritten unit {n} that the filter insisted on."
+            for n in range(2, len(many) + 1)}),
+            "filter", "record", "02-wall.md")
+        check("F43 proposals on nearly every unit print the prompt-fault "
+              "warning — a filter that fires everywhere is almost always "
+              "the PROMPT, not an essay that bad — and name the remedy",
+              "PROMPT fault" in out and "filter show duplicate-words" in out
+              and "Nothing is blocked" in out, out)
+        staged_n = api_filter_edit_count(db, mid, "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md",
+            "--accept", "1",
+            "--reject", *[str(i) for i in range(2, staged_n + 1)],
+            "--reason", "all of these are the filter overreaching")
+        out = run(ws, "filter", "settle", "02-wall.md")
+        check("F43 ...and it SETTLES anyway: the warning blocks nothing, "
+              "and the remedy (edit the artifact) is the author's",
+              "Applied: 1 change(s) made final" in out, out)
+
+        # ---------------- F45-F50: refusals from doctrine -------------
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--window", "2")
+        check("a second essay runs independently — one file per run",
+              "01-open.md" in out, out[:200])
+        out = run(ws, "filter", "run", "metaphor", "01-open.md",
+                  expect_exit=True)
+        check("a global filter with no run at all refuses before creating "
+              "one — a run whose registry was never written has not "
+              "stalled, it has not begun",
+              "filter prelude metaphor 01-open.md" in out, out)
+        check("...and it left no half-made run row behind",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'metaphor' AND "
+                     "file = '01-open.md'", (mid,))["n"] == 0)
+        out = run_stdin(ws, json.dumps(
+            {"registry": "choice — the primal act."}),
+            "filter", "prelude", "metaphor", "01-open.md")
+        check("F50 a SECOND filter on the same file WARNS by name, names "
+              "the collision it can cause, and does NOT refuse — "
+              "refusing would be the machine deciding the author's work "
+              "order",
+              "duplicate-words already has an active run" in out
+              and "drift check" in out and "Registry frozen" in out, out)
+        out = run(ws, "filter", "run", "metaphor", "01-open.md")
+        check("F50 ...and both runs are live on the one file",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND file = '01-open.md' AND "
+                     "status = 'active'", (mid,))["n"] == 2)
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--again", expect_exit=True)
+        check("F50 --again while a run of the SAME filter is active is "
+              "refused, naming both exits",
+              "already active" in out and "filter settle" in out
+              and "filter abandon" in out, out)
+        check("F50 ...and there is still exactly ONE active run of that "
+              "filter on that file",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'duplicate-words' AND "
+                     "file = '01-open.md' AND status = 'active'",
+                     (mid,))["n"] == 1)
+        run(ws, "filter", "abandon", "metaphor", "01-open.md")
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # F49: the native path's refusal, and the chat path succeeding on
+        # the SAME config — the §15.10 reorder lesson, built in from the
+        # start rather than discovered.
+        calls_before = StubLLMHandler.REQUESTS
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--native", expect_exit=True)
+        check("F49 --native with [filtering] absent refuses and names the "
+              "chat flow",
+              "no [filtering] section" in out
+              and "makes no model call at all" in out, out)
+        check("F49 ...and made no call in the process",
+              StubLLMHandler.REQUESTS == calls_before,
+              f"{calls_before} -> {StubLLMHandler.REQUESTS}")
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md")
+        check("F49 the SAME config runs fine with no flag — the payload "
+              "is never gated on the billed path's configuration",
+              "───── block S — " in out, out[:300])
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # F47/F48: the checkout gate, on run AND on record.
+        meta = _gd._mapping(db, manuscript)
+        meta["gdocs"]["02-wall.md"] = {"tab_id": "tab-1",
+                                       "checked_out": True}
+        _gd._save_mapping(db, manuscript, meta)
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again", expect_exit=True)
+        check("F47 filter run on a checked-out file refuses, naming "
+              "doc pull", "doc pull 02-wall.md" in out, out)
+        meta["gdocs"]["02-wall.md"]["checked_out"] = False
+        _gd._save_mapping(db, manuscript, meta)
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now3 = _filter_units((ms / "02-wall.md").read_text())
+        meta["gdocs"]["02-wall.md"]["checked_out"] = True
+        _gd._save_mapping(db, manuscript, meta)
+        out = run_stdin(ws, _filter_reply(now3, (1, len(now3))),
+                        "filter", "record", "02-wall.md", expect_exit=True)
+        check("F48 filter record on a checked-out file refuses too — the "
+              "push→pull window is closed on BOTH halves of the turn",
+              "doc pull 02-wall.md" in out, out)
+        meta["gdocs"]["02-wall.md"]["checked_out"] = False
+        _gd._save_mapping(db, manuscript, meta)
+
+        # F20: pin drift between assembly and registration.
+        (ms / "02-wall.md").write_text(
+            (ms / "02-wall.md").read_text()
+            + "\nA paragraph added in another chat, after the run pinned "
+              "the essay.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, _filter_reply(now3, (1, len(now3))),
+                        "filter", "record", "02-wall.md", expect_exit=True)
+        check("F20 a reply recorded after the file changed under the run "
+              "is refused, naming --again",
+              "changed since this run pinned it" in out and "--again" in out,
+              out)
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+
+        # F45/F46: an active writeup owns the file.
+        run(ws, "summarize", "rebuild", "--all")
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "02-wall.md", "House")
+        out = run(ws, "intent", "declare", "Rewrite the wall essay")
+        intent_id = out.split("[")[1].split("]")[0]
+        run_stdin(ws, "The essay is about the wall.", "write", "start",
+                  "02-wall.md", "--intent", intent_id)
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again", expect_exit=True)
+        check("F45/F46 filter run on a file an active writeup holds "
+              "refuses, naming the writeup's BOTH exits — what is on disk "
+              "is a placeholder, not the essay",
+              "being rewritten right now" in out
+              and "write complete" in out and "write abandon" in out, out)
+        run(ws, "write", "abandon", "--writeup", "02-wall.md")
+
+        # F44: a surviving marker warns and does not block.
+        from authorlm.api import MARKER
+        text = (ms / "02-wall.md").read_text()
+        (ms / "02-wall.md").write_text(text.replace(
+            "# The Wall", f"# The Wall\n\n{MARKER}"))
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again")
+        check("F44 a marker surviving inside a hand-edited file WARNS and "
+              "does not block", "still carries the mid-rewrite marker"
+              in out and "───── block S — " in out, out[:600])
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+
+        # --- filter status: the class drift and the orphaned mark ------
+        run(ws, "filter", "run", "duplicate-words", "01-open.md")
+        run_stdin(ws, SEQ_FILTER.replace('class = "sequential"',
+                                         'class = "global"'),
+                  "filter", "add", "duplicate-words")
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status reports a run whose ARTIFACT class changed "
+              "under it, and says the run will finish as what it started "
+              "— the class is frozen so a mid-run edit cannot change a "
+              "live run's mechanics",
+              "the artifact's class is now 'global'" in out
+              and "will finish as one" in out, out)
+        run_stdin(ws, SEQ_FILTER, "filter", "add", "duplicate-words")
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # A crash between "compose" and "write threads" leaves a marked
+        # file with no written rows. The bytes fully describe that state,
+        # so `filter status` can find it and `filter unmark` can undo it.
+        orphan = (ms / "01-open.md")
+        kept = orphan.read_bytes()
+        first = _filter_units(orphan.read_text())[0]
+        orphan.write_text(orphan.read_text().replace(
+            first, f"<<{first}>>{{{{An orphaned proposal.}}}}"))
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status detects an ORPHANED mark — pending forms on "
+              "disk with no matching staged edit — and names the two-line "
+              "recovery",
+              "carries pending forms on disk with no matching staged edit"
+              in out and "filter unmark 01-open.md" in out, out)
+        run(ws, "filter", "unmark", "01-open.md")
+        check("filter unmark recovers it byte for byte, with no run row "
+              "and no thread to consult — the state was fully described "
+              "by the bytes",
+              orphan.read_bytes() == kept, orphan.read_text()[:200])
     finally:
         server.shutdown()
 
@@ -5420,6 +6459,7 @@ def main_test() -> None:
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)
         scenario_testbench(root)
+        scenario_filter(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")

@@ -13,7 +13,9 @@ this facade composes those; it never duplicates them.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import io
 import json
 import re
 import sys
@@ -39,6 +41,12 @@ from .llm import LLMClient
 from .revisions import (
     collect_revision, detect_transitions, massive_deletions, read_manuscript_files,
 )
+# The filter pass's two collaborators, at module scope because its
+# verbs are ordinary members of this module rather than a lazily
+# reached corner. `passes` imports `api` only from inside function
+# bodies and `staging` imports neither, so no cycle is created.
+from . import passes
+from . import staging
 
 __all__ = [
     "open_db", "load_config", "make_llm",
@@ -657,7 +665,7 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None, episode: dict | None = None) -> dict:
+            analyze: bool | None = None, episode=None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -669,7 +677,16 @@ def collect(db: Database, manuscript: dict, config: dict,
     before the parameter existed. The beat loop passes the PRIMARY
     intent's episode instead: with two writeups open at once, the default
     attached both writeups' beats to whichever intent was declared last
-    (design-intent-scope §0.3)."""
+    (design-intent-scope §0.3).
+
+    `episode=NO_EPISODE` is the third case and it is not the same as
+    `None`: it attaches the transitions to NOTHING. A settle that is
+    hygiene rather than goal-work — a filter pass, a critique-pass
+    resolve — has no goal to be filed under, and filing it under the
+    open episode of whatever the author happened to be doing would make
+    §15.17's completion analysis report that goal as served by an edit
+    sweep. Refusing to guess is the doctrine (§15.19 rule 2); this is
+    that refusal made mechanical."""
     mid = manuscript["id"]
     if auto:
         flagged = massive_deletions(db, manuscript)
@@ -699,7 +716,15 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     transitions = detect_transitions(db, mid, dict(before) if before else None, version)
     attached = False
-    if episode is not None:
+    if episode is NO_EPISODE:
+        # Filed under NO goal, deliberately (filter-pass design §1.8).
+        # `episode=None` means AMBIENT — the session's most recently
+        # created open episode, whatever goal it belongs to — which is
+        # §15.17's mis-attribution. Hygiene work has no goal to be filed
+        # under, so it is filed under none: the version history, the
+        # evidence rows and the run row are the complete record.
+        episode = None
+    elif episode is not None:
         ses.attach_transitions(db, episode, transitions)
         attached = True
     elif session:
@@ -943,6 +968,16 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 # belief reinforcement, and explanation-seeding — unchanged.
 
 BEAT_KIND = "beat"
+
+# The third value of `collect(episode=…)` (filter-pass design §1.8).
+#
+# `None` already means AMBIENT — attach to the session's most recently
+# created open episode — so there was no way to say "attach to nothing"
+# without inventing a value that is neither a row nor None. A sentinel
+# object is that value: it can never collide with an episode dict, it
+# cannot be produced by a database read, and `is` comparison makes the
+# branch unmistakable at the call site.
+NO_EPISODE = object()
 
 # The modeled-rewrite digest (UC-B, design §13.2): the four lists it may
 # carry, mapped to each list's own required text field. The digest is
@@ -3860,3 +3895,881 @@ def resolve_improvement(db: Database, prefix: str, action: str,
     if action not in ("propose", "close", "dismiss"):
         raise ValueError(f"unknown action '{action}' (propose|close|dismiss)")
     return imp.transition(db, imp.find_task(db, prefix), action, note)
+
+
+# ====================================================================
+# The filter pass (docs/filter-pass-design.md)
+#
+# A LENS reads one essay whole and reports findings. A FILTER reads one
+# essay UNIT BY UNIT and proposes an edit to each unit — one ratified
+# prompt applied to every paragraph, each conditioned on what came
+# before. Its output is a staged edit through the finding→edit door, not
+# a guidance row.
+#
+# Blackboard doctrine (§15.19), the review-checklist line, answered once
+# for the whole surface:
+#
+#  - READS are capture-consistent or pinned. Every verb takes exactly
+#    ONE `summaries.capture` and hands it to the gate AND to the thing
+#    the gate gates; a run additionally PINS `source_version_id` at
+#    start and `filter_record` re-checks it, because the gap between
+#    assembly and registration is a conversational turn the write path
+#    does not have.
+#  - WRITES invalidate loudly. An in-flight neighbour refuses, a drifted
+#    pin refuses, a second filter's proposals on the same file warn by
+#    name, a marked file is a state the bytes themselves declare, and a
+#    run whose artifact class changed under it says so rather than
+#    switching.
+#  - ATTRIBUTION refuses rather than guessing. Verdict evidence carries
+#    `episode_id = NULL`; the settle's collect passes NO_EPISODE. A
+#    filter has no goal to be filed under, so it is filed under none.
+# ====================================================================
+
+FILTER_ORIGIN = "filter"
+FILTER_EVIDENCE = "filter_edit"
+
+# A run whose proposals cover more than this share of the essay is
+# almost always a PROMPT fault rather than an essay that bad. It warns
+# and never blocks (§15.13): the remedy is `filter show` and an edit,
+# which is the author's, and nothing here is entitled to make it.
+PROMPT_FAULT_SHARE = 0.75
+
+
+def _filter_capture(db: Database, manuscript: dict, file: str,
+                    verb: str) -> tuple[str, str, tuple]:
+    """The one capture, the three in-flight/placeholder refusals, and the
+    file's text — shared by run, record and settle so a gate and the
+    thing it gates can never read separately (§14.7's dangerous shape).
+
+    Returns `(relpath, text, capture)`."""
+    from . import summaries as sums
+
+    _checkout_gate(db, manuscript, file)
+    capture = sums.capture(db, manuscript)
+    texts, _unlisted, inflight = capture
+    rel = file if file in texts else next(
+        (r for r in texts if Path(r).name == file), None)
+    if rel is None:
+        raise LookupError(
+            f"'{file}' is not in the manuscript's reading order")
+    if rel in inflight:
+        # The refusal borrows `passes.build_context`'s wording verbatim:
+        # what is on disk is a placeholder, not the essay, so a filter
+        # over it would propose edits to a marker.
+        raise ValueError(
+            f"{rel} is being rewritten right now by an active writeup — "
+            f"what is on disk is a placeholder, not the essay, so a "
+            f"{verb} over it would propose edits to a marker. Finish the "
+            f"writeup ('write complete') or put the old essay back "
+            f"('write abandon').")
+    text = texts[rel]
+    if is_placeholder(text):
+        raise ValueError(
+            f"{rel} holds only the mid-rewrite placeholder — a marker is "
+            "not prose, and a filter has nothing to pass through.")
+    return rel, text, capture
+
+
+def _active_filter_run(db: Database, manuscript_id: str, name: str,
+                       file: str) -> dict | None:
+    row = db.one(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND filter = ? "
+        "AND file = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+        (manuscript_id, name, file))
+    return dict(row) if row else None
+
+
+def _filter_run_row(db: Database, manuscript: dict, file: str,
+                    name: str | None = None) -> dict:
+    """The active run this verb is about. With no `name`, the file's ONE
+    active run — ambiguity is refused rather than guessed at, because
+    two filters on one essay is legitimate and picking one for the
+    author is not."""
+    mid = manuscript["id"]
+    if name:
+        run = _active_filter_run(db, mid, name, file)
+        if run is None:
+            raise LookupError(
+                f"no active run of '{name}' on {file} — start one with "
+                f"'filter run {name} {file}'.")
+        return _touched_filter_run(db, run)
+    rows = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at", (mid, file))]
+    if not rows:
+        raise LookupError(f"no active filter run on {file}.")
+    if len(rows) > 1:
+        names = ", ".join(r["filter"] for r in rows)
+        raise LookupError(
+            f"{file} has {len(rows)} active filter runs ({names}) — name "
+            "the one you mean.")
+    return _touched_filter_run(db, rows[0])
+
+
+def _touched_filter_run(db: Database, row: dict) -> dict:
+    """The provenance stamp (§15.15), and the POST-touch row.
+
+    A filter run is assembled in one chat and settled in another as the
+    ORDINARY case — assembly and registration are two turns — so the
+    touched-by list is not an edge case here, it is the shape of the
+    work. Touch first and re-read, exactly as `_touched` does for
+    writeups, so a caller's read-modify-write of `metadata` cannot
+    clobber the clients list."""
+    clients.touch(db, "filter_runs", row, verb=clients.current_verb())
+    fresh = db.one("SELECT * FROM filter_runs WHERE id = ?", (row["id"],))
+    return dict(fresh) if fresh is not None else row
+
+
+def _version_text(db: Database, version_id: str | None,
+                  file: str) -> str | None:
+    if not version_id:
+        return None
+    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
+                 (version_id,))
+    return loads(row["files"], {}).get(file) if row else None
+
+
+def _latest_version_id(db: Database, manuscript_id: str) -> str | None:
+    row = db.one(
+        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
+    return row["id"] if row else None
+
+
+def _settled_runs(db: Database, manuscript_id: str, name: str,
+                  file: str) -> list[dict]:
+    return [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND filter = ? "
+        "AND file = ? AND status = 'settled' ORDER BY created_at",
+        (manuscript_id, name, file))]
+
+
+def _run_threads(db: Database, manuscript_id: str, run: dict) -> list[dict]:
+    return [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = ? AND file = ? AND origin_id LIKE ? "
+        "ORDER BY created_at, id",
+        (manuscript_id, FILTER_ORIGIN, run["file"],
+         f"{run['id']}:{run['file']}:%"))]
+
+
+def _run_tallies(threads: list[dict]) -> dict:
+    return {
+        "proposed": len(threads),
+        "accepted": sum(1 for t in threads
+                        if t["state"] in ("accepted", "written", "cleaned")),
+        "rejected": sum(1 for t in threads
+                        if t["state"] in ("rejected", "declined")),
+        "open": sum(1 for t in threads if t["state"] == "proposed"),
+    }
+
+
+def _other_active_filters(db: Database, manuscript_id: str, rel: str,
+                          name: str) -> str | None:
+    """The warning a run's CREATION carries when another filter already
+    has an active run on this file.
+
+    Warn, never refuse: two filters on one essay is legitimate work, and
+    refusing would be the machine deciding the author's order (§15.19
+    rule 3 — invalidate loudly, never silently). Their staged edits CAN
+    collide on one unit; whichever settles second then hits
+    `compose_marked_text`'s drift check and refuses loudly, which is a
+    safe failure rather than a silent wrong answer."""
+    others = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' AND filter != ?", (manuscript_id, rel, name))]
+    if not others:
+        return None
+    return (f"{', '.join(r['filter'] for r in others)} already has an "
+            f"active run on {rel}. Two filters on one essay is fine, but "
+            f"their edits can collide on the same unit — whichever settles "
+            f"second will refuse on the drift check.")
+
+
+def filter_add(manuscript: dict, name: str, text: str) -> dict:
+    from . import filters as flt
+
+    path, meta = flt.add_filter(manuscript, name, text)
+    return {"name": name, "path": str(path), "class": meta["class"],
+            "state": meta["state"],
+            "class_help": flt.CLASS_HELP[meta["class"]]}
+
+
+def filter_run(db: Database, manuscript: dict, config: dict, name: str,
+               file: str, window: int | None = None,
+               from_unit: int | None = None, again: bool = False,
+               native: bool = False) -> dict:
+    """Assemble one window's payload. **Without `--native` this makes no
+    model call at all** — it prints the payload and the conversation
+    drafts the reply against it.
+
+    The flag polarity is INVERTED against `write draft --dry-run`, and
+    deliberately. That flag exists because the verb was built billed and
+    the ruling came later, so it now names the DEFAULT flow, which is
+    backwards. `filter run` is chat-first from its first commit, so the
+    zero-call behaviour needs no flag. Two verbs with opposite defaults
+    is a real cost; `--dry-run` is accepted as a silent no-op alias for
+    muscle memory, and the tutorial and the skill both say the
+    inversion out loud."""
+    from . import filters as flt
+    from . import filtering as fg
+
+    mid = manuscript["id"]
+    rel, text, _capture = _filter_capture(db, manuscript, file, "filter run")
+    meta, body = flt.load_filter(manuscript, name)
+    warnings: list[str] = []
+    if marker_present(text):
+        # The weaker check (§14.3's rule): the marker survived inside a
+        # file that is no longer just the placeholder. Warn, never block.
+        warnings.append(
+            f"{rel} still carries the mid-rewrite marker line inside "
+            "otherwise-real prose — the filter will see it as a unit.")
+
+    units = passes.paragraphs_of(text)
+    run = _active_filter_run(db, mid, name, rel)
+    if run is None and meta["class"] == "global":
+        # BEFORE the row is created, deliberately: a global run whose
+        # registry has never been written is not a run that has stalled,
+        # it is a run that has not begun, and leaving a half-made row
+        # behind would make `filter status` report one that does not
+        # exist.
+        raise ValueError(
+            f"'{name}' is a GLOBAL filter: every unit is judged against a "
+            f"frozen registry read from the whole essay, and there is no "
+            f"run yet. Run 'filter prelude {name} {rel}' first.")
+    if run is not None and again:
+        raise ValueError(
+            f"a run of '{name}' on {rel} is already active (cursor at "
+            f"unit {run['cursor']} of {run['unit_count']}). '--again' "
+            f"starts a fresh one, so settle this one ('filter settle "
+            f"{rel}') or drop it ('filter abandon {name} {rel}') first.")
+    if run is None:
+        # M1 — the identical-text refusal, the only HARD guarantee of
+        # approximate idempotency (§1.6). One hash comparison against
+        # the text a prior settled run produced.
+        if not again:
+            for prior in _settled_runs(db, mid, name, rel):
+                produced = _version_text(db, prior["result_version_id"], rel)
+                if produced is not None and produced == text:
+                    t = _run_tallies(_run_threads(db, mid, prior))
+                    raise ValueError(
+                        f"{name} already ran on this exact text (run "
+                        f"{prior['id'][:11]}, settled "
+                        f"{(prior['created_at'] or '')[:10]}, "
+                        f"{t['accepted']} accepted / {t['rejected']} "
+                        f"rejected). Nothing has changed since. To look "
+                        f"anyway: --again")
+        collision = _other_active_filters(db, mid, rel, name)
+        if collision:
+            warnings.append(collision)
+        # `class` is a reserved word, so the column is set by
+        # subscript rather than as a keyword — and it is FROZEN here:
+        # editing _filters/<name>.md mid-run cannot change a live run's
+        # mechanics, it can only make the run say the artifact drifted.
+        row = ko_fields("fr")
+        row.update(manuscript_id=mid, filter=name, file=rel,
+                   source_version_id=_latest_version_id(db, mid),
+                   unit_count=len(units), cursor=0, state=None,
+                   registry=None, result_version_id=None, status="active")
+        row["class"] = meta["class"]
+        db.insert("filter_runs", row)
+        run = _touched_filter_run(db, row)
+    else:
+        run = _touched_filter_run(db, run)
+        if run["class"] != meta["class"]:
+            warnings.append(
+                f"the artifact's class is now '{meta['class']}'; this run "
+                f"is '{run['class']}' and will finish as one. The class is "
+                f"frozen at run start so that editing _filters/{name}.md "
+                f"mid-run cannot change a live run's mechanics.")
+        if run["unit_count"] != len(units):
+            warnings.append(
+                f"{rel} had {run['unit_count']} units when this run "
+                f"started and has {len(units)} now.")
+
+    if run["class"] == "global" and not (run["registry"] or "").strip():
+        raise ValueError(
+            f"'{name}' is a GLOBAL filter: every unit is judged against a "
+            f"frozen registry read from the whole essay, and this run has "
+            f"none yet. Run 'filter prelude {name} {rel}' first.")
+
+    start = from_unit if from_unit else run["cursor"] + 1
+    if not 1 <= start <= len(units):
+        raise ValueError(
+            f"unit {start} is out of range — {rel} has {len(units)} units.")
+    span = window if window and window > 0 else len(units)
+    end = min(start + span - 1, len(units))
+    threads = staging.door_threads(db, mid, rel,
+                                   states=("proposed", "accepted",
+                                           "rejected", "written", "cleaned"),
+                                   origin_type=FILTER_ORIGIN)
+    run_meta = loads(run["metadata"], {})
+    run_meta["window"] = [start, end]
+    db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})
+    run["metadata"] = json.dumps(run_meta)
+    payload = fg.assemble(db, manuscript, run, body, units, (start, end),
+                          threads)
+    info = {"run": run, "filter": name, "file": rel, "class": run["class"],
+            "window": (start, end), "unit_count": len(units),
+            "payload": payload, "payload_hashes": payload.hashes,
+            "payload_sizes": payload.sizes,
+            "prompt_location": fg.prompt_location(),
+            "warnings": warnings, "native": False}
+    if not native:
+        return info
+    return {**info, "native": True,
+            **_filter_native(db, manuscript, config, run, payload, units,
+                             (start, end), body)}
+
+
+def _filter_native(db: Database, manuscript: dict, config: dict, run: dict,
+                   payload, units: list[str], window: tuple[int, int],
+                   body: str) -> dict:
+    """The billed path. Refuses when `[filtering]` is absent and names
+    the chat flow, so a missing section can never make the pass
+    unusable."""
+    from . import filtering as fg
+    from . import llm as llm_mod
+
+    client = llm_mod.filtering_llm(config)      # refuses on [filtering]
+    raw = client.complete_json_blocks(payload.system_blocks,
+                                      payload.user_blocks)
+    if raw is None:
+        raise RuntimeError(
+            "the filter model returned nothing (disabled, or the call "
+            "failed). Nothing was staged and the cursor did not move — "
+            f"'filter run {run['filter']} {run['file']}' with no flag "
+            "prints the payload for the conversation instead.")
+    result = fg.validate_reply(raw, units, window, run["class"])
+    return {"reply": result, "usage_line": client.stats_line(),
+            "model": client.model}
+
+
+def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
+                   file: str, replace: bool = False,
+                   native: bool = False, reply: str | None = None) -> dict:
+    """The GLOBAL class's one prelude: read the essay whole, return the
+    registry every unit is judged against. Frozen for the life of the
+    run — `--replace` rewrites it and invalidates the run's cached
+    prefix, which this says out loud."""
+    from . import filters as flt
+    from . import filtering as fg
+    from . import llm as llm_mod
+
+    mid = manuscript["id"]
+    rel, text, _capture = _filter_capture(db, manuscript, file,
+                                          "filter prelude")
+    meta, body = flt.load_filter(manuscript, name)
+    if meta["class"] != "global":
+        raise ValueError(
+            f"'{name}' is a {meta['class']} filter — only a global filter "
+            "has a prelude. A sequential filter's coordination object is "
+            "its carried STATE, not a frozen registry.")
+    units = passes.paragraphs_of(text)
+    run = _active_filter_run(db, mid, name, rel)
+    warnings: list[str] = []
+    if run is None:
+        collision = _other_active_filters(db, mid, rel, name)
+        if collision:
+            warnings.append(collision)
+        row = ko_fields("fr")
+        row.update(manuscript_id=mid, filter=name, file=rel,
+                   source_version_id=_latest_version_id(db, mid),
+                   unit_count=len(units), cursor=0, state=None,
+                   registry=None, result_version_id=None, status="active")
+        row["class"] = "global"
+        db.insert("filter_runs", row)
+        run = _touched_filter_run(db, row)
+    else:
+        run = _touched_filter_run(db, run)
+    if (run["registry"] or "").strip() and not replace:
+        raise ValueError(
+            f"this run already has a frozen registry ({len(run['registry'])} "
+            f"characters). It is immutable for the life of the run so that "
+            f"every unit is judged against the same bytes. To rewrite it — "
+            f"which invalidates this run's cached prefix and re-bills it on "
+            f"the native path — pass --replace.")
+    payload = fg.assemble_prelude(db, manuscript, run, body, units)
+    info = {"run": run, "filter": name, "file": rel, "payload": payload,
+            "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
+            "prompt_location": fg.prompt_location(), "unit_count": len(units),
+            "registry": None, "native": False, "warnings": warnings}
+    if reply is not None:
+        registry = fg.parse_prelude(fg.reply_json(reply))
+    elif native:
+        client = llm_mod.filtering_llm(config)
+        raw = client.complete_json_blocks(payload.system_blocks,
+                                          payload.user_blocks)
+        if raw is None:
+            raise RuntimeError("the filter model returned nothing; the "
+                               "registry was not written.")
+        registry = fg.parse_prelude(raw)
+        info["usage_line"] = client.stats_line()
+    else:
+        return info
+    db.update("filter_runs", run["id"], {"registry": registry})
+    run["registry"] = registry
+    return {**info, "registry": registry, "run": run,
+            "replaced": bool(replace)}
+
+
+def filter_record(db: Database, manuscript: dict, config: dict,
+                  file: str, reply: str, name: str | None = None) -> dict:
+    """Register one window's reply. The whole reply is refused or none of
+    it is: a partially admitted reply is a run whose conditioning nobody
+    can reconstruct.
+
+    The pin is re-checked HERE, not only at `filter run`: assembly and
+    registration are two conversational turns, and a reply drafted
+    against unit 12 cannot be staged against a unit 12 that moved."""
+    from . import filtering as fg
+
+    mid = manuscript["id"]
+    rel, text, _capture = _filter_capture(db, manuscript, file,
+                                          "filter record")
+    run = _filter_run_row(db, manuscript, rel, name)
+    pinned = _version_text(db, run["source_version_id"], rel)
+    if pinned is not None and pinned != text:
+        raise ValueError(
+            f"{rel} has changed since this run pinned it, so a reply "
+            f"drafted against its units cannot be staged against the text "
+            f"that is there now. Nothing was staged and the cursor did not "
+            f"move. Start a fresh run: 'filter run {run['filter']} {rel} "
+            f"--again'.")
+    units = passes.paragraphs_of(text)
+    window = loads(run["metadata"], {}).get("window")
+    if not window:
+        raise ValueError(
+            f"this run has no open window — 'filter run {run['filter']} "
+            f"{rel}' assembles one.")
+    result = fg.validate_reply(fg.reply_json(reply), units,
+                               (window[0], window[1]), run["class"])
+    staged = staging.stage_edits(db, mid, run["id"], rel, text,
+                                 result["edits"],
+                                 origin_type=FILTER_ORIGIN)
+    changes = {"cursor": max(run["cursor"], window[1])}
+    if result["state"] is not None:
+        changes["state"] = result["state"]
+    db.update("filter_runs", run["id"], changes)
+    run.update(changes)
+    covered = window[1] - window[0] + 1
+    share = (len(result["edits"]) / covered) if covered else 0
+    warnings = []
+    if covered >= 8 and share >= PROMPT_FAULT_SHARE:
+        warnings.append(
+            f"{len(result['edits'])} proposals on {covered} units. A "
+            f"filter that fires on nearly every unit is almost always a "
+            f"PROMPT fault rather than an essay that bad — read it with "
+            f"'filter show {run['filter']}' and consider narrowing it. "
+            f"Nothing is blocked.")
+    return {"run": run, "file": rel, "window": (window[0], window[1]),
+            "staged": staged, "keeps": result["keeps"],
+            "state": result["state"], "warnings": warnings,
+            "remaining": run["unit_count"] - run["cursor"]}
+
+
+def _open_run_threads(db: Database, manuscript_id: str, rel: str,
+                     states=("proposed", "accepted", "rejected")
+                     ) -> list[dict]:
+    """The staged edits of this file's ACTIVE runs, in staging order.
+
+    Scoped to the active runs and NOT to the file, deliberately. A
+    settled run's rejected proposals are history — they belong to block
+    A's PRIOR RUNS section, where their reasons are law for the next
+    run — and listing them beside a live run's would let `filter triage
+    --accept 1` re-accept something the author refused a week ago,
+    silently resurrecting it into this run's settle.
+
+    With no active run the open threads on the file are still returned,
+    so a proposal orphaned by an abandoned run is visible rather than
+    invisible."""
+    runs = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at", (manuscript_id, rel))]
+    rows = staging.door_threads(db, manuscript_id, rel, states=states,
+                                origin_type=FILTER_ORIGIN)
+    if not runs:
+        return [r for r in rows if r["state"] in ("proposed", "accepted",
+                                                  "written")]
+    prefixes = tuple(f"{r['id']}:{rel}:" for r in runs)
+    return [r for r in rows if r["origin_id"].startswith(prefixes)]
+
+
+def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
+    """The staged filter proposals of this file's active run(s),
+    numbered for triage."""
+    rel = _resolve_relpath(manuscript, file)
+    rows = _open_run_threads(db, manuscript["id"], rel)
+    items = []
+    for n, t in enumerate(rows, 1):
+        meta = loads(t.get("metadata"), {}) or {}
+        items.append({"n": n, "id": t["id"], "state": t["state"],
+                      "unit": meta.get("anchor_paragraph"),
+                      "old": t["proposed_old"], "new": t["proposed_new"],
+                      "why": t["note"], "ref": meta.get("ref")})
+    return {"file": rel, "count": len(items), "items": items}
+
+
+def filter_triage(db: Database, manuscript: dict, file: str,
+                  operations: list[dict]) -> dict:
+    """The author's verdicts, in batch. One failed op never blocks the
+    rest; numbers resolve against ONE snapshot of `filter_edits` order.
+
+    A rejection's reason is stored on the thread VERBATIM as well as
+    reaching evidence, because block A's PRIOR RUNS section renders it
+    into the next run's CACHED layer — which is the whole of M2, the
+    mechanism that stops a filter re-proposing what the author already
+    refused."""
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    snapshot = _open_run_threads(db, mid, rel)
+    results = []
+    for op in operations:
+        token = str(op.get("item", "")).strip()
+        decision = op.get("verdict")
+        entry = {"item": token, "verdict": decision}
+        try:
+            if token.isdigit():
+                n = int(token)
+                if not 1 <= n <= len(snapshot):
+                    raise LookupError(f"no edit {n} (there are "
+                                      f"{len(snapshot)})")
+                thread = snapshot[n - 1]
+            else:
+                hits = [t for t in snapshot if token in t["id"]]
+                if len(hits) != 1:
+                    raise LookupError(f"'{token}' matches {len(hits)} edits")
+                thread = hits[0]
+            if decision == "reject" and not op.get("reason"):
+                raise ValueError(
+                    "reject requires the author's verbatim reason — it is "
+                    "the highest-value evidence this run produces, and the "
+                    "next run of this filter reads it before it starts")
+            text = (op.get("reason") if decision == "reject"
+                    else op.get("text"))
+            out = passes.verdict(db, mid, thread, decision, text,
+                                 evidence_type=FILTER_EVIDENCE)
+            if decision == "reject":
+                meta = loads(thread.get("metadata"), {}) or {}
+                meta["author_reason"] = op["reason"]
+                db.update("doc_threads", thread["id"],
+                          {"metadata": json.dumps(meta)})
+            entry.update(ok=True, id=thread["id"], **out)
+        except (LookupError, ValueError, KeyError) as err:
+            entry.update(ok=False, error=str(err))
+        results.append(entry)
+    left = [t for t in _open_run_threads(db, mid, rel)
+            if t["state"] == "proposed"]
+    return {"file": rel, "results": results, "still_proposed": len(left)}
+
+
+def _falsified_prefix(db: Database, manuscript_id: str, run: dict
+                      ) -> list[dict]:
+    """§1.3's derived warning. When the author rejects unit 3, every
+    later unit this run proposed was drafted against a prefix that did
+    not survive. Derived, never stored: one pass over the run's threads.
+
+    Deliberately NOT automatic — re-running the tail discards the
+    author's verdicts on those units, and discarding verdicts is never
+    something a verb does on its own."""
+    if run["class"] != "sequential":
+        return []
+    threads = _run_threads(db, manuscript_id, run)
+    by_unit = []
+    for t in threads:
+        meta = loads(t.get("metadata"), {}) or {}
+        by_unit.append((meta.get("anchor_paragraph") or 0, t))
+    out = []
+    for n, t in sorted(by_unit):
+        if t["state"] not in ("rejected", "declined"):
+            continue
+        later = sorted(m for m, o in by_unit
+                       if m > n and o["state"] not in ("withdrawn",
+                                                        "rejected"))
+        if later:
+            out.append({"n": n, "downstream": later})
+    return out
+
+
+def _uncovered_units(run: dict) -> list[tuple[int, int]]:
+    """Units this run never processed. An ordinary open editorial state:
+    it WARNS and never blocks (§15.13), exactly as an unwritten beat and
+    an unaccounted digest point do. Completion is the author's call."""
+    if run["cursor"] >= run["unit_count"]:
+        return []
+    return [(run["cursor"] + 1, run["unit_count"])]
+
+
+def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
+                  pause: bool = False, name: str | None = None) -> dict:
+    """One verb, two halves, chosen by the threads' state.
+
+        filter settle <file>            threads accepted → APPLY directly
+        filter settle <file> --pause    threads accepted → compose, stop
+        filter settle <file>            threads written  → read, finalize
+
+    Direct apply is the DEFAULT: a filter's edits are mechanical and
+    numerous, the triage verdict already IS the author's ruling, and
+    `revise` already carries their wording when they want to change one.
+    The pause is for the filter whose edits the author wants to read in
+    place. Same door, same evidence, same rollback either way — and
+    literally the same code: the direct apply composes the marked text
+    and resolves it in one breath, without ever writing the markers to
+    disk, so there is one composition routine and not two.
+    """
+    from . import summaries as sums
+
+    mid = manuscript["id"]
+    rel, _text, _capture = _filter_capture(db, manuscript, file,
+                                           "filter settle")
+    run = _filter_run_row(db, manuscript, rel, name)
+    path = Path(manuscript["path"]) / rel
+    written = [t for t in _run_threads(db, mid, run)
+               if t["state"] == "written"]
+    warnings: list[str] = []
+
+    if written:
+        if pause:
+            raise ValueError(
+                f"{rel} is already marked — {len(written)} form(s) are "
+                f"written into the file and the author's post-edits are "
+                f"in them. Finalize with 'filter settle {rel}' (no flag), "
+                f"or put the original text back with 'filter unmark "
+                f"{rel}'.")
+        return _filter_finalize(db, manuscript, config, run, rel, path,
+                                warnings)
+
+    accepted = [t for t in _run_threads(db, mid, run)
+                if t["state"] == "accepted"]
+    if not accepted:
+        open_now = [t for t in _run_threads(db, mid, run)
+                    if t["state"] == "proposed"]
+        raise LookupError(
+            f"nothing is accepted on {rel}"
+            + (f" — {len(open_now)} proposal(s) are still awaiting your "
+               f"verdict ('filter edits {rel}')." if open_now
+               else " and nothing is staged."))
+    # The file's OWN bytes, read directly: the settle code owns the
+    # pending-change grammar, and it is the only code in the system that
+    # is allowed to see markers.
+    disk = path.read_text(encoding="utf-8")
+    marked = staging.mark_local(path, disk, accepted) if pause else \
+        passes.compose_marked_text(disk, accepted)
+    for t in accepted:
+        db.update("doc_threads", t["id"], {"state": "written"})
+    if pause:
+        # The read-back assertion: the forms must be present VERBATIM in
+        # the bytes we just wrote, or the mark is undone and the settle
+        # refuses. Nothing is left half-marked.
+        back = path.read_text(encoding="utf-8")
+        if back != marked:
+            staging.unmark(path)
+            for t in accepted:
+                db.update("doc_threads", t["id"], {"state": "accepted"})
+            raise RuntimeError(
+                f"{rel} did not read back as it was written — the mark was "
+                "undone and nothing was changed.")
+        return {"run": run, "file": rel, "paused": True,
+                "forms": len(accepted), "warnings": warnings,
+                "path": str(path)}
+    # Direct apply: resolve the composed text without it ever touching
+    # the disk. `_filter_finalize` reads the file, so hand it the marked
+    # text through the same door by writing it first and finalizing at
+    # once — the file is marked for the duration of one function call
+    # and every guard in the system already covers that state.
+    path.write_text(marked, encoding="utf-8")
+    return _filter_finalize(db, manuscript, config, run, rel, path,
+                            warnings, direct=True)
+
+
+def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
+                     rel: str, path: Path, warnings: list[str],
+                     direct: bool = False) -> dict:
+    """Read the marked file back, record the resolution, write the final
+    text, collect under NO episode, rebuild the summary."""
+    from . import gdocs
+    from . import summaries as sums
+
+    mid = manuscript["id"]
+    # Snapshot whatever is on disk right now BEFORE it is overwritten —
+    # including any local edit made outside this flow. Ambient by
+    # declaration: that work predates the settle and is the author's own.
+    # (Under the canonicalization the marked bytes read as the essay, so
+    # this is a no-op unless there is a real uncollected edit.)
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="pre-filter-settle")
+    final, forms, diffs = staging.resolve_local(
+        db, mid, rel, path, origin_type=FILTER_ORIGIN,
+        evidence_type=FILTER_EVIDENCE)
+    normalized = gdocs.normalize_markdown(final)
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+
+    # NO episode (§1.8). Hygiene work has no goal to be filed under, and
+    # `episode=None` would file it against whatever the author happens to
+    # have open — which is exactly §15.17's mis-attribution.
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="filter-settle",
+                episode=NO_EPISODE)
+    result_version = _latest_version_id(db, mid)
+    db.update("filter_runs", run["id"],
+              {"status": "settled", "result_version_id": result_version})
+    run = dict(run, status="settled", result_version_id=result_version)
+
+    for span in _uncovered_units(run):
+        warnings.append(
+            f"units {span[0]}–{span[1]} of {run['unit_count']} were never "
+            f"processed by this run. That is an ordinary open state, not "
+            f"an error — nothing is blocked.")
+    falsified = _falsified_prefix(db, mid, run)
+
+    summary = {"rebuilt": False, "error": None, "usage": None}
+    llm = sums.summarizer_llm(config)
+    if llm.enabled:
+        try:
+            sums.rebuild_one(db, manuscript, rel, llm)
+            summary.update(rebuilt=True, usage=llm.stats_line())
+        except Exception as err:                        # noqa: BLE001
+            summary["error"] = str(err)
+    return {"run": run, "file": rel, "paused": False, "direct": direct,
+            "forms": len(forms), "diffs": diffs, "final": normalized,
+            "warnings": warnings, "falsified_prefix": falsified,
+            "summary": summary, "result_version_id": result_version}
+
+
+def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
+    """Put the original text back and RETURN the written forms to
+    `accepted`. Two lines of recovery for a state that is fully
+    described by the bytes — including the crash between "compose" and
+    "write threads", which leaves a marked file with no written rows.
+
+    Returned to `accepted`, not withdrawn, and the difference matters:
+    the author's verdicts survive. Unmark undoes the MARKING, not the
+    triage. `filter settle` applies them, `filter triage --undo` reopens
+    them, `filter abandon` throws them away — and the author chooses
+    which, because discarding a verdict is never something a recovery
+    verb does on its own."""
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    _checkout_gate(db, manuscript, rel)
+    path = Path(manuscript["path"]) / rel
+    text, marker_warnings = staging.unmark(path)
+    written = staging.door_threads(db, mid, rel, states=("written",),
+                                   origin_type=FILTER_ORIGIN)
+    for t in written:
+        db.update("doc_threads", t["id"], {"state": "accepted"})
+    return {"file": rel, "reopened": len(written), "text": text,
+            "marker_warnings": marker_warnings}
+
+
+def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
+                    name: str | None = None) -> dict:
+    """Restore the run's pinned source version. The verdicts STAY: they
+    are evidence, and evidence is not undone by putting text back."""
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    _checkout_gate(db, manuscript, rel)
+    row = db.one(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        + ("AND filter = ? " if name else "")
+        + "ORDER BY created_at DESC LIMIT 1",
+        (mid, rel, name) if name else (mid, rel))
+    if row is None:
+        raise LookupError(f"no filter run on {rel} to roll back.")
+    run = dict(row)
+    # A marked file is mid-settle: its bytes are staged proposals the
+    # author may have post-edited, and rolling back over them would
+    # discard those edits AND leave written threads pointing at text
+    # that is no longer there. Refuse, naming both exits — the same
+    # shape `filter abandon` uses, and for the same reason: the author
+    # decides whether the pause ends in an apply or an undo.
+    #
+    # Chosen over documenting an orphan recovery because the orphan this
+    # would create is worse than the one `filter status` already finds:
+    # there the bytes describe the state completely, whereas a rollback
+    # mid-pause destroys the author's post-edits with nothing left to
+    # recover them from.
+    if staging.is_marked((Path(manuscript["path"]) / rel)
+                         .read_text(encoding="utf-8")):
+        raise ValueError(
+            f"{rel} is mid-settle: its bytes carry staged forms you may "
+            f"have already reworded, and a rollback would destroy those "
+            f"edits with nothing left to recover them from. Finalize "
+            f"('filter settle {rel}') or put the original text back "
+            f"('filter unmark {rel}') first — then roll back if you "
+            f"still want to.")
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="pre-filter-rollback")
+    text = staging.rollback(db, manuscript, rel, run["source_version_id"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="filter-rollback",
+                episode=NO_EPISODE)
+    return {"file": rel, "run": run, "restored_chars": len(text)}
+
+
+def filter_abandon(db: Database, manuscript: dict, file: str,
+                   name: str | None = None) -> dict:
+    """Drop an active run and withdraw its open proposals. Written forms
+    are NOT touched — the file's bytes carry them, and `filter unmark`
+    is the verb that ends that state."""
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    run = _filter_run_row(db, manuscript, rel, name)
+    threads = _run_threads(db, mid, run)
+    written = [t for t in threads if t["state"] == "written"]
+    if written:
+        raise ValueError(
+            f"{rel} is marked — {len(written)} form(s) are written into "
+            f"the file. Finalize ('filter settle {rel}') or put the text "
+            f"back ('filter unmark {rel}') before abandoning the run.")
+    withdrawn = 0
+    for t in threads:
+        if t["state"] in ("proposed", "accepted", "rejected"):
+            db.update("doc_threads", t["id"], {"state": "withdrawn"})
+            withdrawn += 1
+    db.update("filter_runs", run["id"], {"status": "abandoned"})
+    return {"file": rel, "run": dict(run, status="abandoned"),
+            "withdrawn": withdrawn}
+
+
+def filter_status(db: Database, manuscript: dict,
+                  file: str | None = None) -> dict:
+    """Run history per (filter, file) with the tallies, so a filter that
+    never settles down is visible without the author having to notice
+    it — plus the orphaned-mark detection: bytes that carry forms with
+    no matching written row."""
+    from . import filters as flt
+
+    mid = manuscript["id"]
+    where = "WHERE manuscript_id = ?" + (" AND file = ?" if file else "")
+    args = (mid, file) if file else (mid,)
+    rows = [dict(r) for r in db.all(
+        f"SELECT * FROM filter_runs {where} ORDER BY created_at", args)]
+    classes = {f["name"]: f["class"] for f in flt.list_filters(manuscript)}
+    runs = []
+    for run in rows:
+        threads = _run_threads(db, mid, run)
+        drift = (classes.get(run["filter"])
+                 if classes.get(run["filter"]) not in (None, run["class"])
+                 else None)
+        runs.append({
+            "id": run["id"], "filter": run["filter"], "file": run["file"],
+            "class": run["class"], "class_now": drift,
+            "status": run["status"], "cursor": run["cursor"],
+            "unit_count": run["unit_count"],
+            "date": (run["created_at"] or "")[:10],
+            "has_registry": bool((run["registry"] or "").strip()),
+            "state_chars": len(run["state"] or ""),
+            **_run_tallies(threads)})
+    orphans = []
+    root = Path(manuscript["path"])
+    for rel in sorted({r["file"] for r in rows} if rows else set()):
+        path = root / rel
+        if not path.exists():
+            continue
+        if not staging.is_marked(path.read_text(encoding="utf-8")):
+            continue
+        if not staging.door_threads(db, mid, rel, states=("written",),
+                                    origin_type=FILTER_ORIGIN):
+            orphans.append(rel)
+    return {"runs": runs, "orphaned_marks": orphans}

@@ -74,6 +74,11 @@ REGISTRY: list[Prompt] = [
            "one beat of the author's prose from the layered drafting payload "
            "(style law, book context, plan, graph, accepted text, beat spec)",
            file="beat-draft.md", module=None),
+    Prompt("filter-run", "filter run; filter prelude",
+           "the filter pass's per-unit edit proposals — the harness's own "
+           "rules (grammar, conditioning, idempotency); the editorial law "
+           "is the author's _filters/<name>.md artifact, sent beside it",
+           file="filter-run.md", module=None),
     Prompt("editor", "critique run",
            "the critique pass's per-essay edit proposals (paragraph-aligned "
            "JSON: keep/replace/insert + suggestions)",

@@ -45,6 +45,40 @@ extraction_max_chars = 24000
 #   model = "anthropic/claude-fable-5", max_tokens = 8000, effort = "high",
 #   timeout_seconds = 600, cache = true
 
+# [filtering] — DELIBERATELY ABSENT. This is the THIRD instance of the pattern,
+# after [writing] above and [budget] below, and the pattern is now standing:
+# what is absent is what is off.
+#
+# Filter passes run in the CONVERSATION (subscription-covered), fed by the
+# payload `authorlm filter run <name> <file>` prints. Note the flag polarity,
+# which is the OPPOSITE of `write draft`: `filter run` with no flag makes NO
+# model call — the call is what needs a flag here. `write draft` has it the
+# other way round only because its ruling arrived after the verb was built.
+#
+# Without this section `filter run --native` REFUSES by design and names the
+# chat flow, so a missing section can never make the pass unusable. There is NO
+# fallback to [llm] model: a silent degradation to a different tier is a result
+# you would attribute to the loop rather than to a line of configuration you
+# never wrote. To enable billed, model-pinned filtering, restore:
+#
+#   [filtering]
+#   model = "openai/gpt-5.6-luna"   # required; NO fallback to [llm] model
+#   max_tokens = 4000
+#   timeout_seconds = 300
+#   cache = true
+#
+# The recommended model is the CHEAP tier, which is the opposite of the drafting
+# ruling and is deliberate: drafting's quality comes from the model's judgment,
+# so economy there comes from caching and effort rather than a smaller model. A
+# filter's quality comes from the assembled context and a prompt that fully
+# specifies the check — the sweep framework's own criterion for the flash tier.
+# A filter that needs a mind rather than a rule is a LENS.
+#
+# Caching: `cache = true` attaches breakpoints only where they do something,
+# which needs litellm transport AND an anthropic-family model. Under the recipe
+# above that is false, so restoring this section buys no caching — said plainly,
+# because a saving that does not exist is worse than no saving.
+
 [critique]
 # Essay summaries and the critique editor on GPT-5.6 Luna (author rulings
 # 2026-08-30: "I actually rather like 5.6 luna. Lets try that for
