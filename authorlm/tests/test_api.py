@@ -204,7 +204,12 @@ def check_drafting_replay_needs_no_key() -> None:
         client = llm_mod.writing_llm(config)
         messages = llm_mod._block_messages(
             *blocks, llm_mod.caching_available(client.model, client.provider))
-        path = client._cache_path(messages)
+        # draft()'s own cache key is unaffected by AE-3's per-client
+        # `self.temperature` — it always keys on the bare TEMPERATURE
+        # constant (llm.py: draft() never sends temperature at all, see
+        # the "NO sampling parameter at all" note there), so every
+        # existing drafting fixture's key stays exactly what it was.
+        path = client._cache_path(messages, llm_mod.TEMPERATURE)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps({
             "model": client.model,
@@ -329,8 +334,10 @@ def check_drafting_cache_layer() -> None:
     client = llm_mod.LLMClient({"llm": {"cache_dir": "/tmp/authorlm-unit"}})
     check("the record/replay key is computed over BLOCK TEXT ONLY: "
           "toggling the cache must not re-record every replay fixture",
-          client._cache_path(messages) == client._cache_path(off),
-          f"{client._cache_path(messages)} vs {client._cache_path(off)}")
+          client._cache_path(messages, llm_mod.TEMPERATURE)
+          == client._cache_path(off, llm_mod.TEMPERATURE),
+          f"{client._cache_path(messages, llm_mod.TEMPERATURE)} vs "
+          f"{client._cache_path(off, llm_mod.TEMPERATURE)}")
     plain = [{"role": "system", "content": "S"},
              {"role": "user", "content": "U"}]
     check("...and stripping is a no-op for plain string content, so every "
@@ -6831,6 +6838,207 @@ def main_test() -> None:
                   sum_client.model == "anthropic/claude-fable-5"
                   and calls_sum[-1].get("api_key") == "anthropic-sentinel",
                   calls_sum)
+
+        # --- AE-3: server-side temperature rejection litellm's local
+        # param map can't pre-empt (drop_params, round 1, only helps when
+        # litellm ITSELF recognizes the model). Unlike round 1's stub
+        # (make_fake_litellm's drop_params-mediated UnsupportedParamsError,
+        # raised/avoided INSIDE litellm before any request goes out), this
+        # simulates the model reaching the wire with `temperature`
+        # attached every time it's present — exactly what happens for a
+        # model litellm doesn't recognize (gpt-5.6-luna).
+        from authorlm.llm import RETRIES as _RETRIES, TEMPERATURE as _TEMPERATURE
+
+        def make_temp_rejecting_litellm(*, reject_message=None,
+                                        unrelated_message=None,
+                                        fail_times=0, transient_exc=None):
+            calls = []
+            invocations = {"n": 0}
+            state = {"raises_left": fail_times}
+            module = types.SimpleNamespace(suppress_debug_info=False,
+                                           drop_params=False)
+
+            def completion(model, messages, timeout=None, **kwargs):
+                invocations["n"] += 1
+                if transient_exc is not None and state["raises_left"] > 0:
+                    state["raises_left"] -= 1
+                    raise transient_exc
+                if unrelated_message is not None:
+                    raise RuntimeError(unrelated_message)
+                if "temperature" in kwargs and reject_message is not None:
+                    raise RuntimeError(reject_message)
+                calls.append({"model": model, **kwargs})
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="the reply"))],
+                    usage=types.SimpleNamespace(prompt_tokens=11,
+                                                completion_tokens=7))
+
+            module.completion = completion
+            return module, calls, invocations
+
+        # (1) The verbatim live failure shape (orchestrator-reported):
+        # gpt-5.6-luna 400s server-side on any temperature but 1. One
+        # reply, exactly two litellm.completion() calls, zero sleeps.
+        fake_r1, calls_r1, inv_r1 = make_temp_rejecting_litellm(
+            reject_message=(
+                "litellm.BadRequestError: OpenAIException - Unsupported "
+                "value: 'temperature' does not support 0.2 with this "
+                "model. Only the default (1) value is supported."))
+        sleeps_r1 = []
+        client_r1 = LLMClient({"llm": {"enabled": True,
+                                       "model": "openai/gpt-5.6-luna"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake_r1}), \
+                mock.patch("authorlm.llm.time.sleep", sleeps_r1.append):
+            reply_r1 = client_r1.complete("sys", "usr")
+        check("a server-side temperature rejection (litellm's local "
+              "param map doesn't know this model) still returns a reply",
+              reply_r1 == "the reply", (reply_r1, calls_r1, inv_r1))
+        check("...in exactly two litellm.completion() calls, with zero "
+              "backoff sleeps",
+              inv_r1["n"] == 2 and not sleeps_r1, (inv_r1, sleeps_r1))
+        check("...and the successful call carried NO temperature kwarg",
+              "temperature" not in calls_r1[-1], calls_r1)
+
+        # (2) Non-regression: a temperature-accepting model still
+        # receives the client's configured temperature (default 0.2).
+        fake_r2, calls_r2, inv_r2 = make_temp_rejecting_litellm()
+        client_r2 = LLMClient({"llm": {"enabled": True,
+                                       "model": "gemini/gemini-2.5-flash"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake_r2}):
+            reply_r2 = client_r2.complete("sys", "usr")
+        check("a temperature-accepting model still receives temperature",
+              reply_r2 == "the reply"
+              and calls_r2[-1].get("temperature") == _TEMPERATURE, calls_r2)
+
+        # (3) Non-regression: a genuine transient error (unrelated to
+        # temperature) still gets the existing backoff retries.
+        fake_r3, calls_r3, inv_r3 = make_temp_rejecting_litellm(
+            fail_times=1, transient_exc=ConnectionError("stalled"))
+        sleeps_r3 = []
+        client_r3 = LLMClient({"llm": {"enabled": True,
+                                       "model": "gemini/gemini-2.5-flash"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake_r3}), \
+                mock.patch("authorlm.llm.time.sleep", sleeps_r3.append):
+            reply_r3 = client_r3.complete("sys", "usr")
+        check("a genuine transient failure still retries with backoff "
+              "and eventually succeeds",
+              reply_r3 == "the reply" and inv_r3["n"] == 2
+              and sleeps_r3 == [1], (inv_r3, sleeps_r3))
+
+        # (4) An unrelated BadRequestError (bad model name, say) is NOT
+        # mistaken for a temperature rejection — it follows the existing
+        # failure path (full backoff, then give up).
+        fake_r4, calls_r4, inv_r4 = make_temp_rejecting_litellm(
+            unrelated_message=(
+                "litellm.BadRequestError: OpenAIException - The "
+                "requested model does not support this operation."))
+        sleeps_r4 = []
+        client_r4 = LLMClient({"llm": {"enabled": True,
+                                       "model": "openai/bad-model-9000"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake_r4}), \
+                mock.patch("authorlm.llm.time.sleep", sleeps_r4.append):
+            reply_r4 = client_r4.complete("sys", "usr")
+        check("an unrelated BadRequestError is NOT retried-without-"
+              "temperature — it follows the existing failure path",
+              reply_r4 is None and inv_r4["n"] == _RETRIES + 1
+              and sleeps_r4 == [1, 2], (reply_r4, inv_r4, sleeps_r4))
+
+        # --- AE-3 scope expansion (Sponsor-ruled): temperature becomes a
+        # per-section config key, [critique] > [llm] > the TEMPERATURE
+        # constant, with "vendor-default" spelling "send none at all".
+        from authorlm.llm import resolve_temperature
+
+        # (a) [critique].temperature honored on the summarizer path.
+        fake_a, calls_a, inv_a = make_temp_rejecting_litellm()
+        sum_client_a = summaries_mod.summarizer_llm({
+            "llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"},
+            "critique": {"temperature": 0.7},
+        })
+        with mock.patch.dict(sys.modules, {"litellm": fake_a}):
+            sum_client_a.complete("sys", "usr")
+        check("[critique].temperature overrides the summarizer client's "
+              "temperature",
+              calls_a[-1].get("temperature") == 0.7, calls_a)
+
+        # (b) fallback chain: [critique] -> [llm] -> the constant.
+        check("resolve_temperature: [critique]'s own value wins when set",
+              resolve_temperature(
+                  {"critique": {"temperature": 0.9},
+                   "llm": {"temperature": 0.4}}, "critique") == 0.9)
+        check("resolve_temperature: [llm]'s value wins when [critique] "
+              "doesn't set one",
+              resolve_temperature(
+                  {"critique": {}, "llm": {"temperature": 0.4}},
+                  "critique") == 0.4)
+        check("resolve_temperature: the TEMPERATURE constant wins when "
+              "neither section sets one",
+              resolve_temperature({"critique": {}, "llm": {}}, "critique")
+              == _TEMPERATURE)
+
+        # (c) "vendor-default" sends NO temperature kwarg at all.
+        fake_c, calls_c, inv_c = make_temp_rejecting_litellm()
+        client_c = LLMClient({"llm": {
+            "enabled": True, "model": "openai/gpt-5.6-luna",
+            "temperature": "vendor-default"}})
+        with mock.patch.dict(sys.modules, {"litellm": fake_c}):
+            client_c.complete("sys", "usr")
+        check('"vendor-default" sends NO temperature kwarg, proactively '
+              "(one call, not the two-call rejection dance)",
+              "temperature" not in calls_c[-1] and inv_c["n"] == 1,
+              (calls_c, inv_c))
+
+        # (d) cache-key/replay coherence: two clients, same model+prompt,
+        # DIFFERENT configured temperatures must not collide on one cache
+        # file, and each recorded entry must carry ITS OWN configured
+        # value. An unconfigured client's key must stay byte-identical to
+        # the pre-AE-3 formula, so existing replay fixtures still hit.
+        with tempfile.TemporaryDirectory() as cache_dir:
+            fake_d1, calls_d1, _ = make_temp_rejecting_litellm()
+            client_d1 = LLMClient({"llm": {
+                "enabled": True, "model": "gemini/gemini-2.5-flash",
+                "temperature": 0.3, "cache_dir": cache_dir}})
+            with mock.patch.dict(sys.modules, {"litellm": fake_d1}):
+                client_d1.complete("cache sys", "cache usr")
+
+            fake_d2, calls_d2, _ = make_temp_rejecting_litellm()
+            client_d2 = LLMClient({"llm": {
+                "enabled": True, "model": "gemini/gemini-2.5-flash",
+                "temperature": 0.9, "cache_dir": cache_dir}})
+            with mock.patch.dict(sys.modules, {"litellm": fake_d2}):
+                client_d2.complete("cache sys", "cache usr")
+
+            written = sorted(Path(cache_dir).glob("*.json"))
+            check("two clients, same model+prompt, different configured "
+                  "temperatures write to DIFFERENT cache files",
+                  len(written) == 2, [p.name for p in written])
+            recorded = [_rjson.loads(p.read_text()) for p in written]
+            check("each cache entry records the temperature actually "
+                  "CONFIGURED for that call",
+                  {r["temperature"] for r in recorded} == {0.3, 0.9},
+                  recorded)
+
+            import hashlib as _hashlib
+
+            plain_messages = [{"role": "system", "content": "cache sys default"},
+                              {"role": "user", "content": "cache usr default"}]
+            expected_payload = _rjson.dumps(
+                {"model": "gemini/gemini-2.5-flash",
+                 "temperature": _TEMPERATURE, "messages": plain_messages},
+                sort_keys=True)
+            expected_digest = _hashlib.sha256(
+                expected_payload.encode()).hexdigest()[:20]
+            fake_d3, calls_d3, _ = make_temp_rejecting_litellm()
+            client_d3 = LLMClient({"llm": {
+                "enabled": True, "model": "gemini/gemini-2.5-flash",
+                "cache_dir": cache_dir}})
+            with mock.patch.dict(sys.modules, {"litellm": fake_d3}):
+                client_d3.complete("cache sys default", "cache usr default")
+            check("an unconfigured client's cache key formula is "
+                  "byte-identical to pre-AE-3 (its replay fixtures are "
+                  "untouched by this feature)",
+                  (Path(cache_dir) / f"{expected_digest}.json").exists(),
+                  sorted(p.name for p in Path(cache_dir).glob("*.json")))
 
         def boom_main(argv):
             raise RuntimeError("network down")

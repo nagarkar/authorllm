@@ -6,6 +6,18 @@
 enabled = true
 model = "gemini/gemini-2.5-flash"
 
+# Optional: temperature. Every [llm]/[critique] call sends 0.2 (llm.py's
+# TEMPERATURE constant) when this key is absent anywhere — the default
+# before AE-3, unaffected by it. Set a number here to change the whole
+# system's default, or "vendor-default" to send NO temperature parameter
+# at all — some models (the Claude 5 family, GPT-5.6 Luna below) reject
+# any value but 1 and need the parameter left out entirely, not set to 1.
+# [critique] (below) can override this per-purpose the same way. There is
+# no general parameter passthrough (top_p, penalties, ...) — add another
+# purpose-specific knob like this one only when a purpose needs it, the
+# way [writing] already carries its own (Sponsor ruling, AE-3).
+# temperature = 0.2
+
 # extraction_max_chars caps the manuscript text sent per extraction call.
 # Why it exists: cost control is half of it. The other half is extraction
 # quality — asked for "10-20 load-bearing concepts" over a very long input,
@@ -24,16 +36,28 @@ extraction_max_chars = 24000
 #   timeout_seconds = 600, cache = true
 
 [critique]
-# Essay summaries on GPT-5.6 Luna (author ruling 2026-08-30: "I actually rather
-# like 5.6 luna. Lets try that for summarizing essays."). Cheaper than the
-# gemini default (~$0.26 vs ~$0.49 per full 24-essay rebuild at measured token
-# volumes) and a stronger small model. Uses OPENAI_API_KEY from .env.
-# BOTH TEMPORARILY disabled pending the AE-3 temperature fix (luna rejects
-# temperature≠1 server-side; the client must learn to retry without it, and
-# temperature is becoming a per-section config key in the same change).
-# Restore these two lines when AE-3 merges (author rulings 2026-08-30):
+# Essay summaries and the critique editor on GPT-5.6 Luna (author rulings
+# 2026-08-30: "I actually rather like 5.6 luna. Lets try that for
+# summarizing essays."). Cheaper than the gemini default (~$0.26 vs ~$0.49
+# per full 24-essay rebuild at measured token volumes) and a stronger
+# small model. Uses OPENAI_API_KEY from .env.
+#
+# Luna rejects any `temperature` but 1, SERVER-SIDE — litellm's own local
+# param map doesn't know that rule (it isn't Claude 5), so it can't
+# preemptively drop the parameter the way it does for Claude 5 (llm.py's
+# `litellm.drop_params`); the client's `_rejects_temperature` retry is
+# the safety net for exactly this shape (one immediate retry without
+# temperature, no backoff burnt, whenever a provider's own 400 says so).
+# `temperature = "vendor-default"` below says the same thing PROACTIVELY
+# instead of relying on that retry every single call. Resolution order
+# (resolve_temperature, llm.py): this section's own value wins, then
+# [llm]'s, then the 0.2 constant when neither is set.
+#
+# ALL THREE TEMPORARILY disabled pending the AE-3 orchestrator merge +
+# live acceptance run. Restore together (author rulings 2026-08-30):
 # summarizer_model = "openai/gpt-5.6-luna"
 # editor_model = "openai/gpt-5.6-luna"
+# temperature = "vendor-default"
 
 [illustrations]
 # Illustration rendering (authorlm illus render); text model above ([llm]

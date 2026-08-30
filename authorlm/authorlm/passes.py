@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
-from .llm import LLMClient
+from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
 from . import threads as th
 
@@ -33,11 +33,15 @@ def editor_prompt() -> str:
 
 def editor_llm(config: dict) -> LLMClient:
     """The frontier-tier client for editorial judgment. `[critique]
-    editor_model` overrides the general `[llm] model`."""
+    editor_model` overrides the general `[llm] model`. `[critique]
+    temperature` (AE-3), if set, likewise overrides `[llm]
+    temperature`/the constant — resolve_temperature (llm.py) is the one
+    place that fallback chain is written."""
     llm = LLMClient(config)
     override = (config.get("critique", {}) or {}).get("editor_model")
     if override:
         llm.model = override
+    llm.temperature = resolve_temperature(config, "critique")
     return llm
 
 

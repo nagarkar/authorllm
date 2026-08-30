@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
-from .llm import LLMClient
+from .llm import LLMClient, resolve_temperature
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "summarizer.md"
 DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
@@ -125,11 +125,15 @@ def summarizer_prompt() -> str:
 def summarizer_llm(config: dict) -> LLMClient:
     """The cheap-tier client for compression work. `[critique]
     summarizer_model` overrides the general `[llm] model`; the LLM key,
-    provider, and cache settings are shared."""
+    provider, and cache settings are shared. `[critique] temperature`
+    (AE-3), if set, likewise overrides `[llm] temperature`/the constant —
+    resolve_temperature (llm.py) is the one place that fallback chain is
+    written."""
     llm = LLMClient(config)
     override = (config.get("critique", {}) or {}).get("summarizer_model")
     if override:
         llm.model = override
+    llm.temperature = resolve_temperature(config, "critique")
     return llm
 
 

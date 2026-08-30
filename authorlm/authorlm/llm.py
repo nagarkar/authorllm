@@ -89,8 +89,74 @@ def vendor_key(model: str, llm: dict) -> str:
     if named:
         return os.environ.get(named, "")
     return os.environ.get(VENDOR_KEY_ENV.get(vendor_of(model), ""), "")
+
+
+def _rejects_temperature(text: str) -> bool:
+    """Whether `text` (an exception message, or an HTTP error body) reads
+    as a provider rejecting the `temperature` sampling parameter outright
+    — the SERVER-SIDE shape `litellm.drop_params` cannot pre-empt.
+    `drop_params` only helps when litellm's OWN local param map already
+    knows a model can't take `temperature` (round-1 fix, AE/temp-compat);
+    a model litellm doesn't recognize reaches the provider with
+    `temperature` still attached, and the provider itself 400s, e.g.
+    litellm.BadRequestError wrapping "Unsupported value: `temperature`
+    does not support 0.2 with this model. Only the default (1) value is
+    supported." Matched conservatively — 'temperature' AND one of the
+    phrasings providers use for a rejected value, case-insensitively —
+    so an unrelated 400 (bad model name, malformed messages, ...) is
+    never misread as this deterministic, non-transient failure."""
+    lowered = text.lower()
+    return "temperature" in lowered and (
+        "does not support" in lowered
+        or "unsupported value" in lowered
+        or "unsupported_value" in lowered)
+
+
+def _error_detail(err: Exception) -> str:
+    """Best-effort text to pattern-match a raised error against. An
+    `HTTPError`'s `str()` is just "HTTP Error 400: Bad Request" — the
+    provider's actual message lives in the response BODY, which is only
+    readable once, so this reads it eagerly and falls back to `str(err)`
+    for every other error shape (including a plain `URLError`, which has
+    no body to read)."""
+    if isinstance(err, urllib.error.HTTPError):
+        try:
+            return err.read().decode(errors="replace")
+        except Exception:
+            pass
+    return str(err)
+
+
 TEMPERATURE = 0.2
+# A model that wants NO temperature parameter at all (the Claude 5
+# family, gpt-5.6-luna) has no numeric spelling for that — "the vendor's
+# own default" is not a number this module can name. This string, in
+# either config tier `resolve_temperature` reads, means exactly that:
+# omit the `temperature` kwarg from the call entirely.
+VENDOR_DEFAULT_TEMPERATURE = "vendor-default"
 RETRIES = 2  # transient-failure retries with exponential backoff (1s, 2s)
+
+
+def resolve_temperature(config: dict, section: str):
+    """The `temperature` sampling parameter for a call made on behalf of
+    `section` (e.g. "critique" for summarizer_llm/editor_llm): `section`'s
+    own `temperature` wins when set, falling back to `[llm]`'s, falling
+    back to the historical TEMPERATURE constant (0.2) when NEITHER
+    configures one — an unconfigured setup keeps sending exactly what it
+    always sent, so its replay cache fixtures are untouched by this
+    feature. AE-3, Sponsor-ruled ("Can we put these additional parameters
+    in the config as well? temperature for instance."): deliberately NOT
+    a general params-passthrough table (top_p, penalties, ...) — that
+    invites unvalidated junk reaching providers; `temperature` earns a
+    config key because two live model failures (rounds 1 and 3 of this
+    same stream) turned on it specifically. Add another purpose-specific
+    knob, the way `[writing]` already does, if a purpose actually needs
+    one — not a generic passthrough."""
+    llm = config.get("llm", {}) or {}
+    scoped = config.get(section, {}) or {}
+    if "temperature" in scoped:
+        return scoped["temperature"]
+    return llm.get("temperature", TEMPERATURE)
 
 # ------------------------------------------------------------ drafting path
 #
@@ -277,6 +343,12 @@ class LLMClient:
         self.base_url = llm.get("base_url", "http://localhost:4000/v1").rstrip("/")
         # api_key is a property (below) — see its docstring for why it
         # cannot be resolved once here and cached.
+        # AE-3: the `temperature` sampling parameter, [llm]'s own value
+        # or the historical constant. `summarizer_llm`/`editor_llm`
+        # (summaries.py / passes.py) reassign this — same pattern as
+        # `.model` — to a `[critique]`-scoped value when one is set;
+        # see `resolve_temperature`.
+        self.temperature = llm.get("temperature", TEMPERATURE)
         self.timeout = llm.get("timeout_seconds", 120)
         # Cap on manuscript text sent per extraction call — cost control and
         # extraction quality (concept selection degrades on very long inputs).
@@ -369,7 +441,14 @@ class LLMClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        cache_path = self._cache_path(messages)
+        # AE-3: keyed on `self.temperature` (the CONFIGURED value —
+        # [critique]/[llm]/constant, per resolve_temperature), not the
+        # bare TEMPERATURE constant. Two clients on the same model but
+        # different configured temperatures must never collide on one
+        # cache file; a client with only the constant behind it (the
+        # common, unconfigured case) gets the exact same key as before,
+        # so its replay fixtures are untouched.
+        cache_path = self._cache_path(messages, self.temperature)
         if cache_path and cache_path.exists():
             self.replays += 1
             return json.loads(cache_path.read_text())["response"]
@@ -387,7 +466,14 @@ class LLMClient:
             cache_path.write_text(json.dumps(
                 {
                     "model": self.model,
-                    "temperature": TEMPERATURE,
+                    # The value CONFIGURED for this call, not necessarily
+                    # what ended up on the wire: a server-side rejection
+                    # (_rejects_temperature) makes ONE immediate retry
+                    # without it and still succeeds under this same
+                    # model+prompt — recording the configured intent
+                    # keeps that resilience path from splitting one
+                    # logical call across two cache entries.
+                    "temperature": self.temperature,
                     "messages": messages,
                     "response": reply,
                     "usage": {
@@ -400,11 +486,11 @@ class LLMClient:
             ))
         return reply
 
-    def _cache_path(self, messages: list[dict]) -> Path | None:
+    def _cache_path(self, messages: list[dict], temperature) -> Path | None:
         if not self.cache_dir:
             return None
         payload = json.dumps(
-            {"model": self.model, "temperature": TEMPERATURE,
+            {"model": self.model, "temperature": temperature,
              "messages": _without_cache_control(messages)},
             sort_keys=True,
         )
@@ -504,7 +590,15 @@ class LLMClient:
                 {"role": "system", "content": "\n\n".join(system_blocks)},
                 {"role": "user", "content": "\n\n".join(user_blocks)},
             ]
-        cache_path = self._cache_path(messages)
+        # AE-3: `_cache_path` now takes its temperature explicitly. draft()
+        # never sends one (see the "NO sampling parameter at all" note
+        # above) and never has — this passes the bare TEMPERATURE constant
+        # exactly as `_cache_path` used internally before AE-3, so every
+        # existing drafting replay fixture keeps its key unchanged. It is
+        # not `self.temperature` (AE-3's per-client value): that would
+        # wire [llm]/[critique] configuration, which draft() deliberately
+        # never reads for this, into a key that has nothing to do with it.
+        cache_path = self._cache_path(messages, TEMPERATURE)
         if cache_path and cache_path.exists():
             self.replays += 1
             # A replayed draft still reports itself. Without this the
@@ -689,13 +783,35 @@ class LLMClient:
         # support while leaving it untouched for models that do, so the
         # backoff loop below only ever sees genuine transient failures.
         litellm.drop_params = True
-        for attempt in range(RETRIES + 1):
+        # AE/temp-compat round 3: drop_params (above) only helps when
+        # litellm's OWN local param map already knows the model can't
+        # take `temperature` — a model litellm doesn't recognize sails
+        # through with `temperature` attached, and the PROVIDER 400s
+        # server-side instead (`_rejects_temperature`'s docstring has the
+        # exact message shape). Same principle as drop_params: this is
+        # deterministic, not transient, so it gets exactly one immediate
+        # retry without `temperature` — no sleep — tracked independently
+        # of `attempt` below so it never eats into the genuine-transient-
+        # failure backoff budget (a transient error after this retry
+        # still gets the FULL RETRIES worth of backoff, not one fewer).
+        #
+        # AE-3 config knob: `self.temperature` is [critique]'s value (for
+        # a summarizer_llm/editor_llm client), else [llm]'s, else the
+        # TEMPERATURE constant (resolve_temperature). VENDOR_DEFAULT_
+        # TEMPERATURE means the config already knows this model wants no
+        # `temperature` kwarg at all — start with it omitted, proactively,
+        # rather than paying for the one avoidable round-trip below.
+        include_temperature = self.temperature != VENDOR_DEFAULT_TEMPERATURE
+        temperature_retried = False
+        attempt = 0
+        while True:
             try:
                 response = litellm.completion(
                     model=self.model,
                     messages=messages,
-                    temperature=TEMPERATURE,
                     timeout=self.timeout,
+                    **({"temperature": self.temperature} if include_temperature
+                       else {}),
                     # Explicit key (env var or config api_key) overrides
                     # litellm's own provider-env detection; absent, litellm
                     # reads GEMINI_API_KEY etc. itself as before.
@@ -711,27 +827,50 @@ class LLMClient:
                     (getattr(usage, "completion_tokens", 0) or 0) if usage else 0,
                 )
             except Exception as err:  # LiteLLM raises many provider-specific types
+                if (include_temperature and not temperature_retried
+                        and _rejects_temperature(str(err))):
+                    temperature_retried = True
+                    include_temperature = False
+                    print(f"warning: {self.model} rejected temperature="
+                          f"{self.temperature} ({err}); retrying immediately "
+                          "without it…", file=sys.stderr)
+                    continue
                 if attempt < RETRIES:
                     delay = 2 ** attempt
                     print(f"warning: LLM call failed ({err}); retrying in {delay}s "
                           f"({attempt + 1}/{RETRIES})…", file=sys.stderr)
                     time.sleep(delay)
+                    attempt += 1
                     continue
                 print(f"warning: LLM call failed after {RETRIES + 1} attempts "
                       f"({err}); continuing without LLM.", file=sys.stderr)
                 return None
 
     def _complete_openai(self, messages: list[dict]) -> tuple[str, int, int] | None:
-        payload = {"model": self.model, "messages": messages, "temperature": TEMPERATURE}
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
-            },
-        )
-        for attempt in range(RETRIES + 1):
+        # AE-3: a temperature-rejecting model behind an OpenAI-compatible
+        # proxy surfaces the SAME shape as the litellm path — an HTTPError
+        # whose response BODY (not str(err), which is just "HTTP Error
+        # 400: Bad Request") carries the provider's message
+        # (_error_detail). One immediate retry without `temperature`, no
+        # sleep, tracked independently of `attempt` — same reasoning as
+        # _complete_litellm above. The request is rebuilt each attempt
+        # (payload now varies with include_temperature; it no longer
+        # needs to be byte-identical across retries).
+        include_temperature = self.temperature != VENDOR_DEFAULT_TEMPERATURE
+        temperature_retried = False
+        attempt = 0
+        while True:
+            payload = {"model": self.model, "messages": messages,
+                      **({"temperature": self.temperature}
+                         if include_temperature else {})}
+            request = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
+                },
+            )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     body = json.loads(response.read().decode())
@@ -742,11 +881,20 @@ class LLMClient:
                     usage.get("completion_tokens", 0) or 0,
                 )
             except (urllib.error.URLError, KeyError, json.JSONDecodeError, TimeoutError) as err:
+                if (include_temperature and not temperature_retried
+                        and _rejects_temperature(_error_detail(err))):
+                    temperature_retried = True
+                    include_temperature = False
+                    print(f"warning: {self.model} rejected temperature="
+                          f"{self.temperature} ({_error_detail(err).strip()[:200]}); "
+                          "retrying immediately without it…", file=sys.stderr)
+                    continue
                 if attempt < RETRIES:
                     delay = 2 ** attempt
                     print(f"warning: LLM call failed ({err}); retrying in {delay}s "
                           f"({attempt + 1}/{RETRIES})…", file=sys.stderr)
                     time.sleep(delay)
+                    attempt += 1
                     continue
                 print(f"warning: LLM call failed after {RETRIES + 1} attempts "
                       f"({err}); continuing without LLM.", file=sys.stderr)
