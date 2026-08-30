@@ -4425,6 +4425,165 @@ def scenario_ephemeral_history() -> None:
           f"history length {readline.get_current_history_length()} != {base}")
 
 
+# --- Scenario WS fixtures (scope-derived intent attachment) ---------------
+#
+# A real toc PARENT CHAIN, which no other e2e workspace has: book.md is a
+# grandparent opener, part.md its child opener, alpha.md and beta.md the
+# essays beneath. That is what makes `chapter` a tier with two levels in
+# it rather than a synonym for "the one parent".
+
+TOC_WS = ('[[chapter]]\nfile = "book.md"\n\n'
+          '[[chapter]]\nfile = "part.md"\nparent = "book.md"\n\n'
+          '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+          '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n\n'
+          '[[chapter]]\nfile = "orphan.md"\n')
+
+WS_BOOK = "# The Book\n\nThe book opener, which sits above every part.\n"
+WS_PART = "# The Part\n\nThe part opener, which sits above its essays.\n"
+WS_ALPHA = ("# Alpha\n\nThe old alpha opening, soon to be raw material.\n\n"
+            "The old alpha second paragraph, about fields.\n")
+WS_BETA = ("# Beta\n\nThe old beta opening, soon to be raw material.\n\n"
+           "The old beta second paragraph, about trajectories.\n")
+WS_ORPHAN = "# Orphan\n\nAn essay no part claims and no intent covers.\n"
+
+WS_PLAN = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                       "budget": 60, "notes": "open on the claim"}])
+
+
+def _ws_workspace(root: Path, server) -> tuple:
+    """The Scenario WS fixture: the parent chain above, a style guide on
+    every essay, and fresh summaries. Returns (ws, ms, db, manuscript)."""
+    from authorlm.db import Database as _DB
+
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    write(ms / "book.md", WS_BOOK)
+    write(ms / "part.md", WS_PART)
+    write(ms / "alpha.md", WS_ALPHA)
+    write(ms / "beta.md", WS_BETA)
+    write(ms / "orphan.md", WS_ORPHAN)
+    write(ms / "toc.toml", TOC_WS)
+    write(ws / ".authorlm" / "config.toml",
+          "[llm]\nenabled = true\nprovider = \"openai\"\n"
+          f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+          "model = \"stub\"\n")
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "style", "guide", "House")
+    for name in ("book.md", "part.md", "alpha.md", "beta.md", "orphan.md"):
+        run(ws, "style", "attach", name, "House")
+    run(ws, "summarize", "rebuild", "--all")
+    db = _DB(ws / ".authorlm" / "authorlm.db")
+    manuscript = dict(db.one("SELECT * FROM manuscripts WHERE name = 'book'"))
+    return ws, ms, db, manuscript
+
+
+def _full_id(db, table: str, prefix: str) -> str:
+    """The CLI prints id PREFIXES; the database is keyed on full ids."""
+    row = db.one(f"SELECT id FROM {table} WHERE id LIKE ?", (f"{prefix}%",))
+    assert row is not None, f"no {table} row for '{prefix}'"
+    return row["id"]
+
+
+def _episode_of(db, intent_id: str) -> dict:
+    row = db.one("SELECT * FROM editorial_episodes WHERE intent_id LIKE ? "
+                 "ORDER BY created_at DESC LIMIT 1", (f"{intent_id}%",))
+    return dict(row) if row else {}
+
+
+def _episode_locations(db, episode: dict) -> list[str]:
+    ids = json.loads(episode.get("transition_ids") or "[]")
+    out = []
+    for tid in ids:
+        row = db.one("SELECT location FROM editorial_transitions WHERE id = ?",
+                     (tid,))
+        if row:
+            out.append(row["location"].split("#", 1)[0])
+    return out
+
+
+def _review_episodes(db, writeup_id: str) -> set:
+    """The episodes this writeup's beat verdicts were recorded against.
+    `beliefs.record_review` carries the episode on the evidence row it
+    writes, and that row names the suggestion text — which is how a
+    verdict is tied back to the beat it settled."""
+    texts = {r["suggestion"][:120] for r in db.all(
+        "SELECT suggestion FROM guidance_history WHERE batch_id LIKE ?",
+        (f"{writeup_id}%",))}
+    return {row["episode_id"] for row in db.all(
+        "SELECT episode_id, target FROM evidence "
+        "WHERE evidence_type = 'author_review'")
+        if row["target"] in texts}
+
+
+def scenario_writeup_scope(root: Path) -> None:
+    """Scenario WS — scope-derived intent attachment (design
+    findings/design-intent-scope.md)."""
+    print("Scenario WS — writeup scope: derived intents and episode attribution")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server)
+        run(ws, "session", "start")
+
+        # ---- WS-11: episode single-attribution, the parallel case.
+        # Two writeups open at once (design §14) under two DIFFERENT
+        # intents. Before this design `collect` attached every transition
+        # to `sessions.current_episode` — the session's most recently
+        # CREATED open episode, whatever intent it belonged to — so both
+        # writeups' beats landed on whichever intent was declared last.
+        out = run(ws, "intent", "declare", "Rewrite alpha")
+        intent_alpha = out.split("[")[1].split("]")[0]
+        out = run(ws, "intent", "declare", "Rewrite beta")
+        intent_beta = out.split("[")[1].split("]")[0]
+
+        out = run_stdin(ws, "", "write", "start", "alpha.md",
+                        "--intent", intent_alpha)
+        wu_alpha = out.split("[")[1].split("]")[0]
+        out = run_stdin(ws, "", "write", "start", "beta.md",
+                        "--intent", intent_beta)
+        wu_beta = out.split("[")[1].split("]")[0]
+        run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "alpha.md")
+        run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "beta.md")
+
+        run_stdin(ws, "Alpha beat one: the claim, stated plainly.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "opens on the claim")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+        run_stdin(ws, "Beta beat one: the same ground, differently held.",
+                  "write", "propose", "--writeup", "beta.md",
+                  "--why", "opens on the claim")
+        run_stdin(ws, "", "write", "accept", "--writeup", "beta.md")
+
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
+        check("WS-11 — the alpha writeup's accepted beat attaches to "
+              "ALPHA's own episode, not to whichever intent was declared "
+              "last (design §0.3: the live mis-attribution)",
+              "alpha.md" in _episode_locations(db, ep_alpha),
+              f"alpha episode {ep_alpha.get('id')} holds "
+              f"{_episode_locations(db, ep_alpha)}")
+        check("WS-11 — and the beta writeup's beat attaches to BETA's "
+              "episode",
+              "beta.md" in _episode_locations(db, ep_beta),
+              f"beta episode {ep_beta.get('id')} holds "
+              f"{_episode_locations(db, ep_beta)}")
+        check("WS-11 — no fan-out: alpha's episode holds NOTHING from "
+              "beta.md",
+              "beta.md" not in _episode_locations(db, ep_alpha),
+              str(_episode_locations(db, ep_alpha)))
+        check("WS-11 — the beat VERDICT is recorded against the same "
+              "episode as the transitions (write_accept passes one row to "
+              "both collect and record_review)",
+              _review_episodes(db, wu_alpha) == {ep_alpha.get("id")},
+              f"{_review_episodes(db, wu_alpha)} != {ep_alpha.get('id')}")
+        check("WS-11 — and beta's verdict likewise",
+              _review_episodes(db, wu_beta) == {ep_beta.get("id")},
+              f"{_review_episodes(db, wu_beta)} != {ep_beta.get('id')}")
+        del wu_beta
+    finally:
+        server.shutdown()
+
+
 def _load_testbench():
     """tools/testbench.py as a module. `tools/` is a directory of scripts,
     not a package, so it is loaded by path rather than imported — the same
@@ -4634,6 +4793,7 @@ def main_test() -> None:
         scenario_write_draft(root)
         scenario_write_new_and_digest(root)
         scenario_parallel_writeups(root)
+        scenario_writeup_scope(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)

@@ -424,11 +424,19 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None) -> dict:
+            analyze: bool | None = None, episode: dict | None = None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
-    a suspicious deletion; {"unchanged": True} when nothing changed."""
+    a suspicious deletion; {"unchanged": True} when nothing changed.
+
+    `episode` names the episode the transitions attach to. The default —
+    the session's most recently created open episode — is what every
+    ambient caller wants and is byte for byte what this function did
+    before the parameter existed. The beat loop passes the PRIMARY
+    intent's episode instead: with two writeups open at once, the default
+    attached both writeups' beats to whichever intent was declared last
+    (design-intent-scope §0.3)."""
     mid = manuscript["id"]
     if auto:
         flagged = massive_deletions(db, manuscript)
@@ -458,7 +466,10 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     transitions = detect_transitions(db, mid, dict(before) if before else None, version)
     attached = False
-    if session:
+    if episode is not None:
+        ses.attach_transitions(db, episode, transitions)
+        attached = True
+    elif session:
         episode = ses.current_episode(db, mid, dict(session))
         ses.attach_transitions(db, episode, transitions)
         attached = True
@@ -891,6 +902,29 @@ def _checkout_gate(db: Database, manuscript: dict, relpath: str) -> None:
             f"{relpath} is checked out to Google Docs — the Doc is the "
             f"working copy. Run 'doc pull {relpath}' first."
         )
+
+
+def _primary_intent_id(writeup: dict) -> str | None:
+    """The intent this writeup's transitions and verdicts belong to.
+
+    `writeups.intent_id` still holds it — the frozen member block names
+    the same row — so this reads the block first (it is authoritative
+    once the set is ratified) and falls back to the column, which is what
+    every writeup written before the block existed carries."""
+    block = loads(writeup["metadata"], {}).get("intents") or {}
+    return block.get("primary") or writeup["intent_id"]
+
+
+def _writeup_episode(db: Database, manuscript: dict, writeup: dict,
+                     session: dict) -> dict:
+    """The episode every beat of this writeup attaches to: the PRIMARY
+    intent's own, resolved once per verb and handed to both `collect` and
+    `record_review` so the transitions and the verdict can never land in
+    two different places (design-intent-scope §1.7)."""
+    intent_id = _primary_intent_id(writeup)
+    if not intent_id:
+        return ses.current_episode(db, manuscript["id"], session)
+    return ses.episode_for_intent(db, manuscript["id"], session, intent_id)
 
 
 def _current_beat(writeup: dict) -> dict:
@@ -1760,7 +1794,12 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
 
     session, _ = ensure_session(db, manuscript)
-    report = collect(db, manuscript, config, source="write-accept")
+    # ONE episode for the whole verb, resolved BEFORE the collect: the
+    # transitions and the verdict must not be able to disagree about
+    # which intent this beat served.
+    episode = _writeup_episode(db, manuscript, writeup, session)
+    report = collect(db, manuscript, config, source="write-accept",
+                     episode=episode)
     if decision == "modified":
         meta = loads(proposal["metadata"], {})
         meta["accepted_text"] = accepted
@@ -1771,7 +1810,6 @@ def write_accept(db: Database, manuscript: dict, config: dict,
         meta["accepted_by"] = clients.current().key()
         db.update("guidance_history", proposal["id"],
                   {"metadata": json.dumps(meta)})
-    episode = ses.current_episode(db, manuscript["id"], session)
     review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), decision, reason,
         episode["id"], llm=llm,
@@ -1802,7 +1840,7 @@ def write_reject(db: Database, manuscript: dict, reason: str,
         raise LookupError(f"nothing proposed for beat {beat['n']} — "
                           "write propose first")
     session, _ = ensure_session(db, manuscript)
-    episode = ses.current_episode(db, manuscript["id"], session)
+    episode = _writeup_episode(db, manuscript, writeup, session)
     review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), "rejected", reason.strip(),
         episode["id"], llm=llm,
