@@ -1473,3 +1473,35 @@ line and omits it.
 still unconditional. The registry now says the same thing about the drafting
 model declaratively; a test asserts the two never disagree rather than making
 either derive from the other.
+
+### 15.12 The live test bench (2026-08-31)
+
+Sponsor ruling: *"We need an automated test to make sure that rewrite placeholder
+is written in obsidian. You could do this on a test manuscript. […] You should
+probably have one test manuscript in the database that you use exclusively for
+testing these kinds of things."* Some properties of §14.3's placeholder are only
+true of a LIVE workspace — the real database, the real config, the real CLI, a
+real file that a real Obsidian vault would open — and the author's manuscripts
+are not the thing a smoke check may truncate. So there is now a third place
+between the hermetic suites and the author's work: `tools/testbench.py`, which
+owns one permanent, disposable manuscript named `testbench` (three tiny essays
+of fixed text, in the gitignored `manuscripts/` tree — the script's constants
+are the committed source of truth, and `--setup` writes any file that is
+missing). `python3 tools/testbench.py --setup` is idempotent, is the ONLY step
+that may call a model (three essay summaries on the cheap summarizer) and prints
+the cost line; on a healthy bench it is a no-op that says so.
+`--check placeholder` then drives the real CLI: `write start` on the middle
+essay, and it asserts on the file ON DISK that it holds exactly `PLACEHOLDER`,
+that the marker is not inside an HTML comment, front matter, or a code fence,
+and that it survives a markdown strip as a plain paragraph — which is the
+property that makes it visible in Obsidian and the property §14.3 was written
+for. A `try/finally` abandons the writeup either way and the restore is asserted
+byte for byte; the whole check runs with the provider keys scrubbed out of the
+subprocess environment and passes with no keys at all. The name `testbench` is
+the safety rail: it is a constant, re-asserted before every mutating step, and
+the script refuses a directory or a registered row that is anything else. The
+standing rule is that live smoke checks land here as named `--check`s rather
+than as one-off scripts; `tests/test_e2e.py`'s Scenario TB drives the whole
+driver hermetically against a temp workspace and the stub model server, and
+proves the visibility assertions DISCRIMINATE by re-running the check against a
+file whose marker has been hidden inside an HTML comment.
