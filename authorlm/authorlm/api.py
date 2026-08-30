@@ -2614,7 +2614,17 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     if accounting is not None or dispositions:
         db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
     _record_served_by(db, writeup, dispositions)
-    report = collect(db, manuscript, config, source="write-complete")
+    # The writeup's LAST collect, and it belongs to the primary exactly as
+    # every per-beat one does. It is usually a no-op — nothing has moved
+    # since the final accept — but "usually" is not "never": a doc pull,
+    # or the author's own hand edit between the last beat and this verb,
+    # makes it a real collect with real transitions, and those would land
+    # on the session's most recently created open episode, whatever intent
+    # it belonged to. Same defect, same fix, one site later.
+    session, _ = ensure_session(db, manuscript)
+    report = collect(db, manuscript, config, source="write-complete",
+                     episode=_writeup_episode(db, manuscript, writeup,
+                                              session))
     extraction = None
     llm = LLMClient(config)
     if llm.enabled:

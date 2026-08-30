@@ -1761,8 +1761,21 @@ intent is a question for the author. Adding the section re-bills every in-flight
 writeup's cached prefix exactly once at deploy; `cache_cold`'s warning firing
 once, on the next beat of each open writeup, is expected.
 
-**One correction to the text above, made while building it.** The flag is
+**Two corrections to the text above, made while building it.** The flag is
 `--book-wide`, not `--manuscript`: `-m/--manuscript` is already registered on
 every subparser as the manuscript SELECTOR, and a second registration of the
-same option string is an argparse conflict at parser-build time. Everything else
-in this section is as ratified.
+same option string is an argparse conflict at parser-build time.
+
+And the primary's episode is passed at THREE sites, not two. `write_accept` and
+`write_reject` were the ones this section named; `write_complete`'s own final
+collect is the third. It is usually a no-op, because nothing has moved since the
+last accepted beat — but a doc pull, or the author's own hand edit between that
+beat and the completion, makes it a real collect with real transitions, and
+those went to `current_episode` like everything else. Naming only the two verbs
+that run every beat was an omission in this text, not a decision; the rule is
+that a writeup's transitions belong to its primary, and it has no exception at
+the last one. `write_abandon`'s collects are deliberately left alone: they
+record the restore, which is the unwinding of the writeup rather than work done
+under its goal.
+
+Everything else in this section is as ratified.

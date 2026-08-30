@@ -4583,6 +4583,38 @@ def scenario_writeup_scope(root: Path) -> None:
               _review_episodes(db, wu_beta) == {ep_beta.get("id")},
               f"{_review_episodes(db, wu_beta)} != {ep_beta.get('id')}")
         del wu_beta
+
+        # ---- WS-11b: the writeup's LAST collect belongs to the primary
+        # too. Between the final accepted beat and `write complete` the
+        # file can genuinely move — a doc pull, or the author's own hand
+        # edit — and `write complete`'s own collect is what records it.
+        # "Usually unchanged" is not never, and when it IS changed those
+        # transitions went the same wrong way the per-beat ones did.
+        before_alpha = set(json.loads(ep_alpha["transition_ids"]))
+        before_beta = set(json.loads(ep_beta["transition_ids"]))
+        (ms / "alpha.md").write_text(
+            (ms / "alpha.md").read_text()
+            + "\nA paragraph the author typed by hand, after the last beat "
+              "and before completing.\n")
+        run(ws, "write", "complete", "--writeup", "alpha.md")
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
+        gained_alpha = set(json.loads(ep_alpha["transition_ids"])) - before_alpha
+        gained_beta = set(json.loads(ep_beta["transition_ids"])) - before_beta
+        check("WS-11b — a hand edit between the last beat and completion is "
+              "collected onto the PRIMARY's episode, not onto whichever "
+              "intent was declared last",
+              gained_alpha and all(
+                  f == "alpha.md" for f in _episode_locations(
+                      db, {"transition_ids": json.dumps(list(gained_alpha))})),
+              str(_episode_locations(
+                  db, {"transition_ids": json.dumps(list(gained_alpha))})))
+        check("WS-11b — and beta's episode gains nothing from alpha's "
+              "completion: the final collect fans out no further than the "
+              "per-beat ones do",
+              not gained_beta,
+              str(_episode_locations(
+                  db, {"transition_ids": json.dumps(list(gained_beta))})))
     finally:
         server.shutdown()
 
