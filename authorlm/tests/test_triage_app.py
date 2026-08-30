@@ -36,6 +36,7 @@ def _paths_vendor_vars() -> list:
 
 
 import contextlib
+import hashlib
 import http.server
 import io
 import json
@@ -676,6 +677,47 @@ class HelpTabTest(unittest.TestCase):
                         "the ownership section did not reach the dist")
         self.assertTrue("Two essays at once" in built,
                         "the parallel-writeups section did not reach the dist")
+
+    def test_dist_checksum_matches_the_doc(self):
+        """AK: a content checksum of the embedded tutorial, structural
+        rather than line-pinned.
+
+        The three tripwires above catch a truncated or never-rebuilt dist
+        only insofar as they happen to touch the lines those tripwires
+        pin. A tutorial rewrite that keeps '# Writing essays with the beat
+        loop' and the three quoted lines verbatim, but changes everything
+        else, would sail past them on a stale dist. The vite build
+        (web/triage-app/vite.config.ts, `tutorial-checksum` plugin) hashes
+        the doc's raw bytes at BUILD time and stamps
+        `<!-- tutorial-sha256:<hex> -->` into the emitted HTML. Recomputing
+        that same hash here and requiring an exact match makes ANY edit to
+        the doc without a rebuild fail this test, regardless of which
+        lines moved — no line list to keep in sync."""
+        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        built = self.DIST.read_text(encoding="utf-8")
+        doc_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
+        expected = f"<!-- tutorial-sha256:{doc_hash} -->"
+        self.assertIn(expected, built,
+                      "the dist's tutorial checksum does not match the doc "
+                      "— rebuild with (cd web/triage-app && npm run build)")
+
+    def test_dist_checksum_catches_a_one_byte_doc_edit(self):
+        """Negative evidence for the guard above: perturb the doc's hash by
+        exactly one byte's worth of content and confirm the dist's
+        checksum — computed from the REAL doc at build time — no longer
+        matches. This is what 'structurally detectable' cashes out to: the
+        comparison fails on ANY edit, not just ones that happen to touch a
+        pinned line."""
+        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        built = self.DIST.read_text(encoding="utf-8")
+        real_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
+        perturbed = hashlib.sha256(
+            self.DOC.read_bytes() + b"x").hexdigest()
+        self.assertNotEqual(real_hash, perturbed)
+        self.assertNotIn(f"<!-- tutorial-sha256:{perturbed} -->", built,
+                         "a one-byte-perturbed hash must not match the "
+                         "dist's real checksum")
+        self.assertIn(f"<!-- tutorial-sha256:{real_hash} -->", built)
 
     def _flat(self) -> str:
         """The whole document with runs of whitespace collapsed to one
