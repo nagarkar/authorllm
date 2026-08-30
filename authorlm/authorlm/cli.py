@@ -838,7 +838,7 @@ def cmd_intent(args):
         scope = None
         if args.scope or args.chapter or args.manuscript_wide:
             try:
-                scope = api._scope_target(db, manuscript, args.scope,
+                scope = api._scope_target(manuscript, args.scope,
                                           args.chapter, args.manuscript_wide)
             except (ValueError, LookupError) as err:
                 sys.exit(f"error: {err}")

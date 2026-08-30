@@ -420,7 +420,7 @@ def abandon_intent(db: Database, manuscript: dict, prefix: str,
     return {"intent": intent}
 
 
-def _scope_target(db: Database, manuscript: dict, scope: str | None,
+def _scope_target(manuscript: dict, scope: str | None,
                   chapter: str | None, manuscript_wide: bool) -> str | None:
     """Exactly one of the three, resolved and validated. A `--chapter`
     target must be a toc OPENER — a file with children — or the word
@@ -466,7 +466,7 @@ def scope_intent(db: Database, manuscript: dict, prefix: str,
             f"intent {intent['id']} is {intent['status']} — scope places "
             f"where FUTURE work routes, and there is none for a "
             f"{intent['status']} goal.")
-    target = _scope_target(db, manuscript, scope, chapter, manuscript_wide)
+    target = _scope_target(manuscript, scope, chapter, manuscript_wide)
     meta = loads(intent["metadata"], {}) or {}
     history = meta.get("scope_history") or []
     history.append({"from": intent["scope"], "to": target, "at": now_iso(),
@@ -1291,9 +1291,13 @@ def _store_intent_block(db: Database, writeup: dict, block: dict) -> None:
     db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
 
 
-def _members_view(block: dict, manuscript: dict, relpath: str) -> list[dict]:
+def _members_view(block: dict) -> list[dict]:
     """Members in render order: primary first, then tier rank, then id.
-    One ordering, spelled once, for the CLI and for block A."""
+    One ordering, spelled once, for the CLI and for block A.
+
+    Takes the stored block and nothing else — no manuscript, no file, no
+    `db`. The order must be a pure function of what was ratified, for
+    exactly the reason the member record freezes its fields."""
     members = block.get("members") or []
     return sorted(members,
                   key=lambda m: (0 if m.get("role") == "primary" else 1,
@@ -1535,7 +1539,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
     unplaced = bool(new) and not named
     return {"writeup": row, "intent": intent,
             "intents": block,
-            "intents_view": _members_view(block, manuscript, relpath),
+            "intents_view": _members_view(block),
             "manuscript_wide": len(manuscript_wide),
             "many_manuscript_wide": len(manuscript_wide) >= MANY_MANUSCRIPT_WIDE,
             "outside_scope": [m["id"] for m in outside],
@@ -1577,8 +1581,7 @@ def write_intents(db: Database, manuscript: dict,
             f"alone.")
     if not (add or remove or primary or defer or ignore):
         return {"writeup_id": writeup["id"], "intents": block,
-                "intents_view": _members_view(block, manuscript,
-                                              writeup["file"]),
+                "intents_view": _members_view(block),
                 "changed": []}
     frozen = block.get("state") == "frozen"
     relpath = writeup["file"]
@@ -1687,7 +1690,7 @@ def write_intents(db: Database, manuscript: dict,
         db.update("writeups", writeup["id"],
                   {"intent_id": block["primary"]})
     return {"writeup_id": writeup["id"], "intents": block,
-            "intents_view": _members_view(block, manuscript, relpath),
+            "intents_view": _members_view(block),
             "changed": changed, "state": block.get("state"),
             "rebills_prefix": bool(frozen and any(
                 c.startswith("added") for c in changed))}
@@ -1836,7 +1839,7 @@ def write_plan(db: Database, manuscript: dict, beats: list,
     return {"writeup_id": writeup["id"], "kept": len(kept),
             "added": len(fresh), "plan": new_plan, "cursor": writeup["cursor"],
             "intents": block,
-            "intents_view": (_members_view(block, manuscript, writeup["file"])
+            "intents_view": (_members_view(block)
                              if block else [])}
 
 
@@ -2177,7 +2180,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
                     ("id", "intent_id", "file", "mode", "status",
                      "source_version_id", "cursor")},
         "intents": block,
-        "intents_view": (_members_view(block, manuscript, writeup["file"])
+        "intents_view": (_members_view(block)
                          if block else []),
         "newly_in_scope": newly,
         "stale_members": stale_members,
