@@ -1912,3 +1912,26 @@ its work and pre-empt its own ruling on what the MCP surface should return. What
 it contributes is a seam: once the ledger exists, that printed line can be
 sourced from `usage.pending()` — the un-flushed recorder totals — instead of from
 a per-verb `stats_line()` the auto path has no client handle for.
+
+### 15.19 The blackboard doctrine (ratified 2026-08-30)
+
+The database is a blackboard: parallel chat sessions, the MCP server, the
+CLI, and the watcher all read and write shared authorial state. Four
+incidents taught the same lesson by different roads (the mid-rebuild race
+→ snapshot isolation; the parallel-rewrite truncation → pinned in-flight
+context; the episode mis-attribution → primary-intent routing; the
+two-ambient-markers case → provenance's refusal). The rule they share is
+now doctrine, to be built to rather than retrofitted toward:
+
+1. **Every read of shared authorial state is capture-consistent or
+   pinned.** A verb resolves its view of the manuscript once per
+   invocation; a gate judges exactly the text its consumer will use.
+2. **Every ambiguous attribution refuses rather than guesses.** Work is
+   never filed to a placeholder, a tie, or "whichever was most recent" —
+   the author's explicit choice, or nothing.
+3. **A concurrent writer invalidates loudly, never silently.** Staleness,
+   in-flight neighbors, and newly-in-scope arrivals are flagged states
+   with named remedies, not conditions discovered later.
+
+Review checklist line: any new surface touching shared state names which
+of the three rules covers each read, write, and attribution it performs.
