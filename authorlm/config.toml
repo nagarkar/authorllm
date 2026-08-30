@@ -23,10 +23,17 @@ extraction_max_chars = 24000
 #   model = "anthropic/claude-fable-5", max_tokens = 8000, effort = "high",
 #   timeout_seconds = 600, cache = true
 
-# [critique] overrides — DELIBERATELY ABSENT (same ruling; the Sonnet override of
-# 2026-08-29 billed ~10¢+/essay per rebuild). Summaries and the critique editor
-# fall back to [llm] model. To restore:
-#   summarizer_model = "anthropic/claude-sonnet-5", editor_model = same
+[critique]
+# Essay summaries on GPT-5.6 Luna (author ruling 2026-08-30: "I actually rather
+# like 5.6 luna. Lets try that for summarizing essays."). Cheaper than the
+# gemini default (~$0.26 vs ~$0.49 per full 24-essay rebuild at measured token
+# volumes) and a stronger small model. Uses OPENAI_API_KEY from .env.
+# BOTH TEMPORARILY disabled pending the AE-3 temperature fix (luna rejects
+# temperature≠1 server-side; the client must learn to retry without it, and
+# temperature is becoming a per-section config key in the same change).
+# Restore these two lines when AE-3 merges (author rulings 2026-08-30):
+# summarizer_model = "openai/gpt-5.6-luna"
+# editor_model = "openai/gpt-5.6-luna"
 
 [illustrations]
 # Illustration rendering (authorlm illus render); text model above ([llm]
