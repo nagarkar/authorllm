@@ -776,6 +776,19 @@ do all three in the same turn:
    `--file <essay>`).
 
 ## Standing duties
+- Style-law harvesting (ratified 2026-08-29): as the author's rulings
+  accumulate in conversation — rejection reasons, rewordings, terminology
+  decisions, ordering principles — proactively PROPOSE the generalizable
+  ones as style elements (or belief candidates) at the moment they
+  generalize: a single explicit terminology/structure ruling qualifies
+  immediately; a wording preference qualifies at two independent
+  instances. Do not wait for the author to ask for a scan. Propose,
+  never silently insert: each proposal names the aspect, the scope
+  (guide or file), and the author's own instances verbatim; the
+  author's yes ratifies (`style add`), and their no is itself recorded
+  evidence. A ruling that contradicts an existing ratified element is
+  surfaced as an amendment question (retire + re-add), never left to
+  drift.
 - Open conversations about the manuscript with `get_briefing`; it (and
   `get_guidance`) collects any fresh edits itself and reports them under
   `caught_up`. When that section is present, narrate the change
