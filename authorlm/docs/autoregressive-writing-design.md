@@ -1600,3 +1600,65 @@ transcripts by timestamp is a confident guess across parallel chats, which is
 the one failure this design exists to prevent. For those, the pre-provenance
 method still works and stays documented — grep the session transcripts for the
 object's id; the filename is the session.
+
+### 15.16 The database performance log — measurement stops being an event (2026-08-30)
+
+Sponsor ruling: *"Can we configure the databases to by default log stuff and
+make sure that we can later on see performance logs from the database itself
+instead of us having to do one-off measurements? That way we can monitor the
+performance over all time."*
+
+`trace.jsonl` (§ "Logging & traces") is the **verb** timeline: one line per CLI
+command or MCP tool call, with the wall time of the whole operation. It can say
+that `collect` took 900 ms and it cannot say where those 900 ms went. Every
+answer to *that* question so far has been a one-off: instrument by hand, run
+the verb, read the number, throw the instrument away. A number obtained that
+way is a snapshot of one afternoon on one dataset — it cannot show a trend, and
+a trend is the only thing that distinguishes "this query is slow" from "this
+query is *becoming* slow", which is the distinction that matters when the
+dataset grows monotonically for years.
+
+**So the measurement is now standing.** Every query through
+`Database.one/all/insert/update`, plus the `BEGIN IMMEDIATE` and the `COMMIT`
+that bracket a transaction, is timed with `perf_counter` and folded into an
+aggregation dict **on the Database instance**, keyed by normalized SQL shape
+(whitespace collapsed, truncated at 120 chars) to `{n, total_s, max_s}`. The
+transaction *body* is deliberately not timed as a unit: that would
+double-count every query inside it and make the totals a lie.
+
+**One line per invocation, not per query.** The aggregate is written once —
+per CLI process (at the end of dispatch, which every `sys.exit` path in `cli.py`
+passes through, with `atexit` as the backstop) and per MCP tool dispatch, since
+that server is long-lived. A verb issuing 900 queries therefore costs 900 dict
+updates and **one** line of I/O. That ratio is the whole argument for shipping
+it on by default rather than behind a flag nobody remembers to set. On top of
+it, any single query over `[db] slow_ms` (default 100) writes its own immediate
+line tagged `"slow": true` — the aggregate already counts it, so that line is
+the detail: when it happened, and under which client.
+
+Each line carries the client provenance join key (§15.15), resolved once per
+invocation and reused, so the perf log joins straight to `trace.jsonl`, to row
+metadata, and to the chat transcript. `authorlm dbperf [--days N] [--top K]`
+reads it back: top shapes by total time and by worst single query, the per-day
+grand totals, the slow-log tail, per-client attribution. It does not open the
+database, so it is safe against a live workspace mid-flight.
+
+**It is never in the way.** Every write swallows its own failure — a full disk,
+an unwritable directory, an unserializable value — because a performance log
+that can break a `collect` is worse than no performance log. The log write sits
+outside every timing window, so it never measures itself, and a workspace
+deleted out from under a late flush is never resurrected by one. No new
+dependency, no schema change, no index. `perf_log = false` leaves `Database`
+holding no recorder at all, so the cost of opting out is one `is None` test per
+query, not a disabled timer.
+
+**The standing watch item this exists to catch.** The latest-manuscript-version
+`SELECT *` reads the whole `files` JSON blob — the complete manuscript text —
+to answer a question about the newest row. Measured at 17.7 ms max across 245
+versions, growing linearly with the version count, and it runs on the common
+path. It is not worth fixing today and the fix is already known: project the
+columns actually needed, or add one ordinary index (never a `CREATE UNIQUE
+INDEX`). What was missing was not the fix but the trigger. Now `authorlm
+dbperf` shows that shape's `max_ms` and its per-day totals over the whole
+history, so the decision to spend the fix is made off a trend instead of off
+another afternoon's one-off measurement.
