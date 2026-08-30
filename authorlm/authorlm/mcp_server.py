@@ -80,7 +80,7 @@ def _guard(fn) -> dict[str, Any]:
     import sys
     import time
 
-    from . import tracelog
+    from . import dbperf, tracelog
 
     # The calling @mcp.tool() function's name is the verb being traced.
     verb = sys._getframe(1).f_code.co_name
@@ -99,10 +99,14 @@ def _guard(fn) -> dict[str, Any]:
         tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
                         duration_ms=int((time.monotonic() - t0) * 1000),
                         ok=False, error=f"{type(err).__name__}: {err}")
+        dbperf.flush(verb)
         raise
     tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     ok=error is None, error=error)
+    # This server is long-lived, so the perf log's unit of aggregation is
+    # the DISPATCH, not the process: one line per tool call, named by it.
+    dbperf.flush(verb)
     return result
 
 

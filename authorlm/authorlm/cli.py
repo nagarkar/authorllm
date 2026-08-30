@@ -5206,6 +5206,17 @@ def _print_beats(db, writeup: dict, index: dict) -> None:
         print("  ← a beat drafted by one chat and settled by another")
 
 
+def cmd_dbperf(args):
+    """Read the always-on database performance log. Read-only, no
+    network, no LLM, no writes — and it does not open the database, so it
+    is safe against a live workspace mid-flight."""
+    from . import dbperf
+
+    for line in dbperf.report(dbperf.log_dir(getattr(args, "workspace", None)),
+                              days=args.days, top=args.top):
+        print(line)
+
+
 def cmd_provenance(args):
     """Which chat did this. Read-only, no network, no LLM, no writes —
     safe to run against a live workspace mid-flight."""
@@ -5957,6 +5968,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_log)
 
+    p = sub.add_parser("dbperf",
+                       help="database performance log: top queries, the "
+                            "per-day trend, the slow log")
+    p.add_argument("--days", type=int, default=7,
+                   help="window to report over (default 7)")
+    p.add_argument("--top", type=int, default=10,
+                   help="how many query shapes per table (default 10)")
+    p.set_defaults(func=cmd_dbperf)
+
     p = sub.add_parser("provenance",
                        help="which chat session touched an object")
     p.add_argument("id", nargs="?",
@@ -6051,7 +6071,7 @@ def _dispatch(argv: list[str] | None = None) -> None:
                  "[--guide NAME | --file FILE]")
     import time as _time
 
-    from . import tracelog
+    from . import dbperf, tracelog
 
     def _trace(ok: bool, error: str | None = None) -> None:
         tracelog.record(
@@ -6061,6 +6081,14 @@ def _dispatch(argv: list[str] | None = None) -> None:
             manuscript=getattr(args, "manuscript", None),
             duration_ms=int((_time.monotonic() - t0) * 1000),
             ok=ok, error=error)
+        # The database perf log's aggregate line for this invocation.
+        # Here rather than in `main`, because every exit path out of the
+        # verb — including the `sys.exit`s this module leans on — passes
+        # through `_trace`. `dbperf`'s own atexit hook is the backstop.
+        # Named by command+action, never raw argv: an intent statement is
+        # a positional argument and does not belong in a telemetry log.
+        dbperf.flush(" ".join(
+            str(p) for p in (args.command, getattr(args, "action", None)) if p))
 
     # Resolve the client ONCE for this invocation, before the verb runs —
     # the per-invocation stamp, never a per-"current client" ambient read.

@@ -98,6 +98,34 @@ image_size = "1536x1024"
 # the tokens of a single-step extraction). Buys back author triage time.
 adjudicate = true
 
+[db]
+# Always-on database performance logging (Sponsor ruling, AN: "configure
+# the databases to by default log stuff … monitor the performance over
+# all time" — instead of one-off measurements).
+#
+# Every query through the Database surface is timed with perf_counter and
+# aggregated IN MEMORY per normalized SQL shape; ONE JSON line per CLI
+# process / MCP tool call then lands in
+# <workspace>/.authorlm/logs/db-perf.jsonl beside trace.jsonl, carrying
+# {n, total_ms, max_ms} per shape plus the client provenance join key
+# (§15.15). A verb issuing 900 queries therefore costs 900 dict updates
+# and one line of I/O — which is what makes shipping it on affordable.
+# Size-rotated at 5 MB, two generations kept.
+#
+# Read it with `authorlm dbperf [--days N] [--top K]`: top shapes by
+# total and by worst single query, the per-day trend, the slow-log tail,
+# per-client attribution.
+#
+# Set false to disable: Database then holds no recorder at all and the
+# cost is one `is None` test per query. Every write is best-effort and
+# swallows its own failures — a perf log must never break a collect.
+perf_log = true
+
+# Any SINGLE query slower than this also writes its own immediate line,
+# tagged "slow": true, with that query's shape, duration and client. The
+# aggregate already counts it; this is the detail — when, and under whom.
+slow_ms = 100
+
 [gdocs]
 # OAuth installed-app client for the Google Docs bridge (doc push/pull).
 client_secret = "/Users/nagarkar/workspace/repos/authorllm/authorlm/client_secret_936657761738-gbalhjavi216muq9ruikmtvu1mtudrpn.apps.googleusercontent.com.json"
