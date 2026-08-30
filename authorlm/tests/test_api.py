@@ -3387,6 +3387,269 @@ def check_client_stamps() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_db_perf_log() -> None:
+    """AN: always-on database performance logging.
+
+    Sponsor ruling: *"configure the databases to by default log stuff …
+    see performance logs from the database itself instead of us having to
+    do one-off measurements … monitor the performance over all time."*
+
+    Six properties, in order: queries aggregate per invocation by
+    normalized shape; the line carries the client provenance join key; a
+    query over `slow_ms` writes its own line and one under it does not;
+    `perf_log = false` takes no timing at all; the log rotates at the cap;
+    `authorlm dbperf` reads it back and is honest when there is nothing to
+    read. Then the property that outranks all of them — a log destination
+    that cannot be written does not break the verb it measures.
+    """
+    import datetime as _dt
+    import tomllib
+
+    from authorlm import dbperf
+    from authorlm.db import Database, ko_fields as ko
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-dbperf-"))
+    try:
+        # --- 1. aggregation: one line per invocation, keyed by shape. ---
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        db = Database(ws / ".authorlm" / "authorlm.db")
+        ms_id = db.insert("manuscripts", {**ko("ms"), "name": "book",
+                                          "path": str(ws / "m")})
+        with db.transaction():
+            for name in ("Gravity", "Choice", "Death"):
+                db.insert("concept_nodes", {**ko("cn"), "manuscript_id": ms_id,
+                                            "name": name})
+        for _ in range(4):
+            db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ?",
+                   (ms_id,))
+        db.update("manuscripts", ms_id, {"author": "Author Penname"})
+        dbperf.flush("test aggregate")
+
+        log = dbperf.log_dir(str(ws)) / dbperf.FILENAME
+        entries = [json.loads(line) for line in log.read_text().splitlines()]
+        aggregate = [e for e in entries if not e.get("slow")][-1]
+        shapes = aggregate["shapes"]
+        listed = shapes.get("SELECT * FROM concept_nodes WHERE manuscript_id = ?")
+        check("every read through the Database surface is aggregated by "
+              "normalized SQL shape as [n, total_ms, max_ms]",
+              listed is not None and listed[0] == 4
+              and listed[1] >= listed[2] > 0, f"{shapes}")
+        check("writes, the transaction's BEGIN IMMEDIATE and the COMMIT "
+              "that follows are shapes of their own — the body is not "
+              "timed as a unit, which would double-count what is inside it",
+              any(s.startswith("INSERT INTO concept_nodes") for s in shapes)
+              and any(s.startswith("UPDATE manuscripts") for s in shapes)
+              and dbperf.BEGIN_SHAPE in shapes
+              and dbperf.COMMIT_SHAPE in shapes, f"{sorted(shapes)}")
+        check("grand_total_ms is the sum of the shape totals",
+              abs(aggregate["grand_total_ms"]
+                  - sum(v[1] for v in shapes.values())) < 0.05,
+              f"{aggregate['grand_total_ms']} vs {shapes}")
+        check("one line per invocation, not per query: 9 queries, 1 line",
+              len([e for e in entries if not e.get("slow")]) == 1
+              and sum(v[0] for v in shapes.values()) >= 9, f"{entries}")
+        check("with detection pinned off the client key is omitted entirely, "
+              "so an unattributed line reads exactly like a pre-stamp one",
+              "client" not in aggregate, f"{aggregate}")
+
+        # The CLI wiring: dispatch flushes, and names the line by the verb.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "provenance", "--clients"])
+        after = [json.loads(line) for line in log.read_text().splitlines()]
+        check("a CLI invocation flushes its own aggregate line at the end "
+              "of dispatch, named by command+action (never raw argv — an "
+              "intent statement is a positional argument)",
+              after[-1].get("invocation") == "provenance", f"{after[-1]}")
+
+        # --- 2. the client provenance join key (§15.15). ---
+        with _as_client("claude-code:perf-chat:Perf Chat"):
+            client_ws = root / "client-ws"
+            (client_ws / ".authorlm").mkdir(parents=True)
+            client_db = Database(client_ws / ".authorlm" / "authorlm.db")
+            client_db.all("SELECT * FROM manuscripts")
+            dbperf.flush("client line")
+        stamped = json.loads(
+            (dbperf.log_dir(str(client_ws)) / dbperf.FILENAME)
+            .read_text().splitlines()[-1])
+        check("the aggregate line carries the client provenance join key, "
+              "so the perf log joins to trace.jsonl and to row metadata",
+              stamped.get("client") == {"engine": "claude-code",
+                                        "session": "perf-chat",
+                                        "precision": "exact"}, f"{stamped}")
+
+        # --- 3. the slow log: above the threshold, and below it. ---
+        slow_ws = root / "slow-ws"
+        (slow_ws / ".authorlm").mkdir(parents=True)
+        slow_db = Database(slow_ws / ".authorlm" / "authorlm.db")
+        slow_db._perf.slow_ms = 0.0001          # everything is slow
+        slow_db.all("SELECT * FROM manuscripts")
+        slow_db._perf.slow_ms = 60_000          # nothing is
+        slow_db.all("SELECT * FROM concept_nodes")
+        dbperf.flush("slow test")
+        slow_lines = [json.loads(line) for line in
+                      (dbperf.log_dir(str(slow_ws)) / dbperf.FILENAME)
+                      .read_text().splitlines()]
+        fired = [e for e in slow_lines if e.get("slow")]
+        slow_aggregate = [e for e in slow_lines if not e.get("slow")][-1]
+        check("a query over slow_ms writes its own immediate line, tagged "
+              "and carrying that one query's shape and duration",
+              len(fired) == 1
+              and fired[0]["sql"] == "SELECT * FROM manuscripts"
+              and fired[0]["ms"] > 0, f"{fired}")
+        check("a query under slow_ms writes no slow line, and both queries "
+              "are still counted exactly once in the aggregate",
+              set(slow_aggregate["shapes"]) == {"SELECT * FROM manuscripts",
+                                                "SELECT * FROM concept_nodes"}
+              and all(v[0] == 1 for v in slow_aggregate["shapes"].values()),
+              f"{slow_aggregate}")
+
+        # --- 4. configuration: shipped on, and cleanly off. ---
+        check("perf logging is shipped ON — an absent [db] section is the "
+              "default, not a silent off-switch",
+              dbperf.settings() == (True, dbperf.DEFAULT_SLOW_MS),
+              f"{dbperf.settings()}")
+        shipped = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "config.toml")
+            .read_text(encoding="utf-8")).get("db") or {}
+        check("and the SHIPPED config.toml says so, in the [db] section",
+              shipped.get("perf_log") is True
+              and isinstance(shipped.get("slow_ms"), int), f"{shipped}")
+
+        off_config = root / "off-config.toml"
+        off_config.write_text("[db]\nperf_log = false\nslow_ms = 7\n")
+        previous_config = os.environ.get("AUTHORLM_CONFIG")
+        os.environ["AUTHORLM_CONFIG"] = str(off_config)
+        try:
+            off_settings = dbperf.settings()
+            off_ws = root / "off-ws"
+            (off_ws / ".authorlm").mkdir(parents=True)
+            off_db = Database(off_ws / ".authorlm" / "authorlm.db")
+            off_db.all("SELECT * FROM manuscripts")
+            off_db.insert("manuscripts", {**ko("ms"), "name": "silent",
+                                          "path": str(off_ws)})
+            dbperf.flush("off")
+            no_recorder = off_db._perf is None
+            wrote = (dbperf.log_dir(str(off_ws)) / dbperf.FILENAME).exists()
+        finally:
+            if previous_config is None:
+                os.environ.pop("AUTHORLM_CONFIG", None)
+            else:
+                os.environ["AUTHORLM_CONFIG"] = previous_config
+        check("perf_log = false holds NO recorder — the timing is not taken, "
+              "not merely unwritten — and nothing reaches the log",
+              off_settings == (False, 7) and no_recorder and not wrote,
+              f"{off_settings} recorder_absent={no_recorder} wrote={wrote}")
+
+        # --- 5. rotation at the cap, two generations kept. ---
+        rotate_ws = root / "rotate-ws"
+        rotate_dir = dbperf.log_dir(str(rotate_ws))
+        rotate_dir.mkdir(parents=True)
+        rotated_path = rotate_dir / dbperf.FILENAME
+        recorder = dbperf.Recorder(rotate_dir)
+        rotated_path.write_text("x" * (dbperf.MAX_BYTES + 1))
+        recorder.record("SELECT 1", 0.001)
+        recorder.flush("first")
+        first = dbperf._generation(rotated_path, 1)
+        check("an oversized perf log rotates to .jsonl.1 and a fresh file "
+              "starts",
+              first.exists() and first.stat().st_size > dbperf.MAX_BYTES
+              and len(rotated_path.read_text().splitlines()) == 1,
+              f"{sorted(p.name for p in rotate_dir.iterdir())}")
+        rotated_path.write_text("y" * (dbperf.MAX_BYTES + 1))
+        recorder.record("SELECT 2", 0.001)
+        recorder.flush("second")
+        check("two generations are kept and the third is dropped",
+              first.read_text().startswith("y")
+              and dbperf._generation(rotated_path, 2).read_text()
+              .startswith("x")
+              and not dbperf._generation(rotated_path, 3).exists(),
+              f"{sorted(p.name for p in rotate_dir.iterdir())}")
+
+        # --- 6. the reading surface. ---
+        report_ws = root / "report-ws"
+        report_dir = dbperf.log_dir(str(report_ws))
+        check("dbperf on a workspace with no log says so rather than "
+              "rendering an empty table",
+              dbperf.report(report_dir)[0].startswith("no performance log yet"),
+              f"{dbperf.report(report_dir)}")
+
+        report_dir.mkdir(parents=True)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        versions = ("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+                    "ORDER BY version_no DESC LIMIT 1")
+        chat_one = {"engine": "claude-code", "session": "chat-one",
+                    "precision": "exact"}
+        chat_two = {"engine": "claude-code", "session": "chat-two",
+                    "precision": "exact"}
+        synthetic = [
+            {"ts": f"{yesterday}T09:00:00+00:00", "invocation": "collect",
+             "shapes": {versions: [3, 40.0, 17.7], "SELECT 1": [900, 9.0, 0.1]},
+             "grand_total_ms": 49.0, "client": chat_one},
+            {"ts": f"{today}T09:00:00+00:00", "invocation": "write draft",
+             "shapes": {versions: [1, 20.0, 20.0]},
+             "grand_total_ms": 20.0, "client": chat_two},
+            {"ts": f"{today}T09:00:01+00:00", "slow": True, "ms": 184.2,
+             "sql": versions, "client": chat_two},
+            # Outside every window this test asks for.
+            {"ts": "2026-01-01T00:00:00+00:00", "invocation": "ancient",
+             "shapes": {"SELECT ancient": [1, 5000.0, 5000.0]},
+             "grand_total_ms": 5000.0},
+        ]
+        (report_dir / dbperf.FILENAME).write_text(
+            "".join(json.dumps(e) + "\n" for e in synthetic))
+        rendered = io.StringIO()
+        with contextlib.redirect_stdout(rendered):
+            cli_main(["--workspace", str(report_ws), "dbperf",
+                      "--days", "3", "--top", "5"])
+        text = rendered.getvalue()
+        check("dbperf ranks shapes by total time across the window, summing "
+              "the per-invocation aggregates",
+              "top by total time" in text
+              and f"      60.0        4      20.0  {versions}" in text, text)
+        check("and ranks them again by the worst single query — the two "
+              "questions a perf log exists to answer",
+              "top by slowest single query" in text, text)
+        check("the per-day grand totals are the trend the Sponsor asked for",
+              f"  {yesterday}        49.0 ms over 1 invocations" in text
+              and f"  {today}        20.0 ms over 1 invocations" in text, text)
+        check("the slow-log tail renders with its client attribution",
+              "184.2 ms" in text and "[claude-code/chat-two]" in text, text)
+        check("per-client attribution is rendered when the lines carry it",
+              "claude-code/chat-one" in text
+              and "claude-code/chat-two" in text, text)
+        check("--days bounds the window: an old line is not counted",
+              "SELECT ancient" not in text and "5000.0" not in text, text)
+
+        # --- 7. the property that outranks the rest. ---
+        blocked_ws = root / "blocked-ws"
+        (blocked_ws / ".authorlm").mkdir(parents=True)
+        blocked_db = Database(blocked_ws / ".authorlm" / "authorlm.db")
+        (blocked_ws / ".authorlm" / "logs").write_text("not a directory")
+        blocked_db.insert("manuscripts", {**ko("ms"), "name": "still-works",
+                                          "path": str(root)})
+        survived = [r["name"] for r in
+                    blocked_db.all("SELECT name FROM manuscripts")]
+        dbperf.flush("blocked")
+        check("a log destination that cannot be written NEVER breaks the "
+              "verb it measures — the write is swallowed and the work lands",
+              survived == ["still-works"], f"{survived}")
+
+        # The perf log never resurrects a workspace deleted under a late
+        # flush: `logs/` is created, its parent workspace never is.
+        gone_ws = root / "gone-ws"
+        gone_recorder = dbperf.Recorder(dbperf.log_dir(str(gone_ws)))
+        gone_recorder.record("SELECT 1", 0.001)
+        gone_recorder.flush("late")
+        check("a flush against a workspace that no longer exists writes "
+              "nothing and recreates nothing",
+              not gone_ws.exists(), f"{gone_ws}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_provenance_verb() -> None:
     """`authorlm provenance` — the payoff verb. Read-only, and honest
     about the rows that predate the stamp."""
@@ -3525,6 +3788,7 @@ def main_test() -> None:
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
+    check_db_perf_log()
     check_placeholder_reader_paths()
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()

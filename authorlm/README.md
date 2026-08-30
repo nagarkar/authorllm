@@ -439,6 +439,23 @@ jq -r '[.duration_ms, .verb, .action // ""] | @tsv' ~/.authorlm/logs/trace.jsonl
 jq -c 'select(.ok == false)' ~/.authorlm/logs/trace.jsonl | tail
 ```
 
+Beside it, `db-perf.jsonl` is the layer underneath: the trace log says a
+verb took 900 ms, this one says where those 900 ms went. Every query
+through the `Database` surface is timed and aggregated in memory per
+normalized SQL shape, and **one** line per CLI process / MCP tool call
+records `{n, total_ms, max_ms}` per shape plus the client provenance join
+key; any single query over `[db] slow_ms` (default 100) also writes its
+own line tagged `"slow": true`. On by default (`[db] perf_log`,
+config.toml), best-effort, same 5 MB rotation. Read it with:
+
+```bash
+authorlm dbperf --days 30 --top 15
+```
+
+which prints the top shapes by total time and by worst single query, the
+per-day trend, the slow-log tail and per-client attribution — no
+one-off measurement, and no need to open the database.
+
 The scheduled cloud reviewer ("AuthorLM daily improvement PR") runs
 against a fresh GitHub checkout and cannot see `~/.authorlm` — it reads
 the snapshot committed at `_diagnostics/trace.jsonl` instead. Refresh it
