@@ -2159,8 +2159,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         raise LookupError(f"no ingested comment '{comment_id}' — pull first")
     if get_thread(db, mid, comment_id):
         raise ValueError("this comment already has a thread")
-    # Refuse delimiter-bearing prose before any Doc edit: {{…}} closes at
-    # the first `}}`, so nested braces would truncate and corrupt.
+    # Delimiter refusal is in `_mark_replace_requests` (form construction):
+    # {{…}} closes at the first `}}`, so nested braces would truncate.
     relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
     if not relpath:
         raise LookupError("the comment's file could not be attributed — "
@@ -2208,7 +2208,16 @@ GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
 def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
                            new: str) -> list[dict]:
     """Requests turning the span [start,end) (holding `old`) into the
-    styled pending form <<old>>{{new}}: old struck through, new green."""
+    styled pending form <<old>>{{new}}: old struck through, new green.
+
+    This is Doc-side form construction (merge #15): the delimiter guard
+    lives here so propose_change / critique_diff_write refuse before any
+    batchUpdate. Building the markers inline without going through
+    render_pending used to write a corrupt span first, then raise only
+    when a later read-back called render_pending — leaving <<>>{{}}
+    debris in the live tab and a proposed thread that approve/strip
+    would truncate at the first `}}`."""
+    threads_mod.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
     return [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
@@ -2230,6 +2239,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     """Requests inserting a green {{new}} paragraph at doc index `at`
     (a paragraph boundary): the critique pass's insertion form."""
+    threads_mod.assert_no_pending_markers("", new)
     text = "\n" + "{{" + new + "}}"
     return [
         {"insertText": {"location": {"tabId": tab_id, "index": at},

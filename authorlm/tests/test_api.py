@@ -5434,6 +5434,30 @@ def main_test() -> None:
               and pulled_c["threads"]["counts"] == {},
               str(pulled_c.get("comments")))
 
+        # Nested braces truncate at the first }} — refuse BEFORE Doc write.
+        # `_mark_replace_requests` is the form-construction gate; without
+        # the assert there, propose_change wrote the corrupt span then
+        # raised only when building the return value via render_pending.
+        tab_before_bad = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                              if t2["title"] == "01-choice.md")
+        try:
+            propose_change(
+                db, manuscript, "c-1", old="Doc went another way.",
+                new="f(x)={{a}}", note="nested braces",
+                service=stub, docs_service=stub)
+            check("propose_change refuses delimiter-bearing new "
+                  "before any Doc write", False)
+        except ValueError as err:
+            tab_after_bad = next(
+                t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                if t2["title"] == "01-choice.md")
+            check("propose_change refuses delimiter-bearing new "
+                  "before any Doc write",
+                  "pending-change grammar" in str(err)
+                  and tab_after_bad == tab_before_bad
+                  and th.get_thread(db, manuscript["id"], "c-1") is None,
+                  f"err={err!s} tab={tab_after_bad!r}")
+
         prop = propose_change(
             db, manuscript, "c-1", old="Doc went another way.",
             new="The Doc chose a firmer road.", note="strengthen per comment",
@@ -5799,6 +5823,10 @@ def main_test() -> None:
             "This text is nowhere in the essay.",
             "Should fail loudly.",
             2, "replace")
+        t_brace = _crit_thread(
+            "Second body paragraph stays.",
+            "Keep the {{nested}} braces out.",
+            3, "replace")
         t_rej = _crit_thread(
             "Second body paragraph stays.",
             "Should never appear.",
@@ -5806,7 +5834,7 @@ def main_test() -> None:
 
         result = critique_diff_write(
             db, manuscript, "07-critique-write.md",
-            [t_rep, t_ins, t_bad, t_rej], stub, stub)
+            [t_rep, t_ins, t_bad, t_brace, t_rej], stub, stub)
         tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
                       if t["title"] == "07-critique-write.md")
         written_ids = {t["id"] for t in result["written"]}
@@ -5824,6 +5852,13 @@ def main_test() -> None:
               and "Should fail loudly" not in tab_cw,
               f"written={written_ids} failed={result['failed']!r} "
               f"tab={tab_cw!r}")
+        check("critique_diff_write refuses delimiter-bearing new "
+              "without writing the corrupt span",
+              t_brace["id"] in failed_ids
+              and t_brace["id"] not in written_ids
+              and "{{nested}}" not in tab_cw
+              and "Keep the" not in tab_cw,
+              f"failed={result['failed']!r} tab={tab_cw!r}")
         check("critique_diff_write leaves local file as OLD (pristine)",
               (ms / "07-critique-write.md").read_text() == local_before)
         check("critique_diff_write reports a Doc tab URL",
