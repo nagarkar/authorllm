@@ -171,6 +171,24 @@ def main_test() -> None:
         check("scope chain = file, toc ancestors, manuscript-wide",
               passes.scope_chain(manuscript, "alpha.md")
               == ["alpha.md", "part.md", None])
+        # The tier is what makes `chapter` a group without a group entity
+        # (design-intent-scope §1.1). It is pure — an index into the
+        # chain — and it is what write start derives a member record from.
+        check("scope_tier: the file itself is the `file` tier",
+              passes.scope_tier(manuscript, "alpha.md", "alpha.md") == "file")
+        check("scope_tier: a toc ancestor is the `chapter` tier",
+              passes.scope_tier(manuscript, "alpha.md", "part.md") == "chapter")
+        check("scope_tier: no scope at all is manuscript-wide",
+              passes.scope_tier(manuscript, "alpha.md", None) == "manuscript")
+        check("scope_tier: a scope naming a file this one is NOT under is "
+              "no tier at all — not in scope, and derivation must not "
+              "silently promote it to manuscript-wide",
+              passes.scope_tier(manuscript, "alpha.md", "beta.md") is None)
+        check("scope_specificity orders file over chapter over manuscript, "
+              "and puts an out-of-chain scope last",
+              [passes.scope_specificity(manuscript, "alpha.md", s)
+               for s in ("alpha.md", "part.md", None, "beta.md")]
+              == [0, 1, 2, 3])
         crit_src = db.source("critic", "Test Critic", "test")
         critique.import_manifest(db, mid, {
             "source": {"name": "Test Critic", "detail": "test"},

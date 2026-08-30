@@ -2658,6 +2658,261 @@ def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
     return root, ws, db, manuscript, intent
 
 
+def check_intent_scope() -> None:
+    """Scope-derived intent attachment at the API layer: determinism of
+    the new block-A section, the metadata-forward re-scope, and the
+    `intent scope` validations (design-intent-scope §5.2)."""
+    import io
+    import json as _json
+
+    from authorlm import writing
+
+    root, ws, db, manuscript, wide = _writeup_fixture("authorlm-scope-")
+    try:
+        api.ensure_session(db, manuscript)
+        scoped = api.declare_intent(db, manuscript,
+                                    "Rewrite the Epictetus essay",
+                                    scope="01-epictetus.md")["intent"]
+        check("declare_intent(scope=…) round-trips the scope onto the row",
+              db.one("SELECT scope FROM declared_intents WHERE id = ?",
+                     (scoped["id"],))["scope"] == "01-epictetus.md")
+        plain = api.declare_intent(db, manuscript,
+                                   "A goal with no place named")["intent"]
+        check("...and the default is still NULL — an absent scope still "
+              "means manuscript-wide, and still opens an episode",
+              db.one("SELECT scope FROM declared_intents WHERE id = ?",
+                     (plain["id"],))["scope"] is None
+              and db.one("SELECT id FROM editorial_episodes WHERE "
+                         "intent_id = ?", (plain["id"],)) is not None)
+        api.abandon_intent(db, manuscript, plain["id"], "fixture")
+        from authorlm import mcp_server
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_result = mcp_server.declare_intent(
+                "A goal declared through MCP", scope="01-epictetus.md")
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+        check("declare_intent carries `scope` through the MCP surface too, "
+              "and says in words what the scope MEANS",
+              mcp_result["ok"]
+              and mcp_result["result"]["intent"]["scope"] == "01-epictetus.md"
+              and "serves this goal" in mcp_result["result"]["scope_means"],
+              str(mcp_result))
+        api.abandon_intent(db, manuscript,
+                           mcp_result["result"]["intent"]["id"], "fixture")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            started = api.write_start(db, manuscript, {}, "01-epictetus.md")
+        writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                              (started["writeup"]["id"],)))
+        block = _json.loads(writeup["metadata"])["intents"]
+        check("with no --intent the API derives both in-scope intents and "
+              "makes the file-scoped one primary",
+              {m["id"] for m in block["members"]} == {scoped["id"], wide["id"]}
+              and block["primary"] == scoped["id"], str(block))
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_plan(db, manuscript,
+                           [{"role": "opener", "concepts": [], "budget": 60}])
+        writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                              (writeup["id"],)))
+
+        beat = _json.loads(writeup["plan"])[0]
+        first = writing.assemble(db, manuscript, writeup, beat)
+        second = writing.assemble(db, manuscript, writeup, beat)
+        check("determinism: identical stored state gives a byte-identical "
+              "block A",
+              first.hashes["A"] == second.hashes["A"])
+        check("block A now carries an INTENTS section — the first time the "
+              "beat drafter is told what the rewrite is FOR",
+              "INTENTS" in first.frame
+              and "Rewrite the Epictetus essay" in first.frame, first.frame)
+        rendered = writing._intents_block(writeup)
+        check("block A ordering: primary first, then tier rank, then id",
+              rendered.splitlines()
+              == ["- [file] Rewrite the Epictetus essay",
+                  "- [manuscript] Rework the Epictetus essay"], rendered)
+        check("no ids and no timestamps in the rendered section — they move "
+              "between beats and would re-bill the cached prefix",
+              "di-" not in rendered and "T" not in rendered.split("[")[0],
+              rendered)
+
+        # The whole point of freezing the member record: `scope` is
+        # mutable now, and a live join would let a re-scope in another
+        # chat change block A between two beats.
+        episode = dict(db.one("SELECT * FROM editorial_episodes WHERE "
+                              "intent_id = ?", (scoped["id"],)))
+        moved = api.scope_intent(db, manuscript, scoped["id"],
+                                 manuscript_wide=True)
+        db.conn.execute("UPDATE declared_intents SET version = version + 1, "
+                        "statement = ? WHERE id = ?",
+                        ("A statement rewritten after ratification",
+                         scoped["id"]))
+        db.conn.commit()
+        third = writing.assemble(db, manuscript, writeup, beat)
+        check("re-scoping a FROZEN member does not change block A — the "
+              "member record is the source, never a live join (design F4's "
+              "silent invalidator, arriving by a new road)",
+              third.hashes["A"] == first.hashes["A"])
+        check("the writeup's member record keeps the tier and scope as they "
+              "stood at ratification",
+              [m for m in block["members"]
+               if m["id"] == scoped["id"]][0]["tier"] == "file")
+        history = _json.loads(db.one(
+            "SELECT metadata FROM declared_intents WHERE id = ?",
+            (scoped["id"],))["metadata"])["scope_history"]
+        check("...and the move is recorded on the intent, with the client "
+              "that made it",
+              len(history) == 1 and history[0]["from"] == "01-epictetus.md"
+              and history[0]["to"] is None and history[0]["by"], str(history))
+        check("no episode, transition or frozen member record is rewritten",
+              dict(db.one("SELECT * FROM editorial_episodes WHERE id = ?",
+                          (episode["id"],)))["transition_ids"]
+              == episode["transition_ids"])
+        check("scope_intent reports the active writeup that ratified the "
+              "intent, so the caller can say it is unaffected",
+              [h["writeup"] for h in moved["frozen_in"]] == [writeup["id"]],
+              str(moved))
+
+        joined = api.declare_intent(db, manuscript, "A goal joined by hand",
+                                    scope="01-epictetus.md")["intent"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_intents(db, manuscript, add=[joined["id"]])
+        writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                              (writeup["id"],)))
+        fourth = writing.assemble(db, manuscript, writeup, beat)
+        check("an explicit --add DOES change block A — the honest, single "
+              "invalidation the author asked for",
+              fourth.hashes["A"] != first.hashes["A"])
+
+        # --- `intent scope` validation.
+        for label, kwargs in (
+                ("two places at once", {"scope": "01-epictetus.md",
+                                        "manuscript_wide": True}),
+                ("no place at all", {}),
+        ):
+            try:
+                api.scope_intent(db, manuscript, wide["id"], **kwargs)
+                failed = None
+            except (ValueError, LookupError) as err:
+                failed = str(err)
+            check(f"scope_intent refuses {label}",
+                  failed and "exactly one place" in failed, str(failed))
+        try:
+            api.scope_intent(db, manuscript, wide["id"], scope="nope.md")
+            failed = None
+        except (ValueError, LookupError) as err:
+            failed = str(err)
+        check("scope_intent refuses a file that is not in the manuscript",
+              failed is not None, str(failed))
+        try:
+            api.scope_intent(db, manuscript, wide["id"],
+                             chapter="01-epictetus.md")
+            failed = None
+        except (ValueError, LookupError) as err:
+            failed = str(err)
+        check("scope_intent refuses --chapter on a file with no essays "
+              "beneath it: the word would name nothing",
+              failed and "no essays beneath it" in failed, str(failed))
+        done = api.declare_intent(db, manuscript, "Already finished")["intent"]
+        api.complete_intent(db, manuscript, done["id"], "done")
+        try:
+            api.scope_intent(db, manuscript, done["id"],
+                             scope="01-epictetus.md")
+            failed = None
+        except (ValueError, LookupError) as err:
+            failed = str(err)
+        check("scope_intent refuses a completed intent — scope places where "
+              "FUTURE work routes, and there is none",
+              failed and "completed" in failed, str(failed))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_scope_evidence() -> None:
+    """The one-time triage's read (design-intent-scope §4.1): files the
+    intent's episodes ACTUALLY touched, and a deterministic suggestion
+    with its reason. Zero model calls."""
+    import io
+
+    from authorlm.db import ko_fields
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-scopeev-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "part.md"\n\n'
+            '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "loose.md"\n')
+        for name in ("part.md", "alpha.md", "beta.md", "loose.md"):
+            (ms / name).write_text(f"# {name}\n\nText.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms), "--no-extract"])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        api.ensure_session(db, manuscript)
+        version = db.one("SELECT id FROM manuscript_versions LIMIT 1")
+
+        def seed(statement, locations):
+            intent = api.declare_intent(db, manuscript, statement)["intent"]
+            episode = db.one("SELECT * FROM editorial_episodes WHERE "
+                             "intent_id = ?", (intent["id"],))
+            ids = []
+            for location in locations:
+                row = ko_fields("tr")
+                row.update(manuscript_id=manuscript["id"], version_before=None,
+                           version_after=version["id"] if version else "v",
+                           kind="rewrite", location=location,
+                           summary="seeded", detail="{}")
+                db.insert("editorial_transitions", row)
+                ids.append(row["id"])
+            db.update("editorial_episodes", episode["id"],
+                      {"transition_ids": json.dumps(ids)})
+            return intent
+
+        one_file = seed("Cut the inheritance down",
+                        ["alpha.md#Intro", "alpha.md", "alpha.md"])
+        one_part = seed("Tighten the part", ["alpha.md", "beta.md"])
+        spread = seed("Something everywhere", ["alpha.md", "loose.md"])
+        untouched = seed("Never let a name carry an argument", [])
+
+        rows = {r["id"]: r for r in api.scope_evidence(db, manuscript)}
+        check("scope_evidence reports every active UNSCOPED intent",
+              set(rows) == {one_file["id"], one_part["id"], spread["id"],
+                            untouched["id"]}, str(list(rows)))
+        check("all transitions in one file → suggest that file, and say why",
+              rows[one_file["id"]]["suggested"]["tier"] == "file"
+              and rows[one_file["id"]]["suggested"]["scope"] == "alpha.md"
+              and "3 of them" in rows[one_file["id"]]["suggested"]["why"],
+              str(rows[one_file["id"]]["suggested"]))
+        check("transitions across essays that share a toc ancestor → "
+              "suggest that part",
+              rows[one_part["id"]]["suggested"]
+              == {"tier": "chapter", "scope": "part.md",
+                  "why": "2 essays, all under part.md"},
+              str(rows[one_part["id"]]["suggested"]))
+        check("spread with no common ancestor → manuscript-wide",
+              rows[spread["id"]]["suggested"]["tier"] == "manuscript"
+              and "across the book" in rows[spread["id"]]["suggested"]["why"],
+              str(rows[spread["id"]]["suggested"]))
+        check("no recorded work at all → manuscript-wide, and the reason "
+              "says it is the author's call rather than the evidence's",
+              rows[untouched["id"]]["suggested"]["tier"] == "manuscript"
+              and "your call" in rows[untouched["id"]]["suggested"]["why"],
+              str(rows[untouched["id"]]["suggested"]))
+        check("the counted files are the ones the transitions name, "
+              "heading-suffix stripped, commonest first",
+              [f["file"] for f in rows[one_file["id"]]["files"]] == ["alpha.md"]
+              and rows[one_file["id"]]["files"][0]["transitions"] == 3,
+              str(rows[one_file["id"]]["files"]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_placeholder_reader_paths() -> None:
     """AC-1 review F5/F6/RK6: the paths that READ a mid-rewrite file.
 
@@ -3789,6 +4044,8 @@ def main_test() -> None:
     check_client_stamps()
     check_provenance_verb()
     check_db_perf_log()
+    check_intent_scope()
+    check_scope_evidence()
     check_placeholder_reader_paths()
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()
@@ -8849,7 +9106,7 @@ def main_test() -> None:
         expected = {
             "list_manuscripts", "get_manuscript_metadata",
             "set_manuscript_metadata", "resolve_file", "get_status",
-            "declare_intent",
+            "declare_intent", "scope_intent",
             "list_intents", "complete_intent", "abandon_intent",
             "collect_revision", "get_guidance", "review_suggestion",
             "get_briefing", "get_concepts", "add_concept", "link_concepts",

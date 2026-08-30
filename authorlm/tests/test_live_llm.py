@@ -249,7 +249,7 @@ def section_episode(ctx: dict) -> None:
     run(ws, "collect")
     intent_id = None
     for line in run(ws, "intent", "list").splitlines():
-        if "(active)" in line and "histories" in line:
+        if "(active" in line and "histories" in line:
             intent_id = line.split("[")[1].split("]")[0]
     out = run(ws, "intent", "complete", intent_id, "--outcome",
               "Histories introduced via the chess story")

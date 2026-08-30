@@ -136,6 +136,30 @@ def scope_chain(manuscript: dict, file: str) -> list[str | None]:
     return [file, *toc_ancestors(manuscript, file), None]
 
 
+def scope_tier(manuscript: dict, file: str,
+               scope: str | None) -> str | None:
+    """Where a scope sits relative to this file: `file`, `chapter` (any
+    toc ancestor, however many levels up), or `manuscript` (no scope at
+    all). None when the scope names a file this one is not under — an
+    intent the author reached for explicitly, which is legitimate and is
+    noted rather than refused (design-intent-scope §1.3)."""
+    if scope is None:
+        return "manuscript"
+    chain = scope_chain(manuscript, file)
+    if scope not in chain:
+        return None
+    return "file" if chain.index(scope) == 0 else "chapter"
+
+
+def scope_specificity(manuscript: dict, file: str,
+                      scope: str | None) -> int:
+    """How specific a scope is to this file — smaller is more specific.
+    The chain is already ordered nearest-first, so the nearest chapter
+    ancestor beating a further one is free."""
+    chain = scope_chain(manuscript, file)
+    return chain.index(scope) if scope in chain else len(chain)
+
+
 def intents_in_scope(db: Database, manuscript: dict, file: str,
                      status: str = "active") -> list[dict]:
     chain = scope_chain(manuscript, file)

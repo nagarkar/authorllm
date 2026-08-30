@@ -28,6 +28,12 @@ A beat may be grounded ONLY in:
 5. CONCEPT NOTES — the author's ratified definitions.
 6. ACCEPTED TEXT SO FAR — this essay's own prose, already accepted by the author.
 
+INTENTS states what this rewrite is *for* — the author's declared goals that cover
+this essay. It governs selection and emphasis: which of the permitted materials above
+to reach for, and what to leave alone. It is **not** a seventh ground and **not** a
+source of facts. A claim that appears only in an intent is not grounded; it is a
+question for the author.
+
 NOT permitted, under any framing: your general knowledge of philosophy, history, or
 any thinker; any citation, date, quotation, title, or attribution not present above;
 any anecdote presented as the author's; any claim about another essay beyond what its
