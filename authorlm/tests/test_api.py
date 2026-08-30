@@ -2967,6 +2967,75 @@ def check_scope_evidence() -> None:
               "mean opposite things",
               "book-wide (ruled)" in listing
               and "book-wide (default)" in listing, listing)
+
+        # --- DECLARING book-wide is a ruling too, and only the EXPLICIT
+        # flag is one. Without this the backfill just refills: every goal
+        # the author deliberately declares book-wide from here on lands
+        # back on the sheet as "no place".
+        before = api.scope_tally(db, manuscript)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "intent", "declare",
+                      "A rule the author means to apply everywhere",
+                      "--book-wide"])
+            cli_main(["--workspace", str(ws), "intent", "declare",
+                      "A goal nobody has placed"])
+        after = api.scope_tally(db, manuscript)
+        listed = {r["statement"] for r in api.scope_evidence(db, manuscript)}
+        check("declaring with the EXPLICIT --book-wide flag records the "
+              "ruling, so the goal never reaches the triage sheet",
+              "A rule the author means to apply everywhere" not in listed,
+              str(sorted(listed)))
+        check("...and declaring with NO flag at all does not: an absent "
+              "scope is a default, and a default is not a decision",
+              "A goal nobody has placed" in listed, str(sorted(listed)))
+        check("the tally moves by exactly one in each direction",
+              (after["ruled_book_wide"] - before["ruled_book_wide"],
+               after["no_place"] - before["no_place"],
+               after["scoped"] - before["scoped"]) == (1, 1, 0),
+              f"{before} -> {after}")
+
+        explicit = api.declare_intent(db, manuscript, "Explicit through the api",
+                                      book_wide=True)["intent"]
+        absent = api.declare_intent(db, manuscript, "Absent through the api")["intent"]
+        check("the api layer carries the same distinction, so it is not a "
+              "property of the CLI's argument parsing",
+              api._scope_ruled(dict(db.one(
+                  "SELECT * FROM declared_intents WHERE id = ?",
+                  (explicit["id"],))))
+              and not api._scope_ruled(dict(db.one(
+                  "SELECT * FROM declared_intents WHERE id = ?",
+                  (absent["id"],)))), "")
+        check("the recorded entry is the SAME null -> null shape the "
+              "triage verb writes, so one predicate reads both",
+              json.loads(db.one(
+                  "SELECT metadata FROM declared_intents WHERE id = ?",
+                  (explicit["id"],))["metadata"])["scope_history"][0]["to"]
+              is None, "")
+
+        from authorlm import mcp_server
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_ruled = mcp_server.declare_intent(
+                "Explicit through MCP", book_wide=True)
+            mcp_absent = mcp_server.declare_intent("Absent through MCP")
+            evidence = mcp_server.list_intents(evidence=True)
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+        mcp_listed = {r["statement"] for r
+                      in evidence["result"]["unscoped_evidence"]}
+        check("MCP distinguishes them too — the surface the assistant uses "
+              "when it asks 'just this essay, the whole part, or the whole "
+              "book?' can record the answer as a ruling",
+              mcp_ruled["ok"] and mcp_absent["ok"]
+              and "Explicit through MCP" not in mcp_listed
+              and "Absent through MCP" in mcp_listed,
+              str(sorted(mcp_listed)))
+        check("and list_intents(evidence=True) carries the sitting's "
+              "closing numbers",
+              set(evidence["result"]["scope_tally"])
+              == {"active", "scoped", "ruled_book_wide", "no_place"},
+              str(evidence["result"].get("scope_tally")))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

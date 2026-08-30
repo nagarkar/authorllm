@@ -866,8 +866,12 @@ def cmd_intent(args):
                                           args.chapter, args.manuscript_wide)
             except (ValueError, LookupError) as err:
                 sys.exit(f"error: {err}")
+        # `args.manuscript_wide` is the author saying "the whole book",
+        # which is not the same act as saying nothing at all. Only the
+        # explicit flag records a ruling.
         result = api.declare_intent(db, manuscript, args.statement,
-                                    scope=scope)
+                                    scope=scope,
+                                    book_wide=bool(args.manuscript_wide))
         row = result["intent"]
         print(f"Declared intent [{row['id'][:8]}]: {args.statement}")
         print(ui.dim("  " + _scope_sentence(row["scope"])))

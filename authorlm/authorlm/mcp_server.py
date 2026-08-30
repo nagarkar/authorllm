@@ -211,6 +211,7 @@ def triage_app_request(method: str, params: dict[str, Any]) -> dict:
 
 @mcp.tool()
 def declare_intent(statement: str, scope: str | None = None,
+                   book_wide: bool = False,
                    manuscript: str | None = None) -> dict:
     """Declare the author's current writing objective (e.g. 'Introduce
     gravity'). Opens a session lazily if none is active. Returns a
@@ -222,12 +223,20 @@ def declare_intent(statement: str, scope: str | None = None,
     goal that really is book-wide — an unscoped intent attaches to EVERY
     future writeup. When the author has not said, ask one line ("just
     this essay, the whole part, or the whole book?"); never default
-    silently."""
+    silently.
+
+    When they answer "the whole book", pass `book_wide=True` rather than
+    simply omitting `scope`. Both leave the scope empty, but the flag
+    records the answer as a RULING — without it the goal reappears on the
+    author's scope-triage sheet as one they have never placed, and the
+    sitting they just finished refills. Omit it only when they genuinely
+    did not say."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         session, created = api.ensure_session(db, ms)
-        result = api.declare_intent(db, ms, statement, scope=scope)
+        result = api.declare_intent(db, ms, statement, scope=scope,
+                                    book_wide=book_wide)
         result["session_opened"] = created
         result["scope_means"] = (
             f"every rewrite of {result['intent']['scope']} (and of anything "

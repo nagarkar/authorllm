@@ -352,16 +352,42 @@ def intent_preview(db: Database, manuscript: dict, statement: str) -> dict:
     return {"matched": matched[:5], "suggestions": suggestions[:3], "graph_empty": False}
 
 
+def _scope_ruling(before: str | None, after: str | None) -> dict:
+    """One entry of `metadata.scope_history` — the record that the author
+    DECIDED where a goal lives. Spelled once, because `_scope_ruled`
+    reads it and the two must not drift: for a book-wide ruling both ends
+    are null, and the entry's existence is the only thing that
+    distinguishes the decision from the default."""
+    return {"from": before, "to": after, "at": now_iso(),
+            "by": clients.current().key()}
+
+
 def declare_intent(db: Database, manuscript: dict, statement: str,
-                   scope: str | None = None) -> dict:
+                   scope: str | None = None, book_wide: bool = False) -> dict:
     """`scope` is where the goal applies: a file, a toc opener (which
     covers every essay beneath it), or None for manuscript-wide. It is
     what `write start` derives the writeup's intents from, so an absent
     scope now has a consequence — every future writeup carries the goal
-    — and both surfaces say so at declaration time (design §15.17, Q2)."""
+    — and both surfaces say so at declaration time (design §15.17, Q2).
+
+    `book_wide` is the author EXPLICITLY choosing the whole book, which
+    is a different act from not naming a place at all. Both leave `scope`
+    NULL, so the ruling is recorded in `metadata.scope_history` exactly as
+    `intent scope --book-wide` records it — otherwise every deliberate
+    book-wide declaration would land straight back on the triage sheet as
+    "no place", and the author's sitting would refill as fast as they
+    emptied it. An ABSENT flag records nothing: a default is not a
+    decision, and the sheet is right to ask about it."""
     if scope is not None:
         scope = _resolve_relpath(manuscript, scope)
     row = ses.declare_intent(db, manuscript["id"], statement, scope=scope)
+    if book_wide and scope is None:
+        meta = loads(row["metadata"], {}) or {}
+        meta["scope_history"] = [_scope_ruling(None, None)]
+        db.update("declared_intents", row["id"],
+                  {"metadata": json.dumps(meta)})
+        row = dict(row)
+        row["metadata"] = json.dumps(meta)
     return {
         "intent": dict(row),
         "preview": intent_preview(db, manuscript, statement),
@@ -469,8 +495,7 @@ def scope_intent(db: Database, manuscript: dict, prefix: str,
     target = _scope_target(manuscript, scope, chapter, manuscript_wide)
     meta = loads(intent["metadata"], {}) or {}
     history = meta.get("scope_history") or []
-    history.append({"from": intent["scope"], "to": target, "at": now_iso(),
-                    "by": clients.current().key()})
+    history.append(_scope_ruling(intent["scope"], target))
     meta["scope_history"] = history
     db.update("declared_intents", intent["id"],
               {"scope": target, "metadata": json.dumps(meta)})
