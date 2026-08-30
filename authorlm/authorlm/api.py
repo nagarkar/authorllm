@@ -4638,10 +4638,17 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
 
 
 def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
-    """Put the original text back and withdraw the written forms. Two
-    lines of recovery for a state that is fully described by the bytes —
-    including the crash between "compose" and "write threads", which
-    leaves a marked file with no written rows."""
+    """Put the original text back and RETURN the written forms to
+    `accepted`. Two lines of recovery for a state that is fully
+    described by the bytes — including the crash between "compose" and
+    "write threads", which leaves a marked file with no written rows.
+
+    Returned to `accepted`, not withdrawn, and the difference matters:
+    the author's verdicts survive. Unmark undoes the MARKING, not the
+    triage. `filter settle` applies them, `filter triage --undo` reopens
+    them, `filter abandon` throws them away — and the author chooses
+    which, because discarding a verdict is never something a recovery
+    verb does on its own."""
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
     _checkout_gate(db, manuscript, rel)
@@ -4651,7 +4658,7 @@ def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
                                    origin_type=FILTER_ORIGIN)
     for t in written:
         db.update("doc_threads", t["id"], {"state": "accepted"})
-    return {"file": rel, "withdrawn": len(written), "text": text,
+    return {"file": rel, "reopened": len(written), "text": text,
             "marker_warnings": marker_warnings}
 
 
@@ -4670,6 +4677,27 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
     if row is None:
         raise LookupError(f"no filter run on {rel} to roll back.")
     run = dict(row)
+    # A marked file is mid-settle: its bytes are staged proposals the
+    # author may have post-edited, and rolling back over them would
+    # discard those edits AND leave written threads pointing at text
+    # that is no longer there. Refuse, naming both exits — the same
+    # shape `filter abandon` uses, and for the same reason: the author
+    # decides whether the pause ends in an apply or an undo.
+    #
+    # Chosen over documenting an orphan recovery because the orphan this
+    # would create is worse than the one `filter status` already finds:
+    # there the bytes describe the state completely, whereas a rollback
+    # mid-pause destroys the author's post-edits with nothing left to
+    # recover them from.
+    if staging.is_marked((Path(manuscript["path"]) / rel)
+                         .read_text(encoding="utf-8")):
+        raise ValueError(
+            f"{rel} is mid-settle: its bytes carry staged forms you may "
+            f"have already reworded, and a rollback would destroy those "
+            f"edits with nothing left to recover them from. Finalize "
+            f"('filter settle {rel}') or put the original text back "
+            f"('filter unmark {rel}') first — then roll back if you "
+            f"still want to.")
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-filter-rollback")
     text = staging.rollback(db, manuscript, rel, run["source_version_id"])

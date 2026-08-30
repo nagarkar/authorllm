@@ -1782,6 +1782,28 @@ why:
 | `write_abandon`, both collects | **excluded, deliberately.** They record the pre-abandon snapshot (RISK K2) and the restore — the unwinding of the writeup, not work done under its goal. |
 | `_critique_resolve_essay`, collect 1 (`pre-critique-resolve`) | **ambient, by declaration.** It snapshots the author's own uncollected local edits, which PREDATE this verb — the same reasoning as `write_start`'s first collect. |
 | `_critique_resolve_essay`, collect 2 (`critique-resolve`) | **NO episode** (`api.NO_EPISODE`). Added 2026-08-30 (AQ). |
+| `_critique_rollback`, collect 1 (`pre-critique-rollback`) | **ambient, by declaration.** Same reasoning: the author's own uncollected edit is their work and predates the verb. |
+| `_critique_rollback`, collect 2 (`critique-rollback`) | **NO episode.** ADDED 2026-08-30 (AQ) — there was no second collect at all, so the version history held the pre-rollback snapshot and then a GAP where the restore should have been. Ambient, it would have credited whatever goal happened to be open with the UNWINDING of an edit pass. |
+| `filter_run`, `filter_record` | no collect. |
+| `filter_settle`, collect 1 (`pre-filter-settle`) | **ambient, by declaration.** The author's own uncollected edit, snapshotted before the settle overwrites the file. |
+| `filter_settle`, collect 2 (`filter-settle`) | **NO episode.** A filter pass is hygiene, not work toward a declared goal (§15.20). |
+| `filter_rollback`, collect 1 (`pre-filter-rollback`) | **ambient, by declaration.** As above. |
+| `filter_rollback`, collect 2 (`filter-rollback`) | **NO episode.** The unwinding of a pass, as with `critique-rollback`. |
+
+**`write_abandon`'s two collects are unchanged and stay as ratified.** They
+record the pre-abandon snapshot (RISK K2) and the restore, and their row above
+calls them "excluded, deliberately — the unwinding of the writeup, not work
+done under its goal." A reader coming from the rollback rows will notice that
+`critique-rollback` and `filter-rollback` are *also* unwindings and are filed
+under NO episode rather than left to the ambient default, and may read the two
+as inconsistent. The standing ruling holds and the cases differ:
+`write_abandon` unwinds a writeup whose primary intent is KNOWN, so the
+question there is which episode to route to and the answer is none of them —
+excluded from routing, ambient by default. The rollback verbs sit on the edit
+door, which has never had an episode to route to at all, so for them "none" has
+to be said explicitly or the default says something false. If a future sitting
+wants the two unified, that is a ruling to make on the record and not a
+tidy-up to perform in passing.
 
 **The table was incomplete outside the write path too, and that omission
 also had teeth (2026-08-30).** `_critique_resolve_essay` runs two collects and
@@ -2018,7 +2040,12 @@ applying `threads.py`'s already-ratified law — "while a thread is pending, the
 CANONICAL text is the old text" — to local files as well as to Doc pulls, in
 one line inside `read_manuscript_files`, beside the `strip_embed_lines` call
 that has always canonicalized at that same seam for the same kind of reason
-(local derived machinery is not the essay). Every observer therefore reads the
+(local derived machinery is not the essay). The local grammar is the REPLACE
+form ALONE — `<<old>>{{new}}` — and not the Doc canonicalizer: in a Doc tab a
+bare `{{…}}` is a critique-pass insertion, but in a manuscript file it is the
+author's `{{title}}` or their set notation, and the broad strip deleted every
+one of them from everything the system observes, silently. A filter never
+stages an insertion, so the narrow rule loses nothing. Every observer therefore reads the
 essay; only the settle verbs, which own the grammar, read the markers. Two
 guards are NOT free and are built with it: `critique_forms_pending`
 generalizes over `origin_type`, and `_refuse_mid_rewrite` grows a byte-level
@@ -2031,8 +2058,12 @@ worth challenging.
 **Attribution: no episode, and that is the point.** A filter's verdicts are
 `evidence` rows with `evidence_type='filter_edit'` and `episode_id = NULL` —
 byte for byte the shape `critique_edit` has always had — and the settle's
-collect attaches its transitions to **no** episode, through a new
-`api.NO_EPISODE` sentinel. Neither of the obvious homes was right. Filing a
+SECOND collect attaches its transitions to **no** episode, through a new
+`api.NO_EPISODE` sentinel. Its FIRST collect stays ambient, deliberately:
+that one snapshots the author's own uncollected local edits before the settle
+overwrites the file, and those predate the verb and are their work. The two
+collects of one verb have different dispositions for different reasons, and
+§15.17's table now names every one of them. Neither of the obvious homes was right. Filing a
 duplicate-word sweep against the file's in-scope intents would make §15.17's
 completion report say a goal was served by hygiene; a filter-owned episode
 would be the grouping object §15.17 refused. Explained rejections still reach
@@ -2105,3 +2136,34 @@ text called the checkout gate "mostly unreachable" cover for it and said
 mostly unreachable is not a guard. A marked file is now skipped and reported
 by name on pull, in the shape `conflicts` and `local_ahead` already use, and
 `--force` cannot reach past it.
+
+5. **The canonicalization is the REPLACE form only, and the text's stated
+reason for the broad one was false.** The design specified `strip_pending` on
+the grounds that it is "pure, idempotent on unmarked text". It is not:
+`{{title}}`, `{{a, b}}` and any Handlebars sample in an essay ABOUT templating
+were deleted from every observed copy of the manuscript, with no warning,
+because once they were gone there was nothing left to warn about — and
+`is_marked` tripped on them, refusing such a file's Doc push forever with a
+message about a settle that did not exist. Four sites narrowed
+(`read_manuscript_files`, `is_marked`, `unmark`, and the settle's
+`final_text_from_marked`, which would otherwise have deleted a `{{title}}`
+from the finished essay). A filter never stages an insertion, so nothing this
+seam exists for is lost.
+
+6. **A re-record supersedes.** An ordinal the new reply did not reach is a
+proposal that no longer exists; left standing it appeared in the next `filter
+edits` list under a number the author reads as current, and could be accepted
+into a settle it was never part of. `passes.stage` has always done this for
+the critique pass, and the door's two producers now agree about it.
+
+7. **`_critique_rollback` gets the same treatment as `_critique_resolve`.** It
+had no post-rollback collect at all, so the restore was never recorded; and
+collected ambiently it would have credited whatever goal was open with the
+undoing of an edit pass. `write_abandon`'s two collects stay as ratified —
+§15.17 now says why the cases differ rather than leaving a reader to infer an
+inconsistency.
+
+8. **`filter rollback` refuses on a marked file**, naming both exits: a
+rollback mid-pause destroys post-edits with nothing left to recover them from,
+which is a strictly worse orphan than the one `filter status` finds, where the
+bytes describe the state completely.

@@ -97,7 +97,7 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
                   f"replacement characters in place of the invalid bytes",
                   file=sys.stderr)
             text = path.read_text(encoding="utf-8", errors="replace")
-        # A file carrying pending-change forms is mid-settle. The
+        # A file carrying a `<<old>>{{new}}` form is mid-settle. The
         # ratified law (threads.py's docstring) is that the canonical
         # text of a pending form is its OLD half: content changes at
         # approval, not at proposal. That law has always been applied to
@@ -116,13 +116,19 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
         # same kind of thing by a different road — machinery the author
         # can see, which is not yet part of the essay.
         #
-        # `strip_pending` is pure and a no-op on text with no forms, so
-        # this is unconditional; it warns rather than guessing on stray
-        # or unbalanced markers, and the only code that sees markers is
-        # the settle code, which reads Path.read_text directly and owns
-        # the grammar (filter-pass design §2.3).
+        # `strip_replacements`, NOT `strip_pending`. The Doc
+        # canonicalizer also deletes a bare `{{…}}`, because in a Doc tab
+        # nothing put one there but AuthorLM and it is a critique-pass
+        # insertion. In a LOCAL file the opposite holds: `{{title}}` in a
+        # template, `{{a, b}}` in set notation, a Handlebars sample in an
+        # essay about templating are all the author's own prose, and the
+        # broad strip deleted every one of them from everything the
+        # system observes — silently, since nothing was left to warn
+        # about. The narrow function is a true no-op on text carrying no
+        # `<<old>>{{new}}` form, which is what makes it safe here
+        # unconditionally (filter-pass design §2.3).
         from . import threads as _threads
-        files[rel] = _threads.strip_pending(strip_embed_lines(text))[0]
+        files[rel] = _threads.strip_replacements(strip_embed_lines(text))[0]
     return files
 
 

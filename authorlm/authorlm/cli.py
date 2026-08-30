@@ -1526,6 +1526,22 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
         db.update("doc_threads", t["id"], {"state": "withdrawn"})
+    # The restore itself, recorded — and filed under NO episode (AQ;
+    # §15.17's disposition table). Two things were wrong here. The
+    # rollback was never collected at all, so the version history had the
+    # pre-rollback snapshot and then a gap where the restore should be;
+    # and had it been collected ambiently it would have filed the
+    # UNWINDING of an edit pass against whatever goal happened to be
+    # open, which is the same lie `critique resolve` was telling one
+    # function away. `filter rollback` does exactly this, and the two
+    # verbs now agree.
+    #
+    # The pre-rollback collect above stays AMBIENT, deliberately: it
+    # snapshots the author's own uncollected edit, which is their work
+    # and predates this verb.
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="critique-rollback",
+                    episode=api.NO_EPISODE)
     try:
         service = gdocs.get_service(config, args.workspace, interactive=True)
         docs_service = gdocs.get_docs_service(config, args.workspace,
@@ -3420,7 +3436,7 @@ def cmd_filter(args):
                 print(ui.yellow(f"  {warn}"))
             print(ui.green(
                 f"{result['file']} restored to its original text; "
-                f"{result['withdrawn']} form(s) returned to 'accepted' — "
+                f"{result['reopened']} form(s) returned to 'accepted' — "
                 f"'filter settle' applies them, 'filter triage --undo' "
                 f"reopens them."))
             return
@@ -3592,6 +3608,25 @@ def cmd_export(args):
         print(f"Wrote {result[args.action]}.")
     for warning in result["warnings"]:
         print(ui.yellow(f"warning: {warning}"))
+
+
+# Verbs that send an LLM prompt announce it in --help and point at the
+# registry, so the words shaping the model are always one command away.
+#
+# Module level so the suite can iterate the REAL set. It lived inside the
+# parser builder, and the test that asserts the note is present listed
+# five of these by hand — so a new LLM verb was unchecked by
+# construction.
+LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
+             "analyze", "lens", "sweep", "illus", "summarize", "doc",
+             "belief", "critique", "triage-app",
+             # `filter run --native` is the filter pass's one call, and
+             # it is off by default — the verb still announces the prompt
+             # it would send, because the CHAT path drafts under exactly
+             # those rules.
+             "filter",
+             # `write draft` is the write path's one LLM call.
+             "write"}
 
 
 def _stdin_text() -> str | None:
@@ -6068,19 +6103,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     original_add_parser = sub.add_parser
 
-    # Verbs that send an LLM prompt announce it in --help and point at the
-    # registry, so the words shaping the model are always one command away.
     from .prompt_registry import HELP_NOTE
-    LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
-                 "analyze", "lens", "sweep", "illus", "summarize", "doc",
-                 "belief", "critique", "triage-app",
-                 # `filter run --native` is the filter pass's one call,
-                 # and it is off by default — the verb still announces
-                 # the prompt it would send, because the CHAT path drafts
-                 # under exactly those rules.
-                 "filter",
-                 # `write draft` is the write path's one LLM call.
-                 "write"}
 
     def add_parser(name, *a, **kw):
         kw.setdefault("parents", [common])

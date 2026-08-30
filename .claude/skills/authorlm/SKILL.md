@@ -610,6 +610,29 @@ filter in an existing class is a file and no code; a third class would be
 code. `filter add <name>` with the artifact on stdin; `filter list`,
 `filter show <name>`.
 
+**Three filters are written and waiting to be ratified**, in full, in
+`docs/filter-pass-design.md`'s appendix:
+
+- **`duplicate-words`** (sequential) — a word or phrase used again too
+  soon, with a carried ledger. Knows that a refrain is not a tic, that a
+  term of art repeats as often as the argument needs, and that a motif
+  word recurring across the book is the book working.
+- **`metaphor-consistency`** (global) — where a figure is used against
+  itself: a motif carrying two incompatible senses, a mixed figure, a
+  metaphor asked to do an argument's work. Its prelude reads the essay
+  whole and returns a motif registry.
+- **`audio-friendly`** (sequential) — where the prose works on the page
+  and fails in the ear, with a carried voice note.
+
+**They are not installed.** `filter list` on the author's manuscript is
+empty until they say yes to one. When the author reaches for a filter,
+or when one of these three would obviously serve what they are doing,
+read them the relevant one AS PROSE — what it flags, and what it
+deliberately refuses to flag — and offer to install it. On a yes, pipe
+that appendix block verbatim into `filter add <name>`. Do not paraphrase
+the artifact when installing it: what goes in the file is what they
+ratified. A filter they have not read is a filter they cannot rule on.
+
 **THE FLAG POLARITY IS INVERTED against `write draft`, and the author
 must never be confused about which way round it is.** `authorlm filter
 run <name> <essay>` makes **no model call at all** — it prints the
@@ -640,10 +663,10 @@ The loop, per essay:
 4. Verdicts: `list_filter_edits` / `triage_filter_edits` in chat, or
    `filter triage <essay> --accept … --reject … --reason "…"` in the
    shell. **Take a rejection's reason in the author's own words,
-   verbatim.** It is the highest-value evidence the run produces, and
-   block A of the NEXT run on this file renders it before the model
-   starts — which is most of what makes a filter approximately
-   idempotent.
+   verbatim.** It is the highest-value evidence the run produces: the
+   next run of this filter on this essay is shown their reasons before
+   it starts, which is most of what stops it proposing the same thing
+   twice.
 5. `authorlm filter settle <essay>` applies the accepted edits directly
    (the default: the triage verdict already IS the ruling). `--pause`
    instead writes `<<old>>{{new}}` forms into the local file for the

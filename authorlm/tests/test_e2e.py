@@ -5657,6 +5657,14 @@ def scenario_filter(root: Path) -> None:
         check("F7 the output says the polarity inversion out loud",
               "opposite of 'write draft'" in out1, out1)
         out2 = run(ws, "filter", "run", "duplicate-words", "02-wall.md")
+        dry = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--dry-run")
+        check("--dry-run is a SILENT NO-OP alias, kept for muscle memory "
+              "from `write draft`: identical output, and still no call",
+              _block_hash(dry, "S") == _block_hash(out2, "S")
+              and _block_hash(dry, "C") == _block_hash(out2, "C")
+              and StubLLMHandler.REQUESTS == before,
+              f"{_block_hash(dry, 'C')} vs {_block_hash(out2, 'C')}")
         check("F8 two consecutive runs with no state change produce "
               "BYTE-IDENTICAL blocks S and A (the write path's "
               "silent-invalidator check, reused)",
@@ -5721,6 +5729,22 @@ def scenario_filter(root: Path) -> None:
             ("F13 an echo mismatch on ONE unit refuses the WHOLE reply",
              _filter_reply(units, window,
                            echo_override={7: "Not the real echo at all"}),
+             "echo mismatch"),
+            # A NEAR MISS, not a wild one: the real echo with a single
+            # word changed. This is the case a well-meaning fuzzy
+            # matcher would wave through, and the whole anchoring law is
+            # that there is no fuzzy match and no closest paragraph. A
+            # casefold-prefix or edit-distance matcher passes every
+            # other test in this loop and fails only this one.
+            ("the anchoring law admits NO fuzzy match: the real echo "
+             "with one word changed is still refused, and the expected "
+             "and received echoes are both printed",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:4] + ["stone"])}),
+             "echo mismatch"),
+            ("...and a case-only difference is refused too",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:5]).upper()}),
              "echo mismatch"),
             ("F14 a missing unit entry refuses the whole reply, naming "
              "the missing n",
@@ -5817,6 +5841,39 @@ def scenario_filter(root: Path) -> None:
               len(after) == 2
               and [r["id"] for r in after] == [r["id"] for r in rows],
               [r["origin_id"] for r in after])
+
+        # A re-record with FEWER proposals must SUPERSEDE, not accumulate.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+        }), "filter", "record", "02-wall.md")
+        open_after = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'proposed' "
+            "ORDER BY origin_id", (mid,))]
+        check("re-recording a window with FEWER proposals SUPERSEDES the "
+              "ones it dropped: the reply is the authoritative answer for "
+              "its window, so an ordinal it did not reach is a proposal "
+              "that no longer exists. Left standing, the stale row would "
+              "appear in the next `filter edits` list under a number the "
+              "author reads as current, and could be accepted into a "
+              "settle it was never part of",
+              len(open_after) == 1
+              and open_after[0]["proposed_old"] == units[1],
+              [(r["origin_id"], r["state"], r["proposed_old"][:30])
+               for r in open_after])
+        withdrawn = db.all(
+            "SELECT origin_id FROM doc_threads WHERE manuscript_id = ? "
+            "AND origin_type = 'filter' AND state = 'withdrawn'", (mid,))
+        check("...and the dropped one is WITHDRAWN rather than deleted — "
+              "the row is history, and origin_id is UNIQUE",
+              len(withdrawn) == 1, [r["origin_id"] for r in withdrawn])
+        # Put the two-proposal state back for the triage that follows.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+            4: "The ledger counts.\n\nNothing in it is an accusation.",
+        }), "filter", "record", "02-wall.md")
 
         beliefs_before = db.one(
             "SELECT COUNT(*) AS n FROM editorial_beliefs WHERE "
@@ -5929,6 +5986,44 @@ def scenario_filter(root: Path) -> None:
         check("F40 the PRIOR RUNS block excludes the CURRENT run",
               _block(again, "A").count("proposed,") == 1,
               _block(again, "A"))
+
+        # Departure #3, pinned directly. A settled run's rejected
+        # proposal must not appear in the NEW run's triage list: it lives
+        # in PRIOR RUNS above, where its reason is law, and listing it
+        # here would let `--accept 1` resurrect the very thing the author
+        # refused — into a settle it was never part of.
+        settled_rejection = dict(db.one(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'rejected' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,)))
+        check("the settled run's rejected proposal is still ON RECORD — "
+              "it is evidence, and nothing withdrew it",
+              settled_rejection["state"] == "rejected",
+              settled_rejection["origin_id"])
+        now_units = _filter_units((ms / "02-wall.md").read_text())
+        run_stdin(ws, _filter_reply(now_units, (1, len(now_units)),
+                                    replaces={6: "A brand-new proposal on "
+                                                 "an entirely different "
+                                                 "unit."}),
+                  "filter", "record", "02-wall.md")
+        listed = run(ws, "filter", "edits", "02-wall.md")
+        check("...and it is NOT in the new run's numbered triage list",
+              "A brand-new proposal" in listed
+              and settled_rejection["proposed_new"][:40] not in listed
+              and listed.count("¶") == 1, listed)
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        fresh_state = db.one(
+            "SELECT state FROM doc_threads WHERE id = ?",
+            (settled_rejection["id"],))["state"]
+        check("...so `--accept 1` targets the NEW run's proposal and "
+              "leaves the settled rejection exactly as the author left "
+              "it (departure #3)",
+              fresh_state == "rejected"
+              and db.one("SELECT state FROM doc_threads WHERE "
+                         "manuscript_id = ? AND origin_type = 'filter' AND "
+                         "proposed_new LIKE 'A brand-new proposal%'",
+                         (mid,))["state"] == "accepted",
+              fresh_state)
 
         # ---------------- F41/F43: warn, never block ------------------
         run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
@@ -6105,11 +6200,26 @@ def scenario_filter(root: Path) -> None:
             "filter", "record", "02-wall.md")
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
         run(ws, "filter", "settle", "02-wall.md", "--pause")
+        out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
+        check("filter rollback REFUSES on a marked file, naming both "
+              "exits — a rollback mid-pause destroys post-edits the "
+              "author may already have made, with nothing left to "
+              "recover them from",
+              "mid-settle" in out and "filter settle 02-wall.md" in out
+              and "filter unmark 02-wall.md" in out, out)
+        check("...and it left the marked bytes untouched",
+              "<<" in (ms / "02-wall.md").read_text())
         out = run(ws, "filter", "unmark", "02-wall.md")
         check("F35 filter unmark restores the original text BYTE FOR BYTE "
-              "and returns the forms to accepted",
+              "and returns the forms to ACCEPTED — it undoes the marking, "
+              "never the triage; the author chooses whether the verdicts "
+              "then apply, reopen, or go",
               (ms / "02-wall.md").read_bytes() == before_unmark
-              and "1 form(s) returned" in out, out)
+              and "1 form(s) returned to 'accepted'" in out, out)
+        check("...so the verdicts really did survive the recovery",
+              db.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                     "manuscript_id = ? AND origin_type = 'filter' AND "
+                     "state = 'accepted'", (mid,))["n"] == 1)
 
         # F36: rollback restores the pin and keeps the verdicts.
         ev_before = db.one(

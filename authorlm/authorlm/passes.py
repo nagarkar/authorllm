@@ -706,13 +706,21 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
 
 
 def final_text_from_marked(marked: str,
-                           written: list[dict] | None = None
+                           written: list[dict] | None = None,
+                           kinds: tuple[str, ...] = ("replace", "insert")
                            ) -> tuple[str, list[dict]]:
-    """Resolve: critique-written forms keep their CURRENT {{new}} half
-    (author post-edits win); any other pending form on the tab (e.g. an
-    open margin-thread proposal) collapses to OLD so resolve never
-    silently approves foreign grammar. Returns (final_text, critique_forms)."""
-    forms = th.pending_forms(marked)
+    """Resolve: written forms keep their CURRENT {{new}} half (author
+    post-edits win); any other pending form on the tab (e.g. an open
+    margin-thread proposal) collapses to OLD so resolve never silently
+    approves foreign grammar. Returns (final_text, matched_forms).
+
+    `kinds` restricts which forms are CONSIDERED, and defaults to both,
+    so the critique pass is unchanged. The local settle transport passes
+    `("replace",)`: a filter never stages an insertion, and an unmatched
+    insertion form collapses to its old half — which for an insertion is
+    the empty string — so leaving bare `{{…}}` in scope would delete a
+    `{{title}}` the author wrote (filter-pass design §2.3)."""
+    forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
     if not written:
         # No written threads: keep old for every form (nothing to approve).
         return th.strip_pending(marked)[0], []

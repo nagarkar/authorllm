@@ -130,6 +130,55 @@ def strip_pending(text: str) -> tuple[str, list[str]]:
     return stripped, warnings
 
 
+_REPLACE_MARKER = re.compile(r"<<|>>")
+
+
+def strip_replacements(text: str) -> tuple[str, list[str]]:
+    """`strip_pending` narrowed to the REPLACE form alone.
+
+    The canonicalizer for LOCAL files (filter-pass design §2.3), and it is
+    deliberately not `strip_pending`.
+
+    `strip_pending` is right for text arriving from a DOC: everything with
+    this grammar in a Doc tab was put there by AuthorLM, so a bare
+    `{{new}}` is a critique-pass insertion and collapsing it to nothing is
+    the ratified behaviour. A local manuscript file is the opposite case.
+    Nothing put `{{…}}` there but the author, and `{{title}}` in a
+    template, `{{a, b}}` in set notation, a Jinja or Handlebars sample in
+    an essay ABOUT templating are all ordinary prose. Running the Doc
+    canonicalizer over local files deleted every one of them from what
+    the whole system observes — silently, with no warning, because
+    `_ANY_MARKER` no longer matched anything once they were gone.
+
+    So: only `<<old>>{{new}}` collapses, and only to its old half. The
+    filter pass never stages an insertion — `insert` is refused by the
+    recorder because a filter passes each bit through rather than adding
+    bits — so nothing this seam is for is lost by narrowing.
+
+    Stray `<<` or `>>` surviving the collapse is an unbalanced replace
+    form and is warned about rather than guessed at. A surviving `{{` or
+    `}}` is NOT warned about: it is not this grammar's business, and a
+    warning on every templating example would be noise that trained the
+    author to ignore the warnings that matter."""
+    stripped = PENDING.sub(lambda m: m.group("old"), text)
+    warnings = []
+    if _REPLACE_MARKER.search(stripped):
+        warnings.append(
+            "stray or unbalanced pending-change markers (<<, >>) — left "
+            "untouched; settle them in the file or ask in chat")
+    return stripped, warnings
+
+
+def has_replacement(text: str) -> bool:
+    """True when the text carries a `<<old>>{{new}}` form.
+
+    The predicate `staging.is_marked` is built on, and narrow for the same
+    reason `strip_replacements` is: a file containing `{{title}}` is not
+    mid-settle, and treating it as such refused its Doc push forever with
+    a message about a settle that does not exist."""
+    return PENDING.search(text) is not None
+
+
 def approved_text(text: str) -> str:
     """What a tab's text becomes when every pending form is approved —
     used by the cleanup path and by equivalence checks."""

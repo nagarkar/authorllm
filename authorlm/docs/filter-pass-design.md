@@ -439,8 +439,40 @@ changes only at approval"* — applied to local files too, in one place:
 
 ```python
 # authorlm/revisions.py — read_manuscript_files, beside strip_embed_lines
-files[rel] = threads.strip_pending(strip_embed_lines(text))[0]
+files[rel] = threads.strip_replacements(strip_embed_lines(text))[0]
 ```
+
+**`strip_replacements`, and NOT `strip_pending`, and this is the correction
+that matters most in this section.** The design first specified
+`strip_pending`, on the reasoning that it is "pure, idempotent on unmarked
+text". That claim is false, and the falsity is a data-loss bug.
+`strip_pending` is the DOC canonicalizer: in a Doc tab nothing put `{{…}}`
+there but AuthorLM, so a bare one is a critique-pass insertion and collapsing
+it to nothing is correct. Pointed at LOCAL files the rule inverts — nothing
+put `{{…}}` there but the AUTHOR. `{{title}}` in a template, `{{a, b}}` in
+set notation, a Handlebars sample in an essay about templating are ordinary
+prose, and the broad strip deleted every one of them from everything the
+system observes: the version history, the summaries, the concept scans, the
+export. Silently, because once they were gone `_ANY_MARKER` had nothing left
+to warn about. `staging.is_marked` tripped on them too, refusing such a
+file's Doc push forever with a message about a settle that did not exist.
+
+So the local grammar is the **replace form alone**: `<<old>>{{new}}`
+collapses to its old half, a surviving `<<` or `>>` is warned about, and a
+bare `{{…}}` is left exactly where the author put it. A filter never stages
+an insertion — `insert` is refused by the recorder, because a filter passes
+each bit through rather than adding bits — so narrowing loses nothing this
+seam exists for. `strip_replacements` IS a true no-op on text carrying no
+`<<old>>{{new}}` form, which is what makes it safe here unconditionally.
+
+The same narrowing applies at three more sites, for the same reason:
+`staging.is_marked` (a file with braces is not mid-settle),
+`staging.unmark` (a recovery that damaged the file it recovered would be no
+recovery), and `staging.resolve_local`, which passes `kinds=("replace",)` to
+`final_text_from_marked` — an unmatched insertion form collapses to its old
+half, and for an insertion that is the empty string, so a settle that looked
+at bare `{{…}}` would have deleted the author's `{{title}}` from the finished
+essay. The critique pass keeps both kinds, where both are its own.
 
 **This seam is already the canonicalizer, which is the argument for putting
 it here.** `read_manuscript_files` has never returned the bytes on disk: it
@@ -483,6 +515,19 @@ assertions discriminate rather than one shadowing the other.
    reported by name, in the shape `conflicts` and `local_ahead` already use,
    and `--force` cannot reach past it. The checkout gate makes this mostly
    unreachable; "mostly unreachable" is not a guard.
+
+Both push guards are tested by their **outcome**, against a recording Drive
+double: the question is not "did `push_doc` raise?" — a `None` service
+answers that by accident, and would raise just as loudly *after* forming and
+sending the body — but "did any text containing `<<` reach the wire?". With
+the guards, no request body is formed at all. With both disabled, the same
+double records the markers, which is what makes the first assertion mean
+something.
+
+`filter rollback` **refuses on a marked file**, naming both exits. A rollback
+mid-pause would destroy post-edits the author may already have made, with
+nothing left to recover them from — a strictly worse orphan than the one
+`filter status` finds, where the bytes describe the state completely.
 
 A crash between "compose" and "write threads" leaves a marked file with no
 written threads. `filter status` detects it (bytes carry forms, no matching

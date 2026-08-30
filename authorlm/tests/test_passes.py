@@ -79,6 +79,104 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+class _RecordingDrive:
+    """A Drive+Docs double that RECORDS every request body it is handed.
+
+    The push guards are tested by their OUTCOME, not by which exception
+    happens to surface: the question is not "did push_doc raise?" but
+    "did any text containing `<<` ever reach the wire?". A `None` service
+    answers that only by accident — the AttributeError it raises would
+    still be raised by a push that had already formed and sent the body.
+
+    Implements exactly enough of the two services for `push_doc`'s
+    REBUILD path to run end to end: no open comments (so the surgical
+    path is not taken), a temp-doc create that captures the uploaded
+    markdown, a documents.get that returns an empty imported doc, and a
+    batchUpdate that captures its requests."""
+
+    def __init__(self, tab_id: str = "tab-1", title: str = "solo.md",
+                 book: str = "book"):
+        self.bodies: list[str] = []
+        self.tab_id = tab_id
+        self.title = title
+        self.book = book
+
+    # -- the recorded surface ------------------------------------------
+    def _record(self, value) -> None:
+        if isinstance(value, (str, bytes)):
+            self.bodies.append(value.decode("utf-8", "replace")
+                               if isinstance(value, bytes) else value)
+        else:
+            self.bodies.append(json.dumps(value, default=str))
+
+    @property
+    def sent(self) -> str:
+        return "\n".join(self.bodies)
+
+    def files(self):
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Files:
+            def create(self, body=None, media_body=None, fields=None):
+                if media_body is not None:
+                    outer._record(media_body.getbytes(0, media_body.size()))
+                outer._record(body)
+                return _Req({"id": "temp-doc"})
+
+            def delete(self, fileId=None):
+                return _Req({})
+
+            def get(self, **kw):
+                return _Req({})
+
+            def list(self, **kw):
+                return _Req({"files": []})
+        return _Files()
+
+    def comments(self):
+        class _Req:
+            def execute(self):
+                return {"comments": []}
+
+        class _Comments:
+            def list(self, **kw):
+                return _Req()
+        return _Comments()
+
+    def documents(self):
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Documents:
+            def get(self, documentId=None, includeTabsContent=None):
+                def tab(tid, title):
+                    return {"tabProperties": {"tabId": tid,
+                                              "title": title},
+                            "documentTab": {"body": {"content": []}},
+                            "childTabs": []}
+                return _Req({"tabs": [tab("tab-root", outer.book),
+                                      tab(outer.tab_id, outer.title)],
+                             "body": {"content": []}})
+
+            def batchUpdate(self, documentId=None, body=None):
+                outer._record(body)
+                return _Req({})
+        return _Documents()
+
+
 MARKED_ESSAY = (
     "# Solo\n\n"
     "A **bold** claim opens the essay.\n\n"
@@ -241,6 +339,40 @@ def _local_transport_guards(root: Path) -> None:
           "because both already call it",
           raised_c is not None and "mid-settle" in raised_c, raised_c)
 
+    # The OUTCOME, not the exception. The question these guards answer is
+    # not "did push_doc raise?" — a `None` service raises either way —
+    # but "did any text carrying `<<` ever reach the wire?". A recording
+    # double answers it directly, and the same double with both guards
+    # disabled proves the assertion is not vacuous.
+    _orig_guards = (gdocs.forms_pending, gdocs._refuse_mid_rewrite)
+    drive_open = _RecordingDrive(tab_id="tab-1")
+    try:
+        gdocs.forms_pending = lambda *a, **k: None
+        gdocs._refuse_mid_rewrite = lambda *a, **k: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                gdocs.push_doc(db, manuscript, "solo.md", service=drive_open,
+                               docs_service=drive_open)
+            except Exception:                             # noqa: BLE001
+                pass
+    finally:
+        gdocs.forms_pending, gdocs._refuse_mid_rewrite = _orig_guards
+    check("with BOTH guards disabled the marked text really does reach "
+          "the wire — the recording double sees `<<`, so the assertion "
+          "below is about the guards and not about a push that never "
+          "happens",
+          "<<" in drive_open.sent, drive_open.sent[:300])
+    drive_guarded = _RecordingDrive(tab_id="tab-1")
+    try:
+        gdocs.push_doc(db, manuscript, "solo.md", service=drive_guarded,
+                       docs_service=drive_guarded)
+    except LookupError:
+        pass
+    check("with the guards in place NO request body contains a marker — "
+          "in fact no request body is formed at all",
+          not any("<<" in b for b in drive_guarded.bodies)
+          and drive_guarded.bodies == [], drive_guarded.sent[:300])
+
     # --- the pull path must not discard a settle ----------------------
     pulled = []
 
@@ -291,6 +423,120 @@ def _local_transport_guards(root: Path) -> None:
     check("the guard is not just 'pull never writes': the same fake "
           "DOES overwrite the file once the marks are gone",
           _pull_writes_when_unmarked(db, manuscript, ms, fake))
+
+    _braces_are_the_authors(root)
+
+
+TEMPLATE_ESSAY = (
+    "# On Templating\n\n"
+    "A template engine substitutes: {{title}} becomes the page's title, "
+    "and {{author.name}} becomes mine.\n\n"
+    "In set-builder notation we write {{a, b}} for the pair, which is "
+    "not a template at all.\n\n"
+    "The point is that a brace is only a brace.\n")
+
+
+def _braces_are_the_authors(root: Path) -> None:
+    """AQ/FU-A — the local canonicalizer is the REPLACE form ONLY.
+
+    `strip_pending` is the DOC canonicalizer: in a Doc tab nothing put
+    `{{…}}` there but AuthorLM, so a bare one is a critique-pass
+    insertion and deleting it is ratified. Pointed at LOCAL files that
+    rule inverts — `{{title}}`, `{{a, b}}`, a Handlebars sample in an
+    essay ABOUT templating are the author's own prose — and the broad
+    strip deleted every one of them from everything the system observes,
+    silently, because once they were gone there was nothing left to warn
+    about. `is_marked` tripped on them too, refusing the file's Doc push
+    forever with a message about a settle that does not exist.
+
+    A filter never stages an insertion (`insert` is refused by the
+    recorder), so narrowing loses nothing this seam exists for."""
+    from authorlm import revisions as _rev
+    from authorlm import staging as _staging
+    from authorlm import threads as _th
+
+    print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
+
+    ws = root / "braces-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "templating.md").write_text(TEMPLATE_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+
+    observed = _rev.read_manuscript_files(ms)["templating.md"]
+    check("an essay containing {{title}} and {{a, b}} reads back BYTE "
+          "IDENTICAL through the observation seam — the author's braces "
+          "are prose, not machinery, and nothing in the system may eat "
+          "them",
+          observed == TEMPLATE_ESSAY, repr(observed))
+    check("...and the narrow strip warns about nothing, because there is "
+          "nothing wrong: a warning on every templating example would be "
+          "noise that trains the author to ignore the warnings that "
+          "matter",
+          _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
+          _th.strip_replacements(TEMPLATE_ESSAY)[1])
+    check("staging.is_marked says NO — the file is not mid-settle",
+          not _staging.is_marked(TEMPLATE_ESSAY))
+
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["templating.md"] = {"tab_id": "tab-1", "checked_out": False}
+    gdocs._save_mapping(db, manuscript, meta)
+    drive = _RecordingDrive(title="templating.md")
+    raised = None
+    try:
+        gdocs.push_doc(db, manuscript, "templating.md", service=drive,
+                       docs_service=drive)
+    except LookupError as err:
+        raised = str(err)
+    check("doc push does NOT refuse it for being mid-settle — a file the "
+          "author fills with braces must stay pushable forever",
+          raised is None or "mid-settle" not in raised, raised)
+    check("...and it really pushed: the author's braces went to the wire "
+          "intact, which is what the narrowing is FOR",
+          "{{title}}" in drive.sent and "{{a, b}}" in drive.sent,
+          drive.sent[:300])
+
+    # And the narrowing did not cost the guard its teeth: add one real
+    # replace form and every one of those answers flips.
+    marked = TEMPLATE_ESSAY.replace(
+        "The point is that a brace is only a brace.",
+        _th.render_pending("The point is that a brace is only a brace.",
+                           "A brace is only a brace."))
+    (ms / "templating.md").write_text(marked)
+    check("a REAL <<old>>{{new}} form still marks the file",
+          _staging.is_marked(marked))
+    check("...and still canonicalizes to the OLD half, leaving the "
+          "author's own braces exactly where they were",
+          _rev.read_manuscript_files(ms)["templating.md"]
+          == TEMPLATE_ESSAY,
+          repr(_rev.read_manuscript_files(ms)["templating.md"]))
+    drive2 = _RecordingDrive(title="templating.md")
+    raised2 = None
+    try:
+        gdocs.push_doc(db, manuscript, "templating.md", service=drive2,
+                       docs_service=drive2)
+    except LookupError as err:
+        raised2 = str(err)
+    check("...and still refuses the push, naming filter unmark",
+          raised2 is not None and "mid-settle" in raised2
+          and "filter unmark" in raised2, raised2)
+    check("...and NOTHING reached the wire — the outcome, not the "
+          "exception: no request body was ever formed, let alone one "
+          "carrying a marker",
+          drive2.bodies == [], drive2.sent[:300])
+    text, _warn = _staging.unmark(ms / "templating.md")
+    check("filter unmark restores the essay byte for byte, braces and "
+          "all — a recovery that damaged the file it recovered would be "
+          "no recovery",
+          text == TEMPLATE_ESSAY
+          and (ms / "templating.md").read_text() == TEMPLATE_ESSAY,
+          repr(text))
 
 
 def _pull_writes_when_unmarked(db, manuscript, ms: Path, fake) -> bool:
@@ -853,15 +1099,68 @@ def main_test() -> None:
             "AND version_no = 1", (rb_mid,))
         passes.pin_version(rb_db, rb_p, "solo.md", v1_row["id"])
 
+        # An open episode FIRST, so the two collects' different
+        # dispositions are both observable (AQ/FU-F). Session start runs
+        # its own catch-up collect, so it has to happen BEFORE the
+        # uncollected edit or that edit is swept up by the catch-up
+        # instead of by the verb under test.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(rb_ws), "session", "start"])
+            cli_main(["--workspace", str(rb_ws), "intent", "declare",
+                      "Tighten Solo throughout"])
+        rb_open = [r["id"] for r in rb_db.all(
+            "SELECT id FROM editorial_episodes WHERE manuscript_id = ? "
+            "AND status = 'open'", (rb_mid,))]
+        check("there IS an open episode for a rollback to be "
+              "mis-attributed to (§14.8)", len(rb_open) >= 1, rb_open)
+
         # The author edits the file after the pin but never collects — the
         # exact state 'critique rollback' must not silently destroy.
         UNCOLLECTED_ROLLBACK = ("# Solo\n\nUNCOLLECTED AUTHOR EDIT, "
                                 "NEVER COLLECTED.\n")
         (rb_ms / "solo.md").write_text(UNCOLLECTED_ROLLBACK)
+        versions_before_rb = rb_db.one(
+            "SELECT MAX(version_no) AS n FROM manuscript_versions WHERE "
+            "manuscript_id = ?", (rb_mid,))["n"]
 
         rb_args = argparse.Namespace(target="solo.md", workspace=str(rb_ws))
         with contextlib.redirect_stdout(io.StringIO()):
             _critique_rollback(rb_db, rb_manuscript, rb_args)
+
+        def _rb_transitions(version_no: int) -> list[str]:
+            row = rb_db.one(
+                "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+                "AND version_no = ?", (rb_mid, version_no))
+            if row is None:
+                return []
+            return [r["id"] for r in rb_db.all(
+                "SELECT id FROM editorial_transitions WHERE "
+                "manuscript_id = ? AND version_after = ?", (rb_mid, row["id"]))]
+
+        attached = set()
+        for r in rb_db.all(
+                "SELECT transition_ids FROM editorial_episodes WHERE "
+                "manuscript_id = ?", (rb_mid,)):
+            attached.update(loads(r["transition_ids"], []))
+        pre_ids = _rb_transitions(versions_before_rb + 1)
+        post_ids = _rb_transitions(versions_before_rb + 2)
+        check("BOTH directions, first: the PRE-rollback collect is "
+              "AMBIENT, so the author's own uncollected edit attached to "
+              "their open episode — it is their work and it predates the "
+              "verb, exactly as write_start's first collect does",
+              pre_ids and all(tid in attached for tid in pre_ids),
+              str({"pre": pre_ids, "attached": sorted(attached)}))
+        check("BOTH directions, second: the POST-rollback collect files "
+              "the UNWINDING of an edit pass under NO episode. Ambient, "
+              "it would have credited whatever goal happened to be open "
+              "with the undoing of a pass — the same lie critique "
+              "resolve was telling one function away (AQ/FU-F)",
+              post_ids and not any(tid in attached for tid in post_ids),
+              str({"post": post_ids, "attached": sorted(attached)}))
+        check("...and the restore IS recorded at all: before this the "
+              "version history held the pre-rollback snapshot and then a "
+              "GAP where the restore should have been",
+              bool(post_ids), post_ids)
         check("rollback restores the pinned content",
               (rb_ms / "solo.md").read_text()
               == "# Solo\n\nOriginal pinned content.\n")

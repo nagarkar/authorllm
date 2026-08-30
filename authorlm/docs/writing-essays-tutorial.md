@@ -1189,33 +1189,196 @@ it: assembling and printing the payload costs nothing, so it works whether or no
 the billed mode is on, and it is what the conversational drafting reads.
 
 Without any model configured at all, the summary rebuild fails loudly rather
-than quietly degrading — see §12's fourth entry.
+than quietly degrading — see §13's fourth entry.
 
-**One verb has the flag the other way round, and you should know it before you
-meet it.** The filter pass — `authorlm filter run <name> <essay.md>`, which
-passes one ratified editorial concern over an essay a paragraph at a time — makes
-**no model call at all** with no flag. It prints the payload and the
-conversation drafts the reply, exactly as `write draft --dry-run` does. There,
-the *call* is what needs a flag: `--native`, and a `[filtering]` section the
-shipped config does not have.
+**The filter pass (§12) costs one summarizer call per settle and nothing else**,
+on the cheap tier. Its `[filtering]` section is absent for the same reason
+`[writing]` is, and its flag runs the OTHER way round: `filter run` calls
+nothing unless you pass `--native`. §12's fold has the table.
+</details>
 
-So the two verbs' defaults are opposites:
+---
+
+## 12. Passing one concern over a finished essay
+
+Everything above builds an essay. This is the other thing: taking one that is
+already written and running a single, narrow question over every paragraph of
+it. Duplicate words. Whether it survives being read aloud. Whether the essay's
+figures are used against each other.
+
+The unit is a paragraph, and the question is the same for every one of them.
+That is the whole idea. It is not a general "improve this essay" pass — those
+produce a hundred changes you have to argue with. It is one concern, stated by
+you, applied evenly.
+
+### What a filter is, next to a lens
+
+A **lens** reads the essay whole and tells you what it noticed. A **filter**
+reads it a paragraph at a time and hands you a rewrite of each paragraph that
+breaks its rule. A lens gives you findings to think about; a filter gives you
+edits to say yes or no to.
+
+A filter's jurisdiction is **one essay**. A metaphor used one way in the Becker
+essay and the opposite way in the kindness essay is a real problem and a filter
+cannot see it — it only ever has one essay in front of it. That question is a
+lens, and the filter's own text says so, so you are never misled about what was
+actually checked.
+
+### The three that are written and waiting for you
+
+They are in `docs/filter-pass-design.md`, in full, at the end. Nothing is
+installed until you say so — ask me to read you one and I will, in plain words,
+and install it if you like it.
+
+- **duplicate-words** — a word or phrase used again too soon. It knows the
+  difference between a tic and a **refrain**: when it cannot tell, it leaves the
+  repetition alone and says it thought about it. It will not touch a term of art,
+  will not substitute a synonym for one, and judges the paragraph rather than the
+  essay when it comes to motif words like fire and wall. It carries a ledger
+  forward, so what it does at ¶31 is consistent with what it did at ¶6.
+- **metaphor-consistency** — first it reads the whole essay and writes down what
+  each figure is doing *here*: fire is the agent and never something a person
+  holds; the wall is the limit of a life lived without the Test. Then it judges
+  each paragraph against that. It flags a figure used against its own sense, a
+  mixed figure, and a metaphor asked to carry an argument it cannot. Recurrence
+  is not a finding — only conflict is.
+- **audio-friendly** — where the prose works on the page and fails in the ear. A
+  subject too far from its verb, a parenthesis carrying real content, a Field and
+  a field both live in one sentence. It will not flatten the register: the prose
+  is meant to sound like scripture read aloud, and it breaks a sentence only when
+  a listener would actually lose the thread, never because it is long.
+
+### What the conversation looks like
+
+> **You:** run the duplicate-words filter over becker
+>
+> **Me:** Before I start — this ran on becker once before, in June. Four of its
+> six proposals you took; you turned two down, and both of your reasons are in
+> front of me: *"the repetition there is the point — it is a refrain"* at the
+> fourth paragraph, and *"'measure' and 'test' are different terms, not a
+> duplicate"* near the end. I will not raise either again.
+>
+> Thirty-four paragraphs. Working through them in order.
+>
+> *(a minute later)*
+>
+> Seven proposals out of thirty-four:
+>
+> 1. **¶6** — "moreover" for the third time in four paragraphs. I cut it and let
+>    the sentence start with "And", which your syntax law prefers anyway.
+> 2. **¶11** — "the wall" four times in one paragraph. Two of them are the motif
+>    and two are ordinary reference; I left the motif and varied the other two.
+> 3. **¶14** — "essentially" twice in one sentence.
+> 4. **¶18** — "the Chid" is glossed here and was already glossed at ¶3. Your
+>    lexicon law says a term is introduced once per essay, so the second gloss
+>    goes and the reference stays.
+> 5. **¶22** — "ledger" three times in two sentences.
+> 6. **¶27** — "fire" five times in the paragraph. This is the one I am least
+>    sure about: it may be the drumbeat you want.
+> 7. **¶31** — "and so" opening three consecutive paragraphs.
+>
+> Number six is the one worth your ruling. Accept all, or tell me which to drop
+> and why — I will take the why in your words.
+>
+> **You:** 6 is deliberate, that's the passage building to the ending. the rest are fine.
+>
+> **Me:** Six taken, one turned down with your reason recorded. Want to read the
+> marked-up essay in Obsidian before I apply them, or shall I apply them now?
+>
+> **You:** just apply them
+>
+> **Me:** Applied. Six paragraphs changed, becker collected as version 247,
+> summary rebuilt. Your reason for ¶27 is on the record, and the next run of this
+> filter on becker will see it before it starts.
+
+You never see a payload, a unit index you did not ask for, or an id. If you want
+to read the changes in place first, say so: the essay is marked up in the file
+itself — struck-through old text, the proposed new text beside it — you reword
+whatever you like in Obsidian, and then I finalize. **Your wording wins.** While
+the file is marked it will not push to Google Docs, and everything else in the
+system still reads the essay as it was: no summary, no export, no concept scan
+ever sees the markup.
+
+### Your "no" is the most valuable thing in the pass
+
+When you turn a proposal down, your reason is recorded in your own words, and
+the next run of that filter on that essay is shown it before it starts. That is
+most of what stops a filter raising the same thing every time you run it. It is
+worth a sentence rather than a shrug — *"that's a refrain"* buys you more than
+*"no"* does.
+
+Nothing a filter does is filed against any of your goals. A duplicate-word sweep
+is not work toward the Becker rewrite, and recording it as though it were would
+make that goal's completion report say something untrue. Your reasons still feed
+the belief learning; the sweep just is not credited to a goal it did not serve.
+
+### If it starts proposing everything
+
+Thirty-one changes on thirty-four paragraphs is almost never an essay that bad —
+it is the filter's text asking for too much. You will get a warning saying so,
+and nothing is blocked. The fix is to read the filter (`filter show
+duplicate-words`) and tighten it. Running it again unchanged will not help.
+
+Two filters do not commute: audio-friendly then duplicate-words gives a
+different essay from the reverse. No order is enforced and none is recommended.
+That is your practice, not a feature.
+
+<details>
+<summary><b>Under the hood — the verbs, and the flag that runs backwards</b></summary>
+
+```
+authorlm filter add <name>                    the artifact on stdin
+authorlm filter list | show <name>
+authorlm filter prelude <name> <essay.md>     global filters only
+authorlm filter run <name> <essay.md>         NO model call
+authorlm filter record <essay.md>             the reply JSON on stdin
+authorlm filter edits <essay.md>
+authorlm filter triage <essay.md> --accept 1 2 --reject 3 --reason "…"
+authorlm filter settle <essay.md> [--pause]
+authorlm filter status [<essay.md>]
+authorlm filter unmark | rollback | abandon <essay.md>
+```
+
+**`filter run` makes no model call.** It prints the payload and I draft the
+reply here, in the conversation. That is the whole flow, not a preview of it.
+The billed path is `--native`, and it refuses without a `[filtering]` section
+that the shipped config deliberately does not have.
+
+This is the opposite of `write draft`, which calls unless you pass `--dry-run`:
 
 | | with no flag | the other mode |
 |---|---|---|
 | `write draft` | **calls the model** (and refuses without `[writing]`) | `--dry-run` prints the payload, free |
 | `filter run` | **prints the payload**, free | `--native` calls the model (and refuses without `[filtering]`) |
 
-That is not an oversight. `write draft` was built billed and the ruling to work
-in the conversation arrived afterwards, so its flag now names the flow you
-actually use — backwards, and not worth churning every habit to fix. `filter
-run` was chat-first from its first line, so the free path needed no flag at all.
-`filter run --dry-run` is accepted and does nothing, for the muscle memory.
+Not an oversight. `write draft` was built billed and the ruling to work in the
+conversation arrived afterwards, so its flag now names the flow you actually
+use — backwards, and not worth churning every habit to fix. `filter run` was
+chat-first from its first line, so the free path needed no flag at all. `filter
+run --dry-run` is accepted and does nothing, for the muscle memory.
+
+**What it costs.** One summarizer call per settle, on the cheap tier — a
+fraction of a cent — because the essay's text changed and a stale summary is a
+lie the next gate refuses. That is the only model call the whole flow makes, and
+it is announced with its usage line. It also marks the essays after this one
+`upstream_stale`, which the settle says out loud.
+
+**Re-running.** A filter refuses to run on text it has already settled on,
+byte for byte, and names the prior run. `--again` looks anyway. It is
+approximately idempotent, not perfectly: nothing converges, and a filter whose
+proposals never stop has a prompt fault.
+
+**If something goes wrong mid-pause.** `filter status` finds an essay whose
+bytes carry markup with nothing staged behind it — what a crash between marking
+and recording leaves — and `filter unmark <essay>` puts the text back exactly as
+it was, keeping your verdicts. `filter rollback <essay>` restores the version
+pinned when the run started; your verdicts stay, because they are evidence and
+putting text back does not un-decide them.
 </details>
 
 ---
 
-## 12. Rough edges, stated plainly
+## 13. Rough edges, stated plainly
 
 Things that are true today and that you will meet:
 

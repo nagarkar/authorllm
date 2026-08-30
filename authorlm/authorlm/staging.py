@@ -37,15 +37,20 @@ from . import threads as th
 
 
 def is_marked(text: str) -> bool:
-    """True when the raw bytes carry a pending-change form.
+    """True when the raw bytes carry a `<<old>>{{new}}` form.
 
     A BYTE check on the file, exactly as `api.is_placeholder` is, and
     deliberately not a database query: it is the guard that survives a
     database that has lost the run row, and the state it describes is
-    fully described by the bytes. `threads.pending_forms` is the same
-    grammar the settle verbs parse, so this predicate and the resolver
-    can never disagree about whether a file is mid-settle."""
-    return bool(th.pending_forms(text))
+    fully described by the bytes.
+
+    The REPLACE form only. `threads.pending_forms` also reports a bare
+    `{{…}}` as an insertion, which is right for a Doc tab and wrong for
+    a manuscript file — an essay containing `{{title}}` is not
+    mid-settle, and treating it as such refused its Doc push forever
+    with a message about a settle that does not exist. A filter never
+    stages an insertion, so nothing this predicate guards is missed."""
+    return th.has_replacement(text)
 
 
 # --------------------------------------------------------- staging
@@ -76,6 +81,7 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
             "origin_type = ? AND file = ? AND origin_id LIKE ?",
             (manuscript_id, origin_type, file, prefix + "%"))}
     staged: list[dict] = []
+    used: set[str] = set()
     for ordinal, entry in enumerate(sorted(entries, key=lambda e: e["n"]), 1):
         n = entry["n"]
         old = units[n - 1]
@@ -112,6 +118,26 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                        **fields)
             db.insert("doc_threads", row)
         staged.append(row)
+        used.add(origin_id)
+    # SUPERSEDE. A re-record of the same window is the authoritative
+    # answer for it, so an ordinal the new reply did not reach is a
+    # proposal that no longer exists — the model changed its mind about
+    # unit 4 and now leaves it alone. Without this the stale row survived
+    # as `proposed`, showed up in the next `filter edits` list under a
+    # number the author would read as current, and could be accepted into
+    # a settle it was never part of.
+    #
+    # `passes.stage` does exactly this for the critique pass and for the
+    # same reason; the door's two producers now agree about it.
+    #
+    # Written rows are NOT withdrawn: those are forms the author is
+    # reading in the file right now, and the re-stage above has already
+    # refused rather than reaching one.
+    for origin_id, prior in existing.items():
+        if origin_id not in used and prior["state"] in ("proposed",
+                                                        "accepted",
+                                                        "rejected"):
+            db.update("doc_threads", prior["id"], {"state": "withdrawn"})
     return staged
 
 
@@ -162,12 +188,16 @@ def mark_local(path: Path, text: str, threads: list[dict]) -> str:
 
 
 def unmark(path: Path) -> tuple[str, list[str]]:
-    """Put the ORIGINAL text back: every pending form collapses to its
-    old half. `strip_pending` warns rather than guessing on stray or
-    unbalanced markers, and those warnings are returned rather than
-    swallowed — a two-line recovery for a state that is fully described
-    by the bytes."""
-    text, warnings = th.strip_pending(path.read_text(encoding="utf-8"))
+    """Put the ORIGINAL text back: every `<<old>>{{new}}` form collapses
+    to its old half. `strip_replacements` warns rather than guessing on
+    stray or unbalanced markers, and those warnings are returned rather
+    than swallowed — a two-line recovery for a state that is fully
+    described by the bytes.
+
+    The narrow strip, for the reason `is_marked` gives: an unmark that
+    also deleted the author's `{{title}}` would be a recovery that
+    damaged the file it recovered."""
+    text, warnings = th.strip_replacements(path.read_text(encoding="utf-8"))
     path.write_text(text, encoding="utf-8")
     return text, warnings
 
@@ -194,7 +224,13 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
             f"nothing is written into {file} — there is no pause to "
             "finalize.")
     marked = path.read_text(encoding="utf-8")
-    final, forms = passes.final_text_from_marked(marked, written=written)
+    # REPLACE forms only, for the third time and for the same reason: an
+    # unmatched insertion form collapses to its old half, which for an
+    # insertion is the empty string — so a settle that looked at bare
+    # `{{…}}` would DELETE the author's `{{title}}` from the finished
+    # essay. The critique pass keeps both kinds, where both are its own.
+    final, forms = passes.final_text_from_marked(marked, written=written,
+                                                 kinds=("replace",))
     diffs = passes.record_resolution(db, manuscript_id, file, forms,
                                      origin_type=origin_type,
                                      evidence_type=evidence_type)
