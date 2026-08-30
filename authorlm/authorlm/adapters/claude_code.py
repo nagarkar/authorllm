@@ -98,6 +98,41 @@ def write_marker(payload: dict, env: Mapping[str, str],
     return path
 
 
+# ------------------------------------------- the transcript contract
+
+# Measured structurally on 2026-08-30 from this machine's own 49
+# transcripts (57,535 lines): key names, types and integers only. **No
+# message text was read, and this parser reads none either.** It touches
+# exactly six keys — `type`, `isSidechain`, `message.id`, `message.model`,
+# `message.usage`, and the four integers inside it — and never `content`,
+# `toolUseResult`, `lastPrompt`, `customTitle` or `aiTitle`.
+#
+# Three facts shaped it:
+#   - usage lives ONLY on `type == "assistant"`, at `message.usage`;
+#   - `iterations` restates the same numbers for the turn's internal
+#     steps, so summing it double-counts — the top-level counters are
+#     read and `iterations` is ignored;
+#   - the same `message.id` is written up to SIX times with a
+#     byte-identical usage object (21,709 usage-bearing lines carrying
+#     10,571 distinct ids: a 2.05x overcount for a parser that sums
+#     lines), which is why the shared sweeper dedups on it.
+#
+# `<synthetic>` rows are locally generated placeholder turns, not API
+# calls. All 32 of them carry zeros, and they are skipped BY NAME so that
+# a future synthetic row with non-zero counts cannot leak in.
+CLAUDE_CODE_USAGE = clients.JsonlTranscriptUsage(
+    is_turn=lambda d: (d.get("type") == "assistant"
+                       and isinstance((d.get("message") or {}).get("usage"),
+                                      dict)),
+    turn_id=lambda d: (d.get("message") or {}).get("id"),
+    model_of=lambda d: (
+        None if (m := (d.get("message") or {}).get("model")) == "<synthetic>"
+        else m),
+    counters=lambda d: clients._four((d.get("message") or {})["usage"]),
+    roots=("~/.claude/projects/*",),
+)
+
+
 def clear_marker(session_id: str | None,
                  workspace: str | Path | None = None) -> bool:
     """Handle a `SessionEnd` payload — one `unlink`, comfortably inside
