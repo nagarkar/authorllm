@@ -1623,8 +1623,6 @@ def write_draft(db: Database, manuscript: dict, config: dict,
             "the one call that cannot degrade to a heuristic. Enable it, or "
             "draft the beat yourself and register it with "
             "'write propose --why …'.")
-    client = llm_mod.writing_llm(config)   # refuses on [writing] / key
-
     # ONE capture for this invocation (Stream AC's convention): the
     # context the model is sent is the context assembled here, not a
     # second read a parallel session could have changed underneath it.
@@ -1634,17 +1632,37 @@ def write_draft(db: Database, manuscript: dict, config: dict,
     meta = loads(writeup["metadata"], {})
     previous_model = meta.get("drafting_model")
     first_draft = not previous_model
-    changed_from = (previous_model
-                    if previous_model and previous_model != client.model
-                    else None)
-    info = {"writeup": writeup, "beat": beat, "model": client.model,
-            "model_changed_from": changed_from,
+    info = {"writeup": writeup, "beat": beat,
             "beats_drafted": len(meta.get("drafting_beats", [])),
             "payload_hashes": payload.hashes,
             "payload_sizes": payload.sizes,
             "prompt_location": writing.prompt_location()}
     if dry_run:
-        return {**info, "dry_run": True, "payload": payload}
+        # The `[writing]`-model and vendor-key gates are BELOW this return,
+        # deliberately (author ruling 2026-08-30; design §15.10). Assembling
+        # and printing the payload needs neither a model nor a key, and with
+        # `[writing]` absent from the shipped config the dry run IS the
+        # drafting flow: it hands the conversation the exact deterministic
+        # payload and the registered prompt to draft against. Gating it on
+        # the billed path's configuration withheld the audit instrument
+        # along with the call it was meant to stop.
+        #
+        # Every gate ABOVE this line still runs on a dry run — writeup
+        # status, the checkout gate, a ratified plan and a beat to draft,
+        # `[llm] enabled` — so a dry run on an unplanned writeup refuses
+        # rather than printing an empty payload. Nothing mutating precedes
+        # it: on_start, the call, and write_propose are all below.
+        #
+        # The model is REPORTED when `[writing]` names one (reading a name
+        # is not a gate) and is None when it does not.
+        named = ((config.get("writing", {}) or {}).get("model") or "").strip()
+        return {**info, "model": named or None, "model_changed_from": None,
+                "dry_run": True, "payload": payload}
+    client = llm_mod.writing_llm(config)   # refuses on [writing]; key in draft()
+    changed_from = (previous_model
+                    if previous_model and previous_model != client.model
+                    else None)
+    info = {**info, "model": client.model, "model_changed_from": changed_from}
     if on_start:
         on_start(info)
     result = client.draft(payload.system_blocks, payload.user_blocks)
