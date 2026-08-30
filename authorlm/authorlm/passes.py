@@ -136,6 +136,42 @@ def scope_chain(manuscript: dict, file: str) -> list[str | None]:
     return [file, *toc_ancestors(manuscript, file), None]
 
 
+# The one ordering of the scope tiers, from most specific to least.
+# `scope_tier` produces these words, so the rank that sorts them lives
+# beside it rather than being spelled once in `api` (primary selection)
+# and again in `writing` (block A's INTENTS section) — two copies of the
+# same fact, one of which is inside the byte-stability guarantee. Both
+# import it from here; `passes` imports neither of them.
+# "outside" is not a derived tier: it is what an intent the author named
+# explicitly gets when its scope does not cover this file.
+INTENT_TIER_RANK = {"file": 0, "chapter": 1, "manuscript": 2, "outside": 3}
+UNKNOWN_TIER_RANK = 9
+
+
+def scope_tier(manuscript: dict, file: str,
+               scope: str | None) -> str | None:
+    """Where a scope sits relative to this file: `file`, `chapter` (any
+    toc ancestor, however many levels up), or `manuscript` (no scope at
+    all). None when the scope names a file this one is not under — an
+    intent the author reached for explicitly, which is legitimate and is
+    noted rather than refused (design-intent-scope §1.3)."""
+    if scope is None:
+        return "manuscript"
+    chain = scope_chain(manuscript, file)
+    if scope not in chain:
+        return None
+    return "file" if chain.index(scope) == 0 else "chapter"
+
+
+def scope_specificity(manuscript: dict, file: str,
+                      scope: str | None) -> int:
+    """How specific a scope is to this file — smaller is more specific.
+    The chain is already ordered nearest-first, so the nearest chapter
+    ancestor beating a further one is free."""
+    chain = scope_chain(manuscript, file)
+    return chain.index(scope) if scope in chain else len(chain)
+
+
 def intents_in_scope(db: Database, manuscript: dict, file: str,
                      status: str = "active") -> list[dict]:
     chain = scope_chain(manuscript, file)

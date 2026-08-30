@@ -155,6 +155,35 @@ def current_episode(db: Database, manuscript_id: str, session: dict) -> dict:
     return row
 
 
+def episode_for_intent(db: Database, manuscript_id: str, session: dict,
+                       intent_id: str) -> dict:
+    """The open episode for THIS intent, in ANY session, else a fresh one
+    in the current session.
+
+    Any session, deliberately. `declare_intent` opens an episode only
+    while a session is live, and `complete_intent` / `abandon_intent`
+    close every open episode for the intent across sessions — so an
+    intent declared yesterday has exactly one open episode and it is not
+    in today's session. `current_episode`, which is scoped to the
+    session, would never find it and would attach the work to whichever
+    intent happened to be declared last (design-intent-scope §1.7)."""
+    episode = db.one(
+        "SELECT * FROM editorial_episodes WHERE manuscript_id = ? "
+        "AND intent_id = ? AND status = 'open' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (manuscript_id, intent_id),
+    )
+    if episode:
+        return dict(episode)
+    row = ko_fields("ep")
+    row.update(
+        manuscript_id=manuscript_id, session_id=session["id"],
+        intent_id=intent_id, transition_ids="[]", outcome=None, status="open",
+    )
+    db.insert("editorial_episodes", row)
+    return row
+
+
 def attach_transitions(db: Database, episode: dict, transitions: list[dict]) -> None:
     ids = loads(episode["transition_ids"], [])
     ids.extend(t["id"] for t in transitions)

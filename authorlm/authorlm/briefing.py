@@ -153,6 +153,10 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
             "id": writeup["id"],
             "file": writeup["file"],
             "intent_id": writeup["intent_id"],
+            # A writeup serves every goal whose scope covers its essay
+            # now, so "which intent" is no longer a complete answer.
+            "intent_count": len((loads(writeup["metadata"], {}).get("intents")
+                                 or {}).get("members") or []) or 1,
             "cursor": cursor,
             "plan_len": len(plan),
             "progress": progress,

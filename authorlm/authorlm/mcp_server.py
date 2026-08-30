@@ -210,28 +210,70 @@ def triage_app_request(method: str, params: dict[str, Any]) -> dict:
 
 
 @mcp.tool()
-def declare_intent(statement: str, manuscript: str | None = None) -> dict:
+def declare_intent(statement: str, scope: str | None = None,
+                   manuscript: str | None = None) -> dict:
     """Declare the author's current writing objective (e.g. 'Introduce
     gravity'). Opens a session lazily if none is active. Returns a
     deterministic preview: concepts the intent matches (with their state,
-    relationships, and precedents) or did-you-mean suggestions."""
+    relationships, and precedents) or did-you-mean suggestions.
+
+    `scope` is WHERE the goal applies: an essay's filename, or a toc part
+    opener (which covers every essay beneath it). Leave it out only for a
+    goal that really is book-wide — an unscoped intent attaches to EVERY
+    future writeup. When the author has not said, ask one line ("just
+    this essay, the whole part, or the whole book?"); never default
+    silently."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         session, created = api.ensure_session(db, ms)
-        result = api.declare_intent(db, ms, statement)
+        result = api.declare_intent(db, ms, statement, scope=scope)
         result["session_opened"] = created
+        result["scope_means"] = (
+            f"every rewrite of {result['intent']['scope']} (and of anything "
+            f"beneath it) serves this goal"
+            if result["intent"]["scope"] else
+            "book-wide: EVERY writeup, on every essay, will carry this goal")
         return result
     return _guard(run)
 
 
 @mcp.tool()
-def list_intents(manuscript: str | None = None) -> dict:
-    """All declared intents with status (active intents are the author's
-    open todos; completed/abandoned are history)."""
+def scope_intent(intent_id: str, scope: str | None = None,
+                 chapter: str | None = None, manuscript_wide: bool = False,
+                 manuscript: str | None = None) -> dict:
+    """(Re)place an existing intent: exactly one of `scope` (this essay),
+    `chapter` (a toc opener, covering every essay beneath it), or
+    `manuscript_wide`. Metadata-forward — episodes keep their
+    transitions and any writeup that already ratified the intent keeps
+    the tier as it stood. This is the verb the one-time scope triage runs,
+    one ruling at a time."""
     def run():
         db = _db()
-        return api.list_intents(db, _manuscript(db, manuscript))
+        return api.scope_intent(db, _manuscript(db, manuscript), intent_id,
+                                scope=scope, chapter=chapter,
+                                manuscript_wide=manuscript_wide)
+    return _guard(run)
+
+
+@mcp.tool()
+def list_intents(manuscript: str | None = None,
+                 evidence: bool = False) -> dict:
+    """All declared intents with status (active intents are the author's
+    open todos; completed/abandoned are history).
+
+    With `evidence=True` this is the scope triage's read: for every
+    active intent with no scope, the files its episodes ACTUALLY touched,
+    the writeups bound to it, and a deterministic suggested tier with the
+    reason in words. Zero model calls. Present them one at a time, oldest
+    first, in the author's terms — never as a menu."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        if evidence:
+            return {"intents": api.list_intents(db, ms),
+                    "unscoped_evidence": api.scope_evidence(db, ms)}
+        return api.list_intents(db, ms)
     return _guard(run)
 
 

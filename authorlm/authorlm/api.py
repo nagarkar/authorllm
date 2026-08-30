@@ -17,6 +17,7 @@ import difflib
 import json
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,9 @@ __all__ = [
     "confirm_edge", "reject_edge", "list_proposals", "reconcile_proposals", "screen_proposals",
     "resolve_proposal",
     "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
-    "write_start", "write_plan", "write_status", "write_propose",
+    "scope_intent", "scope_evidence",
+    "write_start", "write_intents", "write_plan", "write_status",
+    "write_propose",
     "write_draft",
     "write_accept", "write_reject", "write_learn", "write_complete",
     "write_abandon", "write_digest", "get_profile",
@@ -349,8 +352,16 @@ def intent_preview(db: Database, manuscript: dict, statement: str) -> dict:
     return {"matched": matched[:5], "suggestions": suggestions[:3], "graph_empty": False}
 
 
-def declare_intent(db: Database, manuscript: dict, statement: str) -> dict:
-    row = ses.declare_intent(db, manuscript["id"], statement)
+def declare_intent(db: Database, manuscript: dict, statement: str,
+                   scope: str | None = None) -> dict:
+    """`scope` is where the goal applies: a file, a toc opener (which
+    covers every essay beneath it), or None for manuscript-wide. It is
+    what `write start` derives the writeup's intents from, so an absent
+    scope now has a consequence — every future writeup carries the goal
+    — and both surfaces say so at declaration time (design §15.17, Q2)."""
+    if scope is not None:
+        scope = _resolve_relpath(manuscript, scope)
+    row = ses.declare_intent(db, manuscript["id"], statement, scope=scope)
     return {
         "intent": dict(row),
         "preview": intent_preview(db, manuscript, statement),
@@ -375,9 +386,29 @@ def complete_intent(db: Database, manuscript: dict, prefix: str,
     intent = _find_intent(db, manuscript, prefix)
     if intent["status"] != "active":
         raise ValueError(f"intent is already {intent['status']}")
+    # Q4: closing an intent closes every open episode for it, and a
+    # frozen member whose intent completes becomes a stale_member on
+    # every open writeup that ratified it. One query stops the author
+    # discovering that one `write status` at a time. A warning: the
+    # completion is theirs to make.
+    held = _writeups_holding(db, manuscript, intent["id"])
     ses.complete_intent(db, intent, outcome)
     analysis = analyze_pending(db, manuscript, llm) if llm and llm.enabled else []
-    return {"intent": intent, "analysis": analysis}
+    return {"intent": intent, "analysis": analysis, "held_by": held}
+
+
+def _writeups_holding(db: Database, manuscript: dict, intent_id: str) -> list:
+    """Active writeups carrying this intent as a ratified member."""
+    out = []
+    for row in db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
+            (manuscript["id"],)):
+        block = loads(row["metadata"], {}).get("intents") or {}
+        if (block.get("state") == "frozen"
+                and any(m["id"] == intent_id
+                        for m in block.get("members") or [])):
+            out.append({"writeup": row["id"], "file": row["file"]})
+    return out
 
 
 def abandon_intent(db: Database, manuscript: dict, prefix: str,
@@ -387,6 +418,144 @@ def abandon_intent(db: Database, manuscript: dict, prefix: str,
         raise ValueError(f"intent is already {intent['status']}")
     ses.abandon_intent(db, intent, reason)
     return {"intent": intent}
+
+
+def _scope_target(manuscript: dict, scope: str | None,
+                  chapter: str | None, manuscript_wide: bool) -> str | None:
+    """Exactly one of the three, resolved and validated. A `--chapter`
+    target must be a toc OPENER — a file with children — or the word
+    means nothing: scoping to a leaf essay is `--scope`."""
+    from .revisions import read_manuscript_files
+    from .structure import _toc_chapters, TOC_FILENAME
+
+    given = [bool(scope), bool(chapter), bool(manuscript_wide)]
+    if sum(given) != 1:
+        raise ValueError(
+            "name exactly one place: --scope <file> (this essay), "
+            "--chapter <opener> (every essay beneath it), or --manuscript "
+            "(the whole book).")
+    if manuscript_wide:
+        return None
+    target = _resolve_relpath(manuscript, scope or chapter)
+    if chapter:
+        files = read_manuscript_files(Path(manuscript["path"]))
+        children = [c["file"] for c in
+                    _toc_chapters(files.get(TOC_FILENAME) or "")
+                    if c.get("parent") == target]
+        if not children:
+            raise ValueError(
+                f"{target} has no essays beneath it in toc.toml, so "
+                f"--chapter names nothing. Scope it to the essay itself "
+                f"(--scope {target}), or make it a part opener first.")
+    return target
+
+
+def scope_intent(db: Database, manuscript: dict, prefix: str,
+                 scope: str | None = None, chapter: str | None = None,
+                 manuscript_wide: bool = False) -> dict:
+    """(Re)place an existing intent. Metadata-forward, never rewriting:
+    episodes keep their transitions, completed writeups keep their frozen
+    member records with the tier as it stood, and `metadata.scope_history`
+    records the move with the client that made it. Active writeups
+    holding the intent as a frozen member are returned so the caller can
+    say they are unaffected — which is exactly why the member record
+    freezes the tier (design-intent-scope §4.3)."""
+    intent = _find_intent(db, manuscript, prefix)
+    if intent["status"] != "active":
+        raise ValueError(
+            f"intent {intent['id']} is {intent['status']} — scope places "
+            f"where FUTURE work routes, and there is none for a "
+            f"{intent['status']} goal.")
+    target = _scope_target(manuscript, scope, chapter, manuscript_wide)
+    meta = loads(intent["metadata"], {}) or {}
+    history = meta.get("scope_history") or []
+    history.append({"from": intent["scope"], "to": target, "at": now_iso(),
+                    "by": clients.current().key()})
+    meta["scope_history"] = history
+    db.update("declared_intents", intent["id"],
+              {"scope": target, "metadata": json.dumps(meta)})
+    holding = []
+    for row in db.all(
+            "SELECT * FROM writeups WHERE manuscript_id = ? AND status = 'active'",
+            (manuscript["id"],)):
+        block = loads(row["metadata"], {}).get("intents") or {}
+        member = next((m for m in block.get("members") or []
+                       if m["id"] == intent["id"]), None)
+        if member and block.get("state") == "frozen":
+            holding.append({"writeup": row["id"], "file": row["file"],
+                            "tier": member["tier"], "scope": member["scope"]})
+    return {"intent": {**intent, "scope": target}, "was": intent["scope"],
+            "scope": target, "frozen_in": holding}
+
+
+def scope_evidence(db: Database, manuscript: dict,
+                   prefix: str | None = None) -> list[dict]:
+    """The one-time scope triage's read (design-intent-scope §4.1): for
+    each active unscoped intent, the files its episodes ACTUALLY touched,
+    the writeups bound to it, and a deterministic suggestion with the
+    reason for it in words. ZERO LLM calls; the author rules from
+    evidence rather than memory."""
+    from . import passes
+
+    if prefix:
+        rows = [_find_intent(db, manuscript, prefix)]
+    else:
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM declared_intents WHERE manuscript_id = ? "
+            "AND status = 'active' AND scope IS NULL ORDER BY created_at",
+            (manuscript["id"],))]
+    out = []
+    for intent in rows:
+        counts: dict[str, int] = {}
+        for episode in db.all(
+                "SELECT transition_ids FROM editorial_episodes "
+                "WHERE intent_id = ?", (intent["id"],)):
+            for tid in loads(episode["transition_ids"], []):
+                row = db.one(
+                    "SELECT location FROM editorial_transitions WHERE id = ?",
+                    (tid,))
+                if row:
+                    file = row["location"].split("#", 1)[0]
+                    counts[file] = counts.get(file, 0) + 1
+        writeups = [{"id": w["id"], "file": w["file"], "status": w["status"]}
+                    for w in db.all(
+                        "SELECT * FROM writeups WHERE manuscript_id = ? "
+                        "AND intent_id = ? ORDER BY created_at",
+                        (manuscript["id"], intent["id"]))]
+        files = sorted(counts, key=lambda f: (-counts[f], f))
+        total = sum(counts.values())
+        if len(files) == 1:
+            suggested = {"tier": "file", "scope": files[0],
+                         "why": f"every change under it — {total} of them — "
+                                f"landed in {files[0]}"}
+        elif len(files) > 1:
+            chains = [set(passes.toc_ancestors(manuscript, f)) for f in files]
+            common = set.intersection(*chains) if chains else set()
+            nearest = None
+            for candidate in passes.toc_ancestors(manuscript, files[0]):
+                if candidate in common:
+                    nearest = candidate
+                    break
+            if nearest:
+                suggested = {"tier": "chapter", "scope": nearest,
+                             "why": f"{len(files)} essays, all under "
+                                    f"{nearest}"}
+            else:
+                suggested = {"tier": "manuscript", "scope": None,
+                             "why": "changes across the book, with no one "
+                                    "part holding them"}
+        else:
+            suggested = {"tier": "manuscript", "scope": None,
+                         "why": "no recorded work yet — your call"}
+        source = db.one("SELECT * FROM sources WHERE id = ?",
+                        (intent["source_id"],))
+        out.append({
+            "id": intent["id"], "statement": intent["statement"],
+            "created_at": intent["created_at"],
+            "source": dict(source)["kind"] if source else None,
+            "files": [{"file": f, "transitions": counts[f]} for f in files],
+            "writeups": writeups, "suggested": suggested})
+    return out
 
 
 def list_intents(db: Database, manuscript: dict) -> list[dict]:
@@ -424,11 +593,19 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None) -> dict:
+            analyze: bool | None = None, episode: dict | None = None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
-    a suspicious deletion; {"unchanged": True} when nothing changed."""
+    a suspicious deletion; {"unchanged": True} when nothing changed.
+
+    `episode` names the episode the transitions attach to. The default —
+    the session's most recently created open episode — is what every
+    ambient caller wants and is byte for byte what this function did
+    before the parameter existed. The beat loop passes the PRIMARY
+    intent's episode instead: with two writeups open at once, the default
+    attached both writeups' beats to whichever intent was declared last
+    (design-intent-scope §0.3)."""
     mid = manuscript["id"]
     if auto:
         flagged = massive_deletions(db, manuscript)
@@ -458,7 +635,10 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     transitions = detect_transitions(db, mid, dict(before) if before else None, version)
     attached = False
-    if session:
+    if episode is not None:
+        ses.attach_transitions(db, episode, transitions)
+        attached = True
+    elif session:
         episode = ses.current_episode(db, mid, dict(session))
         ses.attach_transitions(db, episode, transitions)
         attached = True
@@ -893,6 +1073,29 @@ def _checkout_gate(db: Database, manuscript: dict, relpath: str) -> None:
         )
 
 
+def _primary_intent_id(writeup: dict) -> str | None:
+    """The intent this writeup's transitions and verdicts belong to.
+
+    `writeups.intent_id` still holds it — the frozen member block names
+    the same row — so this reads the block first (it is authoritative
+    once the set is ratified) and falls back to the column, which is what
+    every writeup written before the block existed carries."""
+    block = loads(writeup["metadata"], {}).get("intents") or {}
+    return block.get("primary") or writeup["intent_id"]
+
+
+def _writeup_episode(db: Database, manuscript: dict, writeup: dict,
+                     session: dict) -> dict:
+    """The episode every beat of this writeup attaches to: the PRIMARY
+    intent's own, resolved once per verb and handed to both `collect` and
+    `record_review` so the transitions and the verdict can never land in
+    two different places (design-intent-scope §1.7)."""
+    intent_id = _primary_intent_id(writeup)
+    if not intent_id:
+        return ses.current_episode(db, manuscript["id"], session)
+    return ses.episode_for_intent(db, manuscript["id"], session, intent_id)
+
+
 def _current_beat(writeup: dict) -> dict:
     plan = loads(writeup["plan"], [])
     if not plan:
@@ -998,8 +1201,122 @@ def _style_candidates(db: Database, manuscript_id: str,
     return "".join(parts)
 
 
+# --------------------------------------------- scope-derived intent sets
+#
+# A rewrite serves every ACTIVE intent whose scope covers the essay
+# (design-intent-scope). There is no group entity — the scope tier IS the
+# group — and no schema change: membership lives in
+# `writeups.metadata.intents`, on the dedup-append idiom
+# `metadata.drafting_models` and `metadata.clients` already use.
+#
+# The member record freezes `statement`, `scope` and `tier` rather than
+# joining them at read time. `declared_intents.scope` is mutable now, and
+# a live join would let a re-scope in another chat silently change block
+# A between beat n and beat n+1 — design F4's silent cache invalidator
+# arriving by a new road. Freezing also makes the record history-safe: a
+# re-scope after ratification cannot retro-narrate what a finished
+# writeup was serving.
+
+# Above this many manuscript-wide intents in one derived set, `write
+# start` says so. They are unscoped, not book-wide by decision, and every
+# one of them will ride along with every writeup until the author's scope
+# triage. A warning, never a gate: they may want to write today.
+MANY_MANUSCRIPT_WIDE = 5
+
+
+def _intent_block(writeup: dict) -> dict:
+    """The stored membership block, or {} for a writeup that predates it."""
+    return loads(writeup["metadata"], {}).get("intents") or {}
+
+
+def _member_record(manuscript: dict, relpath: str, intent: dict,
+                   role: str = "secondary") -> dict:
+    from . import passes
+
+    tier = passes.scope_tier(manuscript, relpath, intent["scope"])
+    return {"id": intent["id"], "tier": tier or "outside",
+            "scope": intent["scope"], "statement": intent["statement"],
+            "role": role}
+
+
+def _member_order(manuscript: dict, relpath: str, member: dict) -> tuple:
+    from . import passes
+
+    return (passes.scope_specificity(manuscript, relpath, member["scope"]),
+            member["id"])
+
+
+def _pick_primary(manuscript: dict, relpath: str,
+                  members: list[dict]) -> tuple[str | None, list[str]]:
+    """The most specific member wins — file over chapter over manuscript,
+    and within chapter the NEAREST toc ancestor. More than one candidate
+    at the winning tier is a tie the machine must not break: oldest-first
+    ("the standing goal") and newest-first ("the one they are working on
+    now") are both plausible, which is the proof (§1.7). Returns
+    (primary or None, the candidates)."""
+    if not members:
+        return None, []
+    ranked = [(_member_order(manuscript, relpath, m)[0], m["id"])
+              for m in members]
+    best = min(rank for rank, _ in ranked)
+    candidates = sorted(mid for rank, mid in ranked if rank == best)
+    return (candidates[0] if len(candidates) == 1 else None), candidates
+
+
+def _with_roles(members: list[dict], primary: str | None) -> list[dict]:
+    return [{**m, "role": "primary" if m["id"] == primary else "secondary"}
+            for m in members]
+
+
+def _new_intent_block(manuscript: dict, relpath: str, members: list[dict],
+                      manual: bool) -> dict:
+    primary, candidates = _pick_primary(manuscript, relpath, members)
+    members = _with_roles(members, primary)
+    return {"state": "proposed", "manual": bool(manual), "primary": primary,
+            "members": members, "derived": [m["id"] for m in members],
+            "adds": [], "removes": [], "deferred": {}, "ignored": [],
+            "frozen_at": None, "tied": [] if primary else candidates}
+
+
+def _store_intent_block(db: Database, writeup: dict, block: dict) -> None:
+    """Read-modify-write on the FRESH row. `_writeup` has already run
+    `_touched`, so `metadata.clients` is on the row this reloads
+    (`_touched`'s docstring, above) and nothing here can clobber it."""
+    row = db.one("SELECT metadata FROM writeups WHERE id = ?",
+                 (writeup["id"],))
+    meta = loads(row["metadata"] if row else writeup["metadata"], {})
+    meta["intents"] = block
+    db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+
+
+def _members_view(block: dict) -> list[dict]:
+    """Members in render order: primary first, then tier rank, then id.
+    One ordering, spelled once, for the CLI and for block A.
+
+    Takes the stored block and nothing else — no manuscript, no file, no
+    `db`. The order must be a pure function of what was ratified, for
+    exactly the reason the member record freezes its fields."""
+    from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
+
+    members = block.get("members") or []
+    return sorted(members,
+                  key=lambda m: (0 if m.get("role") == "primary" else 1,
+                                 INTENT_TIER_RANK.get(m["tier"],
+                                                      UNKNOWN_TIER_RANK),
+                                 m["id"]))
+
+
+def _resolve_member_prefix(block: dict, prefix: str) -> str | None:
+    hits = [m["id"] for m in block.get("members") or [] if prefix in m["id"]]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        raise LookupError(f"'{prefix}' is ambiguous ({len(hits)} members)")
+    return None
+
+
 def write_start(db: Database, manuscript: dict, config: dict,
-                file: str, intent_prefix: str,
+                file: str, intent_prefix: str | Sequence[str] | None = None,
                 after: str | None = None, brief: str | None = None,
                 new: bool = False, style: str | None = None) -> dict:
     """Initiate a fresh-drafting writeup: gate, pin the current version as
@@ -1016,7 +1333,14 @@ def write_start(db: Database, manuscript: dict, config: dict,
 
     `brief` is the author's one paragraph. Required with `new`: a
     brand-new file has no pinned raw material, so the brief is the only
-    essay-specific grounding the beats have."""
+    essay-specific grounding the beats have.
+
+    `intent_prefix` is now zero, one, or many. With none, the intent set
+    is DERIVED from the scopes covering this essay and persisted as
+    PROPOSED, to be frozen at `write plan`. With one or more, derivation
+    is skipped entirely and the FIRST flag is the primary — so the
+    single-flag command that existed before this design produces
+    bit-for-bit the same writeup row."""
     from . import styles as st
 
     mid = manuscript["id"]
@@ -1027,9 +1351,19 @@ def write_start(db: Database, manuscript: dict, config: dict,
         raise ValueError(
             f"--style is only for --new; an existing file's guide is "
             f"attached with 'style attach {relpath} {style}'.")
-    intent = _find_intent(db, manuscript, intent_prefix)
-    if intent["status"] != "active":
-        raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
+    prefixes = ([intent_prefix] if isinstance(intent_prefix, str)
+                else list(intent_prefix or []))
+    # Named intents resolve HERE, at the head of the gate parade, exactly
+    # where the single `--intent` always did: an author who names a dead
+    # intent must still learn that first, not after four other refusals
+    # (design §5.5, MT-5).
+    named = []
+    for prefix in prefixes:
+        intent = _find_intent(db, manuscript, prefix)
+        if intent["status"] != "active":
+            raise ValueError(f"intent {intent['id']} is {intent['status']}, not active")
+        if intent["id"] not in {i["id"] for i in named}:
+            named.append(intent)
     guide = None
     if new:
         # `style attach` cannot run first for a file that does not exist:
@@ -1117,9 +1451,57 @@ def write_start(db: Database, manuscript: dict, config: dict,
     if not ready["ok"]:
         raise ValueError(passes.summaries_message(ready, "drafting pass"))
 
-    ensure_session(db, manuscript)
-    # Two collects: the first captures any uncollected edits so the pinned
-    # source version is complete; the second records the truncation.
+    # Derivation, LAST among the gates and still before the pin/truncate/
+    # collect sequence (RISK K1). It can refuse — an essay no active
+    # intent covers is a writeup with no goal — and a refusal here must
+    # leave the disk exactly as it was.
+    if named:
+        members = [_member_record(manuscript, relpath, i) for i in named]
+        block = _new_intent_block(manuscript, relpath, members, manual=True)
+        # The author's FIRST flag is the primary, whatever the tiers say.
+        # They just reached for it by name; the machine does not overrule
+        # that with a specificity rule.
+        block["primary"] = named[0]["id"]
+        block["tied"] = []
+        block["members"] = _with_roles(block["members"], block["primary"])
+        outside = [m for m in block["members"] if m["tier"] == "outside"]
+    else:
+        members = sorted(
+            (_member_record(manuscript, relpath, i)
+             for i in passes.intents_in_scope(db, manuscript, relpath, "active")),
+            key=lambda m: _member_order(manuscript, relpath, m))
+        if not members:
+            raise ValueError(
+                f"no active intent covers {relpath}, so this rewrite would "
+                f"have no goal. Declare one for it — "
+                f"'intent declare \"<what this rewrite is for>\" --scope "
+                f"{relpath}' — or place an existing one: "
+                f"'intent scope <id> --scope {relpath}'. "
+                f"To reach for an intent by name instead: "
+                f"--intent <id>.")
+        block = _new_intent_block(manuscript, relpath, members, manual=False)
+        outside = []
+    primary_id = block["primary"] or (block["tied"][0] if block["tied"]
+                                      else block["members"][0]["id"])
+    # `writeups.intent_id` keeps holding the primary (no schema change).
+    # While a tie is unsettled it holds the lowest-id candidate as a
+    # placeholder — no beat can be accepted before `write plan`, and
+    # `write plan` refuses until the author settles it, so nothing is
+    # ever attributed to the placeholder.
+    intent = next((i for i in named if i["id"] == primary_id), None) \
+        or _find_intent(db, manuscript, primary_id)
+    manuscript_wide = [m for m in block["members"] if m["tier"] == "manuscript"]
+    proposed_in_scope = passes.intents_in_scope(db, manuscript, relpath,
+                                                "proposed")
+
+    session, _ = ensure_session(db, manuscript)
+    # Two collects, and they are NOT the same kind of act.
+    #
+    # The FIRST captures whatever the author typed and never collected
+    # before this verb ran, so the pinned source version is complete. That
+    # work PREDATES the writeup: it was done under whatever the session
+    # was already doing, and filing it against a goal declared a moment
+    # later would be back-dating. It stays ambient, deliberately.
     collect(db, manuscript, config, source="write-start")
     source = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
@@ -1144,7 +1526,21 @@ def write_start(db: Database, manuscript: dict, config: dict,
         "" if new else PLACEHOLDER, encoding="utf-8")
     if new:
         attach_style(db, manuscript, relpath, guide["name"])
-    collect(db, manuscript, config, source="write-start")
+    # The SECOND collect records the TRUNCATION — this writeup's own first
+    # act, and the largest single transition it will ever produce. It is
+    # filed against the primary exactly as every beat is.
+    #
+    # ONLY when the primary is settled. While a tie is unsettled there is
+    # no primary yet: `writeups.intent_id` below holds the lowest-id
+    # candidate as a placeholder, and real work must never be attributed
+    # to a candidate the author has not chosen. So the truncation stays
+    # ambient in that case — the same refuse-to-guess doctrine the
+    # tiebreak itself rests on, applied to the episode rather than to the
+    # column. `write plan` is what settles it, and every act after that
+    # point is routed.
+    collect(db, manuscript, config, source="write-start",
+            episode=(ses.episode_for_intent(db, mid, session, block["primary"])
+                     if block["primary"] else None))
 
     row = ko_fields("wu")
     row.update(
@@ -1153,17 +1549,244 @@ def write_start(db: Database, manuscript: dict, config: dict,
         cursor=0, learnings="[]",
         metadata=json.dumps({"next_n": 1, "placement": placement,
                              "created_file": bool(new),
-                             "brief": brief or None}),
+                             "brief": brief or None,
+                             "intents": block}),
     )
     db.insert("writeups", row)
     source_text = loads(source["files"], {}).get(relpath, "")
+    # Q3: a `--new` file has no toc entry yet, so `scope_chain` is
+    # [file, None] and no chapter-scoped intent can be derived. Say so
+    # at the start rather than letting the author discover the absence.
+    unplaced = bool(new) and not named
     return {"writeup": row, "intent": intent,
+            "intents": block,
+            "intents_view": _members_view(block),
+            "manuscript_wide": len(manuscript_wide),
+            "many_manuscript_wide": len(manuscript_wide) >= MANY_MANUSCRIPT_WIDE,
+            "outside_scope": [m["id"] for m in outside],
+            "proposed_in_scope": proposed_in_scope,
+            "chapter_undecidable": unplaced,
             "source_version_no": source["version_no"],
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
             "drafting_context": _drafting_context(db, manuscript, row,
                                                   capture=capture)}
+
+
+def write_intents(db: Database, manuscript: dict,
+                  add: Sequence[str] = (), remove: Sequence[str] = (),
+                  primary: str | None = None, defer: str | None = None,
+                  ignore: Sequence[str] = (), reason: str | None = None,
+                  prefix: str | None = None) -> dict:
+    """Adjust the writeup's intent membership. One verb, five
+    adjustments, each with its own window (design-intent-scope §1.5).
+
+    PROPOSED is the editable state: --add, --remove and --primary all
+    work. FROZEN is a ratification, so it is narrower — --add stays legal
+    as an explicit JOIN (it re-bills the cached prefix once, because
+    block A changed), --remove is refused in favour of --defer (removing
+    a ratified member would make the completion report a fiction), and
+    --primary is legal only while `cursor == 0`, since re-pointing after
+    the first accepted beat would split one writeup's transitions across
+    two episodes — the exact fan-out the design forbids, arriving through
+    the back door."""
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    block = _intent_block(writeup)
+    if not block:
+        raise ValueError(
+            f"writeup {writeup['id']} predates scope-derived intents and "
+            f"carries no member set — it serves {writeup['intent_id'][:11]} "
+            f"alone.")
+    if not (add or remove or primary or defer or ignore):
+        return {"writeup_id": writeup["id"], "intents": block,
+                "intents_view": _members_view(block),
+                "changed": []}
+    frozen = block.get("state") == "frozen"
+    relpath = writeup["file"]
+    changed: list[str] = []
+
+    for target in remove:
+        member_id = _resolve_member_prefix(block, target)
+        if member_id is None:
+            raise LookupError(f"'{target}' is not a member of this writeup")
+        if frozen:
+            raise ValueError(
+                f"the intent set was ratified at 'write plan'; removing "
+                f"{member_id[:11]} now would make the completion report a "
+                f"fiction. Record what actually happened instead: "
+                f"'write intents --defer {member_id[:11]} --reason \"<why>\"'.")
+        if member_id == block.get("primary"):
+            # Legal while proposed: nothing has been attributed yet. The
+            # primary is simply re-derived below, and a fresh tie there
+            # is refused at the plan like any other.
+            block["primary"] = None
+        block["members"] = [m for m in block["members"] if m["id"] != member_id]
+        block.setdefault("removes", []).append(
+            {"id": member_id, "at": now_iso()})
+        changed.append(f"removed {member_id[:11]}")
+
+    for target in add:
+        if _resolve_member_prefix(block, target):
+            raise ValueError(f"'{target}' is already a member")
+        intent = _find_intent(db, manuscript, target)
+        if intent["status"] != "active":
+            raise ValueError(
+                f"intent {intent['id']} is {intent['status']}, not active")
+        block["members"].append(_member_record(manuscript, relpath, intent))
+        entry = {"id": intent["id"], "at": now_iso()}
+        if frozen:
+            entry["beat"] = writeup["cursor"]
+        block.setdefault("adds", []).append(entry)
+        block["ignored"] = [i for i in block.get("ignored") or []
+                            if i != intent["id"]]
+        changed.append(f"added {intent['id'][:11]}")
+
+    if primary:
+        member_id = _resolve_member_prefix(block, primary)
+        if member_id is None:
+            raise LookupError(
+                f"'{primary}' is not a member of this writeup — join it "
+                f"first: 'write intents --add {primary}'")
+        if frozen and writeup["cursor"] > 0:
+            raise ValueError(
+                f"beat {writeup['cursor']} is already accepted and its "
+                f"transitions are recorded against "
+                f"{block['primary'][:11]}'s episode. Re-pointing the "
+                f"primary now would split one writeup's transitions across "
+                f"two episodes — one authorial act mined twice. The exit is "
+                f"'write abandon' (it restores the pinned source version).")
+        block["primary"] = member_id
+        block["tied"] = []
+        changed.append(f"primary {member_id[:11]}")
+
+    if defer:
+        if not frozen:
+            raise ValueError(
+                "--defer records a disposition on a RATIFIED set; while the "
+                "set is still proposed the honest adjustment is "
+                "'write intents --remove <id>'.")
+        if not (reason or "").strip():
+            raise ValueError(
+                "--reason is required with --defer: an unexplained deferral "
+                "teaches nothing (the same ground as 'write reject --reason').")
+        member_id = _resolve_member_prefix(block, defer)
+        if member_id is None:
+            raise LookupError(f"'{defer}' is not a member of this writeup")
+        if member_id == block.get("primary"):
+            raise ValueError(
+                f"{member_id[:11]} is the primary — it owns the attribution "
+                f"for every beat already accepted, so it cannot be deferred.")
+        block.setdefault("deferred", {})[member_id] = {
+            "reason": reason.strip(), "at": now_iso(),
+            "beat": writeup["cursor"]}
+        changed.append(f"deferred {member_id[:11]}")
+
+    for target in ignore:
+        if _resolve_member_prefix(block, target):
+            raise ValueError(
+                f"'{target}' is already a member — --ignore is for an intent "
+                f"that has come into scope and has NOT joined.")
+        intent = _find_intent(db, manuscript, target)
+        ignored = block.setdefault("ignored", [])
+        if intent["id"] not in ignored:
+            ignored.append(intent["id"])
+        changed.append(f"ignored {intent['id'][:11]}")
+
+    block["members"] = _with_roles(block["members"], block.get("primary"))
+    if not block.get("primary") and block["members"]:
+        _, candidates = _pick_primary(manuscript, relpath, block["members"])
+        block["tied"] = candidates if len(candidates) > 1 else []
+        if len(candidates) == 1:
+            block["primary"] = candidates[0]
+            block["members"] = _with_roles(block["members"], candidates[0])
+    if not block["members"]:
+        raise ValueError(
+            "that would leave the writeup with no intent at all — a rewrite "
+            "serves a goal. Add another first, or 'write abandon'.")
+    _store_intent_block(db, writeup, block)
+    if block.get("primary") and block["primary"] != writeup["intent_id"]:
+        db.update("writeups", writeup["id"],
+                  {"intent_id": block["primary"]})
+    return {"writeup_id": writeup["id"], "intents": block,
+            "intents_view": _members_view(block),
+            "changed": changed, "state": block.get("state"),
+            "rebills_prefix": bool(frozen and any(
+                c.startswith("added") for c in changed))}
+
+
+def _resolve_beat_tags(block: dict, beats: list) -> None:
+    """A beat spec MAY name the intents it serves — prefixes, resolved to
+    full ids in place and stored resolved, on the digest's `serves`
+    precedent. A tag naming a non-member is refused by the same rule the
+    digest's dangling cross-reference is: a dangling tag makes the
+    disposition report decorative."""
+    member_ids = {m["id"] for m in block.get("members") or []}
+    for spec in beats:
+        tags = spec.get("intents") if isinstance(spec, dict) else None
+        if not tags:
+            continue
+        if not isinstance(tags, list):
+            raise ValueError(
+                'a beat\'s "intents" must be an array of intent id prefixes')
+        resolved = []
+        for tag in tags:
+            hits = [i for i in member_ids if isinstance(tag, str) and tag in i]
+            if len(hits) != 1:
+                names = ", ".join(sorted(i[:11] for i in member_ids))
+                raise ValueError(
+                    f"a beat is tagged for '{tag}', which is not a member of "
+                    f"this writeup — a dangling tag makes the disposition "
+                    f"report decorative. Members: {names}. Join it "
+                    f"('write intents --add {tag}') or drop the tag.")
+            resolved.append(hits[0])
+        spec["intents"] = resolved
+
+
+def _freeze_intents(db: Database, manuscript: dict, writeup: dict,
+                    beats: list) -> dict:
+    """The ratification. `write plan` is already the author's gate
+    (design §13.3), so the set rides it: three refusals, each naming the
+    one command that clears it, and then the set is frozen and block A's
+    INTENTS section is fixed for the rest of the writeup."""
+    block = _intent_block(writeup)
+    if not block:
+        return {}
+    # Beat tags are resolved and validated on EVERY plan, including a
+    # replan of a frozen writeup: a tag left as an unresolved prefix
+    # would never match a member id, and the disposition report would
+    # quietly count the beat as untagged.
+    _resolve_beat_tags(block, beats)
+    if block.get("state") == "frozen":
+        return block
+    if not block.get("primary"):
+        lines = []
+        for member_id in block.get("tied") or []:
+            member = next((m for m in block["members"]
+                           if m["id"] == member_id), None)
+            if member:
+                lines.append(f"  [{member_id[:11]}] {member['statement']}")
+        first = (block.get("tied") or [""])[0][:11]
+        raise ValueError(
+            "two or more intents are tied for primary and the writeup's "
+            "episode hangs off it —\n" + "\n".join(lines)
+            + f"\nName it, then re-run: write intents --primary {first}")
+    for member in block["members"]:
+        row = db.one("SELECT * FROM declared_intents WHERE id = ?",
+                     (member["id"],))
+        status = row["status"] if row else "gone"
+        if status != "active":
+            raise ValueError(
+                f"member [{member['id'][:11]}] is {status}, not active — "
+                f"\"{member['statement']}\". A silently changed set is not a "
+                f"ratified set: drop it yourself, then re-run: "
+                f"write intents --remove {member['id'][:11]}")
+    block["state"] = "frozen"
+    block["frozen_at"] = now_iso()
+    block["members"] = _with_roles(block["members"], block["primary"])
+    return block
 
 
 def write_plan(db: Database, manuscript: dict, beats: list,
@@ -1209,7 +1832,15 @@ def write_plan(db: Database, manuscript: dict, beats: list,
                 f"first: 'write reject --reason \"<why the plan is wrong>\"' "
                 f"(that reason IS the evidence for the replan), or "
                 f"'write accept' to keep the draft.")
+    # The intent set FREEZES here, before any plan mutation. `write plan`
+    # is already the author's ratification gate (design §13.3), so the
+    # set rides it and the success line prints it: ratifying the plan
+    # knowingly ratifies the intents, with no second confirmation verb.
+    # A replan of a frozen writeup leaves membership and frozen_at alone.
+    block = _freeze_intents(db, manuscript, writeup, beats)
     meta = loads(writeup["metadata"], {})
+    if block:
+        meta["intents"] = block
     next_n = meta.get("next_n", 1)
     fresh = []
     for spec in beats:
@@ -1227,7 +1858,10 @@ def write_plan(db: Database, manuscript: dict, beats: list,
     db.update("writeups", writeup["id"],
               {"plan": json.dumps(new_plan), "metadata": json.dumps(meta)})
     return {"writeup_id": writeup["id"], "kept": len(kept),
-            "added": len(fresh), "plan": new_plan, "cursor": writeup["cursor"]}
+            "added": len(fresh), "plan": new_plan, "cursor": writeup["cursor"],
+            "intents": block,
+            "intents_view": (_members_view(block)
+                             if block else [])}
 
 
 def _validate_digest(db: Database, manuscript: dict, payload) -> dict:
@@ -1507,6 +2141,40 @@ def write_digest(db: Database, manuscript: dict, payload=None,
             "source_chars": len(source_text)}
 
 
+def _scope_drift(db: Database, manuscript: dict, writeup: dict,
+                 block: dict) -> tuple[list[dict], list[dict]]:
+    """What has moved under a ratified set (design-intent-scope §1.6).
+
+    `newly_in_scope` is derived-now minus members minus ignored: an
+    intent DECLARED or RE-SCOPED after ratification. It is reported and
+    never joined — membership after the freeze changes only by an
+    authorial verb. `stale_members` are members whose intent has since
+    completed or been abandoned: a note, not a block, because the writeup
+    is still honest about having served them."""
+    from . import passes
+
+    if not block:
+        return [], []
+    member_ids = {m["id"] for m in block.get("members") or []}
+    ignored = set(block.get("ignored") or [])
+    newly = [
+        {"id": row["id"], "statement": row["statement"],
+         "scope": row["scope"],
+         "tier": passes.scope_tier(manuscript, writeup["file"], row["scope"])
+         or "outside"}
+        for row in passes.intents_in_scope(db, manuscript, writeup["file"],
+                                           "active")
+        if row["id"] not in member_ids and row["id"] not in ignored]
+    stale = []
+    for member in block.get("members") or []:
+        row = db.one("SELECT status FROM declared_intents WHERE id = ?",
+                     (member["id"],))
+        status = row["status"] if row else "gone"
+        if status != "active":
+            stale.append({**member, "status": status})
+    return sorted(newly, key=lambda m: m["id"]), stale
+
+
 def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> dict:
     """The resume entry point: where the writeup stands, what's next.
 
@@ -1526,10 +2194,17 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
     # drafting context already says the essay is in flight.)
     _path = Path(manuscript["path"]) / writeup["file"]
     _disk = _path.read_text(encoding="utf-8") if _path.exists() else ""
+    block = _intent_block(writeup)
+    newly, stale_members = _scope_drift(db, manuscript, writeup, block)
     return {
         "writeup": {k: writeup[k] for k in
                     ("id", "intent_id", "file", "mode", "status",
                      "source_version_id", "cursor")},
+        "intents": block,
+        "intents_view": (_members_view(block)
+                         if block else []),
+        "newly_in_scope": newly,
+        "stale_members": stale_members,
         "plan": plan,
         "current_beat": current,
         "pending_proposal": dict(pending) if pending else None,
@@ -1760,7 +2435,12 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
 
     session, _ = ensure_session(db, manuscript)
-    report = collect(db, manuscript, config, source="write-accept")
+    # ONE episode for the whole verb, resolved BEFORE the collect: the
+    # transitions and the verdict must not be able to disagree about
+    # which intent this beat served.
+    episode = _writeup_episode(db, manuscript, writeup, session)
+    report = collect(db, manuscript, config, source="write-accept",
+                     episode=episode)
     if decision == "modified":
         meta = loads(proposal["metadata"], {})
         meta["accepted_text"] = accepted
@@ -1771,7 +2451,6 @@ def write_accept(db: Database, manuscript: dict, config: dict,
         meta["accepted_by"] = clients.current().key()
         db.update("guidance_history", proposal["id"],
                   {"metadata": json.dumps(meta)})
-    episode = ses.current_episode(db, manuscript["id"], session)
     review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), decision, reason,
         episode["id"], llm=llm,
@@ -1802,7 +2481,7 @@ def write_reject(db: Database, manuscript: dict, reason: str,
         raise LookupError(f"nothing proposed for beat {beat['n']} — "
                           "write propose first")
     session, _ = ensure_session(db, manuscript)
-    episode = ses.current_episode(db, manuscript["id"], session)
+    episode = _writeup_episode(db, manuscript, writeup, session)
     review_result = bel.record_review(
         db, manuscript["id"], dict(proposal), "rejected", reason.strip(),
         episode["id"], llm=llm,
@@ -1823,6 +2502,61 @@ def write_learn(db: Database, manuscript: dict, lesson: str,
     learnings.append(lesson.strip())
     db.update("writeups", writeup["id"], {"learnings": json.dumps(learnings)})
     return {"writeup_id": writeup["id"], "learnings": learnings}
+
+
+def _intent_dispositions(writeup: dict, block: dict) -> list[dict]:
+    """Per member: served, deferred, or UNSERVED (design §1.8).
+
+    A beat spec MAY tag the intents it serves, like the digest's point
+    ids; an UNTAGGED beat counts toward every member. "Accepted" means
+    the cursor advanced past the beat — `write_accept` is the only thing
+    that advances it."""
+    if not block:
+        return []
+    plan = loads(writeup["plan"], [])
+    accepted = plan[:writeup["cursor"]]
+    untagged = any(not (b.get("intents") or []) for b in accepted)
+    tagged: set[str] = set()
+    for beat in accepted:
+        tagged.update(beat.get("intents") or [])
+    deferred = block.get("deferred") or {}
+    out = []
+    for member in block.get("members") or []:
+        entry = dict(member)
+        if member["id"] in deferred:
+            entry["disposition"] = "deferred"
+            entry["reason"] = deferred[member["id"]].get("reason")
+        elif untagged or member["id"] in tagged:
+            entry["disposition"] = "served"
+        else:
+            entry["disposition"] = "unserved"
+        entry["beats"] = len(accepted)
+        out.append(entry)
+    return out
+
+
+def _record_served_by(db: Database, writeup: dict,
+                      dispositions: list[dict]) -> None:
+    """One dedup-append entry on each member intent's OWN row, so a
+    chapter-wide intent's completion analysis can see the three essays
+    rewritten under it without a group object ever existing. Deduped by
+    writeup id — re-completing never doubles a row."""
+    stamp = now_iso()
+    for entry in dispositions:
+        row = db.one("SELECT * FROM declared_intents WHERE id = ?",
+                     (entry["id"],))
+        if row is None:
+            continue
+        meta = loads(row["metadata"], {}) or {}
+        served = [s for s in (meta.get("served_by") or [])
+                  if s.get("writeup") != writeup["id"]]
+        served.append({"writeup": writeup["id"], "file": writeup["file"],
+                       "role": entry.get("role", "secondary"),
+                       "disposition": entry["disposition"],
+                       "beats": entry.get("beats", 0), "at": stamp})
+        meta["served_by"] = served
+        db.update("declared_intents", row["id"],
+                  {"metadata": json.dumps(meta)})
 
 
 def write_complete(db: Database, manuscript: dict, config: dict,
@@ -1886,14 +2620,32 @@ def write_complete(db: Database, manuscript: dict, config: dict,
                 toc_path.write_text(new_text, encoding="utf-8")
             toc_registered = True
     accounting = _accounting(writeup)
+    block = _intent_block(writeup)
+    dispositions = _intent_dispositions(writeup, block)
     if accounting is not None:
         meta["accounting_at_complete"] = {
             "kept": len(accounting["kept"]),
             "removed": len(accounting["removed"]),
             "unaccounted": accounting["unaccounted"],
         }
+    if dispositions:
+        # The same metadata pass that persists the removal accounting.
+        meta["intent_dispositions"] = {
+            e["id"]: e["disposition"] for e in dispositions}
+    if accounting is not None or dispositions:
         db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
-    report = collect(db, manuscript, config, source="write-complete")
+    _record_served_by(db, writeup, dispositions)
+    # The writeup's LAST collect, and it belongs to the primary exactly as
+    # every per-beat one does. It is usually a no-op — nothing has moved
+    # since the final accept — but "usually" is not "never": a doc pull,
+    # or the author's own hand edit between the last beat and this verb,
+    # makes it a real collect with real transitions, and those would land
+    # on the session's most recently created open episode, whatever intent
+    # it belonged to. Same defect, same fix, one site later.
+    session, _ = ensure_session(db, manuscript)
+    report = collect(db, manuscript, config, source="write-complete",
+                     episode=_writeup_episode(db, manuscript, writeup,
+                                              session))
     extraction = None
     llm = LLMClient(config)
     if llm.enabled:
@@ -1912,6 +2664,7 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
     return {"writeup_id": writeup["id"], "intent_id": writeup["intent_id"],
+            "intent_dispositions": dispositions,
             "beats_done": writeup["cursor"], "beats_unwritten": remaining,
             "tallies": _beat_tallies(db, writeup),
             "learnings": loads(writeup["learnings"], []),

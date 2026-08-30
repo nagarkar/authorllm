@@ -13,6 +13,13 @@ surface is to keep that evidence flowing while the author just talks.
 1. When the author states a writing goal ("let's introduce gravity in
    preface.md") → `resolve_file` if a file is named, then `declare_intent`.
    Relay the preview (matched concepts, gaps, precedents) conversationally.
+   **Give the intent a PLACE.** When the author names a file, pass it as
+   `declare_intent(scope=<file>)`. When they do not, ask ONE line — "just
+   this essay, the whole part, or the whole book?" — and never default
+   silently: an unscoped intent attaches to EVERY future writeup, which is
+   a real consequence and is theirs to choose. A part is named by its toc
+   opener (`intent scope <id> --chapter <opener>` on the CLI). Say what the
+   answer means in one clause when you record it.
 2. Run `get_guidance` ONCE PER SESSION unprompted — right after the
    opening briefing, or at the first declared intent. This is the
    reinforcement channel: policy reminders only earn (or lose) the
@@ -111,9 +118,14 @@ drafted — it becomes a question to the author, asked before `write propose`.**
 
 | Flow | Start command | Then |
 |---|---|---|
-| New essay from a brief (UC-A) | `write start <name>.md --new --intent <id> --after <file> --style <guide>` (brief on stdin) | straight to step 2 |
-| Modeled rewrite (UC-B) | `write start <file> --intent <id>` (optional brief on stdin) | step 1b first |
-| Plain rewrite | `write start <file> --intent <id>` | straight to step 2 |
+| New essay from a brief (UC-A) | `write start <name>.md --new --after <file> --style <guide>` (brief on stdin) | straight to step 2 |
+| Modeled rewrite (UC-B) | `write start <file>` (optional brief on stdin) | step 1b first |
+| Plain rewrite | `write start <file>` | straight to step 2 |
+
+**`--intent` is no longer routine.** With no flag the intent set is DERIVED
+from the scopes covering the essay; pass `--intent <id>` (repeatable) only
+when the author reaches for a goal by name, and then the first flag is the
+primary. See "Intents on a writeup", below.
 
 Do not infer the flow from context — ask which one it is if the author has
 not said.
@@ -224,6 +236,37 @@ not re-ask at each beat.
    permitted; adding a point, example or citation that is in neither the
    digest nor the brief is a new authorial commitment — take it to the
    author, at plan time.
+1c. **Intents on a writeup — relay, settle, never build.** `write start`
+   prints the PROPOSED set grouped by tier (file / chapter / manuscript)
+   with the primary marked. Relay it in the author's terms, one sentence,
+   naming the goals rather than ids: *"Three of your goals cover this
+   essay — the Becker rewrite, the Part II tightening, and the standing
+   rule about thinkers' names. The Becker one is the primary, so the work
+   gets recorded against it. Anything there that shouldn't be?"* Adjust
+   with `write intents --add/--remove/--primary <id>` while the set is
+   PROPOSED. **Settle a tie BEFORE the plan**: two intents at the same
+   most-specific tier leave the primary unset, `write plan` refuses, and
+   the choice is the author's — the primary owns every verdict and every
+   transition and cannot be re-pointed after the first accepted beat.
+   After the plan the set is FROZEN: `write status` reports anything newly
+   in scope and the author either joins it (`--add`, which re-bills the
+   cached prefix once) or dismisses it (`--ignore`); `--remove` is gone
+   and the honest verb is `--defer <id> --reason "<their words>"`.
+   Relay the per-goal dispositions at `write complete` — served, deferred
+   with the reason, or UNSERVED — as a sentence, and note that closing the
+   goals themselves is separate.
+
+   **The scope triage (one-time sitting).** `list_intents(evidence=True)`,
+   or `authorlm intent scope --triage`, returns every active unscoped
+   intent with the files its episodes ACTUALLY touched, the writeups bound
+   to it, and a suggested tier with the reason. Present them ONE AT A TIME,
+   oldest first, in the author's terms — no ids in the sentence, no flag
+   names, never a menu. Run one `scope_intent` per ruling and report a
+   running count. An intent the author cannot place is left alone and comes
+   back next sitting; never guess. Close with how many are now file-scoped,
+   part-scoped, and deliberately book-wide — the last number is the one
+   that matters, because those ride along with every future writeup.
+
 2. **Plan.** Expand the outline into beat specs conversationally
    (`{"role", "concepts", "budget", "notes"}` each); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.

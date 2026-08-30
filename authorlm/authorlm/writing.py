@@ -23,6 +23,13 @@ the obvious implementation would have broken that:
   `scoped_concepts(file=…)`: `write start` truncates the essay to a
   placeholder, so the file-scoped graph slice is empty for the very file
   being drafted (design F3).
+- intents render from the writeup's FROZEN member records, never from a
+  live join against `declared_intents`. `scope` is mutable now
+  (design-intent-scope's `intent scope`), so a re-scope in another chat
+  would otherwise silently change block A between beat N and beat N+1 —
+  design F4's silent invalidator arriving by a new road. `_intents_block`
+  takes no `db` argument at all, which is the enforceable form of the
+  rule.
 - no row ids, no timestamps, no counters anywhere.
 """
 
@@ -34,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .db import Database, loads
+from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
 NONE = "(none)"
 EMPTY_ACCEPTED = "(nothing accepted yet)"
@@ -183,6 +191,24 @@ def _concept_notes(db: Database, manuscript: dict, plan: list) -> str:
     return "\n".join(lines)
 
 
+def _intents_block(writeup: dict) -> str:
+    """What this rewrite is FOR — the frozen member set, primary first,
+    then tier rank, then id. Tier label and statement only: no ids, no
+    timestamps, no status, nothing that moves between beats.
+
+    No `db` argument, deliberately (see the module docstring). Before
+    this section the beat drafter was never told what the rewrite was
+    for, in any block."""
+    block = loads(writeup["metadata"], {}).get("intents") or {}
+    members = sorted(
+        block.get("members") or [],
+        key=lambda m: (0 if m.get("role") == "primary" else 1,
+                       INTENT_TIER_RANK.get(m.get("tier"), UNKNOWN_TIER_RANK),
+                       m.get("id") or ""))
+    return "\n".join(f"- [{m.get('tier')}] {m.get('statement')}"
+                     for m in members)
+
+
 def _frame_block(db: Database, manuscript: dict, writeup: dict,
                  drafting_context: str) -> str:
     """Block A — the chapter frame, and the second cache breakpoint."""
@@ -193,6 +219,7 @@ def _frame_block(db: Database, manuscript: dict, writeup: dict,
         _section("VALIDATED BELIEFS",
                  _validated_beliefs(db, manuscript["id"])),
         _section("DRAFTING CONTEXT", drafting_context),
+        _section("INTENTS", _intents_block(writeup)),
         _section("BRIEF", meta.get("brief") or ""),
         _section("DIGEST",
                  json.dumps(digest, indent=2) if digest else ""),

@@ -1662,3 +1662,128 @@ INDEX`). What was missing was not the fix but the trigger. Now `authorlm
 dbperf` shows that shape's `max_ms` and its per-day totals over the whole
 history, so the decision to spend the fix is made off a trend instead of off
 another afternoon's one-off measurement.
+
+
+### 15.17 Scope-derived intent attachment — a rewrite serves every goal that covers it (2026-08-29)
+
+Sponsor ruling: an intent should not have to be named to be served. The scope
+already on `declared_intents` says where a goal applies; a rewrite of an essay
+should automatically serve every active intent whose scope covers that essay,
+with no new grouping object — *the scope tier is the group*.
+
+**The gap was one-sided.** `declared_intents.scope` and
+`passes.intents_in_scope` have existed since the critique pass, and two
+consumers use them: `preflight` refuses an edit pass while proposed in-scope
+intents are untriaged, and `build_context` puts the active ones in the editor's
+payload. The write path never called either. A writeup bound itself to exactly
+one intent through `writeups.intent_id` and the other goals covering that essay
+were invisible to it — including to the beat drafter, whose payload carried no
+intent at all, in any block. A beat has never been told what the rewrite is for.
+
+**Derive, then ratify.** `write start` with no `--intent` derives the set —
+`intents_in_scope(file, 'active')` — and persists it in
+`writeups.metadata.intents` as PROPOSED, printed grouped by tier: `file`,
+`chapter` (the toc parent chain), `manuscript`. Explicit `--intent` flags
+override derivation entirely and the author's first flag is the primary, so the
+single-flag command that existed before this section produces bit-for-bit the
+same writeup. The set FREEZES at `write plan`, which is already the author's
+ratification gate (§13.3): the plan's own output prints the frozen set above the
+beats, so ratifying the plan knowingly ratifies the intents, and there is no
+second confirmation verb. `write intents --add/--remove/--primary` adjusts
+between start and plan; `--add` stays legal afterwards as an explicit join, at
+the cost of one re-billed cached prefix.
+
+**Frozen means frozen.** An intent declared or re-scoped mid-writeup never joins
+silently. `write status` reports it as *newly in scope since ratification*, and
+the author either joins it (`--add`) or dismisses it (`--ignore`). Membership
+after the freeze changes only by an authorial verb.
+
+**No schema change, and no group entity.** `writeups.intent_id` keeps holding
+the PRIMARY. Everything else lives in writeup metadata, on the dedup-append
+idiom `drafting_models` and `clients` already use. The member record freezes the
+intent's `statement`, `scope` and `tier` at ratification rather than joining
+them live — `scope` is mutable now (§15.17's `intent scope`), and a live join
+would let a re-scope in another chat silently rewrite block A between two beats,
+which is design F4's silent invalidator arriving by a new road. Freezing also
+makes the record history-safe: re-scoping an intent cannot retro-narrate what a
+finished writeup was serving.
+
+**Episode attribution, and a bug it uncovered.** The most specific in-scope
+intent is primary — file over chapter over manuscript — and per-beat transitions
+attach to the primary's episode ONLY. No fan-out: one authorial act is never
+mined twice. Two intents tied at the most specific tier are not broken by rule;
+the machine has no information that separates them and the choice is
+irreversible, so `write start` prints the tie and `write plan` refuses until
+`write intents --primary` settles it, in the same shape the missing-`--style`
+refusal uses — a refusal that names the candidates rather than sending the
+author away to look them up.
+
+Building this exposed a live defect. `collect` attached transitions to
+`sessions.current_episode`, which returns *the session's most recently created
+open episode*, whatever intent it belongs to — and `write_accept` and
+`write_reject` passed the same row to `record_review`. With two writeups open at
+once, an ordinary way to work since §14, every beat of both landed on whichever
+intent had been declared last. The rule "attach to the primary's episode" fixes
+mis-attribution first and prevents fan-out second. `collect` grows one optional
+`episode` parameter; every other caller is unchanged; a new
+`sessions.episode_for_intent` finds the intent's open episode in ANY session,
+because an intent declared yesterday has no open episode in today's.
+
+**Completion reports, and never blocks.** At `write complete` every member gets
+a disposition — served, explicitly deferred, or UNSERVED — and an unserved
+member warns and names both exits, per §15.13's ratified default. Beat specs MAY
+tag the intents they serve, like the digest's point ids; an untagged beat counts
+toward every member. Each member intent also records `served_by` on its own row,
+so a chapter-wide intent's completion analysis can see the three essays rewritten
+under it without a group object ever existing.
+
+**Scope curation.** `intent declare` gains `--scope <file> | --chapter <opener>
+| --manuscript`, and `intent scope <id> …` (re)places an existing one. A
+re-scope is metadata-forward: the column moves, `metadata.scope_history` records
+the move, and no episode, transition or frozen member record is rewritten. The
+absent scope still means manuscript-wide, but it now has a consequence the
+author must see, so both surfaces say what it means at declaration time and the
+skill asks one line when the author has not said.
+
+The one backfill is the author's own sitting, not a migration: for each
+unscoped active intent, `intent scope --triage` shows the statement and the
+files its episodes ACTUALLY touched, with a suggested tier and the reason for
+it, and the author rules from evidence rather than memory. Until that sitting
+happens, `write start` warns when many manuscript-wide intents would attach to
+every writeup — a warning, because the author may want to write today.
+
+**Determinism.** The frozen set joins block A as an INTENTS section rendered from
+the member records alone — tier label and statement, no ids, no timestamps, no
+status — so identical stored state still yields byte-identical blocks S and A.
+`beat-draft.md` gains one paragraph saying what an intent is *not*: a goal
+governs selection and emphasis, never grounding. A claim that appears only in an
+intent is a question for the author. Adding the section re-bills every in-flight
+writeup's cached prefix exactly once at deploy; `cache_cold`'s warning firing
+once, on the next beat of each open writeup, is expected.
+
+**Two corrections to the text above, made while building it.** The flag is
+`--book-wide`, not `--manuscript`: `-m/--manuscript` is already registered on
+every subparser as the manuscript SELECTOR, and a second registration of the
+same option string is an argparse conflict at parser-build time.
+
+And "`collect` grows one optional `episode` parameter; every other caller is
+unchanged" named too few callers. This section named `write_accept` and
+`write_reject`; the write path in fact runs six collects, and each one needed a
+ruling rather than an assumption. The complete list, with what each does and
+why:
+
+| Site | Disposition |
+|---|---|
+| `write_start`, collect 1 (uncollected pre-existing edits) | **ambient, by declaration.** That work PREDATES the writeup — it was done under whatever the session was already doing — and filing it against a goal declared a moment later would be back-dating. |
+| `write_start`, collect 2 (the truncation) | **routed to the primary**, when the primary is settled. It is the writeup's own first act and the largest single transition it will ever produce. While a tie is UNSETTLED it stays ambient: `writeups.intent_id` then holds the lowest-id candidate as a placeholder, and real work must never be attributed to a candidate the author has not chosen — the refuse-to-guess doctrine of the tiebreak itself, applied to the episode instead of the column. `write plan` settles it, and everything after that point is routed. |
+| `write_accept` | **routed to the primary**, and the same row goes to `record_review`. |
+| `write_reject` | no collect; its `record_review` is **routed to the primary**. |
+| `write_complete` | **routed to the primary.** Usually a no-op, but a doc pull or a hand edit between the last accepted beat and the completion makes it a real collect with real transitions. |
+| `write_abandon`, both collects | **excluded, deliberately.** They record the pre-abandon snapshot (RISK K2) and the restore — the unwinding of the writeup, not work done under its goal. |
+
+Naming only the two verbs that run every beat was an omission in this text
+rather than a decision, and the omission had teeth: the truncation is the
+writeup's biggest transition, and with two writeups open it was landing on
+whichever intent had been declared last.
+
+Everything else in this section is as ratified.

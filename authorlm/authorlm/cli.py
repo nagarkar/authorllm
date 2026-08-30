@@ -666,6 +666,147 @@ def _intent_preview(db: Database, manuscript: dict, statement: str) -> None:
     print(ui.dim("  → 'guide' for full suggestions with drafts."))
 
 
+def _toc_openers(manuscript: dict) -> set:
+    """Files that have essays beneath them in toc.toml — the ones a scope
+    can name to mean a whole part. Best-effort: a missing or unparseable
+    toc degrades to 'no openers', never raises."""
+    from .revisions import read_manuscript_files
+    from .structure import _toc_chapters, TOC_FILENAME
+
+    try:
+        files = read_manuscript_files(Path(manuscript["path"]))
+    except OSError:
+        return set()
+    return {c["parent"] for c in _toc_chapters(files.get(TOC_FILENAME) or "")
+            if c.get("parent")}
+
+
+def _scope_sentence(scope: str | None) -> str:
+    """What the scope MEANS, in words, at the moment the author sets it —
+    an absent scope has a consequence now and they should see it once."""
+    if scope:
+        return (f"Scope {scope} — every rewrite of that essay (and of any "
+                f"essay beneath it) serves this goal.")
+    return ("Scope: the whole book — EVERY writeup, on every essay, will "
+            "carry this goal. Place it instead with "
+            "'intent scope <id> --scope <file>'.")
+
+
+def _print_intent_set(result: dict, label: str) -> None:
+    """The writeup's member set, grouped by tier, primary marked. One
+    shape, printed by start, plan, intents and status."""
+    view = result.get("intents_view") or []
+    if not view:
+        return
+    block = result.get("intents") or {}
+    state = (block.get("state") or "proposed").upper()
+    tail = (" (frozen when you ratify the plan)" if state == "PROPOSED"
+            else "")
+    print(f"{label} — {len(view)}, {state}{tail}:")
+    for member in view:
+        scope = f"   ({member['scope']})" if member.get("scope") else ""
+        mark = "  ← primary" if member.get("role") == "primary" else ""
+        print(f"  {member['tier']:<11} [{member['id'][:8]}] "
+              f"{member['statement']}{scope}{mark}")
+    if block.get("tied"):
+        print(ui.yellow(
+            "  Two or more file-scoped intents are equally specific. The "
+            "primary owns this writeup's episode: every beat verdict and "
+            "every transition is recorded against it, and the others are "
+            "cross-referenced at completion. Name it:"))
+        print(ui.yellow(f"    write intents --primary "
+                        f"{block['tied'][0][:11]}"))
+    for member_id, entry in (block.get("deferred") or {}).items():
+        print(ui.dim(f"  deferred [{member_id[:8]}] — \"{entry['reason']}\""))
+
+
+def _print_newly_in_scope(result: dict) -> None:
+    """The drift line, worded for the state the set is actually in.
+
+    "newly in scope since RATIFICATION" is only true once there has been
+    a ratification. Before the plan there has not been one, and the same
+    words would tell the author their set was frozen when `--remove` is
+    still open to them and nothing has been settled — the sentence would
+    be describing the wrong half of the lifecycle."""
+    frozen = (result.get("intents") or {}).get("state") == "frozen"
+    heading = ("  newly in scope since ratification:" if frozen
+               else "  in scope, but not on this writeup:")
+    tail = (" (re-bills the cached prefix once)" if frozen else "")
+    for member in result.get("newly_in_scope") or []:
+        print(ui.yellow(heading))
+        print(f"    [{member['id'][:8]}] {member['statement']}")
+        print(ui.dim(
+            f"    It has NOT joined. Join it: write intents --add "
+            f"{member['id'][:11]}{tail} · "
+            f"dismiss it: write intents --ignore {member['id'][:11]}"))
+    for member in result.get("stale_members") or []:
+        print(ui.dim(f"  note: member [{member['id'][:8]}] is now "
+                     f"{member['status']} — the writeup still served it."))
+
+
+def _print_intent_dispositions(dispositions: list) -> None:
+    if not dispositions:
+        return
+    print("Intents:")
+    unserved = False
+    for entry in dispositions:
+        role = "  (primary)" if entry.get("role") == "primary" else ""
+        word = entry["disposition"]
+        line = (f"  {word.upper() if word != 'served' else word:<9} "
+                f"[{entry['id'][:8]}] {entry['statement']}{role}")
+        if word == "served":
+            print(line)
+        else:
+            print(ui.yellow(line))
+        if word == "deferred":
+            print(f"            — \"{entry.get('reason')}\"")
+        if word == "unserved":
+            unserved = True
+            print(ui.yellow(
+                f"            No accepted beat serves it and no deferral "
+                f"was recorded. Either it was served (close it: intent "
+                f"complete {entry['id'][:11]}) or it was not (write intents "
+                f"--defer {entry['id'][:11]} --reason \"<why>\")."))
+    if unserved:
+        print(ui.yellow("            Completing anyway — the completion is "
+                        "yours to make."))
+    print(ui.dim("Recorded on each intent: served by this writeup."))
+
+
+def _print_scope_triage(db, manuscript, prefix) -> None:
+    """The one-time sitting's read (design-intent-scope §4). Evidence
+    only — no ruling is made here, and no model is called."""
+    rows = api.scope_evidence(db, manuscript, prefix or None)
+    if not rows:
+        print("No active book-wide intents — nothing to triage.")
+        return
+    print(ui.bold(f"{len(rows)} active intent(s) with no place. Every one of "
+                  f"them attaches to EVERY writeup until it has one."))
+    for row in rows:
+        print()
+        print(ui.bold(f"[{row['id'][:8]}] {row['statement']}"))
+        print(ui.dim(f"  declared {row['created_at'][:10]}"
+                     + (f" · {row['source']}" if row["source"] else "")))
+        if row["files"]:
+            print("  changes landed in: " + ", ".join(
+                f"{f['file']} ({f['transitions']})" for f in row["files"][:6]))
+        else:
+            print(ui.dim("  no recorded changes hang off it"))
+        for writeup in row["writeups"]:
+            print(ui.dim(f"  writeup [{writeup['id'][:8]}] on "
+                         f"{writeup['file']} ({writeup['status']})"))
+        suggested = row["suggested"]
+        where = (f"--scope {suggested['scope']}" if suggested["tier"] == "file"
+                 else f"--chapter {suggested['scope']}"
+                 if suggested["tier"] == "chapter" else "--book-wide")
+        print(f"  suggested: {suggested['tier']} — {suggested['why']}")
+        print(ui.dim(f"    intent scope {row['id'][:11]} {where}"))
+    print()
+    print(ui.dim("Rule each one from the evidence, not from memory. An "
+                 "intent you cannot place is left alone and comes back next "
+                 "sitting."))
+
+
 def cmd_intent(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -705,17 +846,55 @@ def cmd_intent(args):
         return
 
     if args.action == "declare":
-        row = ses.declare_intent(db, manuscript["id"], args.statement)
+        scope = None
+        if args.scope or args.chapter or args.manuscript_wide:
+            try:
+                scope = api._scope_target(manuscript, args.scope,
+                                          args.chapter, args.manuscript_wide)
+            except (ValueError, LookupError) as err:
+                sys.exit(f"error: {err}")
+        result = api.declare_intent(db, manuscript, args.statement,
+                                    scope=scope)
+        row = result["intent"]
         print(f"Declared intent [{row['id'][:8]}]: {args.statement}")
+        print(ui.dim("  " + _scope_sentence(row["scope"])))
         _intent_preview(db, manuscript, args.statement)
         if not ses.active_session(db, manuscript["id"]):
             print("note: no active session — the intent is recorded but no episode was opened.")
+    elif args.action == "scope":
+        if args.triage:
+            _print_scope_triage(db, manuscript, args.statement)
+            return
+        if not args.statement:
+            sys.exit("usage: intent scope <id-prefix> --scope FILE | "
+                     "--chapter OPENER | --book-wide  (or --triage)")
+        try:
+            result = api.scope_intent(db, manuscript, args.statement,
+                                      scope=args.scope, chapter=args.chapter,
+                                      manuscript_wide=args.manuscript_wide)
+        except (ValueError, LookupError) as err:
+            sys.exit(f"error: {err}")
+        row = result["intent"]
+        print(f"Scoped [{row['id'][:8]}]: {row['statement']}")
+        print(ui.dim("  " + _scope_sentence(result["scope"])))
+        for held in result["frozen_in"]:
+            print(ui.dim(
+                f"  writeup [{held['writeup'][:11]}] on {held['file']} "
+                f"ratified this intent as [{held['tier']}] and is "
+                f"UNAFFECTED — a re-scope routes future work, it never "
+                f"rewrites what was already ratified."))
     elif args.action == "complete":
         intent = _find_by_prefix(db, "declared_intents", args.id, manuscript["id"])
         if intent["status"] != "active":
             sys.exit(f"error: intent is already {intent['status']}.")
+        held = api._writeups_holding(db, manuscript, intent["id"])
         ses.complete_intent(db, intent, args.outcome)
         print(f"Intent completed: {intent['statement']}")
+        for entry in held:
+            print(ui.yellow(
+                f"  note: writeup [{entry['writeup'][:11]}] on "
+                f"{entry['file']} ratified this intent and is still open — "
+                f"'write status' will now report it as a stale member."))
         if args.outcome:
             print(f"Outcome: {args.outcome}")
         _analyze_closed_episodes(db, manuscript, args)
@@ -733,9 +912,20 @@ def cmd_intent(args):
         )
         if not rows:
             print("No declared intents.")
+        openers = _toc_openers(manuscript)
         for row in rows:
             outcome = f" → {row['outcome']}" if row["outcome"] else ""
-            print(f"[{row['id'][:8]}] ({row['status']}) {row['statement']}{outcome}")
+            # The tier, not just the column: a scope naming a part opener
+            # covers every essay beneath it, and that is the whole
+            # difference between "this essay" and "this part".
+            if not row["scope"]:
+                where = "book-wide"
+            elif row["scope"] in openers:
+                where = f"chapter {row['scope']}"
+            else:
+                where = f"file {row['scope']}"
+            print(f"[{row['id'][:8]}] ({row['status']} · {where}) "
+                  f"{row['statement']}{outcome}")
 
 
 def cmd_critique(args):
@@ -3263,17 +3453,13 @@ def cmd_write(args):
     try:
         if args.action == "start":
             if not args.params:
-                sys.exit("usage: write start <file> --intent <id>")
-            if not args.intent:
-                sys.exit("write start requires --intent <id> — declare one "
-                         "first (the writeup is bound to it)")
+                sys.exit("usage: write start <file> [--intent <id>]")
             result = api.write_start(db, manuscript, config,
                                      args.params[0], args.intent,
                                      after=args.after, brief=_stdin_text(),
                                      new=args.new, style=args.style)
             w = result["writeup"]
-            print(f"Writeup [{w['id'][:11]}] on {w['file']} "
-                  f"(intent {result['intent']['id'][:11]}).")
+            print(f"Writeup [{w['id'][:11]}] on {w['file']}.")
             if result["created"]:
                 print(f"Created {w['file']} (empty); style guide "
                       f"'{result['style']}' attached.")
@@ -3283,6 +3469,41 @@ def cmd_write(args):
             else:
                 print(f"Pinned v{result['source_version_no']} as raw material "
                       f"({result['source_chars']} chars); file truncated.")
+            print()
+            _print_intent_set(
+                result,
+                "Intents named" if result["intents"].get("manual")
+                else "Intents in scope")
+            if result["intents"].get("manual"):
+                if result["outside_scope"]:
+                    print(ui.dim(
+                        "  note: an intent above is scoped outside this "
+                        "essay — you reached for it explicitly, which is "
+                        "yours to do."))
+                print(ui.dim("  Derivation was skipped: --intent names the "
+                             "set. The first flag is the primary."))
+            else:
+                print(ui.dim("  Adjust before the plan: write intents "
+                             "--add <id> | --remove <id> | --primary <id>"))
+            if result["many_manuscript_wide"]:
+                print(ui.yellow(
+                    f"  ⚠ {result['manuscript_wide']} book-wide intents are "
+                    f"in scope and will attach to EVERY writeup. They are "
+                    f"unscoped, not book-wide by decision. Run the scope "
+                    f"triage — ask the assistant, or: "
+                    f"authorlm intent scope --triage"))
+            if result["chapter_undecidable"]:
+                print(ui.dim(
+                    "  note: this file has no toc entry yet, so no "
+                    "chapter-scoped intent can be derived for it. Its entry "
+                    "lands at 'write complete'; until then name any by hand "
+                    "with --intent."))
+            for row in result["proposed_in_scope"]:
+                print(ui.dim(
+                    f"  note: proposed (untriaged) intent [{row['id'][:8]}] "
+                    f"also covers this essay — 'critique triage' settles it. "
+                    f"It has NOT joined."))
+            print()
             _print_brief(result["brief"])
             _print_drafting_context(result["drafting_context"])
             if not result["created"] and result["source_chars"]:
@@ -3301,8 +3522,23 @@ def cmd_write(args):
                                     replace=args.replace)
             kept = f"kept {result['kept']} written, " if result["kept"] else ""
             print(f"Plan ratified: {kept}{result['added']} beat(s) ahead.")
+            _print_intent_set(result, "Intents")
             for beat in result["plan"][result["cursor"]:]:
                 _print_beat_spec(beat, label="  •")
+        elif args.action == "intents":
+            result = api.write_intents(
+                db, manuscript, add=args.add or (),
+                remove=args.remove_intent or (), primary=args.primary,
+                defer=args.defer, ignore=args.ignore or (),
+                reason=args.reason, prefix=prefix)
+            for change in result["changed"]:
+                print(f"Intent set: {change}.")
+            _print_intent_set(result, "Intents")
+            if result.get("rebills_prefix"):
+                print(ui.yellow(
+                    "  Block A changed, so the next beat re-bills the cached "
+                    "prefix once. A join is cheapest at a replan, which "
+                    "invalidates block A anyway."))
         elif args.action == "status":
             result = api.write_status(db, manuscript, prefix=prefix)
             w = result["writeup"]
@@ -3311,6 +3547,8 @@ def cmd_write(args):
                   f"beat {min(w['cursor'] + 1, len(plan))}/{len(plan)}."
                   if plan else
                   f"Writeup [{w['id'][:11]}] on {w['file']} ({w['status']}) — no plan yet.")
+            _print_intent_set(result, "Intents")
+            _print_newly_in_scope(result)
             if result["current_beat"]:
                 _print_beat_spec(result["current_beat"], label="Current")
             if result["pending_proposal"]:
@@ -3441,6 +3679,7 @@ def cmd_write(args):
             print(f"Writeup [{result['writeup_id'][:11]}] completed — "
                   f"{result['beats_done']} beat(s){unwritten}.")
             _print_marker_warning(result, result["summary_hint"])
+            _print_intent_dispositions(result["intent_dispositions"])
             if result["tallies"]:
                 print("Verdicts: " + ", ".join(
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
@@ -5481,13 +5720,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the URL without opening a browser")
     p.set_defaults(func=cmd_triage_app)
 
-    p = sub.add_parser("intent", help="declare/complete/abandon/list writing intents")
-    p.add_argument("action", choices=["declare", "show", "complete",
+    p = sub.add_parser("intent", help="declare/scope/complete/abandon/list "
+                                      "writing intents")
+    p.add_argument("action", choices=["declare", "show", "scope", "complete",
                                       "abandon", "retire", "list"])
     p.add_argument("statement", nargs="?",
                    help="intent statement (declare) or id prefix "
-                        "(show/complete/abandon)")
+                        "(show/scope/complete/abandon)")
     p.add_argument("--outcome", help="outcome note (complete) or reason (abandon)")
+    p.add_argument("--scope", metavar="FILE",
+                   help="declare/scope: the goal applies to this essay only")
+    p.add_argument("--chapter", metavar="OPENER",
+                   help="declare/scope: the goal applies to every essay "
+                        "beneath this toc opener")
+    # NOT `--manuscript`: `-m/--manuscript` is already on every subparser
+    # (the `common` parent, above), and a second registration is an
+    # argparse conflict at parser-build time. `--book-wide` says the same
+    # thing and cannot be mistaken for the manuscript SELECTOR.
+    p.add_argument("--book-wide", dest="manuscript_wide",
+                   action="store_true",
+                   help="declare/scope: the goal applies to the whole book "
+                        "(what an absent scope already means)")
+    p.add_argument("--triage", action="store_true",
+                   help="scope: the one-time sitting — every unscoped active "
+                        "intent with the files its episodes actually touched")
     p.set_defaults(func=cmd_intent)
 
     p = sub.add_parser(
@@ -5589,11 +5845,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="beat-by-beat co-writing loop: draft → author verdict → append "
              "(docs/autoregressive-writing-design.md)")
     p.add_argument("action",
-                   choices=["start", "plan", "status", "draft", "propose",
-                            "accept", "reject", "learn", "complete",
-                            "abandon", "digest"])
+                   choices=["start", "plan", "intents", "status", "draft",
+                            "propose", "accept", "reject", "learn",
+                            "complete", "abandon", "digest"])
     p.add_argument("params", nargs="*", help="start: <file>")
-    p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--intent", action="append", metavar="ID",
+                   help="start: reach for these intents BY NAME, skipping "
+                        "derivation (repeatable; the first is the primary). "
+                        "Without it the set is derived from the scopes "
+                        "covering the essay")
+    p.add_argument("--add", action="append", metavar="ID",
+                   help="intents: join this intent to the writeup")
+    p.add_argument("--remove", dest="remove_intent", action="append",
+                   metavar="ID",
+                   help="intents: drop it (only while the set is proposed)")
+    p.add_argument("--primary", metavar="ID",
+                   help="intents: the member whose episode carries this "
+                        "writeup's transitions and verdicts")
+    p.add_argument("--defer", metavar="ID",
+                   help="intents: a ratified member this writeup will not "
+                        "serve (--reason required)")
+    p.add_argument("--ignore", action="append", metavar="ID",
+                   help="intents: dismiss a newly-in-scope intent so the "
+                        "flag stops recurring")
     p.add_argument("--new", action="store_true",
                    help="start: create <file>; it does not exist yet "
                         "(requires --after and --style; the one-paragraph "
@@ -5617,7 +5891,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")
     p.add_argument("--reason", help="reject: the author's why, verbatim "
-                                    "(required); accept: optional")
+                                    "(required); intents --defer: required; "
+                                    "accept: optional")
     p.add_argument("--replace", action="store_true",
                    help="plan: replace the remaining (unwritten) beats; "
                         "digest: replace the stored digest")
@@ -6058,6 +6333,12 @@ def _dispatch(argv: list[str] | None = None) -> None:
         sys.exit(f"usage: intent {args.action} <statement-or-id>")
     if args.command == "intent" and args.action in ("complete", "abandon"):
         args.id = args.statement
+    if (args.command == "intent" and args.action == "scope"
+            and not args.triage
+            and not (args.scope or args.chapter or args.manuscript_wide)):
+        sys.exit("usage: intent scope <id-prefix> --scope FILE | "
+                 "--chapter OPENER | --book-wide  (or --triage to see the "
+                 "evidence for every unplaced intent)")
     if args.command == "belief" and args.action == "answer" and not (args.id and args.answer):
         sys.exit("usage: belief answer <id-prefix> \"answer text\"")
     if args.command == "belief" and args.action == "retire" and not (args.id and args.reason):
