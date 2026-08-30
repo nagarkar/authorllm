@@ -752,6 +752,29 @@ never bleed into briefings or guidance about the writing. To settle:
 encoded test), `close` only after the author confirms, `dismiss` needs
 their reason verbatim.
 
+## Mid-writing standing instructions (ratify, don't just obey)
+When the author, during drafting or verdicts, states an instruction in the
+form of a general rule rather than a one-off correction ("don't shorten
+sentences if they lose meaning", "avoid em-dashes", "use simpler words"),
+do all three in the same turn:
+1. Apply it to the work at hand immediately.
+2. Record it through the loop as usual (reject reason verbatim; `write
+   learn` when it recurs) — knowing that writeup learnings are
+   SESSION-LOCAL scaffolding that die with the writeup; they are never a
+   substitute for ratification.
+3. PROPOSE ratification as a style law in the same reply, with a concrete
+   recommendation the author can approve with one word ("LGTM"): the
+   aspect, the exact statement (the author's words preferred), and the
+   SCOPE. Scope heuristic: the house style (root guide) when the
+   instruction is about the author's prose generally; the part-level
+   guide (e.g. "Part II essays — modern English") when it belongs to that
+   register; a file-level element (`style add … --file <essay>`) only
+   when it is about this one essay's voice. Name the recommended guide
+   explicitly, and never ratify silently — the author's one-word answer
+   is the ratification, upon which run
+   `authorlm style add <aspect> "<statement>" --guide "<name>"` (or
+   `--file <essay>`).
+
 ## Standing duties
 - Open conversations about the manuscript with `get_briefing`; it (and
   `get_guidance`) collects any fresh edits itself and reports them under
