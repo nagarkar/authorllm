@@ -2909,6 +2909,133 @@ def check_scope_evidence() -> None:
               [f["file"] for f in rows[one_file["id"]]["files"]] == ["alpha.md"]
               and rows[one_file["id"]]["files"][0]["transitions"] == 3,
               str(rows[one_file["id"]]["files"]))
+
+        # --- A RULING of "book-wide" is a ruling, and must leave the sheet.
+        #
+        # Found live, during the author's own triage: `intent scope <id>
+        # --book-wide` writes NULL over NULL and records the move in
+        # scope_history, which is correct and metadata-forward. But the
+        # sheet's predicate was `scope IS NULL`, so a deliberately
+        # book-wide intent was indistinguishable from a never-ruled one:
+        # after ruling 23 of them the author was shown all 23 again, and
+        # the closing number that matters — how many goals will ride along
+        # with every future writeup BY DECISION — could not be computed at
+        # all.
+        api.scope_intent(db, manuscript, untouched["id"],
+                         manuscript_wide=True)
+        ruled = dict(db.one("SELECT * FROM declared_intents WHERE id = ?",
+                            (untouched["id"],)))
+        history = json.loads(ruled["metadata"])["scope_history"]
+        check("the book-wide ruling still writes NULL over NULL and records "
+              "the move — the WRITE is correct and is not what changed",
+              ruled["scope"] is None and len(history) == 1
+              and history[0]["from"] is None and history[0]["to"] is None,
+              str(history))
+        listed = {r["id"] for r in api.scope_evidence(db, manuscript)}
+        check("an intent RULED book-wide leaves the triage sheet — a "
+              "ruling is a ruling, and re-presenting it would make the "
+              "sitting never end",
+              untouched["id"] not in listed, str(sorted(listed)))
+        check("...while the ones never ruled on are still listed",
+              listed == {one_file["id"], one_part["id"], spread["id"]},
+              str(sorted(listed)))
+        api.scope_intent(db, manuscript, one_file["id"], scope="alpha.md")
+        tally = api.scope_tally(db, manuscript)
+        check("scope_tally gives the author their closing numbers: what is "
+              "still unplaced, what is book-wide BY DECISION, and what is "
+              "scoped to an essay or a part",
+              tally == {"no_place": 2, "ruled_book_wide": 1, "scoped": 1,
+                        "active": 4}, str(tally))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cli_main(["--workspace", str(ws), "intent", "scope", "--triage"])
+        sheet = buffer.getvalue()
+        check("the sheet's summary line carries all three counts, so the "
+              "number the author actually wants at the end exists",
+              "2 with no place" in sheet
+              and "1 ruled book-wide" in sheet
+              and "1 essay/chapter-scoped" in sheet, sheet)
+        check("and the ruled intent is not in the sheet's body either",
+              untouched["id"][:8] not in sheet, sheet)
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cli_main(["--workspace", str(ws), "intent", "list"])
+        listing = buffer.getvalue()
+        check("intent list distinguishes a book-wide RULING from an "
+              "unplaced default — the two look identical in the column and "
+              "mean opposite things",
+              "book-wide (ruled)" in listing
+              and "book-wide (default)" in listing, listing)
+
+        # --- DECLARING book-wide is a ruling too, and only the EXPLICIT
+        # flag is one. Without this the backfill just refills: every goal
+        # the author deliberately declares book-wide from here on lands
+        # back on the sheet as "no place".
+        before = api.scope_tally(db, manuscript)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "intent", "declare",
+                      "A rule the author means to apply everywhere",
+                      "--book-wide"])
+            cli_main(["--workspace", str(ws), "intent", "declare",
+                      "A goal nobody has placed"])
+        after = api.scope_tally(db, manuscript)
+        listed = {r["statement"] for r in api.scope_evidence(db, manuscript)}
+        check("declaring with the EXPLICIT --book-wide flag records the "
+              "ruling, so the goal never reaches the triage sheet",
+              "A rule the author means to apply everywhere" not in listed,
+              str(sorted(listed)))
+        check("...and declaring with NO flag at all does not: an absent "
+              "scope is a default, and a default is not a decision",
+              "A goal nobody has placed" in listed, str(sorted(listed)))
+        check("the tally moves by exactly one in each direction",
+              (after["ruled_book_wide"] - before["ruled_book_wide"],
+               after["no_place"] - before["no_place"],
+               after["scoped"] - before["scoped"]) == (1, 1, 0),
+              f"{before} -> {after}")
+
+        explicit = api.declare_intent(db, manuscript, "Explicit through the api",
+                                      book_wide=True)["intent"]
+        absent = api.declare_intent(db, manuscript, "Absent through the api")["intent"]
+        check("the api layer carries the same distinction, so it is not a "
+              "property of the CLI's argument parsing",
+              api._scope_ruled(dict(db.one(
+                  "SELECT * FROM declared_intents WHERE id = ?",
+                  (explicit["id"],))))
+              and not api._scope_ruled(dict(db.one(
+                  "SELECT * FROM declared_intents WHERE id = ?",
+                  (absent["id"],)))), "")
+        check("the recorded entry is the SAME null -> null shape the "
+              "triage verb writes, so one predicate reads both",
+              json.loads(db.one(
+                  "SELECT metadata FROM declared_intents WHERE id = ?",
+                  (explicit["id"],))["metadata"])["scope_history"][0]["to"]
+              is None, "")
+
+        from authorlm import mcp_server
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(ws)
+        try:
+            mcp_ruled = mcp_server.declare_intent(
+                "Explicit through MCP", book_wide=True)
+            mcp_absent = mcp_server.declare_intent("Absent through MCP")
+            evidence = mcp_server.list_intents(evidence=True)
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+        mcp_listed = {r["statement"] for r
+                      in evidence["result"]["unscoped_evidence"]}
+        check("MCP distinguishes them too — the surface the assistant uses "
+              "when it asks 'just this essay, the whole part, or the whole "
+              "book?' can record the answer as a ruling",
+              mcp_ruled["ok"] and mcp_absent["ok"]
+              and "Explicit through MCP" not in mcp_listed
+              and "Absent through MCP" in mcp_listed,
+              str(sorted(mcp_listed)))
+        check("and list_intents(evidence=True) carries the sitting's "
+              "closing numbers",
+              set(evidence["result"]["scope_tally"])
+              == {"active", "scoped", "ruled_book_wide", "no_place"},
+              str(evidence["result"].get("scope_tally")))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

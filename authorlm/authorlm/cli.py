@@ -777,11 +777,22 @@ def _print_scope_triage(db, manuscript, prefix) -> None:
     """The one-time sitting's read (design-intent-scope §4). Evidence
     only — no ruling is made here, and no model is called."""
     rows = api.scope_evidence(db, manuscript, prefix or None)
+    tally = api.scope_tally(db, manuscript)
+    # The middle number is the whole point of the sitting: it is the one
+    # the author cannot get any other way, and it only exists because a
+    # book-wide RULING is distinguishable from a never-placed default.
+    summary = (f"{tally['no_place']} with no place · "
+               f"{tally['ruled_book_wide']} ruled book-wide · "
+               f"{tally['scoped']} essay/chapter-scoped")
     if not rows:
-        print("No active book-wide intents — nothing to triage.")
+        print(f"Nothing left to place — {summary}.")
+        print(ui.dim("The middle number is the one that matters: those are "
+                     "the goals every future writeup will carry, because "
+                     "you decided they should."))
         return
     print(ui.bold(f"{len(rows)} active intent(s) with no place. Every one of "
                   f"them attaches to EVERY writeup until it has one."))
+    print(ui.dim(f"  {summary}"))
     for row in rows:
         print()
         print(ui.bold(f"[{row['id'][:8]}] {row['statement']}"))
@@ -802,9 +813,11 @@ def _print_scope_triage(db, manuscript, prefix) -> None:
         print(f"  suggested: {suggested['tier']} — {suggested['why']}")
         print(ui.dim(f"    intent scope {row['id'][:11]} {where}"))
     print()
+    print(ui.dim(f"{summary}."))
     print(ui.dim("Rule each one from the evidence, not from memory. An "
                  "intent you cannot place is left alone and comes back next "
-                 "sitting."))
+                 "sitting; one you rule book-wide is settled and will not "
+                 "be offered again."))
 
 
 def cmd_intent(args):
@@ -853,8 +866,12 @@ def cmd_intent(args):
                                           args.chapter, args.manuscript_wide)
             except (ValueError, LookupError) as err:
                 sys.exit(f"error: {err}")
+        # `args.manuscript_wide` is the author saying "the whole book",
+        # which is not the same act as saying nothing at all. Only the
+        # explicit flag records a ruling.
         result = api.declare_intent(db, manuscript, args.statement,
-                                    scope=scope)
+                                    scope=scope,
+                                    book_wide=bool(args.manuscript_wide))
         row = result["intent"]
         print(f"Declared intent [{row['id'][:8]}]: {args.statement}")
         print(ui.dim("  " + _scope_sentence(row["scope"])))
@@ -919,7 +936,11 @@ def cmd_intent(args):
             # covers every essay beneath it, and that is the whole
             # difference between "this essay" and "this part".
             if not row["scope"]:
-                where = "book-wide"
+                # "book-wide" alone reads the same for a goal the author
+                # deliberately made book-wide and one nobody has placed
+                # yet, and they are opposite states.
+                where = ("book-wide (ruled)" if api._scope_ruled(dict(row))
+                         else "book-wide (default)")
             elif row["scope"] in openers:
                 where = f"chapter {row['scope']}"
             else:
