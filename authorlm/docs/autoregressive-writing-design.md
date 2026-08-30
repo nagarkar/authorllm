@@ -1407,5 +1407,15 @@ and `write_propose`.
 the shipped config names an `anthropic/` model. Updating that check is part of
 turning spending back on, which is what keeps it from happening by accident.
 
+**Follow-up, same day: the summarizer gets a cheaper model of its own.**
+`[critique] summarizer_model` returns as `openai/gpt-5.6-luna` — about $0.26 per
+full rebuild of the book against roughly $0.49 on the `[llm]` default, so the
+override that exists to buy editorial judgment also lowers the bill on the most
+repeated call in the system. `editor_model` stays unset and the critique editor
+runs on the default. The line is written into `config.toml` and **commented
+out** pending a temperature fix in `llm.py`; until it lands the summaries run on
+the default. This does not touch the ruling above: luna is an `openai/` model,
+no Anthropic-billed path returns, and the AH-3 guard is unchanged by it.
+
 `.claude/skills/authorlm/SKILL.md` §"The beat loop" and
 `docs/writing-essays-tutorial.md` §0, §2.4, §10 and §11 are aligned to this.
