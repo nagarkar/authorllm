@@ -54,7 +54,7 @@ __all__ = [
     "confirm_edge", "reject_edge", "list_proposals", "reconcile_proposals", "screen_proposals",
     "resolve_proposal",
     "list_beliefs", "run_extraction", "get_plan", "get_doc_links",
-    "scope_intent", "scope_evidence",
+    "scope_intent", "scope_evidence", "scope_tally",
     "write_start", "write_intents", "write_plan", "write_status",
     "write_propose",
     "write_draft",
@@ -488,6 +488,41 @@ def scope_intent(db: Database, manuscript: dict, prefix: str,
             "scope": target, "frozen_in": holding}
 
 
+def _scope_ruled(intent: dict) -> bool:
+    """Whether the author has RULED on where this goal lives.
+
+    Not the same question as "does it have a scope". `intent scope <id>
+    --book-wide` writes NULL over NULL — correctly, because book-wide IS
+    the absent scope — and records the move in `metadata.scope_history`.
+    So the history entry is the only trace a ruling leaves, and without
+    reading it a goal the author deliberately made book-wide is
+    indistinguishable from one nobody has ever placed. Those two mean
+    opposite things: the first is a decision the author wants to see
+    counted, the second is work still to do.
+
+    Any entry counts, including the null → null one. Found live: after
+    the author ruled 23 intents book-wide, the triage sheet offered all
+    23 back to them and the closing number could not be computed."""
+    if intent.get("scope"):
+        return True
+    return bool((loads(intent.get("metadata"), {}) or {}).get("scope_history"))
+
+
+def scope_tally(db: Database, manuscript: dict) -> dict:
+    """The scope triage's closing numbers. `ruled_book_wide` is the one
+    that matters: those are the goals every future writeup will carry, by
+    the author's decision rather than by default."""
+    rows = [dict(r) for r in db.all(
+        "SELECT * FROM declared_intents WHERE manuscript_id = ? "
+        "AND status = 'active'", (manuscript["id"],))]
+    scoped = [r for r in rows if r["scope"]]
+    unscoped = [r for r in rows if not r["scope"]]
+    ruled = [r for r in unscoped if _scope_ruled(r)]
+    return {"active": len(rows), "scoped": len(scoped),
+            "ruled_book_wide": len(ruled),
+            "no_place": len(unscoped) - len(ruled)}
+
+
 def scope_evidence(db: Database, manuscript: dict,
                    prefix: str | None = None) -> list[dict]:
     """The one-time scope triage's read (design-intent-scope §4.1): for
@@ -500,10 +535,14 @@ def scope_evidence(db: Database, manuscript: dict,
     if prefix:
         rows = [_find_intent(db, manuscript, prefix)]
     else:
-        rows = [dict(r) for r in db.all(
+        # "No place" is `scope IS NULL` AND no ruling on record. An intent
+        # the author has already declared book-wide is settled, and the
+        # sitting has to be able to END — a sheet that keeps offering back
+        # what was already ruled on is a sitting with no last page.
+        rows = [row for row in (dict(r) for r in db.all(
             "SELECT * FROM declared_intents WHERE manuscript_id = ? "
             "AND status = 'active' AND scope IS NULL ORDER BY created_at",
-            (manuscript["id"],))]
+            (manuscript["id"],))) if not _scope_ruled(row)]
     out = []
     for intent in rows:
         counts: dict[str, int] = {}

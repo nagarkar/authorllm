@@ -272,7 +272,11 @@ def list_intents(manuscript: str | None = None,
         ms = _manuscript(db, manuscript)
         if evidence:
             return {"intents": api.list_intents(db, ms),
-                    "unscoped_evidence": api.scope_evidence(db, ms)}
+                    "unscoped_evidence": api.scope_evidence(db, ms),
+                    # The sitting's closing numbers. `ruled_book_wide` is
+                    # the one to report back: those are the goals every
+                    # future writeup carries by the author's decision.
+                    "scope_tally": api.scope_tally(db, ms)}
         return api.list_intents(db, ms)
     return _guard(run)
 

@@ -462,7 +462,7 @@ def scenario_editorial_loop(root: Path) -> None:
     check("intent abandon works (retire alias)", "Intent abandoned" in out, out)
     out = run(ws, "intent", "list")
     check("abandoned intent shown with status",
-          "(abandoned · book-wide) A dead-end objective" in out, out)
+          "(abandoned · book-wide (default)) A dead-end objective" in out, out)
     out = run(ws, "intent", "abandon", dead_id, expect_exit=True)
     check("double abandon blocked", "already abandoned" in out, out)
 
@@ -4865,7 +4865,7 @@ def scenario_intent_scope(root: Path) -> None:
         check("WS — intent list prints the TIER, not just the column",
               f"({'active'} · file alpha.md)" in out
               and "· chapter part.md)" in out
-              and "· book-wide)" in out, out)
+              and "· book-wide (default))" in out, out)
 
         # ---- WS-1 / WS-2: derivation by tier, including a GRANDPARENT
         # opener, which is what makes `chapter` a tier with depth.
