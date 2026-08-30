@@ -1020,7 +1020,7 @@ Everything is in `authorlm/config.toml`, versioned with the code. Keys live in
 | Turning a verdict's reason into a candidate rule (`record_review` → the belief distiller, on every explained rejection and every explained reword) | `gemini/gemini-2.5-flash` | same default |
 | Episode analysis, guidance | `gemini/gemini-2.5-flash` | same default |
 | Essay summaries | `openai/gpt-5.6-luna` | `[critique] summarizer_model` |
-| The critique editor pass | `gemini/gemini-2.5-flash` | same default |
+| The critique editor pass | `openai/gpt-5.6-luna` | `[critique] editor_model` |
 | Illustration rendering | `openai/gpt-image-2`, 1536×1024 | `[illustrations] model`, `[illustrations] image_size` |
 | **Drafting the beats** | none — the conversation drafts them | nothing set, deliberately; `[writing] model` would turn the billed mode on |
 
@@ -1033,16 +1033,25 @@ shows up in a diff. A test also fails if an `anthropic/` model reappears in any
 model setting — updating that test is part of turning spending back on, which is
 what stops it happening by accident.
 
-**The summarizer is the one job with its own model, and it is cheaper than the
+**The two critique jobs have a model of their own, and it is cheaper than the
 default, not dearer.** GPT-5.6 Luna reads compressed context into editorial
 judgment for about **$0.26 per full rebuild of the book, against roughly $0.49**
 on the `[llm]` default — so the setting that exists to buy quality also happens
-to save money on the most repeated call in the system. The `summarizer_model`
-line is written into `authorlm/config.toml` but **commented out** while a
-temperature fix lands in the model client; until then the summaries run on the
-`[llm]` default above, at the higher of the two prices. Uncommenting one line
-switches them over. The critique editor has no override at all and stays on the
-default.
+to save money on the most repeated call in the system. Both `summarizer_model`
+and `editor_model` name it, and both are **live since 2026-08-30**: the
+summaries and the critique editor run on Luna, not on the `[llm]` default.
+Beside them sits `temperature = "vendor-default"`, which is that section saying
+"send this model no temperature setting at all" — Luna accepts only its own, and
+the request would be refused with one.
+
+**You do not have to know that about a model for it to be handled.**
+`MODEL_PROFILES` in `llm.py` records what each model this project uses will
+accept, and every request is shaped from it before it is sent, so a setting that
+a model is known to reject is dropped rather than argued with — and said out
+loud when it is. A model the table has never seen still works: the first refusal
+corrects itself and prints the line to add. The `temperature` key above is
+therefore belt as well as braces for Luna, and the real answer for a model
+nobody here has run yet.
 
 **If you restore `[writing]`.** `write draft` without `--dry-run` then sends the
 assembled payload to `anthropic/claude-fable-5`, which is the largest single call

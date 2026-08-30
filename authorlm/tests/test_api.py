@@ -355,6 +355,252 @@ def check_drafting_cache_layer() -> None:
           and not llm_mod.caching_available("stub-writer", "litellm"), "")
 
 
+def check_model_profiles() -> None:
+    """AI: MODEL_PROFILES — the adapter surface above LiteLLM.
+
+    Sponsor ruling on the retry-on-400 temperature net: "This is not ok.
+    We need adapters for the different models." The net stays, demoted to
+    an alarm; what shapes a request now is a declarative table of model
+    contracts we have VERIFIED. These checks pin the three things that
+    make such a table trustworthy rather than decorative: that matching is
+    specific (a family row never sweeps in a model whose contract is the
+    opposite), that the profile OVERRIDES config rather than the other way
+    round, and that a gap in the table announces itself in the exact terms
+    someone would need to close it."""
+    import io as _io
+    import re as _re
+    import types as _types
+    from unittest import mock as _mock
+
+    from authorlm import llm as llm_mod
+    from authorlm import summaries as summaries_mod
+    from authorlm.llm import LLMClient
+
+    def fake_litellm(reject_temperature: bool = False):
+        """Stands in for a provider that 400s server-side on any
+        `temperature` — the shape litellm's own param map cannot
+        pre-empt for a model it does not recognize."""
+        calls = []
+        invocations = {"n": 0}
+        module = _types.SimpleNamespace(suppress_debug_info=False,
+                                        drop_params=False)
+
+        def completion(model, messages, timeout=None, **kwargs):
+            invocations["n"] += 1
+            if reject_temperature and "temperature" in kwargs:
+                raise RuntimeError(
+                    "litellm.BadRequestError: OpenAIException - Unsupported "
+                    "value: 'temperature' does not support "
+                    f"{kwargs['temperature']} with this model. Only the "
+                    "default (1) value is supported.")
+            calls.append({"model": model, **kwargs})
+            return _types.SimpleNamespace(
+                choices=[_types.SimpleNamespace(
+                    message=_types.SimpleNamespace(content="the reply"))],
+                usage=_types.SimpleNamespace(prompt_tokens=11,
+                                             completion_tokens=7))
+
+        module.completion = completion
+        return module, calls, invocations
+
+    # --- (1) matching: longest/most-specific prefix wins ---------------
+    check("the Claude 5 family is vendor-default-only: no temperature "
+          "parameter at all, and litellm's own map agrees "
+          "(supports_sampling_params = false)",
+          all(llm_mod.model_profile(m).temperature
+              == llm_mod.VENDOR_DEFAULT_ONLY
+              for m in ("anthropic/claude-sonnet-5",
+                        "anthropic/claude-fable-5",
+                        "anthropic/claude-opus-5")), "")
+    check("a dated release picks up its family's row — matching is by "
+          "prefix, so the table does not need a row per release",
+          llm_mod.model_profile("anthropic/claude-sonnet-5-20260305")
+          is llm_mod.model_profile("anthropic/claude-sonnet-5"), "")
+    check("claude-haiku-4-5 is NOT swept into the Claude 5 row: litellm's "
+          "map carries no supports_sampling_params flag for it, which "
+          "means it still takes a temperature",
+          llm_mod.model_profile("anthropic/claude-haiku-4-5").temperature
+          == llm_mod.ANY, "")
+    check("gpt-5.6-luna is vendor-default-only (proven live 2026-08-30) "
+          "and the gemini 2.5 family takes temperature as it always has",
+          llm_mod.model_profile("openai/gpt-5.6-luna").temperature
+          == llm_mod.VENDOR_DEFAULT_ONLY
+          and llm_mod.model_profile("gemini/gemini-2.5-flash").temperature
+          == llm_mod.ANY, "")
+    check("a model nobody verified gets the UNKNOWN profile rather than a "
+          "guessed row — gpt-5.6-sol/terra are siblings of luna and are "
+          "NOT assumed to share its contract",
+          llm_mod.model_profile("openai/gpt-5.6-sol")
+          is llm_mod.UNKNOWN_PROFILE
+          and llm_mod.model_profile("openai/gpt-5.6-terra")
+          is llm_mod.UNKNOWN_PROFILE
+          and llm_mod.model_profile("stub-writer")
+          is llm_mod.UNKNOWN_PROFILE, "")
+
+    # Specificity is a property of the MATCHER, not of the current rows'
+    # spelling, so it is asserted against a table built to overlap — in
+    # both orders, because "the more specific row wins" must not be a
+    # fact about where a maintainer happened to paste the line.
+    broad = llm_mod.ModelProfile("broad", llm_mod.ANY, True, None)
+    narrow = llm_mod.ModelProfile("narrow", llm_mod.VENDOR_DEFAULT_ONLY,
+                                  False, "anthropic")
+    for order in ((("v/fam", broad), ("v/fam-x", narrow)),
+                  (("v/fam-x", narrow), ("v/fam", broad))):
+        with _mock.patch.object(llm_mod, "MODEL_PROFILES", order):
+            check("the longest matching prefix wins regardless of table "
+                  f"order ({order[0][0]} declared first)",
+                  llm_mod.model_profile("v/fam-x-1") is narrow
+                  and llm_mod.model_profile("v/fam-y") is broad, "")
+
+    # --- (2) shaping: the profile overrides the config -----------------
+    llm_mod._NOTED.clear()
+    stderr = _io.StringIO()
+    fake_v, calls_v, inv_v = fake_litellm(reject_temperature=True)
+    client_v = LLMClient({"llm": {"enabled": True,
+                                  "model": "openai/gpt-5.6-luna",
+                                  "temperature": 0.7}})
+    with _mock.patch.dict(sys.modules, {"litellm": fake_v}), \
+            contextlib.redirect_stderr(stderr):
+        reply_v = client_v.complete("sys", "usr")
+    check("a config that sets a NUMERIC temperature for a "
+          "vendor-default-only model cannot force it onto the wire: the "
+          "parameter is omitted before the first call, not after a 400",
+          reply_v == "the reply" and inv_v["n"] == 1
+          and "temperature" not in calls_v[-1], (calls_v, inv_v))
+    check("...and the override is stated once, naming the value, the "
+          "profile and the table — a config key with no effect is a fact "
+          "the author is told, not one they discover",
+          "temperature=0.7" in stderr.getvalue()
+          and "gpt-5.6-luna" in stderr.getvalue()
+          and "MODEL_PROFILES" in stderr.getvalue()
+          and "authorlm/llm.py" in stderr.getvalue(), stderr.getvalue())
+
+    fake_p, calls_p, inv_p = fake_litellm()
+    client_p = LLMClient({"llm": {"enabled": True,
+                                  "model": "gemini/gemini-2.5-flash",
+                                  "temperature": 0.7}})
+    with _mock.patch.dict(sys.modules, {"litellm": fake_p}):
+        client_p.complete("sys", "usr")
+    check("an 'any' profile passes the configured temperature straight "
+          "through — the registry shapes what is known, it does not "
+          "second-guess what is configured",
+          calls_p[-1].get("temperature") == 0.7, calls_p)
+
+    # The shipped shape of the ruling: [critique] naming luna, with a
+    # numeric temperature set system-wide.
+    fake_s, calls_s, inv_s = fake_litellm(reject_temperature=True)
+    sum_client = summaries_mod.summarizer_llm({
+        "llm": {"enabled": True, "model": "gemini/gemini-2.5-flash",
+                "temperature": 0.7},
+        "critique": {"summarizer_model": "openai/gpt-5.6-luna"}})
+    with _mock.patch.dict(sys.modules, {"litellm": fake_s}), \
+            contextlib.redirect_stderr(_io.StringIO()):
+        sum_client.complete("sys", "usr")
+    check("the profile follows a POST-CONSTRUCTION .model reassignment, "
+          "exactly as api_key does: summarizer_llm built on gemini and "
+          "pointed at luna sends no temperature",
+          inv_s["n"] == 1 and "temperature" not in calls_s[-1],
+          (calls_s, inv_s))
+
+    # --- (3) the safety net, demoted to an alarm -----------------------
+    llm_mod._NOTED.clear()
+    alarm = _io.StringIO()
+    fake_a, calls_a, inv_a = fake_litellm(reject_temperature=True)
+    sleeps_a = []
+    with _mock.patch.dict(sys.modules, {"litellm": fake_a}), \
+            _mock.patch("authorlm.llm.time.sleep", sleeps_a.append), \
+            contextlib.redirect_stderr(alarm):
+        client_a = LLMClient({"llm": {"enabled": True,
+                                      "model": "openai/gpt-5.6-terra"}})
+        reply_a = client_a.complete("sys", "usr")
+    shouted = alarm.getvalue()
+    check("the retry-without-temperature net still saves an unknown "
+          "model's call (two invocations, no backoff burnt)",
+          reply_a == "the reply" and inv_a["n"] == 2 and not sleeps_a,
+          (inv_a, sleeps_a))
+    check("...but firing it is now an ALARM: the warning says the model "
+          "needs a MODEL_PROFILES row, names the file and the value to "
+          "write, and says the cost of not writing it",
+          "MODEL_PROFILES" in shouted and "authorlm/llm.py" in shouted
+          and 'vendor-default-only' in shouted
+          and "round-trip" in shouted, shouted)
+
+    # --- (4) caching_available: same answers, better reasons -----------
+    check("caching parity: anthropic-on-litellm yes, the same model on "
+          "the raw-HTTP transport no, gemini no, an unknown stub no — "
+          "the four answers the cache-layer suite already pins",
+          llm_mod.caching_available("anthropic/claude-fable-5", "litellm")
+          and not llm_mod.caching_available("anthropic/claude-fable-5",
+                                            "openai")
+          and not llm_mod.caching_available("gemini/gemini-2.5-flash",
+                                            "litellm")
+          and not llm_mod.caching_available("stub-writer", "litellm"), "")
+    try:
+        from litellm.utils import supports_prompt_caching as _spc
+
+        mapped = bool(_spc(model="anthropic/claude-haiku-5"))
+    except Exception:
+        mapped = False
+    check("an anthropic model with NO row keeps exactly the pre-registry "
+          "answer (litellm's own cost map), so the table changed no "
+          "model's caching behavior — only where the verified ones are "
+          "written down",
+          llm_mod.model_profile("anthropic/claude-haiku-5")
+          is llm_mod.UNKNOWN_PROFILE
+          and llm_mod.caching_available("anthropic/claude-haiku-5",
+                                        "litellm") == mapped, mapped)
+
+    # --- (5) the unknown-model note is quiet and one-shot --------------
+    llm_mod._NOTED.clear()
+    once = _io.StringIO()
+    with contextlib.redirect_stderr(once):
+        LLMClient({"llm": {"enabled": True, "model": "openai/nobody-knows"}})
+        LLMClient({"llm": {"enabled": True, "model": "openai/nobody-knows"}})
+    said = once.getvalue()
+    check("an unknown model is NEVER refused — it gets one informational "
+          "line saying rejections will self-correct once and should "
+          "become a row",
+          said.count("no model profile for 'openai/nobody-knows'") == 1
+          and "self-correct once" in said
+          and "MODEL_PROFILES" in said, said)
+    quiet = _io.StringIO()
+    with contextlib.redirect_stderr(quiet):
+        LLMClient({"llm": {"model": "openai/also-unknown"}})
+    check("...and a DISABLED client says nothing at all: a client that "
+          "will never call anything has no profile gap worth reporting",
+          quiet.getvalue() == "", quiet.getvalue())
+
+    # --- (6) draft()'s invariant and the registry must not disagree ----
+    writing_model = _re.search(r'model = "([^"]+)"', llm_mod.WRITING_ABSENT)
+    check("the drafting model the refusal tells the author to paste is "
+          "itself vendor-default-only, so draft()'s unconditional "
+          "omission of every sampling parameter and this table say the "
+          "same thing about it — asserted, not duplicated in code",
+          writing_model is not None
+          and llm_mod.model_profile(writing_model.group(1)).temperature
+          == llm_mod.VENDOR_DEFAULT_ONLY,
+          writing_model and writing_model.group(1))
+
+    # --- (7) the shipped config's models are all known -----------------
+    import tomllib
+
+    shipped = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "config.toml"
+         ).read_text(encoding="utf-8"))
+    chat_models = [v for section, key in (("llm", "model"),
+                                          ("critique", "summarizer_model"),
+                                          ("critique", "editor_model"),
+                                          ("writing", "model"))
+                   for v in [(shipped.get(section) or {}).get(key)] if v]
+    unknown = [m for m in chat_models
+               if llm_mod.model_profile(m) is llm_mod.UNKNOWN_PROFILE]
+    check("every chat model in the SHIPPED config has a profile row — the "
+          "author's own configuration never rings the alarm, and a config "
+          "edit that would is caught here first",
+          not unknown and len(chat_models) >= 3,
+          f"unknown={unknown!r} scanned={chat_models!r}")
+
+
 def check_config_parity() -> None:
     """ORCH-3: api.load_config and cli._load_config must resolve the
     same config.
@@ -2785,6 +3031,7 @@ def main_test() -> None:
     check_drafting_replay_needs_no_key()
     check_drafting_cache_warning()
     check_drafting_cache_layer()
+    check_model_profiles()
     check_extraction_failure_traced()
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
@@ -6880,6 +7127,15 @@ def main_test() -> None:
         # (1) The verbatim live failure shape (orchestrator-reported):
         # gpt-5.6-luna 400s server-side on any temperature but 1. One
         # reply, exactly two litellm.completion() calls, zero sleeps.
+        #
+        # AI: the MODEL STRING here is no longer luna. Luna now has a
+        # MODEL_PROFILES row (llm.py), so this rejection can no longer
+        # reach it — the request is shaped before the first call and the
+        # dance never happens, which check_model_profiles asserts
+        # positively. The net itself is unchanged and still needed, for
+        # exactly one situation: a model the registry does not know.
+        # Pointing this block at such a model keeps every assertion below
+        # verbatim while testing the case that still exists.
         fake_r1, calls_r1, inv_r1 = make_temp_rejecting_litellm(
             reject_message=(
                 "litellm.BadRequestError: OpenAIException - Unsupported "
@@ -6887,7 +7143,7 @@ def main_test() -> None:
                 "model. Only the default (1) value is supported."))
         sleeps_r1 = []
         client_r1 = LLMClient({"llm": {"enabled": True,
-                                       "model": "openai/gpt-5.6-luna"}})
+                                       "model": "openai/gpt-5.6-unmapped"}})
         with mock.patch.dict(sys.modules, {"litellm": fake_r1}), \
                 mock.patch("authorlm.llm.time.sleep", sleeps_r1.append):
             reply_r1 = client_r1.complete("sys", "usr")

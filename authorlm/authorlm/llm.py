@@ -91,6 +91,142 @@ def vendor_key(model: str, llm: dict) -> str:
     return os.environ.get(VENDOR_KEY_ENV.get(vendor_of(model), ""), "")
 
 
+# ------------------------------------------------------- model profiles
+#
+# HOW TO ADD A ROW — read this before touching the table below.
+#
+# This table is the adapter surface (Sponsor ruling, 2026-08-30: "This is
+# not ok [relying on the retry-on-400 temperature safety net]. We need
+# adapters for the different models."). LiteLLM stays the transport and
+# the translation layer; this is the thin AuthorLM-owned layer ABOVE it
+# that says what a given model's REQUEST is allowed to carry. It exists
+# because litellm's own parameter map is authoritative for the models it
+# knows and SILENT about the ones it doesn't — and the models this
+# project actually uses have repeatedly been the ones it doesn't know
+# yet (gpt-5.6-luna, live 2026-08-30).
+#
+# A row is ("<model-string prefix>", ModelProfile(...)). Matching is by
+# prefix and the LONGEST match wins, so a dated release
+# ("anthropic/claude-sonnet-5-20260305") picks up its family's row and a
+# specific row always beats a family row. The order below is for reading;
+# it does not affect matching.
+#
+# Fields:
+#   temperature       ANY                  send the configured temperature.
+#                     VENDOR_DEFAULT_ONLY  the model accepts NO temperature
+#                                          parameter at all (not "1" — none).
+#                                          The request omits it whatever the
+#                                          config says; config cannot force a
+#                                          known-rejected parameter.
+#   reasoning_effort  whether `reasoning_effort` may be sent (drafting path).
+#   prompt_cache      "anthropic"  block-level `cache_control` is copied
+#                                  verbatim into the provider request, so
+#                                  attaching breakpoints is worth it.
+#                     None         nothing to attach (a vendor that caches
+#                                  server-side on its own still does).
+#
+# ONLY add a row for a contract you have VERIFIED — a live call, or
+# litellm's own model map. The map lookups that settled the rows below:
+#
+#     litellm.get_model_info("anthropic/claude-haiku-4-5")
+#     litellm.llms.anthropic.common_utils.AnthropicModelInfo \
+#         ._supports_sampling_params("claude-sonnet-5")   # -> False
+#
+# A guessed row is worse than no row. An unmatched model gets
+# UNKNOWN_PROFILE, which behaves exactly as this module did before the
+# table existed — it sends what the config says and lets the one-shot
+# rejection retry in _complete_litellm/_complete_openai correct it. That
+# retry now SHOUTS about this table when it fires: the alarm is the
+# maintenance instruction, and a model whose profile is right never
+# rings it.
+
+
+ANY = "any"
+VENDOR_DEFAULT_ONLY = "vendor-default-only"
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    """What a model's request may carry. `name` appears in messages."""
+    name: str
+    temperature: str          # ANY | VENDOR_DEFAULT_ONLY
+    reasoning_effort: bool
+    prompt_cache: str | None  # "anthropic" | None
+
+
+# The Claude 5 family removed sampling parameters outright: litellm's map
+# carries supports_sampling_params = false for claude-sonnet-5,
+# claude-fable-5 and claude-opus-5, and its own client raises
+# UnsupportedParamsError ("Only temperature=1 is supported") rather than
+# send one. Note the family is enumerated, NOT globbed: litellm's map says
+# claude-haiku-4-5 AND claude-haiku-5 still take a temperature, so a
+# pattern like "anthropic/claude-" + "-5" would be a guess about models
+# whose contract is the opposite.
+CLAUDE_5 = ModelProfile("claude-5", VENDOR_DEFAULT_ONLY, True, "anthropic")
+
+MODEL_PROFILES: tuple[tuple[str, ModelProfile], ...] = (
+    ("anthropic/claude-sonnet-5", CLAUDE_5),
+    ("anthropic/claude-fable-5", CLAUDE_5),
+    ("anthropic/claude-opus-5", CLAUDE_5),
+    # litellm's map has no supports_sampling_params flag for haiku-4-5,
+    # which means the parameter is accepted; prompt caching advertised.
+    ("anthropic/claude-haiku-4-5",
+     ModelProfile("claude-haiku-4-5", ANY, True, "anthropic")),
+    # Proven live 2026-08-30: 400s server-side on any temperature but 1,
+    # and litellm's local map does not know that rule (it isn't Claude 5),
+    # so nothing below this table would have caught it. OpenAI caches
+    # prefixes server-side without a `cache_control` block, so there is
+    # no breakpoint for us to attach — prompt_cache is None, not "off".
+    ("openai/gpt-5.6-luna",
+     ModelProfile("gpt-5.6-luna", VENDOR_DEFAULT_ONLY, True, None)),
+    # The [llm] default's family. Takes temperature (0.2 has been the
+    # shipped value throughout) and reasoning_effort; its caching is
+    # implicit/server-side, with no block to mark.
+    ("gemini/gemini-2.5",
+     ModelProfile("gemini-2.5", ANY, True, None)),
+)
+
+# No row: assume nothing, change nothing. Every field is what this module
+# did before the table existed, so an unknown model behaves EXACTLY as it
+# used to and the safety net (now an alarm) is what corrects it.
+UNKNOWN_PROFILE = ModelProfile("unknown", ANY, True, None)
+
+
+def model_profile(model: str) -> ModelProfile:
+    """The profile for `model` — longest matching prefix wins, and
+    UNKNOWN_PROFILE when no row matches."""
+    best_pattern = ""
+    best = UNKNOWN_PROFILE
+    for pattern, profile in MODEL_PROFILES:
+        if model.startswith(pattern) and len(pattern) > len(best_pattern):
+            best_pattern, best = pattern, profile
+    return best
+
+
+PROFILE_GAP = (
+    "warning: MODEL_PROFILES (authorlm/llm.py) has no accurate row for "
+    "'{model}' — this rejection cost a round-trip and will cost one on "
+    "every call until a row says temperature=\"vendor-default-only\" for "
+    "it. Add it to the table (its comment block says how).")
+
+UNKNOWN_MODEL_NOTE = (
+    "note: no model profile for '{model}' — using conservative defaults; "
+    "parameter rejections will self-correct once and should become a row "
+    "in MODEL_PROFILES (authorlm/llm.py).")
+
+# Keys already announced this process. A gap is a maintenance fact, not a
+# per-call event: saying it once is informative, saying it on every call
+# of a 24-essay rebuild is noise the author learns to scroll past.
+_NOTED: set[str] = set()
+
+
+def _note_once(key: str, message: str) -> None:
+    if key in _NOTED:
+        return
+    _NOTED.add(key)
+    print(message, file=sys.stderr)
+
+
 def _rejects_temperature(text: str) -> bool:
     """Whether `text` (an exception message, or an HTTP error body) reads
     as a provider rejecting the `temperature` sampling parameter outright
@@ -313,13 +449,23 @@ def _usage_int(holder, name: str) -> int:
 def caching_available(model: str, provider: str) -> bool:
     """Whether `cache_control` breakpoints are worth attaching.
 
-    Three conditions, all structural. The transport must be litellm (the
-    raw-HTTP path has no way to express a content block, and it is what
-    every hermetic test uses). The vendor must be anthropic — that is the
-    litellm surface whose block-level `cache_control` is copied verbatim
-    into the provider request. And the model's own cost map must
-    advertise prompt caching."""
-    if provider != "litellm" or vendor_of(model) != "anthropic":
+    The transport must be litellm — the raw-HTTP path has no way to
+    express a content block, and it is what every hermetic test uses.
+    Past that, the model's PROFILE answers: `prompt_cache == "anthropic"`
+    means block-level `cache_control` is copied verbatim into the
+    provider request, which is the only surface where attaching
+    breakpoints does anything.
+
+    A model with no row keeps the pre-registry answer exactly — the
+    vendor-prefix gate plus litellm's own cost map — so adding the table
+    changed no model's caching behavior, only where the answer is
+    written down for the ones we have verified."""
+    if provider != "litellm":
+        return False
+    profile = model_profile(model)
+    if profile is not UNKNOWN_PROFILE:
+        return profile.prompt_cache == "anthropic"
+    if vendor_of(model) != "anthropic":
         return False
     try:
         import litellm
@@ -376,6 +522,47 @@ class LLMClient:
         self.max_tokens = WRITING_DEFAULTS["max_tokens"]
         self.effort = WRITING_DEFAULTS["effort"]
         self.cache = bool(WRITING_DEFAULTS["cache"])
+        # One quiet line on first construction of a client whose model
+        # has no row (never a refusal — an unknown model still works).
+        self.profile()
+
+    def profile(self) -> ModelProfile:
+        """The MODEL_PROFILES row for this client's CURRENT model.
+
+        Resolved fresh on every call, never cached, for the same reason
+        `api_key` is: `summarizer_llm`/`editor_llm`/`writing_llm` build a
+        client from `[llm]` and then reassign `.model`, so a profile
+        pinned at __init__ time would shape the request for the wrong
+        model. Announces a missing row once per model per process."""
+        profile = model_profile(self.model)
+        if profile is UNKNOWN_PROFILE and self.enabled:
+            _note_once(f"unknown-model:{self.model}",
+                       UNKNOWN_MODEL_NOTE.format(model=self.model))
+        return profile
+
+    def send_temperature(self) -> bool:
+        """Whether this call carries a `temperature` kwarg at all.
+
+        Two independent ways to say no. The CONFIG can say so
+        (`temperature = "vendor-default"`, resolve_temperature), and the
+        PROFILE can say so — and the profile wins, because config cannot
+        force a parameter the model is known to reject. When config
+        actually asked for a number the profile overrides, that is worth
+        exactly one line: it is a live discrepancy between what is
+        written down and what the model accepts, and silence there is how
+        a config grows settings that never had any effect."""
+        profile = self.profile()
+        if profile.temperature == VENDOR_DEFAULT_ONLY:
+            if self.temperature != VENDOR_DEFAULT_TEMPERATURE:
+                _note_once(
+                    f"temperature-override:{self.model}",
+                    f"note: config sets temperature={self.temperature!r} for "
+                    f"'{self.model}', but its model profile "
+                    f"({profile.name}) says the model takes no temperature "
+                    f"parameter at all — omitting it (MODEL_PROFILES, "
+                    f"authorlm/llm.py).")
+            return False
+        return self.temperature != VENDOR_DEFAULT_TEMPERATURE
 
     @property
     def api_key(self) -> str:
@@ -557,7 +744,12 @@ class LLMClient:
           `temperature=1` and `[llm]`'s 0.2 is dropped rather than sent
           (risk R-e: relying on the drop would also silently drop
           `output_config` for a model whose map lacks it — so this path
-          never passes one);
+          never passes one). MODEL_PROFILES now says the same thing
+          declaratively (CLAUDE_5.temperature is VENDOR_DEFAULT_ONLY),
+          but this path deliberately does not consult it: an
+          unconditional omission is the stronger guarantee. The two are
+          asserted never to disagree (check_model_profiles) rather than
+          made to share code;
         - it RAISES instead of returning None, carrying the provider's
           own last message (design §0 F1).
 
@@ -678,6 +870,12 @@ class LLMClient:
                 "provider 'litellm' is configured but the package is not "
                 "installed (pip install litellm)") from err
         litellm.suppress_debug_info = True
+        # AI: `reasoning_effort` is passed only where the profile allows
+        # it. Every verified row today allows it (and so does the unknown
+        # default, which changes nothing); the gate is here so the first
+        # model that doesn't is a one-line table edit rather than a
+        # provider 400 in the middle of a beat.
+        effort = effort if self.profile().reasoning_effort else ""
         last = ""
         for attempt in range(RETRIES + 1):
             try:
@@ -783,6 +981,13 @@ class LLMClient:
         # support while leaving it untouched for models that do, so the
         # backoff loop below only ever sees genuine transient failures.
         litellm.drop_params = True
+        # AI: a drop here is SILENT by construction — litellm sheds the
+        # param inside its own param mapping and offers no callback, so
+        # there is nothing to alarm on and detecting it would mean
+        # reimplementing litellm's map, which is the thing MODEL_PROFILES
+        # exists not to do. The registry is what keeps drop_params from
+        # ever being the mechanism that saves a call: for a model with a
+        # row, the param never reaches litellm at all.
         # AE/temp-compat round 3: drop_params (above) only helps when
         # litellm's OWN local param map already knows the model can't
         # take `temperature` — a model litellm doesn't recognize sails
@@ -801,7 +1006,13 @@ class LLMClient:
         # TEMPERATURE means the config already knows this model wants no
         # `temperature` kwarg at all — start with it omitted, proactively,
         # rather than paying for the one avoidable round-trip below.
-        include_temperature = self.temperature != VENDOR_DEFAULT_TEMPERATURE
+        #
+        # AI: and the MODEL PROFILE says the same thing for a model whose
+        # contract we have verified, whatever the config says
+        # (`send_temperature` above). The registry is the request-shaping
+        # authority; the retry below is now purely the alarm for a model
+        # the registry does not know yet.
+        include_temperature = self.send_temperature()
         temperature_retried = False
         attempt = 0
         while True:
@@ -834,6 +1045,8 @@ class LLMClient:
                     print(f"warning: {self.model} rejected temperature="
                           f"{self.temperature} ({err}); retrying immediately "
                           "without it…", file=sys.stderr)
+                    print(PROFILE_GAP.format(model=self.model),
+                          file=sys.stderr)
                     continue
                 if attempt < RETRIES:
                     delay = 2 ** attempt
@@ -855,8 +1068,10 @@ class LLMClient:
         # sleep, tracked independently of `attempt` — same reasoning as
         # _complete_litellm above. The request is rebuilt each attempt
         # (payload now varies with include_temperature; it no longer
-        # needs to be byte-identical across retries).
-        include_temperature = self.temperature != VENDOR_DEFAULT_TEMPERATURE
+        # needs to be byte-identical across retries). AI: the MODEL
+        # PROFILE shapes the first attempt here too — one registry, both
+        # transports.
+        include_temperature = self.send_temperature()
         temperature_retried = False
         attempt = 0
         while True:
@@ -888,6 +1103,8 @@ class LLMClient:
                     print(f"warning: {self.model} rejected temperature="
                           f"{self.temperature} ({_error_detail(err).strip()[:200]}); "
                           "retrying immediately without it…", file=sys.stderr)
+                    print(PROFILE_GAP.format(model=self.model),
+                          file=sys.stderr)
                     continue
                 if attempt < RETRIES:
                     delay = 2 ** attempt
