@@ -1534,3 +1534,69 @@ plugin now hashes the doc's raw bytes at build time and stamps
 `<!-- tutorial-sha256:<hex> -->` into the emitted HTML; `HelpTabTest`
 recomputes the same hash from the doc and asserts an exact match, making any
 doc edit without a rebuild a structural test failure.
+
+### 15.15 Client provenance — which chat did this (2026-08-30)
+
+Sponsor ruling: *"track which chat session … was involved with which AuthorLM
+session/writeup/intent, so I can go back and look at the session history and
+reconstruct"*, and *"create a hook interface … the interface should be as
+generic as possible."*
+
+The gap was structural, not accidental. AuthorLM records **whose judgment**
+produced a row — `source_id` into the `sources` registry, an author or the
+system — and that is the provenance the belief machinery needs. It has never
+recorded **which conversation** the author was having at the time. With one
+chat that distinction is idle. With three chats open against one workspace, a
+resumable writeup, and a session that is a shared ambient work period by
+design, it is the difference between a history that can be reconstructed and
+one that can only be guessed at.
+
+**The stamp is per invocation, never per "current client".** A resolver in
+`clients.py` returns one small descriptor — engine, session id, label,
+started_at, transcript hint — resolved once per CLI invocation and once per MCP
+tool call, through four layers: an explicit `AUTHORLM_CLIENT` override; an
+ordered list of engine adapters; an ambient workspace marker; then nothing.
+The layers are ranked by how much the answer is worth, and every stamp carries
+the rank as `precision`. `exact` means the identity travelled with this
+invocation. `ambient` means it was inferred from workspace state and may
+misattribute under parallel chats. When two clients are live at once the
+ambient layer **declines to name a session at all** — a stamp that says "one of
+three" can be recovered from; one that confidently names the wrong chat
+corrupts the reconstruction it was built for.
+
+**The Claude Code adapter needs no hook to be correct.** Measured on 2.1.246
+and 2.1.247: `CLAUDE_CODE_SESSION_ID` is in the environment of both Bash-tool
+subprocesses and stdio MCP servers, and it differs per chat — the author's two
+live `authorlm-mcp` processes carry the ids of the two chats that spawned them,
+and each id is the name of that chat's transcript file. The variable is
+undocumented, so it is not leaned on alone: `CLAUDECODE=1` (which *is*
+documented for both surfaces) gates the adapter, and a `SessionStart` hook
+writes a per-session marker under `~/.authorlm/clients/` carrying the label,
+the start time and the transcript path. Today the hook only enriches. If the
+undocumented variable ever goes away, the marker — keyed by the Claude host pid,
+which reaches both surfaces through `CLAUDE_CODE_MESSAGING_SOCKET` — becomes
+the mapping, and the adapter stays exact. Adapters are a tuple in one module,
+the same declarative shape as `MODEL_PROFILES` (§15.11): a new engine is one
+entry plus a documented hook snippet, and an engine whose hooks we cannot reach
+degrades to `ambient`, not to a wrong answer.
+
+**One stamp site, not a list of them.** `ko_fields` builds the KnowledgeObject
+base for every table in the schema and already writes an empty `metadata`; the
+join key goes there, so every row born after this change carries it with no
+call-site edits. The reconstruction payload — label, start time, transcript
+path — is written once per client per AuthorLM session, into that session's
+`metadata.clients` list, and reached by joining on `(engine, session)`. A
+writeup keeps its own touched-by list, deduped, exactly as it already keeps
+`drafting_models`, because a writeup resumed by a second chat is the ordinary
+case and the seam should be visible. No schema change, no index, no migration.
+
+**The payoff verb is `authorlm provenance <id>`**, with `--client <session>`
+inverting it. It reads row metadata for the join and `trace.jsonl` for the
+timeline, and it prints, for a completed essay, which chat drafted each beat
+and which chat accepted it. Rows created before this shipped carry no stamp,
+and the verb says so in a footnote rather than rendering them as `unknown` and
+inviting the inference. Nothing is backfilled: correlating old rows to old
+transcripts by timestamp is a confident guess across parallel chats, which is
+the one failure this design exists to prevent. For those, the pre-provenance
+method still works and stays documented — grep the session transcripts for the
+object's id; the filename is the session.
