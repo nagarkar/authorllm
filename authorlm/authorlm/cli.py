@@ -19,6 +19,7 @@ import textwrap
 from pathlib import Path
 
 from . import api
+from . import clients
 from . import concepts as cg
 from . import critique as crit
 from . import beliefs as bel
@@ -4988,6 +4989,345 @@ def cmd_log(args):
         print(f"{row['created_at']}  [{row['kind']:>11}] {row['location']}: {row['summary']}")
 
 
+# --------------------------------------------------- client provenance
+
+# Which tables `provenance <id-prefix>` will look in, and what to call
+# the thing it finds. Forensic and deliberately unscoped by manuscript:
+# the author has an id and wants to know which chat produced it.
+_PROVENANCE_TABLES = (
+    ("writeups", "writeup"),
+    ("declared_intents", "intent"),
+    ("sessions", "session"),
+    ("guidance_history", "guidance"),
+    ("editorial_reviews", "review"),
+    ("editorial_episodes", "episode"),
+    ("editorial_transitions", "transition"),
+    ("evidence", "evidence"),
+    ("concept_nodes", "concept"),
+    ("concept_edges", "edge"),
+    ("editorial_beliefs", "belief"),
+    ("knowledge_proposals", "proposal"),
+    ("improvement_tasks", "improvement"),
+    ("manuscript_versions", "version"),
+)
+
+
+def _client_name(entry: dict) -> str:
+    """`engine/session`, with a `~` when the claim is only ambient."""
+    session = entry.get("session") or entry.get("session_id")
+    mark = "~" if entry.get("precision") == "ambient" else ""
+    return f"{mark}{entry.get('engine') or 'unknown'}/{session or '(unclaimed)'}"
+
+
+def _client_index(db) -> dict:
+    """`(engine, session)` → the rich payload, gathered from every
+    session's `metadata.clients`. This is the join §1.1 is built around:
+    the ~70-byte key sits on every row, the ~250-byte payload once."""
+    index: dict = {}
+    try:
+        rows = db.all("SELECT id, created_at, metadata FROM sessions "
+                      "ORDER BY created_at")
+    except Exception:
+        return index
+    for row in rows:
+        for entry in (loads(row["metadata"], {}) or {}).get("clients") or []:
+            if not isinstance(entry, dict):
+                continue
+            key = (entry.get("engine"), entry.get("session"))
+            merged = dict(index.get(key) or {})
+            merged.update({k: v for k, v in entry.items() if v})
+            sessions = list(merged.get("sessions") or [])
+            if row["id"] not in sessions:
+                sessions.append(row["id"])
+            merged["sessions"] = sessions
+            index[key] = merged
+    return index
+
+
+def _row_clients(meta: dict) -> list[dict]:
+    """Both stamp shapes on one row: the birth key and the touched-by
+    list, merged so the renderer has a single thing to print."""
+    out: list[dict] = []
+    born = meta.get("client")
+    if isinstance(born, dict):
+        out.append({**born, "born": True})
+    for entry in meta.get("clients") or []:
+        if not isinstance(entry, dict):
+            continue
+        existing = next((e for e in out
+                         if e.get("engine") == entry.get("engine")
+                         and e.get("session") == entry.get("session")), None)
+        if existing is not None:
+            existing.update({k: v for k, v in entry.items() if v})
+        else:
+            out.append(dict(entry))
+    return out
+
+
+def _provenance_hits(db, prefix: str) -> list[tuple]:
+    hits = []
+    for table, label in _PROVENANCE_TABLES:
+        try:
+            rows = db.all(f"SELECT * FROM {table} WHERE id LIKE ?",
+                          (f"%{prefix}%",))
+        except Exception:
+            continue
+        hits.extend((table, label, dict(r)) for r in rows)
+    return hits
+
+
+def _trace_lines(args):
+    from . import tracelog
+
+    path = tracelog.log_dir(getattr(args, "workspace", None)) / "trace.jsonl"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+def _backfill_note(created_at: str | None) -> None:
+    """R5. Old rows carry no stamp, and the verb SAYS so rather than
+    rendering them as `unknown` and letting the reader infer a client
+    that was never recorded. Nothing is backfilled: correlating old rows
+    to old transcripts by timestamp is a confident guess across parallel
+    chats, which is the one failure this whole mechanism exists to
+    prevent."""
+    if created_at and created_at >= clients.STAMPING_SINCE:
+        return
+    print()
+    print(f"note  rows created before {clients.STAMPING_SINCE} carry no "
+          f"client stamp; for those,")
+    print("      attribution is by timestamp correlation only. The method "
+          "that still works:")
+    print("      grep the chat transcripts for the id — the filename is "
+          "the session.")
+    print("      grep -l '<id>' ~/.claude/projects/<cwd-with-dashes>/*.jsonl")
+
+
+def _print_client_body(entry: dict, rich: dict, indent: str = "      ") -> None:
+    label = rich.get("label") or entry.get("label")
+    if label:
+        print(f"{indent}{label}")
+    verbs = entry.get("verbs") or []
+    if verbs:
+        print(f"{indent}{', '.join(str(v) for v in verbs)}")
+    note = entry.get("note") or rich.get("note")
+    if note:
+        print(f"{indent}{note}")
+    hint = rich.get("transcript_hint") or entry.get("transcript_hint")
+    if hint:
+        print(f"{indent}transcript {hint}")
+
+
+def _client_listing(db, index: dict) -> dict:
+    """Every chat we have seen. The rich payload only exists for chats
+    that opened an AuthorLM session — a conversational surface does, bare
+    CLI use does not — so this also sweeps the row stamps, or a CLI-only
+    workspace would report no clients while every row named one."""
+    listing = {k: dict(v) for k, v in index.items()}
+    for table, _label in _PROVENANCE_TABLES:
+        try:
+            rows = db.all(f"SELECT created_at, metadata FROM {table}")
+        except Exception:
+            continue
+        for row in rows:
+            for entry in _row_clients(loads(row["metadata"], {}) or {}):
+                key = (entry.get("engine"), entry.get("session"))
+                known = listing.setdefault(key, {
+                    "engine": key[0], "session": key[1],
+                    "precision": entry.get("precision")})
+                seen = entry.get("last") or row["created_at"]
+                if seen and seen > (known.get("last_seen") or ""):
+                    known["last_seen"] = seen
+                first = entry.get("first") or row["created_at"]
+                if first and first < (known.get("first_seen") or first):
+                    known["first_seen"] = first
+                known.setdefault("first_seen", first)
+    return listing
+
+
+def _print_clients_listing(listing: dict) -> None:
+    if not listing:
+        print("No clients recorded yet. Rows carry a client stamp only from "
+              f"{clients.STAMPING_SINCE}.")
+        return
+    ordered = sorted(listing.values(),
+                     key=lambda e: e.get("last_seen") or "", reverse=True)
+    for entry in ordered:
+        span = (f"{entry.get('first_seen', '?')} → {entry.get('last_seen', '?')}"
+                if entry.get("first_seen") else "")
+        print(f"{_client_name(entry):<44} {entry.get('precision', '?'):<8} {span}")
+        _print_client_body(entry, entry, indent="    ")
+
+
+def _print_beats(db, writeup: dict, index: dict) -> None:
+    rows = db.all(
+        "SELECT * FROM guidance_history WHERE batch_id = ? "
+        "ORDER BY batch_index", (writeup["id"],))
+    if not rows:
+        return
+    print()
+    print("beats")
+    crossed = False
+    for row in rows:
+        meta = loads(row["metadata"], {}) or {}
+        proposed = meta.get("client") if isinstance(meta.get("client"), dict) else None
+        accepted = meta.get("accepted_by") if isinstance(
+            meta.get("accepted_by"), dict) else None
+        if accepted is None:
+            review = db.one(
+                "SELECT metadata FROM editorial_reviews WHERE guidance_id = ? "
+                "ORDER BY created_at DESC LIMIT 1", (row["id"],))
+            if review is not None:
+                candidate = (loads(review["metadata"], {}) or {}).get("client")
+                if isinstance(candidate, dict):
+                    accepted = candidate
+        line = (f"  n{row['batch_index']}  {row['id'][:8]}  "
+                f"proposed by {_client_name(proposed) if proposed else '(unstamped)'}")
+        if accepted:
+            line += f"   {row['state']} by {_client_name(accepted)}"
+            if proposed and (accepted.get("engine"), accepted.get("session")) != (
+                    proposed.get("engine"), proposed.get("session")):
+                line += "  ←"
+                crossed = True
+        print(line)
+    if crossed:
+        print()
+        print("  ← a beat drafted by one chat and settled by another")
+
+
+def cmd_provenance(args):
+    """Which chat did this. Read-only, no network, no LLM, no writes —
+    safe to run against a live workspace mid-flight."""
+    db = _open_db(args)
+    index = _client_index(db)
+
+    if args.clients or (not args.id and not args.client):
+        _print_clients_listing(_client_listing(db, index))
+        return
+
+    if args.client:
+        matches = [e for k, e in _client_listing(db, index).items()
+                   if k[1] and args.client in str(k[1])]
+        if not matches:
+            print(f"No client matching '{args.client}'. "
+                  f"Try `authorlm provenance --clients`.")
+            return
+        for entry in matches:
+            print(f"{_client_name(entry)}   {entry.get('label') or ''}".rstrip())
+            print(f"  {entry.get('first_seen', '?')} → {entry.get('last_seen', '?')}")
+            if entry.get("transcript_hint"):
+                print(f"  transcript {entry['transcript_hint']}")
+            print(f"  sessions   {' '.join(entry.get('sessions') or []) or '-'}")
+            target = (entry.get("engine"), entry.get("session"))
+            for table, label in _PROVENANCE_TABLES:
+                if table == "sessions":
+                    continue
+                try:
+                    rows = db.all(f"SELECT id, metadata FROM {table}")
+                except Exception:
+                    continue
+                ids = [r["id"] for r in rows
+                       if any((c.get("engine"), c.get("session")) == target
+                              for c in _row_clients(loads(r["metadata"], {}) or {}))]
+                if not ids:
+                    continue
+                shown = " ".join(i[:8] for i in ids[:6])
+                more = f" (+{len(ids) - 6})" if len(ids) > 6 else ""
+                print(f"  {label:<10} {shown}{more}")
+            traced = [t for t in _trace_lines(args)
+                      if isinstance(t.get("client"), dict)
+                      and t["client"].get("session") == entry.get("session")]
+            if traced:
+                errors = sum(1 for t in traced if not t.get("ok", True))
+                print(f"  verbs      {len(traced)} invocations, {errors} errors"
+                      f"    (trace.jsonl)")
+            print()
+        return
+
+    hits = _provenance_hits(db, args.id)
+    if not hits:
+        sys.exit(f"error: no object matching '{args.id}'.")
+    if len({h[2]["id"] for h in hits}) > 1:
+        names = ", ".join(sorted(h[2]["id"] for h in hits)[:6])
+        sys.exit(f"error: '{args.id}' is ambiguous ({len(hits)} objects): {names}")
+    table, label, row = hits[0]
+
+    print(f"{row['id']}  {label}  created {row['created_at']}")
+    meta = loads(row.get("metadata"), {}) or {}
+    entries = _row_clients(meta)
+    print()
+    if not entries:
+        print(f"No client stamp on this {label}.")
+    else:
+        print(f"clients that touched this {label}")
+        for entry in entries:
+            rich = index.get((entry.get("engine"), entry.get("session")), {})
+            span = ""
+            if entry.get("first") or entry.get("last"):
+                span = f"{entry.get('first', '?')} → {entry.get('last', '?')}"
+            elif entry.get("born"):
+                span = "created it"
+            print(f"  {_client_name(entry):<44} "
+                  f"{entry.get('precision', '?'):<8} {span}".rstrip())
+            _print_client_body(entry, rich)
+    if table == "writeups":
+        _print_beats(db, row, index)
+    _backfill_note(row.get("created_at"))
+
+
+def cmd_client_hook(args):
+    """Hidden. The `SessionStart` / `SessionEnd` hook target: reads the
+    engine's documented JSON payload on stdin and writes (or removes) one
+    per-session marker file.
+
+    Exits 0 always and prints NOTHING to stdout — a SessionStart hook's
+    stdout is injected into the model's context and we have nothing to
+    say to it. Every failure is swallowed: a provenance hook must never
+    be the reason a chat fails to start."""
+    from .adapters import claude_code
+
+    if args.print_setup:
+        print(claude_code.setup_snippet())
+        print()
+        print("# Paste into .claude/settings.json in this repo (committable, "
+              "binds every")
+        print("# chat started here) or ~/.claude/settings.json (all "
+              "projects, personal).")
+        print("# The hook only ENRICHES: a chat without it is still "
+              "attributed exactly.")
+        return
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        return
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    try:
+        workspace = getattr(args, "workspace", None)
+        if args.end:
+            claude_code.clear_marker(payload.get("session_id"),
+                                     workspace=workspace)
+        else:
+            claude_code.write_marker(payload, os.environ, workspace=workspace)
+    except Exception:
+        pass
+
+
 def cmd_history(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -5617,6 +5957,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_log)
 
+    p = sub.add_parser("provenance",
+                       help="which chat session touched an object")
+    p.add_argument("id", nargs="?",
+                   help="id prefix: wu- / di- / gd- / s- / ev- / concept id")
+    p.add_argument("--client", help="invert: what did this chat touch")
+    p.add_argument("--clients", action="store_true",
+                   help="list known clients, newest first")
+    p.set_defaults(func=cmd_provenance)
+
+    # Hidden: the target of a chat engine's own session hooks, not a verb
+    # the author types. Hooks execute code, so registration stays
+    # explicit — `--print-setup` prints the snippet to paste.
+    p = sub.add_parser("client-hook")  # hidden: a chat engine's hook target
+    p.add_argument("--end", action="store_true")
+    p.add_argument("--print-setup", dest="print_setup", action="store_true")
+    p.set_defaults(func=cmd_client_hook)
+
     p = sub.add_parser("history", help="list/show/restore collected manuscript versions")
     p.add_argument("action", nargs="?", default="list", choices=["list", "show", "restore"])
     p.add_argument("version", nargs="?", help="version number, e.g. '3' or 'v3' (show/restore)")
@@ -5704,6 +6061,13 @@ def _dispatch(argv: list[str] | None = None) -> None:
             manuscript=getattr(args, "manuscript", None),
             duration_ms=int((_time.monotonic() - t0) * 1000),
             ok=ok, error=error)
+
+    # Resolve the client ONCE for this invocation, before the verb runs —
+    # the per-invocation stamp, never a per-"current client" ambient read.
+    clients.configure(
+        surface="cli", workspace=getattr(args, "workspace", None),
+        verb=" ".join(str(p) for p in (args.command,
+                                       getattr(args, "action", None)) if p))
 
     t0 = _time.monotonic()
     try:
