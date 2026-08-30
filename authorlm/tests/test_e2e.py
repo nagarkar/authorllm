@@ -1290,10 +1290,11 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(wg, "plan")
         check("unconnected concept gets standalone placement",
               "Introduce 'Delta'" in out and "new standalone document" in out, out)
-        out = run(wg, "plan", "--draft")
-        check("plan --draft writes stubs into _drafts/",
-              "Draft stub written" in out
-              and (mg / "_drafts" / "alpha.md").exists(), out)
+        # _drafts/ is a generic underscore-prefixed directory, invisible to
+        # observation regardless of what wrote into it (iter_manuscript_paths,
+        # revisions.py) — write into it directly rather than via a drafting
+        # feature.
+        write(mg / "_drafts" / "alpha.md", "Scratch notes, never observed.\n")
         out = run(wg, "collect")
         check("_drafts is invisible to observation", "No changes" in out, out)
 

@@ -1141,17 +1141,16 @@ def get_doc_links(manuscript: str | None = None) -> dict:
 
 
 @mcp.tool()
-def get_plan(draft: bool = False, manuscript: str | None = None) -> dict:
+def get_plan(manuscript: str | None = None) -> dict:
     """The writing plan: for every unrealized concept, where it belongs in
     the manuscript (derived from realized graph neighbors and the TOC
     reading order), which prerequisites to write first, matching active
-    intents, and precedents. With draft=true, opening stubs are written to
-    _drafts/ for the author to pull in. Use when the author asks 'what
-    should I write next?' or 'where does X belong?'."""
+    intents, and precedents. Use when the author asks 'what should I write
+    next?' or 'where does X belong?'."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
-        return api.get_plan(db, ms, llm=_llm(), draft=draft)
+        return api.get_plan(db, ms)
     return _guard(run)
 
 

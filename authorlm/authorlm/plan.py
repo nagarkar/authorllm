@@ -3,35 +3,19 @@
 Joins the active declared intents (the author's open todos) with the
 Concept Graph and the TOC reading order to propose placements for every
 unrealized concept (RFC §21.2: topic sequencing and future chapter
-planning). Placement reasoning is deterministic and free (P9); optional
-stub drafting is the generative layer, written into `_drafts/` — an
-observation-ignored directory — as Level-2 prepared revisions the author
-may pull in or ignore (§16.1).
+planning). Placement reasoning is deterministic and free (P9). Turning a
+plan item into prose is `write start` + `write draft` (§15).
 """
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
 
 from .analysis import find_precedents
 from .concepts import concept_pattern, node_names
 from .db import Database, loads
 from .guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
-from .llm import LLMClient
 from .structure import reading_order
 
-DRAFTS_DIR = "_drafts"
 SKIP_KINDS = {"historical_reference", "mathematical_construct"}
-
-# Registered in prompt_registry as "plan-draft" ('authorlm prompts').
-OPENING_DRAFT_SYSTEM = (
-    "You are an editorial collaborator for a philosophy manuscript. "
-    "Draft a short opening passage (2-3 paragraphs) introducing the "
-    "concept, following the author's demonstrated approach when a "
-    "precedent is given. Reply with the passage only. Format any "
-    "mathematics as MathJax: inline $...$, display $$...$$."
-)
 
 
 def build_plan(db: Database, manuscript: dict) -> dict:
@@ -139,44 +123,3 @@ def build_plan(db: Database, manuscript: dict) -> dict:
     for item in items:
         item.pop("_position")
     return {"items": items, "toc_unlisted": toc_unlisted}
-
-
-def _slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "concept"
-
-
-def draft_stubs(db: Database, manuscript: dict, llm: LLMClient,
-                items: list[dict], limit: int = 3) -> list[dict]:
-    """Level-2 prepared revisions: draft an opening stub for the top plan
-    items into _drafts/ (ignored by observation). The author pulls text in,
-    or doesn't — the manuscript is never touched."""
-    drafts_dir = Path(manuscript["path"]) / DRAFTS_DIR
-    results = []
-    for item in items[:limit]:
-        context = [
-            f"Concept to introduce: {item['concept']} ({item['kind']}).",
-        ]
-        if item["notes"]:
-            context.append(f"Working definition: {item['notes']}")
-        if item["intent"]:
-            context.append(f"The author's declared intent: {item['intent']}")
-        if item["placement_file"]:
-            context.append(f"It will live {item['placement']}.")
-        if item["precedent"]:
-            context.append(
-                f"Precedent — {item['precedent']['label']}, the author: "
-                + "; then ".join(item["precedent"]["actions"]) + "."
-            )
-        draft = llm.complete(OPENING_DRAFT_SYSTEM, "\n".join(context))
-        if not draft:
-            continue
-        drafts_dir.mkdir(exist_ok=True)
-        path = drafts_dir / f"{_slug(item['concept'])}.md"
-        path.write_text(
-            f"<!-- AuthorLM draft stub for '{item['concept']}' — placement: "
-            f"{item['placement']}. Pull in what serves you; delete the rest. -->\n\n"
-            f"{draft.strip()}\n",
-            encoding="utf-8",
-        )
-        results.append({"concept": item["concept"], "path": str(path)})
-    return results
