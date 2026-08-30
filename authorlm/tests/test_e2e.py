@@ -1903,6 +1903,16 @@ def scenario_write_draft(root: Path) -> None:
         check("...and it made no model call",
               StubLLMHandler.REQUESTS == before,
               f"{before} -> {StubLLMHandler.REQUESTS}")
+        # AH-0(d): the gates that sit ABOVE the dry-run return still refuse
+        # a dry run. Moving the [writing]/key gates below it must not have
+        # carried the fabrication guard down with them — a dry run on an
+        # unplanned writeup must refuse, not print an empty payload.
+        out = run(ws, "write", "draft", "--dry-run", expect_exit=True)
+        check("--dry-run refuses without a ratified plan too — the gates "
+              "above the dry-run return still run, so the payload is never "
+              "printed for a beat that does not exist",
+              "no ratified beat plan" in out
+              and "───── block " not in out, out)
 
         plan = json.dumps([
             {"role": "opener", "concepts": ["Choice"], "budget": 60,
@@ -1929,6 +1939,30 @@ def scenario_write_draft(root: Path) -> None:
               StubLLMHandler.REQUESTS == before and not beat_rows()
               and cursor() == 0,
               f"{before} -> {StubLLMHandler.REQUESTS}; {beat_rows()}")
+        # AH-0(a): --dry-run is NOT gated on [writing]. The shipped config
+        # has no [writing] (author ruling 2026-08-30) and the dry run is the
+        # DEFAULT drafting flow under it: it hands the conversation the
+        # exact payload and the registered prompt to draft against. It
+        # makes no call, so gating it on the billed path's configuration
+        # only withheld the audit instrument along with the call.
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", "--dry-run")
+        check("with no [writing] section --dry-run still prints the whole "
+              "payload and names the registered prompt — it makes no call, "
+              "so it is not gated on the billed path's model, and it says "
+              "so instead of naming one",
+              "───── block S — " in out and "───── block A — " in out
+              and "───── block C — " in out
+              and "no [writing] model configured" in out
+              and "write propose" in out
+              and "no call made" in out
+              and "Prompt: " in out and "beat-draft.md" in out, out[:900])
+        check("...and it cost nothing and changed nothing: no model call, "
+              "no guidance row, cursor unchanged",
+              StubLLMHandler.REQUESTS == before and not beat_rows()
+              and cursor() == 0,
+              f"{before} -> {StubLLMHandler.REQUESTS}; {beat_rows()}")
+
         _draft_config(ws, server.server_port, '[writing]\nmodel = ""\n')
         out = run(ws, "write", "draft", expect_exit=True)
         check("an empty [writing] model is the same refusal (a section that "
@@ -1954,6 +1988,22 @@ def scenario_write_draft(root: Path) -> None:
         check("the key refusal also made no model call",
               StubLLMHandler.REQUESTS == before,
               f"{before} -> {StubLLMHandler.REQUESTS}")
+        # AH-0(c): the same config the billed path refuses on — a writing
+        # model whose vendor key is absent — still yields a dry run. The
+        # payload is what the author audits and what the conversation
+        # drafts against; neither needs a key.
+        before = StubLLMHandler.REQUESTS
+        out = run(ws, "write", "draft", "--dry-run")
+        check("--dry-run succeeds with [writing] configured but no vendor "
+              "key, and REPORTS the configured model (reading a name is "
+              "not a gate) — the key gate stays on the billed path",
+              "───── block S — " in out
+              and "Payload for anthropic/claude-fable-5" in out
+              and "ANTHROPIC_API_KEY" not in out, out[:600])
+        check("...and that dry run made no model call either",
+              StubLLMHandler.REQUESTS == before and not beat_rows()
+              and cursor() == 0,
+              f"{before} -> {StubLLMHandler.REQUESTS}; {beat_rows()}")
 
         _draft_config(ws, server.server_port,
                       '[writing]\nmodel = "stub-writer"\n')

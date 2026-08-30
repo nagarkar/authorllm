@@ -3211,7 +3211,14 @@ def _write_draft(db, manuscript, config, prefix, dry_run: bool) -> None:
     if dry_run:
         payload = result["payload"]
         _print_beat_spec(result["beat"])
-        print(ui.dim(f"Payload for {result['model']} — no call made."))
+        target = result["model"] or (
+            "no [writing] model configured — draft this payload in the "
+            "conversation, then register it with 'write propose --why …'")
+        print(ui.dim(f"Payload for {target} — no call made."))
+        # Provenance, on the dry run too: the conversational drafting flow
+        # drafts under this prompt's rules, so it has to be named where the
+        # payload is printed and not only after a billed call.
+        print(ui.dim(f"Prompt: {result['prompt_location']}"))
         for name, text in payload.blocks:
             print()
             print(ui.bold(f"───── block {name} — {len(text):,} chars — "

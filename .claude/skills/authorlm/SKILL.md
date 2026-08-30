@@ -90,10 +90,11 @@ record their reaction (with their reasoning verbatim) as evidence.
 ## The beat loop (`authorlm write` — beat-by-beat co-writing)
 When the author wants a chapter written or rewritten beat by beat (design:
 `docs/autoregressive-writing-design.md`, §13 for the two use cases below),
-`write draft` drafts, under a registered prompt and a configured model; the
-CLI is also the state machine and evidence channel; you orchestrate and
-relay. Run the verbs via Bash; prose and plan JSON travel over stdin
-(heredocs).
+`write draft --dry-run` assembles the payload and names the registered
+prompt, YOU draft the beat in the conversation against them, and
+`write propose --why …` registers it; the CLI is also the state machine and
+evidence channel; you orchestrate and relay. Run the verbs via Bash; prose
+and plan JSON travel over stdin (heredocs).
 
 **We cannot make things up.** This is the author's constraint, verbatim, and
 it is a rule about permitted INPUTS, not a tone. A beat may be grounded only
@@ -276,46 +277,64 @@ not re-ask at each beat.
    plan's ORDERING is where "reorder for better flow" happens. A beat that
    discovers mid-draft that it needs an ungrounded fact triggers
    `write plan --replace` or a question to the author — never an invention.
-3. **Draft.** `authorlm write draft` is the default and you should reach for it first.
-   It assembles the whole payload itself — style law, validated beliefs, the DRAFTING
-   CONTEXT, the brief, the digest, the ratified plan, the concept notes for every
-   concept the plan names, the accepted text so far, this beat's spec, the learnings,
-   and the author's last verdict — sends it to the `[writing]` model under the
-   registered prompt `authorlm/prompts/beat-draft.md`, self-checks in the same call,
-   and registers the result through the ordinary propose path. You do not gather the
-   machinery for a beat by hand any more, and you do not paste a draft you wrote in
-   the conversation into `write propose` as though the verb had produced it.
-   Read what it prints back to the author — the WHY especially — and put the draft to
-   them for a verdict. Step 4 is unchanged.
+3. **Draft — in the conversation, against the dry-run payload.** This is the default
+   and the only path you take unless the author says otherwise (author ruling
+   2026-08-30: the pinned drafting model bills the Anthropic API per beat, and
+   `[writing]` is deliberately absent from `authorlm/config.toml` so that no beat can
+   bill it by accident). Three steps, in order:
 
-   If it replies BLOCKED, it has hit the "we cannot make things up" rule: nothing was
-   registered, and there is a question for the author. Ask it. The answer usually
-   becomes `write plan --replace` on that beat.
+   a. **Get the payload.** `authorlm write draft --dry-run -m <ms>`. It makes NO model
+      call and costs nothing. It assembles and prints exactly what the drafting model
+      would have been sent — style law, validated beliefs, the DRAFTING CONTEXT, the
+      brief, the digest, the ratified plan, the concept notes for every concept the
+      plan names, the accepted text so far, this beat's spec, the learnings, and the
+      author's last verdict — as labelled blocks with a sha256 per block, and it names
+      the registered prompt `authorlm/prompts/beat-draft.md`. This is the machinery
+      assembly step: do NOT gather it by hand, and do not substitute a `get_style` /
+      `get_concepts` sweep of your own — the point of the verb is that the payload is
+      deterministic and the author can reproduce it.
 
-   If it refuses for want of `[writing]` or an API key, relay the refusal — it names
-   the exact TOML and the exact environment variable — and offer to draft the beat
-   conversationally in the meantime (below).
+   b. **Draft the beat yourself, against that payload verbatim, under
+      `authorlm/prompts/beat-draft.md`'s rules.** Read the prompt file; it is law for
+      this step exactly as it is for the model. In particular: ground the beat ONLY in
+      the six permitted inputs the dry-run printed (this beat's spec, the brief, the
+      digest, the DRAFTING CONTEXT's BEFORE block, the concept notes, the accepted text
+      so far) and in nothing else — not your general knowledge, not a citation or date
+      or attribution that is not in a block; treat any `!!` line in the context as
+      unreliable; obey the STYLE LAW block as binding law over your instinct; write to
+      the beat's stated word budget (under is better than over); run the prompt's
+      SELF-CHECK — beat spec, style law, graph, grounding traced item by item, word
+      count against budget — and fix the draft rather than reporting a failed check;
+      and never emit the characters `<<` or `>>`, which are reserved grammar in the
+      document pipeline.
 
-   **Drafting in the conversation is still legal**, and is right in three cases:
-   (a) the author asks you directly for wording, mid-beat ("make that sentence
-   harder"); (b) `[writing]` is unconfigured or the model is unreachable and the
-   author wants to keep going; (c) a beat the author is dictating rather than
-   commissioning. In all three you draft — assembling the machinery exactly as
-   "Drafting on request" prescribes (style law, concept notes, policies, precedents),
-   conditioned on the accepted text so far, the pinned raw material, and step 1's
-   DRAFTING CONTEXT, and SELF-CHECKED against the beat spec, the style guide and the
-   graph — then register with
-   `authorlm write propose --why "<which concepts it realizes, which precedent it
-   follows>"` exactly as before, the draft on stdin. `--why` is mandatory and you
-   **cite the grounding BY ID**. The verb is unchanged and the evidence is identical
-   in kind. What you must not do is draft conversationally *by default* when
-   `write draft` would have worked: the payload it builds is auditable and
-   reproducible and yours is not, which is the whole reason the author asked for a
-   verb.
+      If the beat cannot be written without a fact no block supplies, do not write it.
+      That is the BLOCKED shape: nothing gets registered, and there is a question for
+      the author. Ask it. The answer usually becomes `write plan --replace` on that
+      beat. This is the one failure the whole loop exists to prevent.
 
-   One model drafts one writeup (design §8 — the prompt cache is model-scoped and the
-   voice should not have a seam). `write draft` warns if `[writing] model` changed
-   mid-writeup; relay that warning rather than letting it scroll past.
+   c. **Register it.** `authorlm write propose --why "<which concepts it realizes,
+      which precedent it follows>"` exactly as before, the draft on stdin. `--why` is
+      mandatory and you **cite the grounding BY ID**. Then put the draft and its WHY to
+      the author for a verdict; step 4 is unchanged.
+
+   Drafting in the conversation is also how you handle a beat the author is dictating,
+   and wording they ask for mid-beat ("make that sentence harder") — same route, same
+   evidence.
+
+   **The billed verb is the exception, not the default.** `authorlm write draft`
+   without `--dry-run` sends the payload to the pinned `[writing]` model, self-checks
+   in the same call, and registers the result through the ordinary propose path. Reach
+   for it ONLY when the author explicitly asks for the pinned model, and **say that it
+   bills the Anthropic API per beat before you run it**. As shipped it refuses — there
+   is no `[writing]` section — and the refusal names the exact TOML to paste and the
+   environment variable it needs. Relay that refusal as the configuration decision it
+   is; do not paste the TOML in yourself, and never edit `config.toml` to re-enable a
+   billed path without the author saying so in as many words. If the author does
+   restore it: one model drafts one writeup (design §8 — the prompt cache is
+   model-scoped and the voice should not have a seam), and `write draft` warns if
+   `[writing] model` changed mid-writeup; relay that warning rather than letting it
+   scroll past.
 4. **Verdict.** Relay the author's reaction in their own words:
    - accept as-is → `authorlm write accept`
    - author reworded → `authorlm write accept` with their text on stdin
