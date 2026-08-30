@@ -456,6 +456,38 @@ which prints the top shapes by total time and by worst single query, the
 per-day trend, the slow-log tail and per-client attribution — no
 one-off measurement, and no need to open the database.
 
+Beside both, `usage.jsonl` is the third question: not which verbs ran and
+not where their time went, but **where their money went**. Every model
+call folds its tokens into an in-memory aggregate keyed by
+`purpose | model` — `purpose` being the config section that chose the
+model — and one line per CLI process / MCP tool call records
+`{n, in, out, cache r/w, est_cost}` plus the same client join key; any
+single call estimated over `[usage] expensive_usd` (default 0.50) writes
+its own line tagged `"expensive": true`. On by default (`[usage] ledger`),
+best-effort, same 5 MB rotation. Read it with:
+
+```bash
+authorlm usage --days 7
+authorlm usage --days 30 --by verb        # or client | purpose | model | day
+authorlm usage --sweep                    # close the books first
+```
+
+Two quantities land in it and they are **never summed**. `kind: "api"` is
+billable, and its dollar figure is an **estimate from litellm's public
+price list, not your invoice** — a model litellm cannot price records its
+tokens and a `null` cost, never a guess, and the report names what it
+could not price. `kind: "chat"` is what a Claude Code subscription
+absorbed, swept incrementally from the session transcript (counts only,
+never content, and never a transcript path); it carries **no dollar
+figure at all**, because a subscription does not bill per token.
+
+The chat sweep is opportunistic — at the flush point that already exists,
+for the chat currently driving AuthorLM, at most once per session per
+`[usage] sweep_interval_seconds`. No daemon, no thread, no cron. The
+`SessionEnd` hook adds one forced sweep before it unlinks the marker,
+which is the only place a chat's final turns are counted; without the hook
+the report says so rather than under-counting silently.
+
 The scheduled cloud reviewer ("AuthorLM daily improvement PR") runs
 against a fresh GitHub checkout and cannot see `~/.authorlm` — it reads
 the snapshot committed at `_diagnostics/trace.jsonl` instead. Refresh it

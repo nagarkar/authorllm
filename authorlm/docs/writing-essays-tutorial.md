@@ -1113,11 +1113,24 @@ spends once — the redraft that follows it is written here and adds nothing.
 Two others sit next to the loop rather than inside it: the critique pass, which
 proposes line edits over one essay at a time, and illustration rendering.
 
+And you do not have to take this list on trust: every model call now records its
+own tokens, and the fold below has the command that will tell you what it
+actually cost.
+
 <details>
 <summary><b>Under the hood — which model, and where it is set</b></summary>
 
 Everything is in `authorlm/config.toml`, versioned with the code. Keys live in
 `.env` beside it.
+
+**And `authorlm usage` will tell you what it actually cost.** Every model call
+records its own tokens into `~/.authorlm/logs/usage.jsonl`, so `authorlm usage
+--days 7` prints the estimate per purpose and model, names what it could not
+price rather than quietly dropping it, says what the replay cache saved you, and
+— separately, and with no dollar figure attached, because a subscription does
+not bill per token — what this conversation itself consumed. The table above is
+a claim about the code and ages the moment the code moves; a reader who can
+measure does not have to trust one.
 
 | Job | Model | Set in |
 |---|---|---|

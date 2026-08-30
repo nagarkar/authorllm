@@ -1787,3 +1787,128 @@ writeup's biggest transition, and with two writeups open it was landing on
 whichever intent had been declared last.
 
 Everything else in this section is as ratified.
+
+
+### 15.18 The usage ledger and the budget seam — spend stops being a document (2026-08-30)
+
+Sponsor ruling: *"building a termination and budget feature first class would
+make sense. For now we don't need to cut off the usage when the budget has
+reached, but it would be good to track usage so if you ever want to take this to
+commercial stage, we can have that ready-made."*
+
+The spend audit found seventeen billable call sites reached by thirty-one
+triggers, four of which fire with no author action, and it closed with a standing
+observation: the reason two of those escaped five previous catches is that
+neither path prints a usage line, so **a doc claim was the only thing standing
+between the author and the spend**. That is the defect. A document is a claim
+about the code; it is checked by a person, it ages the moment the code moves, and
+it cannot answer *what did last week actually cost*. `trace.jsonl` knows which
+verbs ran and `db-perf.jsonl` knows where their time went; nothing knew where
+their money went.
+
+**So the accounting is now standing, and it sits below the layer that prints.**
+Every call through `LLMClient` already counts its tokens; those counts now fold
+into an in-memory aggregate keyed by `(purpose, model)` — where `purpose` is the
+config section that chose the model, `[llm]` or `[critique] summarizer_model` or
+`[writing]` — and one JSON line per invocation lands in
+`<workspace>/.authorlm/logs/usage.jsonl` beside the other two logs. The seam is
+`_record_usage`, which is *beneath* `stats_line()` and `_report_llm` and the CLI
+and the MCP server, so the auto-collect extraction and the whole MCP surface —
+the two paths the audit found invisible — are covered with no call-site edit.
+Sixteen of the seventeen call sites reach it that way; `generate_image` is not a
+client and records itself in one line.
+
+**The architecture is `dbperf`'s, because the argument that won there wins
+here.** One line per invocation rather than per call, so a verb making 24
+summariser calls costs 24 dict updates and one line of I/O; 5 MB rotation, two
+generations; every write swallows its own failure, because a usage log that can
+break a `collect` is worse than no usage log; `[usage] ledger = false` holds no
+recorder at all, so opting out costs one identity test per model call — a test
+against something that takes hundreds of milliseconds. Each line carries the
+client provenance join key (§15.15), so the ledger joins straight to the verb
+timeline, to row metadata, and to the chat transcript. And, rhyming with the slow
+line, any single call estimated over `[usage] expensive_usd` writes its own
+immediate line: the aggregate already counts it, so that line is the detail —
+when, under which chat, and for what.
+
+**Cost is an estimate and says so, everywhere.** Rates come from litellm's model
+map through `get_model_info`, which resolves the vendor prefix — `model_cost`
+keyed directly does not, and would have priced `openai/gpt-5.6-luna` and
+`anthropic/claude-fable-5` at `null` while pricing `gemini/gemini-2.5-flash`
+correctly, i.e. silently lost the two most expensive paths in the shipped
+configuration. A model the map does not know records **tokens with a null cost,
+never a guess**, and the report says how many calls it could not price rather
+than printing a total that quietly omits them. It is a public price list, not an
+invoice, and the header says that too.
+
+**The chat side is consumption, not billing, and is measured rather than
+assumed.** Beat drafting moved into the conversation precisely so it would be
+subscription-covered (§15.10) — which made it free to the invoice and invisible
+to everything. It is now measured, through an **optional** adapter capability: an
+adapter that can point at its engine's transcript may implement
+`usage(client, checkpoint)`, and the Claude Code adapter does, by parsing the
+session's JSONL incrementally from a byte offset so each sweep reads only the new
+bytes. Three facts from reading real transcripts shaped it. The volume on a
+cached turn lives in `cache_creation_input_tokens` and `cache_read_input_tokens`,
+not in `input_tokens`, which is routinely `2` — so all four counters are read.
+`iterations` restates the same numbers and is ignored. And **the same
+`message.id` is written to the file up to six times with an identical usage
+object**: across this machine's 49 transcripts, 21,709 usage-bearing lines carry
+10,571 distinct ids, so a parser that sums lines overstates by 2.05×.
+Deduplication on `message.id` is the difference between a number and a fiction.
+Chat totals carry **no dollar figure** — a subscription does not bill per token,
+and printing a notional one would invent a bill that does not exist.
+
+**The sweep runs opportunistically and never as a process.** At the flush point
+that already exists, for the chat that is *right now* driving AuthorLM —
+resolved `exact`, with an adapter that implements the capability — and at most
+once per session per five minutes. Between sweeps the cost is one `stat`.
+`authorlm usage --sweep` forces it across every live session, and the
+`SessionEnd` hook, which already unlinks the marker, gains one forced sweep
+before it: the only place a chat's final turns are ever counted, and worth the
+milliseconds, because the tail of a long session is often its largest part. That
+one sweep declines the discontinuity recompute — a full file read against the
+hook's documented 1.5 s shared budget — and takes the `restart` loss; the
+checkpoint is left untouched, so the next opportunistic sweep of that session
+does the recompute off the hook's clock. No daemon, no thread, no cron. A session
+with no hook is *reported* as uncounted rather than silently under-counted.
+
+**The ledger carries no prose.** Counts, model strings, config-section names, the
+`command + action` verb label `trace.jsonl` already permits, and the provenance
+join key. No prompt, no completion, no filename, no transcript path. The
+transcript parser reads six keys and coerces four integers; it does not evaluate,
+dispatch on, or act upon anything a transcript says, and a line whose usage field
+contains an instruction produces a zero.
+
+**`authorlm usage [--days N] [--by client|purpose|model|day|verb]`** reads it
+back: the estimated API total with its unpriced remainder named, chat consumption
+labelled as subscription and dollar-free, the per-day trend, the top consuming
+chats, and the expensive-call tail. Like `dbperf` it does not open the database,
+so it is safe against a live workspace mid-flight, and like `dbperf` it is honest
+about an empty log rather than printing an empty table.
+
+**And the budget is built, tested, and dormant — which is the ruling, exactly.**
+`[budget]` is a section the shipped config does not have, the same way `[writing]`
+is a section the shipped config does not have, and for a related reason: what is
+absent is what is off. Present, it drives a warning line on the report and one
+stderr line per process when the day's estimate crosses `warn_at`.
+`enforce = true` additionally makes `budget.gate()` refuse a call before it is
+built, at three seams — `complete`, `draft`, `generate_image` — with a refusal
+shaped like `WRITING_ABSENT`: the section, the number, and the recipe both ways.
+**No shipped configuration sets it, and no call is refused today.**
+`budget.settings()` inverts `dbperf.settings()`'s default deliberately: a broken
+config must not be a silent off-switch for a *measurement*, and it must not be a
+silent refusal for a *policy*. Commercial-readiness is not the enforcement; it is
+the seam being exercised on every billable path, returning `None`, with a test
+that proves it would refuse if it were ever asked to.
+
+**Reconciliation with `it-462f742f2bae`** (open: *"usage lines on silent auto
+paths"*). That item is about the author seeing a **printed line in the moment**;
+this section is about the spend being **recoverable after the fact**. They are
+different remedies for the same finding and neither subsumes the other. This work
+deliberately **does not** add printed lines to the auto-collect path or the MCP
+surface — that stays `it-462f742f2bae`'s remit, and doing it here would duplicate
+its work and pre-empt its own ruling on what the MCP surface should return. What
+it contributes is a seam: once the ledger exists, that printed line can be
+sourced from `usage.pending()` — the un-flushed recorder totals — instead of from
+a per-verb `stats_line()` the auto path has no client handle for.
