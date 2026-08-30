@@ -53,11 +53,10 @@ extraction_max_chars = 24000
 # (resolve_temperature, llm.py): this section's own value wins, then
 # [llm]'s, then the 0.2 constant when neither is set.
 #
-# ALL THREE TEMPORARILY disabled pending the AE-3 orchestrator merge +
-# live acceptance run. Restore together (author rulings 2026-08-30):
-# summarizer_model = "openai/gpt-5.6-luna"
-# editor_model = "openai/gpt-5.6-luna"
-# temperature = "vendor-default"
+# Activated 2026-08-30 after the AE-3 merge + orchestrator live acceptance.
+summarizer_model = "openai/gpt-5.6-luna"
+editor_model = "openai/gpt-5.6-luna"
+temperature = "vendor-default"
 
 [illustrations]
 # Illustration rendering (authorlm illus render); text model above ([llm]
