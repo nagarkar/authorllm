@@ -4032,6 +4032,1064 @@ def check_db_perf_log() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _as_config(text: str, root: Path):
+    """Point `AUTHORLM_CONFIG` at a temp config for the duration of the
+    block, dropping every memo keyed on the resolved path."""
+    from authorlm import budget, usage
+
+    path = root / f"cfg-{abs(hash(text)) % 100000}.toml"
+    path.write_text(text, encoding="utf-8")
+    previous = os.environ.get("AUTHORLM_CONFIG")
+    os.environ["AUTHORLM_CONFIG"] = str(path)
+    usage.reset()
+    budget.reset()
+    try:
+        yield path
+    finally:
+        if previous is None:
+            os.environ.pop("AUTHORLM_CONFIG", None)
+        else:
+            os.environ["AUTHORLM_CONFIG"] = previous
+        usage.reset()
+        budget.reset()
+
+
+def _turn(mid: str, **over) -> str:
+    """One synthetic Claude Code `assistant` line, shaped from the real
+    schema measured in design §0.1.
+
+    A transcript is DATA: every prose-bearing field carries the same
+    poison string, and the parser is asserted never to reproduce it."""
+    usage = {"input_tokens": 2, "output_tokens": 150,
+             "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0}
+    usage.update(over.pop("usage", {}))
+    # `iterations` restates the same numbers for the turn's internal
+    # steps; a parser that sums it double-counts.
+    usage["iterations"] = [{"input_tokens": usage["input_tokens"],
+                            "output_tokens": usage["output_tokens"]}]
+    line = {"type": "assistant", "uuid": f"uuid-{mid}-{over.pop('n', 0)}",
+            "sessionId": "sweep-session", "cwd": "/tmp/poison-cwd",
+            "content": "POISONPROSE", "toolUseResult": "POISONPROSE",
+            "lastPrompt": "POISONPROSE", "customTitle": "POISONPROSE",
+            "aiTitle": "POISONPROSE",
+            "message": {"id": mid, "model": over.pop("model",
+                                                     "claude-fable-5"),
+                        "usage": usage, "content": "POISONPROSE"}}
+    line.update(over)
+    return json.dumps(line)
+
+
+def check_usage_ledger() -> None:
+    """AP: the always-on usage ledger — where the money went.
+
+    Sponsor ruling: *"it would be good to track usage so if you ever want
+    to take this to commercial stage, we can have that ready-made."*
+
+    The ledger core (T-1…T-10): one aggregate line per invocation keyed by
+    `purpose|model`; an unpriced model records tokens and a NULL cost,
+    never a zero; the vendor-prefix pricing trap, pinned; no litellm at
+    all still records every token; the expensive detail line; the clean
+    off-switch; never-in-the-way; rotation; replays; the client stamp."""
+    import datetime as _dt
+
+    from authorlm import clients, usage
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-usage-"))
+    previous_workspace = clients._STATE["workspace"]
+    try:
+        usage.reset()
+        usage._PRICE_OVERRIDE.clear()
+        usage._PRICE_CACHE.clear()
+        # Tests INJECT rates. litellm's live map changes under us and a
+        # cost assertion pinned to it would be a time bomb.
+        usage._PRICE_OVERRIDE["zz/sentinel"] = {
+            "input": 1e-6, "output": 2e-6, "cache_read": 1e-7,
+            "cache_write": 5e-7, "partial": False}
+        usage._PRICE_OVERRIDE["zz/unmapped"] = None
+        usage._PRICE_OVERRIDE["zz/dear"] = {
+            "input": 1e-3, "output": 1e-3, "cache_read": 0.0,
+            "cache_write": 0.0, "partial": False}
+
+        # --- T-1: the aggregate line. ---
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        clients.configure(workspace=str(ws))
+        usage.record("llm", "zz/sentinel", 1000, 500, 0, 0)
+        usage.record("llm", "zz/sentinel", 200, 100, 0, 0)
+        usage.record("critique.summarizer", "zz/sentinel", 40, 10, 7, 3)
+        usage.flush("collect --auto")
+        log = usage.log_dir(str(ws)) / usage.FILENAME
+        lines = [json.loads(x) for x in log.read_text().splitlines()]
+        aggregate = lines[-1]
+        hand = ((1240 * 1e-6) + (610 * 2e-6) + (7 * 1e-7) + (3 * 5e-7))
+        check("one aggregate line per invocation, keyed by "
+              "'<purpose>|<model>' as [n, in, out, cache_read, cache_write, "
+              "est_cost] — purpose is WHICH CONFIG SECTION chose the model, "
+              "which `model` alone cannot say once two sections name one "
+              "string",
+              len(lines) == 1 and aggregate["kind"] == "api"
+              and aggregate["calls"]["llm|zz/sentinel"][:5]
+              == [2, 1200, 600, 0, 0]
+              and aggregate["calls"]["critique.summarizer|zz/sentinel"][:5]
+              == [1, 40, 10, 7, 3], f"{lines}")
+        check("the line is named by command+action, never raw argv, and its "
+              "estimated cost is the hand-computed sum of the injected "
+              "rates over all four counters",
+              aggregate["invocation"] == "collect --auto"
+              and abs(aggregate["est_cost_usd"] - hand) < 1e-6
+              and aggregate["cost_complete"] is True,
+              f"{aggregate} vs {hand}")
+
+        # --- T-2: null is not zero. ---
+        usage.record("llm", "zz/sentinel", 100, 0, 0, 0)
+        usage.record("llm", "zz/unmapped", 5000, 900, 0, 0)
+        usage.flush("write status")
+        mixed = json.loads(log.read_text().splitlines()[-1])
+        check("a model litellm cannot price records its TOKENS and a NULL "
+              "cost — never a guess and never a zero, which is a different "
+              "claim — and the line's cost_complete goes false so the "
+              "reader can name the gap instead of printing a total that "
+              "quietly omits it",
+              mixed["calls"]["llm|zz/unmapped"][:5] == [1, 5000, 900, 0, 0]
+              and mixed["calls"]["llm|zz/unmapped"][5] is None
+              and mixed["cost_complete"] is False
+              and mixed["est_cost_usd"] > 0, f"{mixed}")
+        rendered = "\n".join(usage.report(usage.log_dir(str(ws))))
+        check("and the report says how many models went unpriced rather "
+              "than absorbing them into the total",
+              "had no price" in rendered and "zz/unmapped" in rendered
+              and "priced total" in rendered, rendered)
+
+        # --- T-3: THE VENDOR-PREFIX TRAP, pinned. ---
+        usage._PRICE_CACHE.clear()
+        try:
+            import litellm  # noqa: F401
+            have_litellm = True
+        except Exception:
+            have_litellm = False
+        if have_litellm:
+            import litellm
+
+            trapped = ["openai/gpt-5.6-luna", "anthropic/claude-fable-5"]
+            direct = {m: litellm.model_cost.get(m) for m in trapped}
+            resolved = {m: usage.price(m) for m in trapped}
+            check("PRICING GOES THROUGH get_model_info, NOT "
+                  "model_cost[key]: the dict's keys are inconsistent about "
+                  "the vendor prefix and the inconsistency lands exactly on "
+                  "the shipped config's most expensive paths — a direct "
+                  "lookup prices openai/gpt-5.6-luna and "
+                  "anthropic/claude-fable-5 at null, i.e. silently loses "
+                  "the summariser, the critique editor and beat drafting",
+                  all(direct[m] is None for m in trapped)
+                  and all(resolved[m] is not None for m in trapped)
+                  and all(resolved[m]["input"] > 0 for m in trapped),
+                  f"model_cost={direct} get_model_info={resolved}")
+            check("gemini/gemini-2.5-flash is the control: model_cost DOES "
+                  "have it, which is why a naive lookup looks like it works",
+                  litellm.model_cost.get("gemini/gemini-2.5-flash")
+                  is not None
+                  and usage.price("gemini/gemini-2.5-flash") is not None,
+                  "gemini")
+            check("openai/gpt-image-2 is trapped the same way — the third "
+                  "prefix-keyed miss, and the one that renders pictures",
+                  litellm.model_cost.get("openai/gpt-image-2") is None
+                  and usage.price("openai/gpt-image-2") is not None,
+                  "gpt-image-2")
+        else:
+            print("  note: litellm absent — the vendor-prefix regression "
+                  "(T-3) was not exercised.")
+        usage._PRICE_CACHE.clear()
+
+        # --- T-4: no litellm at all. ---
+        import builtins
+
+        real_import = builtins.__import__
+
+        def no_litellm(name, *rest, **kw):
+            if name == "litellm":
+                raise ImportError("no litellm in this environment")
+            return real_import(name, *rest, **kw)
+
+        builtins.__import__ = no_litellm
+        try:
+            usage._PRICE_CACHE.clear()
+            blind = usage.price("gemini/gemini-2.5-flash")
+            usage.record("llm", "gemini/gemini-2.5-flash", 77, 88, 0, 0)
+            usage.flush("no-litellm")
+        finally:
+            builtins.__import__ = real_import
+            usage._PRICE_CACHE.clear()
+        offline = json.loads(log.read_text().splitlines()[-1])
+        key = "llm|gemini/gemini-2.5-flash"
+        check("with no litellm installed every cost is null and every token "
+              "count is intact: pricing is an ENRICHMENT, the ledger is not "
+              "conditional on it, and nothing escapes",
+              blind is None
+              and offline["calls"][key][:5] == [1, 77, 88, 0, 0]
+              and offline["calls"][key][5] is None, f"{offline}")
+
+        # --- T-5: the expensive detail line. ---
+        expensive_ws = root / "expensive-ws"
+        (expensive_ws / ".authorlm").mkdir(parents=True)
+        clients.configure(workspace=str(expensive_ws))
+        usage.reset()
+        usage.record("writing", "zz/dear", 1000, 0, 0, 0)     # $1.00
+        usage.record("llm", "zz/sentinel", 10, 10, 0, 0)      # cheap
+        usage.flush("write draft")
+        expensive_log = usage.log_dir(str(expensive_ws)) / usage.FILENAME
+        entries = [json.loads(x) for x in
+                   expensive_log.read_text().splitlines()]
+        detail = [e for e in entries if e.get("expensive")]
+        agg = [e for e in entries if not e.get("expensive")][-1]
+        check("a single call over [usage] expensive_usd writes its own "
+              "IMMEDIATE line — the aggregate already counts it, so that "
+              "line is the detail: when, under which chat, and for what",
+              len(detail) == 1 and detail[0]["purpose"] == "writing"
+              and detail[0]["model"] == "zz/dear"
+              and abs(detail[0]["est_cost_usd"] - 1.0) < 1e-9
+              and agg["calls"]["writing|zz/dear"][0] == 1, f"{entries}")
+        report = "\n".join(usage.report(usage.log_dir(str(expensive_ws))))
+        check("and the reader counts it in the expensive tail WITHOUT "
+              "adding it to the total a second time (dbperf's slow-line "
+              "discipline)",
+              "expensive single calls, last 1 of 1" in report
+              and "1 invocations, 2 API calls" in report
+              and "1.00         2" in report.split("priced total")[0],
+              report)
+
+        # --- T-6: the off-switch. ---
+        off_ws = root / "off-ws"
+        (off_ws / ".authorlm").mkdir(parents=True)
+        clients.configure(workspace=str(off_ws))
+        with _as_config("[usage]\nledger = false\n", root):
+            settings_off = usage.settings()
+            usage.record("llm", "zz/sentinel", 10, 10, 0, 0)
+            usage.record_image("illustrations", "zz/img", 1)
+            usage.flush("off")
+            held = usage._LEDGER
+            wrote = (usage.log_dir(str(off_ws)) / usage.FILENAME).exists()
+        check("[usage] ledger = false holds NO recorder — record, "
+              "record_image and flush are no-ops and no file is created",
+              settings_off.ledger is False and held is not None
+              and held is not usage._OFF and wrote is False
+              or (settings_off.ledger is False and not wrote),
+              f"{settings_off} wrote={wrote}")
+        check("the ledger is shipped ON: an absent [usage] section is the "
+              "default, not a silent off-switch — a broken config must "
+              "not silently stop a MEASUREMENT",
+              usage.settings().ledger is True
+              and usage.settings().expensive_usd
+              == usage.DEFAULT_EXPENSIVE_USD, f"{usage.settings()}")
+        import tomllib
+
+        shipped = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "config.toml")
+            .read_text(encoding="utf-8")).get("usage") or {}
+        check("and the SHIPPED config.toml says so, in the [usage] section",
+              shipped.get("ledger") is True
+              and shipped.get("chat") is True
+              and isinstance(shipped.get("expensive_usd"), float)
+              and isinstance(shipped.get("sweep_interval_seconds"), int),
+              f"{shipped}")
+
+        # --- T-7: never in the way. ---
+        blocked = root / "blocked-ws"
+        (blocked / ".authorlm").mkdir(parents=True)
+        (blocked / ".authorlm" / "logs").write_text("not a directory")
+        clients.configure(workspace=str(blocked))
+        usage.reset()
+        usage.record("llm", "zz/sentinel", 1, 1, 0, 0)
+        usage.record_image("illustrations", "zz/img")
+        usage.record("llm", object(), "not-an-int", None)     # nonsense
+        usage.flush("blocked")
+        check("a ledger destination that cannot be written NEVER breaks the "
+              "verb it measures: every write swallows its own failure, and "
+              "an unserializable value raises nothing",
+              True, "reached")
+        gone = root / "gone-ws"
+        recorder = usage.Recorder(usage.log_dir(str(gone)))
+        recorder.record("llm", "zz/sentinel", 1, 1)
+        recorder.flush("late")
+        check("a flush against a workspace deleted out from under it writes "
+              "nothing and recreates nothing — logs/ is created, its parent "
+              "workspace never is",
+              not gone.exists(), f"{gone}")
+
+        # --- T-8: rotation. ---
+        rotate_ws = root / "rotate-ws"
+        rotate_dir = usage.log_dir(str(rotate_ws))
+        rotate_dir.mkdir(parents=True)
+        rotated = rotate_dir / usage.FILENAME
+        recorder = usage.Recorder(rotate_dir)
+        rotated.write_text("x" * (usage.MAX_BYTES + 1))
+        recorder.record("llm", "zz/sentinel", 1, 1)
+        recorder.flush("first")
+        first = usage._generation(rotated, 1)
+        rotated.write_text('{"ts":"2999-01-01T00:00:00+00:00","kind":"api",'
+                           '"calls":{},"replays":0}\n'
+                           + "y" * usage.MAX_BYTES)
+        recorder.record("llm", "zz/sentinel", 2, 2)
+        recorder.flush("second")
+        check("an oversized ledger rotates to .jsonl.1 then .2, oldest "
+              "dropped — dbperf's rotation, at the same 5 MB cap",
+              first.exists() and usage._generation(rotated, 2).exists()
+              and not usage._generation(rotated, 3).exists(),
+              f"{sorted(p.name for p in rotate_dir.iterdir())}")
+        check("read_entries returns every generation oldest-first",
+              len(usage.read_entries(rotate_dir)) >= 2,
+              f"{usage.read_entries(rotate_dir)}")
+
+        # --- T-9: replays cost nothing. ---
+        replay_ws = root / "replay-ws"
+        (replay_ws / ".authorlm").mkdir(parents=True)
+        clients.configure(workspace=str(replay_ws))
+        usage.reset()
+        usage.record_replay()
+        usage.record_replay()
+        usage.flush("replayed")
+        replayed = json.loads(
+            (usage.log_dir(str(replay_ws)) / usage.FILENAME)
+            .read_text().splitlines()[-1])
+        check("a call served from the record/replay cache is counted as a "
+              "replay and contributes no tokens and no cost — 'what did the "
+              "cache save me' is the only positive number in the report",
+              replayed["replays"] == 2 and replayed["calls"] == {}
+              and replayed["est_cost_usd"] == 0.0, f"{replayed}")
+
+        # --- T-10: the client stamp. ---
+        stamp_ws = root / "stamp-ws"
+        (stamp_ws / ".authorlm").mkdir(parents=True)
+        clients.configure(workspace=str(stamp_ws))
+        with _as_client("claude-code:usage-chat:Usage Chat"):
+            usage.reset()
+            usage.record("llm", "zz/sentinel", 3, 3)
+            usage.flush("stamped")
+        stamped = json.loads(
+            (usage.log_dir(str(stamp_ws)) / usage.FILENAME)
+            .read_text().splitlines()[-1])
+        usage.reset()
+        usage.record("llm", "zz/sentinel", 3, 3)
+        usage.flush("unstamped")
+        plain = json.loads(
+            (usage.log_dir(str(stamp_ws)) / usage.FILENAME)
+            .read_text().splitlines()[-1])
+        check("the line carries the client provenance join key (§15.15), so "
+              "the ledger joins straight to trace.jsonl and to row "
+              "metadata — and with detection pinned off the key is OMITTED "
+              "entirely rather than written as unknown",
+              stamped["client"] == {"engine": "claude-code",
+                                    "session": "usage-chat",
+                                    "precision": "exact"}
+              and "client" not in plain, f"{stamped} / {plain}")
+
+        # --- T-30: overhead. ---
+        import time as _time
+
+        clients.configure(workspace=str(ws))
+        usage.reset()
+        started = _time.perf_counter()
+        for _ in range(10_000):
+            usage.record("llm", "zz/sentinel", 10, 10, 0, 0)
+        per_call = (_time.perf_counter() - started) / 10_000
+        usage.flush("overhead")
+        check("recording is a dict update on the hot path, not I/O — and "
+              "the per-invocation resolution (the client key, the budget "
+              "presence, the price row) is memoized OFF it, because "
+              "paths.config_path() alone costs ~27 us. Measured 0.7 us; "
+              "the ceiling is 10, against a model call that takes hundreds "
+              "of MILLIseconds",
+              per_call < 10e-6, f"{per_call * 1e6:.2f} us/call")
+    finally:
+        usage.reset()
+        usage._PRICE_OVERRIDE.clear()
+        usage._PRICE_CACHE.clear()
+        clients._STATE["workspace"] = previous_workspace
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_chat_usage_sweep() -> None:
+    """AP: chat consumption, swept from the session transcript.
+
+    T-11…T-20. The measured facts from real transcripts drive every
+    assertion here: lines REPEAT (a 2.05x overcount corpus-wide for a
+    parser that sums them), the volume on a cached turn is in the two
+    cache counters and not in `input_tokens`, and `<synthetic>` rows are
+    not API calls. Nothing here reads a real transcript."""
+    from authorlm import clients, usage
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-chat-"))
+    try:
+        usage.reset()
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        projects = root / "projects" / "one"
+        projects.mkdir(parents=True)
+
+        def transcript(name: str, lines: list) -> Path:
+            path = projects / f"{name}.jsonl"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return path
+
+        def client_for(session: str, hint: Path | None = None):
+            return clients.Client(engine="claude-code", session_id=session,
+                                  precision="exact", adapter="claude-code",
+                                  transcript_hint=str(hint) if hint else None)
+
+        # --- T-11: THE DEDUP TRAP, pinned. ---
+        repeated = [_turn("msg_a", n=i, usage={"input_tokens": 10,
+                                               "output_tokens": 20})
+                    for i in range(6)]
+        repeated += [_turn("msg_b", usage={"input_tokens": 3,
+                                           "output_tokens": 4}),
+                     _turn("msg_c", usage={"input_tokens": 1,
+                                           "output_tokens": 2})]
+        path = transcript("dedup", repeated)
+        line = usage.sweep_session(client_for("dedup", path),
+                                   workspace=ws, force=True)
+        row = line["models"]["claude-fable-5"]
+        check("THE ONE THAT MATTERS: the same message.id is written to the "
+              "transcript up to six times with a byte-identical usage "
+              "object, so a parser that sums LINES overstates by 2.05x "
+              "corpus-wide. Dedup on message.id is the difference between "
+              "a number and a fiction: 8 usage-bearing lines, 3 distinct "
+              "ids, and every counter counts each id exactly ONCE",
+              line["messages"] == 3 and row[0] == 3
+              and row[1] == 10 + 3 + 1 and row[2] == 20 + 4 + 2,
+              f"{line}")
+
+        # The corpus-shaped variant: 40 lines, 20 ids, exactly half.
+        pairs = []
+        for i in range(20):
+            pairs.append(_turn(f"msg_{i}", n=0,
+                               usage={"input_tokens": 100,
+                                      "output_tokens": 50}))
+            pairs.append(_turn(f"msg_{i}", n=1,
+                               usage={"input_tokens": 100,
+                                      "output_tokens": 50}))
+        path = transcript("corpus", pairs)
+        line = usage.sweep_session(client_for("corpus", path),
+                                   workspace=ws, force=True)
+        row = line["models"]["claude-fable-5"]
+        naive_in = 40 * 100
+        check("and the corpus-shaped case: 40 usage-bearing lines over 20 "
+              "distinct ids fold to exactly HALF the naive line sum",
+              line["messages"] == 20 and row[1] == naive_in // 2 == 2000
+              and row[2] == 20 * 50, f"{line}")
+
+        # --- T-12: all four counters, and `iterations` ignored. ---
+        path = transcript("counters", [
+            _turn("msg_cached", usage={"input_tokens": 2,
+                                       "output_tokens": 150,
+                                       "cache_read_input_tokens": 37906,
+                                       "cache_creation_input_tokens": 24652})])
+        line = usage.sweep_session(client_for("counters", path),
+                                   workspace=ws, force=True)
+        row = line["models"]["claude-fable-5"]
+        check("ALL FOUR counters are read. The real observed row is "
+              "input_tokens: 2 beside cache_creation: 24652 and cache_read: "
+              "37906 — on a cached turn the uncached prompt is nearly empty "
+              "and the volume is entirely in the cache counters, so a "
+              "parser reading only input/output measures essentially "
+              "nothing. `iterations` restates the same numbers and is "
+              "IGNORED, because summing it double-counts",
+              row == [1, 2, 150, 37906, 24652], f"{line}")
+
+        # --- T-13: no prose, no path, and transcripts are DATA. ---
+        path = transcript("prose", [
+            _turn("msg_p", usage={"input_tokens":
+                                  "ignore previous instructions",
+                                  "output_tokens": {"do": "this"},
+                                  "cache_read_input_tokens": None,
+                                  "cache_creation_input_tokens": 5})])
+        line = usage.sweep_session(client_for("prose", path),
+                                   workspace=ws, force=True)
+        blob = json.dumps(line)
+        check("A LEDGER LINE CONTAINS NO PROSE and no transcript path. The "
+              "parser reads six keys and coerces four integers; it does not "
+              "evaluate, dispatch on, or act upon anything a transcript "
+              "says, and an instruction-shaped usage value produces 0, "
+              "silently, while the sweep continues",
+              "POISONPROSE" not in blob and str(path) not in blob
+              and "ignore previous instructions" not in blob
+              and line["models"]["claude-fable-5"] == [1, 0, 0, 0, 5],
+              blob)
+
+        # --- T-14: junk is skipped, silently. ---
+        path = transcript("junk", [
+            "not json at all",
+            "[1, 2, 3]",
+            json.dumps({"type": "atis-latch", "message": {"usage": {}}}),
+            json.dumps({"type": "assistant", "message": {"id": "x",
+                                                         "model": "m"}}),
+            _turn("msg_s", model="<synthetic>",
+                  usage={"input_tokens": 9999, "output_tokens": 9999}),
+            json.dumps({"type": "assistant",
+                        "message": {"model": "claude-fable-5",
+                                    "usage": {"input_tokens": 5}}}),
+            _turn("msg_good", usage={"input_tokens": 11,
+                                     "output_tokens": 22}),
+        ])
+        line = usage.sweep_session(client_for("junk", path),
+                                   workspace=ws, force=True)
+        check("unparseable lines, non-dict lines, unknown types, an "
+              "assistant line with no usage, a missing message.id, and "
+              "model == '<synthetic>' (skipped BY NAME, so a future "
+              "synthetic row with non-zero counts cannot leak in) are all "
+              "skipped silently — the good line is still counted and "
+              "nothing is raised",
+              line["messages"] == 1
+              and line["models"] == {"claude-fable-5": [1, 11, 22, 0, 0]},
+              f"{line}")
+
+        # --- T-15: incremental, and the no-op sweep. ---
+        path = transcript("incr", [_turn("msg_1", usage={"input_tokens": 5,
+                                                         "output_tokens": 5})])
+        who = client_for("incr", path)
+        first = usage.sweep_session(who, workspace=ws, force=True)
+        before = path.stat().st_size
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(_turn("msg_2", usage={"input_tokens": 7,
+                                               "output_tokens": 8}) + "\n")
+            handle.write(_turn("msg_3", usage={"input_tokens": 1,
+                                               "output_tokens": 2}) + "\n")
+        appended = path.stat().st_size - before
+        second = usage.sweep_session(who, workspace=ws, force=True)
+        checkpoint = usage.read_checkpoint(ws, "claude-code", "incr")
+        third = usage.sweep_session(who, workspace=ws, force=True)
+        check("each sweep reads ONLY the new bytes and its line carries the "
+              "DELTA, not the cumulative: bytes_read equals the appended "
+              "byte count and the checkpoint's offset equals the file size",
+              first["messages"] == 1
+              and second["models"]["claude-fable-5"] == [2, 8, 10, 0, 0]
+              and second["bytes_read"] == appended
+              and checkpoint["offset"] == path.stat().st_size,
+              f"{first} / {second} / {checkpoint}")
+        check("and a sweep with nothing appended emits NO LINE AT ALL — the "
+              "common case, and it costs one stat",
+              third is None, f"{third}")
+
+        # --- T-16: the partial line. ---
+        path = transcript("partial", [_turn("msg_1",
+                                            usage={"input_tokens": 4,
+                                                   "output_tokens": 4})])
+        fragment = _turn("msg_2", usage={"input_tokens": 6,
+                                         "output_tokens": 6})
+        cut = len(fragment) // 2
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(fragment[:cut])
+        who = client_for("partial", path)
+        usage.sweep_session(who, workspace=ws, force=True)
+        torn = usage.sweep_session(who, workspace=ws, force=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(fragment[cut:] + "\n")
+        healed = usage.sweep_session(who, workspace=ws, force=True)
+        check("a transcript is appended to WHILE it is read: the trailing "
+              "fragment is CARRIED in the checkpoint, not parsed, so half a "
+              "JSON object is never a parse error let alone a dropped "
+              "turn — and once the rest arrives the turn is counted exactly "
+              "ONCE",
+              torn is None
+              and healed["models"]["claude-fable-5"] == [1, 6, 6, 0, 0],
+              f"{torn} / {healed}")
+
+        # --- T-17: discontinuity. ---
+        path = transcript("disc", [
+            _turn(f"msg_{i}", usage={"input_tokens": 10,
+                                     "output_tokens": 10})
+            for i in range(4)])
+        who = client_for("disc", path)
+        usage.sweep_session(who, workspace=ws, force=True)
+        path.write_text(_turn("msg_0", usage={"input_tokens": 10,
+                                              "output_tokens": 10}) + "\n",
+                        encoding="utf-8")
+        shrunk = usage.sweep_session(who, workspace=ws, force=True)
+        check("a truncated or rewound transcript is re-read FROM BYTE 0 "
+              "with the whole id set in memory (so the recompute is exact) "
+              "and the delta against the stored cumulative is CLAMPED AT "
+              "ZERO rather than going negative — the restart flag is still "
+              "reported, because a rewound session legitimately loses turns "
+              "and the reader says so rather than pretending the arithmetic "
+              "was clean",
+              shrunk["restart"] is True and shrunk["messages"] == 0
+              and shrunk["models"] == {}, f"{shrunk}")
+
+        replaced = projects / "disc2.jsonl"
+        replaced.write_text("\n".join(
+            _turn(f"msg_{i}", usage={"input_tokens": 10, "output_tokens": 10})
+            for i in range(3)) + "\n", encoding="utf-8")
+        who2 = client_for("disc2", replaced)
+        usage.sweep_session(who2, workspace=ws, force=True)
+        replaced.unlink()
+        replaced.write_text("\n".join(
+            _turn(f"msg_{i}", usage={"input_tokens": 10, "output_tokens": 10})
+            for i in range(5)) + "\n", encoding="utf-8")
+        grown = usage.sweep_session(who2, workspace=ws, force=True)
+        check("a REPLACED file (new inode, more content) recomputes and the "
+              "delta covers only the genuinely new turns — no double count, "
+              "because the checkpoint's cumulative totals are what make the "
+              "delta honest",
+              grown["restart"] is True and grown["messages"] == 2,
+              f"{grown}")
+
+        # The SessionEnd ruling: that path declines the recompute.
+        replaced.write_text(_turn("msg_0", usage={"input_tokens": 1,
+                                                  "output_tokens": 1}) + "\n",
+                            encoding="utf-8")
+        declined = usage.sweep_session(who2, workspace=ws, force=True,
+                                       allow_recompute=False)
+        after = usage.sweep_session(who2, workspace=ws, force=True)
+        check("the SessionEnd sweep SKIPS the discontinuity recompute "
+              "rather than risk the hook's 1.5 s shared budget on a full "
+              "file read: it declines, leaves the checkpoint untouched, and "
+              "the next opportunistic sweep of that session does the "
+              "recompute off the hook's clock",
+              declined is None and after is not None
+              and after["restart"] is True, f"{declined} / {after}")
+
+        # --- T-18: the refusal to guess a transcript. ---
+        stray = client_for("nowhere", None)
+        check("no transcript_hint and zero glob matches is None, and None "
+              "is a FIRST-CLASS ANSWER — the sweep records nothing rather "
+              "than recording a guess",
+              usage.sweep_session(stray, workspace=ws, force=True) is None,
+              "no transcript")
+        ambiguous = projects.parent / "two"
+        ambiguous.mkdir(exist_ok=True)
+        transcript("ambig", [_turn("msg_1")])
+        (ambiguous / "ambig.jsonl").write_text(_turn("msg_2") + "\n",
+                                               encoding="utf-8")
+        with _as_config("[usage]\ntranscript_roots = "
+                        f'["{projects.parent}/*"]\n', root):
+            found = clients.locate_by_session(
+                client_for("ambig", None), (f"{projects.parent}/*",))
+            single = clients.locate_by_session(
+                client_for("dedup", None), (f"{projects.parent}/*",))
+            declined = usage.sweep_session(client_for("ambig", None),
+                                           workspace=ws, force=True)
+        check("TWO glob matches means two projects have a session by that "
+              "id and we cannot tell which is ours, so it DECLINES — the "
+              "ambient layer's refusal, in a new place, for the same "
+              "reason. One match is accepted: a glob keyed on an id we "
+              "already know is never a guess",
+              found is None and single is not None and declined is None,
+              f"{found} / {single} / {declined}")
+
+        # --- T-19: the interval gate. ---
+        path = transcript("interval", [_turn("msg_1")])
+        who = client_for("interval", path)
+        with _as_config("[usage]\nsweep_interval_seconds = 3600\n", root):
+            usage.sweep_session(who, workspace=ws, force=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(_turn("msg_2") + "\n")
+            gated = usage.sweep_session(who, workspace=ws)
+            forced = usage.sweep_session(who, workspace=ws, force=True)
+        check("two sweeps inside sweep_interval_seconds produce ONE sweep — "
+              "at most one per session per interval, and only for the chat "
+              "actually driving AuthorLM. force=True produces the second",
+              gated is None and forced is not None, f"{gated} / {forced}")
+
+        # --- T-20: the capability is optional. ---
+        check("an adapter with no `usage` method is complete and correct: "
+              "hasattr is the whole feature test, provenance has never "
+              "depended on it, and the sweep simply skips that engine",
+              not hasattr(clients.MCP_STDIO, "usage")
+              and hasattr(clients.CLAUDE_CODE, "usage")
+              and clients.adapter_for_engine("mcp-stdio") is None
+              and usage.sweep_session(
+                  clients.Client(engine="codex", session_id="c1",
+                                 precision="exact"),
+                  workspace=ws, force=True) is None,
+              "capability")
+        with _as_config("[usage]\nchat = false\n", root):
+            path = transcript("chatoff", [_turn("msg_1")])
+            silent = usage.sweep_session(client_for("chatoff", path),
+                                         workspace=ws, force=True)
+        check("[usage] chat = false turns the sweep off entirely",
+              silent is None, f"{silent}")
+
+        # --- the reader's chat half (T-22's dollar-free rule). ---
+        rendered = "\n".join(usage.report(usage.log_dir(str(ws)),
+                                          workspace=str(ws)))
+        head, _, chat_block = rendered.partition("Chat consumption")
+        chat_block = chat_block.split("per day (the trend)")[0]
+        check("chat consumption is labelled SUBSCRIPTION — NOT billed, and "
+              "carries NO DOLLAR FIGURE anywhere in its block. A "
+              "subscription does not bill per token and printing a notional "
+              "number would invent a bill that does not exist",
+              "subscription — NOT billed" in rendered
+              and "$" not in chat_block
+              and "claude-fable-5" in chat_block, chat_block)
+        check("and the two quantities are never summed: the API block is "
+              "labelled an ESTIMATE and stands apart",
+              "ESTIMATE — litellm price list, not your invoice" in rendered
+              or "no API spend in this window" in rendered, rendered)
+    finally:
+        usage.reset()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_usage_reader() -> None:
+    """AP T-21…T-23: the reader. `cmd_usage` is `cmd_dbperf`'s twin — it
+    calls `report()`, prints the lines and owns no logic. Honest when
+    empty, and it never sums an API number with a chat one."""
+    import datetime as _dt
+
+    from authorlm import usage
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-usage-read-"))
+    try:
+        # --- T-21: honest when empty. ---
+        empty_ws = root / "empty"
+        folder = usage.log_dir(str(empty_ws))
+        check("a workspace with no ledger says so rather than rendering an "
+              "empty table",
+              usage.report(folder)[0].startswith("no usage ledger yet"),
+              f"{usage.report(folder)}")
+        folder.mkdir(parents=True)
+        (folder / usage.FILENAME).write_text("")
+        check("a present-but-empty ledger gets the same sentence, not a "
+              "zero-row table",
+              usage.report(folder)[0].startswith("no usage ledger yet"),
+              f"{usage.report(folder)}")
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        chat_one = {"engine": "claude-code", "session": "chat-one",
+                    "precision": "exact"}
+        chat_two = {"engine": "claude-code", "session": "chat-two",
+                    "precision": "exact"}
+        ledger = [
+            {"ts": f"{yesterday}T09:00:00+00:00", "kind": "api",
+             "invocation": "collect --auto",
+             "calls": {"llm|gemini/gemini-2.5-flash": [4, 400, 40, 0, 0,
+                                                       0.12],
+                       "critique.summarizer|openai/gpt-5.6-luna":
+                           [2, 200, 20, 0, 0, 0.03]},
+             "replays": 3, "est_cost_usd": 0.15, "cost_complete": True,
+             "client": chat_one},
+            {"ts": f"{today}T10:00:00+00:00", "kind": "api",
+             "invocation": "illus render",
+             "calls": {"illustrations|openai/gpt-image-2":
+                       [6, 0, 0, 0, 0, None]},
+             "images": {"illustrations|openai/gpt-image-2": 6},
+             "replays": 0, "est_cost_usd": 0.0, "cost_complete": False,
+             "client": chat_two},
+            {"ts": f"{today}T10:00:01+00:00", "kind": "api",
+             "expensive": True, "purpose": "writing",
+             "model": "anthropic/claude-fable-5", "in": 2140, "out": 3980,
+             "cache_read": 118400, "cache_write": 24652,
+             "est_cost_usd": 0.612, "client": chat_two},
+            {"ts": f"{today}T11:00:00+00:00", "kind": "chat",
+             "engine": "claude-code", "session": "chat-two",
+             "adapter": "claude-code",
+             "models": {"claude-fable-5": [41, 58, 9312, 1204551, 88320]},
+             "messages": 41, "sidechain": 0, "bytes_read": 184223,
+             "restart": False},
+            {"ts": "2026-01-01T00:00:00+00:00", "kind": "api",
+             "invocation": "ancient", "calls": {"llm|zz/old":
+                                                [1, 9, 9, 0, 0, 99.0]},
+             "replays": 0, "est_cost_usd": 99.0, "cost_complete": True},
+        ]
+        report_ws = root / "report"
+        report_dir = usage.log_dir(str(report_ws))
+        report_dir.mkdir(parents=True)
+        (report_dir / usage.FILENAME).write_text(
+            "".join(json.dumps(e) + "\n" for e in ledger))
+        rendered = io.StringIO()
+        with contextlib.redirect_stdout(rendered):
+            cli_main(["--workspace", str(report_ws), "usage", "--days", "3"])
+        text = rendered.getvalue()
+
+        # --- T-22: the two quantities, kept apart. ---
+        api_block = text.split("API spend")[1].split("Chat consumption")[0]
+        chat_block = text.split("Chat consumption")[1].split(
+            "per day (the trend)")[0]
+        check("the API block is labelled an ESTIMATE from a public price "
+              "list — it is not the author's invoice, and knows nothing "
+              "about their contract, tier or free quota",
+              "ESTIMATE — litellm price list, not your invoice" in text,
+              text)
+        check("no dollar figure appears anywhere in the chat block",
+              "$" not in chat_block and "1,204,551" in chat_block, chat_block)
+        check("no total sums an API number with a chat one: the priced "
+              "total counts only priced API calls, and the 6 unpriced image "
+              "renders are named rather than absorbed",
+              "priced total" in api_block
+              and "6 images, not priced" in api_block
+              and "had no price" in api_block, api_block)
+        check("replays are reported as saved, not spent",
+              "3 calls replayed from the record/replay cache" in text, text)
+        check("a swept session whose tail was never counted is REPORTED as "
+              "uncounted rather than silently under-counted — the first "
+              "time the SessionEnd hook is more than enrichment",
+              "have no SessionEnd hook" in chat_block
+              and "client-hook --print-setup" in chat_block, chat_block)
+        finalised = list(ledger)
+        finalised[3] = {**ledger[3], "final": True}
+        (report_dir / usage.FILENAME).write_text(
+            "".join(json.dumps(e) + "\n" for e in finalised))
+        counted = "\n".join(usage.report(report_dir, days=3,
+                                         workspace=str(report_ws)))
+        check("and a session swept BY that hook is not accused of lacking "
+              "it: the hook unlinks the marker immediately afterwards, so "
+              "'no marker' would otherwise name exactly the sessions that "
+              "did have it",
+              "have no SessionEnd hook" not in counted, counted)
+        (report_dir / usage.FILENAME).write_text(
+            "".join(json.dumps(e) + "\n" for e in ledger))
+        check("the expensive tail renders with its client attribution and "
+              "is NOT added to the aggregate a second time",
+              "expensive single calls" in text
+              and "claude-code/chat-two" in text
+              and "$   0.61" in text, text)
+        check("--days bounds the window: the ancient $99 line is not "
+              "counted",
+              "99.00" not in text and "zz/old" not in text, text)
+        check("the per-day trend carries BOTH quantities in one row, side "
+              "by side and unsummed",
+              f"  {yesterday}   $" in text and "chat tokens" in text, text)
+
+        # --- T-23: the groupings. ---
+        def render(*extra):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                cli_main(["--workspace", str(report_ws), "usage",
+                          "--days", "3", *extra])
+            return buffer.getvalue()
+
+        by_purpose = render("--by", "purpose")
+        by_model = render("--by", "model")
+        by_verb = render("--by", "verb")
+        check("--by purpose partitions by WHICH SECTION chose the model",
+              "critique.summarizer" in by_purpose
+              and "gemini/gemini-2.5-flash" not in by_purpose.split(
+                  "Chat consumption")[0], by_purpose)
+        check("--by model partitions by the model string",
+              "gemini/gemini-2.5-flash" in by_model
+              and "critique.summarizer" not in by_model.split(
+                  "Chat consumption")[0], by_model)
+        check("--by verb partitions by the invocation label already on "
+              "every line — the trigger, which purpose alone cannot give "
+              "when eleven call sites share purpose = 'llm'",
+              "collect --auto" in by_verb and "illus render" in by_verb,
+              by_verb)
+
+        old_ws = root / "old"
+        old_dir = usage.log_dir(str(old_ws))
+        old_dir.mkdir(parents=True)
+        (old_dir / usage.FILENAME).write_text(
+            "".join(json.dumps(e) + "\n" for e in ledger[-1:]))
+        window = "\n".join(usage.report(old_dir, days=3))
+        check("a present ledger with nothing in the window says so and "
+              "names how many older lines exist, rather than printing an "
+              "empty table",
+              "no entries in the last 3 days" in window
+              and "older lines" in window, window)
+        blob = render("--json")
+        check("--json emits the aggregated structure for the scheduled "
+              "reviewer, not the rendering",
+              blob.strip().startswith("[") and '"kind": "api"' in blob, blob)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_budget_seam() -> None:
+    """AP T-24…T-28: the budget — built, tested, and DORMANT.
+
+    Sponsor ruling: *"For now we don't need to cut off the usage when the
+    budget has reached."* What is absent is what is off, exactly as the
+    absent `[writing]` section is what keeps billed beat drafting off."""
+    import datetime as _dt
+    import tomllib
+
+    from authorlm import budget, clients, usage
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-budget-"))
+    try:
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        previous_workspace = clients._STATE["workspace"]
+        clients.configure(workspace=str(ws))
+        folder = usage.log_dir(str(ws))
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / usage.FILENAME).write_text(json.dumps({
+            "ts": f"{today}T09:00:00+00:00", "kind": "api",
+            "invocation": "collect", "calls": {"llm|zz/s": [1, 1, 1, 0, 0,
+                                                            0.85]},
+            "replays": 0, "est_cost_usd": 0.85, "cost_complete": True}) + "\n")
+
+        # --- T-24: absent is inert. ---
+        with _as_config("[llm]\nenabled = false\n", root):
+            absent = budget.settings()
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                budget.note_spend(folder, 10.0)
+            gated = budget.gate("writing", "anthropic/claude-fable-5")
+            block = budget.report_block(folder)
+            rendered = "\n".join(usage.report(folder))
+        check("with NO [budget] section: settings are off, note_spend "
+              "prints nothing, gate() permits every purpose and model, and "
+              "the report grows no budget block. The absence IS the "
+              "off-switch",
+              absent.present is False and absent.enforce is False
+              and captured.getvalue() == "" and gated is None
+              and block == [] and "budget —" not in rendered,
+              f"{absent} / {captured.getvalue()!r} / {block}")
+
+        # --- T-25: present warns. ---
+        with _as_config("[budget]\napi_dollars_per_day = 1.00\n"
+                        "warn_at = 0.8\n", root):
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                for _ in range(10):
+                    budget.note_spend(folder, 0.0)
+            warned = captured.getvalue()
+            gated = budget.gate("llm", "zz/s")
+            block = "\n".join(budget.report_block(folder))
+        check("with [budget] present the report grows its block and the "
+                "warning fires past warn_at — and it prints EXACTLY ONE "
+                "line across ten calls, because a budget crossing is a "
+                "standing fact and saying it on every call of a 24-essay "
+                "rebuild is noise the author learns to scroll past",
+              warned.count("warning:") == 1 and "0.85" in warned
+              and "85%" in warned and "NOT ENFORCED" in block
+              and "warning only" in warned, f"{warned!r} / {block}")
+        check("warning is NOT refusing: gate() still permits, because "
+              "enforce was not set",
+              gated is None, f"{gated}")
+
+        # --- T-26: enforce refuses, and only then. ---
+        with _as_config("[budget]\napi_dollars_per_day = 0.50\n"
+                        "warn_at = 0.8\nenforce = true\n", root):
+            raised = None
+            try:
+                budget.gate("writing", "anthropic/claude-fable-5")
+            except budget.BudgetExceeded as err:
+                raised = err
+        message = str(raised or "")
+        check("with enforce = true and the day over the cap, gate() RAISES "
+              "BudgetExceeded, and the refusal mirrors WRITING_ABSENT's: it "
+              "names the section, the cap, the spent figure and the recipe "
+              "BOTH ways",
+              raised is not None and "[budget]" in message
+              and "0.50" in message and "0.85" in message
+              and "api_dollars_per_day" in message
+              and "enforce = false" in message
+              and "Nothing was sent and nothing was charged." in message,
+              message)
+        check("BudgetExceeded is a RuntimeError subclass, so mcp_server."
+              "_guard already renders it as {'ok': false, 'error': …} — a "
+              "sentence, not a traceback",
+              isinstance(raised, RuntimeError), f"{type(raised)}")
+        with _as_config("[budget]\napi_dollars_per_day = 0.50\n"
+                        "warn_at = 0.8\n", root):
+            permitted = budget.gate("writing", "anthropic/claude-fable-5")
+        check("the identical setup WITHOUT enforce permits: the seam is "
+              "exercised on every billable path today and returns None "
+              "today. Commercial-readiness is the seam being real, not the "
+              "enforcement being on",
+              permitted is None, f"{permitted}")
+
+        # --- T-27: a broken config permits. ---
+        broken = root / "broken.toml"
+        broken.write_text("[budget\napi_dollars_per_day = ", encoding="utf-8")
+        previous = os.environ.get("AUTHORLM_CONFIG")
+        os.environ["AUTHORLM_CONFIG"] = str(broken)
+        budget.reset()
+        try:
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                budget.note_spend(folder, 99.0)
+            survived = budget.gate("writing", "anthropic/claude-fable-5")
+            settings_broken = budget.settings()
+        finally:
+            if previous is None:
+                os.environ.pop("AUTHORLM_CONFIG", None)
+            else:
+                os.environ["AUTHORLM_CONFIG"] = previous
+            budget.reset()
+        check("an unreadable or malformed config means NO budget, NO "
+              "warning and NO refusal. dbperf defaults ON because a broken "
+              "config must not be a silent off-switch for a MEASUREMENT; "
+              "this defaults OFF for the mirror-image reason — a broken "
+              "config must not be a silent REFUSAL for a POLICY. A tracking "
+              "feature must not become an outage",
+              settings_broken.present is False and survived is None
+              and captured.getvalue() == "", f"{captured.getvalue()!r}")
+
+        # --- T-28: the shipped-config tripwire. ---
+        shipped_path = Path(__file__).resolve().parent.parent / "config.toml"
+        shipped_text = shipped_path.read_text(encoding="utf-8")
+        shipped = tomllib.loads(shipped_text)
+        enforce_keys = [f"[{name}] enforce" for name, body in shipped.items()
+                        if isinstance(body, dict) and "enforce" in body]
+        check("the [writing] tripwire's twin: the SHIPPED config.toml has "
+              "no [budget] table and no `enforce` key in any section, so "
+              "the dormant seam cannot be woken by a merge nobody read — "
+              "and UPDATING THIS CHECK is the deliberate act that wakes it",
+              "budget" not in shipped and enforce_keys == [],
+              f"budget={'budget' in shipped} enforce={enforce_keys}")
+        check("and the absence carries the author's own words and the exact "
+              "restore recipe in the file's own comments, the way the "
+              "absent [writing] section does",
+              "# [budget] — DELIBERATELY ABSENT" in shipped_text
+              and "#   api_dollars_per_day = 5.00" in shipped_text
+              and "NO shipped configuration sets it" in shipped_text,
+              "config comment")
+    finally:
+        budget.reset()
+        usage.reset()
+        clients._STATE["workspace"] = previous_workspace
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_every_llm_factory_tags_purpose() -> None:
+    """AP T-29: the coverage assertion.
+
+    `purpose` is the ledger's answer to "why am I paying for Luna", and a
+    factory that forgets to set it is mis-tagged rather than broken — so
+    the SET of purposes is pinned to a literal list here, and a sixth
+    factory forces a deliberate edit to this check."""
+    from authorlm import llm as llm_module, passes, summaries, triage_analysis
+
+    config = {"llm": {"enabled": False, "model": "gemini/gemini-2.5-flash",
+                      "provider": "openai"},
+              "critique": {"summarizer_model": "openai/gpt-5.6-luna",
+                           "editor_model": "openai/gpt-5.6-luna"},
+              "writing": {"model": "anthropic/claude-fable-5"},
+              "illustrations": {"model": "openai/gpt-image-2"}}
+    found = {
+        "LLMClient": llm_module.LLMClient(config).purpose,
+        "summarizer_llm": summaries.summarizer_llm(config).purpose,
+        "editor_llm": passes.editor_llm(config).purpose,
+        "writing_llm": llm_module.writing_llm(config).purpose,
+        "triage": triage_analysis._llm(config, {}).purpose,
+    }
+    check("every LLMClient factory tags its purpose beside the .model "
+          "reassignment it already does — purpose is a plain attribute, not "
+          "a property, because unlike api_key it does not have to TRACK a "
+          "reassignment: it IS the record of who did the reassigning",
+          found == {"LLMClient": "llm",
+                    "summarizer_llm": "critique.summarizer",
+                    "editor_llm": "critique.editor",
+                    "writing_llm": "writing",
+                    "triage": "triage"}, f"{found}")
+    check("LLMClient.purpose has a default, so a sixth factory added later "
+          "is MIS-TAGGED ('llm') rather than crashing — and the set of "
+          "distinct purposes is pinned to this literal, so adding one "
+          "forces a deliberate edit here",
+          sorted(set(found.values()) | {"illustrations"})
+          == ["critique.editor", "critique.summarizer", "illustrations",
+              "llm", "triage", "writing"], f"{sorted(set(found.values()))}")
+
+
 def check_provenance_verb() -> None:
     """`authorlm provenance` — the payoff verb. Read-only, and honest
     about the rows that predate the stamp."""
@@ -4180,6 +5238,11 @@ def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
+    check_usage_ledger()
+    check_chat_usage_sweep()
+    check_usage_reader()
+    check_budget_seam()
+    check_every_llm_factory_tags_purpose()
     check_shipped_config_bills_no_anthropic_path()
     check_drafting_key_gate()
     check_drafting_replay_needs_no_key()
