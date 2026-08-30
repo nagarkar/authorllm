@@ -15,40 +15,18 @@ model = "gemini/gemini-2.5-flash"
 # Default: 24000 (characters, ~6k tokens).
 extraction_max_chars = 24000
 
-[writing]
-# Beat generation (authorlm write draft). Drafting the author's prose is the most
-# intelligence-sensitive call this system makes (design §8), so it gets its own model
-# and does NOT fall back to [llm] model — an absent section refuses rather than
-# silently drafting the manuscript on the cheap default.
-# Requires ANTHROPIC_API_KEY in .env (see VENDOR_KEY_ENV in llm.py).
-model = "anthropic/claude-fable-5"
+# [writing] — DELIBERATELY ABSENT (author ruling 2026-08-30: "I didn't realize it
+# would be that expensive… I don't want to be hit with big dollars"). Without this
+# section `authorlm write draft` REFUSES by design — beat drafting runs in the
+# conversation (subscription-covered), fed by `write draft --dry-run`'s payload.
+# To re-enable billed, model-pinned drafting, restore the section (see design §15):
+#   model = "anthropic/claude-fable-5", max_tokens = 8000, effort = "high",
+#   timeout_seconds = 600, cache = true
 
-# Thinking + prose share this ceiling. A beat is 100-300 words; the headroom is for
-# adaptive thinking, which is always on for this model family and is not separately
-# capped. 8000 is roughly 6x the largest beat this manuscript plans.
-max_tokens = 8000
-
-# The per-beat cost lever (§8): "high" for drafting. "xhigh" for a chapter that is
-# fighting back; "low" is for mechanical calls and is wrong here.
-effort = "high"
-
-# One drafting call with adaptive thinking runs minutes, not seconds. [llm]
-# timeout_seconds (120) fails every beat; this is the writing path's own ceiling.
-timeout_seconds = 600
-
-# Prompt caching (design §4): breakpoints on the two stable layers, 1h TTL. Applied
-# only when the model advertises support. Set false to bisect a suspected cache
-# problem — drafting still works, at roughly 3x the input cost per chapter.
-cache = true
-
-[critique]
-# Essay summaries and the critique editor pass run on Sonnet (author ruling
-# 2026-08-29): both read compressed context into editorial judgment, where
-# the stronger model earns its price. NOTE: requires ANTHROPIC_API_KEY in
-# .env (see VENDOR_KEY_ENV in llm.py) — absent the key these calls fail
-# loudly rather than degrade.
-summarizer_model = "anthropic/claude-sonnet-5"
-editor_model = "anthropic/claude-sonnet-5"
+# [critique] overrides — DELIBERATELY ABSENT (same ruling; the Sonnet override of
+# 2026-08-29 billed ~10¢+/essay per rebuild). Summaries and the critique editor
+# fall back to [llm] model. To restore:
+#   summarizer_model = "anthropic/claude-sonnet-5", editor_model = same
 
 [illustrations]
 # Illustration rendering (authorlm illus render); text model above ([llm]
