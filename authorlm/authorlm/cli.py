@@ -4467,11 +4467,19 @@ def cmd_doc(args):
                     print(f"{relpath}: local file is ahead (its tab is "
                           f"unchanged since the last push) — kept local. "
                           f"'doc push {relpath}' refreshes the tab.")
+                for relpath in result.get("marked", []):
+                    print(ui.yellow(
+                        f"MID-SETTLE: {relpath} carries staged "
+                        f"<<old>>{{{{new}}}} forms on disk — untouched. "
+                        f"Pulling would discard the settle. Finalize it "
+                        f"('filter settle {relpath}') or put the original "
+                        f"text back ('filter unmark {relpath}')."))
                 if result["changed"]:
                     print("Collecting:")
                     cmd_collect(args)
                 elif (not result["conflicts"] and not result["missing"]
-                      and not result.get("local_ahead")):
+                      and not result.get("local_ahead")
+                      and not result.get("marked")):
                     scope = (f"Tab for {args.name}" if args.name
                              else "All tabs")
                     print(f"{scope} identical to local files — clean round "

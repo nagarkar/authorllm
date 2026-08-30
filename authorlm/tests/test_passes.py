@@ -79,6 +79,234 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+MARKED_ESSAY = (
+    "# Solo\n\n"
+    "A **bold** claim opens the essay.\n\n"
+    "Original paragraph text.\n\n"
+    "![](_illustrations/solo-1.png)\n\n"
+    "- a list item\n")
+
+
+def _local_transport_guards(root: Path) -> None:
+    """AQ step 4 / 4b — the local settle transport's canonicalization and
+    its two push guards, plus the pull-path guard.
+
+    These are the safety-critical part of the filter pass and they are
+    tested at the seam rather than through the filter verbs, because the
+    change lands BEFORE those verbs exist and must be reviewable on its
+    own. Everything here is a `doc_threads` row with
+    `origin_type='filter'` and a marked file on disk — no filter run, no
+    network, no model call."""
+    import hashlib as _hashlib
+    import json as _json
+
+    from authorlm import revisions as _rev
+    from authorlm import staging as _staging
+    from authorlm.db import ko_fields as _ko
+
+    print("AQ/4: pending forms on disk — canonicalization and the guards:")
+
+    ws = root / "marked-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(MARKED_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    mid = manuscript["id"]
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})            # v1: the pristine essay
+    pristine_observed = _rev.read_manuscript_files(ms)["solo.md"]
+    versions_before = db.one(
+        "SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+        "manuscript_id = ?", (mid,))["n"]
+
+    # A mapping, so push_doc gets past the no-tab refusal and reaches
+    # the guards rather than failing for an unrelated reason.
+    normalized = gdocs.normalize_markdown(MARKED_ESSAY)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["solo.md"] = {
+        "tab_id": "tab-1", "checked_out": False,
+        "pushed_hash": _hashlib.sha256(
+            normalized.encode()).hexdigest()[:16]}
+    gdocs._save_mapping(db, manuscript, meta)
+
+    # Mark the file, exactly as `filter settle --pause` will: the pure
+    # composer's output written to disk.
+    marked = MARKED_ESSAY.replace(
+        "Original paragraph text.",
+        th.render_pending("Original paragraph text.",
+                          "Rewritten paragraph text."))
+    (ms / "solo.md").write_text(marked)
+    thread = _ko("dt")
+    thread.update(
+        manuscript_id=mid, origin_type="filter",
+        origin_id="fr-test:solo.md:1", file="solo.md", anchor_quote=None,
+        proposed_old="Original paragraph text.",
+        proposed_new="Rewritten paragraph text.",
+        note="test", state="written", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref="solo.md",
+        metadata=_json.dumps({"kind": "replace", "anchor_paragraph": 2}))
+    db.insert("doc_threads", thread)
+
+    check("the bytes on disk really do carry the pending form — the "
+          "guarded thing has to actually happen (§14.8)",
+          "<<Original paragraph text.>>{{Rewritten paragraph text.}}"
+          in (ms / "solo.md").read_text(), (ms / "solo.md").read_text())
+
+    # --- F29: the canonicalization property ---------------------------
+    observed = _rev.read_manuscript_files(ms)["solo.md"]
+    check("while marked, read_manuscript_files returns the ORIGINAL text "
+          "byte for byte — the canonical text of a pending form is its "
+          "OLD half, and every observer goes through this seam",
+          observed == pristine_observed,
+          repr(observed[:200]))
+    check("...and it still strips illustration embed lines while doing "
+          "it — the pre-existing canonicalization at this seam is not "
+          "displaced by the new one (F31b)",
+          "_illustrations/solo-1.png" not in observed
+          and "![](" not in observed, repr(observed))
+
+    # --- F30: the version history never sees a marker -----------------
+    with contextlib.redirect_stdout(io.StringIO()):
+        report = api.collect(db, manuscript, {})
+    versions_after = db.one(
+        "SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+        "manuscript_id = ?", (mid,))["n"]
+    check("while marked, collect records NOTHING — the marked file is "
+          "byte-identical to the essay through the seam, so there is no "
+          "change to snapshot and no marker can enter version history",
+          report.get("unchanged") is True
+          and versions_after == versions_before,
+          str({"report": report, "before": versions_before,
+               "after": versions_after}))
+    check("and no transition anywhere in the database mentions a marker",
+          not db.all("SELECT id FROM editorial_transitions WHERE "
+                     "manuscript_id = ? AND detail LIKE '%<<%'", (mid,)))
+
+    # --- F31 (a): the DB-level guard, naming the right remedy ---------
+    raised_a = None
+    try:
+        gdocs.push_doc(db, manuscript, "solo.md", service=None,
+                       docs_service=None)
+    except LookupError as err:
+        raised_a = str(err)
+    check("doc push refuses a file with FILTER pending forms and names "
+          "that producer's own settle verb — `critique_forms_pending` "
+          "filtered on origin_type='critique', so a filter's forms "
+          "pushed their markers straight into the Doc, where the next "
+          "pull would silently discard the settle (guard a)",
+          raised_a is not None and "filter pending forms" in raised_a
+          and "filter settle solo.md" in raised_a
+          and "critique resolve" not in raised_a, raised_a)
+    check("and `forms_pending` reports the ORIGIN, not a bool — that is "
+          "what lets one message name the right remedy for either "
+          "producer",
+          gdocs.forms_pending(db, mid, "solo.md") == "filter",
+          repr(gdocs.forms_pending(db, mid, "solo.md")))
+
+    # --- F31 (b): the BYTE-level guard, with the rows gone from under it
+    # Asserting only (a) would leave this guard free to delete with the
+    # suite green (§15.8 note 3), and it is the one that survives a
+    # database that has lost the run row.
+    db.conn.execute("DELETE FROM doc_threads WHERE id = ?", (thread["id"],))
+    db.conn.commit()
+    check("the database now knows nothing about the marked file — so "
+          "only a byte check can save it",
+          gdocs.forms_pending(db, mid, "solo.md") is None)
+    check("staging.is_marked reads the BYTES, so it still says yes",
+          _staging.is_marked((ms / "solo.md").read_text()))
+    raised_b = None
+    try:
+        gdocs.push_doc(db, manuscript, "solo.md", service=None,
+                       docs_service=None)
+    except LookupError as err:
+        raised_b = str(err)
+    check("doc push STILL refuses on the byte check alone, and names "
+          "'filter unmark' — the recovery for a state that is fully "
+          "described by the bytes (guard b)",
+          raised_b is not None and "mid-settle" in raised_b
+          and "filter unmark solo.md" in raised_b, raised_b)
+    raised_c = None
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", None, None)
+    except LookupError as err:
+        raised_c = str(err)
+    check("...and so does the SURGICAL push path, which reads the file "
+          "directly too — one edit to _refuse_mid_rewrite covers both "
+          "because both already call it",
+          raised_c is not None and "mid-settle" in raised_c, raised_c)
+
+    # --- the pull path must not discard a settle ----------------------
+    pulled = []
+
+    class _PullFake:
+        """Enough of Drive+Docs for pull_doc to reach the write. Its
+        export carries the essay WITHOUT the marks, which is exactly the
+        shape that would overwrite the settle."""
+
+        def files(self):
+            class _Files:
+                def export(self, fileId=None, mimeType=None):
+                    class _Req:
+                        def execute(self):
+                            return (
+                                "# **solo.md**\n\n"
+                                "# Solo\n\nA **bold** claim opens the "
+                                "essay.\n\nA sentence the Doc has and "
+                                "local does not.\n\n- a list item\n"
+                            ).encode("utf-8")
+                    return _Req()
+            return _Files()
+
+        def documents(self):
+            class _Documents:
+                def get(self, documentId=None, includeTabsContent=None):
+                    class _Req:
+                        def execute(self):
+                            return {"tabs": [
+                                {"tabProperties": {"tabId": "tab-1",
+                                                   "title": "solo.md"},
+                                 "childTabs": []}]}
+                    return _Req()
+            return _Documents()
+
+    before_bytes = (ms / "solo.md").read_bytes()
+    fake = _PullFake()
+    report = gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                            force=True, with_comments=False,
+                            docs_service=fake)
+    pulled.append(report)
+    check("doc pull leaves a MID-SETTLE file untouched, byte for byte, "
+          "even under --force — pulling over staged forms discards the "
+          "author's post-edits with nothing said",
+          (ms / "solo.md").read_bytes() == before_bytes,
+          (ms / "solo.md").read_text()[:200])
+    check("...and it says so by name rather than skipping in silence",
+          report.get("marked") == ["solo.md"], str(report))
+    check("the guard is not just 'pull never writes': the same fake "
+          "DOES overwrite the file once the marks are gone",
+          _pull_writes_when_unmarked(db, manuscript, ms, fake))
+
+
+def _pull_writes_when_unmarked(db, manuscript, ms: Path, fake) -> bool:
+    """Discrimination for the pull guard: unmark the file and prove the
+    very same stubbed pull overwrites it. Without this the assertion
+    above would pass just as well against a pull that never writes."""
+    from authorlm import threads as _th
+
+    (ms / "solo.md").write_text(
+        _th.strip_pending((ms / "solo.md").read_text())[0])
+    gdocs.pull_doc(db, manuscript, "solo.md", service=fake, force=True,
+                   with_comments=False, docs_service=fake)
+    return ("A sentence the Doc has and local does not."
+            in (ms / "solo.md").read_text())
+
+
 class Stub(http.server.BaseHTTPRequestHandler):
     """Summarizer → canned; editor → scripted responses (a queue so a
     contract violation can be followed by a corrected reply)."""
@@ -1030,6 +1258,8 @@ def main_test() -> None:
             for v in dp_versions)
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
+
+        _local_transport_guards(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

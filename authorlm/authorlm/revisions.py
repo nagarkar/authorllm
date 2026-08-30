@@ -97,7 +97,32 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
                   f"replacement characters in place of the invalid bytes",
                   file=sys.stderr)
             text = path.read_text(encoding="utf-8", errors="replace")
-        files[rel] = strip_embed_lines(text)
+        # A file carrying pending-change forms is mid-settle. The
+        # ratified law (threads.py's docstring) is that the canonical
+        # text of a pending form is its OLD half: content changes at
+        # approval, not at proposal. That law has always been applied to
+        # text arriving from a Doc; the filter pass's local settle
+        # transport makes the same forms reachable on DISK, and the same
+        # law must govern them or every observer in the system reads a
+        # proposal as prose — collect would record markers into version
+        # history, the extractor would mine them, the summarizer would
+        # summarize them, the realization scan would match inside them,
+        # `export` would ship them, and a lens would report on them.
+        #
+        # Beside `strip_embed_lines`, deliberately: this seam has never
+        # returned the bytes on disk. It already drops illustration
+        # embed lines because they are local derived machinery that the
+        # observed manuscript must not contain. A pending form is the
+        # same kind of thing by a different road — machinery the author
+        # can see, which is not yet part of the essay.
+        #
+        # `strip_pending` is pure and a no-op on text with no forms, so
+        # this is unconditional; it warns rather than guessing on stray
+        # or unbalanced markers, and the only code that sees markers is
+        # the settle code, which reads Path.read_text directly and owns
+        # the grammar (filter-pass design §2.3).
+        from . import threads as _threads
+        files[rel] = _threads.strip_pending(strip_embed_lines(text))[0]
     return files
 
 

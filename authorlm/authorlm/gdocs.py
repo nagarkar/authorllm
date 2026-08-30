@@ -30,6 +30,7 @@ from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
                     split_prompt_embeds, strip_dangling)
 from .revisions import iter_manuscript_paths, strip_embed_lines
+from .staging import is_marked as staging_is_marked
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 GDOC_MIME = "application/vnd.google-apps.document"
@@ -955,11 +956,40 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
             documentId=master_id, body={"requests": requests}).execute()
 
 
+# The remedy each producer's pending forms are settled by. A refusal
+# that names the wrong verb is worse than a refusal that names none.
+_SETTLE_REMEDY = {"critique": "critique resolve {file}",
+                  "filter": "filter settle {file}"}
+
+
+def forms_pending(db: Database, manuscript_id: str,
+                  relpath: str) -> str | None:
+    """The `origin_type` of any pending form on this file, or None.
+
+    Generalized from `critique_forms_pending` over `origin_type`
+    (filter-pass design §2.3 / §6 step 4b). It filtered on
+    `origin_type = 'critique'` only, so a file carrying a FILTER's
+    written forms sailed past it and pushed its markers straight into
+    the Doc — where the next pull would overwrite the local file and
+    silently discard the settle. Returning the origin rather than a bool
+    is what lets the refusal name the right remedy."""
+    row = db.one(
+        "SELECT origin_type FROM doc_threads WHERE manuscript_id = ? "
+        "AND file = ? AND state = 'written' "
+        "ORDER BY created_at, id LIMIT 1",
+        (manuscript_id, relpath),
+    )
+    return row["origin_type"] if row else None
+
+
 def critique_forms_pending(db: Database, manuscript_id: str,
                            relpath: str) -> bool:
     """True when the essay still has critique pending forms in the Doc
     (threads in state 'written'). open_threads deliberately excludes
-    these — critique resolve owns them — so push must check separately."""
+    these — critique resolve owns them — so push must check separately.
+
+    Kept as the critique-specific predicate for callers that mean
+    exactly that; the PUSH guard now uses `forms_pending`."""
     return db.one(
         "SELECT id FROM doc_threads WHERE manuscript_id = ? "
         "AND origin_type = 'critique' AND file = ? AND state = 'written' "
@@ -971,8 +1001,18 @@ def critique_forms_pending(db: Database, manuscript_id: str,
 def _refuse_mid_rewrite(relpath: str, text: str) -> None:
     """A push makes the Doc the working copy (api._checkout_gate) — for a
     file that has no text yet, the next pull would then be the authority
-    over an essay that lives only in the database."""
+    over an essay that lives only in the database.
+
+    Two cases, both byte checks on the RAW file. `push_doc` and
+    `diff_push` read the file with `path.read_text`, never through
+    `read_manuscript_files`, so the canonicalization that hides pending
+    forms from every observer does NOT hide them from here: without the
+    second case a marked file would push its markers into the Doc.
+    Byte-level rather than a database query, deliberately — it is the
+    guard that survives a database that has lost the run row, and the
+    state is fully described by the bytes (filter-pass design §2.3)."""
     from .api import is_placeholder
+    from .staging import is_marked
 
     if is_placeholder(text):
         raise LookupError(
@@ -981,6 +1021,15 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"the Doc the working copy for text that does not exist yet. "
             f"Finish the writeup ('write complete') or put the old essay "
             f"back ('write abandon') first.")
+    if is_marked(text):
+        raise LookupError(
+            f"'{relpath}' is mid-settle: the file on disk carries "
+            f"<<old>>{{{{new}}}} pending-change forms, which are staged "
+            f"proposals and not the essay. Pushing them would put the "
+            f"markers in the Doc, and the next pull would overwrite the "
+            f"local file and silently discard the settle. Finalize it "
+            f"('filter settle {relpath}') or put the original text back "
+            f"('filter unmark {relpath}') first.")
 
 
 def push_doc(db: Database, manuscript: dict, query: str,
@@ -993,17 +1042,26 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
-    _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
-    # Critique pause: Doc holds <<old>>{{new}} / {{insert}} forms the
-    # author may have post-edited; local still has OLD. open_threads
-    # only sees author_comment rows, so without this gate a rebuild
-    # (or a surgical push that only guards '<<') would wipe the forms
-    # — including via session-start reconcile auto-push.
-    if critique_forms_pending(db, manuscript["id"], relpath):
+    # The pause: <<old>>{{new}} / {{insert}} forms the author may have
+    # post-edited live either in the Doc (critique) or on disk (filter).
+    # open_threads only sees author_comment rows, so without this gate a
+    # rebuild (or a surgical push that only guards '<<') would wipe the
+    # forms — including via session-start reconcile auto-push.
+    #
+    # ABOVE _refuse_mid_rewrite, deliberately: when the database still
+    # knows who staged the forms, the refusal can name that producer's
+    # own settle verb. The byte-level check below is the SECOND guard,
+    # and it is the one that survives a database that has lost the run
+    # row — so the two are ordered most-informative first, and both are
+    # separately reachable (filter-pass design §2.3 / F31).
+    origin = forms_pending(db, manuscript["id"], relpath)
+    if origin:
+        remedy = _SETTLE_REMEDY.get(origin, "settle the staged edits")
         raise LookupError(
-            f"'{relpath}' has critique pending forms in the Doc — "
-            f"run 'critique resolve {relpath}' before pushing "
+            f"'{relpath}' has {origin} pending forms — "
+            f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
+    _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
     if (threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
@@ -1482,6 +1540,21 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
         path = bridge.root / relpath
         current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        # A marked local file is MID-SETTLE: its bytes carry staged
+        # <<old>>{{new}} proposals the author may have post-edited, and
+        # overwriting them with the tab would discard the settle without
+        # saying so. The checkout gate makes this mostly unreachable (a
+        # marked file is not checked out, so nothing pulls it) — but
+        # "mostly unreachable" is not a guard, and --force must not be
+        # able to reach past it either. Skipped and reported by name,
+        # the shape `conflicts` and `local_ahead` already use; the
+        # remedy is `filter settle` or `filter unmark`
+        # (filter-pass design §2.3).
+        if staging_is_marked(current_raw):
+            report.setdefault("marked", []).append(relpath)
+            entry = links[relpath]
+            entry["checked_out"] = False
+            continue
         # The bridge's canonical text is embed-free: illustration embed
         # lines are local derived machinery, so every comparison strips
         # them and a pull re-inserts them (the prior pick wins).
