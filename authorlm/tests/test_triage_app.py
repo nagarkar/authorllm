@@ -790,6 +790,48 @@ class HelpTabTest(unittest.TestCase):
                          "a model table row names an anthropic model as a "
                          "current setting; the ruling took those out")
 
+    def test_the_model_table_states_the_ACTIVE_critique_models(self):
+        """AI: the fold described a configuration that had already moved.
+
+        It said the `summarizer_model` line was "commented out while a
+        temperature fix lands in the model client", that the summaries
+        therefore ran on the `[llm]` default "at the higher of the two
+        prices", and that "the critique editor has no override at all".
+        All three stopped being true when `[critique]` was activated on
+        2026-08-30 — the author was reading a pending state as a current
+        one, on the page that exists to tell them which model does what,
+        and being quoted the wrong price for a job they run constantly.
+
+        Same defect class as the spend count below, and pinned the same
+        way: the doc does not get to describe a configuration the
+        configuration does not have. Both stale halves fail here — a
+        pending-state sentence, and an editor row on the general default
+        while `[critique] editor_model` names something else."""
+        text = self.DOC.read_text(encoding="utf-8")
+        flat = self._flat()
+        for stale in ("commented out",
+                      "until then the summaries run on the",
+                      "The critique editor has no override at all",
+                      "Uncommenting one line"):
+            self.assertNotIn(stale, flat,
+                             f"{stale!r} describes a configuration that was "
+                             "activated on 2026-08-30")
+        self.assertIn("| The critique editor pass | `openai/gpt-5.6-luna` | "
+                      "`[critique] editor_model` |", text,
+                      "the editor row still shows the general default")
+        self.assertIn("both are **live since 2026-08-30**", flat)
+        # The temperature key explained by what it DOES, not by the client
+        # bug it once worked around.
+        self.assertIn('`temperature = "vendor-default"`', text)
+        # AI: and the registry that makes it belt-and-braces rather than
+        # load-bearing, named where the author would go looking.
+        self.assertIn("MODEL_PROFILES", text)
+        self.assertIn("every request is shaped from it before it is sent",
+                      flat)
+        # An unknown model is not a refusal — the sentence that keeps the
+        # author from reading the table as a whitelist.
+        self.assertIn("A model the table has never seen still works", flat)
+
     def test_the_spending_moments_are_counted_truthfully(self):
         """Truth-in-instrument. The doc used to claim THREE spending
         moments and omit the most frequent one: `write reject` passes an
