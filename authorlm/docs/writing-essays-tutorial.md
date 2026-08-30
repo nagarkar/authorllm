@@ -26,17 +26,28 @@ Two things hold throughout, and neither is negotiable:
    essay. Anything a beat needs beyond those becomes a question to you, asked
    before the draft is written.
 
-**Where the writing itself comes from.** Each beat is drafted by a model of its
-own, from exactly the materials above and under a prompt you can read and edit
-(`authorlm/prompts/beat-draft.md`). Every draft still arrives with its reasoning
-attached, and you can still argue with it — the difference is that the same
-essay, drafted twice, is drafted the same way, and you can ask to see precisely
-what was sent. Section 10 says which model, and where it is set.
+**Where the writing itself comes from.** Each beat is drafted in this
+conversation, by the assistant you are talking to — but not out of thin air.
+Before a word is written, the system assembles the beat's materials into a
+numbered payload: the style law, your ratified concept notes, the frame, your
+brief, the plan, the essay so far, and this beat's spec. The draft is written
+against that payload and against nothing else, under a prompt you can read and
+edit (`authorlm/prompts/beat-draft.md`) that spells out the grounding rules, the
+word budget, and the self-check the draft has to pass before you see it.
 
-The assistant still writes for you when you ask it to — a sentence you want
-harder, a beat you are dictating, or any stretch where the drafting model is
-unreachable. That prose goes into the essay by the same route and carries the
-same evidence. What it does not do is stand in for the drafting step by default.
+Two things follow, and they are the reason it works this way. **Drafting the
+beats adds nothing to your bill — it is covered by the subscription you already
+pay for.** And the
+grounding stays auditable: you can ask to see exactly what a beat was drafted
+against, block by block with a checksum on each, before you read a line of prose
+— so when a beat comes back wrong, the answer is a list you can check rather
+than a conversation you would have to reconstruct.
+
+There is also a mode where a pinned model drafts each beat instead, for a
+strictly reproducible draft. It **bills the Anthropic API per beat**, it is
+opt-in, and it is switched off in the configuration — deliberately, at your
+instruction (2026-08-30). Section 10 says what turning it back on would cost and
+where the switch is.
 
 Other moments in the workflow also call out to a model, each to do a specific
 job: finishing an essay, refreshing the summaries, closing a goal — and, the one
@@ -249,12 +260,13 @@ Then the next beat. Accepting is the only thing that touches the file: your text
 is added, the revision is recorded, your verdict is stored as evidence, and the
 loop moves on — all at once.
 
-The draft itself comes from a named model under a prompt you can read and
-change, not from whatever the conversation happens to be doing. That matters for
-one reason: the same essay, drafted twice, is drafted the same way, and when a
-beat comes back wrong you can look at what was actually sent. One model drafts
-one essay — if that setting changes mid-essay you are told, loudly, because the
-voice will have a seam.
+The draft is written here, in the conversation — but not from whatever the
+conversation happens to be doing. The beat's materials are assembled first, into
+a numbered payload with a checksum on each block, and the draft is written
+against that and against nothing else, under a prompt you can read and change.
+That matters for one reason: when a beat comes back wrong you can look at
+exactly what it was drafted against, and the answer is a short list you can
+check. It adds nothing to your bill.
 
 **Sometimes it refuses**, and that is the feature working. A beat that cannot be
 written without a fact nobody gave it — an attribution, a date, a source — comes
@@ -266,43 +278,53 @@ it, answer it rather than working around it.
 <details>
 <summary><b>Under the hood — the exact commands</b></summary>
 
+Three commands per beat: assemble, register, rule.
+
 ```bash
-authorlm write draft -m SMSTTD
+authorlm write draft --dry-run -m SMSTTD
 # → Beat [n=1 | opener | concepts: Attention | budget ~140]: …
-#   Drafting beat n=1 on anthropic/claude-fable-5 — this can take a minute…
-#   WHY …  SELF-CHECK …  DRAFT …
+#   Payload for no [writing] model configured — draft this payload in the
+#   conversation, then register it with 'write propose --why …' — no call made.
 #   Prompt: authorlm/prompts/beat-draft.md
-#   LLM: 1 live call(s) (4,102 in / 3,180 out tokens; cache 29,880 read /
-#        0 written) — model anthropic/claude-fable-5
-#   Draft registered [gd-77b0e4c1] — author verdict: accept / accept with
-#   reworded stdin / reject --reason.
-
-authorlm write accept -m SMSTTD                        # as-is
-authorlm write accept -m SMSTTD < /tmp/reworded.md     # your wording wins
-authorlm write reject --reason "…" -m SMSTTD           # reason required
+#   ───── block S — 7,057 chars — sha256 687c06f3… (the prompt, then the style law)
+#   ───── block A — 9,213 chars — sha256 1f4ad0be… (frame, beliefs, plan, concepts)
+#   ───── block B — 4,880 chars — sha256 c02e77a1… (the essay so far)
+#   ───── block C — 1,204 chars — sha256 9b31de07… (this beat, lessons, verdict)
 ```
-`write draft` gathers the whole payload itself — the style law, your validated
-rules, the drafting context, the brief, the digest, the plan, the notes for
-every concept the plan names, the essay so far, this beat's spec, the lessons and
-your last verdict — and registers the result through the ordinary path below.
-`--dry-run` prints that payload with a checksum per block and makes no call: it
-is how you audit what is being sent, and how a caching problem is found (compare
-the checksums across two beats; the block that moved is the culprit).
-
-A refusal prints `BLOCKED` and a question, registers nothing, and exits non-zero.
+This is where the payload discipline comes from, and it is the step you should
+never skip. `--dry-run` assembles the whole thing — the style law, your
+validated rules, the drafting context, the brief, the digest, the plan, the notes
+for every concept the plan names, the essay so far, this beat's spec, the lessons
+and your last verdict — prints it with a checksum per block, and **makes no
+model call**. The assistant drafts the beat against those blocks and nothing
+else, under the prompt the last line names. The checksums are also how a caching
+problem is found, if you ever turn the billed mode on: compare them across two
+beats, and the block that moved is the culprit.
 
 ```bash
 authorlm write propose --why "realizes Attention; opener per the plan; grounded \
     in the brief and kindness.md's hard floor — no source cited beyond Weil's \
     name" -m SMSTTD < /tmp/beat1.md
-```
-`write propose` is the hand-drafting path and is unchanged: it is what you use
-for a beat you dictated, for wording you asked for mid-beat, and whenever the
-drafting model is unconfigured or unreachable. `--why` is required either way —
-with `write draft` the model writes it, and your verdict is recorded against it.
 
-A redraft supersedes the pending proposal, from either entry point — you never
-accumulate two live drafts for one beat.
+authorlm write accept -m SMSTTD                        # as-is
+authorlm write accept -m SMSTTD < /tmp/reworded.md     # your wording wins
+authorlm write reject --reason "…" -m SMSTTD           # reason required
+```
+`write propose` registers the draft. It is the same verb used for a beat you
+dictated and for wording you asked for mid-beat — one route, one kind of
+evidence. `--why` is required, and it is what your verdict is recorded against.
+A redraft supersedes the pending proposal — you never accumulate two live drafts
+for one beat.
+
+**The billed mode.** `authorlm write draft` *without* `--dry-run` sends that same
+payload to the pinned `[writing]` model, which writes the WHY, the SELF-CHECK
+and the prose itself and registers them through `write propose`'s path. It bills
+the Anthropic API per beat. As shipped there is no `[writing]` section, so it
+refuses and prints the TOML to paste; the restore recipe is also in
+`authorlm/config.toml`'s own comments, and §10 says what it would cost. Only
+that mode can answer `BLOCKED` in the machine's own voice — but the same rule
+binds the conversational draft, which asks you the question instead of inventing
+the fact.
 </details>
 
 ### Step 5 — lessons, occasionally
@@ -961,21 +983,27 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 
 ## 10. What it costs, and which model does what
 
-Five moments call out to a model, each for a job worth naming. The first is new,
-and it is the expensive one:
+Four moments call out to a model, each for a job worth naming. **Drafting the
+beats is not one of them** — the beats are written in this conversation, and
+that is covered by the subscription you already pay for. What follows is the
+whole of what the system spends on its own:
 
 | Moment | What the model is for |
 |---|---|
-| **Drafting each beat** | Writing the beat itself, from the whole assembled payload, under the prompt at `authorlm/prompts/beat-draft.md`. This is the largest single call the system makes and the one you pay most for — a rejected beat costs it again. Caching the stable half of the payload roughly halves a chapter's bill, and the usage line after every draft tells you whether the cache is actually working. |
 | **Every rejection, and every reworded acceptance you explain** | Reading the reason you gave and trying to state the principle behind it, so it can be offered back to you later as a candidate rule. This is the frequent one — a reason is required on a rejection, so **every rejection spends** — and it is the one the loop learns from. It may also decide your reason was too situation-specific to generalise and propose nothing. |
 | **Finishing an essay** | Reading the finished prose for concepts and relationships you might want to add to the graph. Deferred through the whole loop deliberately, so it happens once over a finished essay rather than partially over every fragment. |
 | **Refreshing summaries** | Writing each essay's compressed summary — the few sentences every other essay's frame is built from. One call per essay whose text moved. |
 | **Closing a goal** | Reconstructing what you decided across the episode, so recurring patterns can be offered to you as candidate rules. |
 
-A plain acceptance adds nothing on top of the draft you were already shown, with
-or without a reason: only a rejection or a reworded acceptance carries a
-correction, and a correction is what there is a principle to extract from.
-A rejection costs twice — once to read your reason, once to draft the beat again.
+All four run on the cheap default model named in the box below. None of them
+bills the Anthropic API. Beat drafting bills anything at all **only if you turn
+the pinned drafting model back on**, which is a deliberate edit to a
+configuration file and is described below.
+
+A plain acceptance costs nothing, with or without a reason: only a rejection or
+a reworded acceptance carries a correction, and a correction is what there is a
+principle to extract from. A rejection is the one verdict that spends, and it
+spends once — the redraft that follows it is written here and adds nothing.
 
 Two others sit next to the loop rather than inside it: the critique pass, which
 proposes line edits over one essay at a time, and illustration rendering.
@@ -991,24 +1019,40 @@ Everything is in `authorlm/config.toml`, versioned with the code. Keys live in
 | Concept extraction, and the adjudication step that screens its candidates | `gemini/gemini-2.5-flash` | `[llm] model` — the default for anything without its own setting |
 | Turning a verdict's reason into a candidate rule (`record_review` → the belief distiller, on every explained rejection and every explained reword) | `gemini/gemini-2.5-flash` | same default |
 | Episode analysis, guidance | `gemini/gemini-2.5-flash` | same default |
-| Essay summaries | `anthropic/claude-sonnet-5` | `[critique] summarizer_model` |
-| The critique editor pass | `anthropic/claude-sonnet-5` | `[critique] editor_model` |
+| Essay summaries | `gemini/gemini-2.5-flash` | same default |
+| The critique editor pass | `gemini/gemini-2.5-flash` | same default |
 | Illustration rendering | `openai/gpt-image-2`, 1536×1024 | `[illustrations] model`, `[illustrations] image_size` |
-| **Drafting the beats** | `anthropic/claude-fable-5` | `[writing] model` — plus `max_tokens`, `effort`, `timeout_seconds`, `cache` |
+| **Drafting the beats** | none — the conversation drafts them | nothing set, deliberately; `[writing] model` would turn the billed mode on |
+
+**Nothing in the shipped file names an Anthropic model.** That is your ruling of
+2026-08-30, after the first bill: the `[writing]` section and the two
+`[critique]` model overrides were deleted, and with them the last paths that
+could bill the Anthropic API. Summaries and the critique editor now fall back to
+the `[llm]` default above. Both deletions leave their **restore recipe in the
+file's own comments**, so turning either back on is one edit in one place that
+shows up in a diff. A test also fails if an `anthropic/` model reappears in any
+model setting — updating that test is part of turning spending back on, which is
+what stops it happening by accident.
+
+**If you restore `[writing]`.** `write draft` without `--dry-run` then sends the
+assembled payload to `anthropic/claude-fable-5`, which is the largest single call
+the system can make and would be the bulk of a chapter's bill — a rejected beat
+pays for it again. `max_tokens`, `effort`, `timeout_seconds` and `cache` sit
+beside the model; caching the stable half of the payload roughly halves the bill,
+and the usage line after every draft says whether the cache is working
+(`cache = false` turns it off for bisecting, at roughly three times the input
+cost per chapter). It needs `ANTHROPIC_API_KEY` in `.env`.
 
 `[writing]` deliberately does **not** fall back to `[llm] model`. Without the
-section, `write draft` refuses and prints the four lines to paste, rather than
+section the billed verb refuses and prints the lines to paste, rather than
 quietly writing your prose on the cheap default — a register you would blame on
-the loop rather than on a line of configuration you never wrote. The refusal
-names `write propose` as the way to keep working meanwhile. It needs
-`ANTHROPIC_API_KEY` in `.env`. `cache = false` turns prompt caching off if you
-ever need to bisect a problem; drafting still works, at roughly three times the
-input cost per chapter.
+the loop rather than on a line of configuration you never wrote. That refusal is
+now doing a second job as the spending switch. `--dry-run` is **not** gated on
+it: assembling and printing the payload costs nothing, so it works whether or not
+the billed mode is on, and it is what the conversational drafting reads.
 
-The two Sonnet settings were an author ruling (2026-08-29): both read compressed
-context into editorial judgment, which is where the stronger model earns its
-price. They require `ANTHROPIC_API_KEY` in `.env`; without it those calls fail
-loudly rather than quietly degrading.
+Without any model configured at all, the summary rebuild fails loudly rather
+than quietly degrading — see §11's fourth entry.
 </details>
 
 ---
@@ -1029,9 +1073,9 @@ Things that are true today and that you will meet:
    attribution.
 4. **Refreshing the summaries is not automatic.** It is needed both before a
    start that the gate refuses and after every finish, and it costs one call per
-   essay whose text moved (roughly twenty-four for the whole book). Like beat
-   drafting, it **fails outright** with no model configured rather than skipping
-   quietly — those two are the only steps that do — see §10.
+   essay whose text moved (roughly twenty-four for the whole book). It **fails
+   outright** with no model configured rather than skipping quietly — the only
+   step that does, now that the beats are drafted here — see §10.
 5. **Two candidate drafts per beat are not supported.** If you find yourself
    wishing for a second option, say so — that is the trigger for a deliberately
    deferred feature, and the count is the evidence for building it.
@@ -1085,6 +1129,8 @@ authorlm session start | session end
 `write` is CLI-only — there are no MCP tools for the beat loop, by design. The
 assistant runs these over Bash, with prose and JSON on stdin via heredocs. The
 verbs are the state machine and the evidence channel: they gate, record and
-collect. `write draft` is also the drafting call; `write propose` registers a
-beat drafted in the conversation instead, and both produce the same evidence.
+collect. `write draft --dry-run` assembles and prints the payload the beat is
+drafted against and makes no call; `write propose` registers the beat drafted in
+the conversation against it. `write draft` without the flag is the opt-in billed
+mode, and refuses while `[writing]` is absent — see §10.
 </details>

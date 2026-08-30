@@ -764,9 +764,22 @@ class HelpTabTest(unittest.TestCase):
             self.assertNotIn(banned, text,
                              f"{banned!r}: mechanism-negation, not purpose")
         for claim in ("Reading the finished prose for concepts",
-                      "Writing each essay's compressed summary",
-                      "anthropic/claude-sonnet-5"):
+                      "Writing each essay's compressed summary"):
             self.assertIn(claim, text)
+        # AH-2: the summaries and the critique editor ran on Sonnet until
+        # the billing ruling of 2026-08-30 removed the two [critique]
+        # overrides. The doc may still NAME Sonnet in the history of that
+        # ruling; what it may not do is present it as the model those two
+        # jobs use now. Pin the pairing, not the bare string.
+        for stale in ("`anthropic/claude-sonnet-5` | `[critique] "
+                      "summarizer_model`",
+                      "`anthropic/claude-sonnet-5` | `[critique] "
+                      "editor_model`"):
+            self.assertNotIn(stale, text,
+                             f"{stale!r}: that override was deleted from the "
+                             f"shipped config")
+        # ...and the model those jobs actually run on now, named.
+        self.assertIn("| Essay summaries | `gemini/gemini-2.5-flash` |", text)
 
     def test_the_spending_moments_are_counted_truthfully(self):
         """Truth-in-instrument. The doc used to claim THREE spending
@@ -778,31 +791,52 @@ class HelpTabTest(unittest.TestCase):
         instrument costs is the defect, not the wording.
 
         The count went to FIVE when `write draft` landed: drafting the beat
-        is now a model call, and it is the largest one the system makes.
-        The same rule that caught the three-moment count catches a stale
-        four."""
+        was a model call, and the largest one the system made.
+
+        AH-2 returns it to FOUR, and for the opposite reason to the one
+        that made four wrong before. The billing ruling of 2026-08-30
+        deleted `[writing]` from the shipped config, so beat drafting bills
+        nothing: what remains is verdict distillation, completion
+        extraction, the summary rebuilds and intent completion, all on the
+        cheap `[llm]` default. Both a stale FIVE (which invoices the author
+        for drafting they are not being charged for) and a stale THREE
+        (which still omits verdict distillation) fail here. The count
+        tracks the shipped configuration; it is not a number the document
+        gets to round."""
         text = self.DOC.read_text(encoding="utf-8")
         self.assertNotIn("Three moments", text,
                          "the three-moment count omits verdict distillation")
-        self.assertNotIn("Four moments", text,
-                         "the four-moment count omits beat drafting")
-        self.assertIn("Five moments call out to a model", text)
-        # The expensive one, named as such — an author who is not told
-        # which call dominates the bill cannot act on the total.
-        self.assertIn("Drafting each beat", text)
-        self.assertIn("the largest single call the system makes", text)
+        self.assertNotIn("Five moments", text,
+                         "the five-moment count bills for beat drafting, "
+                         "which the shipped config does not do")
+        self.assertIn("Four moments call out to a model", text)
+        # Beat drafting named as EXCLUDED, in as many words — an author who
+        # is told a count but not what fell out of it cannot check it.
+        self.assertIn("Drafting the\nbeats is not one of them", text)
+        self.assertIn("only if you turn\nthe pinned drafting model back on",
+                      text)
+        # The billed mode still named, still by its price, so restoring it
+        # is a decision made with the number in view rather than a switch
+        # flipped blind. Present tense ("makes") is banned: it would tell
+        # the author they are paying for it right now.
+        self.assertNotIn("the largest single call the system makes", text)
+        self.assertIn("the largest single call\nthe system can make", text)
         self.assertIn("[writing] model", text)
         # The frequent one, named as such and framed by its purpose.
         self.assertIn("Every rejection, and every reworded acceptance you "
                       "explain", text)
         self.assertIn("every rejection spends", text)
         # ...and the plain acceptance that does NOT spend, so the reader
-        # can tell the two apart. It no longer costs "nothing" outright —
-        # the draft it accepts was already paid for — so the doc must say
-        # what it adds, not what it costs.
-        self.assertIn("A plain acceptance adds nothing on top of the draft",
-                      text)
-        self.assertIn("A rejection costs twice", text)
+        # can tell the two apart. Both of the old sentences priced in a
+        # billed draft — the acceptance "on top of the draft", and the
+        # rejection paying "twice" because the redraft was a second call.
+        # Neither is true when the redraft is written in the conversation.
+        self.assertNotIn("A plain acceptance adds nothing on top of the "
+                         "draft", text)
+        self.assertNotIn("A rejection costs twice", text)
+        self.assertIn("A plain acceptance costs nothing", text)
+        self.assertIn("A rejection is the one verdict that spends, and it\n"
+                      "spends once", text)
 
     def test_the_doc_says_where_the_writing_comes_from(self):
         """The tutorial's §0 told the author, in its own words, that the
@@ -812,21 +846,46 @@ class HelpTabTest(unittest.TestCase):
         is the single most load-bearing sentence in the document, because
         it is what the author reasons about cost, reproducibility and blame
         from. A stale answer here is worse than no answer: it tells them to
-        look in the wrong place when a beat comes back wrong."""
+        look in the wrong place when a beat comes back wrong.
+
+        AH-2 moves it a second time, back to the conversation — but NOT
+        back to that original sentence. The billing ruling of 2026-08-30
+        removed `[writing]` from the shipped config, so the conversation
+        drafts by default again; what stayed false throughout is 'there is
+        nothing to configure'. There IS: a registered prompt the author can
+        read and edit, a payload they can print, and a `[writing]` section
+        that turns a billed pinned-model mode on. Those bans stand. What
+        the doc must now say instead is where the draft comes from (here),
+        what it costs (nothing beyond the subscription), what disciplines
+        it (the printed payload and the prompt), and that the billed mode
+        exists, is off, and is restorable."""
         text = self.DOC.read_text(encoding="utf-8")
         for stale in ("there is nothing to configure",
                       "because the conversation is the drafting",
                       "the drafting step has no model setting",
                       "nothing to set: the drafting is the conversation",
-                      "Drafting the beats costs nothing"):
+                      "Drafting the beats costs nothing",
+                      # ...and the claim AH-2 supersedes: a pinned model of
+                      # its own is exactly what a beat no longer has.
+                      "Each beat is drafted by a model of its"):
             self.assertNotIn(stale, text, f"{stale!r} is no longer true")
-        self.assertIn("Each beat is drafted by a model of its", text)
+        self.assertIn("Each beat is drafted in this\nconversation", text)
         self.assertIn("authorlm/prompts/beat-draft.md", text)
-        # ...and the hand-drafting path is still named as legitimate, so
-        # the author is not left thinking they cannot ask for wording.
-        self.assertIn("The assistant still writes for you when you ask it to",
+        # The cost, qualified. A bare "costs nothing" is banned above; the
+        # subscription is what makes the qualified claim true, and it is
+        # the thing the author is actually paying.
+        self.assertIn("covered by the subscription you already\npay for",
                       text)
-        # F3: the three end-of-essay calls do NOT degrade alike.
+        # The discipline, so "drafted in the conversation" cannot be read
+        # as "drafted from whatever the conversation was doing".
+        self.assertIn("against that payload and against nothing else", text)
+        # The billed mode: named, priced, and stated to be OFF. A doc that
+        # simply stopped mentioning it would leave the author unable to
+        # restore it, and unable to explain a bill if someone else did.
+        self.assertIn("bills the Anthropic API per beat", text)
+        self.assertIn("switched off in the configuration", text)
+        self.assertIn("restore recipe", text)
+        # F3: the end-of-essay calls do NOT degrade alike.
         self.assertIn("fails loudly", text)
         self.assertNotIn("all three still succeed", text)
 
