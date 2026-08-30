@@ -3122,6 +3122,337 @@ def cmd_sweep(args):
             "triage them individually: concept triage)."))
 
 
+def _print_filter_payload(result: dict) -> None:
+    """The payload, block by block, with hashes — `write draft
+    --dry-run`'s shape, so a silent cache invalidator on the native path
+    is findable and the author can audit what is actually sent."""
+    payload = result["payload"]
+    print(ui.dim(f"Prompt: {result['prompt_location']}"))
+    for name, text in payload.blocks:
+        print()
+        print(ui.bold(f"───── block {name} — {len(text):,} chars — "
+                      f"sha256 {payload.hashes[name]}"))
+        print(text)
+    print()
+    print(ui.dim("Identical stored state gives byte-identical blocks S and "
+                 "A. A hash that moved between two windows IS the cache "
+                 "invalidator."))
+
+
+def _print_filter_warnings(warnings) -> None:
+    for line in warnings or []:
+        print(ui.yellow(f"!! {line}"))
+
+
+def cmd_filter(args):
+    """`authorlm filter` — the filter pass (docs/filter-pass-design.md).
+
+    A LENS reads one essay whole and reports findings; a FILTER reads one
+    essay unit by unit and proposes an edit to each unit. Its output goes
+    through the edit door, not the guidance queue."""
+    from . import filters as flt
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+
+    # Two positional shapes, one parser. `add`, `show`, `prelude` and
+    # `run` are NAME-first; everything after the payload is staged is
+    # FILE-first, because by then the author is talking about the essay
+    # and not about the filter. The optional name stays legal on the
+    # file-first verbs for the one case that needs it — two filters with
+    # active runs on the same essay — so `filter settle becker.md` and
+    # `filter settle duplicate-words becker.md` both read naturally.
+    if args.action not in ("add", "show", "prelude", "run") and \
+            args.file is None and args.name is not None:
+        args.name, args.file = None, args.name
+
+    try:
+        if args.action == "add":
+            text = _stdin_text()
+            if not args.name:
+                raise SystemExit("usage: authorlm filter add <name>  "
+                                 "(the artifact, front matter and prompt, "
+                                 "on stdin)")
+            out = api.filter_add(manuscript, args.name, text or "")
+            print(f"Filter '{args.name}' ratified → {out['path']}")
+            print(ui.dim(f"class = {out['class']} — {out['class_help']}"))
+            if out["state"]:
+                print(ui.dim(f"state: {out['state']}"))
+            return
+
+        if args.action == "list":
+            rows = flt.list_filters(manuscript)
+            if not rows:
+                print("No filters defined. Create one: authorlm filter add "
+                      "<name>  (the artifact on stdin)")
+                return
+            for row in rows:
+                if row["error"]:
+                    print(ui.yellow(f"  {row['name']}: MALFORMED — "
+                                    f"{row['error'].splitlines()[0]}"))
+                    continue
+                print(f"  {row['name']} [{row['class']}]: {row['summary']}")
+            return
+
+        if args.action == "show":
+            if not args.name:
+                raise SystemExit("usage: authorlm filter show <name>")
+            shown = flt.show_filter(manuscript, args.name)
+            print(ui.bold(f"Filter '{args.name}' — {shown['path']}"))
+            print(ui.dim(f"class = {shown['class']} — {shown['class_help']}"))
+            if shown["state"]:
+                print(ui.dim(f"state: {shown['state']}"))
+            print()
+            print(shown["prompt"])
+            return
+
+        if args.action == "status":
+            report = api.filter_status(db, manuscript, args.file)
+            if not report["runs"]:
+                print("No filter runs recorded.")
+            for r in report["runs"]:
+                head = (f"{r['filter']} on {r['file']} [{r['class']}] — "
+                        f"{r['status']}, {r['date']}")
+                print(ui.bold(head))
+                print(f"  units {r['cursor']}/{r['unit_count']} processed; "
+                      f"{r['proposed']} proposed, {r['accepted']} accepted, "
+                      f"{r['rejected']} rejected, {r['open']} awaiting a "
+                      f"verdict")
+                if r["class_now"]:
+                    print(ui.yellow(
+                        f"  !! the artifact's class is now "
+                        f"'{r['class_now']}'; this run is '{r['class']}' "
+                        f"and will finish as one"))
+            for rel in report["orphaned_marks"]:
+                print(ui.yellow(
+                    f"!! {rel} carries pending forms on disk with no "
+                    f"matching staged edit — a crash between composing and "
+                    f"writing the threads leaves exactly this. Recover with "
+                    f"'filter unmark {rel}'."))
+            return
+
+        if args.action == "edits":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter edits <essay.md>")
+            report = api.filter_edits(db, manuscript, args.file)
+            if not report["count"]:
+                print(f"No staged filter edits on {report['file']}.")
+                return
+            for item in report["items"]:
+                ref = f" ({item['ref']})" if item["ref"] else ""
+                print(f"{ui.cyan(str(item['n']) + '.')} ¶{item['unit']} "
+                      f"[{item['state']}]{ref} {item['why']}")
+                print(ui.dim(f"    − {gdocs_clamp(item['old'])}"))
+                print(f"    + {gdocs_clamp(item['new'])}")
+            print(ui.dim("\nBulk verdicts by number: filter triage <essay> "
+                         "--accept 1 2 5 | --reject 3 --reason \"…\" | "
+                         "--revise 6 --text \"…\""))
+            return
+
+        if args.action == "triage":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter triage <essay.md> "
+                                 "--accept … | --reject … --reason \"…\"")
+            ops = []
+            for token in args.accept or []:
+                ops.append({"item": token, "verdict": "accept"})
+            for token in args.reject or []:
+                ops.append({"item": token, "verdict": "reject",
+                            "reason": args.reason})
+            for token in args.revise or []:
+                ops.append({"item": token, "verdict": "revise",
+                            "text": args.text})
+            for token in args.undo or []:
+                ops.append({"item": token, "verdict": "undo"})
+            if not ops:
+                raise SystemExit("nothing to record — pass --accept / "
+                                 "--reject / --revise / --undo with the "
+                                 "numbers from 'filter edits'")
+            report = api.filter_triage(db, manuscript, args.file, ops)
+            for r in report["results"]:
+                if r.get("ok"):
+                    print(f"  [{r['item']}] {r['verdict']} → {r['state']}")
+                else:
+                    print(ui.yellow(f"  [{r['item']}] {r['error']}"))
+            print(ui.dim(f"{report['still_proposed']} still awaiting a "
+                         f"verdict."))
+            return
+
+        if args.action == "prelude":
+            if not (args.name and args.file):
+                raise SystemExit("usage: authorlm filter prelude <name> "
+                                 "<essay.md>  (the registry JSON on stdin, "
+                                 "or --native)")
+            result = api.filter_prelude(
+                db, manuscript, config, args.name, args.file,
+                replace=args.replace, native=args.native,
+                reply=_stdin_text())
+            if result["registry"] is None:
+                print(ui.dim(f"Prelude payload for {result['file']} "
+                             f"({result['unit_count']} units) — no call "
+                             f"made. Draft the registry against it and pipe "
+                             f"{{\"registry\": \"…\"}} back into this same "
+                             f"command."))
+                _print_filter_payload(result)
+                return
+            print(ui.green(
+                f"Registry {'replaced' if result['replaced'] else 'frozen'} "
+                f"for this run ({len(result['registry']):,} chars)."))
+            if result["replaced"]:
+                print(ui.yellow("!! the run's cached prefix is invalidated "
+                                "— on the native path the next unit call "
+                                "re-bills blocks S and A."))
+            if result.get("usage_line"):
+                print(ui.dim(result["usage_line"]))
+            return
+
+        if args.action == "run":
+            if not (args.name and args.file):
+                raise SystemExit("usage: authorlm filter run <name> "
+                                 "<essay.md>")
+            result = api.filter_run(
+                db, manuscript, config, args.name, args.file,
+                window=args.window, from_unit=getattr(args, "from_unit", None),
+                again=args.again, native=args.native)
+            _print_filter_warnings(result["warnings"])
+            start, end = result["window"]
+            print(ui.bold(
+                f"{result['filter']} [{result['class']}] on "
+                f"{result['file']} — units {start}–{end} of "
+                f"{result['unit_count']}"))
+            if not result["native"]:
+                print(ui.dim(
+                    "No model call was made. This is the DEFAULT and it is "
+                    "the opposite of 'write draft', which calls unless you "
+                    "pass --dry-run: here the call is what needs the flag "
+                    "(--native), and it needs [filtering] in config.toml "
+                    "as well. Draft the reply against the payload below, "
+                    "then pipe it into 'filter record'."))
+                _print_filter_payload(result)
+                return
+            print(ui.dim(f"Native run on {result['model']}."))
+            print(ui.dim(result["usage_line"] or ""))
+            print(json.dumps({"units": result["reply"]["edits"],
+                              "keeps": result["reply"]["keeps"]}, indent=2))
+            print(ui.dim("Pipe the model's reply into 'filter record' to "
+                         "stage it — nothing is staged by the call itself."))
+            return
+
+        if args.action == "record":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter record <essay.md>  "
+                                 "(the reply JSON on stdin)")
+            reply = _stdin_text()
+            if not reply:
+                raise SystemExit("the reply JSON travels on stdin — nothing "
+                                 "arrived. Nothing was staged and the "
+                                 "cursor did not move.")
+            result = api.filter_record(db, manuscript, config, args.file,
+                                       reply, name=args.name)
+            start, end = result["window"]
+            print(ui.green(
+                f"Recorded units {start}–{end}: {len(result['staged'])} "
+                f"proposal(s), {len(result['keeps'])} kept."))
+            _print_filter_warnings(result["warnings"])
+            if result["remaining"] > 0:
+                print(ui.dim(f"{result['remaining']} unit(s) left — "
+                             f"'filter run {result['run']['filter']} "
+                             f"{result['file']}' assembles the next window."))
+            elif result["staged"]:
+                print(ui.dim(f"Read them back to the author, then "
+                             f"'filter triage {result['file']} --accept …'."))
+            return
+
+        if args.action == "settle":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter settle <essay.md> "
+                                 "[--pause]")
+            result = api.filter_settle(db, manuscript, config, args.file,
+                                       pause=args.pause, name=args.name)
+            _print_filter_warnings(result["warnings"])
+            if result["paused"]:
+                print(ui.green(
+                    f"Marked {result['file']} with {result['forms']} "
+                    f"change(s) — open it and edit any of the {{{{new}}}} "
+                    f"halves you want to reword, then 'filter settle "
+                    f"{result['file']}' with no flag to finalize."))
+                print(ui.dim("The file will not push to Docs while it is "
+                             "marked, and every observer still reads the "
+                             "original text."))
+                return
+            print(ui.green(f"Applied: {result['forms']} change(s) made "
+                           f"final in {result['file']}."))
+            for d in result["diffs"]:
+                print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
+                             f"«{gdocs_clamp(d['final'])}»"))
+            for row in result["falsified_prefix"]:
+                units = ", ".join(str(u) for u in row["downstream"])
+                print(ui.yellow(
+                    f"!! n={row['n']} rejected. Units {units} were drafted "
+                    f"after it and may have assumed it.\n"
+                    f"   Re-run the tail if their edits depended on it:  "
+                    f"filter run {result['run']['filter']} "
+                    f"{result['file']} --from {row['n']}"))
+            summary = result["summary"]
+            if summary["rebuilt"]:
+                print(ui.dim("summary rebuilt; downstream marked "
+                             "upstream_stale"))
+                if summary["usage"]:
+                    print(ui.dim(summary["usage"]))
+            elif summary["error"]:
+                print(ui.yellow(f"summary rebuild failed "
+                                f"({summary['error']}) — run 'summarize "
+                                f"rebuild {result['file']}'"))
+            print(ui.dim("Nothing here was filed against any of your goals: "
+                         "a filter pass is hygiene, not work toward a "
+                         "declared aim, and recording it as if it were "
+                         "would make that goal's completion report say "
+                         "something untrue."))
+            return
+
+        if args.action == "unmark":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter unmark <essay.md>")
+            result = api.filter_unmark(db, manuscript, args.file)
+            for warn in result["marker_warnings"]:
+                print(ui.yellow(f"  {warn}"))
+            print(ui.green(
+                f"{result['file']} restored to its original text; "
+                f"{result['withdrawn']} form(s) returned to 'accepted' — "
+                f"'filter settle' applies them, 'filter triage --undo' "
+                f"reopens them."))
+            return
+
+        if args.action == "rollback":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter rollback <essay.md>")
+            result = api.filter_rollback(db, manuscript, config, args.file,
+                                         name=args.name)
+            print(ui.green(f"{result['file']} restored to the run's pinned "
+                           f"version ({result['restored_chars']:,} chars)."))
+            print(ui.dim("The verdicts stay: they are evidence, and "
+                         "evidence is not undone by putting text back."))
+            return
+
+        if args.action == "abandon":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter abandon <essay.md>")
+            result = api.filter_abandon(db, manuscript, args.file,
+                                        name=args.name)
+            print(ui.green(f"Run dropped; {result['withdrawn']} open "
+                           f"proposal(s) withdrawn."))
+            return
+    except (LookupError, ValueError, RuntimeError) as err:
+        sys.exit(f"error: {err}")
+
+
+def gdocs_clamp(text: str, limit: int = 90) -> str:
+    from .gdocs import clamp
+
+    return clamp(text or "", limit)
+
+
 def cmd_lens(args):
     import json as _json
 
@@ -5742,6 +6073,11 @@ def build_parser() -> argparse.ArgumentParser:
     LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
                  "analyze", "lens", "sweep", "illus", "summarize", "doc",
                  "belief", "critique", "triage-app",
+                 # `filter run --native` is the filter pass's one call,
+                 # and it is off by default — the verb still announces
+                 # the prompt it would send, because the CHAT path drafts
+                 # under exactly those rules.
+                 "filter",
                  # `write draft` is the write path's one LLM call.
                  "write"}
 
@@ -6055,6 +6391,58 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explain", help="the author's reasoning, verbatim — "
                                      "the highest-value evidence")
     p.set_defaults(func=cmd_lens)
+
+    p = sub.add_parser(
+        "filter",
+        help="author-defined filters (_filters/*.md, TOML front matter): "
+             "add, list, show, run <name> <file> (NO model call by "
+             "default), record, edits, triage, settle, status, unmark, "
+             "rollback, abandon",
+        description=(
+            "The filter pass. A LENS reads one essay whole and reports "
+            "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
+            "an edit to each unit, conditioned on what came before.\n\n"
+            "NOTE THE FLAG POLARITY, which is the OPPOSITE of 'write "
+            "draft'. `filter run` makes NO model call: it prints the "
+            "payload for the conversation to draft against. The billed "
+            "path is `--native`, and it needs a [filtering] section that "
+            "the shipped config deliberately does not have. `--dry-run` "
+            "is accepted as a no-op alias for muscle memory."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("action",
+                   choices=["add", "list", "show", "prelude", "run",
+                            "record", "edits", "triage", "settle", "status",
+                            "unmark", "rollback", "abandon"])
+    p.add_argument("name", nargs="?",
+                   help="filter name (add/show/prelude/run); optional "
+                        "elsewhere, to disambiguate two runs on one file")
+    p.add_argument("file", nargs="?", help="the essay (one file per run)")
+    p.add_argument("--window", type=int, default=None,
+                   help="units per reply (default: all remaining)")
+    p.add_argument("--from", type=int, default=None, dest="from_unit",
+                   metavar="N", help="re-open the window at unit N")
+    p.add_argument("--again", action="store_true",
+                   help="run even though this filter already ran on this "
+                        "exact text")
+    p.add_argument("--native", action="store_true",
+                   help="make the billed model call ([filtering] required; "
+                        "absent by design)")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="no-op alias: 'filter run' already makes no call")
+    p.add_argument("--replace", action="store_true",
+                   help="prelude: rewrite the frozen registry (invalidates "
+                        "this run's cached prefix)")
+    p.add_argument("--pause", action="store_true",
+                   help="settle: write the <<old>>{{new}} forms into the "
+                        "file to read in Obsidian instead of applying")
+    p.add_argument("--accept", nargs="*", metavar="N")
+    p.add_argument("--reject", nargs="*", metavar="N")
+    p.add_argument("--revise", nargs="*", metavar="N")
+    p.add_argument("--undo", nargs="*", metavar="N")
+    p.add_argument("--reason", help="the author's verbatim words for a "
+                                    "rejection — the next run reads it")
+    p.add_argument("--text", help="the author's own wording for a revision")
+    p.set_defaults(func=cmd_filter)
 
     p = sub.add_parser(
         "export",

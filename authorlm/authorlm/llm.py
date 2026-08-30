@@ -390,6 +390,64 @@ def writing_llm(config: dict) -> LLMClient:
     return client
 
 
+# ------------------------------------------------------------ filtering path
+#
+# `[filtering]` (config.toml) governs `authorlm filter run --native` — the
+# billed path of the filter pass (docs/filter-pass-design.md §3.4). It ships
+# ABSENT, the third instance of the pattern `[writing]` and `[budget]`
+# established: what is absent is what is off.
+
+FILTERING_DEFAULTS = {
+    "max_tokens": 4000,
+    "timeout_seconds": 300,
+    "cache": True,
+}
+
+FILTERING_ABSENT = (
+    "no [filtering] section in {config} — the billed filter path needs its\n"
+    "own model, and it deliberately does not fall back to [llm] model (a\n"
+    "silent degradation to a different tier is a result you would attribute\n"
+    "to the loop rather than to a line of configuration you never wrote).\n\n"
+    "You almost certainly do not need it. `authorlm filter run <name> <file>`\n"
+    "with NO flag makes no model call at all: it prints the payload and the\n"
+    "conversation drafts the reply against it, which is the whole point of\n"
+    "the filter pass. That is the default and it still works.\n\n"
+    "To enable billed, model-pinned filtering, add:\n\n"
+    '    [filtering]\n    model = "openai/gpt-5.6-luna"\n\n'
+    "and put that vendor's key in the .env beside it.")
+
+
+def filtering_llm(config: dict) -> LLMClient:
+    """The filter client: `[llm]`'s transport, `[filtering]`'s model.
+
+    Mirrors `writing_llm` exactly, including the key-follows-the-model
+    property (`LLMClient.api_key` resolves `vendor_key(self.model, …)` on
+    every access, so reassigning `.model` is sufficient).
+
+    The recommended model is the CHEAP tier, which is the opposite of the
+    drafting ruling, and deliberately: drafting's quality comes from the
+    model's judgment, so economy there comes from caching and effort, not
+    from a smaller model. A filter's quality comes from the assembled
+    context and a prompt that fully specifies the check — the sweep
+    framework's own criterion for running natively on the flash tier. A
+    filter that needs a mind rather than a rule is a LENS."""
+    from . import paths
+
+    filtering = config.get("filtering", {}) or {}
+    model = (filtering.get("model") or "").strip()
+    if not model:
+        raise LookupError(FILTERING_ABSENT.format(config=paths.config_path()))
+    client = LLMClient(config)
+    client.model = model
+    client.purpose = "filtering"          # the usage ledger's key (§15.18)
+    client.timeout = filtering.get("timeout_seconds",
+                                   FILTERING_DEFAULTS["timeout_seconds"])
+    client.max_tokens = filtering.get("max_tokens",
+                                      FILTERING_DEFAULTS["max_tokens"])
+    client.cache = bool(filtering.get("cache", FILTERING_DEFAULTS["cache"]))
+    return client
+
+
 def _without_cache_control(messages: list[dict]) -> list[dict]:
     """`messages` with every block-level `cache_control` key removed.
 
@@ -738,6 +796,84 @@ class LLMClient:
             return json.loads(text)
         except json.JSONDecodeError:
             print("warning: LLM returned unparseable JSON; ignoring.", file=sys.stderr)
+            return None
+
+    def complete_json_blocks(self, system_blocks: list[str],
+                             user_blocks: list[str]):
+        """`complete_json` over CONTENT BLOCKS — the filter pass's native
+        call (filter-pass design §3.4).
+
+        Blocks rather than two strings for exactly one reason: so
+        `cache_control` has somewhere to attach. Two breakpoints, both
+        `ttl: 1h`, on the two stable layers — the end of the system block
+        (harness prompt + the filter + style law) and the end of the
+        first user block (intents, beliefs, graph, prior runs) — which is
+        the same placement `_block_messages` uses on the drafting path,
+        and it is the same function, so the two cannot drift.
+
+        Say plainly what this buys today: `caching_available` requires
+        litellm transport AND a profile whose `prompt_cache` is
+        "anthropic". The recipe's recommended model for `[filtering]` is
+        the cheap OpenAI tier, for which it is False — so the native path
+        ships with no cache behaviour at all and these breakpoints are
+        dead code until someone configures an Anthropic model. That is
+        recorded rather than implied, because a saving that does not
+        exist is worse than no saving.
+
+        Returns the parsed JSON, or None on any failure — `complete`'s
+        contract, not `draft`'s: the filter's native path has the chat
+        path to fall back to, and its caller says so."""
+        if not self.enabled:
+            return None
+        if self.provider != "litellm":
+            # The raw-HTTP path cannot express a content block, so the
+            # blocks flatten and no cache_control is emitted. This is
+            # what every hermetic test uses, which is why no test depends
+            # on caching being available.
+            return self.complete_json("\n\n".join(system_blocks),
+                                      "\n\n".join(user_blocks))
+        from . import budget, usage
+
+        # The enforcement seam, at the top of a transport-entering path,
+        # before any cache check and before any request is built —
+        # `complete`'s own ordering, reused verbatim.
+        budget.gate(self.purpose, self.model)
+        caching = bool(self.cache) and caching_available(self.model,
+                                                         self.provider)
+        messages = _block_messages(system_blocks, user_blocks, caching)
+        cache_path = self._cache_path(messages, self.temperature)
+        if cache_path and cache_path.exists():
+            self.replays += 1
+            usage.record_replay()
+            reply = json.loads(cache_path.read_text())["response"]
+        else:
+            result = self._complete_litellm(messages)
+            if result is None:
+                return None
+            reply, prompt_tokens, completion_tokens = result
+            self._record_usage(prompt_tokens, completion_tokens)
+            if cache_path:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(
+                    {"model": self.model, "temperature": self.temperature,
+                     "messages": _without_cache_control(messages),
+                     "response": reply,
+                     "usage": {"input_tokens": prompt_tokens,
+                               "output_tokens": completion_tokens},
+                     "recorded_at":
+                         datetime.now(timezone.utc).isoformat()},
+                    indent=2))
+        if reply is None:
+            return None
+        text = reply.strip()
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            print("warning: LLM returned unparseable JSON; ignoring.",
+                  file=sys.stderr)
             return None
 
     # ------------------------------------------------------------- drafting
