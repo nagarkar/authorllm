@@ -130,6 +130,7 @@ def summarizer_llm(config: dict) -> LLMClient:
     resolve_temperature (llm.py) is the one place that fallback chain is
     written."""
     llm = LLMClient(config)
+    llm.purpose = "critique.summarizer"     # the usage ledger's key (AP)
     override = (config.get("critique", {}) or {}).get("summarizer_model")
     if override:
         llm.model = override

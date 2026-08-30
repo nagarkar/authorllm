@@ -38,6 +38,7 @@ def editor_llm(config: dict) -> LLMClient:
     temperature`/the constant — resolve_temperature (llm.py) is the one
     place that fallback chain is written."""
     llm = LLMClient(config)
+    llm.purpose = "critique.editor"         # the usage ledger's key (AP)
     override = (config.get("critique", {}) or {}).get("editor_model")
     if override:
         llm.model = override
