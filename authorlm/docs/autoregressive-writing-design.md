@@ -1956,3 +1956,152 @@ now doctrine, to be built to rather than retrofitted toward:
 
 Review checklist line: any new surface touching shared state names which
 of the three rules covers each read, write, and attribution it performs.
+
+
+### 15.20 The filter pass — the loop's editing mode (2026-08-30)
+
+Sponsor ruling, on the difference between a lens and a filter: a lens "takes
+the whole essay and judges it at once"; a filter "takes each bit of an essay
+and passes it through that same process" — unit by unit, one ratified prompt,
+each unit conditioned on what came before, *"like the autoregressive model
+we've created for the write verb."* With it, three rulings: approximate
+idempotency is enough ("we don't need perfect idempotency but yes, we need
+approximate"); there are two use cases, not one, and some "require a global
+view of the document à la prompt pinning"; and the implementation is
+chat-first — "a chat-only implementation, which still generates learning and
+feeds it back into the system, and uses a prompt that is in the system… use
+some of the free tokens we get as part of subscription to do the bulk of the
+work instead of making external LLM calls."
+
+Design: `docs/filter-pass-design.md`. This section records what it means for
+the text above.
+
+**§11's revision mode is answered, in the negative.** §11 reserved
+`writeups.mode='revision'` for "targeted edits at arbitrary positions in
+existing text" and said to build it "when a real revision session demands
+it". The filter pass is that demand, and it is **not** built inside the write
+loop. §10's Q4 finding was that revision beats cannot ride the append-only
+rolling transcript because they target arbitrary positions; the conclusion it
+did not draw is that a targeted edit is not a beat at all. It is a staged
+`<<old>>{{new}}` proposal, and this system already has a door for those. So a
+filter's output goes to `doc_threads` through the critique pass's settle flow,
+not to `guidance_history` through the beat cursor. The `mode` column keeps its
+reserved name for seam and bridge writing (§10's first trial), which is
+genuinely write-loop work; the editing use case has left.
+
+**The two modes of one loop turn out to be two doors of one system.** §10 said
+"design them as two modes of one loop". What is built instead shares the parts
+that were worth sharing — the layered payload with a stable cached prefix, the
+registered prompt file, the deterministic assembly the conversation drafts
+against, the verbatim-anchor law, the author's accept / reword / reject with
+the reason recorded verbatim — and forks the part that was never going to
+share: appending under a plan versus replacing in place under a verdict.
+
+**The finding→edit door is now a contract, not a coincidence.** `passes.stage`
+was written for critique-pass output; three of the four settle functions
+(`compose_marked_text`, `final_text_from_marked`, `record_resolution`) turned
+out to be origin-agnostic already, and the fourth (`staged_threads`) hardcoded
+one literal. The door is now explicit: a producer supplies a file, a unit
+index, the unit's echo, a replacement and a why; the harness supplies `old`
+from the file itself and never from the producer; and a producer that cannot
+anchor verbatim gets nothing, with no fuzzy match and no closest-paragraph
+guess. `origin_type` names the producer — `author_comment`, `critique`,
+`filter`, and `lens` when a lens finding starts carrying a proposal. Lenses
+are unchanged today; the contract is written so they need no refactor when
+they arrive.
+
+**A local settle transport, and one canonicalization to make it safe.** The
+critique pause lives in a Google Doc. A filter's pause lives in the local
+file: the marked text is composed by the same pure function, written to disk,
+post-edited in Obsidian, and read back by the same resolver. This rests on
+applying `threads.py`'s already-ratified law — "while a thread is pending, the
+CANONICAL text is the old text" — to local files as well as to Doc pulls, in
+one line inside `read_manuscript_files`, beside the `strip_embed_lines` call
+that has always canonicalized at that same seam for the same kind of reason
+(local derived machinery is not the essay). Every observer therefore reads the
+essay; only the settle verbs, which own the grammar, read the markers. Two
+guards are NOT free and are built with it: `critique_forms_pending`
+generalizes over `origin_type`, and `_refuse_mid_rewrite` grows a byte-level
+marked-file check — `push_doc` reads the file directly and would otherwise
+push the markers into the Doc, where the next pull would silently discard the
+settle. It is the one place this design moves a rule below §14.2's disk-truth
+/ context-truth line, and it is recorded here because it is the change most
+worth challenging.
+
+**Attribution: no episode, and that is the point.** A filter's verdicts are
+`evidence` rows with `evidence_type='filter_edit'` and `episode_id = NULL` —
+byte for byte the shape `critique_edit` has always had — and the settle's
+collect attaches its transitions to **no** episode, through a new
+`api.NO_EPISODE` sentinel. Neither of the obvious homes was right. Filing a
+duplicate-word sweep against the file's in-scope intents would make §15.17's
+completion report say a goal was served by hygiene; a filter-owned episode
+would be the grouping object §15.17 refused. Explained rejections still reach
+belief learning, because that path runs off the evidence stream and the
+author's words, not off an episode. The in-scope intents do appear in the
+payload — labelled, as in `beat-draft.md`, as governing selection and emphasis
+and never grounding, and here never attribution either.
+
+**Third dormant section, and the pattern is now standing.** `[filtering]` is
+absent from the shipped config, as `[writing]` (§15.10) and `[budget]`
+(§15.18) are absent, and for the same reason: what is absent is what is off.
+`filter run` makes no model call at all — the flag polarity is inverted
+against `write draft --dry-run` deliberately, because the chat path is the
+default here from the first commit rather than after a ruling. `--native`
+refuses without the section and names the chat flow. The recipe's recommended
+model is the CHEAP tier, which is the opposite of §8's drafting ruling and is
+the sweep framework's criterion applied honestly: drafting's quality comes
+from the model, a filter's comes from the assembled context and a prompt that
+fully specifies the check. A filter that needs a mind rather than a rule is a
+lens.
+
+**Deliberately not done:**
+
+- **Cross-essay filters.** A filter's jurisdiction is one essay. The motif
+  used one way in `becker.md` and the opposite way in `kindness.md` is a real
+  finding and this pass cannot see it; that question is a lens. Stated so the
+  metaphor filter is never mistaken for a book-wide check.
+- **Convergence.** Approximate idempotency is four mechanisms — an
+  identical-text refusal, the prior runs' rejection reasons verbatim in the
+  cached layer, a standing paragraph in the harness prompt, and fresh state
+  per run — and no fixpoint loop. A filter whose proposals never stop has a
+  prompt fault, and the remedy is `filter show` and an edit.
+- **A suppression key.** A `dedupe_key` on (filter, file, unit, hash(old))
+  would harden re-proposal suppression and would also silently hide a real
+  finding the moment a unit's text moved for an innocent reason. The
+  rejection reasons are the softer, honest instrument.
+- **A third class.** `sequential` and `global` are what the ruling names and
+  what the three ratified filters need. Adding a filter in an existing class
+  is a file and no code; inventing a class is code, and says so.
+- **Filter ordering and composition.** Two filters do not commute and no
+  order is enforced or recommended by the machinery. That is editorial
+  practice, not a feature.
+
+**Four departures from the text above, made while building it.**
+
+1. **The critique-pass finding is FIXED here, not deferred.** The design
+listed `_critique_resolve_essay`'s ambient collect as a one-line follow-up
+for whoever owns that stream. It ships in this one: the sentinel §15.20 adds
+IS the whole fix, the bug is live on a path the author uses today, and
+leaving a known mis-attribution in place while shipping the machinery that
+fixes it would be the kind of thing rediscovered later as a regression.
+§15.17's disposition table now names both of that verb's collects.
+
+2. **A global filter's run is created by its PRELUDE, not by `filter run`.**
+The text has `filter run` refuse when a global run has no registry. Built
+literally, that created the run row and then refused, leaving a half-made run
+`filter status` would report. `filter run` now refuses BEFORE creating
+anything when no run exists at all, and the prelude — which is where a global
+run really begins — creates the row and carries the two-filters-on-one-file
+warning.
+
+3. **Triage is scoped to the ACTIVE run, not to the file.** Listing every
+filter thread on an essay let `filter triage --accept 1` re-accept a proposal
+the author had rejected in an earlier run, silently resurrecting it into this
+run's settle. A settled run's rejections belong in block A's PRIOR RUNS
+section, where their reasons are law for the next run — not in a triage list.
+
+4. **The pull path gets the symmetric guard, built rather than noted.** The
+text called the checkout gate "mostly unreachable" cover for it and said
+mostly unreachable is not a guard. A marked file is now skipped and reported
+by name on pull, in the shape `conflicts` and `local_ahead` already use, and
+`--force` cannot reach past it.
