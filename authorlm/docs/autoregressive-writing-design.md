@@ -1355,3 +1355,57 @@ parameter, and the MCP `get_plan` tool's `draft=` parameter. `plan.build_plan`
 (deterministic placement) is untouched, and so is the generic underscore-dir
 observation-ignore behavior that `_drafts/` happened to rely on — that
 mechanism is not specific to this feature and stays.
+
+### 15.10 The billed drafting path is off by configuration (2026-08-30)
+
+Sponsor ruling, on seeing the first month's API charges: *"I didn't realize it
+would be that expensive… I don't want to be hit with big dollars."*
+
+`[writing]` is removed from the shipped `authorlm/config.toml`, and with it the
+two `[critique]` Sonnet overrides of 2026-08-29 (§15.7's siblings; the
+summarizer and the editor both billed ~10¢+ per essay per rebuild). Nothing in
+the tracked configuration now names an `anthropic/` model, so no Anthropic-billed
+path remains. Summaries and the critique editor fall back to `[llm] model`
+(`gemini/gemini-2.5-flash`).
+
+**No code is reverted.** The verb, `prompts/beat-draft.md`, the payload
+assembler and §15.4's cache layer all stay, dormant and restorable by config.
+§15.3's no-fallback rule is what makes this work: it was built so an absent
+`[writing]` could not quietly degrade the prose to a cheap-tier register, and it
+turns out to be exactly the shape of a kill switch. `write draft` (without
+`--dry-run`) refuses, by design, and its refusal names the TOML to paste.
+Both restore recipes live in the config file's own comments, where the author
+looks, rather than only here.
+
+**The default drafting flow is now the dry run, fed into the conversation.**
+`write draft --dry-run` assembles and prints the payload — the same blocks, the
+same checksums, the same registered prompt — and the assistant drafts the beat
+against it, then registers through `write propose --why …`. This is not
+§15.1's superseded "skill mode": the machinery assembly is still the verb's, and
+still deterministic and reproducible; only the generation moved. What is lost is
+the per-beat reproducibility of a pinned model, which is what restoring
+`[writing]` buys back.
+
+**One reorder came with the ruling.** `api.write_draft` ran the `[writing]`-model
+gate before the `--dry-run` return, so with the section gone the dry run refused
+too — the kill switch withheld the audit instrument along with the call.
+Reviewer adjudication #7 had accepted that ordering and noted the reverse was a
+small change "if the author complains"; this ruling is that complaint. The gate
+now sits **below** the dry-run return. Assembling and printing a payload needs
+neither a model nor a key. The dry run reports the configured model when
+`[writing]` names one and says so when it does not, and it names the registered
+prompt file — which the conversational flow drafts under. Every gate *above* the
+return still runs on a dry run (writeup status, checkout, a ratified plan and a
+beat to draft, `[llm] enabled`), so a dry run on an unplanned writeup still
+refuses rather than printing an empty payload; the vendor-key gate was already
+below it, inside `draft()` after the replay-cache check (§15.3's note); and
+nothing mutating moved — the dry-run return still precedes `on_start`, the call,
+and `write_propose`.
+
+**A guard, so restoring it is deliberate.** `tests/test_api.py`'s
+`check_shipped_config_bills_no_anthropic_path` fails if any model-bearing key in
+the shipped config names an `anthropic/` model. Updating that check is part of
+turning spending back on, which is what keeps it from happening by accident.
+
+`.claude/skills/authorlm/SKILL.md` §"The beat loop" and
+`docs/writing-essays-tutorial.md` §0, §2.4, §10 and §11 are aligned to this.
