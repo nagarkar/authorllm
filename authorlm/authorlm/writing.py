@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .db import Database, loads
+from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
 NONE = "(none)"
 EMPTY_ACCEPTED = "(nothing accepted yet)"
@@ -190,9 +191,6 @@ def _concept_notes(db: Database, manuscript: dict, plan: list) -> str:
     return "\n".join(lines)
 
 
-TIER_RANK = {"file": 0, "chapter": 1, "manuscript": 2, "outside": 3}
-
-
 def _intents_block(writeup: dict) -> str:
     """What this rewrite is FOR — the frozen member set, primary first,
     then tier rank, then id. Tier label and statement only: no ids, no
@@ -205,7 +203,8 @@ def _intents_block(writeup: dict) -> str:
     members = sorted(
         block.get("members") or [],
         key=lambda m: (0 if m.get("role") == "primary" else 1,
-                       TIER_RANK.get(m.get("tier"), 9), m.get("id") or ""))
+                       INTENT_TIER_RANK.get(m.get("tier"), UNKNOWN_TIER_RANK),
+                       m.get("id") or ""))
     return "\n".join(f"- [{m.get('tier')}] {m.get('statement')}"
                      for m in members)
 

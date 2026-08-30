@@ -4454,6 +4454,10 @@ WS_FILES = {"book.md": WS_BOOK, "part.md": WS_PART, "alpha.md": WS_ALPHA,
 
 WS_PLAN = json.dumps([{"role": "opener", "concepts": ["Choice"],
                        "budget": 60, "notes": "open on the claim"}])
+WS_PLAN_2 = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                         "budget": 60, "notes": "open on the claim"},
+                        {"role": "close", "concepts": ["Choice"],
+                         "budget": 60, "notes": "close on the same ground"}])
 
 
 def _ws_workspace(root: Path, server, name: str = "ws") -> tuple:
@@ -4545,7 +4549,7 @@ def scenario_writeup_scope(root: Path) -> None:
         out = run_stdin(ws, "", "write", "start", "beta.md",
                         "--intent", intent_beta)
         wu_beta = out.split("[")[1].split("]")[0]
-        run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "alpha.md")
+        run_stdin(ws, WS_PLAN_2, "write", "plan", "--writeup", "alpha.md")
         run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "beta.md")
 
         run_stdin(ws, "Alpha beat one: the claim, stated plainly.",
@@ -4582,6 +4586,40 @@ def scenario_writeup_scope(root: Path) -> None:
         check("WS-11 — and beta's verdict likewise",
               _review_episodes(db, wu_beta) == {ep_beta.get("id")},
               f"{_review_episodes(db, wu_beta)} != {ep_beta.get('id')}")
+        # ---- WS-11r: `write reject` is its own site, and is covered as
+        # one. It takes a different path from `write_accept` — no collect,
+        # one `record_review` — so a routing fix applied to accept alone
+        # would leave every rejection filed against whichever intent was
+        # declared last, and rejections are the highest-value evidence the
+        # loop receives.
+        before_beta = _episode_of(db, intent_beta)["transition_ids"]
+        before_verdicts = len(_episodes_referenced(
+            db, {ep_alpha["id"], ep_beta["id"]}))
+        run_stdin(ws, "Alpha beat two: a flat sentence the author turns down.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "closes on the same ground")
+        run_stdin(ws, "", "write", "reject", "--writeup", "alpha.md",
+                  "--reason", "too flat, and it restates the opener")
+        check("WS-11r — a REJECTED beat on alpha is recorded against "
+              "ALPHA's episode, while beta's is the session's newest",
+              _review_episodes(db, wu_alpha) == {ep_alpha.get("id")},
+              f"{_review_episodes(db, wu_alpha)} != {ep_alpha.get('id')}")
+        check("WS-11r — the rejection really was recorded (the assertion "
+              "above is not passing on an absence)",
+              len(_episodes_referenced(db, {ep_alpha["id"], ep_beta["id"]}))
+              > before_verdicts,
+              f"{before_verdicts} verdict rows before")
+        check("WS-11r — and beta's episode is untouched by alpha's "
+              "rejection",
+              _episode_of(db, intent_beta)["transition_ids"] == before_beta,
+              _episode_of(db, intent_beta)["transition_ids"])
+        run_stdin(ws, "Alpha beat two: the closing turn, in the author's "
+                      "own rhythm.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "closes on the same ground")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
         del wu_beta
 
         # ---- WS-11b: the writeup's LAST collect belongs to the primary
@@ -4615,6 +4653,148 @@ def scenario_writeup_scope(root: Path) -> None:
               not gained_beta,
               str(_episode_locations(
                   db, {"transition_ids": json.dumps(list(gained_beta))})))
+    finally:
+        server.shutdown()
+
+
+def _episodes_referenced(db, episode_ids: set) -> list:
+    """Every evidence row pointing at one of these episodes. The reviews
+    themselves carry no episode column — `beliefs.record_review` puts it
+    on the evidence row it writes — so this is where a verdict filed
+    against the wrong intent becomes visible."""
+    return [dict(r) for r in db.all(
+        "SELECT id, episode_id, evidence_type, target FROM evidence "
+        "WHERE episode_id IS NOT NULL")
+        if r["episode_id"] in episode_ids]
+
+
+def _newest_open_episode(db, manuscript_id: str) -> dict:
+    """What `sessions.current_episode` would return: the session's most
+    recently created open episode, whatever intent it belongs to."""
+    row = db.one(
+        "SELECT e.* FROM editorial_episodes e JOIN sessions s "
+        "ON s.id = e.session_id WHERE e.manuscript_id = ? "
+        "AND e.status = 'open' AND s.status = 'active' "
+        "ORDER BY e.created_at DESC LIMIT 1", (manuscript_id,))
+    return dict(row) if row else {}
+
+
+def scenario_intent_no_fanout(root: Path) -> None:
+    """Scenario WS4 — design-intent-scope §5.1 item 11, as specified: a
+    DERIVED writeup with a primary and true secondaries, where fan-out is
+    the failure case and is asserted as an explicit ABSENCE."""
+    print("Scenario WS4 — no fan-out: the secondaries' episodes stay empty")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server, name="ws4")
+        run(ws, "session", "start")
+        # The book-wide one is declared LAST, so ITS episode is the
+        # session's most recently created open one — which is precisely
+        # what `current_episode` would hand every collect on this writeup.
+        i_file = _declare(ws, "Rewrite alpha itself", "--scope", "alpha.md")
+        i_part = _declare(ws, "Tighten every essay in the part",
+                          "--chapter", "part.md")
+        i_wide = _declare(ws, "A standing rule for the whole book")
+
+        out = run_stdin(ws, "", "write", "start", "alpha.md")
+        wu = out.split("[")[1].split("]")[0]
+        ep_file = _episode_of(db, i_file)
+        ep_part = _episode_of(db, i_part)
+        ep_wide = _episode_of(db, i_wide)
+        check("WS4 — the file-scoped intent is the primary; the other two "
+              "are true secondaries",
+              _block_of(db, wu)["primary"].startswith(i_file)
+              and {i[:8] for i in _member_ids(_block_of(db, wu))}
+              == {i_file, i_part, i_wide}, str(_block_of(db, wu)))
+        check("WS4 — the writeup's OWN TRUNCATION is filed against the "
+              "primary's episode. It is the writeup's first recorded act, "
+              "and before this it went wherever current_episode pointed — "
+              "which here is the book-wide secondary declared last",
+              "alpha.md" in _episode_locations(db, ep_file),
+              f"primary episode holds {_episode_locations(db, ep_file)}; "
+              f"the book-wide secondary holds "
+              f"{_episode_locations(db, ep_wide)}")
+
+        plan = json.dumps([{"role": "opener", "concepts": [], "budget": 60},
+                           {"role": "close", "concepts": [], "budget": 60}])
+        run_stdin(ws, plan, "write", "plan", "--writeup", "alpha.md")
+        for n in (1, 2):
+            run_stdin(ws, f"Alpha beat {n}, a sentence of the author's prose.",
+                      "write", "propose", "--writeup", "alpha.md",
+                      "--why", "the beat")
+            run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+
+        ep_file = _episode_of(db, i_file)
+        ep_part = _episode_of(db, i_part)
+        ep_wide = _episode_of(db, i_wide)
+        check("WS4 — the primary's episode holds every transition of the "
+              "writeup",
+              len(json.loads(ep_file["transition_ids"])) >= 3,
+              str(_episode_locations(db, ep_file)))
+        for label, episode in (("chapter", ep_part), ("book-wide", ep_wide)):
+            check(f"WS4 — the {label} SECONDARY's episode transition_ids is "
+                  f"EXACTLY [] — one authorial act is never mined twice, "
+                  f"and the absence is what says so",
+                  json.loads(episode["transition_ids"]) == [],
+                  f"{episode['id']} holds "
+                  f"{_episode_locations(db, episode)}")
+        secondaries = {ep_part["id"], ep_wide["id"]}
+        check("WS4 — and no review reaches a secondary either: not one "
+              "evidence row references either secondary episode",
+              _episodes_referenced(db, secondaries) == [],
+              str(_episodes_referenced(db, secondaries)))
+        check("WS4 — every verdict of this writeup is filed against the "
+              "primary's episode and nowhere else",
+              _review_episodes(db, wu) == {ep_file["id"]},
+              f"{_review_episodes(db, wu)} != {ep_file['id']}")
+        run(ws, "write", "complete", "--writeup", "alpha.md")
+
+        # ---- The tie: the machine must NOT guess an episode either.
+        run(ws, "summarize", "rebuild")
+        tie_one = _declare(ws, "Rewrite gamma around the refrain",
+                           "--scope", "gamma.md")
+        tie_two = _declare(ws, "Cut gamma's inheritance to a paragraph",
+                           "--scope", "gamma.md")
+        # Declared LAST and NOT a member of gamma's set, so it owns the
+        # session episode: that is what "ambient" looks like from outside.
+        bystander = _declare(ws, "Work on beta later", "--scope", "beta.md")
+        ambient = _newest_open_episode(db, manuscript["id"])
+        check("WS4 — the bystander's episode is the session's newest, so it "
+              "is what current_episode would hand the truncation",
+              ambient["intent_id"].startswith(bystander), str(ambient))
+
+        run_stdin(ws, "", "write", "start", "gamma.md")
+        ep_one = _episode_of(db, tie_one)
+        ep_two = _episode_of(db, tie_two)
+        check("WS4 — with the primary UNSETTLED the truncation stays "
+              "AMBIENT: real work is never attributed to a placeholder "
+              "candidate the author has not chosen",
+              "gamma.md" in _episode_locations(
+                  db, _episode_of(db, bystander)),
+              str(_episode_locations(db, _episode_of(db, bystander))))
+        for label, episode in (("first", ep_one), ("second", ep_two)):
+            check(f"WS4 — and the {label} tied candidate's episode holds "
+                  f"nothing: refusing to guess means refusing to file",
+                  json.loads(episode["transition_ids"]) == [],
+                  f"{episode['id']} holds "
+                  f"{_episode_locations(db, episode)}")
+        # ---- The drift line is worded for the state the set is in. This
+        # writeup is still PROPOSED — nothing has been ratified — so
+        # "newly in scope since ratification" would name a moment that has
+        # not happened, and would imply a freeze the author can still edit
+        # their way out of.
+        late = _declare(ws, "A third goal for gamma", "--scope", "gamma.md")
+        out = run(ws, "write", "status", "--writeup", "gamma.md")
+        check("WS4 — while PROPOSED the drift line says 'in scope, but not "
+              "on this writeup' and never claims a ratification",
+              "in scope, but not on this writeup" in out
+              and late in out
+              and "since ratification" not in out, out)
+        check("WS4 — and it does not offer the cache-rebill warning, which "
+              "is only true of a join after the freeze",
+              "re-bills the cached prefix" not in out, out)
+        run(ws, "write", "abandon", "--writeup", "gamma.md")
     finally:
         server.shutdown()
 
@@ -5233,6 +5413,7 @@ def main_test() -> None:
         scenario_write_new_and_digest(root)
         scenario_parallel_writeups(root)
         scenario_writeup_scope(root)
+        scenario_intent_no_fanout(root)
         scenario_intent_scope(root)
         scenario_intent_tie(root)
         scenario_doc_comments(root)

@@ -1766,16 +1766,24 @@ once, on the next beat of each open writeup, is expected.
 every subparser as the manuscript SELECTOR, and a second registration of the
 same option string is an argparse conflict at parser-build time.
 
-And the primary's episode is passed at THREE sites, not two. `write_accept` and
-`write_reject` were the ones this section named; `write_complete`'s own final
-collect is the third. It is usually a no-op, because nothing has moved since the
-last accepted beat — but a doc pull, or the author's own hand edit between that
-beat and the completion, makes it a real collect with real transitions, and
-those went to `current_episode` like everything else. Naming only the two verbs
-that run every beat was an omission in this text, not a decision; the rule is
-that a writeup's transitions belong to its primary, and it has no exception at
-the last one. `write_abandon`'s collects are deliberately left alone: they
-record the restore, which is the unwinding of the writeup rather than work done
-under its goal.
+And "`collect` grows one optional `episode` parameter; every other caller is
+unchanged" named too few callers. This section named `write_accept` and
+`write_reject`; the write path in fact runs six collects, and each one needed a
+ruling rather than an assumption. The complete list, with what each does and
+why:
+
+| Site | Disposition |
+|---|---|
+| `write_start`, collect 1 (uncollected pre-existing edits) | **ambient, by declaration.** That work PREDATES the writeup — it was done under whatever the session was already doing — and filing it against a goal declared a moment later would be back-dating. |
+| `write_start`, collect 2 (the truncation) | **routed to the primary**, when the primary is settled. It is the writeup's own first act and the largest single transition it will ever produce. While a tie is UNSETTLED it stays ambient: `writeups.intent_id` then holds the lowest-id candidate as a placeholder, and real work must never be attributed to a candidate the author has not chosen — the refuse-to-guess doctrine of the tiebreak itself, applied to the episode instead of the column. `write plan` settles it, and everything after that point is routed. |
+| `write_accept` | **routed to the primary**, and the same row goes to `record_review`. |
+| `write_reject` | no collect; its `record_review` is **routed to the primary**. |
+| `write_complete` | **routed to the primary.** Usually a no-op, but a doc pull or a hand edit between the last accepted beat and the completion makes it a real collect with real transitions. |
+| `write_abandon`, both collects | **excluded, deliberately.** They record the pre-abandon snapshot (RISK K2) and the restore — the unwinding of the writeup, not work done under its goal. |
+
+Naming only the two verbs that run every beat was an omission in this text
+rather than a decision, and the omission had teeth: the truncation is the
+writeup's biggest transition, and with two writeups open it was landing on
+whichever intent had been declared last.
 
 Everything else in this section is as ratified.

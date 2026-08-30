@@ -1217,8 +1217,6 @@ def _style_candidates(db: Database, manuscript_id: str,
 # re-scope after ratification cannot retro-narrate what a finished
 # writeup was serving.
 
-INTENT_TIER_RANK = {"file": 0, "chapter": 1, "manuscript": 2, "outside": 3}
-
 # Above this many manuscript-wide intents in one derived set, `write
 # start` says so. They are unscoped, not book-wide by decision, and every
 # one of them will ride along with every writeup until the author's scope
@@ -1298,10 +1296,14 @@ def _members_view(block: dict) -> list[dict]:
     Takes the stored block and nothing else — no manuscript, no file, no
     `db`. The order must be a pure function of what was ratified, for
     exactly the reason the member record freezes its fields."""
+    from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
+
     members = block.get("members") or []
     return sorted(members,
                   key=lambda m: (0 if m.get("role") == "primary" else 1,
-                                 INTENT_TIER_RANK.get(m["tier"], 9), m["id"]))
+                                 INTENT_TIER_RANK.get(m["tier"],
+                                                      UNKNOWN_TIER_RANK),
+                                 m["id"]))
 
 
 def _resolve_member_prefix(block: dict, prefix: str) -> str | None:
@@ -1492,9 +1494,14 @@ def write_start(db: Database, manuscript: dict, config: dict,
     proposed_in_scope = passes.intents_in_scope(db, manuscript, relpath,
                                                 "proposed")
 
-    ensure_session(db, manuscript)
-    # Two collects: the first captures any uncollected edits so the pinned
-    # source version is complete; the second records the truncation.
+    session, _ = ensure_session(db, manuscript)
+    # Two collects, and they are NOT the same kind of act.
+    #
+    # The FIRST captures whatever the author typed and never collected
+    # before this verb ran, so the pinned source version is complete. That
+    # work PREDATES the writeup: it was done under whatever the session
+    # was already doing, and filing it against a goal declared a moment
+    # later would be back-dating. It stays ambient, deliberately.
     collect(db, manuscript, config, source="write-start")
     source = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
@@ -1519,7 +1526,21 @@ def write_start(db: Database, manuscript: dict, config: dict,
         "" if new else PLACEHOLDER, encoding="utf-8")
     if new:
         attach_style(db, manuscript, relpath, guide["name"])
-    collect(db, manuscript, config, source="write-start")
+    # The SECOND collect records the TRUNCATION — this writeup's own first
+    # act, and the largest single transition it will ever produce. It is
+    # filed against the primary exactly as every beat is.
+    #
+    # ONLY when the primary is settled. While a tie is unsettled there is
+    # no primary yet: `writeups.intent_id` below holds the lowest-id
+    # candidate as a placeholder, and real work must never be attributed
+    # to a candidate the author has not chosen. So the truncation stays
+    # ambient in that case — the same refuse-to-guess doctrine the
+    # tiebreak itself rests on, applied to the episode rather than to the
+    # column. `write plan` is what settles it, and every act after that
+    # point is routed.
+    collect(db, manuscript, config, source="write-start",
+            episode=(ses.episode_for_intent(db, mid, session, block["primary"])
+                     if block["primary"] else None))
 
     row = ko_fields("wu")
     row.update(

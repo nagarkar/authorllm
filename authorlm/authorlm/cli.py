@@ -721,12 +721,23 @@ def _print_intent_set(result: dict, label: str) -> None:
 
 
 def _print_newly_in_scope(result: dict) -> None:
+    """The drift line, worded for the state the set is actually in.
+
+    "newly in scope since RATIFICATION" is only true once there has been
+    a ratification. Before the plan there has not been one, and the same
+    words would tell the author their set was frozen when `--remove` is
+    still open to them and nothing has been settled — the sentence would
+    be describing the wrong half of the lifecycle."""
+    frozen = (result.get("intents") or {}).get("state") == "frozen"
+    heading = ("  newly in scope since ratification:" if frozen
+               else "  in scope, but not on this writeup:")
+    tail = (" (re-bills the cached prefix once)" if frozen else "")
     for member in result.get("newly_in_scope") or []:
-        print(ui.yellow("  newly in scope since ratification:"))
+        print(ui.yellow(heading))
         print(f"    [{member['id'][:8]}] {member['statement']}")
         print(ui.dim(
             f"    It has NOT joined. Join it: write intents --add "
-            f"{member['id'][:11]} (re-bills the cached prefix once) · "
+            f"{member['id'][:11]}{tail} · "
             f"dismiss it: write intents --ignore {member['id'][:11]}"))
     for member in result.get("stale_members") or []:
         print(ui.dim(f"  note: member [{member['id'][:8]}] is now "

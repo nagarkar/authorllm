@@ -136,6 +136,18 @@ def scope_chain(manuscript: dict, file: str) -> list[str | None]:
     return [file, *toc_ancestors(manuscript, file), None]
 
 
+# The one ordering of the scope tiers, from most specific to least.
+# `scope_tier` produces these words, so the rank that sorts them lives
+# beside it rather than being spelled once in `api` (primary selection)
+# and again in `writing` (block A's INTENTS section) — two copies of the
+# same fact, one of which is inside the byte-stability guarantee. Both
+# import it from here; `passes` imports neither of them.
+# "outside" is not a derived tier: it is what an intent the author named
+# explicitly gets when its scope does not cover this file.
+INTENT_TIER_RANK = {"file": 0, "chapter": 1, "manuscript": 2, "outside": 3}
+UNKNOWN_TIER_RANK = 9
+
+
 def scope_tier(manuscript: dict, file: str,
                scope: str | None) -> str | None:
     """Where a scope sits relative to this file: `file`, `chapter` (any
