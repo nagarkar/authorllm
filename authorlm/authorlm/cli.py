@@ -5477,6 +5477,31 @@ def cmd_dbperf(args):
         print(line)
 
 
+def cmd_usage(args):
+    """Read the always-on usage ledger. Read-only, no network, no LLM, no
+    writes — and it does not open the database, so it is safe against a
+    live workspace mid-flight.
+
+    `--sweep` is the ONE exception and is explicit: the plain reader never
+    sweeps, because a report that silently changes what it is reporting on
+    is not a report, and an implicit sweep would put a transcript parse on
+    a read-only verb."""
+    from . import usage
+
+    workspace = getattr(args, "workspace", None)
+    if args.sweep:
+        swept = usage.sweep_all(workspace, force=True)
+        print(f"swept {len(swept)} live chat session(s)")
+        print()
+    directory = usage.log_dir(workspace)
+    if getattr(args, "json", False):
+        print(json.dumps(usage.read_entries(directory), indent=1))
+        return
+    for line in usage.report(directory, days=args.days, top=args.top,
+                             by=args.by, workspace=workspace):
+        print(line)
+
+
 def cmd_provenance(args):
     """Which chat did this. Read-only, no network, no LLM, no writes —
     safe to run against a live workspace mid-flight."""
@@ -5591,6 +5616,26 @@ def cmd_client_hook(args):
     try:
         workspace = getattr(args, "workspace", None)
         if args.end:
+            # One forced sweep BEFORE the unlink. This is the only place a
+            # chat's TAIL — everything after its last AuthorLM verb — is
+            # ever counted, and the tail of a long session is often its
+            # largest part. `allow_recompute=False`: the discontinuity path
+            # is a full file read and the hook's documented shared
+            # SessionEnd budget is 1.5 s, so this sweep declines that work
+            # and takes the `restart` loss. Nothing is lost permanently —
+            # the checkpoint is left untouched, so the next opportunistic
+            # sweep of this session (a resume) still sees the
+            # discontinuity and does the recompute off the hook's clock.
+            from . import clients as _clients, usage as _usage
+
+            _usage.sweep_session(
+                _clients.Client(engine=claude_code.ENGINE,
+                                session_id=payload.get("session_id"),
+                                transcript_hint=payload.get("transcript_path"),
+                                precision="exact", adapter="claude-code"),
+                workspace=workspace, force=True, allow_recompute=False,
+                final=True)
+            _usage.flush("client-hook session-end")
             claude_code.clear_marker(payload.get("session_id"),
                                      workspace=workspace)
         else:
@@ -6273,6 +6318,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how many query shapes per table (default 10)")
     p.set_defaults(func=cmd_dbperf)
 
+    p = sub.add_parser("usage",
+                       help="the usage ledger: estimated API spend, chat "
+                            "consumption, the per-day trend")
+    p.add_argument("--days", type=int, default=7,
+                   help="window to report over (default 7)")
+    p.add_argument("--top", type=int, default=10,
+                   help="how many rows per table (default 10)")
+    p.add_argument("--by", default="purpose|model",
+                   choices=["purpose|model", "client", "purpose", "model",
+                            "day", "verb"],
+                   help="how to partition the API spend table")
+    p.add_argument("--sweep", action="store_true",
+                   help="close the books first: force a chat sweep of "
+                        "every live session before reporting")
+    p.add_argument("--json", action="store_true",
+                   help="emit the raw ledger entries instead of the "
+                        "rendering")
+    p.set_defaults(func=cmd_usage)
+
     p = sub.add_parser("provenance",
                        help="which chat session touched an object")
     p.add_argument("id", nargs="?",
@@ -6373,7 +6437,7 @@ def _dispatch(argv: list[str] | None = None) -> None:
                  "[--guide NAME | --file FILE]")
     import time as _time
 
-    from . import dbperf, tracelog
+    from . import dbperf, tracelog, usage
 
     def _trace(ok: bool, error: str | None = None) -> None:
         tracelog.record(
@@ -6389,8 +6453,17 @@ def _dispatch(argv: list[str] | None = None) -> None:
         # through `_trace`. `dbperf`'s own atexit hook is the backstop.
         # Named by command+action, never raw argv: an intent statement is
         # a positional argument and does not belong in a telemetry log.
-        dbperf.flush(" ".join(
-            str(p) for p in (args.command, getattr(args, "action", None)) if p))
+        label = " ".join(
+            str(p) for p in (args.command, getattr(args, "action", None)) if p)
+        dbperf.flush(label)
+        # The usage ledger's aggregate line, on the same terms and named
+        # by the same label.
+        usage.flush(label)
+        # And the chat sweep: opportunistic, rate-limited to one sweep per
+        # session per [usage] sweep_interval_seconds, and scoped to the
+        # chat that is right now driving AuthorLM. No daemon, no thread,
+        # no cron — between sweeps the cost is one `stat`.
+        usage.sweep_opportunistic(getattr(args, "workspace", None))
 
     # Resolve the client ONCE for this invocation, before the verb runs —
     # the per-invocation stamp, never a per-"current client" ambient read.

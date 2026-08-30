@@ -80,7 +80,7 @@ def _guard(fn) -> dict[str, Any]:
     import sys
     import time
 
-    from . import dbperf, tracelog
+    from . import dbperf, tracelog, usage
 
     # The calling @mcp.tool() function's name is the verb being traced.
     verb = sys._getframe(1).f_code.co_name
@@ -100,6 +100,7 @@ def _guard(fn) -> dict[str, Any]:
                         duration_ms=int((time.monotonic() - t0) * 1000),
                         ok=False, error=f"{type(err).__name__}: {err}")
         dbperf.flush(verb)
+        usage.flush(verb)
         raise
     tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
                     duration_ms=int((time.monotonic() - t0) * 1000),
@@ -107,6 +108,11 @@ def _guard(fn) -> dict[str, Any]:
     # This server is long-lived, so the perf log's unit of aggregation is
     # the DISPATCH, not the process: one line per tool call, named by it.
     dbperf.flush(verb)
+    usage.flush(verb)
+    # An MCP-heavy chat dispatches hundreds of tool calls, which is
+    # exactly why the sweep is interval-gated rather than run here
+    # unconditionally: at most one chat line per session per five minutes.
+    usage.sweep_opportunistic(_WORKSPACE)
     return result
 
 
