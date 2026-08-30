@@ -446,6 +446,53 @@ def triage_critique(operations: list[dict], scope: str | None = None,
 
 
 @mcp.tool()
+def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
+    """The FILTER pass's staged edit proposals for one essay (after
+    'filter record' in the shell): numbered, each with the unit
+    (paragraph) it replaces, the verbatim old text, the proposed new
+    text, the one-line why, the registry/ledger entry it names (`ref`),
+    and its state (proposed | accepted | rejected).
+
+    Read them back to the author AS PROSE, by paragraph, never as JSON
+    or as a list of ids — and volunteer the one or two you are least
+    sure about, by number. Record verdicts with triage_filter_edits, and
+    take a rejection's reason in the author's OWN WORDS: it is the
+    highest-value evidence the run produces, and the next run of this
+    filter on this file reads it before it starts.
+
+    Only the ACTIVE run's proposals are listed. A settled run's
+    rejections are history and live in the next run's payload, not in a
+    triage list. Running the filter, settling and rolling back are
+    CLI-only, the same ruling the write loop gets: one call surface, so
+    improving a verb improves every session."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return api.filter_edits(db, ms, essay)
+    return _guard(run)
+
+
+@mcp.tool()
+def triage_filter_edits(essay: str, operations: list[dict],
+                        manuscript: str | None = None) -> dict:
+    """Record the author's verdicts on staged FILTER proposals, in
+    batch. Each operation: {"item": "<list number or id prefix>",
+    "verdict": "accept" | "reject" | "revise" | "undo", "reason": "..."
+    (reject: the author's VERBATIM words, required), "text": "..."
+    (revise: the author's own wording — the diff is evidence)}.
+
+    Verdicts are recorded only; nothing touches the file until 'filter
+    settle' in the shell. Undo is free until then. Numbers resolve
+    against one snapshot of list_filter_edits order. One failed op never
+    blocks the rest."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return api.filter_triage(db, ms, essay, operations)
+    return _guard(run)
+
+
+@mcp.tool()
 def list_critique_edits(essay: str, manuscript: str | None = None) -> dict:
     """The critique pass's STAGED EDIT proposals for one essay (after
     'critique run' in the shell): numbered, each with kind (replace |

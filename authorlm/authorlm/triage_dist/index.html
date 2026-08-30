@@ -1487,6 +1487,27 @@ the billed mode is on, and it is what the conversational drafting reads.
 
 Without any model configured at all, the summary rebuild fails loudly rather
 than quietly degrading — see §12's fourth entry.
+
+**One verb has the flag the other way round, and you should know it before you
+meet it.** The filter pass — \`authorlm filter run <name> <essay.md>\`, which
+passes one ratified editorial concern over an essay a paragraph at a time — makes
+**no model call at all** with no flag. It prints the payload and the
+conversation drafts the reply, exactly as \`write draft --dry-run\` does. There,
+the *call* is what needs a flag: \`--native\`, and a \`[filtering]\` section the
+shipped config does not have.
+
+So the two verbs' defaults are opposites:
+
+| | with no flag | the other mode |
+|---|---|---|
+| \`write draft\` | **calls the model** (and refuses without \`[writing]\`) | \`--dry-run\` prints the payload, free |
+| \`filter run\` | **prints the payload**, free | \`--native\` calls the model (and refuses without \`[filtering]\`) |
+
+That is not an oversight. \`write draft\` was built billed and the ruling to work
+in the conversation arrived afterwards, so its flag now names the flow you
+actually use — backwards, and not worth churning every habit to fix. \`filter
+run\` was chat-first from its first line, so the free path needed no flag at all.
+\`filter run --dry-run\` is accepted and does nothing, for the muscle memory.
 </details>
 
 ---
@@ -1577,6 +1598,6 @@ mode, and refuses while \`[writing]\` is absent — see §10.
   </head>
   <body>
     <div id="root"></div>
-  <!-- tutorial-sha256:1939bee700421a24ffcd9e06e5f22c63978292484efbb02c3d63abf858a9a611 -->
+  <!-- tutorial-sha256:d4af2a396221bff248f64e81b4b3d248df297f406db764ef6155c92a7d13433e -->
   </body>
 </html>

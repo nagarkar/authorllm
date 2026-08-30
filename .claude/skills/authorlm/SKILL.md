@@ -595,6 +595,76 @@ Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
+## The filter pass (one concern, one essay, unit by unit)
+Design reference: `docs/filter-pass-design.md`. A **lens** reads one essay
+whole and reports findings. A **filter** reads one essay UNIT BY UNIT and
+proposes an edit to each unit — one ratified prompt applied to every
+paragraph, each conditioned on what came before, the way the write verb's
+beat loop conditions each beat. A filter is one concern on ONE essay: a
+motif used one way in `becker.md` and the opposite way in `kindness.md`
+is a real finding and a filter cannot see it. That question is a lens.
+
+The artifact is `<manuscript>/_filters/<name>.md` — TOML front matter
+declaring `class` (`sequential` or `global`), then the prompt. Adding a
+filter in an existing class is a file and no code; a third class would be
+code. `filter add <name>` with the artifact on stdin; `filter list`,
+`filter show <name>`.
+
+**THE FLAG POLARITY IS INVERTED against `write draft`, and the author
+must never be confused about which way round it is.** `authorlm filter
+run <name> <essay>` makes **no model call at all** — it prints the
+payload and YOU draft the reply in this conversation. `write draft` is
+the other way round: it calls unless you pass `--dry-run`. Say this in
+plain words the first time in a session that the author reaches for
+either verb, and never describe `filter run` as "a dry run" — there is
+nothing dry about it, it is the flow. `--native` is the billed path and
+refuses unless `[filtering]` is in config.toml, which it deliberately is
+not.
+
+The loop, per essay:
+1. `authorlm filter run <name> <essay>` (shell, no call). Read the
+   payload. For a `global` filter, `filter prelude <name> <essay>` comes
+   first — draft the registry, pipe `{"registry": "…"}` back into the
+   same command; it is then frozen for the run.
+2. Draft the reply **in one message**: one entry per unit, IN ORDER,
+   carrying the state forward as you go — that is what makes the pass
+   autoregressive rather than N independent judgments. Copy each `echo`
+   from the unit; a mismatch discards the whole reply and nothing is
+   staged. Pipe the JSON into `authorlm filter record <essay>`.
+3. **Read the proposals back to the author as PROSE, by paragraph.**
+   Never show them the JSON, a payload, a unit index they did not ask
+   for, an id, or a flag name — the same discipline plan and digest
+   presentation already demand. Volunteer the one or two you are LEAST
+   sure about, by number: those are where their ruling changes the
+   outcome.
+4. Verdicts: `list_filter_edits` / `triage_filter_edits` in chat, or
+   `filter triage <essay> --accept … --reject … --reason "…"` in the
+   shell. **Take a rejection's reason in the author's own words,
+   verbatim.** It is the highest-value evidence the run produces, and
+   block A of the NEXT run on this file renders it before the model
+   starts — which is most of what makes a filter approximately
+   idempotent.
+5. `authorlm filter settle <essay>` applies the accepted edits directly
+   (the default: the triage verdict already IS the ruling). `--pause`
+   instead writes `<<old>>{{new}}` forms into the local file for the
+   author to read and reword in Obsidian; `filter settle` with no flag
+   then finalizes, their words winning. While the file is marked it will
+   not push to Docs and every observer still reads the original text;
+   `filter unmark <essay>` is the way out. `filter rollback <essay>`
+   restores the run's pin (verdicts stay as evidence).
+
+Say the attribution note ONCE, not every run: nothing a filter does is
+filed against any of the author's goals. A duplicate-word sweep is not
+work toward the Becker rewrite, and recording it as if it were would make
+that goal's completion report say something untrue. Explained rejections
+still reach belief learning — that runs off the evidence stream and the
+author's words, not off an episode.
+
+`filter status` shows the run history per (filter, file) with tallies, so
+a filter whose proposals never settle down is visible. A filter firing on
+nearly every unit is almost always a PROMPT fault: the remedy is
+`filter show <name>` and an edit to the artifact, not another run.
+
 ## Publication identity and review PDFs
 Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
 manuscript metadata, never export settings or inferred editorial beliefs.

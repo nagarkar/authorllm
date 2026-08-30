@@ -10316,6 +10316,11 @@ def main_test() -> None:
             "triage_illustrations",
             "import_critique", "critique_status", "list_critique_items",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
+            # The filter pass's conversational pair (AQ). `filter run` is
+            # deliberately NOT here — the same ruling the write loop
+            # gets: the loop is CLI-only so there is one call surface,
+            # and improving a verb improves every session.
+            "list_filter_edits", "triage_filter_edits",
             "move_style_law", "open_triage_app", "triage_app_request",
         }
         check("MCP exposes the full hand-curated tool set",
