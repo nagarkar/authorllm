@@ -13,6 +13,7 @@ from __future__ import annotations
 import getpass
 import json
 import sqlite3
+import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import SCHEMA_VERSION
+from . import SCHEMA_VERSION, dbperf
 
 KNOWLEDGE_OBJECT_COLUMNS = """
     id TEXT PRIMARY KEY,
@@ -461,9 +462,27 @@ def _unicode_lower(value: Any) -> str | None:
     return unicodedata.normalize("NFC", str(value)).lower()
 
 
+def _fetchone(cursor: sqlite3.Cursor) -> Any:
+    return cursor.fetchone()
+
+
+def _fetchall(cursor: sqlite3.Cursor) -> Any:
+    return cursor.fetchall()
+
+
+def _cursor(cursor: sqlite3.Cursor) -> Any:
+    return cursor
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
+        # The performance log's aggregation dict lives on the instance
+        # (dbperf.__doc__); `None` when [db] perf_log is false, which is
+        # the whole of the off-switch — see `_run`. Built before the
+        # connection, so anything the migration routes through this
+        # class's own surface is timed like any other query.
+        self._perf = dbperf.recorder_for(path)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         # SQLite's built-in lower() is ASCII-only and disagrees with
@@ -632,6 +651,38 @@ class Database:
         self._source_cache[key] = fields["id"]
         return fields["id"]
 
+    # ------------------------------------------------- timed query surface
+    #
+    # Every read and write the domain layer issues goes through `_run`, so
+    # the always-on performance log (dbperf) sees it with no call-site
+    # edits. Row materialization is INSIDE the measured window — a SELECT's
+    # cost is mostly `fetchall`, and timing only `execute` would report the
+    # cheap half. `finally`, so a query that raises is still measured: a
+    # statement that took five seconds and then failed is exactly the one
+    # worth seeing.
+
+    def _run(self, sql: str, args, finish) -> Any:
+        if self._perf is None:
+            return finish(self.conn.execute(sql, args))
+        started = time.perf_counter()
+        try:
+            return finish(self.conn.execute(sql, args))
+        finally:
+            self._perf.record(sql, time.perf_counter() - started)
+
+    def _commit(self) -> None:
+        """The commit is a real, separately-attributable cost (fsync), and
+        it is not a statement anyone wrote — hence its own shape."""
+        if self._perf is None:
+            self.conn.commit()
+            return
+        started = time.perf_counter()
+        try:
+            self.conn.commit()
+        finally:
+            self._perf.record(dbperf.COMMIT_SHAPE,
+                              time.perf_counter() - started)
+
     def insert(self, table: str, row: dict[str, Any]) -> str:
         if table == "evidence" and not row.get("source_id"):
             kind = ("system" if row.get("evidence_type") in SYSTEM_EVIDENCE_TYPES
@@ -639,29 +690,33 @@ class Database:
             row["source_id"] = self.source(kind)
         cols = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
-        self.conn.execute(
-            f"INSERT INTO {table} ({cols}) VALUES ({placeholders})", list(row.values())
+        self._run(
+            f"INSERT INTO {table} ({cols}) VALUES ({placeholders})",
+            list(row.values()), _cursor,
         )
         if not self._transaction_depth:
-            self.conn.commit()
+            self._commit()
         return row["id"]
 
     def update(self, table: str, obj_id: str, changes: dict[str, Any]) -> None:
         """Evolve a mutable knowledge object, bumping its version."""
         sets = ", ".join(f"{c} = ?" for c in changes)
-        self.conn.execute(
+        self._run(
             f"UPDATE {table} SET {sets}, version = version + 1 WHERE id = ?",
-            [*changes.values(), obj_id],
+            [*changes.values(), obj_id], _cursor,
         )
         if not self._transaction_depth:
-            self.conn.commit()
+            self._commit()
 
     @contextmanager
     def transaction(self):
         """Make existing insert/update-based domain verbs atomic as a group."""
         outermost = self._transaction_depth == 0
         if outermost:
-            self.conn.execute("BEGIN IMMEDIATE")
+            # Timed on purpose: BEGIN IMMEDIATE takes the write lock and can
+            # sit on `busy_timeout` behind another process. The body is NOT
+            # timed as a unit — that would double-count every query inside it.
+            self._run(dbperf.BEGIN_SHAPE, (), _cursor)
         self._transaction_depth += 1
         try:
             yield
@@ -674,13 +729,13 @@ class Database:
         else:
             self._transaction_depth -= 1
             if outermost:
-                self.conn.commit()
+                self._commit()
 
     def one(self, sql: str, args: tuple = ()) -> sqlite3.Row | None:
-        return self.conn.execute(sql, args).fetchone()
+        return self._run(sql, args, _fetchone)
 
     def all(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-        return self.conn.execute(sql, args).fetchall()
+        return self._run(sql, args, _fetchall)
 
 
 def loads(value: str | None, default: Any) -> Any:
