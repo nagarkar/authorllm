@@ -404,6 +404,86 @@ def check_config_parity() -> None:
         shutil.rmtree(cfg_root, ignore_errors=True)
 
 
+def check_shipped_config_bills_no_anthropic_path() -> None:
+    """AH-3: the SHIPPED `authorlm/config.toml` names no Anthropic model.
+
+    Author ruling 2026-08-30: "I didn't realize it would be that
+    expensive… I don't want to be hit with big dollars." bc76331 removed
+    `[writing]` and the `[critique]` Sonnet overrides, leaving no
+    Anthropic-billed path in the tracked configuration. The code that
+    would use one is untouched and dormant, restorable by config — which
+    is exactly why a config edit can quietly re-arm the bill.
+
+    This is a tripwire, not a policy. A future edit that reintroduces an
+    `anthropic/` model into a model-bearing key fails here, and UPDATING
+    THIS CHECK IS THE DELIBERATE ACT that re-enables it — the author has
+    to be told, in a diff, that spending is back on.
+
+    Scanned generically (any key named `model` or ending `_model`, in any
+    section) so a new billed key cannot slip in under a name this check
+    never heard of; the five keys the ruling names are then asserted to
+    have actually been in the scan's reach, so a section vanishing from
+    the file cannot be mistaken for a section that passed."""
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parent.parent
+    shipped = repo_root / "config.toml"
+    check("the shipped config.toml is tracked and readable",
+          shipped.is_file(), str(shipped))
+    config = tomllib.loads(shipped.read_text(encoding="utf-8"))
+
+    found: dict = {}
+    for section, body in config.items():
+        if not isinstance(body, dict):
+            continue
+        for key, value in body.items():
+            if (key == "model" or key.endswith("_model")) and isinstance(
+                    value, str):
+                found[f"[{section}] {key}"] = value
+
+    billed = {k: v for k, v in found.items()
+              if v.strip().lower().startswith("anthropic/")}
+    check("no model-bearing key in the shipped config.toml names an "
+          "anthropic/ model — the author ruled the billed paths off, and "
+          "re-arming one must be a deliberate edit to THIS check",
+          not billed, f"billed keys present: {billed!r}; all: {found!r}")
+
+    # The ruling names five keys. Each is either absent (the two the
+    # ruling deleted) or present and scanned — never present-and-missed.
+    for name in ("[llm] model", "[critique] summarizer_model",
+                 "[critique] editor_model", "[illustrations] model",
+                 "[writing] model"):
+        section, key = name[1:].split("] ")
+        present = isinstance(config.get(section), dict) and key in config[
+            section]
+        check(f"{name} is either absent or in this check's reach",
+              (not present) or name in found,
+              f"present={present} scanned={name in found}")
+
+    check("[writing] is absent, so `write draft` (no --dry-run) refuses "
+          "and no beat can bill the API by accident",
+          "writing" not in config, str(sorted(config)))
+    check("the [critique] Sonnet overrides are gone, so summaries and the "
+          "critique editor run on the [llm] default",
+          not (config.get("critique", {}) or {}).get("summarizer_model")
+          and not (config.get("critique", {}) or {}).get("editor_model"),
+          str(config.get("critique")))
+    check("...and the [llm] default they fall back to is itself not an "
+          "anthropic model",
+          not (config.get("llm", {}) or {}).get("model", "").startswith(
+              "anthropic/"), str(config.get("llm")))
+
+    # The restore recipes live in the config's own comments, where the
+    # author looks — not only in a design document they would have to know
+    # to open. tomllib drops comments, so read the raw text.
+    raw = shipped.read_text(encoding="utf-8")
+    check("the config carries the restore recipe for [writing] in its own "
+          "comments, so turning drafting back on is a documented decision "
+          "rather than a rediscovery",
+          "[writing]" in raw and "anthropic/claude-fable-5" in raw
+          and "write draft" in raw, raw[:400])
+
+
 def check_extraction_failure_traced() -> None:
     """OPS-2: a raising run_extraction must leave a trace, not just a
     silently-empty result.
@@ -2685,6 +2765,7 @@ def main_test() -> None:
     check_broken_pipe()
     check_show_verbs()
     check_config_parity()
+    check_shipped_config_bills_no_anthropic_path()
     check_drafting_key_gate()
     check_drafting_replay_needs_no_key()
     check_drafting_cache_warning()
