@@ -737,6 +737,133 @@ def _identical_old_halves(root: Path) -> None:
           < final.index("NEW AT FOUR."), final)
 
 
+DOC_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha opens the essay and says a thing worth saying twice.",
+    "And so the wall stands, and the Dead do not pass.",
+    "Gamma follows, saying something else entirely.",
+    "And so the wall stands, and the Dead do not pass.",
+    "Omega closes the essay on a falling cadence.",
+]) + "\n"
+
+DOC_FILTER = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n---\n\n'
+    "# Duplicate words and phrases\n\n"
+    "Flag a word or phrase used again too soon, and propose the wording "
+    "that removes the repetition.\n")
+
+
+def _filter_reply(units, replaces: dict) -> str:
+    entries = []
+    for n in range(1, len(units) + 1):
+        echo = passes.echo_of(units[n - 1])
+        if n in replaces:
+            entries.append({"n": n, "echo": echo, "action": "replace",
+                            "new": replaces[n], "why": "the test's reason"})
+        else:
+            entries.append({"n": n, "echo": echo, "action": "keep"})
+    return json.dumps({"units": entries, "state": "ledger: (empty)"})
+
+
+def _doc_run(root: Path, subdir: str, replaces: dict, essay: str = DOC_ESSAY,
+             accept: bool = True):
+    """A real filter run over a real essay, triaged, with the essay's tab
+    mapped to a live-text Doc fake. Every verb here is the shipped one —
+    no LLM, no network."""
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(essay)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    api.filter_add(manuscript, "duplicate-words", DOC_FILTER)
+    api.filter_run(db, manuscript, {}, "duplicate-words", "solo.md")
+    units = passes.paragraphs_of(essay)
+    api.filter_record(db, manuscript, {}, "solo.md",
+                      _filter_reply(units, replaces))
+    if accept:
+        staged = api.filter_edits(db, manuscript, "solo.md")
+        api.filter_triage(db, manuscript, "solo.md",
+                          [{"item": str(i["n"]), "verdict": "accept"}
+                           for i in staged["items"]])
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript, ms, fake
+
+
+def _run_row(db, mid: str):
+    return dict(db.one("SELECT * FROM filter_runs WHERE manuscript_id = ? "
+                       "ORDER BY created_at DESC LIMIT 1", (mid,)))
+
+
+def _the_transport_is_frozen(root: Path) -> None:
+    """§2.1 / D-3 — the run's TRANSPORT, absent until a transport verb
+    takes one, frozen for the life of the run once taken."""
+    print("§2.1: the run's transport, frozen at the verb that takes it:")
+
+    db, manuscript, ms, _fake = _doc_run(root, "mode-ws", {2: "TWO REDONE."})
+    mid = manuscript["id"]
+    check("a triaged run has NO transport yet — absent is meaningful, and "
+          "a default would lie about a run that has staged and triaged "
+          "edits and not yet decided where to read them",
+          api._run_mode(_run_row(db, mid)) is None,
+          str(_run_row(db, mid).get("metadata")))
+    check("...and `filter status` says so in the author's words rather "
+          "than printing a null",
+          api.filter_status(db, manuscript)["runs"][0]["mode"] is None)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.filter_settle(db, manuscript, {}, "solo.md", pause=True)
+    check("`filter settle --pause` TAKES the local road, and the run "
+          "records it — the transport is frozen by the verb that chooses "
+          "it, not at run start (D-3)",
+          api._run_mode(_run_row(db, mid)) == "local",
+          str(_run_row(db, mid).get("metadata")))
+    status = api.filter_status(db, manuscript)["runs"][0]
+    check("...and status reports the mode AND how many forms are out",
+          status["mode"] == "local" and status["forms_out"] == 1,
+          str(status))
+
+    # The other direction: a run already on the DOC road refuses --pause.
+    db2, ms2, msdir2, _f2 = _doc_run(root, "mode-ws-2", {2: "TWO REDONE."})
+    mid2 = ms2["id"]
+    run2 = _run_row(db2, mid2)
+    api._freeze_run_mode(db2, run2, "doc")
+    before = (msdir2 / "solo.md").read_bytes()
+    raised = None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.filter_settle(db2, ms2, {}, "solo.md", pause=True)
+    except ValueError as err:
+        raised = str(err)
+    check("F-D1 a run on the DOC road refuses `filter settle --pause`, "
+          "naming the road it is already on and both ways off it — one "
+          "run's forms in two places is the state the freeze exists to "
+          "forbid",
+          raised is not None and "put its forms in the Doc" in raised
+          and "filter settle solo.md" in raised
+          and "filter unmark solo.md --force" in raised, raised)
+    check("F-D1 ...and NOTHING moved: the file is byte-identical and no "
+          "thread left 'accepted'",
+          (msdir2 / "solo.md").read_bytes() == before
+          and db2.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                      "manuscript_id = ? AND state = 'written'",
+                      (mid2,))["n"] == 0,
+          str({"bytes": (msdir2 / "solo.md").read_bytes() == before}))
+
+
 TEMPLATE_ESSAY = (
     "# On Templating\n\n"
     "A template engine substitutes: {{title}} becomes the page's title, "
@@ -2046,6 +2173,7 @@ def main_test() -> None:
 
         _local_transport_guards(root)
         _identical_old_halves(root)
+        _the_transport_is_frozen(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

@@ -523,7 +523,13 @@ def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
     rejections are history and live in the next run's payload, not in a
     triage list. Running the filter, settling and rolling back are
     CLI-only, the same ruling the write loop gets: one call surface, so
-    improving a verb improves every session."""
+    improving a verb improves every session.
+
+    `mode` is the run's TRANSPORT and `forms_out` how many of its forms
+    are already placed. `mode='doc'` means the author is reading and
+    rewording those changes in the Google Doc right now: say so, do not
+    offer to apply them, and name the CLI verb that ends the pause —
+    `authorlm filter settle <essay>`, which reads the tab back."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)

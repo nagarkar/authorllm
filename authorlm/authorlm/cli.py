@@ -3242,6 +3242,10 @@ def cmd_filter(args):
                       f"{r['proposed']} proposed, {r['accepted']} accepted, "
                       f"{r['rejected']} rejected, {r['open']} awaiting a "
                       f"verdict")
+                print(ui.dim(
+                    f"  transport: {r['mode'] or 'not chosen yet'}"
+                    + (f"; {r['forms_out']} form(s) out"
+                       if r["forms_out"] else "")))
                 if r["class_now"]:
                     print(ui.yellow(
                         f"  !! the artifact's class is now "

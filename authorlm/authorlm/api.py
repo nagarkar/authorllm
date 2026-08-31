@@ -4058,6 +4058,44 @@ def _filter_run_row(db: Database, manuscript: dict, file: str,
     return _touched_filter_run(db, rows[0])
 
 
+# ------------------------------------------------------ the transport
+#
+# A filter run has a TRANSPORT: the road its accepted edits take to the
+# author's eyes. `local` is the marked file in Obsidian; `doc` is the
+# same `<<old>>{{new}}` forms written surgically into the essay's tab of
+# the master Doc (design-filter-doc-settle §2.1).
+#
+# It lives in the run's `metadata` JSON, not in a column: it is new
+# state on an existing row and the house idiom for that is the metadata
+# blob, which needs no migration and cannot collide with an index.
+# ABSENT is meaningful and is the birth value — *no transport chosen
+# yet* — so a default would lie about a run that has staged and triaged
+# edits and not yet decided where to read them.
+#
+# Frozen at the TRANSPORT VERB, not at run start (D-3): nothing between
+# `filter run` and the first transport verb depends on it, and freezing
+# earlier would refuse the legitimate late choice ("I have triaged
+# thirty of these; I would like to read them in the Doc after all") for
+# no mechanical reason. Once set it is frozen for the life of the run —
+# switching is settle-then-rerun. There is no toggle and no --mode flag
+# on any verb, because a run whose forms are half in the Doc and half on
+# disk is a run nobody can reason about.
+
+def _run_mode(run: dict) -> str | None:
+    """This run's chosen transport: 'local', 'doc', or None for a run
+    that has not taken one yet."""
+    return (loads(run.get("metadata"), {}) or {}).get("mode")
+
+
+def _freeze_run_mode(db: Database, run: dict, mode: str) -> dict:
+    """Record the transport, once. Returns the refreshed run row."""
+    meta = loads(run.get("metadata"), {}) or {}
+    meta["mode"] = mode
+    payload = json.dumps(meta)
+    db.update("filter_runs", run["id"], {"metadata": payload})
+    return dict(run, metadata=payload)
+
+
 def _touched_filter_run(db: Database, row: dict) -> dict:
     """The provenance stamp (§15.15), and the POST-touch row.
 
@@ -4565,9 +4603,17 @@ def _open_run_threads(db: Database, manuscript_id: str, rel: str,
 
 def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
     """The staged filter proposals of this file's active run(s),
-    numbered for triage."""
+    numbered for triage — plus the run's TRANSPORT and how many of its
+    forms are currently out.
+
+    The transport is reported rather than acted on, and that is the
+    whole of what doc mode owes chat (§5's MCP ruling): a session that
+    cannot see `mode='doc'` will offer to apply what is already sitting
+    in the author's Doc, and will try to triage a `written` row that
+    `passes.verdict` refuses anyway."""
     rel = _resolve_relpath(manuscript, file)
-    rows = _open_run_threads(db, manuscript["id"], rel)
+    mid = manuscript["id"]
+    rows = _open_run_threads(db, mid, rel)
     items = []
     for n, t in enumerate(rows, 1):
         meta = loads(t.get("metadata"), {}) or {}
@@ -4575,7 +4621,21 @@ def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
                       "unit": meta.get("anchor_paragraph"),
                       "old": t["proposed_old"], "new": t["proposed_new"],
                       "why": t["note"], "ref": meta.get("ref")})
-    return {"file": rel, "count": len(items), "items": items}
+    active = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at", (mid, rel))]
+    modes = {_run_mode(r) for r in active}
+    mode = next(iter(modes)) if len(modes) == 1 else None
+    forms_out = sum(1 for t in staging.door_threads(
+        db, mid, rel, states=("written",), origin_type=FILTER_ORIGIN))
+    return {"file": rel, "count": len(items), "items": items,
+            "mode": mode, "forms_out": forms_out,
+            "transport_note": (
+                f"{forms_out} form(s) are out in the Doc's tab for this "
+                f"essay. The author settles them THERE and then "
+                f"'authorlm filter settle {rel}' (CLI) reads the tab "
+                f"back — do not offer to apply them from here."
+                if mode == "doc" and forms_out else None)}
 
 
 def filter_triage(db: Database, manuscript: dict, file: str,
@@ -4695,6 +4755,15 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     written = [t for t in _run_threads(db, mid, run)
                if t["state"] == "written"]
     warnings: list[str] = []
+    mode = _run_mode(run)
+    if mode == "doc" and pause:
+        raise ValueError(
+            f"this run put its forms in the Doc — 'filter push {rel}' "
+            f"already chose that road, and --pause would mark the local "
+            f"file as well, leaving one run's forms in two places. "
+            f"Finalize with 'filter settle {rel}' (no flag), which reads "
+            f"the tab back, or take the forms out of the Doc with "
+            f"'filter unmark {rel} --force'.")
 
     if written:
         if pause:
@@ -4704,6 +4773,10 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
                 f"in them. Finalize with 'filter settle {rel}' (no flag), "
                 f"or put the original text back with 'filter unmark "
                 f"{rel}'.")
+        if mode is None:
+            # A run paused before the transport existed: its forms are in
+            # the bytes on disk, so the road it took was the local one.
+            run = _freeze_run_mode(db, run, "local")
         return _filter_finalize(db, manuscript, config, run, rel, path,
                                 warnings)
 
@@ -4717,6 +4790,10 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             + (f" — {len(open_now)} proposal(s) are still awaiting your "
                f"verdict ('filter edits {rel}')." if open_now
                else " and nothing is staged."))
+    # The transport is chosen HERE, by taking it: this is the local
+    # road, and from now on the run says so (§2.1).
+    if mode is None:
+        run = _freeze_run_mode(db, run, "local")
     # The file's OWN bytes, read directly: the settle code owns the
     # pending-change grammar, and it is the only code in the system that
     # is allowed to see markers.
@@ -4923,6 +5000,8 @@ def filter_status(db: Database, manuscript: dict,
         runs.append({
             "id": run["id"], "filter": run["filter"], "file": run["file"],
             "class": run["class"], "class_now": drift,
+            "mode": _run_mode(run),
+            "forms_out": sum(1 for t in threads if t["state"] == "written"),
             "status": run["status"], "cursor": run["cursor"],
             "unit_count": run["unit_count"],
             "date": (run["created_at"] or "")[:10],
