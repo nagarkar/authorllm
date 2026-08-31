@@ -2167,3 +2167,20 @@ inconsistency.
 rollback mid-pause destroys post-edits with nothing left to recover them from,
 which is a strictly worse orphan than the one `filter status` finds, where the
 bytes describe the state completely.
+
+### 15.21 Filter CREATION goes on MCP; the loop stays CLI-only (2026-08-30)
+
+Sponsor ruling: "Is there a verb to create new filters? We need to integrate
+this support into the full toolset — cli, mcp, skill.md." §15.20 shipped the
+CLI-only artifact (`filter add`/`list`/`show`) but never exposed it past the
+shell. The ruling this section records: filter CREATION is a curation act,
+the same standing as `add_style_law`/`define_style_guide` — one author
+decision, one ratified record — so `add_filter`/`list_filters`/`show_filter`
+now exist as MCP tools, thin wrappers with the same read-then-ratify doctrine
+the shell already enforces. The filter LOOP (`run`/`prelude`/`record`/
+`settle`/`triage-flags`/`status`/`unmark`/`rollback`/`abandon`) is unchanged
+and stays CLI-only, by the identical one-call-surface reasoning §15.20 gives
+the write loop: `list_filter_edits`/`triage_filter_edits` remain the loop's
+only conversational door. Creating a filter is a single, idempotent act with
+no autoregressive state to protect; running one is the loop, and the loop
+gets one surface.

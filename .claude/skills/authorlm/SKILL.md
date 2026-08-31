@@ -608,7 +608,10 @@ The artifact is `<manuscript>/_filters/<name>.md` — TOML front matter
 declaring `class` (`sequential` or `global`), then the prompt. Adding a
 filter in an existing class is a file and no code; a third class would be
 code. `filter add <name>` with the artifact on stdin; `filter list`,
-`filter show <name>`.
+`filter show <name>`. In a shell-less context, `add_filter` /
+`list_filters` / `show_filter` do the same three things over MCP, under
+the same read-then-ratify rule; the loop itself (`run`/`prelude`/
+`record`/`settle`/…) stays a CLI-only surface.
 
 **Three filters are written and waiting to be ratified**, in full, in
 `docs/filter-pass-design.md`'s appendix:
