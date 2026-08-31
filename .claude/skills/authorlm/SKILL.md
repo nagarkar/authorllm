@@ -713,12 +713,23 @@ The loop, per essay:
    restores the run's pin (verdicts stay as evidence).
 
    **5b. The Doc road.** `authorlm filter push <essay>` writes the
-   accepted edits into the essay's tab of the master Doc as
+   run's staged edits into the essay's tab of the master Doc as
    struck-through old text with the new text in green, and leaves the
    file on disk holding the OLD essay. **The standing expectation is
    that the author then goes to the Doc and settles there** — `filter
-   settle <essay>` reads the tab back when they say they are done. Tell
-   them three things, once:
+   settle <essay>` reads the tab back when they say they are done.
+
+   **Step 4 is OPTIONAL on this road, and usually skipped.** The tab IS
+   the review: an untouched form is an acceptance, an emptied green half
+   is a decline, a reworded one is a modified acceptance, and the settle
+   records all three exactly as a CLI verdict would. So `filter push`
+   takes the UNTRIAGED proposals out too — never make the author rule on
+   everything in chat first and then again in the Doc. Only a change
+   they have already turned down stays home. If they want to knock a
+   few out before looking, that still works and the push says which is
+   which; it is a convenience, not a gate.
+
+   Tell them three things, once:
    - **An untouched form is an acceptance.** Leaving a change alone
      means taking it. Nothing needs to be marked "yes".
    - **Edit inside the `{{ }}` braces only. Leave `<< >>` alone.**

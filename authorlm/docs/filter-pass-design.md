@@ -552,7 +552,25 @@ recovery for a state that is fully described by the bytes.
 ### 8.3 The doc transport (added 2026-08-30)
 
 The local transport above is the DEFAULT and the recommendation, and every word
-of its argument stands. It is no longer the only road. Sponsor ruling: reading
+of its argument stands. It is no longer the only road.
+
+**Correction, 2026-08-30 (Sponsor intent).** The first cut of this road gated
+`filter push` on `state='accepted'`, keeping `filter triage` as the verdict step.
+Running it live, the Sponsor met *"nothing is accepted — 6 proposal(s) are still
+awaiting your verdict"* on a freshly recorded run: to look at six changes in the
+Doc they first had to rule on all six in the shell. That is reviewing twice, and
+it inverts the ruling the road exists to serve.
+
+**The Doc settle IS the review.** An untouched form is an acceptance, an emptied
+green half is a decline, a reworded one is a modified acceptance, and
+`record_resolution` keys off `state='written'` alone — it never asks what the
+thread was before. So `filter push` takes `proposed` AND `accepted` threads;
+only an explicit `rejected` stays home, its verdict already given and its reason
+already evidence. Triage before a push is now a convenience, not a gate, and the
+push says which of its forms carry a prior verdict and which do not. A written
+thread records the state it was pushed FROM, so a failed write and `filter
+unmark` both return it to that state rather than handing an untriaged proposal
+the author's acceptance. Sponsor ruling: reading
 dozens of struck-and-green spans in Google Docs is easier than reading
 `<<old>>{{new}}` in a text file, so `filter push <essay>` writes the run's
 accepted forms into the essay's tab through the same surgical writer `critique
