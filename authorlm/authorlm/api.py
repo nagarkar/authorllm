@@ -4728,6 +4728,153 @@ def _uncovered_units(run: dict) -> list[tuple[int, int]]:
     return [(run["cursor"] + 1, run["unit_count"])]
 
 
+def _twin_warning(accepted: list[dict]) -> str | None:
+    """§9.2's one informational line, when two accepted edits replace
+    byte-identical paragraphs.
+
+    Warn, never block, and never hold anything back: the Sponsor's
+    ruling is push ALL, twins included, because holding twins back on the
+    local road while the rest went to the Doc would split one run across
+    two transports — the exact state the mode freeze exists to forbid.
+
+    What the author needs to know is small and specific: the forms
+    settle BY POSITION, so rewording either is safe, and only DELETING
+    one outright can attach the decline to the twin they kept. The
+    manuscript text is correct either way; it is the record of which
+    they refused that goes astray (RISK-6)."""
+    from . import gdocs
+
+    groups: dict[str, list[int]] = {}
+    for t in accepted:
+        unit = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph")
+        groups.setdefault(t["proposed_old"], []).append(unit or 0)
+    twins = {old: sorted(units) for old, units in groups.items()
+             if len(units) > 1 and old}
+    if not twins:
+        return None
+    lines = []
+    for old, units in twins.items():
+        where = " and ".join(str(u) for u in units)
+        lines.append(
+            f"{len(units)} of these changes replace the same paragraph "
+            f"text, word for word: «{gdocs.clamp(old)}» (units {where}). "
+            f"They settle by position — the first form in the Doc is the "
+            f"first change — so reword either freely. The one thing to "
+            f"avoid is DELETING one of them outright: your manuscript "
+            f"text is never affected either way, but the record of which "
+            f"of the two you turned down may attach to the other. If you "
+            f"want one gone, empty its green half rather than deleting "
+            f"the whole marked span.")
+    return "\n".join(lines)
+
+
+def filter_push(db: Database, manuscript: dict, config: dict, file: str,
+                service, docs_service, name: str | None = None) -> dict:
+    """The DOC transport verb (design-filter-doc-settle §2.3): write this
+    run's accepted edits into the essay's tab of the master Doc as
+    `<<old>>{{new}}` forms, through the same surgical writer `critique
+    write` uses, and leave the local file holding the OLD text.
+
+    Named `push` and not `write`: `filter write` reads as *write a filter
+    artifact* and collides with `filter add`, and every refusal the
+    author meets on this road already speaks the word "push". The cost,
+    recorded: it is one word from `doc push`, which does something else.
+
+    Nine steps, each of them a refusal point; the ordering is the whole
+    of the safety argument, so it is spelled out rather than inferred."""
+    from . import gdocs
+
+    mid = manuscript["id"]
+    # 1-3. The run's OWN state first, and ordered most-informative-first
+    #      for the same reason `push_doc`'s two guards are: a second push
+    #      would trip the checkout gate below, and that refusal would
+    #      name `doc pull` for a checkout THIS RUN's own levelling push
+    #      created. When the database knows the run has forms out, that
+    #      is the refusal the author needs.
+    rel = _resolve_relpath(manuscript, file)
+    run = _filter_run_row(db, manuscript, rel, name)
+    mode = _run_mode(run)
+    if mode == "local":
+        raise ValueError(
+            f"this run already took the local road — its forms were "
+            f"composed into {rel} on disk, and a run whose forms are half "
+            f"in the Doc and half on disk is a run nobody can reason "
+            f"about. Finish it ('filter settle {rel}') and start a fresh "
+            f"run if you want to read the next batch in the Doc.")
+    threads = _run_threads(db, mid, run)
+    already = [t for t in threads if t["state"] == "written"]
+    if already:
+        unmark = (f"filter unmark {rel} --force" if mode == "doc"
+                  else f"filter unmark {rel}")
+        raise ValueError(
+            f"{len(already)} form(s) of this run are already out — "
+            f"pushing again would mark a tab that still carries them. "
+            f"Finalize ('filter settle {rel}') or take them back out "
+            f"('{unmark}'), then push again if you still want to.")
+    # 4a. The one capture: the checkout gate, the three in-flight and
+    #     placeholder refusals, the sidecar refusal, the file's text. The
+    #     gate STAYS on this verb: staging read `old` from local, so
+    #     pushing forms onto a tab whose text the author has since edited
+    #     in the Doc is the drift case, and the gate names the remedy.
+    #     (`critique write` has no such gate and opens with a `push_doc`
+    #     that would overwrite a Doc-side edit — a live hazard in that
+    #     pass, RISK-4. This design does not inherit it.)
+    _rel, _text, _capture, _dict = _filter_capture(db, manuscript, rel,
+                                                   "filter push")
+    # 4b. Something to push, refused in `filter settle`'s own wording.
+    accepted = [t for t in threads if t["state"] == "accepted"]
+    if not accepted:
+        open_now = [t for t in threads if t["state"] == "proposed"]
+        raise LookupError(
+            f"nothing is accepted on {rel}"
+            + (f" — {len(open_now)} proposal(s) are still awaiting your "
+               f"verdict ('filter edits {rel}')." if open_now
+               else " and nothing is staged."))
+    warnings: list[str] = []
+    # Q-3's default: allow, and warn by count. A partially triaged run in
+    # the Doc means the author sees six forms and not the four they have
+    # not ruled on — worth saying, never worth blocking (§15.13).
+    still_open = [t for t in threads if t["state"] == "proposed"]
+    if still_open:
+        warnings.append(
+            f"{len(still_open)} proposal(s) on {rel} are still awaiting "
+            f"your verdict and are NOT going to the Doc — you will see "
+            f"{len(accepted)} changes there, not "
+            f"{len(accepted) + len(still_open)}. Read the rest with "
+            f"'filter edits {rel}'. Nothing is blocked.")
+    twin_note = _twin_warning(accepted)
+    if twin_note:
+        warnings.append(twin_note)
+    # 5. The drift check, LOCALLY, before any Doc write: a `proposed_old`
+    #    that no longer matches its paragraph raises naming the unit. The
+    #    composed text is DISCARDED — nothing is written to disk, ever,
+    #    on this road (F-D2).
+    path = Path(manuscript["path"]) / rel
+    disk = path.read_text(encoding="utf-8")
+    passes.compose_marked_text(disk, accepted)
+    # 6. The surgical writer: a levelling push of the pristine local
+    #    file, then one marked span per thread, highest anchor first,
+    #    located by occurrence index, then the read-back proof.
+    result = gdocs.write_pending_forms(db, manuscript, rel, accepted,
+                                       service, docs_service)
+    # 7. Written threads advance; FAILED threads stay `accepted` and are
+    #    reported by reason, so a partially landed push is visible and
+    #    the rest can be settled locally or reworded.
+    for t in result["written"]:
+        db.update("doc_threads", t["id"], {"state": "written"})
+    # 8. The mode is recorded only if at least one form landed. A push
+    #    that landed nothing has put nothing out, and stranding the run
+    #    in a mode with no forms in it would refuse the local road for no
+    #    reason.
+    if result["written"]:
+        run = _freeze_run_mode(db, run, "doc")
+    return {"file": rel, "run": run, "url": result["url"],
+            "written": len(result["written"]),
+            "failed": [(t, why) for t, why in result["failed"]],
+            "mode": _run_mode(run), "warnings": warnings,
+            "local_unchanged": path.read_text(encoding="utf-8") == disk}
+
+
 def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
                   pause: bool = False, name: str | None = None) -> dict:
     """One verb, two halves, chosen by the threads' state.

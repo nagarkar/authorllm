@@ -703,7 +703,7 @@ def _identical_old_halves(root: Path) -> None:
                                occurrence=2) is None)
 
     # --- F-D20: the writer places each form at its OWN paragraph ------
-    result = gdocs.critique_diff_write(db, manuscript, "solo.md", threads,
+    result = gdocs.write_pending_forms(db, manuscript, "solo.md", threads,
                                        fake, fake)
     tab = fake.tab_text("solo.md")
     check("F-D20 both threads are written — neither is lost to a "
@@ -722,7 +722,7 @@ def _identical_old_halves(root: Path) -> None:
 
     for t in result["written"]:
         db.update("doc_threads", t["id"], {"state": "written"})
-    fetched = gdocs.critique_tab_markdown(db, manuscript, "solo.md",
+    fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md",
                                           fake, fake)
     written = passes.staged_threads(db, mid, "solo.md", states=("written",))
     final, forms = passes.final_text_from_marked(fetched["marked"],
@@ -862,6 +862,224 @@ def _the_transport_is_frozen(root: Path) -> None:
                       "manuscript_id = ? AND state = 'written'",
                       (mid2,))["n"] == 0,
           str({"bytes": (msdir2 / "solo.md").read_bytes() == before}))
+
+
+def _the_doc_transport_push(root: Path) -> None:
+    """F-D2, F-D3, F-D4, F-D5, F-D11, F-D19 — `filter push` puts the
+    run's accepted forms in the Doc and leaves the disk alone."""
+    from authorlm import revisions as _rev
+    from authorlm import staging as _staging
+
+    print("§2.3: filter push — the forms go to the Doc, the disk keeps "
+          "the old text:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "push-ws", {2: "TWO REDONE.", 4: "FOUR REDONE.",
+                          5: "FIVE REDONE."})
+    mid = manuscript["id"]
+    before = (ms / "solo.md").read_bytes()
+    observed_before = _rev.read_manuscript_files(ms)["solo.md"]
+
+    result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+
+    # --- F-D2: local holds OLD, unmarked, byte-identical --------------
+    check("F-D2 the local file is BYTE-IDENTICAL to its pre-push text — "
+          "in doc mode the essay on disk is the old text, and it is the "
+          "thing the author can always fall back to",
+          (ms / "solo.md").read_bytes() == before,
+          (ms / "solo.md").read_text()[:200])
+    check("F-D2 ...and it is not marked: `staging.mark_local` is the "
+          "local transport's function and the doc road never calls it",
+          not _staging.is_marked((ms / "solo.md").read_text()))
+    check("F-D2 ...and the observation seam returns the same text it "
+          "returned before the push — the canonicalizer is a proven "
+          "no-op here, which is the point",
+          _rev.read_manuscript_files(ms)["solo.md"] == observed_before)
+
+    # --- F-D3: the forms reached the wire, and only those threads -----
+    wire = "\n".join(fake.bodies)
+    tab = fake.tab_text("solo.md")
+    threads = {t["id"]: t for t in api._run_threads(db, mid,
+                                                    _run_row(db, mid))}
+    written = [t for t in threads.values() if t["state"] == "written"]
+    check("F-D3 every accepted thread is now `written`",
+          result["written"] == 3 and len(written) == 3,
+          str({"reported": result["written"], "rows": len(written)}))
+    check("F-D3 the recorded batchUpdate bodies carry the new half of "
+          "every one of them, in the pending grammar",
+          all(f'>>{{{{{t["proposed_new"]}}}}}' in wire for t in written),
+          wire[-400:])
+    check("F-D3 ...and the tab now really carries all three, well-formed "
+          "and unnested",
+          tab.count("<<") == 3 and "<<<<" not in tab
+          and tab.count("{{") == 3, tab)
+    check("F-D3 the run took the doc road, and says so",
+          result["mode"] == "doc"
+          and api._run_mode(_run_row(db, mid)) == "doc")
+
+    # --- F-D19: the ordering invariant twin alignment rests on --------
+    order_in_doc = [tab.index("{{TWO REDONE.}}"),
+                    tab.index("{{FOUR REDONE.}}"),
+                    tab.index("{{FIVE REDONE.}}")]
+    by_created = [t["proposed_new"] for t in api.staging.door_threads(
+        db, mid, "solo.md", states=("written",),
+        origin_type=api.FILTER_ORIGIN)]
+    check("F-D19 the DOCUMENT order of the placed forms equals the "
+          "`created_at, id` order of their threads — twin self-alignment "
+          "at settle rests on nothing else, so it is asserted directly "
+          "rather than inferred",
+          order_in_doc == sorted(order_in_doc)
+          and by_created == ["TWO REDONE.", "FOUR REDONE.", "FIVE REDONE."],
+          str({"doc": order_in_doc, "threads": by_created}))
+    check("F-D19 ...and the WRITE order was descending, which is what "
+          "makes occurrence-from-original correct: the LAST body sent "
+          "carries the LOWEST anchor's form",
+          "{{TWO REDONE.}}" in fake.bodies[-1], fake.bodies[-1][:300])
+
+    # --- F-D5: the DB push guard now fires for a doc-mode run ---------
+    raised = None
+    try:
+        gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                       docs_service=fake)
+    except LookupError as err:
+        raised = str(err)
+    check("F-D5 `doc push` on a doc-mode essay is refused by the DB "
+          "guard, naming `filter settle` — the byte guard is blind here "
+          "because the file is clean, and doc mode is the case that "
+          "proves the two-guard ordering was right",
+          raised is not None and "filter pending forms" in raised
+          and "filter settle solo.md" in raised, raised)
+    check("F-D5 ...and the byte guard really is silent — only the DB "
+          "guard can know anything in doc mode",
+          not _staging.is_marked((ms / "solo.md").read_text()))
+
+    # --- a second push is refused, naming both exits ------------------
+    raised2 = None
+    try:
+        api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    except ValueError as err:
+        raised2 = str(err)
+    check("a second push while forms are out refuses early and BY NAME "
+          "rather than three functions deep in push_doc's own guard",
+          raised2 is not None and "already out" in raised2
+          and "filter settle solo.md" in raised2
+          and "filter unmark solo.md --force" in raised2, raised2)
+
+    # --- F-D11: the checkout gate discriminates -----------------------
+    db3, ms3, msdir3, fake3 = _doc_run(root, "push-ws-3", {2: "TWO REDONE."})
+    meta = gdocs._mapping(db3, ms3)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db3, ms3, meta)
+    raised3 = None
+    try:
+        api.filter_push(db3, ms3, {}, "solo.md", fake3, fake3)
+    except ValueError as err:
+        raised3 = str(err)
+    check("F-D11 `filter push` refuses a CHECKED-OUT file, naming `doc "
+          "pull` — staging read `old` from local, so pushing forms onto "
+          "a tab the author has since edited is the drift case",
+          raised3 is not None and "checked out to Google Docs" in raised3
+          and "doc pull solo.md" in raised3, raised3)
+    check("F-D11 ...and nothing reached the wire: no request body was "
+          "formed at all", not fake3.bodies, str(fake3.bodies[:1]))
+
+
+def _the_push_is_partial_or_nothing(root: Path) -> None:
+    """F-D4 — a thread whose old text is absent from the tab fails alone;
+    a push that lands NOTHING leaves the run's transport unchosen."""
+    print("§2.3 step 7-8: a partial push, and a push that lands nothing:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "partial-ws", {2: "TWO REDONE.", 4: "FOUR REDONE."})
+    mid = manuscript["id"]
+    # The author edited unit 4 in the Doc since the run was staged. The
+    # local drift check passes (local is pristine); the TAB no longer
+    # carries that paragraph verbatim, so that one thread fails there.
+    original = gdocs.push_doc
+
+    def _push_then_edit(db_, ms_, query, **kw):
+        out = original(db_, ms_, query, **kw)
+        tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+        tab["body"] = tab["body"].replace(
+            "Gamma follows, saying something else entirely.",
+            "Gamma, rewritten by the author in the Doc this morning.")
+        return out
+
+    gdocs.push_doc = _push_then_edit
+    try:
+        result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    finally:
+        gdocs.push_doc = original
+
+    states = {t["proposed_new"]: t["state"] for t in api._run_threads(
+        db, mid, _run_row(db, mid))}
+    check("F-D4 the thread whose old text is gone from the tab FAILS, "
+          "by reason, and the other one lands",
+          result["written"] == 1 and len(result["failed"]) == 1
+          and "not found verbatim" in result["failed"][0][1],
+          str({"written": result["written"],
+               "failed": [w for _t, w in result["failed"]]}))
+    check("F-D4 ...and the failed thread stays `accepted`, so it can "
+          "still be settled locally or reworded",
+          states.get("FOUR REDONE.") == "accepted"
+          and states.get("TWO REDONE.") == "written", str(states))
+    check("F-D4 ...and the mode IS set, because something landed",
+          api._run_mode(_run_row(db, mid)) == "doc")
+
+    # And now the other half: a push where NOTHING lands.
+    db2, ms2, msdir2, fake2 = _doc_run(root, "nothing-ws",
+                                       {2: "TWO REDONE."})
+    mid2 = ms2["id"]
+
+    def _push_then_wipe(db_, ms_, query, **kw):
+        out = original(db_, ms_, query, **kw)
+        tab = next(t for t in fake2.tabs if t["title"] == "solo.md")
+        tab["body"] = "Nothing this run staged is in this tab any more.\n"
+        return out
+
+    gdocs.push_doc = _push_then_wipe
+    try:
+        result2 = api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+    finally:
+        gdocs.push_doc = original
+    check("F-D4 a push where NOTHING landed leaves the transport "
+          "UNCHOSEN — recording it would strand the run in a mode with "
+          "no forms in it",
+          result2["written"] == 0
+          and api._run_mode(_run_row(db2, mid2)) is None,
+          str(result2["mode"]))
+    check("F-D4 ...and every thread is still `accepted`, so the local "
+          "road is still open to this run",
+          all(t["state"] == "accepted" for t in api._run_threads(
+              db2, mid2, _run_row(db2, mid2))
+              if t["state"] != "rejected"))
+
+
+def _twins_go_to_the_doc(root: Path) -> None:
+    """F-D16 / §9.2 — push ALL, twins included, with one warning line."""
+    print("§9: identical old halves are pushed, not held back:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "twins-push-ws", {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
+    mid = manuscript["id"]
+    result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    note = "\n".join(result["warnings"])
+    check("§9.2 push says the twins exist — naming the shared text, both "
+          "units, and the one input that misfiles the record",
+          "same paragraph text, word for word" in note
+          and "units 3 and 5" in note
+          and "settle by position" in note
+          and "empty its green half" in note, note)
+    check("§9.2 ...and it WARNED rather than blocking: both twins went "
+          "to the Doc, which is the Sponsor's ruling",
+          result["written"] == 2 and not result["failed"],
+          str(result["written"]))
+    tab = fake.tab_text("solo.md")
+    check("F-D16 each twin's form sits at its OWN paragraph, in the "
+          "essay's own order, with no nesting",
+          "<<<<" not in tab
+          and tab.index("{{TWIN ONE REDONE.}}") < tab.index("Gamma follows")
+          < tab.index("{{TWIN TWO REDONE.}}"), tab)
 
 
 TEMPLATE_ESSAY = (
@@ -1510,7 +1728,7 @@ def main_test() -> None:
         # replace first makes the subsequent insert locate `old` inside that
         # wrapped form and plant {{insert}} between old and >>, corrupting
         # the Doc. Inserts at the same anchor must precede replaces.
-        order = gdocs.critique_write_order([
+        order = gdocs.pending_write_order([
             {"id": "rep6", "proposed_old": "p6", "metadata":
              json.dumps({"anchor_paragraph": 6})},
             {"id": "ins5", "proposed_old": "", "metadata":
@@ -2174,6 +2392,9 @@ def main_test() -> None:
         _local_transport_guards(root)
         _identical_old_halves(root)
         _the_transport_is_frozen(root)
+        _the_doc_transport_push(root)
+        _the_push_is_partial_or_nothing(root)
+        _twins_go_to_the_doc(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

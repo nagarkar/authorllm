@@ -427,7 +427,7 @@ So the door gains a **local transport**:
 3. `filter settle <file>` reads the local file and runs
    `threads.pending_forms` → `passes.final_text_from_marked` →
    `passes.record_resolution` — **all three unchanged**. Byte for byte the
-   critique resolve's second half with `critique_tab_markdown` replaced by
+   critique resolve's second half with `tab_marked_markdown` replaced by
    `path.read_text`.
 
 **Direct apply is the DEFAULT** (no flag), because a filter's edits are

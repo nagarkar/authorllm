@@ -209,7 +209,7 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
     """Read the marked local file back and finalize it.
 
     Byte for byte the critique resolve's second half, with
-    `gdocs.critique_tab_markdown` replaced by `path.read_text`:
+    `gdocs.tab_marked_markdown` replaced by `path.read_text`:
     `threads.pending_forms` → `passes.final_text_from_marked` →
     `passes.record_resolution`, all three unchanged. The author's
     post-edits to the `{{new}}` halves win, as always.

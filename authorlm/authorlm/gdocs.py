@@ -1385,10 +1385,12 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
     return "conflict"
 
 
-def critique_tab_markdown(db: Database, manuscript: dict, file: str,
+def tab_marked_markdown(db: Database, manuscript: dict, file: str,
                           service, docs_service,
                           bridge: DocBridge | None = None) -> dict:
-    """Fetch `file`'s pending-review text straight from the master Doc, the
+    """Fetch `file`'s pending-review text straight from the master Doc —
+    the authoritative marked text for BOTH doc-transport settles
+    (`critique resolve` and a doc-mode `filter settle`), the
     same way pull_doc does: whole-Doc markdown export + order-aware
     split_tabbed_export (never the textRun walk that critique_tab_text
     used, which discards headings/bold/lists/link targets — it-x7-1).
@@ -2409,8 +2411,8 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     ]
 
 
-def critique_write_order(threads: list[dict]) -> list[dict]:
-    """Surgical-write order for accepted critique threads: higher
+def pending_write_order(threads: list[dict]) -> list[dict]:
+    """Surgical-write order for a producer's accepted threads: higher
     anchors first (so earlier indices stay valid); at the same
     anchor, inserts BEFORE replaces.
 
@@ -2418,7 +2420,10 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     n then locates the pristine paragraph text via substring search —
     which matches inside the wrapped form and plants {{insert}} between
     `old` and `>>`, corrupting the pending grammar. Inserts must land
-    first while the anchor text is still verbatim."""
+    first while the anchor text is still verbatim.
+
+    The descending order is also half of the twins invariant: see
+    `_occurrence`, which is correct only because of it."""
     def anchor_of(t):
         return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
 
@@ -2447,15 +2452,21 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     return sum(1 for p in paragraphs[: n - 1] if p == needle)
 
 
-def critique_diff_write(db: Database, manuscript: dict, file: str,
+def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
-    """Critique pass diff-write (design §6.3 step 3): render every
-    ACCEPTED thread of `file` into its Doc tab as a pending form. The
-    tab is first brought level with the local file (a plain push, since
-    the local file is pristine), then each span is marked surgically,
-    last-to-first so earlier indices stay valid. Local keeps OLD.
-    Returns {written, failed:[(thread, reason)]}."""
+    """Render every ACCEPTED thread of `file` into its Doc tab as a
+    pending form (critique design §6.3 step 3). The tab is first brought
+    level with the local file (a plain push, since the local file is
+    pristine), then each span is marked surgically, last-to-first so
+    earlier indices stay valid, and located by OCCURRENCE INDEX so two
+    identical old halves land in their own paragraphs (§9.3). Local
+    keeps OLD. Returns {written, failed:[(thread, reason)]}.
+
+    Two producers now: `critique write` and `filter push`. Neither is
+    named in the signature — the threads arrive as an argument and the
+    caller owns their state transitions — which is why this took a
+    rename and not an `origin_type` parameter."""
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -2469,7 +2480,7 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = critique_write_order(
+    accepted = pending_write_order(
         [t for t in threads if t["state"] == "accepted"])
     written, failed = [], []
     for t in accepted:

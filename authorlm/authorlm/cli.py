@@ -1360,7 +1360,7 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
         passes.compose_marked_text(text, threads)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    result = gdocs.critique_diff_write(db, manuscript, file, threads,
+    result = gdocs.write_pending_forms(db, manuscript, file, threads,
                                        service, docs_service)
     for t in result["written"]:
         db.update("doc_threads", t["id"], {"state": "written"})
@@ -1402,7 +1402,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (it-x7-1). Three-wayed against local so an edit made elsewhere in
     # the tab still lands, and a genuine two-sided edit is surfaced
     # instead of a side being picked silently.
-    fetched = gdocs.critique_tab_markdown(db, manuscript, file,
+    fetched = gdocs.tab_marked_markdown(db, manuscript, file,
                                           service, docs_service)
     if fetched["state"] == "missing":
         sys.exit(f"error: '{file}' has no matching section in the "
@@ -3419,6 +3419,52 @@ def cmd_filter(args):
             elif result["staged"]:
                 print(ui.dim(f"Read them back to the author, then "
                              f"'filter triage {result['file']} --accept …'."))
+            return
+
+        if args.action == "push":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter push <essay.md>")
+            from . import gdocs as _gd
+
+            try:
+                service = _gd.get_service(config, args.workspace,
+                                          interactive=True)
+                docs_service = _gd.get_docs_service(config, args.workspace,
+                                                    interactive=True)
+            except ValueError as err:
+                # The local road needs no credentials and is the DEFAULT
+                # and the recommendation — an author without a Doc bridge
+                # must never be left thinking the pass is unavailable.
+                sys.exit(f"error: {err}\nThe Doc road needs the [gdocs] "
+                         f"bridge. The local road does not: 'filter settle "
+                         f"{args.file} --pause' writes the same "
+                         f"<<old>>{{{{new}}}} forms into the file in your "
+                         f"vault, and 'filter settle {args.file}' finalizes "
+                         f"them.")
+            result = api.filter_push(db, manuscript, config, args.file,
+                                     service, docs_service, name=args.name)
+            _print_filter_warnings(result["warnings"])
+            for t, why in result["failed"]:
+                print(ui.yellow(f"  could not write [{t['id'][:8]}]: {why}"
+                                " — left accepted"))
+            if not result["written"]:
+                print(ui.yellow(
+                    "Nothing landed in the Doc, so this run has NOT taken "
+                    "the Doc road — the local settle is still open to it."))
+                return
+            print(ui.green(f"{result['written']} change(s) written into "
+                           f"{result['file']}'s tab")
+                  + ui.dim(f" — {result['url']}"))
+            print(ui.dim(
+                "Old text struck through, the new text beside it in green. "
+                "Reword any of the {{new}} halves you like; your wording "
+                "wins, and anything you leave alone is taken as a yes. "
+                f"Then 'filter settle {result['file']}' reads the tab back "
+                "and makes them final."))
+            print(ui.dim(
+                f"The file on your disk still holds {result['file']} "
+                "exactly as it was, and it will not push to Docs until "
+                "this is finished."))
             return
 
         if args.action == "settle":
@@ -6476,8 +6522,8 @@ def build_parser() -> argparse.ArgumentParser:
         "filter",
         help="author-defined filters (_filters/*.md, TOML front matter): "
              "add, list, show, run <name> <file> (NO model call by "
-             "default), record, edits, triage, settle, status, unmark, "
-             "rollback, abandon",
+             "default), record, edits, triage, push, settle, status, "
+             "unmark, rollback, abandon",
         description=(
             "The filter pass. A LENS reads one essay whole and reports "
             "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
@@ -6487,12 +6533,26 @@ def build_parser() -> argparse.ArgumentParser:
             "payload for the conversation to draft against. The billed "
             "path is `--native`, and it needs a [filtering] section that "
             "the shipped config deliberately does not have. `--dry-run` "
-            "is accepted as a no-op alias for muscle memory."),
+            "is accepted as a no-op alias for muscle memory.\n\n"
+            "TWO ROADS TO THE AUTHOR'S EYES, and the run picks one by "
+            "which verb it meets first. `filter settle <essay>` is the "
+            "LOCAL road and the default: the changes are applied (or, "
+            "with --pause, written into the file as <<old>>{{new}} forms "
+            "to read in Obsidian). `filter push <essay>` is the DOC road: "
+            "the same forms go into the essay's tab of the master Doc, "
+            "struck-through and green, the file on disk keeps the OLD "
+            "text, and `filter settle <essay>` later reads the tab back. "
+            "Local is recommended — its whole state is described by the "
+            "bytes on disk, and the Doc road's is not (a crash mid-recovery "
+            "can leave forms in a tab that nothing on disk records; "
+            "'doc push <essay>' rebuilds the tab from the pristine file). "
+            "Once a run takes a road it keeps it; switching is "
+            "settle-then-rerun, never a flag."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action",
                    choices=["add", "list", "show", "prelude", "run",
-                            "record", "edits", "triage", "settle", "status",
-                            "unmark", "rollback", "abandon"])
+                            "record", "edits", "triage", "push", "settle",
+                            "status", "unmark", "rollback", "abandon"])
     p.add_argument("name", nargs="?",
                    help="filter name (add/show/prelude/run); optional "
                         "elsewhere, to disambiguate two runs on one file")
