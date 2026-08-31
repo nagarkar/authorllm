@@ -1466,29 +1466,17 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         idx = order.index(file)
         if idx >= p["cursor"]:
             db.update("critique_passes", p["id"], {"cursor": idx + 1})
-    if diffs:
-        _critique_learnings(db, manuscript, diffs, config)
+    _print_pattern_candidate(
+        passes.settle_learnings(db, manuscript, diffs, config))
     nxt = order[idx + 1] if file in order and idx + 1 < len(order) else None
     print(ui.dim(f"Next essay: {nxt} — 'critique run {nxt}' when you say so."
                  if nxt else "That was the last essay in reading order."))
 
 
-def _critique_learnings(db: Database, manuscript: dict, diffs: list[dict],
-                        config: dict) -> None:
-    """Modified acceptances feed the margin-learnings duty: at ≥2 in one
-    resolve, surface a pattern candidate through the scoped distiller."""
-    if len(diffs) < 2:
-        return
-    from . import placement
-    from .llm import LLMClient
-
-    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
-                                f"«{d['final'][:120]}»") for d in diffs]
-    llm = LLMClient(config)
-    try:
-        candidate = placement.distill_batch(db, manuscript, explanations, llm)
-    except Exception:  # noqa: BLE001
-        candidate = None
+def _print_pattern_candidate(candidate: dict | None) -> None:
+    """The one line a settle's pattern candidate earns. The distiller
+    itself is `passes.settle_learnings`, shared by both passes and both
+    filter transports; each CLI path owns its own output."""
     if candidate:
         print(ui.yellow("Pattern candidate from your post-edits: "
                         + ui.shorten(candidate.get("statement", ""), 70)))
@@ -3527,6 +3515,7 @@ def cmd_filter(args):
                 print(ui.yellow(f"summary rebuild failed "
                                 f"({summary['error']}) — run 'summarize "
                                 f"rebuild {result['file']}'"))
+            _print_pattern_candidate(result.get("pattern_candidate"))
             if result.get("tab_still_marked"):
                 print(ui.dim(
                     f"The Doc tab still shows the struck-and-green marks: "

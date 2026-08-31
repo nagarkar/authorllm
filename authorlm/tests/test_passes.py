@@ -1308,6 +1308,89 @@ def _twins_settle_by_position(root: Path) -> None:
           "<<" not in final2 and "{{" not in final2, final2)
 
 
+def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
+    """F-D8 / §1.2 — the pattern-candidate distiller fires for a filter
+    settle, on BOTH transports, exactly once, and only at ≥2 modified
+    acceptances.
+
+    `record_resolution` was origin-parameterized in the filter stream, so
+    the proposal→final diffs have always been recorded. The half that
+    turns them into a rule the author can ratify lived in a CLI-private
+    `_critique_learnings` and only `critique resolve` reached it, so the
+    highest-value output of a settle — *your post-edits keep doing the
+    same thing; here is the rule you may be enacting* — had never fired
+    for a filter, in either mode."""
+    from authorlm import placement as _placement
+
+    print("§1.2: the learnings loop, now reaching both filter roads:")
+
+    calls: list[list] = []
+
+    def _recording_distiller(db_, ms_, items, llm):
+        calls.append(list(items))
+        return {"statement": "prefer the Anglo-Saxon word"}
+
+    original = _placement.distill_batch
+    _placement.distill_batch = _recording_distiller
+    try:
+        # --- LOCAL road: pause, reword TWO halves in the file, settle --
+        db, manuscript, ms, _fake = _doc_run(
+            root, "learn-local", {2: "TWO AS PROPOSED.",
+                                  4: "FOUR AS PROPOSED."})
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.filter_settle(db, manuscript, {}, "solo.md", pause=True)
+        marked = (ms / "solo.md").read_text()
+        (ms / "solo.md").write_text(
+            marked.replace("{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}")
+                  .replace("{{FOUR AS PROPOSED.}}", "{{FOUR, MY WORDING.}}"))
+        result = api.filter_settle(db, manuscript, {}, "solo.md")
+        check("F-D8 two modified acceptances on the LOCAL road call the "
+              "shared distiller EXACTLY once — the filter pass never "
+              "reached this before, in either mode, and doc mode must "
+              "not be the only road that closes the gap",
+              len(calls) == 1 and len(calls[0]) == 2, str(calls))
+        check("F-D8 ...and the candidate is returned to the caller rather "
+              "than printed inside the distiller, so each surface owns "
+              "its own output",
+              result["pattern_candidate"] == {
+                  "statement": "prefer the Anglo-Saxon word"},
+              str(result["pattern_candidate"]))
+
+        # --- DOC road: reword TWO halves in the tab, settle -----------
+        calls.clear()
+        db2, ms2, msdir2, fake2 = _doc_run(
+            root, "learn-doc", {2: "TWO AS PROPOSED.",
+                                4: "FOUR AS PROPOSED."})
+        api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+        _reword_in_tab(fake2, "{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}")
+        _reword_in_tab(fake2, "{{FOUR AS PROPOSED.}}",
+                       "{{FOUR, MY WORDING.}}")
+        result2 = api.filter_settle(db2, ms2, {}, "solo.md",
+                                    services=lambda: (fake2, fake2))
+        check("F-D8 the same two on the DOC road call it exactly once too "
+              "— the parity claim, made testable rather than asserted",
+              len(calls) == 1 and len(calls[0]) == 2
+              and len(result2["diffs"]) == 2, str(calls))
+
+        # --- ONE modified acceptance: it must NOT fire ---------------
+        calls.clear()
+        db3, ms3, msdir3, _f3 = _doc_run(root, "learn-one",
+                                         {2: "TWO AS PROPOSED."})
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.filter_settle(db3, ms3, {}, "solo.md", pause=True)
+        marked3 = (msdir3 / "solo.md").read_text()
+        (msdir3 / "solo.md").write_text(
+            marked3.replace("{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}"))
+        result3 = api.filter_settle(db3, ms3, {}, "solo.md")
+        check("F-D8 ONE modified acceptance does not fire it — a pattern "
+              "needs at least two instances, and a candidate raised from "
+              "one is a guess the author has to refuse",
+              not calls and len(result3["diffs"]) == 1
+              and result3["pattern_candidate"] is None, str(calls))
+    finally:
+        _placement.distill_batch = original
+
+
 TEMPLATE_ESSAY = (
     "# On Templating\n\n"
     "A template engine substitutes: {{title}} becomes the page's title, "
@@ -2624,6 +2707,7 @@ def main_test() -> None:
         _the_doc_settle(root)
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)
+        _the_learnings_loop_reaches_the_filter(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

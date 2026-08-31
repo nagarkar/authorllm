@@ -5122,11 +5122,17 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             summary.update(rebuilt=True, usage=llm.stats_line())
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
+    # The learnings duty, on BOTH transports — the half of the loop that
+    # had never fired for a filter (§1.2). It costs a settle a SECOND
+    # model call where the filter design claimed one, on the general tier
+    # rather than the cheap one, and only when the author reworded at
+    # least two proposals. It fails soft.
+    candidate = passes.settle_learnings(db, manuscript, diffs, config)
     return {"run": run, "file": rel, "paused": False, "direct": direct,
             "forms": len(forms), "diffs": diffs, "final": normalized,
             "warnings": warnings, "falsified_prefix": falsified,
             "summary": summary, "result_version_id": result_version,
-            "mode": _run_mode(run),
+            "pattern_candidate": candidate, "mode": _run_mode(run),
             # Q-2's default, matching `critique resolve` exactly: the
             # settle does NOT re-push. A settle that pushes is a settle
             # that can fail halfway on the network after the evidence is
