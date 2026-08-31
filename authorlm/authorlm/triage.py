@@ -150,7 +150,11 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
             {"id": "kind", "label": "Kind", "kind": "enum", "width": 110},
             {"id": "scope_label", "label": "Sitting", "kind": "enum", "width": 150},
             {"id": "unit", "label": "Unit", "kind": "text", "width": 180},
-            {"id": "statement", "label": "Item", "kind": "long_text", "width": 430},
+            # editable: an inline edit of this column stages the named
+            # action with the new text as its parameter — the app's
+            # edit-in-place path to Revise & accept.
+            {"id": "statement", "label": "Item", "kind": "long_text",
+             "width": 430, "editable": "revise"},
             {"id": "source_name", "label": "Critic", "kind": "enum", "width": 200},
             {"id": "raised", "label": "Raised", "kind": "text", "width": 105},
             {"id": "version", "label": "Row v", "kind": "number", "width": 70},

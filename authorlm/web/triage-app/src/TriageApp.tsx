@@ -38,6 +38,7 @@ type ReviewState = "any" | "recommended" | "staged" | "unreviewed";
 type ColumnDef = GridColumn & {
   key: string;
   source: "database" | "analysis" | "recommendation" | "decision";
+  editable?: string;
 };
 type FieldFilter = {value?: string; min?: string; max?: string};
 type FieldFilterDef = {
@@ -222,7 +223,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         <nav className="tab-rail" aria-label="Help">
           <button className={helpTab ? "active" : ""}
                   onClick={() => setHelpTab((open) => !open)}>
-            <span>04</span>help
+            <span>05</span>help
           </button>
           <div className="tab-rule" />
         </nav>
@@ -300,13 +301,16 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
   });
 
   const columns: ColumnDef[] = [
-    ...snapshot.schema.columns.map((column) => ({
+    ...snapshot.schema.columns.map((column, index) => ({
       id: `db:${column.id}`,
       key: column.id,
       title: column.label,
       width: column.width || 140,
-      group: "DATABASE",
+      // The first column is frozen; glide paints group headers once per
+      // region, so sharing the group label would render "DATABASE" twice.
+      group: index === 0 ? "" : "DATABASE",
       source: "database" as const,
+      editable: column.editable,
       themeOverride: {bgCell: "#fffaf0", bgHeader: "#e8dfcf", textHeader: "#51483b"},
     })),
     ...snapshot.schema.analysis_columns.map((column) => ({
@@ -390,12 +394,16 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     }
     const editableReason = column.source === "decision" && column.key === "reason"
       && !!row.draft && actionAcceptsReason(row.draft.action);
+    const editableItem = column.source === "database" && !!column.editable;
     return {
       kind: GridCellKind.Text,
       data: textValue(value),
       displayData: textValue(value),
-      allowOverlay: editableReason || (column.source === "analysis" && column.key === "why"),
-      readonly: !editableReason,
+      // Every text cell opens on double-click: editable cells for
+      // editing, the rest as a read-only overlay whose text can be
+      // selected and copied (standard grid behavior).
+      allowOverlay: true,
+      readonly: !(editableReason || editableItem),
       allowWrapping: true,
       cursor: column.source === "analysis" && column.key === "why" ? "pointer" : "default",
       themeOverride: colors,
@@ -595,9 +603,25 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     for (const edit of edits) {
       const column = columns[edit.location[0]];
       const row = filteredRows[edit.location[1]];
-      if (column?.source !== "decision" || column.key !== "reason" || !row?.draft
-          || !actionAcceptsReason(row.draft.action)) continue;
+      if (!column || !row) continue;
       const value = edit.value as EditableGridCell & {data?: unknown};
+      // An inline edit of an editable database column (e.g. the critique
+      // Item) stages the schema-named action ("revise") with the new
+      // wording: the row shows as a dirty draft, and Accept/Apply lands
+      // it — no separate Revise & accept round trip.
+      if (column.source === "database" && column.editable) {
+        const text = textValue(value.data).trim();
+        if (!text || text === textValue(row[column.key])) continue;
+        decisions.push({
+          object_id: row.id,
+          action: column.editable,
+          parameters: {text},
+          reason: row.draft?.reason,
+        });
+        continue;
+      }
+      if (column.source !== "decision" || column.key !== "reason" || !row.draft
+          || !actionAcceptsReason(row.draft.action)) continue;
       decisions.push({
         object_id: row.id,
         action: row.draft.action,
@@ -843,7 +867,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         ))}
         <button className={helpTab ? "active" : ""}
                 onClick={() => { setHelpTab(true); setMobileFiltersOpen(false); }}>
-          <span>04</span>help
+          <span>05</span>help
         </button>
         <div className="tab-rule" />
         {!helpTab && <div className="row-count"><strong>{filteredRows.length}</strong> shown / {snapshot.rows.length}</div>}
@@ -955,6 +979,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
           <DataEditor
             width="100%" height="100%" columns={columns} rows={filteredRows.length}
             getCellContent={cellContent} rowMarkers="checkbox" smoothScrollX smoothScrollY
+            rowSelectionMode="multi"
             freezeColumns={1} getCellsForSelection gridSelection={gridSelection}
             onGridSelectionChange={onGridSelectionChange}
             onCellsEdited={(edits) => { void editReasons(edits); return true; }}

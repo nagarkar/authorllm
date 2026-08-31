@@ -10,6 +10,10 @@ export interface ColumnSchema {
   label: string;
   kind: string;
   width?: number;
+  // Names the staging action an inline edit of this column becomes
+  // (e.g. "revise"): the author edits the text in place and the row is
+  // staged as a dirty revision, tracked like any other draft decision.
+  editable?: string;
 }
 
 export interface ActionSchema {
