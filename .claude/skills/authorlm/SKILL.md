@@ -535,6 +535,15 @@ in their own words.
 Design reference: `docs/critique-pass-design.md`. When the author brings a
 critic's report (editorial analysis, beta-reader notes, any external
 feedback document):
+0. **Ingest to Markdown first** — the intake pipeline reads Markdown.
+   A critique arriving as a PDF is converted with
+   `python3 authorlm/tools/pdf2md.py <report.pdf>` (repo tool: direct
+   text-layer extraction with per-page OCR fallback, header/page-number
+   stripping, de-hyphenation, `<!-- p.N -->` page markers) — not with
+   ad-hoc extraction scripts. A `.docx` converts with
+   `pandoc <report.docx> -t markdown` (or `textutil` on macOS). Keep the
+   converted `.md` beside the manifest in `<manuscript>/_critiques/` as
+   the report's durable copy.
 1. **Import** — parse the report conversationally (`critique.parse_units`
    handles markdown), map units to essay files via toc, classify items
    (revision tasks → intents; standing rules and preservation strands →
@@ -632,6 +641,23 @@ paragraph, each conditioned on what came before, the way the write verb's
 beat loop conditions each beat. A filter is one concern on ONE essay: a
 motif used one way in `becker.md` and the opposite way in `kindness.md`
 is a real finding and a filter cannot see it. That question is a lens.
+
+**The lens door (built 2026-08-31, design §7.2).** A lens finding may
+carry an optional `replacement` — the quoted text's substitute within its
+unit. When it anchors cleanly (quote verbatim in exactly one unit, once),
+the harness builds `new` from the unit itself and stages a doc thread with
+`origin_type='lens'`; ambiguity is refused per finding, never guessed, and
+the finding itself is always kept. `lens push <essay>` then writes the
+staged lens edits into the essay's tab as `<<old>>{{new}}` forms and
+`lens settle <essay>` reads the tab back — the filter doc road's contract
+verbatim: the tab is the review, untouched = accept, old-restored =
+decline, reworded (or hand-resolved) = the author's words win, one
+producer's forms per tab, evidence as `lens_edit` under no episode.
+Ruling on a FINDING (`lens review` / conversation) and settling its EDIT
+are independent verdicts — accepting the finding does not apply the edit.
+When registering findings on the author's behalf, include `replacement`
+only where the fix is confidently mechanical; judgment-shaped findings
+stay findings.
 
 The artifact is `<manuscript>/_filters/<name>.md` — TOML front matter
 declaring `class` (`sequential` or `global`), then the prompt. Adding a
