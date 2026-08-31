@@ -864,6 +864,106 @@ def _the_transport_is_frozen(root: Path) -> None:
           str({"bytes": (msdir2 / "solo.md").read_bytes() == before}))
 
 
+CONTAINING_ESSAY = "\n\n".join([
+    "# The Wall",
+    "And so the wall stands, and the Dead do not pass. Or so I once "
+    "believed.",
+    "And so the wall stands, and the Dead do not pass.",
+    "Gamma follows, saying something else entirely.",
+    "And so the wall stands, and the Dead do not pass.",
+    "Omega closes the essay.",
+]) + "\n"
+
+
+def _a_paragraph_that_contains_another(root: Path) -> None:
+    """P1 — `_occurrence` must count in the SAME universe `_locate_in_tab`
+    searches: SUBSTRING occurrences in the joined tab text, not paragraphs
+    equal to the needle.
+
+    The two universes agree only while no paragraph strictly CONTAINS
+    another paragraph's whole text. A refrain that also opens a longer
+    paragraph breaks that, and this manuscript is full of refrains. When
+    they diverge the writer plants each form in the wrong paragraph,
+    the read-back proof passes (the form IS present, just not where it
+    belongs), the settle resolves both threads `cleaned`, and the
+    author's manuscript is silently corrupted.
+
+    `main` fails LOUDLY on this same input — first-match-always nests the
+    second write and the read-back catches it. Trading a loud failure for
+    a silent wrong write is a strictly worse bug than the one AV-1 set
+    out to fix, so it gets its own probe."""
+    print("P1: a paragraph that CONTAINS another paragraph's text:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "contains-ws", {3: "THREE.", 5: "FIVE."},
+        essay=CONTAINING_ESSAY)
+    mid = manuscript["id"]
+    paragraphs = passes.paragraphs_of(CONTAINING_ESSAY)
+    twin = paragraphs[2]
+    check("the fixture really is the hazard: paragraph 2 CONTAINS the "
+          "twin text without being equal to it (§14.8 — the guarded "
+          "thing has to actually happen)",
+          twin in paragraphs[1] and paragraphs[1] != twin
+          and paragraphs[2] == paragraphs[4] == twin, str(paragraphs[1]))
+    check("P1 the two universes disagree on this input, which is the "
+          "whole bug: paragraph-EQUALITY counts 1 before unit 5, "
+          "SUBSTRING counts 2",
+          sum(1 for p in paragraphs[:4] if p == twin) == 1
+          and "\n".join(paragraphs[:4]).count(twin) == 2)
+
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    check("P1 the containing paragraph is NOT touched — its form belongs "
+          "to no thread, and planting one there rewrites a paragraph the "
+          "author never had a proposal on",
+          "<<" not in tab.split("\n")[1], repr(tab.split("\n")[1]))
+    check("P1 each form sits at its OWN unit: THREE at the first bare "
+          "twin, FIVE at the second",
+          tab.index("{{THREE.}}") < tab.index("Gamma follows")
+          < tab.index("{{FIVE.}}"), tab)
+    check("P1 ...and both threads landed, so the fix is not a loud "
+          "failure standing in for a correct write",
+          result["written"] == 2 and not result["failed"],
+          str([(t["id"][:8], w) for t, w in result["failed"]]))
+
+    settle = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("P1 the settled manuscript is correct: the containing "
+          "paragraph survives whole, and neither twin's replacement "
+          "landed inside it",
+          "And so the wall stands, and the Dead do not pass. Or so I "
+          "once believed." in final
+          and "THREE. Or so I once believed." not in final, final)
+    check("P1 ...both replacements landed, each at its own unit, and no "
+          "bare twin is left over",
+          final.index("THREE.") < final.index("Gamma follows")
+          < final.index("FIVE.")
+          and settle["forms"] == 2, final)
+
+    # --- the discrimination half of F-D20, never written until now ----
+    # Forcing the occurrence to 0 must reproduce the ORIGINAL defect. An
+    # assertion that the parameter is correct proves nothing unless
+    # removing it breaks something.
+    db2, ms2, msdir2, fake2 = _doc_run(
+        root, "occ-zero-ws", {3: "THREE.", 5: "FIVE."})
+    original = gdocs._occurrence
+    gdocs._occurrence = lambda paragraphs, n, needle: 0
+    try:
+        forced = api.filter_push(db2, ms2, {}, "solo.md",
+                                 services=lambda: (fake2, fake2))
+    finally:
+        gdocs._occurrence = original
+    tab2 = fake2.tab_text("solo.md")
+    check("F-D20 (discrimination) with the occurrence forced to 0 the "
+          "original defect comes straight back — both writes land on one "
+          "span, nesting as `<<<<`, and a thread fails the read-back. "
+          "The parameter is load-bearing, not decoration",
+          "<<<<" in tab2 and forced["written"] == 1
+          and len(forced["failed"]) == 1, tab2)
+
+
 def _the_doc_transport_push(root: Path) -> None:
     """F-D2, F-D3, F-D4, F-D5, F-D11, F-D19 — `filter push` puts the
     run's accepted forms in the Doc and leaves the disk alone."""
@@ -3004,6 +3104,7 @@ def main_test() -> None:
         _local_transport_guards(root)
         _identical_old_halves(root)
         _the_transport_is_frozen(root)
+        _a_paragraph_that_contains_another(root)
         _the_doc_transport_push(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)

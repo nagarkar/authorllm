@@ -2434,22 +2434,44 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
 
 
 def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
-    """How many paragraphs BEFORE unit `n` are byte-identical to
-    `needle` — the occurrence index the tab writer must locate.
+    """The occurrence index of unit `n`'s own text, counted in the SAME
+    universe `_locate_in_tab` searches.
+
+    That universe is SUBSTRING matches in the tab's joined text — not
+    paragraphs equal to the needle. The distinction is the whole of this
+    function's correctness. Counting paragraph EQUALITY agrees with the
+    locator only while no paragraph strictly CONTAINS another
+    paragraph's whole text; a refrain that also opens a longer paragraph
+    breaks that, and this manuscript is full of refrains. Where the two
+    counts diverge, the writer plants each form in the WRONG paragraph
+    and the read-back proof cannot see it — the form IS present, just
+    not where it belongs — so the settle resolves every thread `cleaned`
+    and the manuscript is silently corrupted. A silent wrong write is
+    strictly worse than the loud nesting failure this parameter exists
+    to fix, so the counting universe is matched exactly.
+
+    So: rebuild the text the tab holds, find where unit `n` starts in
+    it, and count the matches that BEGIN before that — which is exactly
+    how many the locator will step over on its way there.
 
     Computed from the LOCAL paragraph list, which is byte-identical to
-    the tab because the levelling `push_doc` has just put it there. It
-    is correct only in company with the DESCENDING write order: when
-    unit n is written, every paragraph before it is still pristine, so
-    the k-th occurrence in the live tab is still the k-th occurrence in
-    the original text. Paragraphs AFTER n may already be wrapped — their
-    old text still occurs inside the wrapper — but they sit past n and
-    cannot shift a lower occurrence index. Descending order and
-    occurrence-from-original are jointly correct or not at all
+    the tab because the levelling `push_doc` has just put it there, and
+    correct only in company with the DESCENDING write order: when unit n
+    is written, every paragraph before it is still pristine, so a match
+    before it is still where it was. Paragraphs AFTER n may already be
+    wrapped — their old text still occurs inside the wrapper — but they
+    sit past n and cannot shift a lower occurrence index. Descending
+    order and occurrence-from-original are jointly correct or not at all
     (design-filter-doc-settle §9.3)."""
-    if n <= 0:
+    if n <= 0 or not needle:
         return 0
-    return sum(1 for p in paragraphs[: n - 1] if p == needle)
+    full = "".join(p + "\n" for p in paragraphs)
+    start = sum(len(p) + 1 for p in paragraphs[: n - 1])
+    count, at = 0, full.find(needle)
+    while 0 <= at < start:
+        count += 1
+        at = full.find(needle, at + 1)
+    return count
 
 
 def write_pending_forms(db: Database, manuscript: dict, file: str,
