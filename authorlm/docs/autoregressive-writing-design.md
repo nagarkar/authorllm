@@ -2431,3 +2431,95 @@ and because a template needs a worked example. One sentence names STYLE LAW's
   because a filter *ran* is a file in the author's vault they did not ask for,
   and it is instantly a Doc tab, a version-history entry and a diff.
 
+
+### 15.23 The filter pass gains a Doc transport (2026-08-30)
+
+Sponsor ruling: *"We need to build in a way to review edits more easily. We
+already have the ability to send `<<new>>` edits to the Google doc as part of
+comment processing… Can we use that methodology to make edits? That path also
+has the learning loop built in. We can keep the authorlm verb for the review
+process if running cli or in chat (using mcp)."*
+
+§15.20 chose a LOCAL settle transport for the filter pass and called it the
+riskiest decision in that design, on three grounds: dozens of forms and an OAuth
+round trip per essay, the author reads essays in Obsidian, and the Doc bridge is
+credential-bound where the pass must work key-less. All three grounds stand. None
+of them is a reason the Doc road should be *unavailable*, and the Sponsor asked
+for it because reading dozens of struck-and-green spans in Google Docs is
+genuinely easier than reading `<<old>>{{new}}` in a text file.
+
+So the transport becomes a **property of the run, not of the pass**. The run's
+`mode` — in its `metadata`, the house idiom for new state on an existing row — is
+absent until a transport verb chooses one: `filter push <essay>` writes the run's
+accepted forms into the essay's tab through the same surgical writer `critique
+write` uses and sets `doc`; `filter settle` with no prior push takes the local
+road and sets `local`. Once set the mode is frozen — switching is
+settle-then-rerun, never a toggle, because a run whose forms are half in the Doc
+and half on disk is a run nobody can reason about. Local remains the DEFAULT and
+the recommendation: its state is fully described by the bytes on disk, and doc
+mode's is not.
+
+Three things this ruling settles, recorded because each was got wrong once:
+
+1. **The settle reads the DOC, not a pulled local file.** `pull_doc` runs
+   `strip_pending` on incoming text before writing it, so pulling a tab that
+   carries forms writes the pre-edit text and discards every `{{new}}` half —
+   including the author's rewordings. X7-1v2 made `critique resolve` read the tab
+   as markdown and three-way it against local; the local file is the comparison,
+   never the authority. The filter's doc settle does exactly the same, through
+   the same function (now `gdocs.tab_marked_markdown`).
+2. **In doc mode the local file holds the OLD text, unmarked.** The critique
+   model held exactly: ratified content changes only at approval. This costs the
+   filter's staging nothing — `staging.mark_local`, `unmark`, `is_marked` and
+   `resolve_local` are the local transport's four functions and the doc road
+   calls none of them. It also means push guard (a) splits cleanly: its DB half
+   (`forms_pending`, already generalized over `origin_type`) fires in doc mode
+   and its byte half (`staging.is_marked`) fires in local mode, and the ordering
+   they were given — most-informative first, both separately reachable — is what
+   makes that work with no new guard. `filter rollback` needed the same
+   treatment for the same reason, and got a DB refusal above its byte check:
+   in doc mode the bytes are clean and only the rows can see that forms are out.
+3. **The learning loop the ruling cited was never wired to the filter pass.**
+   `record_resolution` was origin-parameterized in the filter stream, so the
+   proposal→final diffs have always been recorded; but the second half — ≥2
+   modified acceptances distilled into a pattern candidate for the author to
+   ratify — lived in `_critique_learnings` in the CLI and only the critique
+   resolve reached it. It is hoisted to `passes.settle_learnings` and called from
+   both settles and both transports. The symmetry with §15.20's own §1.8 is
+   exact: there, the filter's attribution ruling exposed and fixed the same hole
+   in `critique resolve`; here, its transport ruling exposes and fixes the same
+   hole in the filter's own settle. A settle now costs two model calls where
+   §15.20 claimed one — the cheap-tier summary rebuild, and the general-tier
+   distiller when and only when the author reworded at least two proposals.
+
+**Identical old halves ("twins"), Sponsor-ruled: push all.** Two staged edits
+can share a byte-identical `proposed_old` — that is two byte-identical
+paragraphs in one essay, which refrains and liturgical repetitions really
+produce. They are pushed, not held back and not refused: holding twins on the
+local road while the rest went to the Doc would split one run across two
+transports, the exact state the mode freeze exists to forbid. `filter push`
+prints one informational line instead (§15.13, warn-never-block). Their join at
+settle is POSITIONAL — the Doc carries no thread id, and Google's anchor store is
+private, so there is nowhere to put one — which is correct for the text in every
+case and best-effort for the attribution in exactly one: deleting a whole marked
+span can attach the decline to the twin the author kept. The manuscript is never
+affected; only the record of which of two threads proposing identical changes was
+refused. Accepted by Sponsor ruling.
+
+Verifying that invariant found a live defect in the critique pass and fixed it
+first. `gdocs._locate_in_tab` returned the FIRST verbatim match of its needle, so
+twins both resolved to the same span; the descending write order then nested the
+second write inside the first (`<<<<old>>{{new}}>>{{new}}`), and
+`threads.PENDING`, being non-greedy, left the remainder in the finished
+manuscript as literal text. It now takes an `occurrence` index — defaulting to 0,
+so `propose_change`'s hand-quoted span is byte-identical — which
+`write_pending_forms` computes from the local paragraph list. That is correct
+only in company with the descending write order, and the two are documented as
+jointly correct or not at all.
+
+MCP is unchanged, and that is the ruling rather than an omission. `gdocs` is not
+imported by the MCP server at all, deliberately: agent-driven calls must never be
+able to pop an OAuth consent window. The review half the Sponsor named is already
+on MCP and is transport-independent; what doc mode owes chat is legibility, so
+`list_filter_edits` reports the run's mode and whether forms are out, and names
+the CLI verb that ends the pause.

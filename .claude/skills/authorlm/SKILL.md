@@ -689,6 +689,41 @@ The loop, per essay:
    `filter unmark <essay>` is the way out. `filter rollback <essay>`
    restores the run's pin (verdicts stay as evidence).
 
+   **5b. The Doc road.** `authorlm filter push <essay>` writes the
+   accepted edits into the essay's tab of the master Doc as
+   struck-through old text with the new text in green, and leaves the
+   file on disk holding the OLD essay. **The standing expectation is
+   that the author then goes to the Doc and settles there** — `filter
+   settle <essay>` reads the tab back when they say they are done. Tell
+   them three things, once:
+   - **An untouched form is an acceptance.** Leaving a change alone
+     means taking it. Nothing needs to be marked "yes".
+   - **Edit inside the `{{ }}` braces only. Leave `<< >>` alone.**
+     Editing the old half breaks the join, and the settle records that
+     change as a decline — their text still survives, but the verdict on
+     the record is wrong.
+   - **When two changes replace identical paragraphs**, `filter push`
+     says so. They settle by position. Rewording either is safe;
+     deleting one outright may attach the decline to the other twin. The
+     manuscript text is never affected.
+
+   A run takes ONE road and keeps it: a push makes it a doc run, a
+   settle with no prior push makes it a local run, and switching is
+   settle-then-rerun rather than a flag. Local stays the DEFAULT and the
+   recommendation, because its whole state is described by the bytes on
+   disk and the Doc road's is not — a crash between `filter unmark
+   --force`'s withdraw and its rebuild can leave forms in a tab that
+   nothing on disk records, and `filter status` cannot see that without
+   a network call it has no credentials for. The documented recovery is
+   `doc push <essay>`, which rebuilds the tab from the (pristine) local
+   file and is permitted the moment no forms are out.
+
+   `filter push` is CLI-only, like every other loop verb — `gdocs` is
+   deliberately not reachable from MCP, so an agent-driven call can
+   never pop an OAuth consent window. `list_filter_edits` reports the
+   run's `mode` and `forms_out`, so a chat session never offers to apply
+   what is already sitting in the author's Doc.
+
 Say the attribution note ONCE, not every run: nothing a filter does is
 filed against any of the author's goals. A duplicate-word sweep is not
 work toward the Becker rewrite, and recording it as if it were would make

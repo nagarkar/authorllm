@@ -410,6 +410,20 @@ this section records where the build landed differently or added detail.
 
 Deviations / additions worth knowing:
 
+- **Renames (2026-08-30, the filter's doc-settle stream).** Three `gdocs`
+  functions gained a second producer and their names would have lied:
+  `critique_diff_write` → `write_pending_forms`, `critique_write_order` →
+  `pending_write_order`, `critique_tab_markdown` → `tab_marked_markdown`.
+  Behaviour unchanged; none takes an `origin_type`, so the rename cost
+  nothing else. `critique_forms_pending` keeps its name — it genuinely means
+  *critique's* forms. In the same stream `_locate_in_tab` gained an
+  `occurrence` index (default 0, so `propose_change` is byte-identical) and
+  `write_pending_forms` computes it per thread: two accepted threads
+  replacing byte-identical paragraphs used to resolve to the SAME span,
+  nesting the second write inside the first and leaving a literal
+  `<<old>>{{new}}` in the finished manuscript. That was live here, not in
+  the filter; see autoregressive-writing-design §15.23.
+
 - **Verbs**: the design's `critique triage` (edits) is `critique triage
   --edits <essay>`; the intake triage keeps the bare form. Diff-write is
   its own verb `critique write` (the design folded it into triage end) so
