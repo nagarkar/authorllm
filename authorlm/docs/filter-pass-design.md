@@ -575,6 +575,13 @@ exit that saves it. Preserving such an edit inside the recovery verb was
 considered and refused: it would put a tab read and a three-way into the one verb
 the author reaches for when something has already gone wrong.
 
+A run recovered with `filter unmark --force` settles locally while its
+recorded transport still reads `doc`; at that point the transport is
+provenance, not a live constraint (reviewer ruling, AV round 2 —
+2026-08-30). Clearing `mode` would contradict "a run that has had forms
+out keeps saying so", and refusing the local settle would strand the run
+with no exit after the recovery verb this section itself names.
+
 Only one producer's forms may occupy a tab at a time. A second filter's push on
 the same essay is refused early and by name (Q-1), because the settle join is the
 old text and neither settle could tell whose forms were whose.
