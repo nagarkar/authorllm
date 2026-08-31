@@ -1749,11 +1749,11 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           raised2 is not None and "mid-settle" in raised2, raised2)
 
 
-def _two_runs_one_essay(root: Path):
+def _two_runs_one_essay(root: Path, subdir: str):
     """A second filter with its own active run on the same essay — which
     the pass permits by design (it warns, it does not refuse)."""
     db, manuscript, ms, fake = _doc_run(
-        root, "two-runs-ws", {2: "TWO AS PROPOSED."})
+        root, subdir, {2: "TWO AS PROPOSED."})
     api.filter_add(manuscript, "second-filter",
                    DOC_FILTER.replace("Duplicate words and phrases",
                                       "A second concern entirely"))
@@ -1776,7 +1776,7 @@ def _chat_sees_each_run_s_transport(root: Path) -> None:
     author's Doc while another's proposals are still on the table."""
     print("P3b: two runs on one essay, on different roads:")
 
-    db, manuscript, ms, fake = _two_runs_one_essay(root)
+    db, manuscript, ms, fake = _two_runs_one_essay(root, "two-runs-ws")
     mid = manuscript["id"]
     api.filter_push(db, manuscript, {}, "solo.md",
                     services=lambda: (fake, fake), name="duplicate-words")
@@ -1804,6 +1804,60 @@ def _chat_sees_each_run_s_transport(root: Path) -> None:
           "of freezing the whole essay",
           "still yours to triage as usual"
           in (report["transport_note"] or ""), report["transport_note"])
+
+
+def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
+    """P3c / Q-1, ruled: refuse EARLY and BY NAME when another producer's
+    forms are already in this essay's tab.
+
+    The push's composed drift check runs against LOCAL, which knows
+    nothing about the tab, so a second push would mark a tab already
+    carrying the first run's forms. It fails regardless —
+    `push_doc`'s `forms_pending` refuses the levelling push from inside
+    `write_pending_forms` — so the ruling is about WHERE the author meets
+    the refusal and whether it names the filter they know."""
+    print("P3c / Q-1: a second run pushing into an occupied tab:")
+
+    db, manuscript, ms, fake = _two_runs_one_essay(root, "occupied-tab-ws")
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake), name="duplicate-words")
+    staged = api.filter_edits(db, manuscript, "solo.md")
+    api.filter_triage(db, manuscript, "solo.md",
+                      [{"item": str(i["n"]), "verdict": "accept"}
+                       for i in staged["items"] if i["state"] == "proposed"])
+    bodies_before = len(fake.bodies)
+    tab_before = fake.tab_text("solo.md")
+    raised = None
+    try:
+        api.filter_push(db, manuscript, {}, "solo.md",
+                        services=lambda: (fake, fake), name="second-filter")
+    except ValueError as err:
+        raised = str(err)
+    check("P3c the second run's push is refused EARLY, naming the filter "
+          "whose forms are already in the tab and the verb that ends its "
+          "pause — not a row id, and not three functions deep in "
+          "push_doc's own guard",
+          raised is not None and "'duplicate-words'" in raised
+          and "already in solo.md's tab" in raised
+          and "filter settle solo.md" in raised, raised)
+    check("P3c ...and it says WHY, which is the part a warning could not "
+          "carry: two producers' forms in one tab cannot be told apart "
+          "at settle, because the join is the old text",
+          raised is not None
+          and "cannot be told apart at settle" in raised, raised)
+    check("P3c ...and NOTHING moved: no request body was formed and the "
+          "tab is byte-identical, so the refusal really is early rather "
+          "than a rollback after a half-done write",
+          len(fake.bodies) == bodies_before
+          and fake.tab_text("solo.md") == tab_before,
+          str(len(fake.bodies) - bodies_before))
+    check("P3c ...and the second run's own verdicts are untouched — a "
+          "refusal is not a withdrawal",
+          all(t["state"] == "accepted" for t in api._run_threads(
+              db, mid, dict(db.one(
+                  "SELECT * FROM filter_runs WHERE manuscript_id = ? AND "
+                  "filter = 'second-filter'", (mid,))))))
 
 
 def _the_hint_after_an_unmark(root: Path) -> None:
@@ -3341,6 +3395,7 @@ def main_test() -> None:
         _the_learnings_loop_reaches_the_filter(root)
         _recovery_while_forms_are_out(root)
         _chat_sees_each_run_s_transport(root)
+        _a_second_run_may_not_push_into_the_same_tab(root)
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)

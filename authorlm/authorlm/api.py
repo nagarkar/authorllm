@@ -4758,6 +4758,17 @@ def _uncovered_units(run: dict) -> list[tuple[int, int]]:
     return [(run["cursor"] + 1, run["unit_count"])]
 
 
+def _owning_filter(db: Database, manuscript_id: str,
+                   thread: dict) -> str | None:
+    """The filter whose run staged this thread, by its `origin_id`
+    prefix (`{run_id}:{file}:{ordinal}`) — so a refusal can name the
+    filter the author knows rather than a row id they have never seen."""
+    run_id = (thread.get("origin_id") or "").split(":", 1)[0]
+    row = db.one("SELECT filter FROM filter_runs WHERE id = ? AND "
+                 "manuscript_id = ?", (run_id, manuscript_id))
+    return row["filter"] if row else None
+
+
 def _twin_warning(accepted: list[dict]) -> str | None:
     """§9.2's one informational line, when two accepted edits replace
     byte-identical paragraphs.
@@ -4841,6 +4852,37 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
             f"pushing again would mark a tab that still carries them. "
             f"Finalize ('filter settle {rel}') or take them back out "
             f"('{unmark}'), then push again if you still want to.")
+    # 3b. Q-1, ruled: refuse when SOMEONE ELSE's forms are already in
+    #     this tab — a second filter's run, or the critique pass's.
+    #     The composed drift check further down runs against LOCAL,
+    #     which knows nothing about the tab, so a second push would mark
+    #     a tab that already carries another producer's forms. It fails
+    #     anyway — `push_doc`'s `forms_pending` refuses the levelling
+    #     push from inside `write_pending_forms` — so this refusal exists
+    #     to be EARLY and BY NAME rather than three functions deep.
+    #
+    #     ABOVE the capture, with the other DB-known refusals, for the
+    #     reason given there: the first run's own levelling push checked
+    #     this file out, so the checkout gate would otherwise answer
+    #     first and send the author to `doc pull`, which does not help.
+    mine = {t["id"] for t in threads}
+    outside = [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
+        "AND state = 'written' ORDER BY created_at", (mid, rel))
+        if r["id"] not in mine]
+    if outside:
+        origin = outside[0]["origin_type"]
+        owner = (_owning_filter(db, mid, outside[0])
+                 if origin == FILTER_ORIGIN else None)
+        whose = f"'{owner}'" if owner else f"the {origin} pass"
+        remedy = (f"filter settle {rel}" if origin == FILTER_ORIGIN
+                  else f"critique resolve {rel}")
+        raise ValueError(
+            f"{len(outside)} form(s) from {whose} are already in {rel}'s "
+            f"tab. Two producers' forms in one tab cannot be told apart "
+            f"at settle — the join is the old text, and neither settle "
+            f"would know which forms were its own. Finish that one "
+            f"('{remedy}') and then push this run.")
     # 4a. The one capture: the checkout gate, the three in-flight and
     #     placeholder refusals, the sidecar refusal, the file's text. The
     #     gate STAYS on this verb: staging read `old` from local, so
