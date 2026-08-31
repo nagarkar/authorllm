@@ -7342,6 +7342,47 @@ def main_test() -> None:
         check("export writes _exports/<name>.md even without Drive",
               local_only["doc_id"] is None and export_path.read_text() == text)
 
+        # Footnote labels are only file-unique; concatenation must
+        # namespace them or pandoc binds colliding labels to one
+        # definition across essays (it-9e6b7613a5c5). The token is the
+        # shortest unique prefix of the stem — first letter, extended
+        # letter by letter on collision (the author's scheme).
+        from authorlm.export import footnote_prefixes, namespace_footnotes
+
+        toks = footnote_prefixes(
+            ["recapitulation.md", "rebirth.md", "redemption.md",
+             "god.md", "good-choice.md", "good-life.md", "kindness.md"])
+        check("footnote prefixes extend letterwise until unique",
+              toks == {"recapitulation.md": "rec", "rebirth.md": "reb",
+                       "redemption.md": "red", "god.md": "god",
+                       "good-choice.md": "good-c",
+                       "good-life.md": "good-l", "kindness.md": "k"},
+              toks)
+        noted = "The herd [^E1] persists.\n\n[^E1]: A note.\n"
+        check("namespace_footnotes rewrites refs and definitions",
+              namespace_footnotes(noted, "k")
+              == "The herd [^k-E1] persists.\n\n[^k-E1]: A note.\n",
+              namespace_footnotes(noted, "k"))
+
+        (ms / "02-kind.md").write_text("Kind [^E1].\n\n[^E1]: kind note\n")
+        (ms / "03-rank.md").write_text("Rank [^E1].\n\n[^E1]: rank note\n")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "02-kind.md"\n\n'
+            '[[chapter]]\nfile = "03-rank.md"\n')
+        collided, _, _ = combined_markdown(api.get_manuscript(db))
+        import re as _re
+        labels = _re.findall(r"\[\^([A-Za-z0-9_-]+)\]", collided)
+        check("combined export carries no duplicate footnote labels",
+              len(set(labels)) * 2 == len(labels)  # each label: 1 ref + 1 def
+              and "02-E1" in labels and "03-E1" in labels, labels)
+        for name in ("02-kind.md", "03-rank.md"):
+            (ms / name).unlink()
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "00-intro.md"\n')
+
         exported = export_manuscript(db, manuscript, service=stub)
         check("export creates the manuscript Doc in the existing folder",
               exported["created"] and exported["doc_id"] is not None

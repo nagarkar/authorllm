@@ -34,15 +34,48 @@ def export_filename(name: str) -> str:
     return cleaned + ".md"
 
 
+_NOTE_LABEL = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+
+
+def footnote_prefixes(names: list[str]) -> dict[str, str]:
+    """Per-file namespace tokens for footnote labels in combined exports:
+    the shortest unique prefix of each file's stem — the first letter,
+    extended to k+1 letters wherever two files collide on their first k
+    (the author's scheme, it-9e6b7613a5c5). An exhausted stem uses its
+    whole self; file names are unique, so the map is collision-free."""
+    stems = {name: Path(name).stem for name in names}
+    tokens: dict[str, str] = {}
+    for name, stem in stems.items():
+        others = [s for n, s in stems.items() if n != name]
+        k = 1
+        while k < len(stem) and any(o[:k] == stem[:k] for o in others):
+            k += 1
+        tokens[name] = stem[:k]
+    return tokens
+
+
+def namespace_footnotes(text: str, token: str) -> str:
+    """[^X] → [^token-X] on every reference and definition, so labels
+    stay unique after concatenation. Labels never render — the reader's
+    footnote numbering is untouched; only the collision goes away."""
+    return _NOTE_LABEL.sub(lambda m: f"[^{token}-{m.group(1)}]", text)
+
+
 def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     """(combined text, ordered file names, files missing from toc.toml).
 
     Pure concatenation of the normalized content files in reading order —
     no added headings or separators; the combination is mechanical, the
-    prose stays exactly the author's."""
+    prose stays exactly the author's. Footnote labels alone are
+    namespaced per file (footnote_prefixes): they are only file-unique
+    in the sources, and pandoc would bind colliding labels to one
+    definition across essays."""
     files = read_manuscript_files(Path(manuscript["path"]))
     order, unlisted = reading_order(files)
-    parts = [normalize_markdown(files[name]).rstrip("\n") for name in order]
+    tokens = footnote_prefixes(order)
+    parts = [namespace_footnotes(
+        normalize_markdown(files[name]).rstrip("\n"), tokens[name])
+        for name in order]
     text = "\n\n".join(part for part in parts if part)
     return (text + "\n" if text else ""), order, unlisted
 
@@ -191,6 +224,7 @@ def publish_markdown(manuscript: dict, variant: str,
 
     warnings: list[str] = []
     parts: list[str] = []
+    tokens = footnote_prefixes(order)
     for name in order:
         if is_placeholder(files[name]):
             # A mid-rewrite essay used to disappear from the exported
@@ -229,6 +263,7 @@ def publish_markdown(manuscript: dict, variant: str,
                     lines.append(f"![{caption}]({ILLUS_DIR}/{target})")
             text = normalize_markdown("\n".join(lines)).rstrip("\n")
         if text:
+            text = namespace_footnotes(text, tokens[name])
             if semantic_sections:
                 role = ("authorlm-title-page" if name == "title.md"
                         else "authorlm-essay")
