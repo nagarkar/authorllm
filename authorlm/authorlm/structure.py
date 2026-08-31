@@ -38,9 +38,53 @@ TOC_FILENAME = "toc.toml"
 
 MATTER_VALUES = ("front", "main", "back")
 
+# Sidecars: structural, but MARKDOWN and Doc-mirrored (§15.22). The
+# author edits `pronunciations.md` in the Doc exactly like an essay, and
+# it is never part of the book.
+#
+# The flag is the FILENAME, in this tuple, and not a marker inside the
+# file. A marker can be deleted by a careless Doc edit or eaten by a
+# round trip, and the failure mode is that the dictionary silently
+# reclassifies as an essay and SHIPS INSIDE THE BOOK — the same argument
+# that gave `_filters/` and `_lenses/` two directories instead of one
+# with a kind marker, applied to a file. `toc.toml` uses a filename for
+# the same reason. A configurable name is not supported and not wanted:
+# one manuscript, one dictionary.
+SIDECAR_FILES = ("pronunciations.md",)
+
+
+def is_sidecar(name: str) -> bool:
+    """Structural, but markdown and Doc-mirrored.
+
+    A separate predicate from `is_structural` rather than an inline
+    literal, because exactly one site must NOT exclude it — the Doc tab
+    list (`gdocs._reading_order_files`) — and that site has to be
+    greppable."""
+    return name in SIDECAR_FILES
+
 
 def is_structural(name: str) -> bool:
-    return name == TOC_FILENAME
+    return name == TOC_FILENAME or is_sidecar(name)
+
+
+def refuse_sidecar(name: str) -> None:
+    """The named refusal, shared by every verb that could be pointed at
+    the dictionary and must not run on it: `filter run|prelude|record|
+    settle`, `lens run`, and `intent --scope`.
+
+    Every one of these ALREADY refuses through the generic
+    "not in the manuscript's reading order" path — the sidecar is out of
+    the reading order, so the exclusion is structural rather than
+    conditional. But that wording is misleading for a file that plainly
+    exists and that the author can see as a tab in their own Doc, so the
+    refusal says what the file IS and where the work actually happens.
+    One helper rather than three, so the three cannot drift."""
+    if is_sidecar(name):
+        raise ValueError(
+            f"{name} is the pronunciation dictionary, not an essay — no "
+            f"filter, no lens and no critique pass runs on it, and it "
+            f"never ships inside the book. Edit it directly (or in its "
+            f"Doc tab), or rule on proposed rows with 'proposal review'.")
 
 
 def content_files(files: dict[str, str]) -> dict[str, str]:

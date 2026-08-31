@@ -1543,7 +1543,78 @@ and install it if you like it.
   subject too far from its verb, a parenthesis carrying real content, a Field and
   a field both live in one sentence. It will not flatten the register: the prose
   is meant to sound like scripture read aloud, and it breaks a sentence only when
-  a listener would actually lose the thread, never because it is long.
+  a listener would actually lose the thread, never because it is long. It also
+  stocks your pronunciation dictionary — see below.
+
+### Your words are protected, and I am shown the list
+
+Every one of these gets the whole of your vocabulary handed to it before it
+starts: every concept, every figure, every named construct, every proper name,
+and every alternate name of each of them, straight out of your own graph.
+Nothing on that list gets a synonym, a rewording, or a change of
+capitalization — and the list is the *whole* vocabulary rather than a handful I
+happened to remember, so it grows the day you add a concept and never drifts.
+
+Capitalization works the way it already does everywhere else: a single-word name
+you declared with a capital is your term only where the text capitalizes it, so
+**Field** is the concept and *field* is ordinary English. A name you declared in
+lower case — \`anattā\`, \`ressentiment\` — is your term in any casing, which is why
+the list is not filtered down to the capitalized ones.
+
+If a proposal does drop one of your terms, you are told so by name at the moment
+it is recorded. It is still staged: the machine hands you the law, it does not
+get to be the editor. But it is usually the proposal worth looking at first.
+
+### The pronunciation dictionary
+
+Some of the book's words are hard to say aloud — \`Bṛhadāraṇyaka\`, \`Nāgārjuna\`,
+\`Śūnyatā\`, \`Böhme\`. If the essay is ever narrated, someone has to decide how,
+and that someone is you.
+
+\`pronunciations.md\` sits in the manuscript root beside \`toc.toml\`. It is a plain
+markdown table, and it looks exactly like this:
+
+| Term | Say it | Note |
+| --- | --- | --- |
+| anattā | uh-NUT-taa | Pali; the second a is long |
+| Nāgārjuna | naa-GAAR-ju-na | |
+
+It is **not part of the book**. It never appears in the reading order, never
+gets scanned for concepts, never gets summarized, never gets filtered, and never
+ships in an export. But it does get a tab in the master Doc, right at the end,
+so you can edit it there exactly like an essay — and it is versioned and
+diffable like everything else, so a bad edit is recoverable.
+
+It fills up like this:
+
+> **You:** run the audio filter over becker
+>
+> **Me:** Before the paragraphs — four terms in this essay have no pronunciation
+> yet, and three of them are Sanskrit. Here is what I would tell a narrator:
+>
+> - **Bṛhadāraṇyaka** — bri-ha-DAA-ran-ya-ka. Sanskrit; the stress is on the
+>   third syllable, not the first.
+> - **Śūnyatā** — shoon-yuh-TAA.
+> - **Nāgārjuna** — naa-GAAR-ju-na.
+> - **Böhme** — BUR-muh. German; the ö is not "oh".
+>
+> Say yes to the ones you want and I will write them into the table.
+
+Two things worth knowing about that exchange.
+
+**The row is yours, and only yours.** Nothing in the system writes that file
+except your own yes. Not the filter, not the settle, not the rollback, not a
+Doc pull. A row you have written is settled and no pass will ever rewrite it.
+
+**A term I ask about is a term I will never ask about again.** Say no to one and
+it is gone from the queue for good — including if I would have offered a
+different spelling next time. If you change your mind, open the file and write
+the row yourself; that is the escape hatch, and it is a better one than another
+round of guessing.
+
+And the loop closes: once a term is in the table, the audio filter stops
+flagging it as hard to say. The dictionary is the fix, so there is nothing left
+to flag.
 
 ### What the conversation looks like
 
@@ -1761,6 +1832,6 @@ mode, and refuses while \`[writing]\` is absent — see §10.
   </head>
   <body>
     <div id="root"></div>
-  <!-- tutorial-sha256:44024458b7f43f074dbe1daeb8b00c30dbf705007bd53f595ec733e06c0acb35 -->
+  <!-- tutorial-sha256:5635e36ccc1edbd0f3df599303820970b89c5504b292edfc6b4dcc2f92c5fb20 -->
   </body>
 </html>

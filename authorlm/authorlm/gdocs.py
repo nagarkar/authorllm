@@ -473,13 +473,20 @@ def workspace_bridge(manuscript: dict) -> DocBridge:
 def _reading_order_files(bridge: DocBridge) -> list[str]:
     """Tab order for a bridge's files: TOC order for the manuscript root
     (reading_order falls back to alphabetical when no toc.toml exists —
-    which is exactly right for the workspace directory)."""
+    which is exactly right for the workspace directory).
+
+    THE ONE INVERSION (§15.22, §2.5 row 19). Every other site excludes a
+    sidecar; this one includes it, appended LAST, after the essays and
+    before the manifest. The dictionary is edited in the Doc like an
+    essay — that is the Sponsor's ruling — so it must have a tab, and a
+    tab it does not have is a dictionary the author cannot reach from
+    the place they actually work."""
     from .revisions import read_manuscript_files
-    from .structure import reading_order
+    from .structure import is_sidecar, reading_order
 
     files = read_manuscript_files(bridge.root)
     order, _ = reading_order(files)
-    return order
+    return order + [n for n in sorted(files) if is_sidecar(n)]
 
 
 def _doc_tabs(docs_service, master_id: str) -> list[tuple[str, str]]:
@@ -1128,6 +1135,23 @@ def push_doc(db: Database, manuscript: dict, query: str,
     }
 
 
+def _sidecar_would_be_emptied(relpath: str, incoming: str,
+                              current: str) -> bool:
+    """True when writing `incoming` over a sidecar would drop every row
+    it has. Deterministic, and it consults the sidecar's OWN parser
+    rather than counting lines: what matters is whether the rows survive
+    the round trip, not whether the bytes look like a table."""
+    from .structure import is_sidecar
+
+    if not is_sidecar(relpath):
+        return False
+    from . import pronunciations as pron
+
+    if not (current or "").strip():
+        return False
+    return bool(pron.parse(current)[0]) and not pron.parse(incoming)[0]
+
+
 def classify_tabs(tabs: list[tuple[str, str]], links: dict,
                   local_files: set[str]) -> dict:
     """Classify the master Doc's tabs against the mapping. The stable key is
@@ -1218,9 +1242,17 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     (never-pushed local files) are preserved after their previous
     predecessor; per-file attributes (matter) ride through unchanged.
     Returns the new (name, depth) tree."""
-    from .structure import (TOC_FILENAME, parents_to_tree,
+    from .structure import (TOC_FILENAME, is_sidecar, parents_to_tree,
                             serialize_toc_tree, toc_attrs)
 
+    # SIDECAR GUARD 3 of 3 (§15.22 §2.5 row 25), and the one that does the
+    # most damage if it is missing: writing `pronunciations.md` into
+    # toc.toml makes it a CHAPTER, at which point every exclusion in
+    # §2.5 unravels at once — it enters the reading order, the concept
+    # scan mines it, and it ships inside the book. Guarded here as well
+    # as at both call sites, because this function writes the file and a
+    # guard on the caller is a guard on the caller.
+    doc_pairs = [(n, p) for n, p in doc_pairs if not is_sidecar(n)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -1245,7 +1277,8 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
     moved since the last sync (local_moved / insync); a doc-side change
     means 'pull first'."""
-    from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents
+    from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
+                            tree_to_parents)
 
     meta = _mapping(db, manuscript)
     links = meta.get("gdocs", {})
@@ -1263,12 +1296,18 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     linked = {f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")}
+    # SIDECAR GUARD 1 of 3 (§15.22 §2.5 row 23). `linked` contains the
+    # dictionary — it has a tab — and `parse_toc_tree` never can, because
+    # a sidecar is not in the reading order. Comparing a doc list that
+    # holds it against a desired list that cannot would be a PERMANENT
+    # `unsynced`, and tab-order sync would stop working the day the
+    # dictionary first appeared.
     doc_pairs = [(n, p if p in linked else None)
-                 for n, p in doc_pairs if n in linked]
+                 for n, p in doc_pairs if n in linked and not is_sidecar(n)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked]
+               if n in linked and not is_sidecar(n)]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     state = classify_structure(doc_pairs, desired, base)
@@ -1571,6 +1610,21 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             entry = links[relpath]
             entry["checked_out"] = False
             continue
+        # The sidecar guard (§15.22 §2.6) — the highest-value line in
+        # this feature. One bad Docs export (a table converted to
+        # bullets, a table dropped) would otherwise destroy the whole
+        # pronunciation dictionary on the next pull, silently, with the
+        # only recovery in a version history nobody thinks to look at.
+        # A pull that parses to FEWER rows is NOT guarded: that is an
+        # author deleting a row in the Doc, which is legitimate and must
+        # work. Zero rows against a local file that has rows is not an
+        # edit, it is a loss — and `--force` must not reach past it, for
+        # the same reason the marked-file guard above refuses it:
+        # "mostly unreachable" is not a guard, and neither is a guard
+        # with a flag that turns it off.
+        if _sidecar_would_be_emptied(relpath, text, current_raw):
+            report.setdefault("sidecar_unparsable", []).append(relpath)
+            continue
         # The bridge's canonical text is embed-free: illustration embed
         # lines are local derived machinery, so every comparison strips
         # them and a pull re-inserts them (the prior pick wins).
@@ -1664,13 +1718,21 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # content: only-Doc-moved rewrites toc.toml; only-local-moved defers to
     # the next push; both → conflict, touch nothing.
     if doc_pairs and query is None and bridge.toc_sync:
-        from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents
+        from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
+                                tree_to_parents)
 
         linked = {f for f, e in links.items()
                   if not f.startswith("_") and isinstance(e, dict)
                   and e.get("tab_id")}
+        # SIDECAR GUARD 2 of 3 (§15.22 §2.5 row 24). Same mismatched
+        # comparison as sync_tab_structure's, on the pull side: the
+        # dictionary has a tab and can never be in toc.toml, so leaving
+        # it in `doc_struct` would report a permanent conflict — and,
+        # worse, a `doc_moved` verdict would hand it to
+        # rewrite_toc_from_doc.
         doc_struct = [(n, p if p in linked else None)
-                      for n, p in doc_pairs if n in linked]
+                      for n, p in doc_pairs
+                      if n in linked and not is_sidecar(n)]
         toc_path = bridge.root / TOC_FILENAME
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])

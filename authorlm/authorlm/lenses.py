@@ -119,6 +119,13 @@ def run_lens(db: Database, manuscript: dict, session: dict, name: str,
     if not path.exists():
         known = ", ".join(l["name"] for l in list_lenses(manuscript)) or "none"
         raise LookupError(f"no lens '{name}' (defined: {known})")
+    from .structure import refuse_sidecar
+
+    # §2.5 row 15 — the one site that accepts toc.toml today. A lens
+    # reads an essay whole and reports findings about the prose; the
+    # dictionary is a table of the author's rulings, and there is
+    # nothing in it for a lens to find.
+    refuse_sidecar(Path(relpath).name)
     files = read_manuscript_files(Path(manuscript["path"]))
     if relpath not in files:
         raise LookupError(f"'{relpath}' is not a manuscript file")
@@ -147,6 +154,9 @@ def register_findings(db: Database, manuscript: dict, session: dict,
     """The registration door for externally produced findings (Claude
     subagent lenses: tether, deep philosophical passes). Same hygiene,
     same store, same review loop — one evidence stream, no forks."""
+    from .structure import refuse_sidecar
+
+    refuse_sidecar(Path(relpath).name)      # the other door, same refusal
     files = read_manuscript_files(Path(manuscript["path"]))
     if relpath not in files:
         raise LookupError(f"'{relpath}' is not a manuscript file")

@@ -236,6 +236,29 @@ def _rc_edge_reproposal(db, mid, row, payload):
     return LIVE, None, None
 
 
+def _rc_pronunciation(db, mid, row, payload):
+    """Satisfied when the term has since reached the dictionary BY ANY
+    ROAD — the author typed it, or a Doc edit added it — so the queue
+    settles itself instead of asking a question the file already
+    answers."""
+    from pathlib import Path
+
+    from . import pronunciations as pron
+
+    manuscript = db.one("SELECT path FROM manuscripts WHERE id = ?", (mid,))
+    if manuscript is None:
+        return ORPHAN, "the manuscript no longer exists", None
+    path = Path(manuscript["path"]) / pron.FILENAME
+    if not path.exists():
+        return LIVE, None, None
+    text = path.read_text(encoding="utf-8")
+    if pron.key(payload.get("name") or "") in {
+            pron.key(t) for t in pron.terms(text)}:
+        return SATISFIED, (f"'{payload.get('name')}' is already in "
+                           f"{pron.FILENAME}"), None
+    return LIVE, None, None
+
+
 def _rc_variant_of_retired(db, mid, row, payload):
     existing = _by_name(db, mid, payload.get("proposed_name"))
     if existing and existing["status"] != "retired":
@@ -552,6 +575,23 @@ REGISTRY: dict[str, LoopSpec] = {
         aspect="concept-identity", source="triage-variant_of_retired",
         evidence_type="proposal_review", render=_render_proposal,
         reconcile=_rc_variant_of_retired),
+    # Reconciliation only, like the four above (§15.22 §3.6 item 3). Its
+    # screen half becomes live the day the author ratifies law about
+    # pronunciations ("never respell a Sanskrit term for an English
+    # ear"); until then `active_law` finds nothing and the screen is
+    # inert BY CONSTRUCTION, which is the documented behaviour of the
+    # reconcile-only specs rather than a new condition. `dedupe_render`
+    # is the term ALONE: the respelling is exactly what two proposals
+    # about one term differ in, and comparing it would let a second
+    # guess through the firewall — which is the failure
+    # `_pronunciation_settled` closes on the other axis.
+    "proposals/pronunciation": LoopSpec(
+        key="proposals/pronunciation", table="knowledge_proposals",
+        kind="pronunciation",
+        aspect="pronunciation", source="triage-pronunciation",
+        evidence_type="proposal_review", render=_render_proposal,
+        dedupe_render=lambda r: _payload(r).get("name", ""),
+        reconcile=_rc_pronunciation),
     "illustrations": LoopSpec(
         key="illustrations", table="illus_proposals",
         aspect="illustration-placement", source="margin-thread",

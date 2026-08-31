@@ -50,6 +50,60 @@ from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
 NONE = "(none)"
+
+# ---------------------------------------------- protected terms (§15.22)
+#
+# The line is VOCABULARY versus LABEL: a kind whose `name` is a word the
+# author uses IN THE PROSE is protected; a kind whose `name` is a label
+# the author gave to a MOVE IN AN ARGUMENT is not.
+#
+# `objection`, `example`, `question` and `syllogism` are excluded because
+# their names are SENTENCES, not words — "Question about Supreme God",
+# "God beyond reach as excuse". Listing those would protect the ordinary
+# English inside them ("question", "about", "good"), and a protection
+# list that protects ordinary words protects nothing, because the model
+# stops believing it.
+#
+# The cost, stated: an `example` node may name a genuine recurring
+# exemplum whose wording is load-bearing. The remedy is the right one
+# rather than a workaround — the author re-kinds it to `concept`, which
+# is what the kind taxonomy is for. A second protection axis that could
+# disagree with the kind would be the ambiguity two directories exist to
+# refuse.
+PROTECTED_KINDS = frozenset({
+    "concept", "metaphor", "mathematical_construct", "historical_reference",
+})
+
+# `declared` is protected even though the concept has not been found in
+# any text yet: a declared name is one the author has RATIFIED and
+# intends to use, and realization is a scan that may simply not have
+# caught up. A declared name that never appears costs one line; a filter
+# recasting a term the author declared last night is the expensive one.
+#
+# `retired` is excluded, and it is the ruling most worth stating out
+# loud: a retired concept's name is vocabulary the author DELIBERATELY
+# ABANDONED, and protecting it would freeze exactly the wording a
+# duplicate-words pass should be free to recast. The synonyms that
+# matter survive anyway — `concepts.merge_concepts` turns a retired
+# duplicate's names into ALIASES of the canonical, so a genuine synonym
+# stays protected through the live node.
+PROTECTED_STATUSES = frozenset({"declared", "realized"})
+
+# Wrapped exactly as the design renders it. The wrapping is part of the
+# ratified block: block A is a cached layer, so these bytes are compared
+# window against window and a re-flow is a cache invalidation.
+PROTECTED_HEADER = (
+    "PROTECTED TERMS (the author's vocabulary — never substitute a synonym for one,\n"
+    "never re-word one, never change its capitalization). A single-word name written\n"
+    "here with a capital is the term of art only where the text capitalizes it:\n"
+    "\"Field\" is the concept, \"field\" is ordinary English. A multi-word name, and any\n"
+    "name written here in lower case, is the term of art in any casing. A name\n"
+    "followed by \"·\" carries alternate names; all of them are the same term.")
+
+DICTIONARY_HEADER = (
+    "PRONUNCIATION DICTIONARY (settled by the author — read these aloud this way,\n"
+    "and never flag one of these terms as hard to say: the dictionary IS the fix)")
+
 NOT_APPLICABLE_GLOBAL = (
     "(not applicable — this is a GLOBAL filter: each unit is judged "
     "against the whole essay above and the frozen registry, never "
@@ -79,6 +133,26 @@ Return JSON only, in this shape and nothing else:
   {"registry": "<the registry, as THE FILTER defines it>"}
 The registry is frozen for the life of this run: every unit will see these
 exact bytes. Never emit << >> {{ or }} anywhere in the reply."""
+
+# The one legal value of the `prelude` front-matter key.
+PRONUNCIATION_PRELUDE = "pronunciations"
+
+HARD_TERMS_HEADER = (
+    "HARD TERMS FOUND IN THIS ESSAY (computed, not judged — every one of these needs\n"
+    "a pronunciation unless the dictionary already has it)")
+
+PRONUNCIATION_CONTRACT = """OUTPUT CONTRACT
+Return JSON only, in this shape and nothing else:
+  {"pronunciations": [{"term": "<the term, copied from the essay>",
+                       "say": "<plain respelling, e.g. uh-NUT-taa>",
+                       "note": "<the language or the one thing worth saying>"}]}
+No unit is judged here and the essay is not touched. A term that is not in
+THE ESSAY verbatim, or that PRONUNCIATION DICTIONARY already carries,
+discards the WHOLE reply. Never emit << >> {{ or }} anywhere in the reply."""
+
+# Same doctrine as STATE_CAP: a prelude proposing 200 terms is a prompt
+# fault, and a silently truncated list lies about what was found.
+PRONUNCIATION_CAP = 60
 
 
 @dataclass(frozen=True)
@@ -189,11 +263,24 @@ def _intents_block(db: Database, manuscript: dict, file: str) -> str:
                      for _rank, statement, tier in entries)
 
 
-def _concept_notes(db: Database, manuscript: dict, file: str) -> str:
+def _scoped(db: Database, manuscript: dict, file: str,
+            text: str | None) -> dict:
+    """The file-scoped graph slice, read from THE CAPTURE.
+
+    `text` is the caller's captured essay text (`assemble`'s parameter),
+    which `scoped_concepts` uses in place of a second disk read. Passing
+    it is what makes CONCEPT NOTES and PROTECTED TERMS obey the
+    one-capture rule: without it a parallel session's edit between window
+    N and window N+1 changes block A and forfeits the cached prefix."""
     from . import api
 
+    return api.scoped_concepts(db, manuscript, file=file, text=text)
+
+
+def _concept_notes(db: Database, manuscript: dict, file: str,
+                   text: str | None = None) -> str:
     try:
-        graph = api.scoped_concepts(db, manuscript, file=file)
+        graph = _scoped(db, manuscript, file, text)
     except LookupError:
         return ""
     lines = []
@@ -202,6 +289,286 @@ def _concept_notes(db: Database, manuscript: dict, file: str) -> str:
         notes = (node.get("notes") or "").strip() or "(no notes)"
         lines.append(f"- {node['name']} — {notes}")
     return "\n".join(lines)
+
+
+def _is_protected(node: dict) -> bool:
+    return (node.get("kind") in PROTECTED_KINDS
+            and node.get("status") in PROTECTED_STATUSES)
+
+
+def _names_of(node: dict) -> list[str]:
+    return [node["name"], *(node.get("aliases") or [])]
+
+
+def protected_terms(db: Database, manuscript: dict, file: str,
+                    text: str | None = None,
+                    dictionary: str = "") -> dict:
+    """The deterministic derivation (§15.22 §1.1). No model, no prose
+    parsing, no second vocabulary source.
+
+    Three lists:
+
+    1. IN THIS ESSAY — the file-scoped slice, gated on kind and status.
+    2. THE BOOK'S LEXICON — the same gate over the whole manuscript,
+       names and aliases only. It exists because a term of art reaches an
+       essay through a quotation, an allusion or a cross-reference
+       without ever having realized there, and the file-scoped slice
+       cannot see that.
+    3. The dictionary's own terms — a term the author has ruled on aloud
+       is by construction a term of art, and joins the protected set even
+       when no concept node carries it.
+
+    Returns `{"in_essay": [(name, [alias, …]), …], "lexicon": [name, …],
+    "all": [name, …]}`, every list `sorted()` on the RAW name — codepoint
+    order, no locale, no case-folding, which is what makes the rendered
+    block byte-identical across processes and platforms.
+
+    Deliberately NOT filtered by capitalization. `concepts.mention_pattern`
+    already carries the ratified rule for where a name is the term of art;
+    the block states that rule in prose, once, in its header, and leaves
+    the list COMPLETE underneath it. Pre-filtering would be a second
+    implementation of `mention_pattern`'s split, free to drift from it —
+    and it would drop every borrowed lower-case term (`anattā`,
+    `ressentiment`, `upaya`) from the very protection they most need."""
+    from . import pronunciations as pron
+
+    try:
+        scoped = _scoped(db, manuscript, file, text)
+    except LookupError:
+        scoped = {"nodes": []}
+    in_essay = sorted(
+        ((n["name"], sorted(n.get("aliases") or []))
+         for n in scoped.get("nodes", []) if _is_protected(n)),
+        key=lambda pair: pair[0])
+
+    rows = db.all(
+        "SELECT name, kind, status, aliases FROM concept_nodes "
+        "WHERE manuscript_id = ?", (manuscript["id"],))
+    lexicon: set[str] = set()
+    for row in rows:
+        node = {"name": row["name"], "kind": row["kind"],
+                "status": row["status"],
+                "aliases": loads(row["aliases"], [])}
+        if _is_protected(node):
+            lexicon.update(_names_of(node))
+
+    dict_terms = pron.terms(dictionary)
+    everything = set(lexicon) | set(dict_terms)
+    for name, aliases in in_essay:
+        everything.add(name)
+        everything.update(aliases)
+    return {"in_essay": in_essay,
+            "lexicon": sorted(lexicon | set(dict_terms)),
+            "all": sorted(everything)}
+
+
+def _protected_block(terms: dict) -> str:
+    """The rendered section. No counts, no ids, no timestamps, no
+    statuses, no kinds — the whole serialization discipline this module
+    inherits from the write path. Identical stored state ⇒ byte-identical
+    section."""
+    lines = ["IN THIS ESSAY"]
+    if terms["in_essay"]:
+        for name, aliases in terms["in_essay"]:
+            suffix = (" · " + " · ".join(aliases)) if aliases else ""
+            lines.append(f"- {name}{suffix}")
+    else:
+        lines.append(NONE)
+    lines.append(
+        "THE BOOK'S LEXICON (every term of art in the manuscript — one may "
+        "reach this\nessay through a quotation or an allusion)")
+    if terms["lexicon"]:
+        lines.extend(f"- {name}" for name in terms["lexicon"])
+    else:
+        lines.append(NONE)
+    return "\n".join(lines)
+
+
+def _dictionary_block(dictionary: str) -> str:
+    from . import pronunciations as pron
+
+    return "\n".join(pron.block_lines(dictionary))
+
+
+def is_hard_to_say(term: str) -> bool:
+    """F1 — the hard signal, harness-computed and never model-judged.
+
+    A term containing, after NFC normalization, a character with
+    `ord(c) > 127` WHOSE UNICODE CATEGORY STARTS WITH `L`. Letters only:
+    `’` and `—` are punctuation and carry no phonetic information, so
+    `Noether’s Theorem` is correctly NOT hard to say while `Bṛhadāraṇyaka`,
+    `Nāgārjuna`, `anattā`, `Śūnyatā` and `οὐκ ὄν θεός` all are.
+
+    This IS the Sponsor's "all standard non-english terms", and it needs
+    no model at all."""
+    import unicodedata
+
+    return any(ord(c) > 127 and unicodedata.category(c).startswith("L")
+               for c in unicodedata.normalize("NFC", term or ""))
+
+
+def _occurs(term: str, text: str) -> bool:
+    from .concepts import mention_pattern
+
+    return bool(mention_pattern(term).search(text or ""))
+
+
+def hard_terms(text: str, protected: list[str],
+               dictionary: str = "") -> list[str]:
+    """F1 over this essay: the protected names and aliases that occur in
+    it, are absent from the dictionary, and carry a non-ASCII letter.
+    Sorted, deduplicated, deterministic."""
+    from . import pronunciations as pron
+
+    settled = {pron.key(t) for t in pron.terms(dictionary)}
+    return sorted({t for t in protected
+                   if is_hard_to_say(t)
+                   and pron.key(t) not in settled
+                   and _occurs(t, text)})
+
+
+def candidate_terms(text: str, protected: list[str],
+                    dictionary: str = "") -> list[str]:
+    """F2 — candidacy, harness-computed; difficulty, prompt-judged.
+
+    Every protected term or alias occurring in this essay and absent from
+    the dictionary, EXCEPT a single-word ASCII name whose lower-case form
+    is also live in this essay's prose. That exception is the
+    `Field`/`field`, `Test`/`test`, `Measure`/`measure` case: an ordinary
+    English word doing duty as a term of art. It is a HOMOPHONE problem,
+    which the audio filter already owns as a unit finding, and it is not
+    a pronunciation problem — nobody needs to be told how to say
+    "field"."""
+    import re as _re
+
+    from . import pronunciations as pron
+
+    settled = {pron.key(t) for t in pron.terms(dictionary)}
+    out = set()
+    for term in protected:
+        name = (term or "").strip()
+        if not name or pron.key(name) in settled or not _occurs(name, text):
+            continue
+        if (" " not in name and name.isascii() and name[:1].isupper()
+                and _re.search(rf"\b{_re.escape(name.lower())}\b",
+                               text or "")):
+            continue
+        out.add(name)
+    return sorted(out)
+
+
+def parse_pronunciations(raw, text: str, dictionary: str = "") -> list[dict]:
+    """The pronunciation prelude's reply. Every check REFUSES the WHOLE
+    reply, never part of it — `validate_reply`'s standing rule, for the
+    same reason: a partially admitted reply is a run whose conditioning
+    nobody can reconstruct."""
+    from . import pronunciations as pron
+
+    if not isinstance(raw, dict):
+        raise ReplyError("the prelude reply is not a JSON object")
+    items = raw.get("pronunciations")
+    if not isinstance(items, list):
+        raise ReplyError(
+            "the prelude must return a `pronunciations` list — one entry "
+            "per term of this essay a narrator would stumble over, and an "
+            "empty list when there are none.")
+    if len(items) > PRONUNCIATION_CAP:
+        raise ReplyError(
+            f"{len(items)} pronunciations in one reply, over the "
+            f"{PRONUNCIATION_CAP} cap. A prelude proposing that many "
+            "terms is a PROMPT fault rather than an essay that hard. "
+            "Refused rather than truncated: a silently truncated list "
+            "lies about what was found.")
+    settled = {pron.key(t) for t in pron.terms(dictionary)}
+    seen: dict[str, str] = {}
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ReplyError(
+                "every entry in `pronunciations` must be an object")
+        term = str(item.get("term") or "").strip()
+        say = str(item.get("say") or "").strip()
+        note = str(item.get("note") or "").strip()
+        if not term:
+            raise ReplyError("a pronunciation with no term")
+        if term not in (text or ""):
+            # The anchoring law, applied to the prelude: a pronunciation
+            # for a term that is not in the essay is a hallucination, and
+            # the door's standing rule is that a producer which cannot
+            # anchor gets nothing.
+            raise ReplyError(
+                f"'{term}' does not appear in the essay verbatim. A "
+                "pronunciation for a term that is not there is a guess "
+                "about a word this essay does not use — copy the term "
+                "from THE ESSAY. The whole reply is refused.")
+        if not say:
+            raise ReplyError(
+                f"'{term}' has no pronunciation. An entry with a term and "
+                "nothing to say about it asks the author a question with "
+                "no answer in it.")
+        for field, value in (("term", term), ("say", say), ("note", note)):
+            for marker in _MARKERS:
+                if marker in value:
+                    raise ReplyError(
+                        f"'{term}': the {field} contains {marker!r}, which "
+                        "is reserved grammar in this system (the "
+                        "pending-change form). The whole reply is refused.")
+            if "\n" in value or "\r" in value:
+                raise ReplyError(
+                    f"'{term}': the {field} carries a newline. A "
+                    "dictionary row is ONE LINE — a multi-line cell does "
+                    "not survive a Docs table round trip in a shape the "
+                    "parser can trust.")
+            if "|" in value:
+                raise ReplyError(
+                    f"'{term}': the {field} carries a '|', which is the "
+                    "dictionary table's own column separator. It does not "
+                    "survive a Docs round trip in any form — an escaped "
+                    "pipe is unescaped by the next push and the row's "
+                    "cells shift — and a pipe carries no phonetic "
+                    "information, so no pronunciation needs one.")
+        key = pron.key(term)
+        if key in seen:
+            raise ReplyError(
+                f"'{term}' and '{seen[key]}' are the same term (case and "
+                "Unicode composition do not distinguish two rows). One "
+                "entry per term.")
+        if key in settled:
+            raise ReplyError(
+                f"'{term}' is already in PRONUNCIATION DICTIONARY. Those "
+                "rows are SETTLED — additions only, and a reply that "
+                "proposes to restate one is a reply that did not read "
+                "block A.")
+        seen[key] = term
+        out.append({"term": term, "say": say, "note": note})
+    return out
+
+
+def protected_loss(old: str, new: str, protected: list[str]) -> list[str]:
+    """Protected terms present in `old` and absent from `new`, in the
+    casing the protection rule gives them. Deterministic, no model.
+
+    Matching is `concepts.mention_pattern` — the SAME pattern the
+    realization scan uses — so "Field" in `old` and "field" in `new`
+    counts as a loss and "field"→"field" does not. One rule for "appears
+    as a term of art" across the whole system, never a second one here.
+
+    The harness supplies the list and does not enforce it; this is the
+    single exception, and it WARNS rather than refusing (§15.22, D6). A
+    legitimate recast can drop one of two mentions of a term, and a
+    refusal discards the WHOLE reply for a judgment the harness is not
+    entitled to make. Flipping it to a refusal is one line if the Sponsor
+    wants it."""
+    from .concepts import mention_pattern
+
+    lost = []
+    for name in protected:
+        if not (name or "").strip():
+            continue
+        pattern = mention_pattern(name)
+        if pattern.search(old or "") and not pattern.search(new or ""):
+            lost.append(name)
+    return lost
 
 
 def prior_runs(db: Database, manuscript_id: str, filter_name: str,
@@ -256,13 +623,23 @@ def _essay_block(units: list[str]) -> str:
 
 
 def _frame_block(db: Database, manuscript: dict, run: dict,
-                 units: list[str]) -> str:
+                 units: list[str], text: str | None = None,
+                 dictionary: str = "") -> str:
     """Block A — the second cache breakpoint.
 
     THE ESSAY and MOTIF REGISTRY appear for a GLOBAL filter only. The
     class is frozen at run start, so this is stable for the life of the
     run — and class resolution is observable in the bytes, which is what
-    makes it testable rather than a claim about the code."""
+    makes it testable rather than a claim about the code.
+
+    PROTECTED TERMS and PRONUNCIATION DICTIONARY sit between CONCEPT
+    NOTES and PRIOR RUNS: graph-derived sections together, run-history
+    and essay sections adjacent to each other. Both render for EVERY
+    filter of EVERY class, always — a section that comes and goes is a
+    shape change, and shape changes are cache invalidations. A `global`
+    filter needs the protection as much as a sequential one, because a
+    motif family's own name is a protected term and a `replace` that
+    swaps it for a synonym is precisely the harm."""
     file = run["file"]
     sections = [
         _section("INTENTS (they govern which changes matter — never "
@@ -272,7 +649,11 @@ def _frame_block(db: Database, manuscript: dict, run: dict,
         _section("VALIDATED BELIEFS",
                  _validated_beliefs(db, manuscript["id"])),
         _section("CONCEPT NOTES (the author's settled definitions)",
-                 _concept_notes(db, manuscript, file)),
+                 _concept_notes(db, manuscript, file, text)),
+        _section(PROTECTED_HEADER,
+                 _protected_block(protected_terms(db, manuscript, file,
+                                                  text, dictionary))),
+        _section(DICTIONARY_HEADER, _dictionary_block(dictionary)),
         _section("PRIOR RUNS OF THIS FILTER ON THIS FILE",
                  prior_runs(db, manuscript["id"], run["filter"], file,
                             exclude_run_id=run["id"])),
@@ -355,47 +736,81 @@ def _units_block(run: dict, units: list[str],
 
 def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
              units: list[str], window: tuple[int, int],
-             threads: list[dict]) -> Payload:
+             threads: list[dict], text: str | None = None,
+             dictionary: str = "") -> Payload:
     """The whole payload, from stored state only.
 
     `units` comes from the caller's ONE capture of the manuscript (the
     one-capture-per-invocation convention): the text the model is sent
     must be the text the caller's own gates saw, not a second read a
-    parallel session could have moved underneath it."""
+    parallel session could have moved underneath it. `text` is that same
+    capture's essay text, handed down so the graph slice reads it too.
+
+    `dictionary` is `pronunciations.md`'s text, read ONCE per invocation
+    by `api._filter_capture` and handed to every consumer of that
+    invocation. It is read LIVE from the file rather than pinned to the
+    run's `source_version_id`, and that is the Sponsor's suppression
+    ruling made mechanical: an accepted pronunciation must take effect at
+    the NEXT WINDOW, not the next run. It sits in the stable layer, so a
+    dictionary edit mid-run invalidates block A and re-bills the cached
+    prefix — an HONEST invalidation, because the suppression set
+    genuinely changed, and `filter run` prints the per-block hashes so it
+    is visible rather than mysterious."""
     return Payload(
         law=_law_block(db, manuscript["id"], run["file"], artifact_body),
-        frame=_frame_block(db, manuscript, run, units),
+        frame=_frame_block(db, manuscript, run, units, text, dictionary),
         prefix=_prefix_block(run, units, window[0], threads),
         units=_units_block(run, units, window),
     )
 
 
 def assemble_prelude(db: Database, manuscript: dict, run: dict,
-                     artifact_body: str, units: list[str]) -> Payload:
-    """The prelude payload for a GLOBAL filter: the same block S, the
-    whole essay, and the prelude's own contract. Blocks B and C exist
-    and are labelled — a payload whose block count changes between the
-    prelude and the units would be a different shape for the reader as
-    well as for the cache."""
+                     artifact_body: str, units: list[str],
+                     text: str | None = None, dictionary: str = "",
+                     kind: str = "registry") -> Payload:
+    """The prelude payload. Blocks B and C exist and are labelled — a
+    payload whose block count changes between the prelude and the units
+    would be a different shape for the reader as well as for the cache.
+
+    `kind` is the prelude's ARTIFACT (§15.22 §3.1). A prelude is a
+    whole-essay pass that runs before any unit is judged and produces a
+    run-scoped artifact: for `global` that artifact is the frozen
+    registry, rendered into block A; for a sequential filter that
+    declares `prelude = "pronunciations"` it is a set of PROPOSALS, and
+    nothing enters block A at all."""
+    file = run["file"]
+    terms = protected_terms(db, manuscript, file, text, dictionary)
+    frame = [
+        _section("INTENTS (they govern which changes matter — never "
+                 "whether a change is grounded, never what the essay "
+                 "claims, and never who this work is filed under)",
+                 _intents_block(db, manuscript, file)),
+        _section("VALIDATED BELIEFS",
+                 _validated_beliefs(db, manuscript["id"])),
+        _section("CONCEPT NOTES (the author's settled definitions)",
+                 _concept_notes(db, manuscript, file, text)),
+        _section(PROTECTED_HEADER, _protected_block(terms)),
+        _section(DICTIONARY_HEADER, _dictionary_block(dictionary)),
+        _section(f"THE ESSAY — {file} ({len(units)} units)",
+                 _essay_block(units)),
+    ]
+    if kind == PRONUNCIATION_PRELUDE:
+        essay = text if text is not None else "\n\n".join(units)
+        body = _section(HARD_TERMS_HEADER,
+                        "\n".join(f"- {t}" for t in hard_terms(
+                            essay, terms["all"], dictionary)))
+        units_block = (body + "\n" + PRONUNCIATION_CONTRACT + "\n")
+    else:
+        units_block = (_section("THE PRELUDE",
+                                "Read THE ESSAY whole and return the "
+                                "registry this filter's own prompt "
+                                "defines. No unit is judged yet.")
+                       + "\n" + PRELUDE_CONTRACT + "\n")
     return Payload(
-        law=_law_block(db, manuscript["id"], run["file"], artifact_body),
-        frame="\n".join([
-            _section("INTENTS (they govern which changes matter — never "
-                     "whether a change is grounded, never what the essay "
-                     "claims, and never who this work is filed under)",
-                     _intents_block(db, manuscript, run["file"])),
-            _section("VALIDATED BELIEFS",
-                     _validated_beliefs(db, manuscript["id"])),
-            _section("CONCEPT NOTES (the author's settled definitions)",
-                     _concept_notes(db, manuscript, run["file"])),
-            _section(f"THE ESSAY — {run['file']} ({len(units)} units)",
-                     _essay_block(units)),
-        ]),
+        law=_law_block(db, manuscript["id"], file, artifact_body),
+        frame="\n".join(frame),
         prefix=_section("FILTERED PREFIX", NOT_APPLICABLE_GLOBAL),
-        units=_section("THE PRELUDE",
-                       "Read THE ESSAY whole and return the registry this "
-                       "filter's own prompt defines. No unit is judged "
-                       "yet.") + "\n" + PRELUDE_CONTRACT + "\n",
+        units=units_block,
     )
 
 

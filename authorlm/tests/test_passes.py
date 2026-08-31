@@ -610,7 +610,183 @@ def good_reply(paragraphs):
     }
 
 
+CANONICAL_DICT = (
+    "# Pronunciations\n\n"
+    "How they are said.\n\n"
+    "| Term | Say it | Note |\n"
+    "| --- | --- | --- |\n"
+    "| anattā | uh-NUT-taa | Pali; the second a is long |\n"
+    "| Nāgārjuna | naa-GAAR-ju-na |  |\n"
+    "| Śūnyatā | shoon-yuh-TAA | Sanskrit |\n")
+
+
+def pronunciation_purity() -> None:
+    """P1–P8 — `pronunciations.py`, the pure layer (§15.22).
+
+    No database, no manuscript, no model: text in, text out. The file is
+    the AUTHOR'S, so every assertion here is about what the module
+    refuses to touch as much as about what it reads."""
+    import unicodedata
+
+    from authorlm import pronunciations as pron
+    from authorlm.gdocs import normalize_markdown
+
+    print("\npronunciation dictionary — the pure layer:")
+
+    rows, warns = pron.parse(CANONICAL_DICT)
+    check("P1 a canonical table parses to its rows, in file order",
+          [r["term"] for r in rows] == ["anattā", "Nāgārjuna", "Śūnyatā"]
+          and rows[0]["say"] == "uh-NUT-taa"
+          and rows[0]["note"] == "Pali; the second a is long"
+          and rows[1]["note"] == "" and not warns, f"{rows} {warns}")
+
+    # P2 — everything Docs actually emits: alignment colons, padded
+    # cells, a bolded header, an NBSP, a backslash-escaped pipe, a
+    # trailing empty cell, a trailing empty row, and a fourth column.
+    docsy = (
+        "# Pronunciations\n\n"
+        "How they are said.\n\n"
+        "| **Term** | **Say it** | **Note** | |\n"
+        "| :--- | :---: | ---------- | --- |\n"
+        "|  anattā  |  uh-NUT-taa  | Pali; the second a is long | |\n"
+        "| Nāgārjuna | naa-GAAR-ju-na |  | |\n"
+        "| Śūnyatā | shoon-yuh-TAA | Sanskrit | |\n"
+        "|  |  |  | |\n")
+    docsy_rows, docsy_warns = pron.parse(docsy)
+    check("P2 a Docs-shaped export of the same table parses to "
+          "BYTE-IDENTICAL rows — colons, padding, bold, NBSP, a fourth "
+          "column, a trailing empty row",
+          docsy_rows == rows and not docsy_warns,
+          f"{docsy_rows}\n{rows}\n{docsy_warns}")
+    # A pipe is the table's own column separator and does not survive
+    # the Doc bridge in ANY form: normalize_markdown strips exactly the
+    # backslash an escape would write, and push_doc normalizes and writes
+    # back, so an escaped pipe is unescaped on the author's own disk and
+    # the row reparses with its cells shifted one to the left. The row
+    # COUNT is unchanged by that, so §2.6's zero-rows guard never sees
+    # it — a settled row silently rewritten, which is the one thing this
+    # file exists to make impossible. So the row is SKIPPED and named.
+    pipe_table = ("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                  "| a\\|b | ay-bee | the \\| is literal |\n"
+                  "| anattā | uh-NUT-taa | Pali |\n")
+    escaped, esc_warns = pron.parse(pipe_table)
+    check("P7 an author-typed ESCAPED pipe row is skipped and named, "
+          "never read as shifted cells — and the settled row beside it "
+          "survives untouched",
+          escaped == [{"term": "anattā", "say": "uh-NUT-taa",
+                       "note": "Pali"}]
+          and len(esc_warns) == 1 and "a|b" in esc_warns[0]
+          and "cannot be read as one three-column row" in esc_warns[0],
+          f"{escaped}\n{esc_warns}")
+    pushed = normalize_markdown(pipe_table)
+    shifted, shift_warns = pron.parse(pushed)
+    check("P7 ...and after push_doc's normalize-and-write-back has "
+          "stripped the backslash, the SAME row is skipped for the "
+          "shift instead — the two signatures of one fault",
+          shifted == escaped and len(shift_warns) == 1
+          and "its cells are shifted" in shift_warns[0],
+          f"{shifted}\n{shift_warns}")
+    check("P7 a table that is ALL pipe rows parses to NOTHING, so the "
+          "pull's zero-rows guard refuses it — the two guards compose "
+          "rather than fight",
+          pron.parse("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                     "| a|b | c | d |\n")[0] == [], "")
+    check("P7 a trailing EMPTY cell is still tolerated — that is what "
+          "Docs actually emits, and it means nothing",
+          pron.parse("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                     "| anattā | uh-NUT-taa | Pali | |\n")[0]
+          == [{"term": "anattā", "say": "uh-NUT-taa", "note": "Pali"}], "")
+    try:
+        raised_pipe = ""
+        pron.render_row({"term": "a|b", "say": "x"})
+    except ValueError as err:
+        raised_pipe = str(err)
+    check("P7 and render_row REFUSES a pipe rather than escaping one — "
+          "nothing this system writes can carry one, which is what makes "
+          "the fixed-point check below true and keeps proposals.adopt the "
+          "only writer of the file",
+          "does not survive the Doc bridge" in raised_pipe, raised_pipe)
+
+    prosy = (CANONICAL_DICT
+             + "\nAuthor's own note below, with | a pipe in it.\n")
+    prosy_rows, _ = pron.parse(prosy)
+    check("P3 prose before and after the table is ignored, never read as "
+          "rows and never rewritten",
+          prosy_rows == rows, prosy_rows)
+
+    nfd = unicodedata.normalize("NFD", "Śūnyatā")
+    check("P4 the fixture really does differ in bytes (NFC vs NFD)",
+          nfd != "Śūnyatā" and pron.key(nfd) == pron.key("Śūnyatā"))
+    dup = (CANONICAL_DICT
+           + f"| {nfd} | SHOON-ya-taa | a second, decomposed |\n"
+           + "| śūnyatā | shoo-nya-TAA | a third, lower case |\n")
+    dup_rows, dup_warns = pron.parse(dup)
+    check("P4 case and Unicode composition collapse to ONE term; the "
+          "FIRST row wins and the duplicates are warned about, never "
+          "deleted",
+          len(dup_rows) == 3 and dup_rows[2]["say"] == "shoon-yuh-TAA"
+          and len(dup_warns) == 2
+          and all("appears more than once" in w for w in dup_warns)
+          and all("nothing was deleted" in w for w in dup_warns),
+          f"{dup_rows}\n{dup_warns}")
+
+    crlf = CANONICAL_DICT.replace("\n", "\r\n")
+    added = pron.add_row(crlf, {"term": "Böhme", "say": "BUR-muh",
+                                "note": "German"})
+    check("P5 add_row on a CRLF file KEEPS CRLF — not one LF is "
+          "introduced (insert_toc_entry's hard-won rule, and a Doc round "
+          "trip is a recurring source of CRLF)",
+          added.count("\n") == added.count("\r\n"),
+          repr(added[-60:]))
+    check("P5 and it rewrites no line it did not add — the old bytes are "
+          "a literal PREFIX of the new ones",
+          added.startswith(crlf) and added == crlf + "| Böhme | BUR-muh "
+          "| German |\r\n", repr(added[len(crlf):]))
+    check("P5 add_row is idempotent on a term already present, in any "
+          "casing or composition",
+          pron.add_row(added, {"term": "böhme", "say": "different"})
+          == added)
+
+    seeded = pron.add_row("", {"term": "anattā", "say": "uh-NUT-taa",
+                               "note": "Pali"})
+    check("P6 add_row on a missing file produces the seed: title, the "
+          "prose paragraph, the header row, the delimiter, one row",
+          seeded.startswith(pron.TITLE) and pron.PREAMBLE in seeded
+          and pron.HEADER in seeded and pron.DELIMITER in seeded
+          and seeded.endswith("| anattā | uh-NUT-taa | Pali |\n")
+          and pron.parse(seeded)[0] == [
+              {"term": "anattā", "say": "uh-NUT-taa", "note": "Pali"}],
+          repr(seeded))
+
+    written = pron.render(rows)
+    check("P7 normalize_markdown is a NO-OP on what we write, so an "
+          "accepted row never dirties the file on the next doc push",
+          normalize_markdown(written) == written,
+          repr(normalize_markdown(written)))
+
+    unfinished = ("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                  "| Chāndogya |  | started, not finished |\n")
+    un_rows, un_warns = pron.parse(unfinished)
+    check("P8 a term with an empty pronunciation is KEPT as a row and "
+          "warned about — the author is working on it",
+          len(un_rows) == 1 and un_rows[0]["say"] == ""
+          and len(un_warns) == 1 and "Chāndogya" in un_warns[0],
+          f"{un_rows} {un_warns}")
+    check("P8 and it is in `terms`, so it suppresses proposals for that "
+          "term exactly as a finished row does",
+          pron.terms(unfinished) == ["Chāndogya"], pron.terms(unfinished))
+
+    try:
+        raised = ""
+        pron.render_row({"term": "a\nb", "say": "x"})
+    except ValueError as err:
+        raised = str(err)
+    check("a newline in any field is refused — a row is one line",
+          "one line" in raised, raised)
+
+
 def main_test() -> None:
+    pronunciation_purity()
     root = Path(tempfile.mkdtemp(prefix="authorlm-passes-"))
     server = http.server.HTTPServer(("127.0.0.1", 0), Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()

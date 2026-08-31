@@ -47,6 +47,7 @@ from .revisions import (
 # bodies and `staging` imports neither, so no cycle is created.
 from . import passes
 from . import staging
+from . import structure
 
 __all__ = [
     "open_db", "load_config", "make_llm",
@@ -471,6 +472,10 @@ def _scope_target(manuscript: dict, scope: str | None,
     if manuscript_wide:
         return None
     target = _resolve_relpath(manuscript, scope or chapter)
+    # §2.5 row 31: an intent scoped to the dictionary means nothing —
+    # there is no writing to route there. Same helper as the filter and
+    # lens refusals, so the three cannot drift.
+    structure.refuse_sidecar(Path(target).name)
     if chapter:
         files = read_manuscript_files(Path(manuscript["path"]))
         children = [c["file"] for c in
@@ -3719,12 +3724,25 @@ def concept_overview(db: Database, manuscript: dict) -> dict:
 
 def scoped_concepts(db: Database, manuscript: dict,
                     file: str | None = None,
-                    query: str | None = None) -> dict:
+                    query: str | None = None,
+                    text: str | None = None) -> dict:
     """The relevant slice of the graph, compact. `query` matches name,
     notes, or aliases (case-insensitive substring). `file` selects
     concepts realized in that essay: introduced there, or whose name or
     alias appears in its text. Edges are restricted to the selected
-    nodes."""
+    nodes.
+
+    `text` is the CAPTURE OVERRIDE, and it closes a pre-existing
+    one-capture violation rather than adding a feature. With `file` and
+    no `text` this re-reads the disk through `read_manuscript_files` —
+    a SECOND read inside a verb that already took exactly one capture.
+    `filtering._concept_notes` did precisely that, so `filter run`'s
+    CONCEPT NOTES could differ between window N and window N+1 if a
+    parallel session edited the file, silently forfeiting the cached
+    prefix that block A exists to hold. Supplying the caller's own
+    captured text replaces the disk read for the file-scoping match, and
+    the file is still RESOLVED against the manuscript so an unknown name
+    is still a LookupError. Defaults to today's behaviour."""
     mid = manuscript["id"]
     nodes = [dict(n) for n in db.all(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
@@ -3744,11 +3762,11 @@ def scoped_concepts(db: Database, manuscript: dict,
                     or Path(r).name == file), None)
         if rel is None:
             raise LookupError(f"no manuscript file matching '{file}'")
-        text = files[rel].lower()
+        haystack = (files[rel] if text is None else text).lower()
         nodes = [n for n in nodes
                  if n.get("introduced_in") == rel
-                 or n["name"].lower() in text
-                 or any(a.lower() in text
+                 or n["name"].lower() in haystack
+                 or any(a.lower() in haystack
                         for a in loads(n.get("aliases"), []))]
     ids = {n["id"] for n in nodes}
     edges = [
@@ -3936,12 +3954,26 @@ PROMPT_FAULT_SHARE = 0.75
 
 
 def _filter_capture(db: Database, manuscript: dict, file: str,
-                    verb: str) -> tuple[str, str, tuple]:
-    """The one capture, the three in-flight/placeholder refusals, and the
-    file's text — shared by run, record and settle so a gate and the
-    thing it gates can never read separately (§14.7's dangerous shape).
+                    verb: str) -> tuple[str, str, tuple, str]:
+    """The one capture, the three in-flight/placeholder refusals, the
+    file's text, and the pronunciation dictionary — shared by run,
+    record, prelude and settle so a gate and the thing it gates can never
+    read separately (§14.7's dangerous shape).
 
-    Returns `(relpath, text, capture)`."""
+    Returns `(relpath, text, capture, dictionary_text)`.
+
+    The dictionary is read HERE and nowhere else, which is the whole of
+    the bend this feature puts in the blackboard doctrine (§15.22, D4).
+    The capture's `texts` map is built from `reading_order`, which the
+    sidecar flag removes the dictionary from, so it cannot be in the
+    capture without putting the dictionary back into the reading order.
+    The two alternatives — widening `summaries.capture`'s tuple arity for
+    a non-prose sidecar, or pinning the dictionary to the run's version
+    (which would make an accepted pronunciation invisible until the run
+    ended, contradicting the Sponsor's suppression ruling) — both lost.
+    What holds is the doctrine's actual requirement: ONE READ PER
+    INVOCATION, with the gate and the thing it gates reading the same
+    bytes."""
     from . import summaries as sums
 
     _checkout_gate(db, manuscript, file)
@@ -3950,6 +3982,11 @@ def _filter_capture(db: Database, manuscript: dict, file: str,
     rel = file if file in texts else next(
         (r for r in texts if Path(r).name == file), None)
     if rel is None:
+        # Named, before the generic refusal (§15.22 §2.5 row 13). The
+        # sidecar is out of the capture by construction, so the generic
+        # "not in the reading order" already fires — but it reads as a
+        # missing file to an author looking at the tab in their own Doc.
+        structure.refuse_sidecar(Path(file).name)
         raise LookupError(
             f"'{file}' is not in the manuscript's reading order")
     if rel in inflight:
@@ -3967,7 +4004,22 @@ def _filter_capture(db: Database, manuscript: dict, file: str,
         raise ValueError(
             f"{rel} holds only the mid-rewrite placeholder — a marker is "
             "not prose, and a filter has nothing to pass through.")
-    return rel, text, capture
+    return rel, text, capture, _dictionary_text(manuscript)
+
+
+def _dictionary_text(manuscript: dict) -> str:
+    """`pronunciations.md`'s bytes, or "" when the author has none yet.
+
+    An absent file parses as an EMPTY dictionary with no error, which is
+    the common first-run case and is why the file is never seeded by a
+    filter path (§15.22 §2.7): an empty table materializing because a
+    filter RAN is a file in the author's vault they did not ask for, and
+    it immediately becomes a Doc tab, a version-history entry and a
+    diff."""
+    from . import pronunciations as pron
+
+    path = Path(manuscript["path"]) / pron.FILENAME
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 def _active_filter_run(db: Database, manuscript_id: str, name: str,
@@ -4091,7 +4143,7 @@ def filter_add(manuscript: dict, name: str, text: str) -> dict:
 
     path, meta = flt.add_filter(manuscript, name, text)
     return {"name": name, "path": str(path), "class": meta["class"],
-            "state": meta["state"],
+            "state": meta["state"], "prelude": meta["prelude"],
             "class_help": flt.CLASS_HELP[meta["class"]]}
 
 
@@ -4115,7 +4167,8 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
     from . import filtering as fg
 
     mid = manuscript["id"]
-    rel, text, _capture = _filter_capture(db, manuscript, file, "filter run")
+    rel, text, _capture, dictionary = _filter_capture(
+        db, manuscript, file, "filter run")
     meta, body = flt.load_filter(manuscript, name)
     warnings: list[str] = []
     if marker_present(text):
@@ -4208,7 +4261,18 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
     db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})
     run["metadata"] = json.dumps(run_meta)
     payload = fg.assemble(db, manuscript, run, body, units, (start, end),
-                          threads)
+                          threads, text=text, dictionary=dictionary)
+    if (meta.get("prelude") and not loads(run["metadata"], {}).get("prelude")):
+        # Optional where the registry is required (§15.22 §3.1): a run
+        # whose pronunciation prelude never ran is still a correct audio
+        # pass, so this is one printed line and never a refusal. The
+        # global registry's hard refusal stays hard, because a global
+        # unit judged against no registry is judged against nothing.
+        warnings.append(
+            f"'{name}' declares a {meta['prelude']} prelude and this run "
+            f"has not had one. The units below are judged normally; the "
+            f"prelude only proposes dictionary rows. To run it: "
+            f"'filter prelude {name} {rel}'.")
     info = {"run": run, "filter": name, "file": rel, "class": run["class"],
             "window": (start, end), "unit_count": len(units),
             "payload": payload, "payload_hashes": payload.hashes,
@@ -4248,23 +4312,36 @@ def _filter_native(db: Database, manuscript: dict, config: dict, run: dict,
 def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
                    file: str, replace: bool = False,
                    native: bool = False, reply: str | None = None) -> dict:
-    """The GLOBAL class's one prelude: read the essay whole, return the
-    registry every unit is judged against. Frozen for the life of the
-    run — `--replace` rewrites it and invalidates the run's cached
-    prefix, which this says out loud."""
+    """A prelude: a whole-essay pass that runs before any unit is judged
+    and produces a RUN-SCOPED ARTIFACT (§15.22 §3.1).
+
+    For a GLOBAL filter the artifact is the frozen registry every unit is
+    judged against — immutable for the life of the run; `--replace`
+    rewrites it and invalidates the run's cached prefix, which this says
+    out loud.
+
+    For a SEQUENTIAL filter that declares `prelude = "pronunciations"` in
+    its front matter the artifact is a set of PROPOSALS on the ordinary
+    queue: nothing enters block A, nothing is frozen into the run beyond
+    a marker that it happened, and the essay is not touched."""
     from . import filters as flt
     from . import filtering as fg
     from . import llm as llm_mod
 
     mid = manuscript["id"]
-    rel, text, _capture = _filter_capture(db, manuscript, file,
-                                          "filter prelude")
+    rel, text, _capture, dictionary = _filter_capture(db, manuscript, file,
+                                                      "filter prelude")
     meta, body = flt.load_filter(manuscript, name)
-    if meta["class"] != "global":
+    kind = ("registry" if meta["class"] == "global"
+            else meta.get("prelude") or "")
+    if not kind:
         raise ValueError(
-            f"'{name}' is a {meta['class']} filter — only a global filter "
-            "has a prelude. A sequential filter's coordination object is "
-            "its carried STATE, not a frozen registry.")
+            f"'{name}' is a {meta['class']} filter and declares no "
+            f"prelude. A global filter always has one (its frozen "
+            f"registry); a sequential filter has one only when its front "
+            f"matter says so — add `prelude = "
+            f"\"{fg.PRONUNCIATION_PRELUDE}\"` to _filters/{name}.md if "
+            f"this filter should propose dictionary rows.")
     units = passes.paragraphs_of(text)
     run = _active_filter_run(db, mid, name, rel)
     warnings: list[str] = []
@@ -4277,11 +4354,15 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
                    source_version_id=_latest_version_id(db, mid),
                    unit_count=len(units), cursor=0, state=None,
                    registry=None, result_version_id=None, status="active")
-        row["class"] = "global"
+        row["class"] = meta["class"]
         db.insert("filter_runs", row)
         run = _touched_filter_run(db, row)
     else:
         run = _touched_filter_run(db, run)
+    if kind == fg.PRONUNCIATION_PRELUDE:
+        return _pronunciation_prelude(db, manuscript, config, name, rel,
+                                      text, dictionary, body, units, run,
+                                      warnings, replace, native, reply)
     if (run["registry"] or "").strip() and not replace:
         raise ValueError(
             f"this run already has a frozen registry ({len(run['registry'])} "
@@ -4289,7 +4370,8 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             f"every unit is judged against the same bytes. To rewrite it — "
             f"which invalidates this run's cached prefix and re-bills it on "
             f"the native path — pass --replace.")
-    payload = fg.assemble_prelude(db, manuscript, run, body, units)
+    payload = fg.assemble_prelude(db, manuscript, run, body, units,
+                                  text=text, dictionary=dictionary)
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),
@@ -4313,6 +4395,75 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             "replaced": bool(replace)}
 
 
+def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,
+                           name: str, rel: str, text: str, dictionary: str,
+                           body: str, units: list[str], run: dict,
+                           warnings: list[str], replace: bool,
+                           native: bool, reply: str | None) -> dict:
+    """The sequential prelude's artifact is a PROPOSAL SET (§15.22 §3.5).
+
+    Nothing enters block A, nothing is frozen into the run beyond
+    `metadata.prelude`, and the essay is not touched. The rows themselves
+    are written by `proposals.adopt` and by nothing else — this verb only
+    ASKS."""
+    from . import filtering as fg
+    from . import llm as llm_mod
+    from . import pronunciations as pron
+
+    mid = manuscript["id"]
+    run_meta = loads(run["metadata"], {}) or {}
+    if run_meta.get("prelude") and not replace:
+        # The registry's refusal, word for word in shape: a second
+        # prelude on the same run is refused rather than silently
+        # re-asking, and `--replace` is the way through.
+        prior = run_meta["prelude"]
+        raise ValueError(
+            f"this run already ran its pronunciation prelude "
+            f"({prior.get('proposed', 0)} proposed, "
+            f"{prior.get('suppressed', 0)} suppressed). To run it again — "
+            f"which re-proposes only terms still absent from "
+            f"{pron.FILENAME} — pass --replace.")
+    payload = fg.assemble_prelude(db, manuscript, run, body, units,
+                                  text=text, dictionary=dictionary,
+                                  kind=fg.PRONUNCIATION_PRELUDE)
+    info = {"run": run, "filter": name, "file": rel, "payload": payload,
+            "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
+            "prompt_location": fg.prompt_location(), "unit_count": len(units),
+            "kind": fg.PRONUNCIATION_PRELUDE, "registry": None,
+            "native": False, "warnings": warnings}
+    if reply is not None:
+        entries = fg.parse_pronunciations(fg.reply_json(reply), text,
+                                          dictionary)
+    elif native:
+        client = llm_mod.filtering_llm(config)
+        raw = client.complete_json_blocks(payload.system_blocks,
+                                          payload.user_blocks)
+        if raw is None:
+            raise RuntimeError("the filter model returned nothing; no "
+                               "pronunciation was proposed.")
+        entries = fg.parse_pronunciations(raw, text, dictionary)
+        info["usage_line"] = client.stats_line()
+    else:
+        return info
+
+    proposed, suppressed = [], []
+    for entry in entries:
+        row = prop.create(
+            db, mid, kind="pronunciation", target=pron.key(entry["term"]),
+            payload={"name": entry["term"], "say": entry["say"],
+                     "note": entry["note"], "file": rel, "filter": name},
+            source="filter-prelude")
+        (proposed if row else suppressed).append(entry["term"])
+    run_meta["prelude"] = {"kind": fg.PRONUNCIATION_PRELUDE,
+                           "at": now_iso(), "proposed": len(proposed),
+                           "suppressed": len(suppressed)}
+    db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})
+    run["metadata"] = json.dumps(run_meta)
+    return {**info, "native": bool(native), "run": run,
+            "proposed": proposed, "suppressed": suppressed,
+            "replaced": bool(replace)}
+
+
 def filter_record(db: Database, manuscript: dict, config: dict,
                   file: str, reply: str, name: str | None = None) -> dict:
     """Register one window's reply. The whole reply is refused or none of
@@ -4325,8 +4476,8 @@ def filter_record(db: Database, manuscript: dict, config: dict,
     from . import filtering as fg
 
     mid = manuscript["id"]
-    rel, text, _capture = _filter_capture(db, manuscript, file,
-                                          "filter record")
+    rel, text, _capture, dictionary = _filter_capture(db, manuscript, file,
+                                                      "filter record")
     run = _filter_run_row(db, manuscript, rel, name)
     pinned = _version_text(db, run["source_version_id"], rel)
     if pinned is not None and pinned != text:
@@ -4355,6 +4506,23 @@ def filter_record(db: Database, manuscript: dict, config: dict,
     covered = window[1] - window[0] + 1
     share = (len(result["edits"]) / covered) if covered else 0
     warnings = []
+    # The one deterministic check the harness CAN make (§15.22 §1.9).
+    # It WARNS and never blocks, naming every lost term and its unit: a
+    # legitimate recast can drop one of two mentions, and a refusal would
+    # discard the WHOLE reply for a judgment the harness is not entitled
+    # to make. Supplying the list is the pass; being the editor is not.
+    protected = fg.protected_terms(db, manuscript, rel, text,
+                                   dictionary)["all"]
+    for edit in result["edits"]:
+        lost = fg.protected_loss(units[edit["n"] - 1], edit["new"], protected)
+        if lost:
+            warnings.append(
+                f"unit {edit['n']}: the replacement drops "
+                f"{', '.join(repr(t) for t in lost)} — "
+                f"{'these are' if len(lost) > 1 else 'that is'} on "
+                f"PROTECTED TERMS, the author's own vocabulary. Staged "
+                f"anyway; the harness supplies the law, it is not the "
+                f"editor. Reject it at triage if the term should stand.")
     if covered >= 8 and share >= PROMPT_FAULT_SHARE:
         warnings.append(
             f"{len(result['edits'])} proposals on {covered} units. A "
@@ -4520,8 +4688,8 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     from . import summaries as sums
 
     mid = manuscript["id"]
-    rel, _text, _capture = _filter_capture(db, manuscript, file,
-                                           "filter settle")
+    rel, _text, _capture, _dict = _filter_capture(db, manuscript, file,
+                                                  "filter settle")
     run = _filter_run_row(db, manuscript, rel, name)
     path = Path(manuscript["path"]) / rel
     written = [t for t in _run_threads(db, mid, run)
