@@ -4635,18 +4635,37 @@ def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
     active = [dict(r) for r in db.all(
         "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
         "AND status = 'active' ORDER BY created_at", (mid, rel))]
-    modes = {_run_mode(r) for r in active}
+    # PER RUN, not one collapsed value. Two filters on one essay is
+    # legitimate work, and when their transports differ the collapsed
+    # answer was None — which chat reads as "no transport chosen" — and
+    # it suppressed the note in exactly the case that most needs it: one
+    # run's forms sitting in the author's Doc while another's proposals
+    # are still on the table here.
+    runs = [{"filter": r["filter"], "mode": _run_mode(r),
+             "forms_out": sum(1 for t in _run_threads(db, mid, r)
+                              if t["state"] == "written")}
+            for r in active]
+    modes = {r["mode"] for r in runs}
     mode = next(iter(modes)) if len(modes) == 1 else None
     forms_out = sum(1 for t in staging.door_threads(
         db, mid, rel, states=("written",), origin_type=FILTER_ORIGIN))
+    out_in_doc = [r for r in runs if r["mode"] == "doc" and r["forms_out"]]
+    note = None
+    if out_in_doc:
+        which = ", ".join(f"{r['filter']} ({r['forms_out']})"
+                          for r in out_in_doc)
+        note = (f"{sum(r['forms_out'] for r in out_in_doc)} form(s) are "
+                f"out in the Doc's tab for this essay — {which}. The "
+                f"author settles those THERE, and then 'authorlm filter "
+                f"settle {rel}' (CLI) reads the tab back. Do not offer "
+                f"to apply them from here.")
+        if len(runs) > len(out_in_doc):
+            note += (" The other run(s) on this essay are on the local "
+                     "road and their proposals above are still yours to "
+                     "triage as usual.")
     return {"file": rel, "count": len(items), "items": items,
-            "mode": mode, "forms_out": forms_out,
-            "transport_note": (
-                f"{forms_out} form(s) are out in the Doc's tab for this "
-                f"essay. The author settles them THERE and then "
-                f"'authorlm filter settle {rel}' (CLI) reads the tab "
-                f"back — do not offer to apply them from here."
-                if mode == "doc" and forms_out else None)}
+            "mode": mode, "runs": runs, "forms_out": forms_out,
+            "transport_note": note}
 
 
 def filter_triage(db: Database, manuscript: dict, file: str,

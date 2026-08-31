@@ -1749,6 +1749,63 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           raised2 is not None and "mid-settle" in raised2, raised2)
 
 
+def _two_runs_one_essay(root: Path):
+    """A second filter with its own active run on the same essay — which
+    the pass permits by design (it warns, it does not refuse)."""
+    db, manuscript, ms, fake = _doc_run(
+        root, "two-runs-ws", {2: "TWO AS PROPOSED."})
+    api.filter_add(manuscript, "second-filter",
+                   DOC_FILTER.replace("Duplicate words and phrases",
+                                      "A second concern entirely"))
+    api.filter_run(db, manuscript, {}, "second-filter", "solo.md")
+    units = passes.paragraphs_of(DOC_ESSAY)
+    api.filter_record(db, manuscript, {}, "solo.md",
+                      _filter_reply(units, {4: "GAMMA, SECOND FILTER."}),
+                      name="second-filter")
+    return db, manuscript, ms, fake
+
+
+def _chat_sees_each_run_s_transport(root: Path) -> None:
+    """P3b — `filter_edits` (and so `list_filter_edits` on MCP) must
+    report the transport PER RUN.
+
+    Two filters on one essay is legitimate work. When their transports
+    differ, collapsing them to a single value produced `mode=None` — read
+    by chat as "no transport chosen" — and suppressed the transport note
+    in exactly the case it matters most: one run's forms sitting in the
+    author's Doc while another's proposals are still on the table."""
+    print("P3b: two runs on one essay, on different roads:")
+
+    db, manuscript, ms, fake = _two_runs_one_essay(root)
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake), name="duplicate-words")
+    report = api.filter_edits(db, manuscript, "solo.md")
+    by_name = {r["filter"]: r for r in report["runs"]}
+    check("P3b every active run reports its OWN transport and its own "
+          "forms-out count",
+          by_name["duplicate-words"]["mode"] == "doc"
+          and by_name["duplicate-words"]["forms_out"] == 1
+          and by_name["second-filter"]["mode"] is None
+          and by_name["second-filter"]["forms_out"] == 0, str(report["runs"]))
+    check("P3b the collapsed `mode` is still None when the runs disagree "
+          "— that value was never wrong, it was just not enough",
+          report["mode"] is None)
+    check("P3b ...and the transport note FIRES anyway, naming which "
+          "filter's forms are in the Doc. Suppressing it here was the "
+          "bug: chat would have offered to apply what is already sitting "
+          "in the author's Doc",
+          report["transport_note"] is not None
+          and "duplicate-words (1)" in report["transport_note"]
+          and "filter settle solo.md" in report["transport_note"],
+          str(report["transport_note"]))
+    check("P3b ...and it says the OTHER run's proposals are still "
+          "ordinary triage, so the note narrows chat's behaviour instead "
+          "of freezing the whole essay",
+          "still yours to triage as usual"
+          in (report["transport_note"] or ""), report["transport_note"])
+
+
 def _the_hint_after_an_unmark(root: Path) -> None:
     """P3a — the settle's "the tab still shows the marks" line must be
     keyed on whether THIS settle read the tab, not on the run's mode.
@@ -3283,6 +3340,7 @@ def main_test() -> None:
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)
         _recovery_while_forms_are_out(root)
+        _chat_sees_each_run_s_transport(root)
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
