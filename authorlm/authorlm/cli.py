@@ -3453,10 +3453,26 @@ def cmd_filter(args):
                 "wins, and anything you leave alone is taken as a yes. "
                 f"Then 'filter settle {result['file']}' reads the tab back "
                 "and makes them final."))
-            print(ui.dim(
-                f"The file on your disk still holds {result['file']} "
-                "exactly as it was, and it will not push to Docs until "
-                "this is finished."))
+            if result["local_unchanged"]:
+                print(ui.dim(
+                    f"The file on your disk still holds {result['file']} "
+                    "exactly as it was, and it will not push to Docs "
+                    "until this is finished."))
+            else:
+                # The push levels the tab from the local file, and that
+                # goes through `normalize_markdown` — so on a file that
+                # was not already canonical the bytes DID move. Saying
+                # "exactly as it was" there is false, and an author who
+                # later finds a diff they were told did not exist has
+                # been given a reason to distrust the whole road.
+                print(ui.dim(
+                    f"The file on your disk still holds the OLD "
+                    f"{result['file']} — none of these changes is in it "
+                    f"— but the push did rewrite it once, into canonical "
+                    f"markdown (list markers, spacing, trailing "
+                    f"whitespace; not a word of the prose). That is the "
+                    f"same normalization every 'doc push' does. It will "
+                    f"not push to Docs again until this is finished."))
             return
 
         if args.action == "settle":

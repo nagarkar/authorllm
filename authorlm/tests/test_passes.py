@@ -996,6 +996,9 @@ def _the_doc_transport_push(root: Path) -> None:
           "returned before the push — the canonicalizer is a proven "
           "no-op here, which is the point",
           _rev.read_manuscript_files(ms)["solo.md"] == observed_before)
+    check("F-D2 ...and the verb SAYS the file is untouched, because on "
+          "this fixture it is",
+          result["local_unchanged"] is True)
 
     # --- F-D3: the forms reached the wire, and only those threads -----
     wire = "\n".join(fake.bodies)
@@ -1085,6 +1088,76 @@ def _the_doc_transport_push(root: Path) -> None:
           and "doc pull solo.md" in raised3, raised3)
     check("F-D11 ...and nothing reached the wire: no request body was "
           "formed at all", not fake3.bodies, str(fake3.bodies[:1]))
+
+
+NON_CANONICAL_ESSAY = (
+    "# The Wall\n\n"
+    "* one thing the wall does   \n"
+    "* another thing it does\n\n"
+    "Alpha opens the essay and says a thing worth saying twice.  \n\n"
+    "Gamma follows, saying something else entirely.\n\n\n\n"
+    "Omega closes the essay on a falling cadence.\n")
+
+
+def _the_push_says_what_it_did_to_the_file(root: Path) -> None:
+    """P2b — `filter push` must not claim the local file is untouched
+    when the levelling push canonicalized it.
+
+    The truth was already computed (`local_unchanged`) and thrown away,
+    while the CLI printed "still holds <file> exactly as it was"
+    unconditionally. On a file that was not already canonical that is
+    false, and an author who later finds a diff they were told did not
+    exist has been given a reason to distrust the whole road.
+
+    The fixture is deliberately non-canonical — `*` bullets, trailing
+    spaces, a run of blank lines — so the assertion can actually FAIL.
+    F-D2's original fixture was already canonical, which made its
+    byte-identity claim true for a reason that had nothing to do with
+    the code under test."""
+    import authorlm.gdocs as _gd
+
+    print("P2b: what the push did to the file on disk:")
+
+    ws = root / "noncanon-ws"
+    db, manuscript, ms, fake = _doc_run(
+        root, "noncanon-ws", {3: "ALPHA REDONE."},
+        essay=NON_CANONICAL_ESSAY)
+    before = (ms / "solo.md").read_text()
+    check("the fixture really is non-canonical — otherwise this whole "
+          "test is asserting nothing (§14.8)",
+          gdocs.normalize_markdown(before) != before, repr(before))
+
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(["--workspace", str(ws), "filter", "push", "solo.md"])
+        printed = out.getvalue()
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
+
+    after = (ms / "solo.md").read_text()
+    check("P2b the push DID rewrite the file — this is the case the old "
+          "message lied about",
+          after != before and after == gdocs.normalize_markdown(before),
+          repr(after))
+    check("P2b ...and the verb says so instead of claiming the file is "
+          "as it was: it names what moved (markers, spacing) and what "
+          "did not (the prose)",
+          "exactly as it was" not in printed
+          and "did rewrite it once" in printed
+          and "not a word of the prose" in printed, printed)
+    check("P2b ...and it still says the plain thing that matters: the "
+          "file holds the OLD essay, none of these changes is in it",
+          "still holds the OLD solo.md" in printed
+          and "none of these changes is in it" in printed, printed)
+    check("P2b the file really does still hold the old text, unmarked — "
+          "canonicalization moved bytes, not meaning",
+          "ALPHA REDONE." not in after
+          and "Alpha opens the essay and says a thing worth saying twice."
+          in after and "<<" not in after, after)
 
 
 def _the_push_is_partial_or_nothing(root: Path) -> None:
@@ -3156,6 +3229,7 @@ def main_test() -> None:
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
         _the_doc_transport_push(root)
+        _the_push_says_what_it_did_to_the_file(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
         _the_doc_settle(root)
