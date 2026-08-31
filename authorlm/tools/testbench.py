@@ -984,6 +984,116 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
     return report.failed
 
 
+# The sixteen live SMSTTD names whose only oddity is a non-ASCII LETTER,
+# and the two whose only non-ASCII character is a curly apostrophe. F1 is
+# a deterministic test, so the bench asserts it against real names rather
+# than invented ones (§15.22 §3.3).
+HARD_SAMPLE = (
+    "Bṛhadāraṇyaka", "Chāndogya", "Cit-Śakti", "Jñāna", "Līlā",
+    "Nāgārjuna", "Nāsadīya Sūkta", "Prakāśa", "Saddharmapuṇḍarīka Sūtra",
+    "Vimarśa", "Böhme", "anattā", "jīvanmukta", "Śūnya-Pūrṇa", "Śūnyatā",
+    "οὐκ ὄν θεός",
+)
+EASY_SAMPLE = ("Noether’s Theorem", "Jung’s Septem Sermones ad Mortuos")
+
+
+def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
+                         _corrupt=None) -> int:
+    """PROTECTED TERMS derives, holds still, and the dictionary parses.
+
+    Read-only against the live manuscript: it assembles two payloads and
+    parses a file. Nothing is written, nothing is settled, and there is
+    no try/finally because there is nothing to roll back.
+
+    `_corrupt` is a test seam and nothing else: a callable applied to the
+    dictionary text before it is parsed, used by the hermetic suite to
+    prove this check DISCRIMINATES — a table hidden inside an HTML
+    comment must make the parse assertion FAIL. Production has no caller
+    for it."""
+    from authorlm import api as _api
+    from authorlm import filtering as _fg
+    from authorlm import pronunciations as _pron
+
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    text = target.read_text(encoding="utf-8")
+    report = _Report()
+
+    dict_path = manuscript_dir / _pron.FILENAME
+    raw = (dict_path.read_text(encoding="utf-8")
+           if dict_path.exists() else "")
+    if _corrupt is not None:
+        raw = _corrupt(raw)
+
+    terms = _fg.protected_terms(db, manuscript, TARGET, text, raw)
+    report("the protected set is non-empty — a filter with an empty "
+           "vocabulary list is a filter that was told nothing",
+           bool(terms["all"]), f"{len(terms['all'])} terms")
+    retired = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "status = 'retired'", (manuscript["id"],))}
+    live = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "status != 'retired'", (manuscript["id"],))}
+    leaked = sorted((retired - live) & set(terms["all"]))
+    report("...and it contains NO retired name — a retired name is "
+           "vocabulary the author deliberately abandoned",
+           not leaked, ", ".join(leaked[:10]))
+    labelled = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "kind IN ('objection', 'example', 'question', 'syllogism')",
+        (manuscript["id"],))}
+    sentences = sorted(labelled & set(terms["all"]))
+    report("...and NO label kind — those names are sentences, and a list "
+           "that protects the ordinary English inside them protects "
+           "nothing",
+           not sentences, ", ".join(sentences[:10]))
+
+    first = _fg._protected_block(terms)
+    second = _fg._protected_block(
+        _fg.protected_terms(db, manuscript, TARGET, text, raw))
+    report("the block is BYTE-STABLE across two assemblies on identical "
+           "stored state — no counts, no ids, no timestamps",
+           first == second,
+           f"{len(first)} vs {len(second)} characters")
+
+    admitted = [t for t in HARD_SAMPLE if _fg.is_hard_to_say(t)]
+    refused = [t for t in EASY_SAMPLE if _fg.is_hard_to_say(t)]
+    report(f"F1 admits all {len(HARD_SAMPLE)} non-ASCII-LETTER names",
+           len(admitted) == len(HARD_SAMPLE),
+           "missed: " + ", ".join(t for t in HARD_SAMPLE
+                                  if t not in admitted))
+    report("F1 refuses the two whose only non-ASCII character is a curly "
+           "apostrophe — letters carry phonetic information and "
+           "punctuation does not",
+           not refused, ", ".join(refused))
+
+    if not raw.strip():
+        report(f"no {_pron.FILENAME} yet — an absent dictionary parses as "
+               f"empty with no error, which is the first-run case", True)
+    else:
+        rows, warnings = _pron.parse(raw)
+        report(f"{_pron.FILENAME} parses with no warnings "
+               f"({len(rows)} row(s))",
+               bool(rows) and not warnings,
+               f"{len(rows)} rows; " + "; ".join(warnings[:5]))
+        report("...and every term it carries is in the protected set — "
+               "a term the author ruled on aloud is by construction a "
+               "term of art",
+               all(t in terms["all"] for t in _pron.terms(raw)),
+               ", ".join(t for t in _pron.terms(raw)
+                         if t not in terms["all"]))
+    return report.failed
+
+
 def _hash_of(out: str, name: str) -> str:
     marker = f"───── block {name} — "
     if marker not in out:
@@ -994,7 +1104,8 @@ def _hash_of(out: str, name: str) -> str:
 
 CHECKS = {"placeholder": check_placeholder,
           "intent-scope": check_intent_scope,
-          "filter": check_filter}
+          "filter": check_filter,
+          "pronunciations": check_pronunciations}
 
 
 # ------------------------------------------------------------------ main

@@ -2184,3 +2184,213 @@ the write loop: `list_filter_edits`/`triage_filter_edits` remain the loop's
 only conversational door. Creating a filter is a single, idempotent act with
 no autoregressive state to protect; running one is the loop, and the loop
 gets one surface.
+
+### 15.22 Protected terms and the pronunciation dictionary (2026-08-30)
+
+*(Numbered 15.22 rather than 15.21: §15.21 was taken by the MCP filter-creation
+ruling, which merged the same day this stream began.)*
+
+Two Sponsor rulings on the filter pass, arriving the day after it shipped, and
+they turn out to be one mechanism seen from two sides.
+
+**The first: a filter must know the author's vocabulary, deterministically.**
+*"Does the filter get the concept graph…so it knows not to substitute terms of
+art?"* It did not. Block A carried CONCEPT NOTES — the author's definitions, in
+prose — and a definition is not a list. The duplicate-words artifact papered
+over the gap by naming eight terms in its own text, which is a lexicon that
+cannot grow and cannot be checked. Block A now carries PROTECTED TERMS, derived
+from `concept_nodes` by a rule with no model in it: four of the eight node kinds,
+two of the three statuses, names and aliases, plus every term the pronunciation
+dictionary carries. The kinds are chosen on one line — **vocabulary, not
+label**. `concept`, `metaphor`, `mathematical_construct` and
+`historical_reference` name words the author uses in the prose; `objection`,
+`example`, `question` and `syllogism` name moves in an argument, and their names
+are sentences ("Question about Supreme God"), so listing them would protect the
+ordinary English inside them and teach the model that the list means nothing.
+Retired concepts are excluded because a retired name is vocabulary the author
+deliberately abandoned, and protecting it would freeze exactly the wording a
+recast should be free to move; the synonyms that matter survive anyway, because
+`merge_concepts` turns a retired duplicate's names into aliases of the
+canonical. The capitalization rule is not re-implemented: it is
+`concepts.mention_pattern`'s ratified rule — *a single-word name declared with a
+capital is the term only where the text capitalizes it* — stated once in the
+block's header, with the list left complete underneath it. Pre-filtering the
+list by capitalization would have dropped every borrowed lower-case term
+(`anattā`, `ressentiment`, `upaya`) from the very protection the second ruling
+exists to give them.
+
+The harness supplies the list and does not enforce it — with one exception that
+costs nothing. `filter record` now runs `protected_loss(old, new, protected)`,
+a pure function over `mention_pattern`, and **warns by name** when a replacement
+drops a protected term the original carried. It warns rather than refusing
+because a legitimate recast can drop one of two mentions, and a refusal discards
+the whole reply for a judgment the harness is not entitled to make. It is the
+line between supplying law and being the editor, and the pass stays on the
+supplying side of it.
+
+**The second: the terms that are hard to say need somewhere to live.**
+*"a running pronunciation dictionary table associated with the manuscript…
+make sure the pass does not overwrite existing pronunciations that have been
+validated earlier… similar to how toc.md lives… editable from the doc."*
+`pronunciations.md` is a new manuscript-root sidecar: markdown, a table, mirrored
+into the master Doc as an ordinary tab so the author edits it there like an
+essay, and excluded from reading order, concept scanning, summaries, critique,
+filter targeting, the manifest and every export by a filename flag that widens
+`structure.is_structural`. The flag is a **filename**, not a marker inside the
+file, for §1's reason: a marker a Doc round trip can eat is a marker that
+silently reclassifies the dictionary as an essay, at which point it ships inside
+the book. It stays inside `read_manuscript_files`, so it is versioned,
+checksummed, diffed and rollback-able like everything else — structure is not
+content, but it is still the author's.
+
+The one inversion is the tab list, and it is what makes three otherwise-invisible
+sites safety-critical. `gdocs._reading_order_files` appends the sidecar so it
+gets a tab; from that moment `links` contains a file `parse_toc_tree` can never
+contain. `sync_tab_structure`, the pull's toc sync and `rewrite_toc_from_doc`
+all compare those two lists, and unguarded they would report a permanent
+`unsynced` — tab-order sync simply stops working — and then write the dictionary
+into `toc.toml`, at which point it becomes a chapter and every exclusion above
+unravels at once. All three are filtered, and each one has a test that fails
+when its own guard is removed.
+
+Immutability was asked for and is not implemented as a rule. It is a consequence
+of there being **exactly one writer**: `proposals.adopt`. Not the model, not
+`filter prelude`, not `filter record`, not `filter settle`, not `filter
+rollback`, not `filter unmark`, and not the Doc pull except as the author's own
+edit arriving through the ordinary tab write. The write itself is
+`structure.insert_toc_entry`'s discipline applied to a second table — pure text
+insertion, rewriting no line it did not add, on the file's own dominant line
+ending. In front of the pull sits the highest-value line in the whole feature:
+an incoming tab that parses to **zero rows** over a local file that has rows is
+skipped and reported by name, and `--force` does not reach past it. One bad
+Docs export would otherwise destroy the dictionary silently, with the only
+recovery in a version history nobody thinks to look at. A pull that parses to
+*fewer* rows is not guarded — that is an author deleting a row, which is
+legitimate and must work.
+
+**The prelude generalizes, and the class table is amended rather than
+smuggled.** §1.1 said a sequential filter has no prelude. A prelude is now
+*a whole-essay pass before any unit is judged, producing a run-scoped artifact*:
+for `global` that artifact is the frozen registry, rendered into block A; for a
+sequential filter that declares `prelude = "pronunciations"` in front matter it
+is a set of proposals, and nothing enters block A. The sequential prelude is
+optional where the registry is required, because a run without a dictionary diff
+is still a correct audio pass while a global unit judged against no registry is
+judged against nothing. This is the first front-matter key added since
+ratification, and the honest statement is that adding a filter which wants this
+prelude is code, once — §1's "a file and no code" holds for the class set, not
+for the harness's repertoire.
+
+What counts as difficult is a **floor computed by the harness and a ceiling left
+to the prompt**. The floor is one deterministic test: a term containing a
+non-ASCII character whose Unicode category is a *letter*. On the live graph that
+admits all sixteen of `Bṛhadāraṇyaka`, `Nāgārjuna`, `anattā`, `Śūnyatā`,
+`οὐκ ὄν θεός` and their kin, and correctly refuses `Noether's Theorem`, whose
+only non-ASCII character is a curly apostrophe. That is the Sponsor's "all
+standard non-english terms" with no model in it at all. Above the floor the
+prompt judges, because the prompt is reading the prose and can see an italicized
+borrowing the graph has never heard of; below it, an ordinary English word doing
+duty as a term of art (`Field`, `Test`, `Measure`) is never a candidate, because
+nobody needs to be told how to say "field".
+
+Additions ride the ordinary proposal queue, which the door required anyway: a
+filter never inserts, so a new dictionary row could not come through the edit
+door if it wanted to. The queue's verbatim-repeat hash was not enough — a second
+prelude offering a different respelling of a dismissed term would sail past it,
+the same way eighteen `note_update` rows once accumulated on one concept — so
+the guard is on the term, not the spelling: **one proposal per term, ever, in any
+state.** The cost is stated rather than hidden: an author who dismisses because
+the respelling was wrong is never asked again, and their remedy is to write the
+row themselves, which was the better path in that case anyway.
+
+**And the loop closes on itself, which is the part worth ratifying.** The
+Sponsor ruled that a term with a pronunciation is settled: the audio filter
+stops flagging it. So the dictionary is simultaneously this pass's **output
+channel** and its **suppression list** — a term enters because the filter did
+not know how to say it, and once it is in, the filter never asks again. That is
+why the dictionary sits in block A, the cached layer, read live from the file
+rather than pinned to the run's version: an accepted pronunciation must take
+effect at the next window, not the next run. A dictionary edit therefore
+invalidates the stable layer and re-bills the cached prefix. That is an honest
+invalidation — the suppression set genuinely changed — and `filter run` already
+prints the per-block hashes, so it is visible rather than mysterious. §4's four
+mechanisms of approximate idempotency gain a fifth that is not approximate at
+all, and it costs no convergence machinery: the pass terminates on this concern
+because its own output is what stops it.
+
+One doctrine bend is recorded rather than hidden. The blackboard checklist says
+every read of shared authorial state is capture-consistent or pinned, and the
+dictionary is neither: `summaries.capture`'s `texts` map is built from
+`reading_order`, which the sidecar flag removes it from, so it cannot be in the
+capture without putting the dictionary back into the reading order. Widening
+`capture`'s tuple arity for a non-prose sidecar would break every unpack site;
+pinning to `source_version_id` would contradict the suppression ruling above.
+What ships is `api._filter_capture` reading it ONCE per invocation and handing
+it to run, record, prelude and settle alike, so the doctrine's actual
+requirement — one read per invocation, the gate and the thing it gates reading
+the same bytes — holds. Found and fixed in the same breath: `scoped_concepts`
+was already doing a second disk read inside that same one-capture verb, so
+CONCEPT NOTES could differ between window N and window N+1 if a parallel session
+touched the file. It gains an optional `text=` override and now reads the
+capture too.
+
+**And the three artifacts stop naming this book's words, which ratifies a
+boundary that had been left implicit.** A filter artifact is a per-manuscript
+object: it lives in the gitignored `_filters/`, the author ratifies it, and it
+is supposed to carry doctrine specific enough to be wrong somewhere else — a
+duplicate-words filter that did not know this author repeats deliberately would
+strip the refrains out of the book. **The prompt carries the author's DOCTRINE;
+the payload carries the book's DATA; and where a prompt enumerates data the
+payload can supply, the enumeration goes.** So "Nothing, Nothingness, Qualities,
+the Chid" leaves both prompts for a reference to PROTECTED TERMS — the Sponsor's
+own phrasing, *a list of terms of art will be provided and should be left
+alone* — and the motif families leave for a reference to the `[figure]` elements
+of STYLE LAW. Refrain-by-default, cut-don't-substitute, precision-over-brevity
+and "a listener cannot look back" stay exactly where they are, in the author's
+words, because that is what a per-manuscript artifact is *for*. What the three
+become is templates: a second manuscript copies them, argues with the doctrine,
+and inherits the vocabulary, the families and the pronunciations from its own
+graph, law and dictionary with no editing at all.
+
+The motif families were checked for a deterministic derivation and **do not have
+one**, which is recorded rather than fudged. The names are real but they live
+inside two different `[figure]` statements in two different grammars —
+`walls/chains, fire/light, …` after a colon in one, `Fire, fields, walls, stone,
+ledger, ladder, and tremor` in prose in another — and a parser would have to
+choose which element is authoritative. Choosing is guessing, the same objection
+that refused italic-borrowed terms. But the enumeration still leaves the
+prompts, because `styles.render` already prints every element whole into block S
+with its aspect in brackets: the data is in the payload, in the author's own
+ratified words, and the prompt can name it instead of copying it. The aspect tag
+is the structured handle; the names inside the statement are not; the design uses
+the one that is. The distinction pairs (test/measure, virtue/quality) stay
+listed, because `concept-identity` law was read and governs the proposal
+screen's verdicts on the graph rather than prose word choice — routing prose law
+through it would be the aspect mismatch `loop.REGISTRY` already records once —
+and because a template needs a worked example. One sentence names STYLE LAW's
+`[lexicon]` elements as the authority the example only illustrates.
+
+**Deliberately not done:**
+
+- **Parsing motif families out of the figure law.** Two elements, two grammars,
+  no schema, and both are sentences the author may reword at any ratification.
+  The prompts point at the law instead, which is strictly more correct than a
+  copy that can disagree with it.
+- **A hand-maintained lexicon file.** The graph is the vocabulary. A second
+  source that can disagree with it is the ambiguity §1 refuses.
+- **Italic-borrowed terms as a derived category.** The only source is `*…*` in
+  prose; parsing it is prose parsing, it collides with ordinary emphasis, and it
+  is not stable across a Doc round trip — which would break the byte-stability
+  the cached layer rests on. The prompt still sees the italics, because the
+  units are verbatim.
+- **IPA.** The author reads this table. A notation they cannot check is a
+  notation they cannot rule on.
+- **A "re-open" verb for a dismissed pronunciation.** The file is the escape
+  hatch, and it is a better one.
+- **Refusing a reply that drops a protected term.** It warns. The harness
+  supplies law; it is not the editor.
+- **Seeding the file from a filter path.** `pronunciations.md` appears on the
+  first ACCEPTED proposal and never before. An empty table that materializes
+  because a filter *ran* is a file in the author's vault they did not ask for,
+  and it is instantly a Doc tab, a version-history entry and a diff.
+

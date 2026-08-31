@@ -103,7 +103,7 @@ within a month.
 | The question | "given everything that came before, is this unit right?" | "given the whole essay, is this unit right?" |
 | Unit N sees | the run's own text for units 1..N−1, plus the carried STATE | the whole pinned essay, plus the frozen REGISTRY |
 | Order matters | yes | no |
-| Prelude | none | one, required, before any unit |
+| Prelude | none, or one **optional**, declared in front matter (§15.22) | one, **required**, before any unit |
 | Carried state | yes | no; the registry is frozen instead |
 | Examples | duplicate words, audio-friendly voice continuity | metaphor consistency, motif discipline |
 
@@ -213,6 +213,19 @@ The **registry** is the same idea with a different lifetime: written once by
 the prelude, stored in `filter_runs.registry`, rendered into **block A** (the
 cached layer), immutable for the life of the run. `filter prelude --replace`
 rewrites it and invalidates the cached prefix, which the verb says out loud.
+
+**A prelude artifact that is not a registry (§15.22).** A prelude generalizes
+to *a whole-essay pass that runs before any unit is judged and produces a
+run-scoped artifact*. For `global` that artifact is the frozen registry, above.
+For a sequential filter that declares `prelude = "pronunciations"` in its front
+matter, the artifact is a set of **proposals on the ordinary queue**: nothing
+enters block A, nothing is frozen into the run beyond
+`metadata.prelude = {kind, at, proposed, suppressed}`, and the run's mechanics
+are untouched. It is **optional** where the registry is required, because a run
+whose dictionary diff never ran is still a correct audio pass, while a global
+unit judged against no registry is judged against nothing — `filter run` prints
+one line and proceeds. A second prelude on the same run refuses without
+`--replace`, in the registry's own shape.
 
 ---
 
@@ -579,7 +592,9 @@ Block S  (system; cache breakpoint 1)
 Block A  (user; cache breakpoint 2)
   INTENTS                            in-scope active; emphasis only, never attribution
   VALIDATED BELIEFS                  sorted by statement, no confidence
-  CONCEPT NOTES                      api.scoped_concepts(file=file), sorted
+  CONCEPT NOTES                      api.scoped_concepts(file, text=capture), sorted
+  PROTECTED TERMS                    every class: the derivation, §15.22 §1.1
+  PRONUNCIATION DICTIONARY           every class: pronunciations.md, read live
   PRIOR RUNS OF THIS FILTER ON THIS FILE   dates, tallies, reasons verbatim
   THE ESSAY                          global class only: every unit, numbered
   MOTIF REGISTRY                     global class only: the frozen prelude output
@@ -599,6 +614,17 @@ one applies: beliefs sorted by **statement** with no confidence printed
 silently re-bills the cached layer); intents as tier label and statement
 only; no row ids, no timestamps, no counters; an absent section prints
 `(none)`.
+
+PROTECTED TERMS and PRONUNCIATION DICTIONARY render for **every filter of
+every class, always** — a section that comes and goes is a shape change, and
+shape changes are cache invalidations; the dictionary's terms join the
+protected set, so `duplicate-words` needs it too; and a `global` filter needs
+the protection as much as a sequential one, because a motif family's own name
+is a protected term. The dictionary is read LIVE from the file rather than
+pinned to `source_version_id`, so an accepted pronunciation takes effect at the
+next WINDOW; that invalidates block A honestly, and `filter run` already prints
+the per-block hashes. `api._filter_capture` reads it once per invocation and
+hands it to run, record, prelude and settle alike.
 
 Two notes worth recording because they **invert** the write path's:
 
@@ -723,7 +749,9 @@ file is a state the bytes themselves declare.
 ```
 filter add <name>                 the artifact on stdin; refuses a bad class by name
 filter list | show <name>
-filter prelude <name> <file>      global only; registry JSON on stdin, or --native
+filter prelude <name> <file>      global (registry JSON on stdin) or a filter
+                                  declaring prelude = "pronunciations"
+                                  ({"pronunciations": [...]} on stdin); --native
 filter run <name> <file>          assembles a window; NO model call
 filter record <file>              the reply JSON on stdin
 filter edits <file>               the active run's proposals, numbered
@@ -744,6 +772,12 @@ every session without touching the skill.
 A settled run's rejections are history and belong in the next run's PRIOR
 RUNS block, not in a triage list where `--accept 1` could resurrect one.
 
+A pronunciation prelude's output never touches the edit door: it files
+`pronunciation` proposals on the ordinary knowledge queue, so `proposal
+review | list | accept | dismiss` and `list_proposals` / `resolve_proposal` on
+MCP carry it with no new surface. That is where the *review* half is reachable
+from a chat session, which is where the author actually rules.
+
 ---
 
 ## 12. Tests
@@ -758,6 +792,17 @@ RUNS block, not in a triage list where `--accept 1` could resurrect one.
   nothing was staged and the cursor did not move), the door, the local
   transport, approximate idempotency, warn-never-block, and the refusals from
   doctrine.
+- `tests/test_e2e.py` Scenario PR and Scenario PB — protected terms and the
+  pronunciation dictionary (§15.22): the derivation over a fixture graph
+  carrying every kind and every status, block-A byte stability across
+  processes and hash seeds, the honest invalidation, `protected_loss`, every
+  refusal of `parse_pronunciations` asserting twice, the full cycle (flag →
+  accept → re-run → neither flagged nor re-proposed), immutability across all
+  nine verbs, every exclusion one assertion each, the three Doc-sync guards
+  and the pull's zero-rows refusal that `--force` cannot pass.
+- `tools/testbench.py --check pronunciations` — the live check against the
+  real manuscript, in `--check filter`'s shape and discriminating the same
+  way.
 - `tools/testbench.py --check filter` — the live check, in `--check
   placeholder`'s shape. It asserts the echo refusal ON THE DATABASE, that
   `proposed_old` came from disk, that the marked form is visible markdown in
@@ -782,6 +827,19 @@ RUNS block, not in a triage list where `--accept 1` could resurrect one.
   order is enforced or recommended. That is editorial practice.
 - **The lens door.** Specified in §7.2 so that when it is built it is three
   lines and not a refactor. Nothing built this stream.
+- **Parsing motif families out of the figure law (§15.22).** Two `[figure]`
+  elements, two grammars, no schema, and both are sentences the author may
+  reword at any ratification. The prompts point at the law instead, which is
+  strictly more correct than a copy that can disagree with it.
+- **A hand-maintained lexicon file.** The graph is the vocabulary. A second
+  source that can disagree with it is the ambiguity §1.2 refuses.
+- **Italic-borrowed terms as a derived category.** The only source is `*…*`
+  in prose; parsing it is prose parsing, it collides with ordinary emphasis,
+  and it is not stable across a Doc round trip — which would break the
+  byte-stability the cached layer rests on. The prompt still sees the
+  italics, because the units are verbatim.
+- **Refusing a reply that drops a protected term.** It warns. The harness
+  supplies law; it is not the editor.
 
 ---
 
@@ -798,6 +856,33 @@ in the gitignored `<manuscript>/_filters/`, and this appendix is the ratificatio
 surface. The assistant pipes each into `filter add` once the author approves it.
 A `--from-library` flag would be machinery in place of a conversation, and the
 conversation IS the ratification.
+
+**The genericity boundary (ratified with §15.22).** A filter artifact is a
+per-manuscript object BY DESIGN, and that specificity is the point rather than a
+defect: a duplicate-words filter that did not know this author repeats
+deliberately would strip the refrains out of the book. The line, in one sentence:
+
+> **A filter's prompt carries the author's DOCTRINE; the payload carries the
+> book's DATA; and where a prompt enumerates data the payload can supply, the
+> enumeration goes.**
+
+An enumeration in a prompt is a copy of the graph that cannot grow, cannot be
+curated, and drifts silently the moment the author adds a concept — which is the
+whole reason PROTECTED TERMS exists. So the three artifacts below no longer name
+this book's terms of art (the PROTECTED TERMS block is the authority) or its
+motif families (STYLE LAW's `[figure]` elements are). The distinction pairs stay
+listed, with STYLE LAW's `[lexicon]` elements named as the authority the list
+only illustrates — a template needs a worked example, and it must not pretend
+the example is the law. Refrain-by-default, cut-don't-substitute,
+precision-over-brevity and "a listener cannot look back" stay exactly where they
+are, in the author's words, because that is what a per-manuscript artifact is
+FOR.
+
+What the three become is **templates**: a second manuscript copies them, argues
+with the doctrine, and inherits the vocabulary, the families and the
+pronunciations from its OWN graph, style law and dictionary with no editing at
+all. Scenario PR's template check asserts it — an artifact that names a term of
+this book is a template that will lie to the next one.
 
 ### `duplicate-words` — sequential, word-ledger state
 
@@ -831,17 +916,27 @@ that removes the repetition without removing anything else.
   close, a line that has been building through the essay — is a refrain and you
   leave it exactly as it is. When you cannot tell whether a repetition is a tic or
   a refrain, it is a refrain: `keep` it and say in `why` that you thought about it.
-- **A term of art.** "Nothing", "Nothingness", "Qualities", "Fields", "Field of
-  Choice", "The Dharma", "The Chid" and the rest of the lexicon are the book's
-  vocabulary and repeat as often as the argument needs. Substituting a synonym for
-  one is forbidden by the style law and is the worst thing this filter could do.
-- **A motif word.** Fire, wall, stone, chain, ledger, ladder, tremor, field,
-  journey: these recur across the whole book on purpose. Within one paragraph, four
-  uses of "the wall" may be three too many; across an essay, they are the book
-  working. Judge the paragraph, never the essay.
-- **Two words that only look alike.** "Test" and "measure" are different terms in
-  this book, with a law that says never to interchange them. So are "virtue" and
-  "quality". Repetition is a matter of the same word twice, not of near neighbours.
+- **A term of art.** A list of the author's terms of art is provided in
+  PROTECTED TERMS, and everything on that list is left alone: never substitute a
+  synonym for one, never decapitalize one, never swap one for a paraphrase. The
+  list is the whole vocabulary — every name and every alternate name of every
+  concept, figure, construct and proper name this book uses, drawn from the
+  author's own graph and from the pronunciation dictionary — so it is the
+  authority, not a sample of one. These terms repeat as often as the argument
+  needs. When one genuinely does repeat too closely, the fix is to CUT the
+  second mention or recast the sentence around it, never to replace it; if
+  neither is possible, `keep` the unit and say so in `why`.
+- **A motif word.** The established motif families are the ones the `[figure]`
+  elements of STYLE LAW name; their words recur across the whole book on
+  purpose. Within one paragraph, four uses of one of them may be three too many;
+  across an essay, they are the book working. Judge the paragraph, never the
+  essay.
+- **Two words that only look alike.** Some pairs are distinct terms in this book
+  with a law that says never to interchange them — "test" and "measure" are one
+  such pair, "virtue" and "quality" another. STYLE LAW's `[lexicon]` elements are
+  the authority on which pairs those are and what each one means; the two named
+  here are examples of the kind, not the whole set. Repetition is a matter of
+  the same word twice, not of near neighbours.
 - **Function words.** The, of, and, to, that, is. Never flag them.
 
 ## How to fix
@@ -903,11 +998,13 @@ The registry is a reading of what the essay actually does, not of what it should
 do. If a motif is used two ways, the registry says so — that is the finding, and
 the units that create the inconsistency will be judged against it.
 
-Draw the family names from the STYLE LAW's figurative-language elements, which name
-the established families the author works in. A figure that belongs to no family in
-the law is recorded in the registry under its own name and flagged in the prelude
-as a stranger — introducing a new motif family is an authorial decision, not a
-filter's.
+Draw the family names from the `[figure]` elements of STYLE LAW, which name the
+established families this author works in. The registry example above is a
+worked illustration of the FORM, not the list: the families are whatever the law
+names, and they change when the author changes the law. A figure that belongs to
+no family in the law is recorded in the registry under its own name and flagged
+in the prelude as a stranger — introducing a new motif family is an authorial
+decision, not a filter's.
 
 ## What counts, per unit
 
@@ -938,6 +1035,11 @@ filter's.
   here and the opposite way in a different essay is a real finding and it is
   invisible from where you are standing; do not guess at it and do not mention it.
   That question belongs to a lens over the whole book.
+- **A term of art.** The names in PROTECTED TERMS are the author's vocabulary,
+  and a `replace` that swaps one of them for a synonym is out of bounds even
+  when the swap would fix a mixed figure. A motif family's own name is one of
+  these: restore the registry's SENSE by rewriting what is said about the
+  figure, never by renaming the figure.
 
 ## Naming your finding
 
@@ -949,11 +1051,12 @@ records that a motif is used two ways, choose the sense that the majority of the
 essay's uses carry, say so in `why`, and be consistent about it in every unit.
 ```
 
-### `audio-friendly` — sequential, voice-continuity state
+### `audio-friendly` — sequential, voice-continuity state, pronunciation prelude
 
 ```markdown
 ---
 class = "sequential"
+prelude = "pronunciations"
 state = "the voice note: how the reading has been going — the current sentence rhythm, the last few sentence openings, any construction that has just been used and should not recur in the ear"
 ---
 
@@ -978,11 +1081,11 @@ time. Everything below follows from that.
 - **A parenthesis or an em-dash aside carrying real content.** Punctuation the ear
   cannot hear must not be load-bearing. Either promote the aside to its own
   sentence or fold it into the main clause.
-- **A homophone that will be misheard in this context.** The one that matters most
-  in this book: a term of art whose ordinary homonym is also live in the sentence —
-  a Field and a field, the Test and a test, the Measure and a measure. The
-  capitalization does all the work on the page and none of it aloud. Recast so the
-  sense is carried by the words.
+- **A homophone that will be misheard in this context.** The one that matters
+  most in this book: a term from PROTECTED TERMS whose ordinary homonym is also
+  live in the sentence — the capitalization does all the work on the page and
+  none of it aloud. Recast so the sense is carried by the words, never by
+  replacing the term.
 - **A pronoun whose antecedent is more than a sentence back**, or which could
   attach to either of two nouns. Name the thing.
 - **A list of more than three items with no structure.** In the ear a flat list
@@ -996,8 +1099,10 @@ time. Everything below follows from that.
 ## What does not count
 
 - **A term of art, however hard to say.** Never simplify the lexicon for the ear.
-  Nothing, Nothingness, Qualities, the Chid, the Field of Choice: these are the
-  book's words and they stay, capitalization and all.
+  A list of the author's terms of art is provided in PROTECTED TERMS, and
+  everything on it stays exactly as it is, capitalization and all. A listener
+  who has to work at a word is being served; a listener who is given a different
+  word has been lied to.
 - **The register.** The prose is meant to sound like scripture read aloud; that is
   the point, and paratactic weight, inversion, antithesis and cumulative rhythm are
   ratified law. Do not flatten a period into three flat sentences because the ear
@@ -1007,6 +1112,21 @@ time. Everything below follows from that.
   refrains are doing work. That is a different filter's business, and this one
   never removes a repetition.
 - **A heading.** Headings are read as headings. Leave them.
+
+## The pronunciation dictionary
+
+PRONUNCIATION DICTIONARY is the author's settled reading of the terms a narrator
+would stumble over. It is law here in the same way the style law is law.
+
+A term in the dictionary is SETTLED: never flag it as hard to say, never
+recast a sentence to avoid it, and never propose a gloss for it. The dictionary
+IS the fix. If a term is hard to say and it is in the dictionary, the work is
+already done.
+
+A term that is hard to say and is NOT in the dictionary is not this pass's
+business either — it belongs to the prelude, which proposes a row for the author
+to rule on. Judging the unit and stocking the dictionary are two different jobs,
+and doing the second one here would put a pronunciation into the prose.
 
 ## The rule that outranks the rest
 

@@ -5469,6 +5469,60 @@ def scenario_testbench(root: Path) -> None:
               StubLLMHandler.REQUESTS - before <= 1,
               f"{StubLLMHandler.REQUESTS - before} calls")
 
+        # --- the pronunciations check (§15.22) ---------------------------
+        _pin_config(ws)
+        (msdir / "pronunciations.md").write_text(
+            "# Pronunciations\n\nHow they are said.\n\n"
+            "| Term | Say it | Note |\n| --- | --- | --- |\n"
+            "| Nothing | NUH-thing | the book's own word |\n",
+            encoding="utf-8")
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "pronunciations")
+        check("the pronunciations check passes on a healthy bench, and "
+              "asserts the F1 floor against REAL names rather than "
+              "invented ones",
+              "FAIL" not in out
+              and "F1 admits all 16 non-ASCII-LETTER names" in out
+              and "F1 refuses the two whose only non-ASCII character is a "
+                  "curly apostrophe" in out, out)
+        check("...and it is READ-ONLY: not one model call, and no verb "
+              "that writes",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+        check("--list-checks names it",
+              "pronunciations " in bench("--list-checks"), "")
+        # The check must DISCRIMINATE, and the corruption is the real
+        # failure mode rather than an invented one: a Docs export that
+        # turned the table into bullet lines. (The design named an HTML
+        # comment; a line-oriented pipe-table parser does not care about
+        # one, and asserting that it does would assert a behaviour that
+        # does not exist. The mangled table is what the pull guard exists
+        # for, so it is the corruption worth catching here too.)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed = tb.check_pronunciations(
+                ws, msdir, _corrupt=lambda x: x.replace(
+                    "| Nothing | NUH-thing | the book's own word |",
+                    "- Nothing NUH-thing the book's own word"))
+        negative = buffer.getvalue()
+        check("the pronunciations check FAILS BY NAME on a dictionary "
+              "whose table has been mangled into bullet lines — it never "
+              "reads a lost table as an empty one",
+              failed >= 1
+              and "FAIL: pronunciations.md parses with no warnings"
+              in negative, negative)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed_dup = tb.check_pronunciations(
+                ws, msdir, _corrupt=lambda x: x
+                + "| nothing | NAW-thing | a second, lower case |\n")
+        dup_out = buffer.getvalue()
+        check("...and on a dictionary carrying two rows for one term, "
+              "which the parser reports and never deletes",
+              failed_dup >= 1
+              and "appears more than once" in dup_out, dup_out)
+        (msdir / "pronunciations.md").unlink()
+
     finally:
         server.shutdown()
 
@@ -7043,6 +7097,90 @@ def scenario_pronunciations(root: Path) -> None:
               [r["location"] for r in db.all(
                   "SELECT location FROM editorial_transitions WHERE "
                   "manuscript_id = ?", (mid,))])
+        # ================= E9 — the pointers resolve =================
+        # §6.0's genericity boundary is only real if the thing the
+        # prompts POINT AT is actually in the payload. Two halves: the
+        # aspect tags reach block S, and the three artifacts name no word
+        # of this book.
+        run(ws, "style", "guide", "Book Law")
+        run(ws, "style", "add", "figure",
+            "Draw from the established motif families: walls/chains, "
+            "fire/light.", "--guide", "Book Law")
+        run(ws, "style", "add", "lexicon",
+            "'Test' names the two questions; 'measure' is the universal "
+            "count. Never interchange them.", "--guide", "Book Law")
+        run(ws, "style", "attach", "02-terms.md", "Book Law")
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_s = _block(out, "S")
+        check("E9 STYLE LAW prints one element per line with its aspect "
+              "in brackets, so a prompt that says \"the `[figure]` "
+              "elements of STYLE LAW\" names something actually in the "
+              "payload",
+              "- [figure] Draw from the established motif families"
+              in block_s
+              and "- [lexicon] 'Test' names the two questions" in block_s,
+              block_s[-600:])
+        check("E9 ...and the harness prompt makes exactly that pointer, "
+              "so a renderer change that dropped the tag fails a test "
+              "rather than silently turning three prompt pointers into "
+              "references to nothing",
+              "`[figure]`" in block_s and "`[lexicon]`" in block_s,
+              block_s[:2000])
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+
+        # The template check. A listed-exceptions test, not a bare "no
+        # book words": an artifact may keep the worked example §6.0
+        # ratifies, and a bare assertion would fail on the first ordinary
+        # English collision.
+        design = (Path(__file__).resolve().parent.parent / "docs"
+                  / "filter-pass-design.md").read_text(encoding="utf-8")
+        appendix = design.split(
+            "## Appendix — the three filters, in full", 1)[1]
+        # The NORMATIVE prose only. The indented blocks are worked
+        # examples of a FORM — a state ledger's shape, a registry's shape
+        # — and §6.4 labels them as such in as many words. An
+        # enumeration in a normative bullet is a lexicon the model treats
+        # as the set; a labelled example is not, and rewriting the
+        # ratified examples was not part of the ruling.
+        normative = "\n".join(line for line in appendix.split("\n")
+                               if not line.startswith("    "))
+        this_book = [
+            "Nothingness", "Qualities", "The Chid", "the Chid",
+            "Field of Choice", "The Dharma", "the Dead", "the Dharma",
+        ]
+        named = [t for t in this_book if t in normative]
+        check("E9 the three artifacts name NO term of this book in "
+              "normative prose — the vocabulary comes from PROTECTED "
+              "TERMS, so a second manuscript adopts them unedited",
+              not named, ", ".join(named))
+        families = ["Fire, wall, stone, chain, ledger, ladder, tremor",
+                    "Fire, wall, stone, chain, ledger, ladder, tremor, "
+                    "field,", "walls/chains, fire/light"]
+        listed = [f for f in families if f in normative]
+        check("E9 ...and no motif-family list either — the `[figure]` "
+              "elements of STYLE LAW are the authority, and a copy in a "
+              "prompt is a copy that can disagree with the law",
+              not listed, ", ".join(listed))
+        check("E9 the worked examples that DO carry this book's words "
+              "are labelled as illustrations of the FORM, never of the "
+              "set — which is the whole difference between an example "
+              "and an enumeration",
+              "worked illustration of the FORM, not the list" in appendix,
+              "")
+        check("E9 the worked example §6.0 keeps IS still there, with the "
+              "law named as the authority it only illustrates — a "
+              "template needs an example, and must not pretend the "
+              "example is the law",
+              '"test" and "measure" are one' in appendix
+              and "`[lexicon]` elements are\n  the authority" in appendix,
+              appendix[:200])
+        check("E9 and the doctrine stays, in the author's words, because "
+              "that is what a per-manuscript artifact is FOR",
+              "**A refrain.**" in appendix
+              and "Cut, don't substitute." in appendix
+              and "precision wins" in appendix
+              and "A listener cannot look back" in appendix, "")
+
     finally:
         server.shutdown()
 
