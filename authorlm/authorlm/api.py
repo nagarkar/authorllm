@@ -5151,7 +5151,14 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             # that can fail halfway on the network after the evidence is
             # recorded — so the tab keeps showing the marks until the
             # author's next ordinary `doc push`, and the verb says so.
-            "tab_still_marked": _run_mode(run) == "doc"}
+            #
+            # Keyed on whether THIS settle actually read forms back out
+            # of the tab, not on the run's mode. A doc-mode run whose
+            # forms were taken back by `filter unmark --force` settles
+            # locally against a tab that verb just rebuilt CLEAN; telling
+            # the author it still shows struck-and-green text sends them
+            # to look at marks that are not there.
+            "tab_still_marked": marked_doc is not None}
 
 
 def _file_run_mode(db: Database, manuscript_id: str, rel: str) -> str | None:

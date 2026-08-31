@@ -1749,6 +1749,52 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           raised2 is not None and "mid-settle" in raised2, raised2)
 
 
+def _the_hint_after_an_unmark(root: Path) -> None:
+    """P3a — the settle's "the tab still shows the marks" line must be
+    keyed on whether THIS settle read the tab, not on the run's mode.
+
+    `filter unmark` deliberately does not clear the mode (§2.1), so a run
+    whose forms were taken back is still `mode='doc'` while its tab has
+    just been rebuilt CLEAN. Keying the hint on the mode sent the author
+    to look at struck-and-green text that is not there, and at a `doc
+    push` with nothing to clear."""
+    print("P3a: the settle hint after the forms were taken back:")
+
+    db, manuscript, ms, fake = _doc_run(root, "hint-ws",
+                                        {2: "TWO AS PROPOSED."})
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
+    api.filter_unmark(db, manuscript, "solo.md", force=True,
+                      services=lambda: (fake, fake))
+    check("the tab really was rebuilt clean — otherwise the hint would "
+          "be TRUE and this test asserts nothing (§14.8)",
+          "<<" not in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
+    settled = api.filter_settle(db, manuscript, {}, "solo.md",
+                                services=lambda: (fake, fake))
+    check("P3a the settle does NOT claim the tab still shows the marks — "
+          "it read the FILE, and the tab it would be talking about was "
+          "rebuilt clean one verb ago",
+          settled["tab_still_marked"] is False,
+          str({"hint": settled["tab_still_marked"],
+               "mode": settled["mode"]}))
+    check("P3a ...and the run's mode is STILL 'doc' at that moment, "
+          "which is exactly why keying the hint on the mode was wrong",
+          settled["mode"] == "doc")
+    check("P3a the hint still fires on a settle that really did read the "
+          "tab — the fix narrows it, it does not delete it",
+          _a_real_doc_settle_still_hints(root))
+
+
+def _a_real_doc_settle_still_hints(root: Path) -> bool:
+    db, manuscript, ms, fake = _doc_run(root, "hint-ws-2",
+                                        {2: "TWO AS PROPOSED."})
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
+    out = api.filter_settle(db, manuscript, {}, "solo.md",
+                            services=lambda: (fake, fake))
+    return out["tab_still_marked"] is True
+
+
 def _awkward_new_halves_through_the_doc(root: Path) -> None:
     """F-D13 / F-D15 — the two shapes §4 and §8 flag as UNPROVEN through
     a real Doc: a `{{new}}` half containing a blank line, and one
@@ -3237,6 +3283,7 @@ def main_test() -> None:
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)
         _recovery_while_forms_are_out(root)
+        _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
     finally:
