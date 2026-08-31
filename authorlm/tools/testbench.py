@@ -67,6 +67,34 @@ BENCH = "testbench"
 BENCH_STYLE = "Bench Plain"
 BENCH_INTENT = "Test bench: exercise the write path against fixed text."
 
+# The bench's whole concept graph, seeded by hand at --setup (§15.22).
+#
+# The bench is registered `--no-extract` because an EXTRACTED graph over
+# it would add triage proposals and model calls to a step that must stay
+# free. A hand-seeded graph adds neither: `concept add` makes no model
+# call, and a declared concept that never appears in the text raises no
+# proposal. What it buys is that `--check pronunciations` has a real
+# derivation to run against instead of an empty one.
+#
+# Four nodes, chosen so every branch of the kind/status rule is exercised
+# and so that TWO of the three graph assertions stop being vacuous:
+# without a retired node and a label-kind node on the bench, "contains no
+# retired name" and "contains no label kind" pass over empty sets and
+# would pass over a completely broken derivation too.
+BENCH_CONCEPTS = (
+    # (name, kind, retire?)
+    ("Figure", "concept", False),          # protected: the plainest case
+    ("Prägnanz", "concept", False),        # protected, and non-ASCII, so
+                                           # F1 has a GRAPH-DERIVED hard
+                                           # term and not only literals
+    ("Objection to ground as nothing",     # NOT protected: a label kind,
+     "objection", False),                  # whose name is a sentence
+    ("Salience", "concept", True),         # NOT protected: retired is
+)                                          # vocabulary deliberately dropped
+
+BENCH_PROTECTED = ("Figure", "Prägnanz")
+BENCH_UNPROTECTED = ("Objection to ground as nothing", "Salience")
+
 # The essay a check rewrites. Deliberately the MIDDLE one, so the
 # before/after drafting context has a neighbour on each side and the
 # summary-freshness gate is exercised rather than skirted.
@@ -225,6 +253,18 @@ def _summary_states(db: Database, manuscript: dict) -> dict[str, str]:
     return {r["file"]: r["state"] for r in sums.status(db, manuscript)}
 
 
+def _unseeded_concepts(db: Database, row: dict | None) -> list[tuple]:
+    """The BENCH_CONCEPTS rows not yet in the graph, in declaration
+    order. Idempotent by NAME so a re-run seeds nothing and --setup can
+    report the bench healthy."""
+    if row is None:
+        return list(BENCH_CONCEPTS)
+    have = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ?",
+        (row["id"],))}
+    return [c for c in BENCH_CONCEPTS if c[0] not in have]
+
+
 def _needs_summaries(states: dict[str, str]) -> list[str]:
     """`upstream_stale` is deliberately NOT here. It is tolerated by the
     drafting gate (passes.summaries_ready), so treating it as work would
@@ -275,6 +315,12 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     if stale:
         todo.append(f"build summaries for {', '.join(stale)} "
                     f"(the ONLY step that calls a model)")
+    unseeded = _unseeded_concepts(db, row)
+    if unseeded:
+        todo.append(f"seed {len(unseeded)} bench concept(s) so the "
+                    f"derivation has a graph to run against: "
+                    f"{', '.join(n for n, _k, _r in unseeded)} "
+                    f"(no model call)")
 
     if drifted:
         print(f"note: {', '.join(drifted)} differ(s) from the text in "
@@ -322,6 +368,16 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
         _guard(db, manuscript_dir)
         print(cli(workspace, "-m", BENCH, "style", "attach",
                   name, BENCH_STYLE).strip())
+        done += 1
+
+    for name, kind, retire in unseeded:
+        _guard(db, manuscript_dir)
+        print(cli(workspace, "-m", BENCH, "concept", "add", name,
+                  "--kind", kind).strip())
+        if retire:
+            _guard(db, manuscript_dir)
+            print(cli(workspace, "-m", BENCH, "concept", "retire",
+                      name).strip())
         done += 1
 
     states = _summary_states(db, row)
@@ -1001,9 +1057,28 @@ def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
                          _corrupt=None) -> int:
     """PROTECTED TERMS derives, holds still, and the dictionary parses.
 
-    Read-only against the live manuscript: it assembles two payloads and
-    parses a file. Nothing is written, nothing is settled, and there is
-    no try/finally because there is nothing to roll back.
+    Read-only: it assembles two payloads and parses a file. Nothing is
+    written, nothing is settled, and there is no try/finally because
+    there is nothing to roll back.
+
+    It runs against the BENCH graph, which `--setup` seeds by hand
+    (BENCH_CONCEPTS), and it asserts the seeded names BY NAME. The first
+    cut asserted only "the protected set is non-empty" against a bench
+    registered `--no-extract`, whose graph is empty by design — so it
+    could never pass on its own, and passed in the hermetic suite only
+    because a `pronunciations.md` written moments earlier supplied a term
+    through list 3. Its two siblings passed VACUOUSLY, over empty sets,
+    and would have passed over a completely broken derivation.
+
+    Reading the author's real graph instead was considered and refused:
+    this script's load-bearing rail is that nothing in it resolves a
+    manuscript by argument, and a live read would have to resolve one
+    nobody named — "the manuscript that is not the testbench" — making
+    the verdict depend on which manuscripts happen to be registered. The
+    live-graph question is answered by the product rather than by this
+    script, and the measurement is recorded: `protected_terms` over the
+    live SMSTTD graph returns 313 nodes / 348 names, which is the
+    design's own figure.
 
     `_corrupt` is a test seam and nothing else: a callable applied to the
     dictionary text before it is parsed, used by the hermetic suite to
@@ -1035,28 +1110,42 @@ def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
     if _corrupt is not None:
         raw = _corrupt(raw)
 
+    if _unseeded_concepts(db, manuscript):
+        raise BenchRefusal(
+            "the bench graph is not seeded — run --setup. Without it the "
+            "derivation runs over an empty graph and every assertion "
+            "below would pass by saying nothing.")
     terms = _fg.protected_terms(db, manuscript, TARGET, text, raw)
-    report("the protected set is non-empty — a filter with an empty "
-           "vocabulary list is a filter that was told nothing",
-           bool(terms["all"]), f"{len(terms['all'])} terms")
+    missing = [n for n in BENCH_PROTECTED if n not in terms["all"]]
+    report("the protected set carries the bench's vocabulary kinds BY "
+           "NAME — a filter with an empty list is a filter that was told "
+           "nothing, and 'non-empty' alone would pass on the wrong list",
+           not missing,
+           "missing: " + ", ".join(missing)
+           + f" (set has {len(terms['all'])})")
     retired = {r["name"] for r in db.all(
         "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
         "status = 'retired'", (manuscript["id"],))}
     live = {r["name"] for r in db.all(
         "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
         "status != 'retired'", (manuscript["id"],))}
+    report("the bench really HAS a retired name for that to be about — "
+           "an assertion over an empty set passes on a broken derivation",
+           bool(retired - live), sorted(retired))
     leaked = sorted((retired - live) & set(terms["all"]))
-    report("...and it contains NO retired name — a retired name is "
+    report("...and NO retired name is in the set — a retired name is "
            "vocabulary the author deliberately abandoned",
            not leaked, ", ".join(leaked[:10]))
     labelled = {r["name"] for r in db.all(
         "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
         "kind IN ('objection', 'example', 'question', 'syllogism')",
         (manuscript["id"],))}
+    report("the bench really HAS a label-kind node too, for the same "
+           "reason", bool(labelled), sorted(labelled))
     sentences = sorted(labelled & set(terms["all"]))
-    report("...and NO label kind — those names are sentences, and a list "
-           "that protects the ordinary English inside them protects "
-           "nothing",
+    report("...and NO label kind is in the set — those names are "
+           "sentences, and a list that protects the ordinary English "
+           "inside them protects nothing",
            not sentences, ", ".join(sentences[:10]))
 
     first = _fg._protected_block(terms)
@@ -1067,6 +1156,11 @@ def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
            first == second,
            f"{len(first)} vs {len(second)} characters")
 
+    graph_hard = sorted(t for t in terms["all"] if _fg.is_hard_to_say(t))
+    report("F1 runs over a name the DERIVATION produced, not only over "
+           "the literals below — the bench seeds one non-ASCII concept "
+           "so the floor is exercised end to end",
+           graph_hard == ["Prägnanz"], graph_hard)
     admitted = [t for t in HARD_SAMPLE if _fg.is_hard_to_say(t)]
     refused = [t for t in EASY_SAMPLE if _fg.is_hard_to_say(t)]
     report(f"F1 admits all {len(HARD_SAMPLE)} non-ASCII-LETTER names",
