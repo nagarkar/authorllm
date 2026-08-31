@@ -1539,7 +1539,14 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           and sum(1 for t in api._run_threads(db, mid, _run_row(db, mid))
                   if t["state"] == "written") == 2)
 
-    # --- Q-4: the doc unmark asks for --force, and says what is lost --
+    # --- Q-4 / P2a: the refusal must describe the REAL blast radius ---
+    # The author has also edited the tab somewhere OUTSIDE any marked
+    # passage. The rebuild is whole-tab, so that edit dies too, and a
+    # refusal saying "nothing else is at risk" is a lie about scope.
+    elsewhere = "Omega closes, with a sentence I typed in the Doc."
+    tab_row = next(t for t in fake.tabs if t["title"] == "solo.md")
+    tab_row["body"] = tab_row["body"].replace(
+        "Omega closes the essay on a falling cadence.", elsewhere)
     refused = None
     try:
         api.filter_unmark(db, manuscript, "solo.md",
@@ -1550,8 +1557,19 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           "destroyed — the one place doc mode is deliberately LESS "
           "convenient than local, because it is the one place the loss "
           "is unrecoverable",
-          refused is not None and "recorded NOWHERE ELSE" in refused
-          and "--force" in refused, refused)
+          refused is not None and "--force" in refused, refused)
+    check("P2a ...and it names the REAL blast radius: the rebuild is "
+          "WHOLE-TAB, so an edit made anywhere else in that tab dies "
+          "with the green halves. Saying 'nothing else is at risk' was "
+          "a lie about scope",
+          refused is not None and "REBUILDS THE WHOLE TAB" in refused
+          and "any other edit you made anywhere else" in refused
+          and "nothing else is at risk" not in refused, refused)
+    check("P2a ...and it names the exit that costs nothing: 'doc pull' "
+          "brings an outside-the-forms edit down to the file first and "
+          "leaves the tab and the forms alone",
+          refused is not None and "doc pull solo.md" in refused
+          and "leaves the tab and the forms alone" in refused, refused)
     check("Q-4 ...and the refusal moved nothing: the tab still carries "
           "both forms and both threads are still `written`",
           fake.tab_text("solo.md").count("<<") == 2
@@ -1581,6 +1599,38 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           "the triage",
           result["reopened"] == 2 and states.count("accepted") == 2
           and "withdrawn" not in states, str(states))
+    check("P2a ...and the unrelated Doc-side edit really IS gone, which "
+          "is why the refusal has to say so: the assertion is the honest "
+          "outcome, not the comfortable one",
+          elsewhere not in tab
+          and "Omega closes the essay on a falling cadence." in tab, tab)
+
+    # --- P2a: the remedy the refusal names is REAL, not a slogan ------
+    db3, ms3, msdir3, fake3 = _doc_run(root, "recover-pull-ws",
+                                       {2: "TWO AS PROPOSED."})
+    api.filter_push(db3, ms3, {}, "solo.md",
+                    services=lambda: (fake3, fake3))
+    tab3 = next(t for t in fake3.tabs if t["title"] == "solo.md")
+    tab3["body"] = tab3["body"].replace(
+        "Omega closes the essay on a falling cadence.", elsewhere)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gdocs.pull_doc(db3, ms3, "solo.md", service=fake3,
+                       docs_service=fake3, with_comments=False)
+        api.filter_unmark(db3, ms3, "solo.md", force=True,
+                          services=lambda: (fake3, fake3))
+    check("P2a following the named remedy — 'doc pull' first, then "
+          "unmark --force — the outside-the-forms edit SURVIVES, in the "
+          "file and in the rebuilt tab. The refusal names a real exit",
+          elsewhere in (msdir3 / "solo.md").read_text()
+          and elsewhere in fake3.tab_text("solo.md"),
+          (msdir3 / "solo.md").read_text())
+    check("P2a ...and the forms are still gone from the tab and the "
+          "verdicts still survive",
+          "<<" not in fake3.tab_text("solo.md")
+          and sum(1 for t in api._run_threads(db3, ms3["id"],
+                                              _run_row(db3, ms3["id"]))
+                  if t["state"] == "accepted") == 1,
+          fake3.tab_text("solo.md"))
 
     # --- and NOW the rollback the refusal named is reachable ---------
     # The rebuild left the file checked out, exactly as any `doc push`

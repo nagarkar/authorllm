@@ -5186,11 +5186,23 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
     `critique rollback`'s own trick (§2.5): return the `written` threads
     to `accepted` FIRST — which is what lifts `push_doc`'s
     `forms_pending` refusal — then `push_doc` the unchanged local file to
-    rebuild the tab clean. The verdicts survive as on the local road; the
-    author's Doc-side REWORDINGS do not, and nothing has recorded them,
-    which is why this branch alone requires `--force` (Q-4). It is the
-    one place doc mode should be less convenient than local, because it
-    is the one place the loss is unrecoverable."""
+    rebuild the tab clean. The verdicts survive as on the local road.
+
+    **The rebuild is WHOLE-TAB, and the refusal must say so.** It is not
+    only the green halves that go: `push_doc` reconstructs the essay's
+    tab from the local file, so an edit the author made anywhere else in
+    that tab since the push is destroyed too, and nothing has recorded
+    it. That is why this branch alone requires `--force` (Q-4) — the one
+    place doc mode is deliberately less convenient than local, because
+    it is the one place the loss is unrecoverable.
+
+    The refusal names the exit that costs nothing: `doc pull <essay>`
+    brings a Doc-side edit made OUTSIDE the marked passages down to the
+    local file first, leaving the tab and the forms alone (§2.6), after
+    which this verb costs only the green halves. Preserving that edit
+    HERE was considered and refused: it would put a tab read and a
+    three-way inside a recovery verb, which is new machinery in the one
+    place the author reaches for when something has already gone wrong."""
     from . import gdocs
 
     mid = manuscript["id"]
@@ -5202,12 +5214,18 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
         if not force:
             raise ValueError(
                 f"{len(written)} form(s) of {rel} are out in the Google "
-                f"Doc, and any rewording you did to their green halves "
-                f"is recorded NOWHERE ELSE — taking them back out "
-                f"destroys it. The local file already holds the essay's "
-                f"old text, so nothing else is at risk. Re-run with "
-                f"--force if that is what you want, or finish in the Doc "
-                f"and 'filter settle {rel}' to keep your wording.")
+                f"Doc, and taking them back out REBUILDS THE WHOLE TAB "
+                f"from the local file. Everything you have typed in that "
+                f"tab since the push goes: the rewording inside the "
+                f"green halves, and any other edit you made anywhere "
+                f"else in {rel}'s tab. None of it is recorded anywhere "
+                f"else. (The file on disk is untouched either way — it "
+                f"has held the old essay throughout.) "
+                f"To keep your wording, finish in the Doc and 'filter "
+                f"settle {rel}'. To keep an edit you made OUTSIDE the "
+                f"marked passages, run 'doc pull {rel}' first: it brings "
+                f"that edit down to the file and leaves the tab and the "
+                f"forms alone. Then re-run with --force.")
         # Withdraw FIRST: `push_doc`'s DB guard refuses while any form is
         # `written`, and it is right to. Returning the verdicts to
         # `accepted` is what lifts it.

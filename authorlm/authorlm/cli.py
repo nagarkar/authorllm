@@ -3556,8 +3556,12 @@ def cmd_filter(args):
                     f"{result['reopened']} form(s) returned to 'accepted' "
                     f"— 'filter settle' applies them, 'filter triage "
                     f"--undo' reopens them."))
-                print(ui.dim("The file on disk was never touched: it has "
-                             "held the old text throughout."))
+                print(ui.dim(
+                    "The tab was rebuilt from the file on disk, so it now "
+                    "shows the essay as it stands there — anything typed "
+                    "into that tab since the push is gone. The file itself "
+                    "was never touched: it has held the old text "
+                    "throughout."))
                 return
             print(ui.green(
                 f"{result['file']} restored to its original text; "
