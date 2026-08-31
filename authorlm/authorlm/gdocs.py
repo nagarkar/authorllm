@@ -2477,7 +2477,7 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
 def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
-    """Render every ACCEPTED thread of `file` into its Doc tab as a
+    """Render every thread it is GIVEN into `file`'s Doc tab as a
     pending form (critique design §6.3 step 3). The tab is first brought
     level with the local file (a plain push, since the local file is
     pristine), then each span is marked surgically, last-to-first so
@@ -2502,10 +2502,15 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = pending_write_order(
-        [t for t in threads if t["state"] == "accepted"])
+    # EVERY thread handed in is written. The caller chooses the set and
+    # owns the state transitions — which is what the two producers now
+    # need to differ about: `critique write` sends its accepted threads,
+    # and `filter push` sends the untriaged proposals too, because on
+    # the Doc road the tab IS the review surface. A state filter in here
+    # would silently drop half of one producer's push.
+    ordered = pending_write_order(threads)
     written, failed = [], []
-    for t in accepted:
+    for t in ordered:
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:

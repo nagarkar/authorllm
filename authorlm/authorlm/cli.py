@@ -1365,7 +1365,11 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
         passes.compose_marked_text(text, threads)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    result = gdocs.write_pending_forms(db, manuscript, file, threads,
+    # `accepted`, not `threads`: the writer no longer filters by state,
+    # because its two producers now disagree about which states go to
+    # the tab. The critique pass's contract is unchanged — accepted
+    # edits only — and it is stated HERE now, where it belongs.
+    result = gdocs.write_pending_forms(db, manuscript, file, accepted,
                                        service, docs_service)
     for t in result["written"]:
         db.update("doc_threads", t["id"], {"state": "written"})
@@ -3457,10 +3461,11 @@ def cmd_filter(args):
                   + ui.dim(f" — {result['url']}"))
             print(ui.dim(
                 "Old text struck through, the new text beside it in green. "
-                "Reword any of the {{new}} halves you like; your wording "
-                "wins, and anything you leave alone is taken as a yes. "
-                f"Then 'filter settle {result['file']}' reads the tab back "
-                "and makes them final."))
+                "The tab is where you rule on these: leave a change alone "
+                "to take it, empty its green half to turn it down, or "
+                "reword the green half to make it yours — your wording "
+                f"wins. Then 'filter settle {result['file']}' reads the "
+                "tab back and records every one of those verdicts."))
             if result["local_unchanged"]:
                 print(ui.dim(
                     f"The file on your disk still holds {result['file']} "

@@ -7272,26 +7272,37 @@ def main_test() -> None:
             "Should never appear.",
             3, "replace", state="rejected")
 
+        # The CALLER chooses the set — the writer no longer filters by
+        # state, because its two producers now disagree about which
+        # states belong in a tab: `critique write` sends its accepted
+        # threads, `filter push` sends the untriaged proposals too. So
+        # the rejected thread is excluded HERE, exactly as
+        # `_critique_write_essay` excludes it, and the assertion below
+        # that it never reaches the tab still means what it meant.
         result = write_pending_forms(
             db, manuscript, "07-critique-write.md",
-            [t_rep, t_ins, t_bad, t_rej], stub, stub)
+            [t_rep, t_ins, t_bad], stub, stub)
         tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
                       if t["title"] == "07-critique-write.md")
         written_ids = {t["id"] for t in result["written"]}
         failed_ids = {t["id"] for t, _ in result["failed"]}
-        check("write_pending_forms marks accepted replace+insert; "
-              "isolates missing-span failure; skips rejected",
+        check("write_pending_forms marks every thread it is GIVEN — "
+              "replace and insert — and isolates the missing-span "
+              "failure to its own thread",
               t_rep["id"] in written_ids and t_ins["id"] in written_ids
               and t_bad["id"] in failed_ids
-              and t_rej["id"] not in written_ids
-              and t_rej["id"] not in failed_ids
               and ("<<First body paragraph for replace.>>"
                    "{{First body paragraph, carefully revised.}}") in tab_cw
               and "{{A bridging paragraph, newly inserted.}}" in tab_cw
-              and "Should never appear" not in tab_cw
               and "Should fail loudly" not in tab_cw,
               f"written={written_ids} failed={result['failed']!r} "
               f"tab={tab_cw!r}")
+        check("a REJECTED thread the caller withheld never reaches the "
+              "tab — the guarantee is unchanged, it is now the caller's "
+              "to keep and `_critique_write_essay` keeps it",
+              t_rej["id"] not in written_ids
+              and t_rej["id"] not in failed_ids
+              and "Should never appear" not in tab_cw, tab_cw)
         check("write_pending_forms leaves local file as OLD (pristine)",
               (ms / "07-critique-write.md").read_text() == local_before)
         check("write_pending_forms reports a Doc tab URL",

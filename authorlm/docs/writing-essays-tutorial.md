@@ -1379,11 +1379,18 @@ ever sees the markup.
 Reading a couple of dozen struck-and-green changes is genuinely easier in Docs
 than in a text file, so that road exists too. One sentence opens it.
 
+**You do not have to rule on anything first.** The tab is where you rule. Say the
+word straight after the proposals are read to you — or straight after they are
+recorded, without hearing them at all — and all of them go to the Doc, the ones
+you have opinions about and the ones you have not looked at yet. What you do in
+the tab IS the verdict. If you have already turned some down, those stay behind.
+
 > **You:** put them in the google doc so I can read them there
 >
 > **Me:** Six changes are in becker's tab now — old text struck through, the new
-> text beside it in green. Reword any of the green halves; leave the
-> struck-through parts alone. Anything you don't touch, I'll take as a yes.
+> text beside it in green. Leave a change alone to take it, empty the green half
+> to turn it down, or reword the green half to make it yours — your wording
+> wins. Anything you don't touch, I'll take as a yes.
 >
 > Two of the six replace the same sentence, word for word — it appears twice in
 > the essay. They'll settle in the order they appear, so rewording either is
@@ -1452,7 +1459,7 @@ authorlm filter run <name> <essay.md>         NO model call
 authorlm filter record <essay.md>             the reply JSON on stdin
 authorlm filter edits <essay.md>
 authorlm filter triage <essay.md> --accept 1 2 --reject 3 --reason "…"
-authorlm filter push <essay.md>               the accepted edits → the Doc tab
+authorlm filter push <essay.md>               the staged edits → the Doc tab
 authorlm filter settle <essay.md> [--pause]   local road, or reads the tab back
 authorlm filter status [<essay.md>]           incl. the run's transport
 authorlm filter unmark [--force] | rollback | abandon <essay.md>
