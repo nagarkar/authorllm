@@ -1391,6 +1391,128 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
         _placement.distill_batch = original
 
 
+def _recovery_while_forms_are_out(root: Path) -> None:
+    """F-D9 / F-D10 — rollback refuses while forms are out even though
+    the local file is clean, and `filter unmark` takes them back out."""
+    from authorlm import staging as _staging
+
+    print("§2.5: rollback and unmark while the forms are in the Doc:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "recover-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    before = (ms / "solo.md").read_bytes()
+
+    # --- F-D9: the DB refusal, where the byte guard is blind ----------
+    check("F-D9 the local file is UNMARKED, so the byte guard the local "
+          "rollback relies on cannot see anything at all",
+          not _staging.is_marked((ms / "solo.md").read_text()))
+    raised = None
+    try:
+        api.filter_rollback(db, manuscript, {}, "solo.md")
+    except ValueError as err:
+        raised = str(err)
+    check("F-D9 `filter rollback` refuses anyway, on the DB guard, and "
+          "names BOTH exits — the byte check alone would have restored "
+          "the pin over a file whose forms are sitting in the Doc "
+          "pointed at text that no longer exists there",
+          raised is not None and "still out in the Google Doc" in raised
+          and "filter settle solo.md" in raised
+          and "filter unmark solo.md --force" in raised, raised)
+    check("F-D9 ...and NOTHING moved: the file is byte-identical and "
+          "every form is still `written`",
+          (ms / "solo.md").read_bytes() == before
+          and sum(1 for t in api._run_threads(db, mid, _run_row(db, mid))
+                  if t["state"] == "written") == 2)
+
+    # --- Q-4: the doc unmark asks for --force, and says what is lost --
+    refused = None
+    try:
+        api.filter_unmark(db, manuscript, "solo.md",
+                          services=lambda: (fake, fake))
+    except ValueError as err:
+        refused = str(err)
+    check("Q-4 the DOC unmark requires --force and says exactly what is "
+          "destroyed — the one place doc mode is deliberately LESS "
+          "convenient than local, because it is the one place the loss "
+          "is unrecoverable",
+          refused is not None and "recorded NOWHERE ELSE" in refused
+          and "--force" in refused, refused)
+    check("Q-4 ...and the refusal moved nothing: the tab still carries "
+          "both forms and both threads are still `written`",
+          fake.tab_text("solo.md").count("<<") == 2
+          and sum(1 for t in api._run_threads(db, mid, _run_row(db, mid))
+                  if t["state"] == "written") == 2,
+          fake.tab_text("solo.md"))
+
+    # --- F-D10: the doc unmark, withdraw-then-rebuild -----------------
+    bodies_before = len(fake.bodies)
+    result = api.filter_unmark(db, manuscript, "solo.md", force=True,
+                               services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    check("F-D10 the tab is rebuilt CLEAN — the threads return to "
+          "`accepted` first, which is what lifts `push_doc`'s own "
+          "forms_pending refusal, and only then does the push run",
+          "<<" not in tab and "{{" not in tab
+          and "Alpha opens the essay" in tab, tab)
+    check("F-D10 ...and a rebuild really reached the wire",
+          len(fake.bodies) > bodies_before)
+    check("F-D10 the local file is BYTE-UNCHANGED — it has held the old "
+          "text throughout, so there is nothing for this recovery to "
+          "restore", (ms / "solo.md").read_bytes() == before)
+    states = [t["state"] for t in api._run_threads(db, mid,
+                                                   _run_row(db, mid))]
+    check("F-D10 the author's VERDICTS survive: the forms are back at "
+          "`accepted`, not withdrawn — unmark undoes the marking, never "
+          "the triage",
+          result["reopened"] == 2 and states.count("accepted") == 2
+          and "withdrawn" not in states, str(states))
+
+    # --- and NOW the rollback the refusal named is reachable ---------
+    # The rebuild left the file checked out, exactly as any `doc push`
+    # does, so the ordinary gate stands in front of it and names its own
+    # remedy. That is the pre-existing rule, not a leftover of the forms.
+    still = None
+    try:
+        api.filter_rollback(db, manuscript, {}, "solo.md")
+    except ValueError as err:
+        still = str(err)
+    check("after the rebuild the only thing left in front of the "
+          "rollback is the ORDINARY checkout gate — the forms refusal is "
+          "gone",
+          still is not None and "checked out to Google Docs" in still
+          and "still out" not in still, still)
+    with contextlib.redirect_stdout(io.StringIO()):
+        gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                       docs_service=fake, with_comments=False)
+        rolled = api.filter_rollback(db, manuscript, {}, "solo.md")
+    check("F-D9 with the forms taken out and the checkout cleared, the "
+          "rollback the refusal named goes through",
+          rolled["file"] == "solo.md")
+
+    # --- the LOCAL road's byte guard is still separately reachable ----
+    db2, ms2, msdir2, _f2 = _doc_run(root, "recover-local-ws",
+                                     {2: "TWO AS PROPOSED."})
+    mid2 = ms2["id"]
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.filter_settle(db2, ms2, {}, "solo.md", pause=True)
+    db2.conn.execute("DELETE FROM doc_threads WHERE manuscript_id = ? AND "
+                     "state = 'written'", (mid2,))
+    db2.conn.commit()
+    raised2 = None
+    try:
+        api.filter_rollback(db2, ms2, {}, "solo.md")
+    except ValueError as err:
+        raised2 = str(err)
+    check("the BYTE guard is still separately reachable: with the rows "
+          "deleted from under it, a marked local file still refuses — it "
+          "is the guard that survives a database that has lost the run "
+          "row, and asserting only the DB guard would leave it free to "
+          "delete with the suite green",
+          raised2 is not None and "mid-settle" in raised2, raised2)
+
+
 TEMPLATE_ESSAY = (
     "# On Templating\n\n"
     "A template engine substitutes: {{title}} becomes the page's title, "
@@ -2708,6 +2830,7 @@ def main_test() -> None:
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)
+        _recovery_while_forms_are_out(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

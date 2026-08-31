@@ -5141,7 +5141,22 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             "tab_still_marked": _run_mode(run) == "doc"}
 
 
-def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
+def _file_run_mode(db: Database, manuscript_id: str, rel: str) -> str | None:
+    """The transport of the most recent run on this file that took one.
+    `filter unmark` and `filter rollback` are FILE-scoped verbs — they
+    exist to recover a state the bytes or the rows describe — so they
+    ask the file, not a named run."""
+    for row in db.all(
+            "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+            "ORDER BY created_at DESC", (manuscript_id, rel)):
+        mode = _run_mode(dict(row))
+        if mode:
+            return mode
+    return None
+
+
+def filter_unmark(db: Database, manuscript: dict, file: str,
+                  force: bool = False, services=None) -> dict:
     """Put the original text back and RETURN the written forms to
     `accepted`. Two lines of recovery for a state that is fully
     described by the bytes — including the crash between "compose" and
@@ -5152,18 +5167,51 @@ def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
     triage. `filter settle` applies them, `filter triage --undo` reopens
     them, `filter abandon` throws them away — and the author chooses
     which, because discarding a verdict is never something a recovery
-    verb does on its own."""
+    verb does on its own.
+
+    In DOC mode there are no local bytes to strip, so the recovery is
+    `critique rollback`'s own trick (§2.5): return the `written` threads
+    to `accepted` FIRST — which is what lifts `push_doc`'s
+    `forms_pending` refusal — then `push_doc` the unchanged local file to
+    rebuild the tab clean. The verdicts survive as on the local road; the
+    author's Doc-side REWORDINGS do not, and nothing has recorded them,
+    which is why this branch alone requires `--force` (Q-4). It is the
+    one place doc mode should be less convenient than local, because it
+    is the one place the loss is unrecoverable."""
+    from . import gdocs
+
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
-    _checkout_gate(db, manuscript, rel)
-    path = Path(manuscript["path"]) / rel
-    text, marker_warnings = staging.unmark(path)
     written = staging.door_threads(db, mid, rel, states=("written",),
                                    origin_type=FILTER_ORIGIN)
+    path = Path(manuscript["path"]) / rel
+    if _file_run_mode(db, mid, rel) == "doc":
+        if not force:
+            raise ValueError(
+                f"{len(written)} form(s) of {rel} are out in the Google "
+                f"Doc, and any rewording you did to their green halves "
+                f"is recorded NOWHERE ELSE — taking them back out "
+                f"destroys it. The local file already holds the essay's "
+                f"old text, so nothing else is at risk. Re-run with "
+                f"--force if that is what you want, or finish in the Doc "
+                f"and 'filter settle {rel}' to keep your wording.")
+        # Withdraw FIRST: `push_doc`'s DB guard refuses while any form is
+        # `written`, and it is right to. Returning the verdicts to
+        # `accepted` is what lifts it.
+        for t in written:
+            db.update("doc_threads", t["id"], {"state": "accepted"})
+        service, docs_service = _settle_services(services, rel)
+        gdocs.push_doc(db, manuscript, rel, service=service,
+                       docs_service=docs_service)
+        return {"file": rel, "reopened": len(written), "mode": "doc",
+                "text": path.read_text(encoding="utf-8"),
+                "marker_warnings": []}
+    _checkout_gate(db, manuscript, rel)
+    text, marker_warnings = staging.unmark(path)
     for t in written:
         db.update("doc_threads", t["id"], {"state": "accepted"})
-    return {"file": rel, "reopened": len(written), "text": text,
-            "marker_warnings": marker_warnings}
+    return {"file": rel, "reopened": len(written), "mode": "local",
+            "text": text, "marker_warnings": marker_warnings}
 
 
 def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
@@ -5172,7 +5220,6 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
     are evidence, and evidence is not undone by putting text back."""
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
-    _checkout_gate(db, manuscript, rel)
     row = db.one(
         "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
         + ("AND filter = ? " if name else "")
@@ -5181,6 +5228,31 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
     if row is None:
         raise LookupError(f"no filter run on {rel} to roll back.")
     run = dict(row)
+    # The DB guard, FIRST and in either mode (§2.5 / D-4). In doc mode
+    # the local file is unmarked, so the byte check below is BLIND: the
+    # rollback would proceed, restoring the pin over a file whose forms
+    # are sitting in the Doc pointed at text that no longer exists there,
+    # with the author's rewordings destroyed and nothing left to recover
+    # them from. That is exactly the failure the byte refusal exists to
+    # prevent, so it gets a refusal that can see it. Ordered
+    # most-informative first, the shape `push_doc`'s two guards use, and
+    # both stay separately reachable.
+    out = [t for t in _run_threads(db, mid, run)
+           if t["state"] == "written"]
+    if out:
+        mode = _run_mode(run)
+        where = ("in the Google Doc" if mode == "doc"
+                 else "in the file on disk")
+        unmark = (f"filter unmark {rel} --force" if mode == "doc"
+                  else f"filter unmark {rel}")
+        raise ValueError(
+            f"{len(out)} form(s) of this run are still out {where}, and "
+            f"you may have already reworded them — a rollback would "
+            f"destroy those edits with nothing left to recover them "
+            f"from. Finalize what is there ('filter settle {rel}'), or "
+            f"take the forms back out ('{unmark}'), and then roll back "
+            f"if you still want to.")
+    _checkout_gate(db, manuscript, rel)
     # A marked file is mid-settle: its bytes are staged proposals the
     # author may have post-edited, and rolling back over them would
     # discard those edits AND leave written threads pointing at text

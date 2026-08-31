@@ -6280,11 +6280,16 @@ def scenario_filter(root: Path) -> None:
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
         run(ws, "filter", "settle", "02-wall.md", "--pause")
         out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
-        check("filter rollback REFUSES on a marked file, naming both "
+        check("filter rollback REFUSES while forms are out, naming both "
               "exits — a rollback mid-pause destroys post-edits the "
               "author may already have made, with nothing left to "
-              "recover them from",
-              "mid-settle" in out and "filter settle 02-wall.md" in out
+              "recover them from. The DB guard is what answers here, "
+              "above the byte check, because in DOC mode the local file "
+              "is clean and only the rows can know (§2.5); the byte "
+              "guard stays separately reachable and is asserted at the "
+              "seam, with the rows deleted from under it",
+              "still out in the file on disk" in out
+              and "filter settle 02-wall.md" in out
               and "filter unmark 02-wall.md" in out, out)
         check("...and it left the marked bytes untouched",
               "<<" in (ms / "02-wall.md").read_text())

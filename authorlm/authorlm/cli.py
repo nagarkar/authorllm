@@ -3533,9 +3533,28 @@ def cmd_filter(args):
         if args.action == "unmark":
             if not args.file:
                 raise SystemExit("usage: authorlm filter unmark <essay.md>")
-            result = api.filter_unmark(db, manuscript, args.file)
+            def _unmark_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            result = api.filter_unmark(db, manuscript, args.file,
+                                       force=args.force,
+                                       services=_unmark_bridge)
             for warn in result["marker_warnings"]:
                 print(ui.yellow(f"  {warn}"))
+            if result["mode"] == "doc":
+                print(ui.green(
+                    f"{result['file']}'s tab rebuilt clean; "
+                    f"{result['reopened']} form(s) returned to 'accepted' "
+                    f"— 'filter settle' applies them, 'filter triage "
+                    f"--undo' reopens them."))
+                print(ui.dim("The file on disk was never touched: it has "
+                             "held the old text throughout."))
+                return
             print(ui.green(
                 f"{result['file']} restored to its original text; "
                 f"{result['reopened']} form(s) returned to 'accepted' — "
@@ -6591,6 +6610,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause", action="store_true",
                    help="settle: write the <<old>>{{new}} forms into the "
                         "file to read in Obsidian instead of applying")
+    p.add_argument("--force", action="store_true",
+                   help="unmark: required on the DOC road, where taking "
+                        "the forms out of the tab destroys any rewording "
+                        "the author did there and nothing else holds it")
     p.add_argument("--accept", nargs="*", metavar="N")
     p.add_argument("--reject", nargs="*", metavar="N")
     p.add_argument("--revise", nargs="*", metavar="N")
