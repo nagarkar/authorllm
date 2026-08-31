@@ -167,9 +167,12 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
              "help": "The critic's item is refused. The reason is the author's, "
                      "verbatim — it is the evidence the system learns from.",
              "reason": _required_reason("Why is the critic wrong here?")},
-            {"id": "revise", "label": "Revise & accept",
-             "help": "Accept in the author's own wording. Provenance flips to "
-                     "the author; the critic's original survives as lineage and "
+            # hidden: no action-bar button — the Item column's edit-in-place
+            # (editable: "revise") is the only path that stages this action.
+            {"id": "revise", "label": "Revise & accept", "hidden": True,
+             "help": "Double-click the Item cell and type your own wording — "
+                     "the edit stages this action. Provenance flips to the "
+                     "author; the critic's original survives as lineage and "
                      "the original→final diff is recorded as evidence.",
              "parameter": {"id": "text", "label": "The author's wording",
                            "multiline": True}},
