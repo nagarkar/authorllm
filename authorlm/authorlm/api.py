@@ -4758,6 +4758,19 @@ def _uncovered_units(run: dict) -> list[tuple[int, int]]:
     return [(run["cursor"] + 1, run["unit_count"])]
 
 
+def _pushed_from(thread: dict) -> str:
+    """The state a written thread came from, for the recovery verbs.
+
+    `accepted` when the thread carries no record — the local road never
+    writes anything else, and neither did the Doc road before untriaged
+    proposals were allowed onto it. Recovering an untriaged proposal to
+    `accepted` would fabricate a verdict the author never gave, which is
+    exactly what `filter unmark` exists NOT to do: it undoes the
+    marking, never the triage."""
+    return (loads(thread.get("metadata"), {}) or {}).get(
+        "pushed_from") or "accepted"
+
+
 def _owning_filter(db: Database, manuscript_id: str,
                    thread: dict) -> str | None:
     """The filter whose run staged this thread, by its `origin_id`
@@ -4812,9 +4825,28 @@ def _twin_warning(accepted: list[dict]) -> str | None:
 def filter_push(db: Database, manuscript: dict, config: dict, file: str,
                 services=None, name: str | None = None) -> dict:
     """The DOC transport verb (design-filter-doc-settle §2.3): write this
-    run's accepted edits into the essay's tab of the master Doc as
+    run's staged edits into the essay's tab of the master Doc as
     `<<old>>{{new}}` forms, through the same surgical writer `critique
     write` uses, and leave the local file holding the OLD text.
+
+    **UNTRIAGED PROPOSALS GO TOO** (Sponsor-intent correction,
+    2026-08-30). The first cut gated this on `state='accepted'`, keeping
+    CLI triage as the verdict step and the Doc as a final-settle
+    surface — so a freshly recorded run met *"nothing is accepted — 6
+    proposal(s) are still awaiting your verdict"* and the author had to
+    rule on every edit in the shell before they could look at any of
+    them in the Doc. That is reviewing twice, and it is the opposite of
+    the ruling this road was built to serve: *"We need to build in a way
+    to review edits more easily… That path also has the learning loop
+    built in."*
+
+    The Doc settle IS the review, and it always was: an untouched form
+    is an acceptance, a deleted one is a decline, a reworded one is a
+    modified acceptance, and `record_resolution` records all three as
+    evidence with no reference to what the thread's state was before it
+    was written. So `proposed` and `accepted` both go out. Only an
+    explicit `rejected` stays home — that verdict has already been
+    given, and its reason is already evidence.
 
     Named `push` and not `write`: `filter write` reads as *write a filter
     artifact* and collides with `filter add`, and every refusal the
@@ -4893,28 +4925,39 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #     pass, RISK-4. This design does not inherit it.)
     _rel, _text, _capture, _dict = _filter_capture(db, manuscript, rel,
                                                    "filter push")
-    # 4b. Something to push, refused in `filter settle`'s own wording.
-    accepted = [t for t in threads if t["state"] == "accepted"]
-    if not accepted:
-        open_now = [t for t in threads if t["state"] == "proposed"]
+    # 4b. Something to push. UNTRIAGED PROPOSALS GO TOO — see the
+    #     function docstring: on this road the tab is the review surface,
+    #     so gating on a prior CLI verdict would make the author review
+    #     twice. Only an explicit rejection stays home.
+    untriaged = [t for t in threads if t["state"] == "proposed"]
+    pre_accepted = [t for t in threads if t["state"] == "accepted"]
+    rejected = [t for t in threads if t["state"] == "rejected"]
+    pushable = [t for t in threads
+                if t["state"] in ("proposed", "accepted")]
+    if not pushable:
         raise LookupError(
-            f"nothing is accepted on {rel}"
-            + (f" — {len(open_now)} proposal(s) are still awaiting your "
-               f"verdict ('filter edits {rel}')." if open_now
+            f"nothing on {rel} can go to the Doc"
+            + (f" — all {len(rejected)} of this run's proposals are ones "
+               f"you turned down." if rejected
                else " and nothing is staged."))
     warnings: list[str] = []
-    # Q-3's default: allow, and warn by count. A partially triaged run in
-    # the Doc means the author sees six forms and not the four they have
-    # not ruled on — worth saying, never worth blocking (§15.13).
-    still_open = [t for t in threads if t["state"] == "proposed"]
-    if still_open:
+    # Q-3, re-read against the Sponsor's intent. The old line said the
+    # untriaged proposals were NOT going to the Doc, which was the
+    # defect. What the author needs now is the opposite: they are all
+    # going, and what to DO in the tab is the verdict.
+    if untriaged and pre_accepted:
         warnings.append(
-            f"{len(still_open)} proposal(s) on {rel} are still awaiting "
-            f"your verdict and are NOT going to the Doc — you will see "
-            f"{len(accepted)} changes there, not "
-            f"{len(accepted) + len(still_open)}. Read the rest with "
-            f"'filter edits {rel}'. Nothing is blocked.")
-    twin_note = _twin_warning(accepted)
+            f"All {len(pushable)} changes go to the Doc — the "
+            f"{len(pre_accepted)} you have already accepted and the "
+            f"{len(untriaged)} you have not ruled on yet. The tab is the "
+            f"review: leave a change alone to take it, empty its green "
+            f"half to turn it down, reword it to make it yours. Every "
+            f"verdict is recorded when you run 'filter settle {rel}'.")
+    if rejected:
+        warnings.append(
+            f"{len(rejected)} change(s) you already turned down stay "
+            f"home and are not in the Doc.")
+    twin_note = _twin_warning(pushable)
     if twin_note:
         warnings.append(twin_note)
     # 5. The drift check, LOCALLY, before any Doc write: a `proposed_old`
@@ -4923,7 +4966,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #    on this road (F-D2).
     path = Path(manuscript["path"]) / rel
     disk = path.read_text(encoding="utf-8")
-    passes.compose_marked_text(disk, accepted)
+    passes.compose_marked_text(disk, pushable)
     # 6. The surgical writer: a levelling push of the pristine local
     #    file, then one marked span per thread, highest anchor first,
     #    located by occurrence index, then the read-back proof.
@@ -4935,13 +4978,22 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #    nothing. It also keeps `tools/testbench.py` able to assert these
     #    refusals with no key, no token and no network.
     service, docs_service = _settle_services(services, rel)
-    result = gdocs.write_pending_forms(db, manuscript, rel, accepted,
+    result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
                                        service, docs_service)
-    # 7. Written threads advance; FAILED threads stay `accepted` and are
-    #    reported by reason, so a partially landed push is visible and
-    #    the rest can be settled locally or reworded.
+    # 7. Written threads advance to `written`, remembering the state they
+    #    came FROM. Failed threads are simply not touched, so each keeps
+    #    its own prior state — a proposal that failed to land is still a
+    #    proposal, not an acceptance the author never gave.
+    #
+    #    `pushed_from` exists for `filter unmark`, which returns written
+    #    threads to `accepted`. That was right while only accepted
+    #    threads could be written; now it would invent a verdict for
+    #    every untriaged proposal it took back out.
     for t in result["written"]:
-        db.update("doc_threads", t["id"], {"state": "written"})
+        meta = loads(t.get("metadata"), {}) or {}
+        meta["pushed_from"] = t["state"]
+        db.update("doc_threads", t["id"],
+                  {"state": "written", "metadata": json.dumps(meta)})
     # 8. The mode is recorded only if at least one form landed. A push
     #    that landed nothing has put nothing out, and stranding the run
     #    in a mode with no forms in it would refuse the local road for no
@@ -5295,10 +5347,10 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
                 f"that edit down to the file and leaves the tab and the "
                 f"forms alone. Then re-run with --force.")
         # Withdraw FIRST: `push_doc`'s DB guard refuses while any form is
-        # `written`, and it is right to. Returning the verdicts to
-        # `accepted` is what lifts it.
+        # `written`, and it is right to. Returning the threads to their
+        # PRE-PUSH state is what lifts it.
         for t in written:
-            db.update("doc_threads", t["id"], {"state": "accepted"})
+            db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
         service, docs_service = _settle_services(services, rel)
         gdocs.push_doc(db, manuscript, rel, service=service,
                        docs_service=docs_service)
@@ -5308,7 +5360,7 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
     _checkout_gate(db, manuscript, rel)
     text, marker_warnings = staging.unmark(path)
     for t in written:
-        db.update("doc_threads", t["id"], {"state": "accepted"})
+        db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
     return {"file": rel, "reopened": len(written), "mode": "local",
             "text": text, "marker_warnings": marker_warnings}
 

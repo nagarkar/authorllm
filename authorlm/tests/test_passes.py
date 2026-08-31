@@ -964,6 +964,203 @@ def _a_paragraph_that_contains_another(root: Path) -> None:
           and len(forced["failed"]) == 1, tab2)
 
 
+def _the_doc_is_the_review(root: Path) -> None:
+    """The Sponsor-intent correction (2026-08-30): `filter push` takes
+    UNTRIAGED proposals to the Doc, because the tab is the review.
+
+    The Sponsor ran the live flow and met *"nothing is accepted — 6
+    proposal(s) are still awaiting your verdict"* on a freshly recorded
+    run. Gating the Doc road on a prior CLI verdict makes the author
+    rule on every edit in the shell before they can look at any of them
+    in the Doc — reviewing twice, which is the opposite of the ruling
+    this road was built to serve."""
+    print("Sponsor intent: the Doc settle IS the review:")
+
+    # --- the exact live scenario: recorded, NOT triaged, pushed -------
+    db, manuscript, ms, fake = _doc_run(
+        root, "all-proposed-ws",
+        {2: "TWO REDONE.", 4: "FOUR REDONE.", 6: "SIX REDONE."},
+        accept=False)
+    mid = manuscript["id"]
+    states = [t["state"] for t in api._run_threads(db, mid,
+                                                   _run_row(db, mid))]
+    check("the fixture is the Sponsor's: every proposal is untriaged, "
+          "exactly as `filter record` leaves them (§14.8)",
+          states == ["proposed"] * 3, str(states))
+
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    check("an ALL-PROPOSED run pushes — this is the refusal the Sponsor "
+          "hit, and the whole of the correction",
+          result["written"] == 3 and not result["failed"],
+          str(result["written"]))
+    tab = fake.tab_text("solo.md")
+    check("...and all three forms really are in the tab for them to rule "
+          "on there",
+          tab.count("<<") == 3 and "{{TWO REDONE.}}" in tab
+          and "{{SIX REDONE.}}" in tab, tab)
+
+    # The tab IS the review: one taken by silence, one reworded, one
+    # emptied. No CLI verdict was ever given on any of them.
+    _reword_in_tab(fake, "{{FOUR REDONE.}}", "{{Four, in my own words.}}")
+    _reword_in_tab(
+        fake,
+        "<<Omega closes the essay on a falling cadence.>>"
+        "{{SIX REDONE.}}",
+        "Omega closes the essay on a falling cadence.")
+    settle = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("the three Doc-side outcomes are recorded as the three "
+          "verdicts, for threads that were NEVER triaged in the shell: "
+          "untouched → cleaned, reworded → cleaned, emptied → declined",
+          rows[2] == "cleaned" and rows[4] == "cleaned"
+          and rows[6] == "declined", str(rows))
+    check("...and the manuscript carries exactly what the author did in "
+          "the tab",
+          "TWO REDONE." in final and "Four, in my own words." in final
+          and "SIX REDONE." not in final
+          and "Omega closes the essay on a falling cadence." in final,
+          final)
+    ev = db.all("SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'filter_edit' ORDER BY created_at",
+                (mid,))
+    signals = sorted(r["signal"] for r in ev)
+    check("the evidence is the settle's and ONLY the settle's — one row "
+          "per thread, no triage row in front of it, because no triage "
+          "happened. `record_resolution` keys off `written` alone and "
+          "never asks what the thread was before",
+          signals == ["declined", "resolved", "revised"], str(signals))
+    check("...and the modified acceptance is the learnings feedstock, "
+          "recorded from a thread that was `proposed` an hour ago",
+          len(settle["diffs"]) == 1
+          and settle["diffs"][0]["final"] == "Four, in my own words.",
+          str(settle["diffs"]))
+
+
+def _mixed_push_set_membership(root: Path) -> None:
+    """Which states go to the Doc, and what the author is told."""
+    print("push set membership: proposed and accepted go, rejected stays:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "mixed-ws",
+        {2: "TWO REDONE.", 4: "FOUR REDONE.", 6: "SIX REDONE."},
+        accept=False)
+    mid = manuscript["id"]
+    staged = api.filter_edits(db, manuscript, "solo.md")
+    by_unit = {i["unit"]: i["n"] for i in staged["items"]}
+    api.filter_triage(db, manuscript, "solo.md", [
+        {"item": str(by_unit[2]), "verdict": "accept"},
+        {"item": str(by_unit[6]), "verdict": "reject",
+         "reason": "the cadence there is deliberate"}])
+
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("the ACCEPTED one and the UNTRIAGED one both go to the Doc",
+          result["written"] == 2 and rows[2] == "written"
+          and rows[4] == "written", str(rows))
+    check("the REJECTED one stays home — that verdict is already given "
+          "and its reason is already evidence",
+          rows[6] == "rejected" and "{{SIX REDONE.}}" not in tab, tab)
+    note = "\n".join(result["warnings"])
+    check("the mixed-set line says ALL of them go and that the tab is "
+          "where the verdict happens — the old line said the untriaged "
+          "ones were NOT going, which was the defect",
+          "All 2 changes go to the Doc" in note
+          and "1 you have already accepted" in note
+          and "1 you have not ruled on yet" in note
+          and "The tab is the review" in note
+          and "NOT going to the Doc" not in note, note)
+    check("...and the rejected one is accounted for by count, so the "
+          "author is never left wondering where it went",
+          "1 change(s) you already turned down stay home" in note, note)
+
+    # --- nothing left to push, when everything was turned down --------
+    db2, ms2, msdir2, fake2 = _doc_run(root, "all-rejected-ws",
+                                       {2: "TWO REDONE."}, accept=False)
+    staged2 = api.filter_edits(db2, ms2, "solo.md")
+    api.filter_triage(db2, ms2, "solo.md",
+                      [{"item": str(staged2["items"][0]["n"]),
+                        "verdict": "reject", "reason": "no"}])
+    raised = None
+    try:
+        api.filter_push(db2, ms2, {}, "solo.md",
+                        services=lambda: (fake2, fake2))
+    except LookupError as err:
+        raised = str(err)
+    check("a run whose every proposal was turned down refuses, saying "
+          "so — the refusal survives, it just no longer fires on an "
+          "untriaged run",
+          raised is not None and "nothing on solo.md can go to the Doc"
+          in raised and "you turned down" in raised, raised)
+    check("...and nothing reached the wire", not fake2.bodies)
+
+
+def _failed_writes_keep_their_own_state(root: Path) -> None:
+    """A thread that fails to land keeps the state it had — a proposal
+    stays a proposal. Promoting it to `accepted` would fabricate a
+    verdict the author never gave."""
+    print("a partial push: each failed thread keeps its OWN prior state:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "revert-ws", {2: "TWO REDONE.", 4: "FOUR REDONE.",
+                            6: "SIX REDONE."}, accept=False)
+    mid = manuscript["id"]
+    staged = api.filter_edits(db, manuscript, "solo.md")
+    by_unit = {i["unit"]: i["n"] for i in staged["items"]}
+    api.filter_triage(db, manuscript, "solo.md",
+                      [{"item": str(by_unit[4]), "verdict": "accept"}])
+
+    # Units 4 and 6 vanish from the tab between the levelling push and
+    # the marks: one was ACCEPTED, one was never triaged.
+    original = gdocs.push_doc
+
+    def _push_then_edit(db_, ms_, query, **kw):
+        out = original(db_, ms_, query, **kw)
+        tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+        tab["body"] = tab["body"].replace(
+            "Gamma follows, saying something else entirely.",
+            "Gamma, rewritten by the author in the Doc.").replace(
+            "Omega closes the essay on a falling cadence.",
+            "Omega, also rewritten in the Doc.")
+        return out
+
+    gdocs.push_doc = _push_then_edit
+    try:
+        result = api.filter_push(db, manuscript, {}, "solo.md",
+                                 services=lambda: (fake, fake))
+    finally:
+        gdocs.push_doc = original
+
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("the one that landed is `written`",
+          result["written"] == 1 and len(result["failed"]) == 2
+          and rows[2] == "written", str(rows))
+    check("the ACCEPTED thread that failed is still `accepted`",
+          rows[4] == "accepted", str(rows))
+    check("the UNTRIAGED thread that failed is still `proposed` — NOT "
+          "accepted. A failed write must never hand the machine's "
+          "proposal the author's verdict",
+          rows[6] == "proposed", str(rows))
+
+    # --- and the same rule on the way back out ------------------------
+    api.filter_unmark(db, manuscript, "solo.md", force=True,
+                      services=lambda: (fake, fake))
+    back = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("`filter unmark` returns a written thread to the state it was "
+          "pushed FROM — the untriaged one comes back `proposed`, not "
+          "`accepted`. Unmark undoes the marking, never the triage, and "
+          "it must not invent a verdict either",
+          back[2] == "proposed", str(back))
+
+
 def _the_doc_transport_push(root: Path) -> None:
     """F-D2, F-D3, F-D4, F-D5, F-D11, F-D19 — `filter push` puts the
     run's accepted forms in the Doc and leaves the disk alone."""
@@ -2076,12 +2273,14 @@ def _the_doc_road_through_the_cli(root: Path) -> None:
             cli_main(["--workspace", str(ws), "filter", "push", "solo.md"])
         pushed = out.getvalue()
         check("FD push reports the count and the tab URL, and tells the "
-              "author the three things they need once: reword the green "
-              "halves, an untouched change is a yes, the disk keeps the "
-              "old text",
+              "author how to rule in the tab — all three verdicts, "
+              "because untriaged proposals go out too now — and that "
+              "the disk keeps the old text",
               "2 change(s) written into solo.md's tab" in pushed
               and "docs.google.com/document/d/doc-fake" in pushed
-              and "anything you leave alone is taken as a yes" in pushed
+              and "leave a change alone to take it" in pushed
+              and "empty its green half to turn it down" in pushed
+              and "reword the green half to make it yours" in pushed
               and "still holds solo.md" in pushed, pushed)
         status = io.StringIO()
         with contextlib.redirect_stdout(status):
@@ -3448,6 +3647,9 @@ def main_test() -> None:
         _identical_old_halves(root)
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
+        _the_doc_is_the_review(root)
+        _mixed_push_set_membership(root)
+        _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)
         _the_push_says_what_it_did_to_the_file(root)
         _the_push_is_partial_or_nothing(root)
