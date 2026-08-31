@@ -4841,12 +4841,21 @@ def cmd_doc(args):
                         f"Pulling would discard the settle. Finalize it "
                         f"('filter settle {relpath}') or put the original "
                         f"text back ('filter unmark {relpath}')."))
+                for relpath in result.get("sidecar_unparsable", []):
+                    print(ui.yellow(
+                        f"REFUSED: the tab for {relpath} came back with no "
+                        f"table rows at all, and the local file has some — "
+                        f"a Docs export that mangled the table would "
+                        f"destroy the dictionary. Untouched, and --force "
+                        f"does not reach past this. Fix the table in the "
+                        f"Doc (it must stay a table) and pull again."))
                 if result["changed"]:
                     print("Collecting:")
                     cmd_collect(args)
                 elif (not result["conflicts"] and not result["missing"]
                       and not result.get("local_ahead")
-                      and not result.get("marked")):
+                      and not result.get("marked")
+                      and not result.get("sidecar_unparsable")):
                     scope = (f"Tab for {args.name}" if args.name
                              else "All tabs")
                     print(f"{scope} identical to local files — clean round "
