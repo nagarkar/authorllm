@@ -5427,6 +5427,19 @@ def scenario_testbench(root: Path) -> None:
               "refusal",
               "exactly the original with that one unit replaced" in out
               and "refuses and names the prior run" in out, out)
+        check("it asserts the DOC transport's refusals too — the honest, "
+              "partial answer §6 rules for it: every one reads the run's "
+              "own state, so none can reach the network even on a fully "
+              "authorized bridge",
+              "refuses 'filter push' by name" in out
+              and "refuses 'filter settle --pause' by name" in out
+              and "prints the run's transport" in out
+              and "names 'filter settle'" in out, out)
+        check("...and each of those is PAIRED with the same verb at the "
+              "other mode, so the section is proved to discriminate "
+              "rather than to pass whatever it is handed",
+              "the discrimination without which the refusal below proves "
+              "nothing" in out and "says the OTHER thing" in out, out)
         check("the check leaves the bench exactly as it found it",
               (msdir / tb.TARGET).read_bytes() == original,
               (msdir / tb.TARGET).read_text())
@@ -6280,11 +6293,16 @@ def scenario_filter(root: Path) -> None:
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
         run(ws, "filter", "settle", "02-wall.md", "--pause")
         out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
-        check("filter rollback REFUSES on a marked file, naming both "
+        check("filter rollback REFUSES while forms are out, naming both "
               "exits — a rollback mid-pause destroys post-edits the "
               "author may already have made, with nothing left to "
-              "recover them from",
-              "mid-settle" in out and "filter settle 02-wall.md" in out
+              "recover them from. The DB guard is what answers here, "
+              "above the byte check, because in DOC mode the local file "
+              "is clean and only the rows can know (§2.5); the byte "
+              "guard stays separately reachable and is asserted at the "
+              "seam, with the rows deleted from under it",
+              "still out in the file on disk" in out
+              and "filter settle 02-wall.md" in out
               and "filter unmark 02-wall.md" in out, out)
         check("...and it left the marked bytes untouched",
               "<<" in (ms / "02-wall.md").read_text())

@@ -7225,8 +7225,8 @@ def main_test() -> None:
                   "WHERE manuscript_id = ? AND source = 'margin-thread'",
                   (manuscript["id"],))["n"] == 0, str(decided))
 
-        # --- critique_diff_write: accepted forms → Doc; failure isolation ---
-        from authorlm.gdocs import critique_diff_write
+        # --- write_pending_forms: accepted forms → Doc; failure isolation ---
+        from authorlm.gdocs import write_pending_forms
 
         critique_body = (
             "# Critique Target\n\n"
@@ -7272,14 +7272,14 @@ def main_test() -> None:
             "Should never appear.",
             3, "replace", state="rejected")
 
-        result = critique_diff_write(
+        result = write_pending_forms(
             db, manuscript, "07-critique-write.md",
             [t_rep, t_ins, t_bad, t_rej], stub, stub)
         tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
                       if t["title"] == "07-critique-write.md")
         written_ids = {t["id"] for t in result["written"]}
         failed_ids = {t["id"] for t, _ in result["failed"]}
-        check("critique_diff_write marks accepted replace+insert; "
+        check("write_pending_forms marks accepted replace+insert; "
               "isolates missing-span failure; skips rejected",
               t_rep["id"] in written_ids and t_ins["id"] in written_ids
               and t_bad["id"] in failed_ids
@@ -7292,9 +7292,9 @@ def main_test() -> None:
               and "Should fail loudly" not in tab_cw,
               f"written={written_ids} failed={result['failed']!r} "
               f"tab={tab_cw!r}")
-        check("critique_diff_write leaves local file as OLD (pristine)",
+        check("write_pending_forms leaves local file as OLD (pristine)",
               (ms / "07-critique-write.md").read_text() == local_before)
-        check("critique_diff_write reports a Doc tab URL",
+        check("write_pending_forms reports a Doc tab URL",
               "doc-2" in (result.get("url") or "")
               and "tab=" in (result.get("url") or ""),
               str(result.get("url")))
@@ -7303,7 +7303,7 @@ def main_test() -> None:
         # so a second call starts clean; the bad thread fails alone.
         t_oor = _crit_thread(
             "", "orphan insert", 99, "insert")
-        result2 = critique_diff_write(
+        result2 = write_pending_forms(
             db, manuscript, "07-critique-write.md", [t_oor], stub, stub)
         tab_after_fail = next(
             t["text"] for t in stub.state["docs"]["doc-2"]
@@ -9906,7 +9906,7 @@ def main_test() -> None:
               and verbose["beliefs"][0]["source"] == "review-explanation",
               str(verbose))
 
-        # --- Critique Doc mark requests (pure; feed critique_diff_write) ---
+        # --- Critique Doc mark requests (pure; feed write_pending_forms) ---
         from authorlm.gdocs import (_mark_insert_requests,
                                     _mark_replace_requests, _utf16_len)
 

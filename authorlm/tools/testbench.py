@@ -846,6 +846,149 @@ def _active_run(db: Database, manuscript: dict) -> dict | None:
     return dict(row) if row else None
 
 
+def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
+                       db: Database, manuscript: dict, report) -> None:
+    """The doc transport's share of `--check filter`: an honest, PARTIAL
+    answer (design-filter-doc-settle §6).
+
+    A zero-LLM round trip through a real Google Doc is NOT feasible here,
+    and pretending otherwise would be the vacuous-assertion failure
+    §15.22 already recorded once: it needs interactive OAuth and it
+    mutates a shared document this bench does not own. The bench's
+    non-negotiable rails — provider keys scrubbed from every subprocess,
+    nothing resolved by argument — forbid it outright.
+
+    What IS feasible is every refusal that reads the run's own state,
+    because `filter push` and `filter settle` both build the Doc bridge
+    LAST, after those refusals. Not one assertion below can reach the
+    network even if the operator's [gdocs] bridge is fully authorized,
+    and that is a property of the ordering rather than of luck.
+
+    Five assertions, each paired with the SAME verb at the OTHER mode so
+    the check is proved to DISCRIMINATE rather than to pass whatever it
+    is handed."""
+    import json as _json
+
+    from authorlm import gdocs as _gdocs
+
+    target = manuscript_dir / TARGET
+    as_found = target.read_bytes()
+    _guard(db, manuscript_dir)
+    cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER, TARGET,
+        "--again", stdin_text="", scrub_keys=True)
+    units = _units_of(target.read_text(encoding="utf-8"))
+    cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+        stdin_text=_tb_reply(units, {
+            2: units[1] + " (the bench doc-mode probe)"}),
+        scrub_keys=True)
+    cli(workspace, "-m", BENCH, "filter", "triage", TARGET, "--accept", "1",
+        stdin_text="", scrub_keys=True)
+    run = _active_run(db, manuscript)
+
+    def _set_mode(mode: str | None) -> None:
+        meta = loads(run.get("metadata"), {}) or {}
+        if mode is None:
+            meta.pop("mode", None)
+        else:
+            meta["mode"] = mode
+        db.update("filter_runs", run["id"], {"metadata": _json.dumps(meta)})
+
+    def _mode_now() -> str | None:
+        row = db.one("SELECT metadata FROM filter_runs WHERE id = ?",
+                     (run["id"],))
+        return (loads(row["metadata"] if row else None, {}) or {}).get("mode")
+
+    try:
+        report("a triaged run has no transport yet — absent is the birth "
+               "value, and a default would lie about a run that has not "
+               "decided where its edits will be read",
+               _mode_now() is None, str(_mode_now()))
+        # (1) The local road is TAKEN by taking it, and does NOT meet the
+        #     doc refusal. This is the discrimination for (4).
+        _guard(db, manuscript_dir)
+        paused = cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+                     "--pause", stdin_text="", scrub_keys=True)
+        report("'filter settle --pause' takes the LOCAL road, records the "
+               "transport, and meets no doc-mode refusal — the "
+               "discrimination without which the refusal below proves "
+               "nothing",
+               _mode_now() == "local"
+               and "put its forms in the Doc" not in paused
+               and "Marked" in paused, paused)
+        # (2) A local-mode run refuses `filter push`, by name, on the
+        #     run's own state — no bridge is built to say so.
+        push_local = cli(workspace, "-m", BENCH, "filter", "push", TARGET,
+                         stdin_text="", scrub_keys=True, allow_fail=True)
+        report("a run already on the LOCAL road refuses 'filter push' by "
+               "name, and refuses on state alone: no Doc bridge is built, "
+               "so no token, no consent window and no network are in play",
+               "already took the local road" in push_local
+               and "docs.google.com" not in push_local, push_local)
+        # (3) The same verb at mode='doc' says something DIFFERENT — and
+        #     still never reaches the bridge.
+        _set_mode("doc")
+        push_doc_mode = cli(workspace, "-m", BENCH, "filter", "push",
+                            TARGET, stdin_text="", scrub_keys=True,
+                            allow_fail=True)
+        report("...and the SAME verb on a doc-mode run whose forms are "
+               "already out says the OTHER thing — the refusal reads the "
+               "mode instead of firing at everything",
+               "already out" in push_doc_mode
+               and "already took the local road" not in push_doc_mode
+               and "docs.google.com" not in push_doc_mode, push_doc_mode)
+        # (4) mode='doc' refuses `filter settle --pause`, by name.
+        pause_doc = cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+                        "--pause", stdin_text="", scrub_keys=True,
+                        allow_fail=True)
+        report("a doc-mode run refuses 'filter settle --pause' by name — "
+               "one run's forms half in the Doc and half on disk is the "
+               "state the mode freeze exists to forbid",
+               "put its forms in the Doc" in pause_doc, pause_doc)
+        # (5) `filter status` prints the transport.
+        status = cli(workspace, "-m", BENCH, "filter", "status", TARGET,
+                     stdin_text="", scrub_keys=True)
+        report("'filter status' prints the run's transport and its "
+               "forms-out count, so a run whose forms are sitting in a "
+               "Doc is never invisible from the shell",
+               "transport: doc" in status and "form(s) out" in status,
+               status[-600:])
+        # (6) The DB push guard, in-process, with NO services at all: it
+        #     raises before either is touched, which is exactly why the
+        #     assertion is safe to make here.
+        try:
+            _gdocs.push_doc(db, manuscript, TARGET, service=None,
+                            docs_service=None)
+            refusal = ""
+        except LookupError as err:
+            refusal = str(err)
+        report("with the run's forms out, the DB push guard refuses 'doc "
+               "push' and names 'filter settle' — the guard that is the "
+               "ONLY one able to see anything when the transport is the "
+               "Doc and the local file is clean",
+               "filter pending forms" in refusal
+               and f"filter settle {TARGET}" in refusal, refusal)
+    finally:
+        # Clear the transport BEFORE the unmark: the doc branch of
+        # `filter unmark` would want --force and a Doc bridge, and this
+        # run's forms are on disk, not in any tab.
+        _set_mode(None)
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "unmark", TARGET,
+            stdin_text="", scrub_keys=True, allow_fail=True)
+        cli(workspace, "-m", BENCH, "filter", "abandon", TARGET,
+            stdin_text="", scrub_keys=True, allow_fail=True)
+        # Put the bytes back and COLLECT, so the version history agrees
+        # with the disk. A restore without a collect leaves the newest
+        # version describing text that is no longer there, and the next
+        # run's pin check reads that disagreement as author drift.
+        if target.read_bytes() != as_found:
+            target.write_bytes(as_found)
+        report("the doc-mode section left the bench essay exactly as it "
+               "found it", target.read_bytes() == as_found,
+               f"{len(as_found)} bytes before, "
+               f"{len(target.read_bytes())} after")
+
+
 def check_filter(workspace: Path, manuscript_dir: Path, *,
                  _corrupt=None) -> int:
     """a filter pass runs, stages, marks and settles with ZERO model calls.
@@ -1015,6 +1158,15 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
                "prior run and its tallies",
                "already ran on this exact text" in out and "--again" in out,
                out)
+
+        # --- 9. the DOC transport, credential-free ---------------------
+        # Skipped under `_corrupt`, which exists solely to prove the
+        # VISIBILITY assertions above fail on a hidden form. It leaves
+        # the essay wrapped in an HTML comment, and a second run staged
+        # against that is asserting nothing about the transport.
+        if _corrupt is None:
+            _doc_mode_refusals(workspace, manuscript_dir, db, manuscript,
+                               report)
     finally:
         if started:
             _guard(db, manuscript_dir)
@@ -1023,6 +1175,15 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
             print(out.strip())
             if target.read_bytes() != original:
                 target.write_bytes(original)
+            # COLLECT after the restore. `filter run` pins
+            # `_latest_version_id` and does not collect, so a bench left
+            # with history describing text that is no longer on disk
+            # makes the NEXT run's pin check refuse for drift the author
+            # never caused. The restore above always needs this; before
+            # the doc-mode section it happened to be a no-op because the
+            # rollback target's pin was already the original.
+            cli(workspace, "-m", BENCH, "collect", stdin_text="",
+                scrub_keys=True, allow_fail=True)
             report("filter rollback restored the essay byte for byte",
                    target.read_bytes() == original,
                    f"{len(original)} bytes before, "

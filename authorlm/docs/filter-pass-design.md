@@ -427,7 +427,7 @@ So the door gains a **local transport**:
 3. `filter settle <file>` reads the local file and runs
    `threads.pending_forms` → `passes.final_text_from_marked` →
    `passes.record_resolution` — **all three unchanged**. Byte for byte the
-   critique resolve's second half with `critique_tab_markdown` replaced by
+   critique resolve's second half with `tab_marked_markdown` replaced by
    `path.read_text`.
 
 **Direct apply is the DEFAULT** (no flag), because a filter's edits are
@@ -548,6 +548,54 @@ row) and `filter unmark <file>` is `strip_pending` written back — a two-line
 recovery for a state that is fully described by the bytes.
 
 ---
+
+### 8.3 The doc transport (added 2026-08-30)
+
+The local transport above is the DEFAULT and the recommendation, and every word
+of its argument stands. It is no longer the only road. Sponsor ruling: reading
+dozens of struck-and-green spans in Google Docs is easier than reading
+`<<old>>{{new}}` in a text file, so `filter push <essay>` writes the run's
+accepted forms into the essay's tab through the same surgical writer `critique
+write` uses, and the local file keeps the OLD text, unmarked and byte-identical
+to the pin. `filter settle <essay>` then reads the TAB back — never a pulled
+local file, because `pull_doc` strips pending forms to their old halves before
+writing, which would discard the author's rewordings before the settle ever ran.
+
+The transport is a property of the RUN, recorded in `filter_runs.metadata` as
+`mode` and frozen by whichever verb takes it. Full design and rulings:
+`.ai-productionization/authorllm/findings/design-filter-doc-settle.md`; the
+dated record is §15.23 of `docs/autoregressive-writing-design.md`.
+
+Two verbs read differently on this road and their words were made to match.
+`filter push` says whether the levelling push canonicalized the local file rather
+than claiming it is untouched; and `filter unmark <essay> --force` states that
+its recovery rebuilds the WHOLE TAB from the local file, so an edit made anywhere
+else in that tab dies with the green halves — naming `doc pull <essay>` as the
+exit that saves it. Preserving such an edit inside the recovery verb was
+considered and refused: it would put a tab read and a three-way into the one verb
+the author reaches for when something has already gone wrong.
+
+A run recovered with `filter unmark --force` settles locally while its
+recorded transport still reads `doc`; at that point the transport is
+provenance, not a live constraint (reviewer ruling, AV round 2 —
+2026-08-30). Clearing `mode` would contradict "a run that has had forms
+out keeps saying so", and refusing the local settle would strand the run
+with no exit after the recovery verb this section itself names.
+
+Only one producer's forms may occupy a tab at a time. A second filter's push on
+the same essay is refused early and by name (Q-1), because the settle join is the
+old text and neither settle could tell whose forms were whose.
+
+One cost is paid rather than argued away: **doc mode's state is not fully
+described by the bytes.** The sentence appears four times above and is the
+reason the local transport was chosen. `filter status` cannot detect a Doc-side
+orphan — forms in a tab with no rows describing them — without a network call it
+has no credentials for. The remedy is documented rather than detected: `doc push
+<essay>` rebuilds the tab from the pristine local file, and the guard lets it
+through the moment no `written` rows exist. `filter status` states that its
+orphan scan is byte-based and covers the local road only, so a clean scan is
+never read as a clean bill of health, and it carries the tab URL for a doc-mode
+run with forms out (from the stored mapping — no network, no credentials).
 
 ## 9. Execution — chat mode first
 
@@ -719,10 +767,22 @@ warns rather than blocking.
 **Summaries are NOT required to run**, but `filter settle` rebuilds the
 essay's summary exactly as `critique resolve` does, because the text changed
 and a stale summary is a lie the next gate will refuse. That is one billed
-summarizer call per settle, on the cheap tier, and it is **the one model call
-the whole chat-mode filter path makes**. It is announced with its usage line
-and fails soft. It marks downstream essays `upstream_stale`, and the settle
+summarizer call per settle, on the cheap tier. It is announced with its usage
+line and fails soft. It marks downstream essays `upstream_stale`, and the settle
 output says so.
+
+> **Corrected 2026-08-30 (§15.23, doc-settle stream).** This paragraph used to
+> call that "the one model call the whole chat-mode filter path makes", and it
+> is no longer true. The learnings distiller — ≥2 modified acceptances → a
+> pattern candidate for the author to ratify — lived in the CLI's
+> `_critique_learnings` and only `critique resolve` could reach it, so the
+> highest-value output of a settle had never fired for a filter. It is hoisted
+> to `passes.settle_learnings` and called from both transports. A settle
+> therefore makes TWO calls when and only when the author reworded at least two
+> proposals: the cheap-tier rebuild, and the distiller on the general `[llm]`
+> tier — the same client the critique pass uses, deliberately, because one code
+> path is better than a second model-tier decision smuggled in under a
+> learning-loop fix. It fails soft.
 
 **Usage ledger purpose tags.** Native path: `purpose = "filtering"`, the
 config section that chose the model. Chat path: nothing to tag and nothing

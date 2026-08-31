@@ -1365,7 +1365,7 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
         passes.compose_marked_text(text, threads)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    result = gdocs.critique_diff_write(db, manuscript, file, threads,
+    result = gdocs.write_pending_forms(db, manuscript, file, threads,
                                        service, docs_service)
     for t in result["written"]:
         db.update("doc_threads", t["id"], {"state": "written"})
@@ -1407,7 +1407,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (it-x7-1). Three-wayed against local so an edit made elsewhere in
     # the tab still lands, and a genuine two-sided edit is surfaced
     # instead of a side being picked silently.
-    fetched = gdocs.critique_tab_markdown(db, manuscript, file,
+    fetched = gdocs.tab_marked_markdown(db, manuscript, file,
                                           service, docs_service)
     if fetched["state"] == "missing":
         sys.exit(f"error: '{file}' has no matching section in the "
@@ -1471,29 +1471,17 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         idx = order.index(file)
         if idx >= p["cursor"]:
             db.update("critique_passes", p["id"], {"cursor": idx + 1})
-    if diffs:
-        _critique_learnings(db, manuscript, diffs, config)
+    _print_pattern_candidate(
+        passes.settle_learnings(db, manuscript, diffs, config))
     nxt = order[idx + 1] if file in order and idx + 1 < len(order) else None
     print(ui.dim(f"Next essay: {nxt} — 'critique run {nxt}' when you say so."
                  if nxt else "That was the last essay in reading order."))
 
 
-def _critique_learnings(db: Database, manuscript: dict, diffs: list[dict],
-                        config: dict) -> None:
-    """Modified acceptances feed the margin-learnings duty: at ≥2 in one
-    resolve, surface a pattern candidate through the scoped distiller."""
-    if len(diffs) < 2:
-        return
-    from . import placement
-    from .llm import LLMClient
-
-    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
-                                f"«{d['final'][:120]}»") for d in diffs]
-    llm = LLMClient(config)
-    try:
-        candidate = placement.distill_batch(db, manuscript, explanations, llm)
-    except Exception:  # noqa: BLE001
-        candidate = None
+def _print_pattern_candidate(candidate: dict | None) -> None:
+    """The one line a settle's pattern candidate earns. The distiller
+    itself is `passes.settle_learnings`, shared by both passes and both
+    filter transports; each CLI path owns its own output."""
     if candidate:
         print(ui.yellow("Pattern candidate from your post-edits: "
                         + ui.shorten(candidate.get("statement", ""), 70)))
@@ -3247,6 +3235,11 @@ def cmd_filter(args):
                       f"{r['proposed']} proposed, {r['accepted']} accepted, "
                       f"{r['rejected']} rejected, {r['open']} awaiting a "
                       f"verdict")
+                print(ui.dim(
+                    f"  transport: {r['mode'] or 'not chosen yet'}"
+                    + (f"; {r['forms_out']} form(s) out"
+                       if r["forms_out"] else "")
+                    + (f" — {r['tab_url']}" if r.get("tab_url") else "")))
                 if r["class_now"]:
                     print(ui.yellow(
                         f"  !! the artifact's class is now "
@@ -3258,6 +3251,8 @@ def cmd_filter(args):
                     f"matching staged edit — a crash between composing and "
                     f"writing the threads leaves exactly this. Recover with "
                     f"'filter unmark {rel}'."))
+            if report.get("orphan_scan_note"):
+                print(ui.dim(report["orphan_scan_note"]))
             return
 
         if args.action == "edits":
@@ -3422,12 +3417,90 @@ def cmd_filter(args):
                              f"'filter triage {result['file']} --accept …'."))
             return
 
+        if args.action == "push":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter push <essay.md>")
+            def _push_bridge():
+                from . import gdocs as _gd
+
+                try:
+                    return (_gd.get_service(config, args.workspace,
+                                            interactive=True),
+                            _gd.get_docs_service(config, args.workspace,
+                                                 interactive=True))
+                except ValueError as err:
+                    # The local road needs no credentials and is the
+                    # DEFAULT and the recommendation — an author without
+                    # a Doc bridge must never be left thinking the pass
+                    # is unavailable.
+                    raise ValueError(
+                        f"{err}\nThe Doc road needs the [gdocs] bridge. "
+                        f"The local road does not: 'filter settle "
+                        f"{args.file} --pause' writes the same "
+                        f"<<old>>{{{{new}}}} forms into the file in your "
+                        f"vault, and 'filter settle {args.file}' "
+                        f"finalizes them.") from err
+
+            result = api.filter_push(db, manuscript, config, args.file,
+                                     services=_push_bridge, name=args.name)
+            _print_filter_warnings(result["warnings"])
+            for t, why in result["failed"]:
+                print(ui.yellow(f"  could not write [{t['id'][:8]}]: {why}"
+                                " — left accepted"))
+            if not result["written"]:
+                print(ui.yellow(
+                    "Nothing landed in the Doc, so this run has NOT taken "
+                    "the Doc road — the local settle is still open to it."))
+                return
+            print(ui.green(f"{result['written']} change(s) written into "
+                           f"{result['file']}'s tab")
+                  + ui.dim(f" — {result['url']}"))
+            print(ui.dim(
+                "Old text struck through, the new text beside it in green. "
+                "Reword any of the {{new}} halves you like; your wording "
+                "wins, and anything you leave alone is taken as a yes. "
+                f"Then 'filter settle {result['file']}' reads the tab back "
+                "and makes them final."))
+            if result["local_unchanged"]:
+                print(ui.dim(
+                    f"The file on your disk still holds {result['file']} "
+                    "exactly as it was, and it will not push to Docs "
+                    "until this is finished."))
+            else:
+                # The push levels the tab from the local file, and that
+                # goes through `normalize_markdown` — so on a file that
+                # was not already canonical the bytes DID move. Saying
+                # "exactly as it was" there is false, and an author who
+                # later finds a diff they were told did not exist has
+                # been given a reason to distrust the whole road.
+                print(ui.dim(
+                    f"The file on your disk still holds the OLD "
+                    f"{result['file']} — none of these changes is in it "
+                    f"— but the push did rewrite it once, into canonical "
+                    f"markdown (list markers, spacing, trailing "
+                    f"whitespace; not a word of the prose). That is the "
+                    f"same normalization every 'doc push' does. It will "
+                    f"not push to Docs again until this is finished."))
+            return
+
         if args.action == "settle":
             if not args.file:
                 raise SystemExit("usage: authorlm filter settle <essay.md> "
                                  "[--pause]")
+            def _doc_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            # A CALLABLE, not two arguments: the local road must work
+            # with no credentials, so nothing here can pop a consent
+            # window unless the run actually took the Doc road.
             result = api.filter_settle(db, manuscript, config, args.file,
-                                       pause=args.pause, name=args.name)
+                                       pause=args.pause, name=args.name,
+                                       services=_doc_bridge)
             _print_filter_warnings(result["warnings"])
             if result["paused"]:
                 print(ui.green(
@@ -3439,8 +3512,16 @@ def cmd_filter(args):
                              "marked, and every observer still reads the "
                              "original text."))
                 return
-            print(ui.green(f"Applied: {result['forms']} change(s) made "
-                           f"final in {result['file']}."))
+            if result.get("mode") == "doc":
+                print(ui.green(
+                    f"Finalized: {result['forms']} change(s) made final in "
+                    f"{result['file']}"
+                    + (f", {len(result['diffs'])} of them in your wording "
+                       f"rather than mine" if result["diffs"] else "")
+                    + "."))
+            else:
+                print(ui.green(f"Applied: {result['forms']} change(s) made "
+                               f"final in {result['file']}."))
             for d in result["diffs"]:
                 print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
                              f"«{gdocs_clamp(d['final'])}»"))
@@ -3462,6 +3543,14 @@ def cmd_filter(args):
                 print(ui.yellow(f"summary rebuild failed "
                                 f"({summary['error']}) — run 'summarize "
                                 f"rebuild {result['file']}'"))
+            _print_pattern_candidate(result.get("pattern_candidate"))
+            if result.get("tab_still_marked"):
+                print(ui.dim(
+                    f"The Doc tab still shows the struck-and-green marks: "
+                    f"a settle that also re-pushed could fail halfway on "
+                    f"the network after the evidence was recorded, so it "
+                    f"does not. Your next 'doc push {result['file']}' "
+                    f"clears them."))
             print(ui.dim("Nothing here was filed against any of your goals: "
                          "a filter pass is hygiene, not work toward a "
                          "declared aim, and recording it as if it were "
@@ -3472,9 +3561,32 @@ def cmd_filter(args):
         if args.action == "unmark":
             if not args.file:
                 raise SystemExit("usage: authorlm filter unmark <essay.md>")
-            result = api.filter_unmark(db, manuscript, args.file)
+            def _unmark_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            result = api.filter_unmark(db, manuscript, args.file,
+                                       force=args.force,
+                                       services=_unmark_bridge)
             for warn in result["marker_warnings"]:
                 print(ui.yellow(f"  {warn}"))
+            if result["mode"] == "doc":
+                print(ui.green(
+                    f"{result['file']}'s tab rebuilt clean; "
+                    f"{result['reopened']} form(s) returned to 'accepted' "
+                    f"— 'filter settle' applies them, 'filter triage "
+                    f"--undo' reopens them."))
+                print(ui.dim(
+                    "The tab was rebuilt from the file on disk, so it now "
+                    "shows the essay as it stands there — anything typed "
+                    "into that tab since the push is gone. The file itself "
+                    "was never touched: it has held the old text "
+                    "throughout."))
+                return
             print(ui.green(
                 f"{result['file']} restored to its original text; "
                 f"{result['reopened']} form(s) returned to 'accepted' — "
@@ -6477,8 +6589,8 @@ def build_parser() -> argparse.ArgumentParser:
         "filter",
         help="author-defined filters (_filters/*.md, TOML front matter): "
              "add, list, show, run <name> <file> (NO model call by "
-             "default), record, edits, triage, settle, status, unmark, "
-             "rollback, abandon",
+             "default), record, edits, triage, push, settle, status, "
+             "unmark, rollback, abandon",
         description=(
             "The filter pass. A LENS reads one essay whole and reports "
             "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
@@ -6488,12 +6600,26 @@ def build_parser() -> argparse.ArgumentParser:
             "payload for the conversation to draft against. The billed "
             "path is `--native`, and it needs a [filtering] section that "
             "the shipped config deliberately does not have. `--dry-run` "
-            "is accepted as a no-op alias for muscle memory."),
+            "is accepted as a no-op alias for muscle memory.\n\n"
+            "TWO ROADS TO THE AUTHOR'S EYES, and the run picks one by "
+            "which verb it meets first. `filter settle <essay>` is the "
+            "LOCAL road and the default: the changes are applied (or, "
+            "with --pause, written into the file as <<old>>{{new}} forms "
+            "to read in Obsidian). `filter push <essay>` is the DOC road: "
+            "the same forms go into the essay's tab of the master Doc, "
+            "struck-through and green, the file on disk keeps the OLD "
+            "text, and `filter settle <essay>` later reads the tab back. "
+            "Local is recommended — its whole state is described by the "
+            "bytes on disk, and the Doc road's is not (a crash mid-recovery "
+            "can leave forms in a tab that nothing on disk records; "
+            "'doc push <essay>' rebuilds the tab from the pristine file). "
+            "Once a run takes a road it keeps it; switching is "
+            "settle-then-rerun, never a flag."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action",
                    choices=["add", "list", "show", "prelude", "run",
-                            "record", "edits", "triage", "settle", "status",
-                            "unmark", "rollback", "abandon"])
+                            "record", "edits", "triage", "push", "settle",
+                            "status", "unmark", "rollback", "abandon"])
     p.add_argument("name", nargs="?",
                    help="filter name (add/show/prelude/run); optional "
                         "elsewhere, to disambiguate two runs on one file")
@@ -6516,6 +6642,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause", action="store_true",
                    help="settle: write the <<old>>{{new}} forms into the "
                         "file to read in Obsidian instead of applying")
+    p.add_argument("--force", action="store_true",
+                   help="unmark: required on the DOC road, where taking "
+                        "the forms out of the tab destroys any rewording "
+                        "the author did there and nothing else holds it")
     p.add_argument("--accept", nargs="*", metavar="N")
     p.add_argument("--reject", nargs="*", metavar="N")
     p.add_argument("--revise", nargs="*", metavar="N")

@@ -802,3 +802,42 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
         _edit_evidence(db, manuscript_id, t, "declined",
                        evidence_type=evidence_type)
     return diffs
+
+
+LEARNINGS_THRESHOLD = 2
+
+
+def settle_learnings(db: Database, manuscript: dict, diffs: list[dict],
+                     config: dict) -> dict | None:
+    """The second half of the margin-learnings duty: at ≥2 modified
+    acceptances in ONE settle, surface a pattern candidate through the
+    scoped distiller. Returns the candidate, or None — the caller owns
+    its own output, which is why this lives here and not in either CLI
+    path.
+
+    Hoisted out of `cli._critique_learnings` because it was CLI-private
+    and only `critique resolve` could reach it. `record_resolution` was
+    origin-parameterized in the filter-pass stream, so the filter's
+    proposal→final diffs have ALWAYS been recorded — but the half that
+    turns them into a rule the author can ratify had never fired for a
+    filter, in either transport. The Sponsor's "that path also has the
+    learning loop built in" was true of the critique pass and false of
+    the filter pass; doc mode did not create that gap and must not be
+    the only road that closes it (design-filter-doc-settle §1.2).
+
+    Fails soft: the distiller is best-effort and a settle is never
+    blocked by it. It runs on the GENERAL model tier, deliberately —
+    the same client the critique pass uses, one code path rather than a
+    second model-tier decision smuggled in under a learning-loop fix."""
+    if len(diffs) < LEARNINGS_THRESHOLD:
+        return None
+    from . import placement
+    from .llm import LLMClient
+
+    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
+                                f"«{d['final'][:120]}»") for d in diffs]
+    try:
+        return placement.distill_batch(db, manuscript, explanations,
+                                       LLMClient(config))
+    except Exception:  # noqa: BLE001 — a settle is never blocked by this
+        return None

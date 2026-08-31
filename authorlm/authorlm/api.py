@@ -3954,13 +3954,23 @@ PROMPT_FAULT_SHARE = 0.75
 
 
 def _filter_capture(db: Database, manuscript: dict, file: str,
-                    verb: str) -> tuple[str, str, tuple, str]:
+                    verb: str, checkout: bool = True
+                    ) -> tuple[str, str, tuple, str]:
     """The one capture, the three in-flight/placeholder refusals, the
     file's text, and the pronunciation dictionary — shared by run,
-    record, prelude and settle so a gate and the thing it gates can never
-    read separately (§14.7's dangerous shape).
+    record, prelude, push and settle so a gate and the thing it gates
+    can never read separately (§14.7's dangerous shape).
 
     Returns `(relpath, text, capture, dictionary_text)`.
+
+    `checkout=False` is for exactly one caller: the DOC-mode settle.
+    `_checkout_gate` refuses a file whose Doc entry is `checked_out`, and
+    `write_pending_forms`'s levelling push sets that flag — so in doc
+    mode the file is checked out BY DESIGN (the Doc *is* the working
+    copy, which is the whole point of the mode) and the gate would
+    refuse the one verb whose job is to read the Doc back. The gate is
+    right for run, record, prelude, push and the local settle, and wrong
+    for that one; `critique resolve` has no gate for the same reason.
 
     The dictionary is read HERE and nowhere else, which is the whole of
     the bend this feature puts in the blackboard doctrine (§15.22, D4).
@@ -3976,7 +3986,8 @@ def _filter_capture(db: Database, manuscript: dict, file: str,
     bytes."""
     from . import summaries as sums
 
-    _checkout_gate(db, manuscript, file)
+    if checkout:
+        _checkout_gate(db, manuscript, file)
     capture = sums.capture(db, manuscript)
     texts, _unlisted, inflight = capture
     rel = file if file in texts else next(
@@ -4056,6 +4067,44 @@ def _filter_run_row(db: Database, manuscript: dict, file: str,
             f"{file} has {len(rows)} active filter runs ({names}) — name "
             "the one you mean.")
     return _touched_filter_run(db, rows[0])
+
+
+# ------------------------------------------------------ the transport
+#
+# A filter run has a TRANSPORT: the road its accepted edits take to the
+# author's eyes. `local` is the marked file in Obsidian; `doc` is the
+# same `<<old>>{{new}}` forms written surgically into the essay's tab of
+# the master Doc (design-filter-doc-settle §2.1).
+#
+# It lives in the run's `metadata` JSON, not in a column: it is new
+# state on an existing row and the house idiom for that is the metadata
+# blob, which needs no migration and cannot collide with an index.
+# ABSENT is meaningful and is the birth value — *no transport chosen
+# yet* — so a default would lie about a run that has staged and triaged
+# edits and not yet decided where to read them.
+#
+# Frozen at the TRANSPORT VERB, not at run start (D-3): nothing between
+# `filter run` and the first transport verb depends on it, and freezing
+# earlier would refuse the legitimate late choice ("I have triaged
+# thirty of these; I would like to read them in the Doc after all") for
+# no mechanical reason. Once set it is frozen for the life of the run —
+# switching is settle-then-rerun. There is no toggle and no --mode flag
+# on any verb, because a run whose forms are half in the Doc and half on
+# disk is a run nobody can reason about.
+
+def _run_mode(run: dict) -> str | None:
+    """This run's chosen transport: 'local', 'doc', or None for a run
+    that has not taken one yet."""
+    return (loads(run.get("metadata"), {}) or {}).get("mode")
+
+
+def _freeze_run_mode(db: Database, run: dict, mode: str) -> dict:
+    """Record the transport, once. Returns the refreshed run row."""
+    meta = loads(run.get("metadata"), {}) or {}
+    meta["mode"] = mode
+    payload = json.dumps(meta)
+    db.update("filter_runs", run["id"], {"metadata": payload})
+    return dict(run, metadata=payload)
 
 
 def _touched_filter_run(db: Database, row: dict) -> dict:
@@ -4565,9 +4614,17 @@ def _open_run_threads(db: Database, manuscript_id: str, rel: str,
 
 def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
     """The staged filter proposals of this file's active run(s),
-    numbered for triage."""
+    numbered for triage — plus the run's TRANSPORT and how many of its
+    forms are currently out.
+
+    The transport is reported rather than acted on, and that is the
+    whole of what doc mode owes chat (§5's MCP ruling): a session that
+    cannot see `mode='doc'` will offer to apply what is already sitting
+    in the author's Doc, and will try to triage a `written` row that
+    `passes.verdict` refuses anyway."""
     rel = _resolve_relpath(manuscript, file)
-    rows = _open_run_threads(db, manuscript["id"], rel)
+    mid = manuscript["id"]
+    rows = _open_run_threads(db, mid, rel)
     items = []
     for n, t in enumerate(rows, 1):
         meta = loads(t.get("metadata"), {}) or {}
@@ -4575,7 +4632,40 @@ def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
                       "unit": meta.get("anchor_paragraph"),
                       "old": t["proposed_old"], "new": t["proposed_new"],
                       "why": t["note"], "ref": meta.get("ref")})
-    return {"file": rel, "count": len(items), "items": items}
+    active = [dict(r) for r in db.all(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at", (mid, rel))]
+    # PER RUN, not one collapsed value. Two filters on one essay is
+    # legitimate work, and when their transports differ the collapsed
+    # answer was None — which chat reads as "no transport chosen" — and
+    # it suppressed the note in exactly the case that most needs it: one
+    # run's forms sitting in the author's Doc while another's proposals
+    # are still on the table here.
+    runs = [{"filter": r["filter"], "mode": _run_mode(r),
+             "forms_out": sum(1 for t in _run_threads(db, mid, r)
+                              if t["state"] == "written")}
+            for r in active]
+    modes = {r["mode"] for r in runs}
+    mode = next(iter(modes)) if len(modes) == 1 else None
+    forms_out = sum(1 for t in staging.door_threads(
+        db, mid, rel, states=("written",), origin_type=FILTER_ORIGIN))
+    out_in_doc = [r for r in runs if r["mode"] == "doc" and r["forms_out"]]
+    note = None
+    if out_in_doc:
+        which = ", ".join(f"{r['filter']} ({r['forms_out']})"
+                          for r in out_in_doc)
+        note = (f"{sum(r['forms_out'] for r in out_in_doc)} form(s) are "
+                f"out in the Doc's tab for this essay — {which}. The "
+                f"author settles those THERE, and then 'authorlm filter "
+                f"settle {rel}' (CLI) reads the tab back. Do not offer "
+                f"to apply them from here.")
+        if len(runs) > len(out_in_doc):
+            note += (" The other run(s) on this essay are on the local "
+                     "road and their proposals above are still yours to "
+                     "triage as usual.")
+    return {"file": rel, "count": len(items), "items": items,
+            "mode": mode, "runs": runs, "forms_out": forms_out,
+            "transport_note": note}
 
 
 def filter_triage(db: Database, manuscript: dict, file: str,
@@ -4668,13 +4758,241 @@ def _uncovered_units(run: dict) -> list[tuple[int, int]]:
     return [(run["cursor"] + 1, run["unit_count"])]
 
 
+def _owning_filter(db: Database, manuscript_id: str,
+                   thread: dict) -> str | None:
+    """The filter whose run staged this thread, by its `origin_id`
+    prefix (`{run_id}:{file}:{ordinal}`) — so a refusal can name the
+    filter the author knows rather than a row id they have never seen."""
+    run_id = (thread.get("origin_id") or "").split(":", 1)[0]
+    row = db.one("SELECT filter FROM filter_runs WHERE id = ? AND "
+                 "manuscript_id = ?", (run_id, manuscript_id))
+    return row["filter"] if row else None
+
+
+def _twin_warning(accepted: list[dict]) -> str | None:
+    """§9.2's one informational line, when two accepted edits replace
+    byte-identical paragraphs.
+
+    Warn, never block, and never hold anything back: the Sponsor's
+    ruling is push ALL, twins included, because holding twins back on the
+    local road while the rest went to the Doc would split one run across
+    two transports — the exact state the mode freeze exists to forbid.
+
+    What the author needs to know is small and specific: the forms
+    settle BY POSITION, so rewording either is safe, and only DELETING
+    one outright can attach the decline to the twin they kept. The
+    manuscript text is correct either way; it is the record of which
+    they refused that goes astray (RISK-6)."""
+    from . import gdocs
+
+    groups: dict[str, list[int]] = {}
+    for t in accepted:
+        unit = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph")
+        groups.setdefault(t["proposed_old"], []).append(unit or 0)
+    twins = {old: sorted(units) for old, units in groups.items()
+             if len(units) > 1 and old}
+    if not twins:
+        return None
+    lines = []
+    for old, units in twins.items():
+        where = " and ".join(str(u) for u in units)
+        lines.append(
+            f"{len(units)} of these changes replace the same paragraph "
+            f"text, word for word: «{gdocs.clamp(old)}» (units {where}). "
+            f"They settle by position — the first form in the Doc is the "
+            f"first change — so reword either freely. The one thing to "
+            f"avoid is DELETING one of them outright: your manuscript "
+            f"text is never affected either way, but the record of which "
+            f"of the two you turned down may attach to the other. If you "
+            f"want one gone, empty its green half rather than deleting "
+            f"the whole marked span.")
+    return "\n".join(lines)
+
+
+def filter_push(db: Database, manuscript: dict, config: dict, file: str,
+                services=None, name: str | None = None) -> dict:
+    """The DOC transport verb (design-filter-doc-settle §2.3): write this
+    run's accepted edits into the essay's tab of the master Doc as
+    `<<old>>{{new}}` forms, through the same surgical writer `critique
+    write` uses, and leave the local file holding the OLD text.
+
+    Named `push` and not `write`: `filter write` reads as *write a filter
+    artifact* and collides with `filter add`, and every refusal the
+    author meets on this road already speaks the word "push". The cost,
+    recorded: it is one word from `doc push`, which does something else.
+
+    Nine steps, each of them a refusal point; the ordering is the whole
+    of the safety argument, so it is spelled out rather than inferred."""
+    from . import gdocs
+
+    mid = manuscript["id"]
+    # 1-3. The run's OWN state first, and ordered most-informative-first
+    #      for the same reason `push_doc`'s two guards are: a second push
+    #      would trip the checkout gate below, and that refusal would
+    #      name `doc pull` for a checkout THIS RUN's own levelling push
+    #      created. When the database knows the run has forms out, that
+    #      is the refusal the author needs.
+    rel = _resolve_relpath(manuscript, file)
+    run = _filter_run_row(db, manuscript, rel, name)
+    mode = _run_mode(run)
+    if mode == "local":
+        raise ValueError(
+            f"this run already took the local road — its forms were "
+            f"composed into {rel} on disk, and a run whose forms are half "
+            f"in the Doc and half on disk is a run nobody can reason "
+            f"about. Finish it ('filter settle {rel}') and start a fresh "
+            f"run if you want to read the next batch in the Doc.")
+    threads = _run_threads(db, mid, run)
+    already = [t for t in threads if t["state"] == "written"]
+    if already:
+        unmark = (f"filter unmark {rel} --force" if mode == "doc"
+                  else f"filter unmark {rel}")
+        raise ValueError(
+            f"{len(already)} form(s) of this run are already out — "
+            f"pushing again would mark a tab that still carries them. "
+            f"Finalize ('filter settle {rel}') or take them back out "
+            f"('{unmark}'), then push again if you still want to.")
+    # 3b. Q-1, ruled: refuse when SOMEONE ELSE's forms are already in
+    #     this tab — a second filter's run, or the critique pass's.
+    #     The composed drift check further down runs against LOCAL,
+    #     which knows nothing about the tab, so a second push would mark
+    #     a tab that already carries another producer's forms. It fails
+    #     anyway — `push_doc`'s `forms_pending` refuses the levelling
+    #     push from inside `write_pending_forms` — so this refusal exists
+    #     to be EARLY and BY NAME rather than three functions deep.
+    #
+    #     ABOVE the capture, with the other DB-known refusals, for the
+    #     reason given there: the first run's own levelling push checked
+    #     this file out, so the checkout gate would otherwise answer
+    #     first and send the author to `doc pull`, which does not help.
+    mine = {t["id"] for t in threads}
+    outside = [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
+        "AND state = 'written' ORDER BY created_at", (mid, rel))
+        if r["id"] not in mine]
+    if outside:
+        origin = outside[0]["origin_type"]
+        owner = (_owning_filter(db, mid, outside[0])
+                 if origin == FILTER_ORIGIN else None)
+        whose = f"'{owner}'" if owner else f"the {origin} pass"
+        remedy = (f"filter settle {rel}" if origin == FILTER_ORIGIN
+                  else f"critique resolve {rel}")
+        raise ValueError(
+            f"{len(outside)} form(s) from {whose} are already in {rel}'s "
+            f"tab. Two producers' forms in one tab cannot be told apart "
+            f"at settle — the join is the old text, and neither settle "
+            f"would know which forms were its own. Finish that one "
+            f"('{remedy}') and then push this run.")
+    # 4a. The one capture: the checkout gate, the three in-flight and
+    #     placeholder refusals, the sidecar refusal, the file's text. The
+    #     gate STAYS on this verb: staging read `old` from local, so
+    #     pushing forms onto a tab whose text the author has since edited
+    #     in the Doc is the drift case, and the gate names the remedy.
+    #     (`critique write` has no such gate and opens with a `push_doc`
+    #     that would overwrite a Doc-side edit — a live hazard in that
+    #     pass, RISK-4. This design does not inherit it.)
+    _rel, _text, _capture, _dict = _filter_capture(db, manuscript, rel,
+                                                   "filter push")
+    # 4b. Something to push, refused in `filter settle`'s own wording.
+    accepted = [t for t in threads if t["state"] == "accepted"]
+    if not accepted:
+        open_now = [t for t in threads if t["state"] == "proposed"]
+        raise LookupError(
+            f"nothing is accepted on {rel}"
+            + (f" — {len(open_now)} proposal(s) are still awaiting your "
+               f"verdict ('filter edits {rel}')." if open_now
+               else " and nothing is staged."))
+    warnings: list[str] = []
+    # Q-3's default: allow, and warn by count. A partially triaged run in
+    # the Doc means the author sees six forms and not the four they have
+    # not ruled on — worth saying, never worth blocking (§15.13).
+    still_open = [t for t in threads if t["state"] == "proposed"]
+    if still_open:
+        warnings.append(
+            f"{len(still_open)} proposal(s) on {rel} are still awaiting "
+            f"your verdict and are NOT going to the Doc — you will see "
+            f"{len(accepted)} changes there, not "
+            f"{len(accepted) + len(still_open)}. Read the rest with "
+            f"'filter edits {rel}'. Nothing is blocked.")
+    twin_note = _twin_warning(accepted)
+    if twin_note:
+        warnings.append(twin_note)
+    # 5. The drift check, LOCALLY, before any Doc write: a `proposed_old`
+    #    that no longer matches its paragraph raises naming the unit. The
+    #    composed text is DISCARDED — nothing is written to disk, ever,
+    #    on this road (F-D2).
+    path = Path(manuscript["path"]) / rel
+    disk = path.read_text(encoding="utf-8")
+    passes.compose_marked_text(disk, accepted)
+    # 6. The surgical writer: a levelling push of the pristine local
+    #    file, then one marked span per thread, highest anchor first,
+    #    located by occurrence index, then the read-back proof.
+    #
+    #    The bridge is built HERE and not at the top, deliberately: every
+    #    refusal above is a state refusal that costs nothing, and a verb
+    #    that pops an OAuth consent window only to then tell the author
+    #    their run is on the other road has spent their attention for
+    #    nothing. It also keeps `tools/testbench.py` able to assert these
+    #    refusals with no key, no token and no network.
+    service, docs_service = _settle_services(services, rel)
+    result = gdocs.write_pending_forms(db, manuscript, rel, accepted,
+                                       service, docs_service)
+    # 7. Written threads advance; FAILED threads stay `accepted` and are
+    #    reported by reason, so a partially landed push is visible and
+    #    the rest can be settled locally or reworded.
+    for t in result["written"]:
+        db.update("doc_threads", t["id"], {"state": "written"})
+    # 8. The mode is recorded only if at least one form landed. A push
+    #    that landed nothing has put nothing out, and stranding the run
+    #    in a mode with no forms in it would refuse the local road for no
+    #    reason.
+    if result["written"]:
+        run = _freeze_run_mode(db, run, "doc")
+    return {"file": rel, "run": run, "url": result["url"],
+            "written": len(result["written"]),
+            "failed": [(t, why) for t, why in result["failed"]],
+            "mode": _run_mode(run), "warnings": warnings,
+            "local_unchanged": path.read_text(encoding="utf-8") == disk}
+
+
+def _settle_services(services, rel: str):
+    """The Drive/Docs pair, built only at the moment a verb actually
+    needs it.
+
+    A callable, not two arguments, and called LAST rather than first.
+    The local settle must work with no credentials at all; and every
+    state refusal on the doc road — the wrong mode, forms already out, a
+    checked-out file, nothing accepted, a drifted paragraph — costs
+    nothing and must be reachable without a token, so that a verb never
+    pops an OAuth consent window only to then refuse, and so that
+    `tools/testbench.py` can assert those refusals with no key and no
+    network."""
+    if services is None:
+        raise ValueError(
+            f"{rel} needs the Google Doc bridge for this step, and none "
+            f"was supplied.")
+    try:
+        return services()
+    except ValueError as err:
+        raise ValueError(
+            f"{err}\nThe Doc road for {rel} needs the [gdocs] bridge. "
+            f"Authorize with 'doc auth'; or, if forms are already out in "
+            f"the tab, take them back with 'filter unmark {rel} --force' "
+            f"— which loses any rewording you did there.") from err
+
+
 def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
-                  pause: bool = False, name: str | None = None) -> dict:
-    """One verb, two halves, chosen by the threads' state.
+                  pause: bool = False, name: str | None = None,
+                  services=None) -> dict:
+    """One verb, three halves: the threads' state chooses whether this is
+    an apply or a finalize, and the RUN'S TRANSPORT chooses where the
+    marked text is read from (D-2).
 
         filter settle <file>            threads accepted → APPLY directly
         filter settle <file> --pause    threads accepted → compose, stop
         filter settle <file>            threads written  → read, finalize
+                                        mode 'local' → the marked file
+                                        mode 'doc'   → the essay's tab
 
     Direct apply is the DEFAULT: a filter's edits are mechanical and
     numerous, the triage verdict already IS the author's ruling, and
@@ -4684,17 +5002,36 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     literally the same code: the direct apply composes the marked text
     and resolves it in one breath, without ever writing the markers to
     disk, so there is one composition routine and not two.
+
+    The dispatch is on the run's MODE and not on `origin_type` (D-2):
+    both filter roads carry `origin_type='filter'`, so `origin_type` is
+    the wrong key, and a sibling verb would be larger than a branch in
+    the verb that already dispatches on thread state.
     """
+    from . import gdocs
     from . import summaries as sums
 
     mid = manuscript["id"]
-    rel, _text, _capture, _dict = _filter_capture(db, manuscript, file,
-                                                  "filter settle")
+    # The run's own state before the capture, for `filter push`'s reason:
+    # in doc mode the file is checked out BY DESIGN and the gate must be
+    # told not to fire (§2.4).
+    rel = _resolve_relpath(manuscript, file)
     run = _filter_run_row(db, manuscript, rel, name)
+    mode = _run_mode(run)
+    _rel, _text, _capture, _dict = _filter_capture(
+        db, manuscript, rel, "filter settle", checkout=(mode != "doc"))
     path = Path(manuscript["path"]) / rel
     written = [t for t in _run_threads(db, mid, run)
                if t["state"] == "written"]
     warnings: list[str] = []
+    if mode == "doc" and pause:
+        raise ValueError(
+            f"this run put its forms in the Doc — 'filter push {rel}' "
+            f"already chose that road, and --pause would mark the local "
+            f"file as well, leaving one run's forms in two places. "
+            f"Finalize with 'filter settle {rel}' (no flag), which reads "
+            f"the tab back, or take the forms out of the Doc with "
+            f"'filter unmark {rel} --force'.")
 
     if written:
         if pause:
@@ -4704,6 +5041,37 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
                 f"in them. Finalize with 'filter settle {rel}' (no flag), "
                 f"or put the original text back with 'filter unmark "
                 f"{rel}'.")
+        if mode == "doc":
+            # The DOC road. The authoritative marked text is the TAB's —
+            # `pull_doc` runs `strip_pending` on incoming text before
+            # writing it, so a pull of a tab carrying forms writes the
+            # pre-edit text and discards every {{new}} half INCLUDING the
+            # author's rewordings. A settle that read the pulled local
+            # file would find no forms, resolve nothing, and decline
+            # every thread (D-1). `doc pull` is not part of this flow and
+            # is harmless if it happens (§2.6).
+            service, docs_service = _settle_services(services, rel)
+            fetched = gdocs.tab_marked_markdown(db, manuscript, rel,
+                                                service, docs_service)
+            if fetched["state"] == "missing":
+                raise LookupError(
+                    f"'{rel}' has no matching section in the master Doc "
+                    f"export — the tab this run's forms were written to "
+                    f"is gone. 'doc push {rel}' rebuilds it from the "
+                    f"local file, which still holds the old text.")
+            if fetched["state"] == "conflict":
+                raise ValueError(
+                    f"'{rel}' changed both locally and in the Doc since "
+                    f"the last sync — the settle refuses to guess which "
+                    f"wins. Compare the local file against the Doc tab by "
+                    f"hand, then re-run 'filter settle {rel}'.")
+            warnings.extend(fetched["marker_warnings"])
+            return _filter_finalize(db, manuscript, config, run, rel, path,
+                                    warnings, marked_doc=fetched["marked"])
+        if mode is None:
+            # A run paused before the transport existed: its forms are in
+            # the bytes on disk, so the road it took was the local one.
+            run = _freeze_run_mode(db, run, "local")
         return _filter_finalize(db, manuscript, config, run, rel, path,
                                 warnings)
 
@@ -4717,6 +5085,10 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             + (f" — {len(open_now)} proposal(s) are still awaiting your "
                f"verdict ('filter edits {rel}')." if open_now
                else " and nothing is staged."))
+    # The transport is chosen HERE, by taking it: this is the local
+    # road, and from now on the run says so (§2.1).
+    if mode is None:
+        run = _freeze_run_mode(db, run, "local")
     # The file's OWN bytes, read directly: the settle code owns the
     # pending-change grammar, and it is the only code in the system that
     # is allowed to see markers.
@@ -4752,9 +5124,18 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
 
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
-                     direct: bool = False) -> dict:
-    """Read the marked file back, record the resolution, write the final
-    text, collect under NO episode, rebuild the summary."""
+                     direct: bool = False,
+                     marked_doc: str | None = None) -> dict:
+    """Read the marked text back, record the resolution, write the final
+    text, collect under NO episode, rebuild the summary.
+
+    ONE thing differs between the transports and it is where the marked
+    text comes from: `marked_doc` is the tab's export on the doc road and
+    None on the local road, where the file's own bytes are read. From
+    `diffs` onward the two roads are literally the same code — same
+    `final_text_from_marked`, same `record_resolution`, same
+    `filter_edit` evidence with `episode_id = NULL`, same NO_EPISODE
+    collect, same summary rebuild."""
     from . import gdocs
     from . import summaries as sums
 
@@ -4766,9 +5147,25 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     # this is a no-op unless there is a real uncollected edit.)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-filter-settle")
-    final, forms, diffs = staging.resolve_local(
-        db, mid, rel, path, origin_type=FILTER_ORIGIN,
-        evidence_type=FILTER_EVIDENCE)
+    if marked_doc is None:
+        final, forms, diffs = staging.resolve_local(
+            db, mid, rel, path, origin_type=FILTER_ORIGIN,
+            evidence_type=FILTER_EVIDENCE)
+    else:
+        written = staging.door_threads(db, mid, rel, states=("written",),
+                                       origin_type=FILTER_ORIGIN)
+        # kinds=("replace",) on BOTH roads, for the same reason: an
+        # unmatched insertion form collapses to its old half, which for
+        # an insertion is the empty string — so a settle that looked at
+        # bare `{{…}}` would DELETE an author's `{{title}}` from the
+        # finished essay. In the tab that `{{title}}` arrived from the
+        # author's own file through `push_doc`, so the hazard is real
+        # there too. A filter never stages an insertion.
+        final, forms = passes.final_text_from_marked(
+            marked_doc, written=written, kinds=("replace",))
+        diffs = passes.record_resolution(db, mid, rel, forms,
+                                         origin_type=FILTER_ORIGIN,
+                                         evidence_type=FILTER_EVIDENCE)
     normalized = gdocs.normalize_markdown(final)
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")
@@ -4799,13 +5196,48 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             summary.update(rebuilt=True, usage=llm.stats_line())
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
+    # The learnings duty, on BOTH transports — the half of the loop that
+    # had never fired for a filter (§1.2). It costs a settle a SECOND
+    # model call where the filter design claimed one, on the general tier
+    # rather than the cheap one, and only when the author reworded at
+    # least two proposals. It fails soft.
+    candidate = passes.settle_learnings(db, manuscript, diffs, config)
     return {"run": run, "file": rel, "paused": False, "direct": direct,
             "forms": len(forms), "diffs": diffs, "final": normalized,
             "warnings": warnings, "falsified_prefix": falsified,
-            "summary": summary, "result_version_id": result_version}
+            "summary": summary, "result_version_id": result_version,
+            "pattern_candidate": candidate, "mode": _run_mode(run),
+            # Q-2's default, matching `critique resolve` exactly: the
+            # settle does NOT re-push. A settle that pushes is a settle
+            # that can fail halfway on the network after the evidence is
+            # recorded — so the tab keeps showing the marks until the
+            # author's next ordinary `doc push`, and the verb says so.
+            #
+            # Keyed on whether THIS settle actually read forms back out
+            # of the tab, not on the run's mode. A doc-mode run whose
+            # forms were taken back by `filter unmark --force` settles
+            # locally against a tab that verb just rebuilt CLEAN; telling
+            # the author it still shows struck-and-green text sends them
+            # to look at marks that are not there.
+            "tab_still_marked": marked_doc is not None}
 
 
-def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
+def _file_run_mode(db: Database, manuscript_id: str, rel: str) -> str | None:
+    """The transport of the most recent run on this file that took one.
+    `filter unmark` and `filter rollback` are FILE-scoped verbs — they
+    exist to recover a state the bytes or the rows describe — so they
+    ask the file, not a named run."""
+    for row in db.all(
+            "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+            "ORDER BY created_at DESC", (manuscript_id, rel)):
+        mode = _run_mode(dict(row))
+        if mode:
+            return mode
+    return None
+
+
+def filter_unmark(db: Database, manuscript: dict, file: str,
+                  force: bool = False, services=None) -> dict:
     """Put the original text back and RETURN the written forms to
     `accepted`. Two lines of recovery for a state that is fully
     described by the bytes — including the crash between "compose" and
@@ -4816,18 +5248,69 @@ def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
     triage. `filter settle` applies them, `filter triage --undo` reopens
     them, `filter abandon` throws them away — and the author chooses
     which, because discarding a verdict is never something a recovery
-    verb does on its own."""
+    verb does on its own.
+
+    In DOC mode there are no local bytes to strip, so the recovery is
+    `critique rollback`'s own trick (§2.5): return the `written` threads
+    to `accepted` FIRST — which is what lifts `push_doc`'s
+    `forms_pending` refusal — then `push_doc` the unchanged local file to
+    rebuild the tab clean. The verdicts survive as on the local road.
+
+    **The rebuild is WHOLE-TAB, and the refusal must say so.** It is not
+    only the green halves that go: `push_doc` reconstructs the essay's
+    tab from the local file, so an edit the author made anywhere else in
+    that tab since the push is destroyed too, and nothing has recorded
+    it. That is why this branch alone requires `--force` (Q-4) — the one
+    place doc mode is deliberately less convenient than local, because
+    it is the one place the loss is unrecoverable.
+
+    The refusal names the exit that costs nothing: `doc pull <essay>`
+    brings a Doc-side edit made OUTSIDE the marked passages down to the
+    local file first, leaving the tab and the forms alone (§2.6), after
+    which this verb costs only the green halves. Preserving that edit
+    HERE was considered and refused: it would put a tab read and a
+    three-way inside a recovery verb, which is new machinery in the one
+    place the author reaches for when something has already gone wrong."""
+    from . import gdocs
+
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
-    _checkout_gate(db, manuscript, rel)
-    path = Path(manuscript["path"]) / rel
-    text, marker_warnings = staging.unmark(path)
     written = staging.door_threads(db, mid, rel, states=("written",),
                                    origin_type=FILTER_ORIGIN)
+    path = Path(manuscript["path"]) / rel
+    if _file_run_mode(db, mid, rel) == "doc":
+        if not force:
+            raise ValueError(
+                f"{len(written)} form(s) of {rel} are out in the Google "
+                f"Doc, and taking them back out REBUILDS THE WHOLE TAB "
+                f"from the local file. Everything you have typed in that "
+                f"tab since the push goes: the rewording inside the "
+                f"green halves, and any other edit you made anywhere "
+                f"else in {rel}'s tab. None of it is recorded anywhere "
+                f"else. (The file on disk is untouched either way — it "
+                f"has held the old essay throughout.) "
+                f"To keep your wording, finish in the Doc and 'filter "
+                f"settle {rel}'. To keep an edit you made OUTSIDE the "
+                f"marked passages, run 'doc pull {rel}' first: it brings "
+                f"that edit down to the file and leaves the tab and the "
+                f"forms alone. Then re-run with --force.")
+        # Withdraw FIRST: `push_doc`'s DB guard refuses while any form is
+        # `written`, and it is right to. Returning the verdicts to
+        # `accepted` is what lifts it.
+        for t in written:
+            db.update("doc_threads", t["id"], {"state": "accepted"})
+        service, docs_service = _settle_services(services, rel)
+        gdocs.push_doc(db, manuscript, rel, service=service,
+                       docs_service=docs_service)
+        return {"file": rel, "reopened": len(written), "mode": "doc",
+                "text": path.read_text(encoding="utf-8"),
+                "marker_warnings": []}
+    _checkout_gate(db, manuscript, rel)
+    text, marker_warnings = staging.unmark(path)
     for t in written:
         db.update("doc_threads", t["id"], {"state": "accepted"})
-    return {"file": rel, "reopened": len(written), "text": text,
-            "marker_warnings": marker_warnings}
+    return {"file": rel, "reopened": len(written), "mode": "local",
+            "text": text, "marker_warnings": marker_warnings}
 
 
 def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
@@ -4836,7 +5319,6 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
     are evidence, and evidence is not undone by putting text back."""
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
-    _checkout_gate(db, manuscript, rel)
     row = db.one(
         "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
         + ("AND filter = ? " if name else "")
@@ -4845,6 +5327,31 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
     if row is None:
         raise LookupError(f"no filter run on {rel} to roll back.")
     run = dict(row)
+    # The DB guard, FIRST and in either mode (§2.5 / D-4). In doc mode
+    # the local file is unmarked, so the byte check below is BLIND: the
+    # rollback would proceed, restoring the pin over a file whose forms
+    # are sitting in the Doc pointed at text that no longer exists there,
+    # with the author's rewordings destroyed and nothing left to recover
+    # them from. That is exactly the failure the byte refusal exists to
+    # prevent, so it gets a refusal that can see it. Ordered
+    # most-informative first, the shape `push_doc`'s two guards use, and
+    # both stay separately reachable.
+    out = [t for t in _run_threads(db, mid, run)
+           if t["state"] == "written"]
+    if out:
+        mode = _run_mode(run)
+        where = ("in the Google Doc" if mode == "doc"
+                 else "in the file on disk")
+        unmark = (f"filter unmark {rel} --force" if mode == "doc"
+                  else f"filter unmark {rel}")
+        raise ValueError(
+            f"{len(out)} form(s) of this run are still out {where}, and "
+            f"you may have already reworded them — a rollback would "
+            f"destroy those edits with nothing left to recover them "
+            f"from. Finalize what is there ('filter settle {rel}'), or "
+            f"take the forms back out ('{unmark}'), and then roll back "
+            f"if you still want to.")
+    _checkout_gate(db, manuscript, rel)
     # A marked file is mid-settle: its bytes are staged proposals the
     # author may have post-edited, and rolling back over them would
     # discard those edits AND leave written threads pointing at text
@@ -4905,8 +5412,21 @@ def filter_status(db: Database, manuscript: dict,
     """Run history per (filter, file) with the tallies, so a filter that
     never settles down is visible without the author having to notice
     it — plus the orphaned-mark detection: bytes that carry forms with
-    no matching written row."""
+    no matching written row.
+
+    A doc-mode run with forms out carries its TAB URL, read from the
+    stored mapping — no network, no credentials. The status verb is
+    where an author goes to find a run they have half-forgotten, and on
+    the Doc road the forms are somewhere this shell cannot show them.
+
+    The orphan scan is BYTE-based and therefore covers LOCAL mode only.
+    That is the one doctrine cost doc mode pays (RISK-1): forms left in
+    a tab with no rows describing them cannot be detected from here
+    without a network call this verb has no credentials for. The report
+    says so rather than letting a clean scan read as a clean bill of
+    health, and names the documented recovery."""
     from . import filters as flt
+    from . import gdocs
 
     mid = manuscript["id"]
     where = "WHERE manuscript_id = ?" + (" AND file = ?" if file else "")
@@ -4914,15 +5434,24 @@ def filter_status(db: Database, manuscript: dict,
     rows = [dict(r) for r in db.all(
         f"SELECT * FROM filter_runs {where} ORDER BY created_at", args)]
     classes = {f["name"]: f["class"] for f in flt.list_filters(manuscript)}
+    links = gdocs._mapping(db, manuscript).get("gdocs", {})
+    master_id = links.get("_master_id")
     runs = []
     for run in rows:
         threads = _run_threads(db, mid, run)
         drift = (classes.get(run["filter"])
                  if classes.get(run["filter"]) not in (None, run["class"])
                  else None)
+        mode = _run_mode(run)
+        forms_out = sum(1 for t in threads if t["state"] == "written")
+        tab_id = (links.get(run["file"]) or {}).get("tab_id")
         runs.append({
             "id": run["id"], "filter": run["filter"], "file": run["file"],
             "class": run["class"], "class_now": drift,
+            "mode": mode, "forms_out": forms_out,
+            "tab_url": (gdocs.tab_url(master_id, tab_id)
+                        if mode == "doc" and forms_out
+                        and master_id and tab_id else None),
             "status": run["status"], "cursor": run["cursor"],
             "unit_count": run["unit_count"],
             "date": (run["created_at"] or "")[:10],
@@ -4940,4 +5469,15 @@ def filter_status(db: Database, manuscript: dict,
         if not staging.door_threads(db, mid, rel, states=("written",),
                                     origin_type=FILTER_ORIGIN):
             orphans.append(rel)
-    return {"runs": runs, "orphaned_marks": orphans}
+    doc_files = sorted({r["file"] for r in runs if r["mode"] == "doc"})
+    return {"runs": runs, "orphaned_marks": orphans,
+            "orphan_scan_note": (
+                f"The orphan scan above reads the BYTES on disk, so it "
+                f"covers the LOCAL road only. "
+                f"{', '.join(doc_files)} has had forms in the Doc, and a "
+                f"tab left carrying forms that no row describes cannot "
+                f"be seen from here — that would take a network call "
+                f"this verb has no credentials for. If a tab still shows "
+                f"struck-and-green text for a finished essay, 'doc push "
+                f"<essay>' rebuilds it from the local file."
+                if doc_files else None)}

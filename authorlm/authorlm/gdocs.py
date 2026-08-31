@@ -1385,10 +1385,12 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
     return "conflict"
 
 
-def critique_tab_markdown(db: Database, manuscript: dict, file: str,
+def tab_marked_markdown(db: Database, manuscript: dict, file: str,
                           service, docs_service,
                           bridge: DocBridge | None = None) -> dict:
-    """Fetch `file`'s pending-review text straight from the master Doc, the
+    """Fetch `file`'s pending-review text straight from the master Doc —
+    the authoritative marked text for BOTH doc-transport settles
+    (`critique resolve` and a doc-mode `filter settle`), the
     same way pull_doc does: whole-Doc markdown export + order-aware
     split_tabbed_export (never the textRun walk that critique_tab_text
     used, which discards headings/bold/lists/link targets — it-x7-1).
@@ -2266,16 +2268,32 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
 
 
 def _locate_in_tab(docs_service, master_id: str, tab_id: str,
-                   needle: str) -> tuple[int, int] | None:
-    """(start, end) doc indices (UTF-16 units) of the FIRST verbatim
-    occurrence of `needle` in the tab, or None. Exactness is law: no
+                   needle: str, occurrence: int = 0) -> tuple[int, int] | None:
+    """(start, end) doc indices (UTF-16 units) of the
+    (`occurrence`+1)-th verbatim occurrence of `needle` in the tab, or
+    None when the tab holds fewer than that many. Exactness is law: no
     normalization, no fuzz (design: an approval authorizes one exact
-    transformation)."""
+    transformation).
+
+    `occurrence` defaults to 0 — the FIRST match, which is exactly what
+    a hand-quoted span means and what `propose_change` still passes.
+
+    A producer writing SEVERAL forms into one tab must compute it.
+    Two staged edits whose old halves are byte-identical (two identical
+    paragraphs in one essay — a refrain, a liturgical repetition) both
+    searched for the same needle and both resolved to the same span; the
+    descending write order then landed the second write INSIDE the
+    wrapper the first had planted, and `threads.PENDING`, being
+    non-greedy, matched `<<<<old>>{{new}}` at settle and left the rest
+    of the wrapper in the author's manuscript as literal text. Text
+    corruption, not a cosmetic fault (design-filter-doc-settle §9.3)."""
     runs = _tab_runs(docs_service, master_id, tab_id)
     full = "".join(content for _, content in runs)
-    offset = full.find(needle)
-    if offset < 0:
-        return None
+    offset = -1
+    for _ in range(occurrence + 1):
+        offset = full.find(needle, offset + 1)
+        if offset < 0:
+            return None
 
     def doc_index(py_offset: int) -> int:
         seen = 0
@@ -2393,8 +2411,8 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     ]
 
 
-def critique_write_order(threads: list[dict]) -> list[dict]:
-    """Surgical-write order for accepted critique threads: higher
+def pending_write_order(threads: list[dict]) -> list[dict]:
+    """Surgical-write order for a producer's accepted threads: higher
     anchors first (so earlier indices stay valid); at the same
     anchor, inserts BEFORE replaces.
 
@@ -2402,7 +2420,10 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     n then locates the pristine paragraph text via substring search —
     which matches inside the wrapped form and plants {{insert}} between
     `old` and `>>`, corrupting the pending grammar. Inserts must land
-    first while the anchor text is still verbatim."""
+    first while the anchor text is still verbatim.
+
+    The descending order is also half of the twins invariant: see
+    `_occurrence`, which is correct only because of it."""
     def anchor_of(t):
         return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
 
@@ -2412,15 +2433,62 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
-def critique_diff_write(db: Database, manuscript: dict, file: str,
+def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
+    """The occurrence index of unit `n`'s own text, counted in the SAME
+    universe `_locate_in_tab` searches.
+
+    That universe is SUBSTRING matches in the tab's joined text — not
+    paragraphs equal to the needle. The distinction is the whole of this
+    function's correctness. Counting paragraph EQUALITY agrees with the
+    locator only while no paragraph strictly CONTAINS another
+    paragraph's whole text; a refrain that also opens a longer paragraph
+    breaks that, and this manuscript is full of refrains. Where the two
+    counts diverge, the writer plants each form in the WRONG paragraph
+    and the read-back proof cannot see it — the form IS present, just
+    not where it belongs — so the settle resolves every thread `cleaned`
+    and the manuscript is silently corrupted. A silent wrong write is
+    strictly worse than the loud nesting failure this parameter exists
+    to fix, so the counting universe is matched exactly.
+
+    So: rebuild the text the tab holds, find where unit `n` starts in
+    it, and count the matches that BEGIN before that — which is exactly
+    how many the locator will step over on its way there.
+
+    Computed from the LOCAL paragraph list, which is byte-identical to
+    the tab because the levelling `push_doc` has just put it there, and
+    correct only in company with the DESCENDING write order: when unit n
+    is written, every paragraph before it is still pristine, so a match
+    before it is still where it was. Paragraphs AFTER n may already be
+    wrapped — their old text still occurs inside the wrapper — but they
+    sit past n and cannot shift a lower occurrence index. Descending
+    order and occurrence-from-original are jointly correct or not at all
+    (design-filter-doc-settle §9.3)."""
+    if n <= 0 or not needle:
+        return 0
+    full = "".join(p + "\n" for p in paragraphs)
+    start = sum(len(p) + 1 for p in paragraphs[: n - 1])
+    count, at = 0, full.find(needle)
+    while 0 <= at < start:
+        count += 1
+        at = full.find(needle, at + 1)
+    return count
+
+
+def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
-    """Critique pass diff-write (design §6.3 step 3): render every
-    ACCEPTED thread of `file` into its Doc tab as a pending form. The
-    tab is first brought level with the local file (a plain push, since
-    the local file is pristine), then each span is marked surgically,
-    last-to-first so earlier indices stay valid. Local keeps OLD.
-    Returns {written, failed:[(thread, reason)]}."""
+    """Render every ACCEPTED thread of `file` into its Doc tab as a
+    pending form (critique design §6.3 step 3). The tab is first brought
+    level with the local file (a plain push, since the local file is
+    pristine), then each span is marked surgically, last-to-first so
+    earlier indices stay valid, and located by OCCURRENCE INDEX so two
+    identical old halves land in their own paragraphs (§9.3). Local
+    keeps OLD. Returns {written, failed:[(thread, reason)]}.
+
+    Two producers now: `critique write` and `filter push`. Neither is
+    named in the signature — the threads arrive as an argument and the
+    caller owns their state transitions — which is why this took a
+    rename and not an `origin_type` parameter."""
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -2434,15 +2502,16 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = critique_write_order(
+    accepted = pending_write_order(
         [t for t in threads if t["state"] == "accepted"])
     written, failed = [], []
     for t in accepted:
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
-                span = _locate_in_tab(docs_service, master_id, tab_id,
-                                      t["proposed_old"])
+                span = _locate_in_tab(
+                    docs_service, master_id, tab_id, t["proposed_old"],
+                    _occurrence(paragraphs, n, t["proposed_old"]))
                 if span is None:
                     raise LookupError("old text not found verbatim in the tab")
                 requests = _mark_replace_requests(
@@ -2454,8 +2523,9 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
                 else:
                     if n > len(paragraphs):
                         raise LookupError(f"anchor paragraph {n} out of range")
-                    span = _locate_in_tab(docs_service, master_id, tab_id,
-                                          paragraphs[n - 1])
+                    span = _locate_in_tab(
+                        docs_service, master_id, tab_id, paragraphs[n - 1],
+                        _occurrence(paragraphs, n, paragraphs[n - 1]))
                     if span is None:
                         raise LookupError("anchor paragraph not found "
                                           "verbatim in the tab")
