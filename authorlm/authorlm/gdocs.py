@@ -43,6 +43,21 @@ _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
+_FOOTNOTE_SYNTAX = re.compile(r"\[\^")
+
+
+def escape_footnotes(markdown: str) -> str:
+    """Pandoc footnote syntax — [^X1] references and [^X1]: definitions —
+    must reach the Doc as LITERAL text, matching the manuscript convention
+    the author reads in the tabs. Google's markdown importer consumes the
+    syntax, and the tab transplant then drops whatever it made of it
+    (it-e63eabd58b11: every footnote silently lost on push). A
+    backslash-escaped bracket imports as a literal bracket, and
+    normalize_markdown's _ESCAPE strips the backslash on export, so the
+    push→pull round trip stays byte-clean against the unescaped hash.
+    Apply ONLY to bytes handed to a markdown import, never to the text
+    that is hashed or written locally."""
+    return _FOOTNOTE_SYNTAX.sub(r"\\[^", markdown)
 
 
 def normalize_markdown(text: str) -> str:
@@ -1094,7 +1109,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry = meta[bridge.meta_key][relpath]
     tab_id = entry["tab_id"]
 
-    _rewrite_tab(service, docs_service, master_id, tab_id, normalized,
+    _rewrite_tab(service, docs_service, master_id, tab_id,
+                 escape_footnotes(normalized),
                  f"authorlm-temp-{Path(relpath).stem}")
     apply_tab_spacing(docs_service, master_id, tab_id,
                       doc_spacing(manuscript))
@@ -2878,6 +2894,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     "endIndex": end}}})
             if tag in ("replace", "insert") and j2 > j1:
                 chunk = "\n\n".join(local_paras[j1:j2]) + "\n"
+                chunk = escape_footnotes(chunk)
                 media = MediaInMemoryUpload(chunk.encode("utf-8"),
                                             mimetype=MARKDOWN_MIME)
                 temp = service.files().create(

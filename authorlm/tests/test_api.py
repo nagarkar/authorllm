@@ -6019,6 +6019,27 @@ def main_test() -> None:
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
 
+        # Pandoc footnotes must reach the Doc as literal text: Google's
+        # markdown importer consumes the syntax and the transplant drops
+        # it (it-e63eabd58b11). escape_footnotes protects refs and
+        # definitions; normalize_markdown's escape-stripping undoes it,
+        # so the push→pull round trip is byte-clean.
+        from authorlm.gdocs import escape_footnotes
+
+        noted = ("The herd [^I1] persists.\n\n"
+                 "[^I1]: See *Beyond Good and Evil* (§§199–202).\n")
+        escaped = escape_footnotes(noted)
+        check("escape_footnotes shields refs and definitions",
+              escaped == ("The herd \\[^I1] persists.\n\n"
+                          "\\[^I1]: See *Beyond Good and Evil* "
+                          "(§§199–202).\n"), repr(escaped))
+        check("footnote escape round-trips through the normalizer",
+              normalize_markdown(escaped) == normalize_markdown(noted),
+              repr(normalize_markdown(escaped)))
+        check("escape_footnotes leaves illustration tags alone",
+              escape_footnotes("[Illustration: a fork | caption: x]")
+              == "[Illustration: a fork | caption: x]")
+
         # An empty heading paragraph in the Doc (e.g. a blank Subtitle
         # line) must be dropped — never merged into the next heading
         # ('## ##', it-7b127d3164ff).

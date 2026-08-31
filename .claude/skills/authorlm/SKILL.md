@@ -414,7 +414,13 @@ not re-ask at each beat.
    time; the judgments were made when they were recorded, and you write
    only the connective prose. It goes last (order any footnotes beat before
    it in the plan — the loop appends, so the last beat lands last), and it
-   is proposed and accepted like any other beat.
+   is proposed and accepted like any other beat. **It does not stay in the
+   manuscript** (author ruling 2026-08-30, verbatim: "The 'What was removed
+   and why' should not be present in local or google doc"): after
+   `write complete`, strip the section from the file before any doc push —
+   the recorded dispositions in the writeup are the durable record, and the
+   accepted beat is its author-review; the prose itself is workflow
+   accounting, not book content.
 5. **Learnings.** When a pattern recurs across verdicts (not on every
    verdict), distill one line and send it on STDIN — `write learn` takes no
    positional lesson (a positional after `-m` trips argparse's greedy
