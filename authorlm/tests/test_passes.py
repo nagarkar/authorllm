@@ -1806,6 +1806,69 @@ def _chat_sees_each_run_s_transport(root: Path) -> None:
           in (report["transport_note"] or ""), report["transport_note"])
 
 
+def _status_can_reach_the_tab(root: Path) -> None:
+    """P3d / design step 9 — `filter status` carries the tab URL for a
+    doc-mode run with forms out, and says that its orphan scan covers
+    the local road only.
+
+    Both are about the same honesty: on the Doc road the forms are
+    somewhere this shell cannot show, and a clean byte scan must not read
+    as a clean bill of health (RISK-1)."""
+    import authorlm.gdocs as _gd
+
+    print("P3d: status reaches the tab, and admits what it cannot see:")
+
+    ws = root / "status-ws"
+    db, manuscript, ms, fake = _doc_run(root, "status-ws",
+                                        {2: "TWO AS PROPOSED."})
+    before = api.filter_status(db, manuscript, "solo.md")["runs"][0]
+    check("before the push there is no tab URL — nothing is out there to "
+          "look at, and a link to an unmarked tab is noise",
+          before["tab_url"] is None and before["mode"] is None)
+    check("...and no orphan-scan caveat either: this manuscript has "
+          "never been on the Doc road, so the byte scan really is the "
+          "whole truth",
+          api.filter_status(db, manuscript,
+                            "solo.md")["orphan_scan_note"] is None)
+
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
+    report = api.filter_status(db, manuscript, "solo.md")
+    row = report["runs"][0]
+    check("P3d a doc-mode run with forms out carries its TAB URL, read "
+          "from the stored mapping — no network and no credentials, "
+          "which is what makes it safe to put in a status verb",
+          row["tab_url"] == "https://docs.google.com/document/d/doc-fake"
+                            "/edit?tab=tab-2", str(row["tab_url"]))
+    check("P3d ...and the orphan scan says out loud that it covers the "
+          "LOCAL road only, so a clean byte scan is not read as a clean "
+          "bill of health (RISK-1)",
+          report["orphan_scan_note"] is not None
+          and "covers the LOCAL road only" in report["orphan_scan_note"]
+          and "solo.md" in report["orphan_scan_note"],
+          str(report["orphan_scan_note"]))
+    check("P3d ...and it names the documented recovery, because this is "
+          "a cost that is mitigated by instructions rather than detected",
+          "doc push <essay>" in (report["orphan_scan_note"] or ""),
+          report["orphan_scan_note"])
+
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(["--workspace", str(ws), "filter", "status",
+                      "solo.md"])
+        printed = out.getvalue()
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
+    check("P3d the CLI prints both — the author can click through to the "
+          "tab from the shell, and is told what the scan cannot see",
+          "?tab=tab-2" in printed
+          and "covers the LOCAL road only" in printed, printed)
+
+
 def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
     """P3c / Q-1, ruled: refuse EARLY and BY NAME when another producer's
     forms are already in this essay's tab.
@@ -3395,6 +3458,7 @@ def main_test() -> None:
         _the_learnings_loop_reaches_the_filter(root)
         _recovery_while_forms_are_out(root)
         _chat_sees_each_run_s_transport(root)
+        _status_can_reach_the_tab(root)
         _a_second_run_may_not_push_into_the_same_tab(root)
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)

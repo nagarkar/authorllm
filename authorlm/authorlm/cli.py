@@ -3233,7 +3233,8 @@ def cmd_filter(args):
                 print(ui.dim(
                     f"  transport: {r['mode'] or 'not chosen yet'}"
                     + (f"; {r['forms_out']} form(s) out"
-                       if r["forms_out"] else "")))
+                       if r["forms_out"] else "")
+                    + (f" — {r['tab_url']}" if r.get("tab_url") else "")))
                 if r["class_now"]:
                     print(ui.yellow(
                         f"  !! the artifact's class is now "
@@ -3245,6 +3246,8 @@ def cmd_filter(args):
                     f"matching staged edit — a crash between composing and "
                     f"writing the threads leaves exactly this. Recover with "
                     f"'filter unmark {rel}'."))
+            if report.get("orphan_scan_note"):
+                print(ui.dim(report["orphan_scan_note"]))
             return
 
         if args.action == "edits":

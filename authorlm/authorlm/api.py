@@ -5412,8 +5412,21 @@ def filter_status(db: Database, manuscript: dict,
     """Run history per (filter, file) with the tallies, so a filter that
     never settles down is visible without the author having to notice
     it — plus the orphaned-mark detection: bytes that carry forms with
-    no matching written row."""
+    no matching written row.
+
+    A doc-mode run with forms out carries its TAB URL, read from the
+    stored mapping — no network, no credentials. The status verb is
+    where an author goes to find a run they have half-forgotten, and on
+    the Doc road the forms are somewhere this shell cannot show them.
+
+    The orphan scan is BYTE-based and therefore covers LOCAL mode only.
+    That is the one doctrine cost doc mode pays (RISK-1): forms left in
+    a tab with no rows describing them cannot be detected from here
+    without a network call this verb has no credentials for. The report
+    says so rather than letting a clean scan read as a clean bill of
+    health, and names the documented recovery."""
     from . import filters as flt
+    from . import gdocs
 
     mid = manuscript["id"]
     where = "WHERE manuscript_id = ?" + (" AND file = ?" if file else "")
@@ -5421,17 +5434,24 @@ def filter_status(db: Database, manuscript: dict,
     rows = [dict(r) for r in db.all(
         f"SELECT * FROM filter_runs {where} ORDER BY created_at", args)]
     classes = {f["name"]: f["class"] for f in flt.list_filters(manuscript)}
+    links = gdocs._mapping(db, manuscript).get("gdocs", {})
+    master_id = links.get("_master_id")
     runs = []
     for run in rows:
         threads = _run_threads(db, mid, run)
         drift = (classes.get(run["filter"])
                  if classes.get(run["filter"]) not in (None, run["class"])
                  else None)
+        mode = _run_mode(run)
+        forms_out = sum(1 for t in threads if t["state"] == "written")
+        tab_id = (links.get(run["file"]) or {}).get("tab_id")
         runs.append({
             "id": run["id"], "filter": run["filter"], "file": run["file"],
             "class": run["class"], "class_now": drift,
-            "mode": _run_mode(run),
-            "forms_out": sum(1 for t in threads if t["state"] == "written"),
+            "mode": mode, "forms_out": forms_out,
+            "tab_url": (gdocs.tab_url(master_id, tab_id)
+                        if mode == "doc" and forms_out
+                        and master_id and tab_id else None),
             "status": run["status"], "cursor": run["cursor"],
             "unit_count": run["unit_count"],
             "date": (run["created_at"] or "")[:10],
@@ -5449,4 +5469,15 @@ def filter_status(db: Database, manuscript: dict,
         if not staging.door_threads(db, mid, rel, states=("written",),
                                     origin_type=FILTER_ORIGIN):
             orphans.append(rel)
-    return {"runs": runs, "orphaned_marks": orphans}
+    doc_files = sorted({r["file"] for r in runs if r["mode"] == "doc"})
+    return {"runs": runs, "orphaned_marks": orphans,
+            "orphan_scan_note": (
+                f"The orphan scan above reads the BYTES on disk, so it "
+                f"covers the LOCAL road only. "
+                f"{', '.join(doc_files)} has had forms in the Doc, and a "
+                f"tab left carrying forms that no row describes cannot "
+                f"be seen from here — that would take a network call "
+                f"this verb has no credentials for. If a tab still shows "
+                f"struck-and-green text for a finished essay, 'doc push "
+                f"<essay>' rebuilds it from the local file."
+                if doc_files else None)}
