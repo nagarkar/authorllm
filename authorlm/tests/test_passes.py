@@ -177,6 +177,177 @@ class _RecordingDrive:
         return _Documents()
 
 
+class _SurgicalDocFake:
+    """A Drive+Docs double whose tab bodies hold REAL text and whose
+    `batchUpdate` actually APPLIES `insertText` / `deleteContentRange`.
+
+    The other two doubles in this file answer different questions:
+    `_RecordingDrive` proves what reached the wire and `_ResolveDocFake`
+    proves what came back from an export. Neither can answer the
+    question the surgical writer poses — *where in the tab did the form
+    land, and what did the tab become as a result* — because neither
+    mutates. A writer that locates the wrong span is invisible to a
+    double that throws its requests away.
+
+    The model is Docs': a tab body is a flat string whose first
+    character is at doc index 1, paragraphs are its `\\n`-terminated
+    segments, and the temp-doc import → transplant → tab pipeline runs
+    end to end (so `push_doc`'s REBUILD path works against it).
+    Style requests are accepted and ignored: colour and strikethrough
+    are not what any assertion here turns on."""
+
+    def __init__(self, tabs, book: str = "book"):
+        import re as _re
+
+        self._re = _re
+        self.book = book
+        self.master_id = "doc-fake"
+        self.bodies: list[str] = []          # every batchUpdate, as JSON
+        self.temps: dict[str, str] = {}
+        self._next = [100]
+        self.tabs = [{"id": f"tab-{i}", "title": t,
+                      "body": self._as_body(x)}
+                     for i, (t, x) in enumerate(tabs, 1)]
+
+    # -- the text model ------------------------------------------------
+    def _paras(self, markdown: str) -> list[str]:
+        return [p.strip() for p in self._re.split(r"\n\s*\n", markdown)
+                if p.strip()]
+
+    def _as_body(self, markdown: str) -> str:
+        return "".join(p + "\n" for p in self._paras(markdown))
+
+    def _tab(self, tab_id: str) -> dict | None:
+        return next((t for t in self.tabs if t["id"] == tab_id), None)
+
+    def tab_text(self, title: str) -> str:
+        """The tab's body exactly as it now stands — what the author
+        would see, markers and all."""
+        return next(t["body"] for t in self.tabs if t["title"] == title)
+
+    def _content(self, body: str) -> list[dict]:
+        out, index = [], 1
+        for seg in body.splitlines(keepends=True):
+            end = index + len(seg)
+            out.append({
+                "startIndex": index, "endIndex": end,
+                "paragraph": {
+                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                    "elements": [{"startIndex": index, "endIndex": end,
+                                  "textRun": {"content": seg,
+                                              "textStyle": {}}}]}})
+            index = end
+        return out
+
+    # -- Drive ---------------------------------------------------------
+    def files(self):
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Files:
+            def create(self, body=None, media_body=None, fields=None):
+                outer._next[0] += 1
+                temp_id = f"temp-{outer._next[0]}"
+                if media_body is not None:
+                    outer.temps[temp_id] = media_body.getbytes(
+                        0, media_body.size()).decode("utf-8")
+                return _Req({"id": temp_id})
+
+            def delete(self, fileId=None):
+                return _Req({})
+
+            def get(self, **kw):
+                return _Req({})
+
+            def list(self, **kw):
+                return _Req({"files": []})
+
+            def export(self, fileId=None, mimeType=None):
+                whole = "\n".join(
+                    f"# **{t['title']}**\n\n"
+                    + "\n\n".join(outer._paras(t["body"]))
+                    + ("\n" if t["body"].strip() else "")
+                    for t in outer.tabs)
+                return _Req(whole.encode("utf-8"))
+        return _Files()
+
+    def comments(self):
+        class _Req:
+            def execute(self):
+                return {"comments": []}
+
+        class _Comments:
+            def list(self, **kw):
+                return _Req()
+        return _Comments()
+
+    # -- Docs ----------------------------------------------------------
+    def documents(self):
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Documents:
+            def get(self, documentId=None, includeTabsContent=None):
+                if documentId in outer.temps:
+                    return _Req({"body": {"content": outer._content(
+                        outer._as_body(outer.temps[documentId]))}})
+                tabs = [{"tabProperties": {"tabId": t["id"],
+                                           "title": t["title"]},
+                         "documentTab": {"body": {
+                             "content": outer._content(t["body"])}},
+                         "childTabs": []} for t in outer.tabs]
+                return _Req({"tabs": tabs, "body": {"content": []}})
+
+            def batchUpdate(self, documentId=None, body=None):
+                outer.bodies.append(json.dumps(body, default=str))
+                replies = []
+                for req in (body or {}).get("requests", []):
+                    replies.append(outer._apply(req))
+                return _Req({"replies": replies})
+        return _Documents()
+
+    def _apply(self, req: dict) -> dict:
+        if "insertText" in req:
+            spec = req["insertText"]
+            tab = self._tab(spec["location"].get("tabId"))
+            if tab is not None:
+                at = spec["location"]["index"] - 1
+                tab["body"] = tab["body"][:at] + spec["text"] + \
+                    tab["body"][at:]
+            return {}
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            tab = self._tab(rng.get("tabId"))
+            if tab is not None:
+                tab["body"] = (tab["body"][:rng["startIndex"] - 1]
+                               + tab["body"][rng["endIndex"] - 1:])
+            return {}
+        if "addDocumentTab" in req:
+            self._next[0] += 1
+            tab_id = f"tab-{self._next[0]}"
+            title = req["addDocumentTab"].get(
+                "tabProperties", {}).get("title", "")
+            self.tabs.append({"id": tab_id, "title": title, "body": ""})
+            return {"addDocumentTab": {"tabProperties": {"tabId": tab_id}}}
+        if "deleteTab" in req:
+            self.tabs = [t for t in self.tabs
+                         if t["id"] != req["deleteTab"].get("tabId")]
+            return {}
+        return {}          # styles, bullets, tab moves: accepted, ignored
+
+
 MARKED_ESSAY = (
     "# Solo\n\n"
     "A **bold** claim opens the essay.\n\n"
@@ -425,6 +596,145 @@ def _local_transport_guards(root: Path) -> None:
           _pull_writes_when_unmarked(db, manuscript, ms, fake))
 
     _braces_are_the_authors(root)
+
+
+TWIN_ESSAY = (
+    "Alpha opens the essay and says a thing.\n\n"
+    "And so the wall stands, and the Dead do not pass.\n\n"
+    "Gamma follows, saying something else entirely.\n\n"
+    "And so the wall stands, and the Dead do not pass.\n\n"
+    "Omega closes the essay.\n")
+
+TWIN = "And so the wall stands, and the Dead do not pass."
+
+
+def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY):
+    """A workspace whose one essay is mapped to a tab of a live-text
+    Doc fake, positioned exactly where `critique write` finds it."""
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(essay)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript, ms, fake
+
+
+def _twin_threads(db, mid: str, anchors, origin_type: str = "critique"):
+    from authorlm.db import ko_fields as _ko
+
+    made = []
+    for anchor, new in anchors:
+        row = _ko("dt")
+        row.update(
+            manuscript_id=mid, origin_type=origin_type,
+            origin_id=f"twin:{anchor}", file="solo.md", anchor_quote=None,
+            proposed_old=TWIN, proposed_new=new, note="test",
+            state="accepted", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md",
+            metadata=json.dumps({"kind": "replace",
+                                 "anchor_paragraph": anchor,
+                                 "intent_id": None, "original_new": new,
+                                 "unit": anchor}))
+        db.insert("doc_threads", row)
+        made.append(row)
+    return made
+
+
+def _identical_old_halves(root: Path) -> None:
+    """F-D20 / F-D21 — the surgical writer locates by OCCURRENCE INDEX.
+
+    `_locate_in_tab` returned the FIRST verbatim match of its needle. Two
+    staged edits whose `proposed_old` halves are byte-identical (two
+    identical paragraphs in one essay: a refrain, a liturgical
+    repetition) therefore both resolved to the SAME span, and because
+    the write order is descending the second write landed INSIDE the
+    wrapper the first had just planted — `<<<<old>>{{new2}}>>{{new4}}`.
+    At settle `threads.PENDING` is non-greedy, so it matched
+    `<<<<old>>{{new2}}` with `old = "<<old"`, matched no thread,
+    collapsed to that old half, and left the literal string
+    `<<old>>{{new4}}` in the finished manuscript.
+
+    That is text corruption from a rare-but-real input, it is live in
+    the critique pass today, and it is what the filter's push-all ruling
+    (design-filter-doc-settle §9.3) makes reachable a second time. Both
+    producers are fixed by the one edit, so it is proved here on the
+    producer that already ships."""
+    print("§9.3: identical old halves — occurrence-indexed location:")
+
+    db, manuscript, ms, fake = _twin_fixture(root, "twin-ws")
+    mid = manuscript["id"]
+    threads = _twin_threads(db, mid, [(2, "NEW AT TWO."), (4, "NEW AT FOUR.")])
+
+    # --- F-D21: the default is byte-for-byte the old behaviour --------
+    span_first = gdocs._locate_in_tab(fake, "doc-fake", "tab-2", TWIN)
+    span_zero = gdocs._locate_in_tab(fake, "doc-fake", "tab-2", TWIN,
+                                     occurrence=0)
+    span_second = gdocs._locate_in_tab(fake, "doc-fake", "tab-2", TWIN,
+                                       occurrence=1)
+    body = fake.tab_text("solo.md")
+    check("F-D21 the default locates the FIRST occurrence — the "
+          "hand-quoted span `propose_change` means, unchanged",
+          span_first == span_zero and span_first[0] - 1 == body.find(TWIN),
+          str({"default": span_first, "explicit": span_zero,
+               "find": body.find(TWIN)}))
+    check("F-D21 occurrence=1 locates the SECOND, and they are different "
+          "spans — the parameter does something",
+          span_second is not None and span_second[0] > span_first[0]
+          and span_second[0] - 1 == body.find(TWIN, span_first[0]),
+          str({"first": span_first, "second": span_second}))
+    check("F-D21 an occurrence the tab does not have is None, never the "
+          "last one it does have",
+          gdocs._locate_in_tab(fake, "doc-fake", "tab-2", TWIN,
+                               occurrence=2) is None)
+
+    # --- F-D20: the writer places each form at its OWN paragraph ------
+    result = gdocs.critique_diff_write(db, manuscript, "solo.md", threads,
+                                       fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("F-D20 both threads are written — neither is lost to a "
+          "read-back failure caused by the other",
+          len(result["written"]) == 2 and not result["failed"],
+          str({"written": len(result["written"]),
+               "failed": [(t["id"][:8], why)
+                          for t, why in result["failed"]]}))
+    check("F-D20 the tab carries NO nested wrapper — `<<<<` is the "
+          "signature of two forms landing on one span",
+          "<<<<" not in tab, tab)
+    check("F-D20 each form sits at its own paragraph, in the essay's own "
+          "order: the first twin took NEW AT TWO, the second NEW AT FOUR",
+          tab.index("{{NEW AT TWO.}}") < tab.index("Gamma follows")
+          < tab.index("{{NEW AT FOUR.}}"), tab)
+
+    for t in result["written"]:
+        db.update("doc_threads", t["id"], {"state": "written"})
+    fetched = gdocs.critique_tab_markdown(db, manuscript, "solo.md",
+                                          fake, fake)
+    written = passes.staged_threads(db, mid, "solo.md", states=("written",))
+    final, forms = passes.final_text_from_marked(fetched["marked"],
+                                                 written=written)
+    check("F-D20 the settled essay carries NO residual marker — the "
+          "corruption this fixes is a literal `<<old>>{{new}}` left in "
+          "the author's manuscript",
+          "<<" not in final and "{{" not in final and ">>" not in final,
+          final)
+    check("F-D20 ...and both new halves landed, each in its own place",
+          final.index("NEW AT TWO.") < final.index("Gamma follows")
+          < final.index("NEW AT FOUR."), final)
 
 
 TEMPLATE_ESSAY = (
@@ -1735,6 +2045,7 @@ def main_test() -> None:
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
         _local_transport_guards(root)
+        _identical_old_halves(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

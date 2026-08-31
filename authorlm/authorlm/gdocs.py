@@ -2266,16 +2266,32 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
 
 
 def _locate_in_tab(docs_service, master_id: str, tab_id: str,
-                   needle: str) -> tuple[int, int] | None:
-    """(start, end) doc indices (UTF-16 units) of the FIRST verbatim
-    occurrence of `needle` in the tab, or None. Exactness is law: no
+                   needle: str, occurrence: int = 0) -> tuple[int, int] | None:
+    """(start, end) doc indices (UTF-16 units) of the
+    (`occurrence`+1)-th verbatim occurrence of `needle` in the tab, or
+    None when the tab holds fewer than that many. Exactness is law: no
     normalization, no fuzz (design: an approval authorizes one exact
-    transformation)."""
+    transformation).
+
+    `occurrence` defaults to 0 — the FIRST match, which is exactly what
+    a hand-quoted span means and what `propose_change` still passes.
+
+    A producer writing SEVERAL forms into one tab must compute it.
+    Two staged edits whose old halves are byte-identical (two identical
+    paragraphs in one essay — a refrain, a liturgical repetition) both
+    searched for the same needle and both resolved to the same span; the
+    descending write order then landed the second write INSIDE the
+    wrapper the first had planted, and `threads.PENDING`, being
+    non-greedy, matched `<<<<old>>{{new}}` at settle and left the rest
+    of the wrapper in the author's manuscript as literal text. Text
+    corruption, not a cosmetic fault (design-filter-doc-settle §9.3)."""
     runs = _tab_runs(docs_service, master_id, tab_id)
     full = "".join(content for _, content in runs)
-    offset = full.find(needle)
-    if offset < 0:
-        return None
+    offset = -1
+    for _ in range(occurrence + 1):
+        offset = full.find(needle, offset + 1)
+        if offset < 0:
+            return None
 
     def doc_index(py_offset: int) -> int:
         seen = 0
@@ -2412,6 +2428,25 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
+def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
+    """How many paragraphs BEFORE unit `n` are byte-identical to
+    `needle` — the occurrence index the tab writer must locate.
+
+    Computed from the LOCAL paragraph list, which is byte-identical to
+    the tab because the levelling `push_doc` has just put it there. It
+    is correct only in company with the DESCENDING write order: when
+    unit n is written, every paragraph before it is still pristine, so
+    the k-th occurrence in the live tab is still the k-th occurrence in
+    the original text. Paragraphs AFTER n may already be wrapped — their
+    old text still occurs inside the wrapper — but they sit past n and
+    cannot shift a lower occurrence index. Descending order and
+    occurrence-from-original are jointly correct or not at all
+    (design-filter-doc-settle §9.3)."""
+    if n <= 0:
+        return 0
+    return sum(1 for p in paragraphs[: n - 1] if p == needle)
+
+
 def critique_diff_write(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
@@ -2441,8 +2476,9 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
-                span = _locate_in_tab(docs_service, master_id, tab_id,
-                                      t["proposed_old"])
+                span = _locate_in_tab(
+                    docs_service, master_id, tab_id, t["proposed_old"],
+                    _occurrence(paragraphs, n, t["proposed_old"]))
                 if span is None:
                     raise LookupError("old text not found verbatim in the tab")
                 requests = _mark_replace_requests(
@@ -2454,8 +2490,9 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
                 else:
                     if n > len(paragraphs):
                         raise LookupError(f"anchor paragraph {n} out of range")
-                    span = _locate_in_tab(docs_service, master_id, tab_id,
-                                          paragraphs[n - 1])
+                    span = _locate_in_tab(
+                        docs_service, master_id, tab_id, paragraphs[n - 1],
+                        _occurrence(paragraphs, n, paragraphs[n - 1]))
                     if span is None:
                         raise LookupError("anchor paragraph not found "
                                           "verbatim in the tab")
