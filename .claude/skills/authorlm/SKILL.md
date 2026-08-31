@@ -631,7 +631,8 @@ the same read-then-ratify rule; the loop itself (`run`/`prelude`/
   metaphor asked to do an argument's work. Its prelude reads the essay
   whole and returns a motif registry.
 - **`audio-friendly`** (sequential) — where the prose works on the page
-  and fails in the ear, with a carried voice note.
+  and fails in the ear, with a carried voice note. It also declares a
+  **pronunciation prelude** (below).
 
 **They are not installed.** `filter list` on the author's manuscript is
 empty until they say yes to one. When the author reaches for a filter,
@@ -657,7 +658,10 @@ The loop, per essay:
 1. `authorlm filter run <name> <essay>` (shell, no call). Read the
    payload. For a `global` filter, `filter prelude <name> <essay>` comes
    first — draft the registry, pipe `{"registry": "…"}` back into the
-   same command; it is then frozen for the run.
+   same command; it is then frozen for the run. For a filter whose front
+   matter declares `prelude = "pronunciations"` the same verb runs the
+   dictionary diff instead (below); it is OPTIONAL, and `filter run`
+   prints one line and proceeds if it has not been run.
 2. Draft the reply **in one message**: one entry per unit, IN ORDER,
    carrying the state forward as you go — that is what makes the pass
    autoregressive rather than N independent judgments. Copy each `echo`
@@ -696,6 +700,59 @@ author's words, not off an episode.
 a filter whose proposals never settle down is visible. A filter firing on
 nearly every unit is almost always a PROMPT fault: the remedy is
 `filter show <name>` and an edit to the artifact, not another run.
+
+### Protected terms — the payload carries the author's vocabulary
+
+Every filter payload now carries **PROTECTED TERMS**: every name and
+every alternate name of every concept, figure, construct and proper name
+the book uses, derived from the author's own graph, plus every term the
+pronunciation dictionary carries. It is the authority, not a sample.
+Never substitute a synonym for one, never re-word one, never change its
+capitalization. A single-word name written there with a capital is the
+term of art only where the text capitalizes it; a multi-word name, and
+any name written there in lower case, is the term in any casing.
+
+`filter record` warns by name when a replacement drops a protected term
+the original carried. It **stages it anyway** — the harness supplies the
+law and is not the editor. Read that warning to the author in plain
+words when it fires; it is usually the proposal they most want to look
+at.
+
+### The pronunciation dictionary
+
+`<manuscript>/pronunciations.md` is the author's table of how the book's
+hard terms are said aloud. It is a SIDECAR: markdown, mirrored into the
+master Doc as an ordinary tab so they can edit it there like an essay,
+and excluded from the reading order, from concept scanning, from
+summaries and from every export. It never ships inside the book, and no
+filter, lens or critique pass runs on it.
+
+**It appears on the first accepted row and never before**, and the ONLY
+thing in the system that writes it is the author's own `proposal accept`.
+
+The loop, when a filter declares a pronunciation prelude:
+
+1. `authorlm filter prelude audio-friendly <essay>` (shell, no call).
+   The payload carries HARD TERMS FOUND IN THIS ESSAY — computed, not
+   judged: every term with a non-English LETTER in it that the
+   dictionary does not already have. That is a floor, not a ceiling.
+2. Propose how to say each one, as **plain respelling with the stressed
+   syllable in capitals** — never IPA; the author reads this table and a
+   notation they cannot check is one they cannot rule on. Pipe
+   `{"pronunciations": [{"term": …, "say": …, "note": …}]}` back into
+   the same command. Every term must be in the essay VERBATIM.
+3. Each becomes an ordinary proposal. `list_proposals` /
+   `resolve_proposal` carry them in chat; `proposal review` in the
+   shell. Read them to the author as prose, one at a time.
+4. Accepting writes the row. From the next window on, that term is in
+   block A's PRONUNCIATION DICTIONARY and the audio filter never flags
+   it again — the dictionary IS the fix.
+
+**Say this out loud the first time: a term you propose is a term the
+author will never be asked about again.** One proposal per term, ever, in
+any state — a dismissal is final, and the remedy if they change their
+mind is to write the row in `pronunciations.md` themselves. So propose
+the ones a narrator would actually stumble over, and leave the rest.
 
 ## Publication identity and review PDFs
 Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
