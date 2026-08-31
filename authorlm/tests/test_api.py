@@ -10377,6 +10377,40 @@ def main_test() -> None:
         finally:
             mcp_server._WORKSPACE = prev_workspace
 
+        # --- the SKILL's one tripwire (§15.22, F4-minimal) ---
+        #
+        # THE FIRST TEST THIS REPOSITORY HAS EVER HAD ON THE SKILL, and
+        # it is deliberately one cheap string pin rather than a suite.
+        # The skill had no coverage at all, which was tolerable while it
+        # only described verbs the CLI tests already pin: a drifted
+        # sentence about `filter run` is caught by the reader the next
+        # time they use the verb. The pronunciation prelude changed that.
+        # Its CONTRACT — one proposal per term, ever, in any state, so a
+        # dismissal is final — exists NOWHERE the author can meet it
+        # except this document and the tutorial. The harness enforces it
+        # silently (proposals._pronunciation_settled) and the assistant
+        # is the only thing that can warn anyone before they answer. A
+        # skill that quietly lost that sentence would leave the author
+        # saying no to a question they did not know was their last.
+        #
+        # So: one sentence, pinned. Not the whole section, which would
+        # make every edit to the prose a test failure and teach everyone
+        # to delete the test.
+        skill = (Path(__file__).resolve().parent.parent.parent
+                 / ".claude" / "skills" / "authorlm" / "SKILL.md")
+        check("the authorlm SKILL is where the parity checklist can see "
+              "it", skill.is_file(), str(skill))
+        skill_text = skill.read_text(encoding="utf-8")
+        check("the SKILL still tells the assistant to say the "
+              "one-proposal-per-term contract OUT LOUD — the only place "
+              "the author can learn a dismissal is final before they "
+              "make one",
+              "a term you propose is a term the\nauthor will never be "
+              "asked about again" in skill_text
+              and "One proposal per term, ever, in\nany state"
+              in skill_text,
+              skill_text[-1200:])
+
         # --- CLI/MCP parity checklist ---
         from authorlm.mcp_server import mcp
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}

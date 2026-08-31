@@ -6857,6 +6857,10 @@ def scenario_pronunciations(root: Path) -> None:
         refuse("a newline in any field — a row is ONE LINE",
                {"pronunciations": [{"term": "Chid", "say": "chit\nchit"}]},
                "carries a newline")
+        refuse("a PIPE in any field — the table's own column separator, "
+               "which no escape can carry across the Doc bridge",
+               {"pronunciations": [{"term": "Chid", "say": "chit|kid"}]},
+               "carries a '|'")
         refuse("two entries that are the same term under key()",
                {"pronunciations": [{"term": "Chid", "say": "chit"},
                                    {"term": "chid", "say": "kid"}]},
@@ -7054,7 +7058,21 @@ def scenario_pronunciations(root: Path) -> None:
         untouched("filter unmark")
         run(ws, "filter", "abandon", "audio-friendly", "02-terms.md")
         untouched("filter abandon")
-        check("E3 nine verbs, and NOTHING in the system writes that file "
+        # The TENTH verb, and the only one that could actually rewrite
+        # the file: `doc push` normalizes its text and WRITES THE
+        # NORMALIZED BYTES BACK to disk (gdocs.push_doc), which makes it
+        # a second writer of anything normalize_markdown is not a no-op
+        # on. Driven at the seam — what is under test is the write-back,
+        # not Drive.
+        from authorlm.gdocs import normalize_markdown as _norm
+        pushed = _norm(dict_path.read_text(encoding="utf-8"))
+        check("E3 `doc push` normalizes and writes back, so its "
+              "normalizer must be a NO-OP on the dictionary — otherwise "
+              "the push is a SECOND WRITER of a file whose whole point "
+              "is that only the author's verdict writes it",
+              pushed.encode("utf-8") == frozen,
+              repr(pushed[-160:]))
+        check("E3 ten verbs, and NOTHING in the system writes that file "
               "except the author's own verdict at `proposal accept`",
               dict_path.read_bytes() == frozen)
         (ms / "02-terms.md").write_bytes(essay_before)
@@ -7181,9 +7199,18 @@ def scenario_pronunciations(root: Path) -> None:
               "normative prose — the vocabulary comes from PROTECTED "
               "TERMS, so a second manuscript adopts them unedited",
               not named, ", ".join(named))
+        # Not only the two removed lists: the metaphor artifact's
+        # per-unit bullets used to teach this book's families in passing
+        # ("fire is the agent", "a wall that catches light", "since the
+        # wall is stone"), which is the same enumeration wearing an
+        # example's clothes.
         families = ["Fire, wall, stone, chain, ledger, ladder, tremor",
                     "Fire, wall, stone, chain, ledger, ladder, tremor, "
-                    "field,", "walls/chains, fire/light"]
+                    "field,", "walls/chains, fire/light",
+                    "the registry says fire is", "carries his fire",
+                    "a wall that\n  catches light", "a ledger that burns",
+                    "a path that strikes", "since the wall is stone",
+                    "fire, wall, stone"]
         listed = [f for f in families if f in normative]
         check("E9 ...and no motif-family list either — the `[figure]` "
               "elements of STYLE LAW are the authority, and a copy in a "
@@ -7317,6 +7344,26 @@ def scenario_pronunciation_bridge(root: Path) -> None:
           "next comparison starts from a list the toc can match",
           [tuple(x) for x in saved] == [("01-open.md", None),
                                         ("02-next.md", None)], saved)
+
+    # Site 23 has TWO halves and only the doc_pairs half is exercised
+    # above, because toc.toml cannot normally name a sidecar. It CAN if
+    # the author hand-lists it — or if a pre-guard build already wrote it
+    # there, which is exactly the state guard 25 exists to prevent and
+    # therefore exactly the state a repair must survive. With the desired
+    # side unfiltered, `desired` would then hold the dictionary while the
+    # base recorded above does not, and the sync would report movement
+    # that never happened.
+    toc_path_pre = ms / "toc.toml"
+    hand_listed = toc_path_pre.read_bytes()
+    toc_path_pre.write_text(hand_listed.decode()
+                            + f'\n[[chapter]]\nfile = "{_pron.FILENAME}"\n')
+    state = _gd.sync_tab_structure(db, manuscript, docs)
+    check("E7 site 23, the DESIRED half: a toc.toml that names the "
+          "dictionary — hand-listed, or left by a pre-guard build — "
+          "still reports insync. Filtering only the doc side would leave "
+          "the repair path reporting movement that never happened",
+          state == {"insync": True}, state)
+    toc_path_pre.write_bytes(hand_listed)
 
     # ---- E7 / site 25: rewrite_toc_from_doc -----------------------
     toc_path = ms / "toc.toml"

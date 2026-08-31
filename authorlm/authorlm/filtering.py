@@ -519,6 +519,14 @@ def parse_pronunciations(raw, text: str, dictionary: str = "") -> list[dict]:
                     "dictionary row is ONE LINE — a multi-line cell does "
                     "not survive a Docs table round trip in a shape the "
                     "parser can trust.")
+            if "|" in value:
+                raise ReplyError(
+                    f"'{term}': the {field} carries a '|', which is the "
+                    "dictionary table's own column separator. It does not "
+                    "survive a Docs round trip in any form — an escaped "
+                    "pipe is unescaped by the next push and the row's "
+                    "cells shift — and a pipe carries no phonetic "
+                    "information, so no pronunciation needs one.")
         key = pron.key(term)
         if key in seen:
             raise ReplyError(

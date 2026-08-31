@@ -799,7 +799,10 @@ from a chat session, which is where the author actually rules.
   refusal of `parse_pronunciations` asserting twice, the full cycle (flag →
   accept → re-run → neither flagged nor re-proposed), immutability across all
   nine verbs, every exclusion one assertion each, the three Doc-sync guards
-  and the pull's zero-rows refusal that `--force` cannot pass.
+  and the pull's zero-rows refusal that `--force` cannot pass. E3 counts
+  `doc push` as its tenth verb, because `push_doc` writes its normalized
+  bytes back and is therefore a second writer of anything the normalizer
+  is not a no-op on.
 - `tools/testbench.py --check pronunciations` — the live check against the
   real manuscript, in `--check filter`'s shape and discriminating the same
   way.
@@ -881,8 +884,20 @@ FOR.
 What the three become is **templates**: a second manuscript copies them, argues
 with the doctrine, and inherits the vocabulary, the families and the
 pronunciations from its OWN graph, style law and dictionary with no editing at
-all. Scenario PR's template check asserts it — an artifact that names a term of
-this book is a template that will lie to the next one.
+all.
+
+**The claim is about NORMATIVE PROSE, and it is worth being exact.** What left
+the artifacts is every enumeration a bullet stated as law — the terms of art,
+the motif families. What stays is the indented WORKED EXAMPLES: a state
+ledger's shape, a registry's shape. Those still carry this book's nouns, and
+they are ratified that way on purpose, because a template needs a worked example
+to be usable and an example of a form cannot be written out of nothing. The
+metaphor artifact says so in as many words where its example sits — *"a worked
+illustration of the FORM, not the list"* — and that label is the whole
+difference between an example and an enumeration: an enumeration in a bullet is
+a lexicon the model treats as the set, and a labelled example is not. Scenario
+PR's template check asserts exactly this and no more: no book term in normative
+prose, and the label present on the example that keeps them.
 
 ### `duplicate-words` — sequential, word-ledger state
 
@@ -1008,16 +1023,18 @@ decision, not a filter's.
 
 ## What counts, per unit
 
-- **A motif used against its own sense in this essay.** The registry says fire is
-  the agent and never a possession; a unit in which someone "carries his fire" is
-  the finding. Propose the wording that restores the registry's sense.
-- **A mixed figure.** Two families collided inside one sentence: a wall that
-  catches light, a ledger that burns, a path that strikes. The families are
-  distinct on purpose; crossing them dissolves both.
+- **A motif used against its own sense in this essay.** Where the registry says a
+  family is doing one thing and a unit uses it doing another — a family the
+  registry records as always the agent, used in a unit as something a person
+  holds — that unit is the finding. Propose the wording that restores the
+  registry's sense.
+- **A mixed figure.** Two families collided inside one sentence. The families are
+  the ones the `[figure]` elements of STYLE LAW name and they are distinct on
+  purpose; crossing them dissolves both.
 - **A figure asked to do an argument's work.** A metaphor is not an identity claim.
-  Where a unit reasons FROM the figure — "since the wall is stone, it cannot be
-  moved, and therefore…" — the argument is resting on the picture rather than on
-  the claim, and the fix is to make the claim and let the figure illustrate it.
+  Where a unit reasons FROM the figure — "since it is stone, it cannot be moved,
+  and therefore…" — the argument is resting on the picture rather than on the
+  claim, and the fix is to make the claim and let the figure illustrate it.
 - **A parable retold in a way that changes it.** The style law permits a recurring
   parable to be retold from a new perspective and forbids reinventing it. A
   retelling that changes what happens is the finding.

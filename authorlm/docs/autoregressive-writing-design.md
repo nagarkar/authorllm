@@ -2260,7 +2260,12 @@ rollback`, not `filter unmark`, and not the Doc pull except as the author's own
 edit arriving through the ordinary tab write. The write itself is
 `structure.insert_toc_entry`'s discipline applied to a second table — pure text
 insertion, rewriting no line it did not add, on the file's own dominant line
-ending. In front of the pull sits the highest-value line in the whole feature:
+ending. "Exactly one writer" turned out to need defending rather than merely
+asserting: `push_doc` normalizes a file's text and writes the normalized bytes
+back, so it is a second writer of anything the normalizer is not a no-op on,
+and a `\|` escape put the dictionary in exactly that class. The rule that
+closes it is that nothing this system writes can carry a pipe at all (below),
+and the test that holds it is E3 counting `doc push` as its tenth verb. In front of the pull sits the highest-value line in the whole feature:
 an incoming tab that parses to **zero rows** over a local file that has rows is
 skipped and reported by name, and `--force` does not reach past it. One bad
 Docs export would otherwise destroy the dictionary silently, with the only
@@ -2385,6 +2390,20 @@ and because a template needs a worked example. One sentence names STYLE LAW's
   units are verbatim.
 - **IPA.** The author reads this table. A notation they cannot check is a
   notation they cannot rule on.
+- **Escaping a pipe.** The first cut wrote `\|`, and that was worse than
+  nothing: `normalize_markdown`'s `_ESCAPE` strips exactly that backslash, and
+  `push_doc` normalizes and WRITES THE RESULT BACK to disk — so the escape was
+  defeated on the author's own machine and the row reparsed with its cells
+  shifted one to the left (`a|b` said `ay-bee` became `a` said `b`). The row
+  COUNT does not change under that, so §2.6's zero-rows guard never sees it: a
+  settled row silently rewritten, by a SECOND WRITER, which is the one thing
+  this file exists to make impossible. A pipe is now refused on all three
+  sides — the prelude reply, the row renderer, and the parser, which skips a
+  pipe-bearing row and names it rather than guessing at its cells. Refusing
+  rather than escaping is also what makes
+  `normalize_markdown(render(rows)) == render(rows)` true, which is what keeps
+  `push_doc`'s write-back a no-op and `proposals.adopt` the only writer. A
+  pipe carries no phonetic information; no pronunciation needs one.
 - **A "re-open" verb for a dismissed pronunciation.** The file is the escape
   hatch, and it is a better one.
 - **Refusing a reply that drops a protected term.** It warns. The harness

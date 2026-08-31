@@ -1007,9 +1007,11 @@ def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
 
     `_corrupt` is a test seam and nothing else: a callable applied to the
     dictionary text before it is parsed, used by the hermetic suite to
-    prove this check DISCRIMINATES — a table hidden inside an HTML
-    comment must make the parse assertion FAIL. Production has no caller
-    for it."""
+    prove this check DISCRIMINATES. The corruptions it applies are the
+    real failure modes rather than invented ones — a table a Docs export
+    mangled into bullet lines (which must FAIL rather than read as an
+    empty dictionary), and two rows for one term (which the parser must
+    report and never delete). Production has no caller for it."""
     from authorlm import api as _api
     from authorlm import filtering as _fg
     from authorlm import pronunciations as _pron

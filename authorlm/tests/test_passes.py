@@ -658,11 +658,54 @@ def pronunciation_purity() -> None:
           "column, a trailing empty row",
           docsy_rows == rows and not docsy_warns,
           f"{docsy_rows}\n{rows}\n{docsy_warns}")
-    escaped, _ = pron.parse("| Term | Say it | Note |\n| --- | --- | --- |\n"
-                            "| a\\|b | ay-bee | the \\| is literal |\n")
-    check("P2 a backslash-escaped pipe is one cell, unescaped",
-          escaped == [{"term": "a|b", "say": "ay-bee",
-                       "note": "the | is literal"}], escaped)
+    # A pipe is the table's own column separator and does not survive
+    # the Doc bridge in ANY form: normalize_markdown strips exactly the
+    # backslash an escape would write, and push_doc normalizes and writes
+    # back, so an escaped pipe is unescaped on the author's own disk and
+    # the row reparses with its cells shifted one to the left. The row
+    # COUNT is unchanged by that, so §2.6's zero-rows guard never sees
+    # it — a settled row silently rewritten, which is the one thing this
+    # file exists to make impossible. So the row is SKIPPED and named.
+    pipe_table = ("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                  "| a\\|b | ay-bee | the \\| is literal |\n"
+                  "| anattā | uh-NUT-taa | Pali |\n")
+    escaped, esc_warns = pron.parse(pipe_table)
+    check("P7 an author-typed ESCAPED pipe row is skipped and named, "
+          "never read as shifted cells — and the settled row beside it "
+          "survives untouched",
+          escaped == [{"term": "anattā", "say": "uh-NUT-taa",
+                       "note": "Pali"}]
+          and len(esc_warns) == 1 and "a|b" in esc_warns[0]
+          and "cannot be read as one three-column row" in esc_warns[0],
+          f"{escaped}\n{esc_warns}")
+    pushed = normalize_markdown(pipe_table)
+    shifted, shift_warns = pron.parse(pushed)
+    check("P7 ...and after push_doc's normalize-and-write-back has "
+          "stripped the backslash, the SAME row is skipped for the "
+          "shift instead — the two signatures of one fault",
+          shifted == escaped and len(shift_warns) == 1
+          and "its cells are shifted" in shift_warns[0],
+          f"{shifted}\n{shift_warns}")
+    check("P7 a table that is ALL pipe rows parses to NOTHING, so the "
+          "pull's zero-rows guard refuses it — the two guards compose "
+          "rather than fight",
+          pron.parse("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                     "| a|b | c | d |\n")[0] == [], "")
+    check("P7 a trailing EMPTY cell is still tolerated — that is what "
+          "Docs actually emits, and it means nothing",
+          pron.parse("| Term | Say it | Note |\n| --- | --- | --- |\n"
+                     "| anattā | uh-NUT-taa | Pali | |\n")[0]
+          == [{"term": "anattā", "say": "uh-NUT-taa", "note": "Pali"}], "")
+    try:
+        raised_pipe = ""
+        pron.render_row({"term": "a|b", "say": "x"})
+    except ValueError as err:
+        raised_pipe = str(err)
+    check("P7 and render_row REFUSES a pipe rather than escaping one — "
+          "nothing this system writes can carry one, which is what makes "
+          "the fixed-point check below true and keeps proposals.adopt the "
+          "only writer of the file",
+          "does not survive the Doc bridge" in raised_pipe, raised_pipe)
 
     prosy = (CANONICAL_DICT
              + "\nAuthor's own note below, with | a pipe in it.\n")

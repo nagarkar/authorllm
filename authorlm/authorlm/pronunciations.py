@@ -97,6 +97,39 @@ def _is_header(cells: list[str]) -> bool:
     return bool(cells) and key(cells[0]) == "term"
 
 
+def _unreadable_row(cells: list[str]) -> str | None:
+    """Why this line cannot be read as ONE three-column row, or None.
+
+    A pipe is the table's own column separator and it does not survive
+    the Doc bridge in any form: `gdocs.normalize_markdown`'s `_ESCAPE`
+    strips exactly the backslash an escape would write, and `push_doc`
+    normalizes and WRITES BACK, so an escaped pipe is unescaped on the
+    author's disk and the row reparses with its cells shifted one to the
+    left — `| a\\|b | ay-bee | note |` became term 'a', say 'b', note
+    'ay-bee'. The row COUNT is unchanged by that, so §2.6's zero-rows
+    guard never sees it: it is a settled row silently rewritten, which is
+    the one thing this file exists to make impossible.
+
+    So a row carrying a pipe is SKIPPED and named, never guessed at. Two
+    signatures, both meaning the same thing:
+
+    - a non-empty cell beyond the third — the shift a raw interior pipe
+      leaves. Trailing EMPTY cells stay tolerated, because a trailing
+      empty cell is exactly what Docs emits and means nothing.
+    - a pipe surviving inside a cell — what a hand-written `\\|` leaves
+      before the next push unescapes it.
+
+    Skipping composes with the zero-rows guard rather than fighting it: a
+    table whose rows all carry pipes parses to NOTHING, so a pull of it
+    is refused by name and `--force` cannot reach past it."""
+    extra = [c for c in cells[3:] if c]
+    if extra:
+        return "its cells are shifted"
+    if any("|" in c for c in cells[:3]):
+        return "escaped, which the Doc bridge unescapes"
+    return None
+
+
 def parse(text: str) -> tuple[list[dict], list[str]]:
     """`(rows, warnings)` from the file's text.
 
@@ -124,6 +157,15 @@ def parse(text: str) -> tuple[list[dict], list[str]]:
         if not term:
             # Docs leaves blank trailing rows in tables constantly.
             continue
+        shifted = _unreadable_row(cells)
+        if shifted:
+            warnings.append(
+                f"the row beginning '{term}' carries a '|' ({shifted}), so "
+                "it cannot be read as one three-column row. Skipped, "
+                "never guessed at — a pipe is the table's own column "
+                "separator and no pronunciation needs one. Remove it and "
+                "the row reads again.")
+            continue
         say = cells[1] if len(cells) > 1 else ""
         note = cells[2] if len(cells) > 2 else ""
         k = key(term)
@@ -150,23 +192,35 @@ def has_term(text: str, term: str) -> bool:
     return key(term) in lookup(rows)
 
 
-def _escape(value: str) -> str:
-    return (value or "").replace("|", "\\|")
-
-
 def render_row(row: dict) -> str:
-    """One table line. A newline in any field is refused — a row is one
-    line, and a multi-line cell does not survive a Docs table round trip
-    in a shape the parser can trust."""
+    """One table line. A newline OR a pipe in any field is refused.
+
+    A row is one line, and a multi-line cell does not survive a Docs
+    table round trip in a shape the parser can trust. A pipe does not
+    survive one either, and the earlier escape (`\\|`) was worse than
+    nothing: `normalize_markdown` strips exactly that backslash, and
+    `push_doc` normalizes and writes back, so the escape was defeated on
+    the author's own disk and the row came back with its cells shifted.
+    Refusing here rather than escaping means nothing this system writes
+    can ever carry one — which is what makes
+    `normalize_markdown(render(rows)) == render(rows)` true, and what
+    keeps `proposals.adopt` the only writer of this file."""
     for field in ("term", "say", "note"):
         value = row.get(field) or ""
         if "\n" in value or "\r" in value:
             raise ValueError(
                 f"a pronunciation row's `{field}` carries a newline; a "
                 "row is one line.")
-    return (f"| {_escape(row.get('term') or '')} "
-            f"| {_escape(row.get('say') or '')} "
-            f"| {_escape(row.get('note') or '')} |")
+        if "|" in value:
+            raise ValueError(
+                f"a pronunciation row's `{field}` carries a '|', which is "
+                "the table's own column separator and does not survive "
+                "the Doc bridge in any form — an escaped pipe is "
+                "unescaped by the next push and the row's cells shift. "
+                "No pronunciation needs one.")
+    return (f"| {row.get('term') or ''} "
+            f"| {row.get('say') or ''} "
+            f"| {row.get('note') or ''} |")
 
 
 def render(rows: list[dict]) -> str:
