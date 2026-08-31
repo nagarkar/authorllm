@@ -243,6 +243,51 @@ class TriageAppTest(unittest.TestCase):
             db.one("SELECT status FROM declared_intents WHERE id = ?",
                    (row["id"],))["status"], "proposed")
 
+    def test_critique_schema_editable_revise_contract(self):
+        """3be8d05: the Item column's `editable: revise` is the edit-in-place
+        contract the triage app stages against. Dropping or misnaming it
+        silently breaks revise-from-inline-edit; empty text has a gate that
+        must refuse before anything is stored."""
+        from authorlm import critique as crit
+
+        db, manuscript, *_ = self.fixture()
+        snap = triage.snapshot(db, manuscript, "critique")
+        schema = snap["schema"]
+        statement = next(c for c in schema["columns"] if c["id"] == "statement")
+        self.assertEqual(statement.get("editable"), "revise")
+        action_ids = {a["id"] for a in schema["actions"]}
+        self.assertIn("revise", action_ids)
+        revise = next(a for a in schema["actions"] if a["id"] == "revise")
+        self.assertEqual(revise["parameter"]["id"], "text")
+        # Every editable marker must name a real action for that tab —
+        # otherwise the app stages a verb the schema does not know.
+        for column in schema["columns"]:
+            if column.get("editable"):
+                self.assertIn(column["editable"], action_ids)
+
+        crit.import_manifest(db, manuscript["id"], {
+            "source": {"name": "App Review"},
+            "items": [{"kind": "intent", "unit": "U", "ordinal": 1,
+                       "text": "Do the thing.", "scope": None}]})
+        row = triage.list_rows(db, manuscript, "critique")[0]
+        with self.assertRaisesRegex(ValueError, "Revise needs"):
+            triage.apply_action(db, manuscript, "critique", row, "revise",
+                                parameters={"text": "   "})
+        with self.assertRaisesRegex(ValueError, "Revise needs"):
+            triage.stage_decisions(db, manuscript, "critique", [{
+                "object_id": row["id"], "action": "revise",
+                "parameters": {},
+            }])
+        self.assertEqual(
+            db.one("SELECT status, statement FROM declared_intents WHERE id = ?",
+                   (row["id"],))["status"], "proposed")
+        self.assertEqual(
+            db.one("SELECT statement FROM declared_intents WHERE id = ?",
+                   (row["id"],))["statement"], "Do the thing.")
+        self.assertIsNone(
+            db.one("SELECT * FROM triage_drafts WHERE object_id = ?",
+                   (row["id"],)))
+
     def test_schema_and_profiles_are_shared(self):
         db, manuscript, *_ = self.fixture()
         profile = triage.resolve_profile(manuscript, "concepts")

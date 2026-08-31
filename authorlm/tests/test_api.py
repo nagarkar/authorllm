@@ -7303,6 +7303,25 @@ def main_test() -> None:
               t_rej["id"] not in written_ids
               and t_rej["id"] not in failed_ids
               and "Should never appear" not in tab_cw, tab_cw)
+        # AW: the writer is state-blind. Re-adding `state == accepted`
+        # would silently drop Doc-road proposals while filter_push
+        # reports them pushed. Prove a proposed thread handed in alone
+        # still lands.
+        t_prop = _crit_thread(
+            "Second body paragraph stays.",
+            "Second body paragraph, proposed in the tab.",
+            3, "replace", state="proposed")
+        result_prop = write_pending_forms(
+            db, manuscript, "07-critique-write.md", [t_prop], stub, stub)
+        tab_prop = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                        if t["title"] == "07-critique-write.md")
+        check("write_pending_forms writes a PROPOSED thread it is given "
+              "— state filtering belongs to the caller, not the writer",
+              any(t["id"] == t_prop["id"] for t in result_prop["written"])
+              and ("<<Second body paragraph stays.>>"
+                   "{{Second body paragraph, proposed in the tab.}}")
+              in tab_prop,
+              f"written={result_prop['written']!r} tab={tab_prop!r}")
         check("write_pending_forms leaves local file as OLD (pristine)",
               (ms / "07-critique-write.md").read_text() == local_before)
         check("write_pending_forms reports a Doc tab URL",

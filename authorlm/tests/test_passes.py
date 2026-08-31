@@ -964,6 +964,58 @@ def _a_paragraph_that_contains_another(root: Path) -> None:
           and len(forced["failed"]) == 1, tab2)
 
 
+def _local_settle_still_needs_a_verdict(root: Path) -> None:
+    """AW asymmetry: Doc push takes untriaged proposals; local settle does
+    not. Without this lock, "make local match Doc" would apply unreviewed
+    edits straight to disk."""
+    print("local settle still needs a verdict (AW asymmetry):")
+
+    db, manuscript, ms, _fake = _doc_run(
+        root, "local-proposed-ws", {2: "TWO REDONE."}, accept=False)
+    mid = manuscript["id"]
+    before = (ms / "solo.md").read_text()
+    states = [t["state"] for t in api._run_threads(db, mid, _run_row(db, mid))]
+    check("fixture: every proposal is still untriaged",
+          states == ["proposed"], str(states))
+
+    raised = None
+    try:
+        api.filter_settle(db, manuscript, {}, "solo.md")
+    except LookupError as err:
+        raised = str(err)
+    check("local settle refuses an all-proposed run — the Doc road's "
+          "push+settle is the review; the shell road still wants a "
+          "verdict first",
+          raised is not None
+          and "nothing is accepted" in raised
+          and "awaiting your verdict" in raised, raised)
+    after_states = [t["state"] for t in
+                    api._run_threads(db, mid, _run_row(db, mid))]
+    check("...and nothing moved: threads stay proposed, disk unmarked",
+          after_states == ["proposed"]
+          and (ms / "solo.md").read_text() == before
+          and "<<" not in before, str(after_states))
+
+
+def _pushed_from_defaults(root: Path) -> None:
+    """Missing/corrupt `pushed_from` must default to `accepted` — recovering
+    an untriaged proposal as accepted would invent a verdict (AW)."""
+    print("_pushed_from recovery defaults:")
+    del root  # pure helper; workspace unused
+
+    check("no metadata → accepted (legacy / local road)",
+          api._pushed_from({}) == "accepted")
+    check("empty metadata → accepted",
+          api._pushed_from({"metadata": ""}) == "accepted")
+    check("metadata without pushed_from → accepted",
+          api._pushed_from({"metadata": "{}"}) == "accepted")
+    check("explicit proposed is preserved — unmark must not promote it",
+          api._pushed_from({"metadata": '{"pushed_from": "proposed"}'})
+          == "proposed")
+    check("corrupt JSON → accepted (loads default), never proposed",
+          api._pushed_from({"metadata": "{not-json"}) == "accepted")
+
+
 def _the_doc_is_the_review(root: Path) -> None:
     """The Sponsor-intent correction (2026-08-30): `filter push` takes
     UNTRIAGED proposals to the Doc, because the tab is the review.
@@ -3647,6 +3699,8 @@ def main_test() -> None:
         _identical_old_halves(root)
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
+        _local_settle_still_needs_a_verdict(root)
+        _pushed_from_defaults(root)
         _the_doc_is_the_review(root)
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
