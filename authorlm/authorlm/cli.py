@@ -3195,6 +3195,11 @@ def cmd_filter(args):
             print(ui.dim(f"class = {out['class']} — {out['class_help']}"))
             if out["state"]:
                 print(ui.dim(f"state: {out['state']}"))
+            if out.get("prelude"):
+                print(ui.dim(f"prelude = {out['prelude']} — run it with "
+                             f"'filter prelude {args.name} <essay.md>'; it "
+                             f"proposes dictionary rows and judges no "
+                             f"unit."))
             return
 
         if args.action == "list":
@@ -3219,6 +3224,8 @@ def cmd_filter(args):
             print(ui.dim(f"class = {shown['class']} — {shown['class_help']}"))
             if shown["state"]:
                 print(ui.dim(f"state: {shown['state']}"))
+            if shown.get("prelude"):
+                print(ui.dim(f"prelude = {shown['prelude']}"))
             print()
             print(shown["prompt"])
             return
@@ -3305,6 +3312,35 @@ def cmd_filter(args):
                 replace=args.replace, native=args.native,
                 reply=_stdin_text())
             _print_filter_warnings(result.get("warnings"))
+            if result.get("kind") == "pronunciations":
+                if "proposed" not in result:
+                    print(ui.dim(
+                        f"Pronunciation prelude payload for "
+                        f"{result['file']} ({result['unit_count']} units) "
+                        f"— no call made. Draft the reply against it and "
+                        f"pipe {{\"pronunciations\": [...]}} back into "
+                        f"this same command. No unit is judged and the "
+                        f"essay is not touched."))
+                    _print_filter_payload(result)
+                    return
+                proposed, suppressed = (result["proposed"],
+                                        result["suppressed"])
+                print(ui.green(
+                    f"{len(proposed)} pronunciation(s) proposed"
+                    + (f", {len(suppressed)} suppressed" if suppressed
+                       else "") + "."))
+                for term in proposed:
+                    print(f"  · {term}")
+                for term in suppressed:
+                    print(ui.dim(f"  (already settled, not re-asked: "
+                                 f"{term})"))
+                if proposed:
+                    print(ui.dim("Rule on them with 'proposal review' — "
+                                 "accepting one writes the row into "
+                                 "pronunciations.md."))
+                if result.get("usage_line"):
+                    print(ui.dim(result["usage_line"]))
+                return
             if result["registry"] is None:
                 print(ui.dim(f"Prelude payload for {result['file']} "
                              f"({result['unit_count']} units) — no call "

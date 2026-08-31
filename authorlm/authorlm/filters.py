@@ -64,7 +64,24 @@ CLASS_HELP = {
 # examples are heterogeneous (a word ledger, a metaphor registry, a voice
 # note) and any schema imposed here is a schema the next filter's prompt
 # has to fight.
-KEYS = ("class", "state")
+#
+# `prelude` declares a SEQUENTIAL filter's optional prelude (§15.22
+# §3.1). §1.1's table said a sequential filter has no prelude; this
+# amends it openly rather than smuggling it. The generalization: a
+# prelude is a whole-essay pass that runs before any unit is judged and
+# produces a RUN-SCOPED ARTIFACT. For `global` that artifact is the
+# frozen registry, rendered into block A. For a sequential filter that
+# declares one, the artifact is a set of PROPOSALS — nothing enters block
+# A, nothing is frozen into the run beyond a marker that it happened, and
+# the run's mechanics are untouched.
+#
+# Adding a filter that WANTS a pronunciation prelude is code, once. §1's
+# "a file and no code" holds for the two classes as they stand; this is
+# the first front-matter key added since ratification, and the honest
+# statement is that the key set is closed again after it.
+PRELUDES = ("pronunciations",)
+
+KEYS = ("class", "state", "prelude")
 
 DELIMITER = "---"
 
@@ -144,11 +161,26 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
     if state is not None and not isinstance(state, str):
         raise FilterError("`state` is a one-line string describing what "
                           "this filter's STATE block is for.")
+    prelude = meta.get("prelude")
+    if prelude is not None:
+        if not isinstance(prelude, str) or prelude not in PRELUDES:
+            raise FilterError(
+                f"unknown prelude {prelude!r} — the legal value is "
+                f"{' and '.join(repr(p) for p in PRELUDES)}. A prelude is "
+                "a whole-essay pass that runs before any unit is judged; "
+                "'pronunciations' proposes dictionary rows for the terms "
+                "of this essay a narrator would stumble over.")
+        if klass == "global":
+            raise FilterError(
+                "a GLOBAL filter's prelude is its frozen registry, and "
+                "two outputs for one call is two preludes. Drop "
+                "`prelude` here, or make this filter sequential.")
     body = "\n".join(lines[end + 1:]).strip()
     if not body:
         raise FilterError("a filter is its prompt — there is nothing "
                           "after the front matter.")
-    return {"class": klass, "state": (state or "").strip()}, body
+    return {"class": klass, "state": (state or "").strip(),
+            "prelude": prelude}, body
 
 
 def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:
@@ -198,11 +230,11 @@ def list_filters(manuscript: dict) -> list[dict]:
             meta, body = parse_front_matter(text)
         except FilterError as err:
             out.append({"name": path.stem, "class": None, "state": "",
-                        "summary": "", "error": str(err)})
+                        "prelude": None, "summary": "", "error": str(err)})
             continue
         out.append({"name": path.stem, "class": meta["class"],
-                    "state": meta["state"], "summary": summary_of(body),
-                    "error": None})
+                    "state": meta["state"], "prelude": meta["prelude"],
+                    "summary": summary_of(body), "error": None})
     return out
 
 
@@ -222,5 +254,5 @@ def show_filter(manuscript: dict, name: str) -> dict:
     path = _filter_path(manuscript, name)
     meta, body = load_filter(manuscript, name)
     return {"name": name, "path": str(path), "class": meta["class"],
-            "state": meta["state"], "prompt": body,
-            "class_help": CLASS_HELP[meta["class"]]}
+            "state": meta["state"], "prelude": meta["prelude"],
+            "prompt": body, "class_help": CLASS_HELP[meta["class"]]}

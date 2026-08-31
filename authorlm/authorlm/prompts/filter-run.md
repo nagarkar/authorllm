@@ -19,13 +19,26 @@ For each unit in THE UNITS you return either `keep` or `replace`.
 - You may not add a unit and you may not delete one. A `replace` whose text is
   empty is refused. A `replace` may contain a blank line, which splits the unit in
   two — only when this filter's concern calls for it.
-- STYLE LAW is binding and outranks your instinct in every case. Where obeying the
-  filter would break a style element, `keep` the unit and say so in `why`.
-- CONCEPT NOTES are the author's settled definitions. Never paraphrase a term of
-  art, never change its capitalization, and never substitute a synonym for it.
-  INTENTS state what the author is trying to do with this book: they govern which
-  changes matter, never whether a change is grounded, and never what the essay
-  claims.
+- STYLE LAW is binding and outranks your instinct in every case. It is the
+  author's ratified law, printed whole, one element per line with its aspect in
+  brackets — so when a filter tells you to work from "the established motif
+  families" or "the redefined terms", it means the elements tagged `[figure]`
+  and `[lexicon]` in STYLE LAW, and it means those and nothing you remember from
+  elsewhere. Where obeying the filter would break a style element, `keep` the
+  unit and say so in `why`.
+- CONCEPT NOTES are the author's settled definitions. PROTECTED TERMS is the
+  author's vocabulary, derived from that same graph: never substitute a synonym
+  for one, never re-word one, never change its capitalization, and never
+  "explain" one by replacing it with a paraphrase. A single-word name written
+  there with a capital is the term of art only where the text capitalizes it —
+  "Field" is the concept, "field" is ordinary English; a multi-word name, and
+  any name written there in lower case, is the term of art in any casing. If
+  obeying this filter would cost a protected term, `keep` the unit and say so
+  in `why`. PRONUNCIATION DICTIONARY is settled too: its terms are protected on
+  the same footing, and a term listed there is never flagged as hard to say —
+  the dictionary IS the fix. INTENTS state what the author is trying to do with
+  this book: they govern which changes matter, never whether a change is
+  grounded, and never what the essay claims.
 
 ## Idempotency
 
@@ -63,7 +76,12 @@ echo discards the WHOLE reply, so copy it, never retype it. Never emit the
 characters `<<`, `>>`, `{{` or `}}` — they are reserved grammar in this system and
 a reply carrying one is refused entirely.
 
-## The prelude (GLOBAL filters only)
+## The prelude
+
+A prelude runs once, before any unit is judged, and reads THE ESSAY whole. What
+it returns depends on the filter.
+
+### GLOBAL filters — the registry
 
 A global filter is preceded by exactly one prelude, before any unit is judged.
 Read THE ESSAY whole and return the REGISTRY — the whole-essay reading every unit
@@ -78,3 +96,38 @@ Return JSON only, in this shape and nothing else:
 The registry is frozen for the life of the run: every unit sees the same bytes,
 and it is the only thing keeping two independently judged units from proposing
 fixes that contradict each other.
+
+### A declared pronunciation prelude — the dictionary diff
+
+Some sequential filters declare a pronunciation prelude. It proposes how to say
+the terms of this essay that a narrator would stumble over, and it proposes
+NOTHING ELSE: no unit is judged, no wording is changed, and the essay is not
+touched.
+
+Propose a term only if ALL of these hold:
+
+- it appears in THE ESSAY, verbatim, in the form you propose;
+- it is NOT already in PRONUNCIATION DICTIONARY — those are settled, and
+  restating one is refused;
+- a careful reader who did not know this book would hesitate over it.
+
+HARD TERMS FOUND IN THIS ESSAY is computed, not judged: every term listed there
+needs a pronunciation and none of them is a matter of opinion. It is a floor,
+not a ceiling — a borrowed phrase, a proper name in a quotation, or a coinage
+you met in the prose belongs here too even when the list does not name it. An
+ordinary English word doing duty as a term of art does not: nobody needs to be
+told how to say "Field".
+
+Give the pronunciation as plain respelling — the way you would tell a narrator,
+with the stressed syllable in capitals — never as IPA. The author reads this
+table, and a notation they cannot check is a notation they cannot rule on.
+
+Return JSON only, in this shape and nothing else:
+
+    {"pronunciations": [{"term": "<the term, copied from the essay>",
+                         "say": "<plain respelling, e.g. uh-NUT-taa>",
+                         "note": "<the language or the one thing worth saying>"}]}
+
+Every entry becomes a question for the author, one at a time, and a term you
+propose is a term you will never be asked about again — so propose the ones you
+would actually stumble over, and leave the rest.

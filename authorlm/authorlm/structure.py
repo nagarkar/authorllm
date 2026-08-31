@@ -67,6 +67,26 @@ def is_structural(name: str) -> bool:
     return name == TOC_FILENAME or is_sidecar(name)
 
 
+def refuse_sidecar(name: str) -> None:
+    """The named refusal, shared by every verb that could be pointed at
+    the dictionary and must not run on it: `filter run|prelude|record|
+    settle`, `lens run`, and `intent --scope`.
+
+    Every one of these ALREADY refuses through the generic
+    "not in the manuscript's reading order" path — the sidecar is out of
+    the reading order, so the exclusion is structural rather than
+    conditional. But that wording is misleading for a file that plainly
+    exists and that the author can see as a tab in their own Doc, so the
+    refusal says what the file IS and where the work actually happens.
+    One helper rather than three, so the three cannot drift."""
+    if is_sidecar(name):
+        raise ValueError(
+            f"{name} is the pronunciation dictionary, not an essay — no "
+            f"filter, no lens and no critique pass runs on it, and it "
+            f"never ships inside the book. Edit it directly (or in its "
+            f"Doc tab), or rule on proposed rows with 'proposal review'.")
+
+
 def content_files(files: dict[str, str]) -> dict[str, str]:
     """Manuscript files that count as prose (structural files removed)."""
     return {k: v for k, v in files.items() if not is_structural(k)}
