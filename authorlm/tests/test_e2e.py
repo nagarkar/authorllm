@@ -6611,9 +6611,37 @@ def scenario_pronunciations(root: Path) -> None:
         _api.merge_concepts(db, manuscript, "Chid", "Chid-consciousness")
         run(ws, "collect")
 
-        run_stdin(ws, PRON_FILTER, "filter", "add", "audio-friendly")
+        out = run_stdin(ws, PRON_FILTER, "filter", "add", "audio-friendly")
+        check("the `prelude` front-matter key is accepted on a SEQUENTIAL "
+              "filter and reported, so the author sees what they ratified",
+              "prelude = pronunciations" in out, out)
         run_stdin(ws, DUP_FILTER, "filter", "add", "duplicate-words")
         run_stdin(ws, GLOBAL_PRON_FILTER, "filter", "add", "metaphor")
+
+        out = run_stdin(ws, GLOBAL_PRON_FILTER.replace(
+            'state = "not used"',
+            'prelude = "pronunciations"\nstate = "not used"'),
+            "filter", "add", "both", expect_exit=True)
+        check("a GLOBAL filter declaring a prelude is refused — its "
+              "prelude is the registry, and two outputs for one call is "
+              "two preludes",
+              "two outputs for one call is two preludes" in out, out)
+        out = run_stdin(ws, PRON_FILTER.replace(
+            '"pronunciations"', '"phonetics"'),
+            "filter", "add", "typo-prelude", expect_exit=True)
+        check("an unknown prelude value is refused BY NAME, with the one "
+              "legal value spelled out",
+              "'phonetics'" in out and "'pronunciations'" in out, out)
+        # run_stdin, not run: `filter prelude` reads its reply off stdin
+        # before it dispatches, so a harness leaving stdin an open pipe
+        # would block here — the same idiom the F11 checks use.
+        out = run_stdin(ws, "", "filter", "prelude", "duplicate-words",
+                        "02-terms.md", expect_exit=True)
+        check("`filter prelude` on a sequential filter that declares NO "
+              "prelude refuses and names the front-matter key that would "
+              "give it one",
+              "declares no prelude" in out
+              and 'prelude = "pronunciations"' in out, out)
 
         # ================= T2 — the derivation ======================
         out1 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")

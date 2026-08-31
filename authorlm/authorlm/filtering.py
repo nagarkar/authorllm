@@ -89,20 +89,20 @@ PROTECTED_KINDS = frozenset({
 # stays protected through the live node.
 PROTECTED_STATUSES = frozenset({"declared", "realized"})
 
+# Wrapped exactly as the design renders it. The wrapping is part of the
+# ratified block: block A is a cached layer, so these bytes are compared
+# window against window and a re-flow is a cache invalidation.
 PROTECTED_HEADER = (
-    "PROTECTED TERMS (the author's vocabulary — never substitute a "
-    "synonym for one, never re-word one, never change its "
-    "capitalization). A single-word name written here with a capital is "
-    "the term of art only where the text capitalizes it: \"Field\" is the "
-    "concept, \"field\" is ordinary English. A multi-word name, and any "
-    "name written here in lower case, is the term of art in any casing. "
-    "A name followed by \"·\" carries alternate names; all of them are "
-    "the same term.")
+    "PROTECTED TERMS (the author's vocabulary — never substitute a synonym for one,\n"
+    "never re-word one, never change its capitalization). A single-word name written\n"
+    "here with a capital is the term of art only where the text capitalizes it:\n"
+    "\"Field\" is the concept, \"field\" is ordinary English. A multi-word name, and any\n"
+    "name written here in lower case, is the term of art in any casing. A name\n"
+    "followed by \"·\" carries alternate names; all of them are the same term.")
 
 DICTIONARY_HEADER = (
-    "PRONUNCIATION DICTIONARY (settled by the author — read these aloud "
-    "this way, and never flag one of these terms as hard to say: the "
-    "dictionary IS the fix)")
+    "PRONUNCIATION DICTIONARY (settled by the author — read these aloud this way,\n"
+    "and never flag one of these terms as hard to say: the dictionary IS the fix)")
 
 NOT_APPLICABLE_GLOBAL = (
     "(not applicable — this is a GLOBAL filter: each unit is judged "
@@ -138,8 +138,8 @@ exact bytes. Never emit << >> {{ or }} anywhere in the reply."""
 PRONUNCIATION_PRELUDE = "pronunciations"
 
 HARD_TERMS_HEADER = (
-    "HARD TERMS FOUND IN THIS ESSAY (computed, not judged — every one of "
-    "these needs a pronunciation unless the dictionary already has it)")
+    "HARD TERMS FOUND IN THIS ESSAY (computed, not judged — every one of these needs\n"
+    "a pronunciation unless the dictionary already has it)")
 
 PRONUNCIATION_CONTRACT = """OUTPUT CONTRACT
 Return JSON only, in this shape and nothing else:
@@ -374,9 +374,9 @@ def _protected_block(terms: dict) -> str:
             lines.append(f"- {name}{suffix}")
     else:
         lines.append(NONE)
-    lines.append("THE BOOK'S LEXICON (every term of art in the manuscript "
-                 "— one may reach this essay through a quotation or an "
-                 "allusion)")
+    lines.append(
+        "THE BOOK'S LEXICON (every term of art in the manuscript — one may "
+        "reach this\nessay through a quotation or an allusion)")
     if terms["lexicon"]:
         lines.extend(f"- {name}" for name in terms["lexicon"])
     else:

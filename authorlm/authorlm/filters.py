@@ -141,8 +141,8 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
         # nothing like the one the author thought they ratified.
         raise FilterError(
             f"unknown front-matter key(s): {', '.join(unknown)}. A "
-            f"filter's front matter carries {' and '.join(KEYS)}, "
-            "nothing else.")
+            f"filter's front matter carries "
+            f"{', '.join(KEYS[:-1])} and {KEYS[-1]}, nothing else.")
     klass = meta.get("class")
     if klass is None:
         raise FilterError(
