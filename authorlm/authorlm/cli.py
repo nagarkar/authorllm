@@ -3471,8 +3471,20 @@ def cmd_filter(args):
             if not args.file:
                 raise SystemExit("usage: authorlm filter settle <essay.md> "
                                  "[--pause]")
+            def _doc_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            # A CALLABLE, not two arguments: the local road must work
+            # with no credentials, so nothing here can pop a consent
+            # window unless the run actually took the Doc road.
             result = api.filter_settle(db, manuscript, config, args.file,
-                                       pause=args.pause, name=args.name)
+                                       pause=args.pause, name=args.name,
+                                       services=_doc_bridge)
             _print_filter_warnings(result["warnings"])
             if result["paused"]:
                 print(ui.green(
@@ -3484,8 +3496,16 @@ def cmd_filter(args):
                              "marked, and every observer still reads the "
                              "original text."))
                 return
-            print(ui.green(f"Applied: {result['forms']} change(s) made "
-                           f"final in {result['file']}."))
+            if result.get("mode") == "doc":
+                print(ui.green(
+                    f"Finalized: {result['forms']} change(s) made final in "
+                    f"{result['file']}"
+                    + (f", {len(result['diffs'])} of them in your wording "
+                       f"rather than mine" if result["diffs"] else "")
+                    + "."))
+            else:
+                print(ui.green(f"Applied: {result['forms']} change(s) made "
+                               f"final in {result['file']}."))
             for d in result["diffs"]:
                 print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
                              f"«{gdocs_clamp(d['final'])}»"))
@@ -3507,6 +3527,13 @@ def cmd_filter(args):
                 print(ui.yellow(f"summary rebuild failed "
                                 f"({summary['error']}) — run 'summarize "
                                 f"rebuild {result['file']}'"))
+            if result.get("tab_still_marked"):
+                print(ui.dim(
+                    f"The Doc tab still shows the struck-and-green marks: "
+                    f"a settle that also re-pushed could fail halfway on "
+                    f"the network after the evidence was recorded, so it "
+                    f"does not. Your next 'doc push {result['file']}' "
+                    f"clears them."))
             print(ui.dim("Nothing here was filed against any of your goals: "
                          "a filter pass is hygiene, not work toward a "
                          "declared aim, and recording it as if it were "

@@ -1082,6 +1082,232 @@ def _twins_go_to_the_doc(root: Path) -> None:
           < tab.index("{{TWIN TWO REDONE.}}"), tab)
 
 
+def _reword_in_tab(fake, old_form: str, new_form: str) -> None:
+    """The author, editing the {{new}} half in Google Docs."""
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    assert old_form in tab["body"], tab["body"]
+    tab["body"] = tab["body"].replace(old_form, new_form)
+
+
+def _the_doc_settle(root: Path) -> None:
+    """F-D7, F-D12, F-D14 — the settle reads the DOC, three-ways it
+    against local, and ends in exactly the local road's evidence."""
+    from authorlm import staging as _staging
+
+    print("§2.4: the doc settle reads the tab, not a pulled local file:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "settle-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED.",
+                            6: "SIX AS PROPOSED."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    # The author, in the Doc: rewords one, leaves one alone, DELETES the
+    # whole marked span of the third.
+    _reword_in_tab(fake, "{{TWO AS PROPOSED.}}", "{{TWO, IN MY OWN WORDS.}}")
+    _reword_in_tab(
+        fake,
+        "<<Omega closes the essay on a falling cadence.>>"
+        "{{SIX AS PROPOSED.}}",
+        "Omega closes the essay on a falling cadence.")
+
+    check("F-D11 the push left the file CHECKED OUT — in doc mode the Doc "
+          "is the working copy, which is the whole point of the mode",
+          gdocs.doc_status(db, manuscript)["solo.md"]["checked_out"] is True)
+
+    result = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+
+    check("F-D11 ...and the doc settle does NOT refuse it: the gate would "
+          "refuse the one verb whose job is to read the Doc back, which "
+          "is why `critique resolve` has no gate either",
+          result["run"]["status"] == "settled", str(result["run"]["status"]))
+    check("F-D14 the settle never marks local: the finished essay carries "
+          "the {{new}} halves' TEXT and no marker",
+          not _staging.is_marked(final) and "<<" not in final
+          and "{{" not in final, final)
+    check("the author's Doc-side rewording WINS, the untouched form is "
+          "taken as an acceptance, and the deleted one leaves the old "
+          "text standing",
+          "TWO, IN MY OWN WORDS." in final
+          and "FOUR AS PROPOSED." in final
+          and "Omega closes the essay on a falling cadence." in final
+          and "SIX AS PROPOSED." not in final, final)
+
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("F-D7 the reworded form is `cleaned` and the untouched one is "
+          "too — an untouched form is an ACCEPTANCE, the standing "
+          "critique contract",
+          rows[2] == "cleaned" and rows[4] == "cleaned", str(rows))
+    check("F-D7 ...and the form the author DELETED is `declined`",
+          rows[6] == "declined", str(rows))
+
+    ev = db.all("SELECT * FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'filter_edit' ORDER BY created_at", (mid,))
+    check("F-D7 every evidence row of a DOC settle is `filter_edit` with "
+          "`episode_id IS NULL` and weight 'high' — byte for byte the "
+          "local road's shape, because it is the same call",
+          len(ev) >= 3 and all(r["episode_id"] is None for r in ev)
+          and all(r["weight"] == "high" for r in ev),
+          str([(r["evidence_type"], r["episode_id"], r["weight"])
+               for r in ev]))
+    check("F-D7 the modified acceptance is recorded as a proposal→final "
+          "diff, and ONLY it",
+          len(result["diffs"]) == 1
+          and result["diffs"][0]["proposal"] == "TWO AS PROPOSED."
+          and result["diffs"][0]["final"] == "TWO, IN MY OWN WORDS.",
+          str(result["diffs"]))
+    check("Q-2 the settle does NOT re-push, and says the tab keeps its "
+          "marks until the next ordinary `doc push`",
+          result["tab_still_marked"] is True
+          and "<<" in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
+    check("the run settled, on the doc road",
+          result["run"]["status"] == "settled" and result["mode"] == "doc")
+
+    # --- F-D12: a genuine two-sided edit refuses, and moves nothing ---
+    db2, ms2, msdir2, fake2 = _doc_run(root, "conflict-ws",
+                                       {2: "TWO AS PROPOSED."})
+    mid2 = ms2["id"]
+    api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+    local_drift = (msdir2 / "solo.md").read_text().replace(
+        "Omega closes the essay on a falling cadence.",
+        "Omega closes, rewritten on disk and nowhere else.")
+    (msdir2 / "solo.md").write_text(local_drift)
+    tab2 = next(t for t in fake2.tabs if t["title"] == "solo.md")
+    tab2["body"] = tab2["body"].replace(
+        "Gamma follows, saying something else entirely.",
+        "Gamma, rewritten in the Doc and nowhere else.")
+    raised = None
+    try:
+        api.filter_settle(db2, ms2, {}, "solo.md",
+                          services=lambda: (fake2, fake2))
+    except ValueError as err:
+        raised = str(err)
+    check("F-D12 local moved AND the tab's settled content moved → the "
+          "doc settle refuses rather than picking a side",
+          raised is not None
+          and "changed both locally and in the Doc" in raised, raised)
+    check("F-D12 ...and it resolved NOTHING: the file is untouched and "
+          "every thread is still `written`",
+          (msdir2 / "solo.md").read_text() == local_drift
+          and all(t["state"] == "written" for t in api._run_threads(
+              db2, mid2, _run_row(db2, mid2))),
+          (msdir2 / "solo.md").read_text()[:120])
+    check("F-D12 ...and the run is still active — a refusal settles "
+          "nothing",
+          _run_row(db2, mid2)["status"] == "active")
+
+
+def _a_pull_between_push_and_settle(root: Path) -> None:
+    """F-D6 — `doc pull` while forms are out is legal and harmless, and
+    the settle afterwards still finds them."""
+    print("§2.6: a pull between the push and the settle:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "pull-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    _reword_in_tab(fake, "{{TWO AS PROPOSED.}}", "{{TWO, REWORDED.}}")
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    tab["body"] = tab["body"].replace(
+        "Omega closes the essay on a falling cadence.",
+        "Omega closes, with a sentence the author added in the Doc.")
+    before_tab = tab["body"]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        report = gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                                docs_service=fake, with_comments=False)
+    local = (ms / "solo.md").read_text()
+    check("F-D6 the pull is NOT skipped — the local file is unmarked, so "
+          "the byte guard is silent, and that is correct",
+          "solo.md" not in report.get("marked", []), str(report))
+    check("F-D6 it wrote the OLD halves locally and never a marker — "
+          "`strip_pending` collapses each form to its old half, which is "
+          "exactly why the settle must read the DOC and not this file",
+          "<<" not in local and "{{" not in local
+          and "TWO REDONE." not in local
+          and "Alpha opens the essay" in local, local)
+    check("F-D6 ...and it landed the author's edit made ELSEWHERE in the "
+          "tab", "a sentence the author added in the Doc" in local, local)
+    check("F-D6 the pull never wrote to the Doc: the tab still carries "
+          "both forms", fake.tab_text("solo.md") == before_tab)
+    check("F-D6 ...and the run's `written` rows are untouched",
+          sum(1 for t in api._run_threads(db, mid, _run_row(db, mid))
+              if t["state"] == "written") == 2)
+    check("F-D6 ...and the checkout is cleared",
+          not gdocs.doc_status(db, manuscript)["solo.md"]["checked_out"])
+
+    result = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("F-D6 a settle AFTER that pull still finds both forms and "
+          "takes the reworded half",
+          result["forms"] == 2 and "TWO, REWORDED." in final
+          and "FOUR AS PROPOSED." in final and "<<" not in final, final)
+
+
+def _twins_settle_by_position(root: Path) -> None:
+    """F-D17 / F-D18 — the twin join is positional; the TEXT is always
+    right and the attribution is best-effort when a span is deleted."""
+    print("§9.1: twins settle by position:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "twins-settle-ws",
+        {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    _reword_in_tab(fake, "{{TWIN ONE REDONE.}}", "{{THE FIRST, MY WORDING.}}")
+    result = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("F-D17 the reworded text lands at the FIRST twin and the "
+          "original proposal at the second — each form's own text in its "
+          "own place",
+          final.index("THE FIRST, MY WORDING.")
+          < final.index("Gamma follows")
+          < final.index("TWIN TWO REDONE."), final)
+    check("F-D17 the `revised` diff attaches to the thread whose form was "
+          "first in document order, and ONLY to it",
+          len(result["diffs"]) == 1
+          and result["diffs"][0]["proposal"] == "TWIN ONE REDONE.",
+          str(result["diffs"]))
+
+    # --- F-D18: one twin's whole marked span DELETED in the Doc -------
+    db2, ms2, msdir2, fake2 = _doc_run(
+        root, "twins-deleted-ws",
+        {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
+    mid2 = ms2["id"]
+    api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+    _reword_in_tab(
+        fake2,
+        "<<And so the wall stands, and the Dead do not pass.>>"
+        "{{TWIN ONE REDONE.}}",
+        "And so the wall stands, and the Dead do not pass.")
+    result2 = api.filter_settle(db2, ms2, {}, "solo.md",
+                                services=lambda: (fake2, fake2))
+    final2 = (msdir2 / "solo.md").read_text()
+    check("F-D18 the TEXT outcome is strict: the surviving form's text "
+          "lands in its own place and the deleted one leaves the old "
+          "paragraph standing",
+          final2.count("And so the wall stands, and the Dead do not pass.")
+          == 1
+          and final2.index("And so the wall stands") < final2.index("Gamma")
+          < final2.index("TWIN TWO REDONE."), final2)
+    states = sorted(t["state"] for t in api._run_threads(
+        db2, mid2, _run_row(db2, mid2)) if t["state"] in ("cleaned",
+                                                          "declined"))
+    check("F-D18 exactly one thread is `declined` and one `cleaned` — "
+          "the attribution is POSITIONAL BEST-EFFORT (RISK-6, accepted "
+          "by Sponsor ruling): which of two threads proposing changes to "
+          "identical text got the decline is not recoverable from a Doc "
+          "that carries no thread id",
+          states == ["cleaned", "declined"], str(states))
+    check("F-D18 ...and the manuscript text is correct regardless, which "
+          "is the half that was never allowed to be best-effort",
+          "<<" not in final2 and "{{" not in final2, final2)
+
+
 TEMPLATE_ESSAY = (
     "# On Templating\n\n"
     "A template engine substitutes: {{title}} becomes the page's title, "
@@ -2395,6 +2621,9 @@ def main_test() -> None:
         _the_doc_transport_push(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
+        _the_doc_settle(root)
+        _a_pull_between_push_and_settle(root)
+        _twins_settle_by_position(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

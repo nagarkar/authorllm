@@ -3954,13 +3954,23 @@ PROMPT_FAULT_SHARE = 0.75
 
 
 def _filter_capture(db: Database, manuscript: dict, file: str,
-                    verb: str) -> tuple[str, str, tuple, str]:
+                    verb: str, checkout: bool = True
+                    ) -> tuple[str, str, tuple, str]:
     """The one capture, the three in-flight/placeholder refusals, the
     file's text, and the pronunciation dictionary — shared by run,
-    record, prelude and settle so a gate and the thing it gates can never
-    read separately (§14.7's dangerous shape).
+    record, prelude, push and settle so a gate and the thing it gates
+    can never read separately (§14.7's dangerous shape).
 
     Returns `(relpath, text, capture, dictionary_text)`.
+
+    `checkout=False` is for exactly one caller: the DOC-mode settle.
+    `_checkout_gate` refuses a file whose Doc entry is `checked_out`, and
+    `write_pending_forms`'s levelling push sets that flag — so in doc
+    mode the file is checked out BY DESIGN (the Doc *is* the working
+    copy, which is the whole point of the mode) and the gate would
+    refuse the one verb whose job is to read the Doc back. The gate is
+    right for run, record, prelude, push and the local settle, and wrong
+    for that one; `critique resolve` has no gate for the same reason.
 
     The dictionary is read HERE and nowhere else, which is the whole of
     the bend this feature puts in the blackboard doctrine (§15.22, D4).
@@ -3976,7 +3986,8 @@ def _filter_capture(db: Database, manuscript: dict, file: str,
     bytes."""
     from . import summaries as sums
 
-    _checkout_gate(db, manuscript, file)
+    if checkout:
+        _checkout_gate(db, manuscript, file)
     capture = sums.capture(db, manuscript)
     texts, _unlisted, inflight = capture
     rel = file if file in texts else next(
@@ -4875,13 +4886,39 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
             "local_unchanged": path.read_text(encoding="utf-8") == disk}
 
 
+def _settle_services(services, rel: str):
+    """The Drive/Docs pair, built only on the road that needs it.
+
+    A callable, not two arguments: the LOCAL settle must work with no
+    credentials at all, so the doc bridge is never constructed — and
+    never able to pop a consent window — unless the run took the Doc
+    road. The refusal names both exits when it cannot be built."""
+    if services is None:
+        raise ValueError(
+            f"the forms for {rel} are in the Google Doc and only the Doc "
+            f"can be read back, but no Doc bridge was supplied.")
+    try:
+        return services()
+    except ValueError as err:
+        raise ValueError(
+            f"{err}\nThe forms for {rel} are in the Doc and only the Doc "
+            f"can be read back. Authorize with 'doc auth', or take them "
+            f"out of the tab with 'filter unmark {rel} --force' — which "
+            f"loses any rewording you did there.") from err
+
+
 def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
-                  pause: bool = False, name: str | None = None) -> dict:
-    """One verb, two halves, chosen by the threads' state.
+                  pause: bool = False, name: str | None = None,
+                  services=None) -> dict:
+    """One verb, three halves: the threads' state chooses whether this is
+    an apply or a finalize, and the RUN'S TRANSPORT chooses where the
+    marked text is read from (D-2).
 
         filter settle <file>            threads accepted → APPLY directly
         filter settle <file> --pause    threads accepted → compose, stop
         filter settle <file>            threads written  → read, finalize
+                                        mode 'local' → the marked file
+                                        mode 'doc'   → the essay's tab
 
     Direct apply is the DEFAULT: a filter's edits are mechanical and
     numerous, the triage verdict already IS the author's ruling, and
@@ -4891,18 +4928,28 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     literally the same code: the direct apply composes the marked text
     and resolves it in one breath, without ever writing the markers to
     disk, so there is one composition routine and not two.
+
+    The dispatch is on the run's MODE and not on `origin_type` (D-2):
+    both filter roads carry `origin_type='filter'`, so `origin_type` is
+    the wrong key, and a sibling verb would be larger than a branch in
+    the verb that already dispatches on thread state.
     """
+    from . import gdocs
     from . import summaries as sums
 
     mid = manuscript["id"]
-    rel, _text, _capture, _dict = _filter_capture(db, manuscript, file,
-                                                  "filter settle")
+    # The run's own state before the capture, for `filter push`'s reason:
+    # in doc mode the file is checked out BY DESIGN and the gate must be
+    # told not to fire (§2.4).
+    rel = _resolve_relpath(manuscript, file)
     run = _filter_run_row(db, manuscript, rel, name)
+    mode = _run_mode(run)
+    _rel, _text, _capture, _dict = _filter_capture(
+        db, manuscript, rel, "filter settle", checkout=(mode != "doc"))
     path = Path(manuscript["path"]) / rel
     written = [t for t in _run_threads(db, mid, run)
                if t["state"] == "written"]
     warnings: list[str] = []
-    mode = _run_mode(run)
     if mode == "doc" and pause:
         raise ValueError(
             f"this run put its forms in the Doc — 'filter push {rel}' "
@@ -4920,6 +4967,33 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
                 f"in them. Finalize with 'filter settle {rel}' (no flag), "
                 f"or put the original text back with 'filter unmark "
                 f"{rel}'.")
+        if mode == "doc":
+            # The DOC road. The authoritative marked text is the TAB's —
+            # `pull_doc` runs `strip_pending` on incoming text before
+            # writing it, so a pull of a tab carrying forms writes the
+            # pre-edit text and discards every {{new}} half INCLUDING the
+            # author's rewordings. A settle that read the pulled local
+            # file would find no forms, resolve nothing, and decline
+            # every thread (D-1). `doc pull` is not part of this flow and
+            # is harmless if it happens (§2.6).
+            service, docs_service = _settle_services(services, rel)
+            fetched = gdocs.tab_marked_markdown(db, manuscript, rel,
+                                                service, docs_service)
+            if fetched["state"] == "missing":
+                raise LookupError(
+                    f"'{rel}' has no matching section in the master Doc "
+                    f"export — the tab this run's forms were written to "
+                    f"is gone. 'doc push {rel}' rebuilds it from the "
+                    f"local file, which still holds the old text.")
+            if fetched["state"] == "conflict":
+                raise ValueError(
+                    f"'{rel}' changed both locally and in the Doc since "
+                    f"the last sync — the settle refuses to guess which "
+                    f"wins. Compare the local file against the Doc tab by "
+                    f"hand, then re-run 'filter settle {rel}'.")
+            warnings.extend(fetched["marker_warnings"])
+            return _filter_finalize(db, manuscript, config, run, rel, path,
+                                    warnings, marked_doc=fetched["marked"])
         if mode is None:
             # A run paused before the transport existed: its forms are in
             # the bytes on disk, so the road it took was the local one.
@@ -4976,9 +5050,18 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
 
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
-                     direct: bool = False) -> dict:
-    """Read the marked file back, record the resolution, write the final
-    text, collect under NO episode, rebuild the summary."""
+                     direct: bool = False,
+                     marked_doc: str | None = None) -> dict:
+    """Read the marked text back, record the resolution, write the final
+    text, collect under NO episode, rebuild the summary.
+
+    ONE thing differs between the transports and it is where the marked
+    text comes from: `marked_doc` is the tab's export on the doc road and
+    None on the local road, where the file's own bytes are read. From
+    `diffs` onward the two roads are literally the same code — same
+    `final_text_from_marked`, same `record_resolution`, same
+    `filter_edit` evidence with `episode_id = NULL`, same NO_EPISODE
+    collect, same summary rebuild."""
     from . import gdocs
     from . import summaries as sums
 
@@ -4990,9 +5073,25 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     # this is a no-op unless there is a real uncollected edit.)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-filter-settle")
-    final, forms, diffs = staging.resolve_local(
-        db, mid, rel, path, origin_type=FILTER_ORIGIN,
-        evidence_type=FILTER_EVIDENCE)
+    if marked_doc is None:
+        final, forms, diffs = staging.resolve_local(
+            db, mid, rel, path, origin_type=FILTER_ORIGIN,
+            evidence_type=FILTER_EVIDENCE)
+    else:
+        written = staging.door_threads(db, mid, rel, states=("written",),
+                                       origin_type=FILTER_ORIGIN)
+        # kinds=("replace",) on BOTH roads, for the same reason: an
+        # unmatched insertion form collapses to its old half, which for
+        # an insertion is the empty string — so a settle that looked at
+        # bare `{{…}}` would DELETE an author's `{{title}}` from the
+        # finished essay. In the tab that `{{title}}` arrived from the
+        # author's own file through `push_doc`, so the hazard is real
+        # there too. A filter never stages an insertion.
+        final, forms = passes.final_text_from_marked(
+            marked_doc, written=written, kinds=("replace",))
+        diffs = passes.record_resolution(db, mid, rel, forms,
+                                         origin_type=FILTER_ORIGIN,
+                                         evidence_type=FILTER_EVIDENCE)
     normalized = gdocs.normalize_markdown(final)
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")
@@ -5026,7 +5125,14 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     return {"run": run, "file": rel, "paused": False, "direct": direct,
             "forms": len(forms), "diffs": diffs, "final": normalized,
             "warnings": warnings, "falsified_prefix": falsified,
-            "summary": summary, "result_version_id": result_version}
+            "summary": summary, "result_version_id": result_version,
+            "mode": _run_mode(run),
+            # Q-2's default, matching `critique resolve` exactly: the
+            # settle does NOT re-push. A settle that pushes is a settle
+            # that can fail halfway on the network after the evidence is
+            # recorded — so the tab keeps showing the marks until the
+            # author's next ordinary `doc push`, and the verb says so.
+            "tab_still_marked": _run_mode(run) == "doc"}
 
 
 def filter_unmark(db: Database, manuscript: dict, file: str) -> dict:
