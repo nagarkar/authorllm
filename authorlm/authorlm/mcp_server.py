@@ -446,6 +446,65 @@ def triage_critique(operations: list[dict], scope: str | None = None,
 
 
 @mcp.tool()
+def add_filter(name: str, prompt: str, manuscript: str | None = None) -> dict:
+    """Ratify a new FILTER artifact (docs/filter-pass-design.md). `prompt`
+    is the WHOLE artifact — TOML front matter (`class` = "sequential" |
+    "global", required; optional one-line `state` note) then a `---`
+    line then the prompt body — exactly what `filter add <name>` reads
+    from stdin in the shell. `name` is a short kebab-case slug.
+
+    A filter is ratified law, the style-law sibling: record one only
+    AFTER the author has read and approved this exact text. Do not
+    paraphrase or author a filter's prompt yourself and install it
+    silently — a filter they have not read is a filter they cannot rule
+    on. Bad name, empty prompt, missing/unknown class, or malformed TOML
+    front matter is refused through the normal {ok:false, error}
+    envelope, each error naming what is wrong and the legal values.
+
+    Creating a filter is curation, so it lives here; RUNNING one
+    (`filter run`/`prelude`/`record`/`settle`/`triage-flags`/`status`/
+    `unmark`/`rollback`/`abandon`) stays CLI-only, the write loop's
+    one-call-surface ruling — use list_filter_edits/triage_filter_edits
+    for the conversational half of that loop instead."""
+    def run():
+        db = _db()
+        return api.filter_add(_manuscript(db, manuscript), name, prompt)
+    return _guard(run)
+
+
+@mcp.tool()
+def list_filters(manuscript: str | None = None) -> dict:
+    """Every filter artifact defined on the manuscript: name, class
+    (sequential | global), and its one-line summary — never the prompt
+    body (show_filter reads one in full). A malformed artifact is listed
+    with its error where the summary would be, not hidden, so a typo the
+    author made stays visible instead of silently vanishing."""
+    def run():
+        from . import filters as flt
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return {"filters": flt.list_filters(ms)}
+    return _guard(run)
+
+
+@mcp.tool()
+def show_filter(name: str, manuscript: str | None = None) -> dict:
+    """The full ratified text of one filter's prompt, plus its class and
+    state note — for the author asking to read one back, or for you to
+    check what an installed filter actually says before recommending it
+    or drafting a reply to its run. Reading is not running: `filter run`
+    stays a CLI-only verb."""
+    def run():
+        from . import filters as flt
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return flt.show_filter(ms, name)
+    return _guard(run)
+
+
+@mcp.tool()
 def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
     """The FILTER pass's staged edit proposals for one essay (after
     'filter record' in the shell): numbered, each with the unit

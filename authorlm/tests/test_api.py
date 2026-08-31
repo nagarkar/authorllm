@@ -10267,6 +10267,72 @@ def main_test() -> None:
               == {"Prefer terse fragments.",
                   "Address the reader in second person."})
 
+        # --- filter creation MCP tools (AS): add_filter/list_filters/
+        #     show_filter round-trip through the same envelope every
+        #     other tool uses, against the style-ws fixture above (no
+        #     LLM needed — filter creation makes no model call). ---
+        from authorlm import mcp_server
+
+        prev_workspace = mcp_server._WORKSPACE
+        mcp_server._WORKSPACE = str(style_ws)
+        try:
+            bad_name = mcp_server.add_filter(
+                "Not A Slug", '---\nclass = "sequential"\n---\n\nBody.\n')
+            check("add_filter refuses a non-kebab-case name through the "
+                  "{ok:false, error} envelope",
+                  bad_name["ok"] is False and "kebab-case" in bad_name["error"],
+                  str(bad_name))
+
+            empty_prompt = mcp_server.add_filter("empty-prompt", "")
+            check("add_filter refuses an empty prompt",
+                  empty_prompt["ok"] is False
+                  and "its prompt" in empty_prompt["error"],
+                  str(empty_prompt))
+
+            no_class = mcp_server.add_filter(
+                "no-class", "---\n---\n\nBody with no class.\n")
+            check("add_filter refuses front matter missing the required "
+                  "`class` key",
+                  no_class["ok"] is False
+                  and "class" in no_class["error"],
+                  str(no_class))
+
+            filter_text = (
+                '---\nclass = "sequential"\n'
+                'state = "a ledger of flagged words"\n---\n\n'
+                "# Duplicate words\n\nFlag a word used again too soon.\n")
+            added = mcp_server.add_filter("dupe-words", filter_text)
+            check("add_filter ratifies a well-formed artifact",
+                  added["ok"] and added["result"]["class"] == "sequential"
+                  and added["result"]["state"] == "a ledger of flagged words",
+                  str(added))
+
+            listed = mcp_server.list_filters()
+            check("list_filters shows the newly-added filter, compact "
+                  "(name/class/summary, no prompt body)",
+                  listed["ok"]
+                  and any(row["name"] == "dupe-words"
+                          and row["class"] == "sequential"
+                          and row["summary"] == "Duplicate words"
+                          and "prompt" not in row
+                          for row in listed["result"]["filters"]),
+                  str(listed))
+
+            shown = mcp_server.show_filter("dupe-words")
+            check("show_filter returns the byte-identical prompt body "
+                  "that was ratified",
+                  shown["ok"] and shown["result"]["prompt"]
+                  == "# Duplicate words\n\nFlag a word used again too soon.",
+                  str(shown))
+
+            missing = mcp_server.show_filter("no-such-filter")
+            check("show_filter names the filters that DO exist when asked "
+                  "for one that doesn't",
+                  missing["ok"] is False and "dupe-words" in missing["error"],
+                  str(missing))
+        finally:
+            mcp_server._WORKSPACE = prev_workspace
+
         # --- MCP tool envelope (T4, risk-register §3): _guard's real
         # contract at the @mcp.tool() seam — (LookupError, ValueError,
         # RuntimeError) become an {"ok": False, "error": ...} dict every
@@ -10342,6 +10408,11 @@ def main_test() -> None:
             # gets: the loop is CLI-only so there is one call surface,
             # and improving a verb improves every session.
             "list_filter_edits", "triage_filter_edits",
+            # Filter CREATION (AS) is curation, the style-law precedent,
+            # so it is exposed here; the filter LOOP verbs it feeds
+            # (run/prelude/record/settle/…) stay CLI-only by the same
+            # one-call-surface ruling as `filter run` above.
+            "add_filter", "list_filters", "show_filter",
             "move_style_law", "open_triage_app", "triage_app_request",
         }
         check("MCP exposes the full hand-curated tool set",
