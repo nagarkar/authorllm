@@ -163,13 +163,14 @@ def withdraw(db: Database, manuscript_id: str, file: str,
 # ------------------------------------------------- the local transport
 
 def apply_accepted(text: str, threads: list[dict]) -> str:
-    """The essay with every ACCEPTED thread applied directly.
+    """The essay with every thread in `threads` applied directly.
 
     Exactly the composition `compose_marked_text` performs — including
     its drift check, which raises rather than applying to a moved target
-    — with the forms then collapsed to their NEW halves. Written this
-    way on purpose: a second composition routine is a second way for the
-    door to be wrong about where an edit goes."""
+    — with the forms then collapsed to their NEW halves. Callers pass
+    the accepted set. Written this way on purpose: a second composition
+    routine is a second way for the door to be wrong about where an
+    edit goes."""
     return th.approved_text(passes.compose_marked_text(text, threads))
 
 
