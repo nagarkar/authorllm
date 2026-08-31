@@ -709,14 +709,26 @@ The loop, per essay:
 
    A run takes ONE road and keeps it: a push makes it a doc run, a
    settle with no prior push makes it a local run, and switching is
-   settle-then-rerun rather than a flag. Local stays the DEFAULT and the
-   recommendation, because its whole state is described by the bytes on
-   disk and the Doc road's is not — a crash between `filter unmark
+   settle-then-rerun rather than a flag. Only ONE producer's forms can
+   be in an essay's tab at a time — a second filter's `filter push` on
+   the same essay is refused by name, because two producers' forms in
+   one tab cannot be told apart at settle. Local stays the DEFAULT and
+   the recommendation, because its whole state is described by the bytes
+   on disk and the Doc road's is not — a crash between `filter unmark
    --force`'s withdraw and its rebuild can leave forms in a tab that
-   nothing on disk records, and `filter status` cannot see that without
-   a network call it has no credentials for. The documented recovery is
-   `doc push <essay>`, which rebuilds the tab from the (pristine) local
-   file and is permitted the moment no forms are out.
+   nothing on disk records, and `filter status` says so rather than
+   letting its byte scan read as a clean bill of health. The documented
+   recovery is `doc push <essay>`, which rebuilds the tab from the
+   (pristine) local file and is permitted the moment no forms are out.
+
+   **`filter unmark <essay> --force` rebuilds the WHOLE TAB from the
+   local file.** Never describe it as "taking the changes back out": it
+   destroys everything the author has typed into that tab since the
+   push, the rewordings AND any unrelated edit they made elsewhere in
+   the essay. If they may have edited outside the marked passages, say
+   so and offer `doc pull <essay>` first — it brings that edit down to
+   the file and leaves the tab and the forms alone, after which the
+   unmark costs only the green halves.
 
    `filter push` is CLI-only, like every other loop verb — `gdocs` is
    deliberately not reachable from MCP, so an agent-driven call can

@@ -566,13 +566,29 @@ The transport is a property of the RUN, recorded in `filter_runs.metadata` as
 `.ai-productionization/authorllm/findings/design-filter-doc-settle.md`; the
 dated record is §15.23 of `docs/autoregressive-writing-design.md`.
 
+Two verbs read differently on this road and their words were made to match.
+`filter push` says whether the levelling push canonicalized the local file rather
+than claiming it is untouched; and `filter unmark <essay> --force` states that
+its recovery rebuilds the WHOLE TAB from the local file, so an edit made anywhere
+else in that tab dies with the green halves — naming `doc pull <essay>` as the
+exit that saves it. Preserving such an edit inside the recovery verb was
+considered and refused: it would put a tab read and a three-way into the one verb
+the author reaches for when something has already gone wrong.
+
+Only one producer's forms may occupy a tab at a time. A second filter's push on
+the same essay is refused early and by name (Q-1), because the settle join is the
+old text and neither settle could tell whose forms were whose.
+
 One cost is paid rather than argued away: **doc mode's state is not fully
 described by the bytes.** The sentence appears four times above and is the
 reason the local transport was chosen. `filter status` cannot detect a Doc-side
 orphan — forms in a tab with no rows describing them — without a network call it
 has no credentials for. The remedy is documented rather than detected: `doc push
 <essay>` rebuilds the tab from the pristine local file, and the guard lets it
-through the moment no `written` rows exist.
+through the moment no `written` rows exist. `filter status` states that its
+orphan scan is byte-based and covers the local road only, so a clean scan is
+never read as a clean bill of health, and it carries the tab URL for a doc-mode
+run with forms out (from the stored mapping — no network, no credentials).
 
 ## 9. Execution — chat mode first
 

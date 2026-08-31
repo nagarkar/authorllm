@@ -2517,6 +2517,20 @@ so `propose_change`'s hand-quoted span is byte-identical — which
 only in company with the descending write order, and the two are documented as
 jointly correct or not at all.
 
+**And the index must be counted in the LOCATOR's universe, which is the second
+thing this got wrong.** The first cut counted paragraphs EQUAL to the needle;
+`_locate_in_tab` counts SUBSTRING matches in the tab's joined text. The two agree
+only while no paragraph strictly contains another paragraph's whole text — and a
+refrain that also opens a longer paragraph breaks that, which this manuscript
+produces readily. Where they diverged every form landed in the WRONG paragraph
+and the read-back proof could not see it (the form is present, just not where it
+belongs), so every thread settled `cleaned` and the manuscript was silently
+corrupted. That is strictly worse than the loud nesting failure the parameter
+exists to fix: `main` refuses that input noisily. The recorded rule is that a
+mechanism which trades a loud failure for a silent wrong write has not fixed the
+bug, and that an index is only meaningful together with the universe it counts
+in.
+
 MCP is unchanged, and that is the ruling rather than an omission. `gdocs` is not
 imported by the MCP server at all, deliberately: agent-driven calls must never be
 able to pop an OAuth consent window. The review half the Sponsor named is already
