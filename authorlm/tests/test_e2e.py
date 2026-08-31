@@ -6435,6 +6435,474 @@ def scenario_filter(root: Path) -> None:
         server.shutdown()
 
 
+# ==================================================================
+# Scenario PR — protected terms and the pronunciation dictionary
+# (docs/autoregressive-writing-design.md §15.22)
+#
+# Zero model calls: every reply the pass needs travels on stdin, and the
+# stub's own counter is asserted rather than assumed.
+# ==================================================================
+
+PRON_ESSAY = "\n\n".join([
+    "# Terms of art",
+    "The Chid is what looks out. It is not the Field, and the field it "
+    "stands in is not the Field of Choice either.",
+    "Nāgārjuna wrote that anattā is not a thing a person has. Noether’s "
+    "Theorem is a different kind of statement altogether.",
+    "The Bṛhadāraṇyaka says one thing and the Chid says another. Between "
+    "them is the whole of the difficulty.",
+    "A ledger counts. A ledger counts again, and nothing in it is an "
+    "accusation, which is the point of keeping one. Some transliterate "
+    "the word as chid, without its capital.",
+]) + "\n"
+
+PRON_FILTER = (
+    '---\nclass = "sequential"\n'
+    'prelude = "pronunciations"\n'
+    'state = "the voice note: what has already been heard aloud"\n---\n\n'
+    "# Audio friendly\n\n"
+    "Read each unit aloud in your head and flag what a listener cannot "
+    "follow.\n")
+
+DUP_FILTER = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n---\n\n'
+    "# Duplicate words\n\n"
+    "Flag a word used again too soon.\n")
+
+GLOBAL_PRON_FILTER = (
+    '---\nclass = "global"\n'
+    'state = "not used"\n---\n\n'
+    "# Metaphor consistency\n\nReturn a registry of the motif families.\n")
+
+PRON_SEED_ROWS = (
+    "# Pronunciations\n\n"
+    "How the terms in this book are said aloud.\n\n"
+    "| Term | Say it | Note |\n"
+    "| --- | --- | --- |\n"
+    "| anattā | uh-NUT-taa | Pali |\n"
+    "| Nāgārjuna | naa-GAAR-ju-na |  |\n"
+    "| Ereignis | er-EYE-gnis | German; no concept node carries it |\n")
+
+
+def _pron_section(payload_block: str, header_start: str) -> str:
+    """One named section out of a printed block, up to the next section."""
+    body = payload_block.split(header_start, 1)[1]
+    for nxt in ("\nTHE BOOK'S LEXICON", "\nPRONUNCIATION DICTIONARY",
+                "\nPRIOR RUNS", "\nTHE ESSAY —", "\nHARD TERMS",
+                "\nOUTPUT CONTRACT"):
+        if nxt in body:
+            body = body.split(nxt, 1)[0]
+    return body
+
+
+def scenario_pronunciations(root: Path) -> None:
+    print("Scenario PR — protected terms and the pronunciation dictionary "
+          "(§15.22)")
+    import subprocess
+
+    from authorlm import api as _api
+    from authorlm import filtering as _fg
+    from authorlm import pronunciations as _pron
+    from authorlm.db import Database as _DB, loads as _loads
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "pron"
+        ms = ws / "manuscript"
+        write(ms / "01-open.md", CH1)
+        write(ms / "02-terms.md", PRON_ESSAY)
+        write(ms / "toc.toml",
+              '[[chapter]]\nfile = "01-open.md"\n\n'
+              '[[chapter]]\nfile = "02-terms.md"\n')
+        _draft_config(ws, server.server_port)
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        db = _DB(ws / ".authorlm" / "authorlm.db")
+        manuscript = _api.get_manuscript(db)
+        mid = manuscript["id"]
+        run(ws, "collect")
+        dict_path = ms / _pron.FILENAME
+
+        # ---------- the fixture graph: every kind, every status --------
+        _api.add_concept(db, manuscript, "Chid", kind="concept",
+                         notes="what looks out")
+        _api.add_concept(db, manuscript, "Field of Choice", kind="concept",
+                         notes="where choosing happens")
+        _api.alias_concept(db, manuscript, "Field of Choice",
+                           ["the Field"])
+        _api.add_concept(db, manuscript, "Field", kind="concept",
+                         notes="the ordinary word, capitalized")
+        _api.add_concept(db, manuscript, "anattā", kind="concept",
+                         notes="no self")
+        _api.add_concept(db, manuscript, "Nāgārjuna",
+                         kind="historical_reference", notes="the man")
+        _api.add_concept(db, manuscript, "Bṛhadāraṇyaka",
+                         kind="historical_reference", notes="the upaniṣad")
+        _api.add_concept(db, manuscript, "Noether’s Theorem",
+                         kind="mathematical_construct", notes="a symmetry")
+        _api.add_concept(db, manuscript, "The Ledger", kind="metaphor",
+                         notes="the count a life can read")
+        for kind, name in (("objection", "Objection to Man as beast"),
+                           ("example", "The Herdsman’s lantern"),
+                           ("question", "Question about Supreme God"),
+                           ("syllogism", "Syllogism of the wall")):
+            _api.add_concept(db, manuscript, name, kind=kind, notes="a move")
+        _api.add_concept(db, manuscript, "Abandoned Wording", kind="concept",
+                         notes="deliberately given up")
+        _api.retire_concept(db, manuscript, "Abandoned Wording")
+        _api.add_concept(db, manuscript, "Chid-consciousness", kind="concept",
+                         notes="a duplicate of Chid")
+        _api.merge_concepts(db, manuscript, "Chid", "Chid-consciousness")
+        run(ws, "collect")
+
+        run_stdin(ws, PRON_FILTER, "filter", "add", "audio-friendly")
+        run_stdin(ws, DUP_FILTER, "filter", "add", "duplicate-words")
+        run_stdin(ws, GLOBAL_PRON_FILTER, "filter", "add", "metaphor")
+
+        # ================= T2 — the derivation ======================
+        out1 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_a = _block(out1, "A")
+        in_essay = _pron_section(block_a, "IN THIS ESSAY\n")
+        lexicon = _pron_section(block_a, "allusion)\n")
+        check("T2 the four VOCABULARY kinds are protected — concept, "
+              "metaphor, mathematical_construct, historical_reference",
+              all(f"- {n}" in lexicon for n in
+                  ("Chid", "The Ledger", "Noether’s Theorem", "Nāgārjuna")),
+              lexicon)
+        check("T2 the four LABEL kinds are NOT — their names are "
+              "SENTENCES, and a list that protects the ordinary English "
+              "inside them protects nothing",
+              not any(n in block_a for n in
+                      ("Objection to Man as beast", "Herdsman’s lantern",
+                       "Question about Supreme God", "Syllogism of the wall")),
+              block_a)
+        check("T2 a RETIRED name is not protected — it is vocabulary the "
+              "author deliberately abandoned, and freezing it would freeze "
+              "exactly the wording a recast should be free to move",
+              "Abandoned Wording" not in block_a, block_a)
+        check("T2 a DECLARED concept IS protected: the author ratified the "
+              "name, and realization is a scan that may not have caught up",
+              "- Bṛhadāraṇyaka" in lexicon, lexicon)
+        check("T2 aliases ride on their node's line after ' · ', never on "
+              "lines of their own — the grouping is information the "
+              "homophone rule can use",
+              "- Field of Choice · the Field" in in_essay, in_essay)
+        check("T2 a synonym that survived retirement through "
+              "merge_concepts is protected THROUGH THE CANONICAL",
+              "Chid · Chid-consciousness" in in_essay
+              or "- Chid" in in_essay and "Chid-consciousness" in lexicon,
+              in_essay + "|" + lexicon)
+
+        # ================= T3 — the rule is prose ===================
+        check("T3 a single-word LOWER-CASE name is in the list — a rule "
+              "that only protected capitalized names would drop every "
+              "borrowed term from the protection they most need",
+              "- anattā" in in_essay, in_essay)
+        check("T3 and a single-word CAPITALIZED name is too",
+              "- Field\n" in in_essay, in_essay)
+        check("T3 the capitalization rule appears in the header exactly "
+              "ONCE, as prose",
+              block_a.count("is ordinary English") == 1, block_a)
+        check("T3 and NOWHERE as a per-line annotation — the list is "
+              "rendered unmarked",
+              "(capitalized only)" not in block_a
+              and "[capitalized]" not in block_a, block_a)
+
+        # ================= T1 — byte-stable protection ===============
+        out2 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        check("T1 two assemblies on identical stored state produce a "
+              "BYTE-IDENTICAL block A",
+              _block_hash(out1, "A") == _block_hash(out2, "A"),
+              f"{_block_hash(out1, 'A')} vs {_block_hash(out2, 'A')}")
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = "12345"
+        env["AUTHORLM_CONFIG"] = str(ws / ".authorlm" / "config.toml")
+        env["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+        env["AUTHORLM_CLIENT"] = "none"
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        proc = subprocess.run(
+            [sys.executable,
+             str(Path(__file__).resolve().parent.parent / "main.py"),
+             "--workspace", str(ws),
+             "filter", "run", "duplicate-words", "02-terms.md"],
+            env=env, capture_output=True, text=True)
+        check("T1 ...in a SEPARATE PROCESS with a different "
+              "PYTHONHASHSEED too — the derivation walks sets, and a "
+              "sorted() that was forgotten would show up here and "
+              "nowhere else",
+              proc.returncode == 0
+              and _block_hash(proc.stdout, "A") == _block_hash(out1, "A"),
+              proc.stdout[-800:] + proc.stderr[-400:])
+
+        # ================= T4/T5 — the dictionary in block A =========
+        check("T4 an absent dictionary renders (none) rather than the "
+              "section disappearing — a section that comes and goes is a "
+              "shape change, and shape changes are cache invalidations",
+              "PRONUNCIATION DICTIONARY (settled by the author" in block_a
+              and _pron_section(block_a, "the dictionary IS the fix)\n")
+              .strip() == "(none)",
+              _pron_section(block_a, "the dictionary IS the fix)\n"))
+        dict_path.write_text(PRON_SEED_ROWS, encoding="utf-8")
+        out3 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_a3 = _block(out3, "A")
+        check("T5 adding a dictionary row changes block A and NOTHING "
+              "else — an honest invalidation, because the suppression set "
+              "genuinely changed",
+              _block_hash(out3, "A") != _block_hash(out1, "A")
+              and _block_hash(out3, "S") == _block_hash(out1, "S")
+              and _block_hash(out3, "B") == _block_hash(out1, "B")
+              and _block_hash(out3, "C") == _block_hash(out1, "C"),
+              f"S {_block_hash(out3, 'S')}/{_block_hash(out1, 'S')} "
+              f"A {_block_hash(out3, 'A')}/{_block_hash(out1, 'A')}")
+        rendered = _pron_section(block_a3, "the dictionary IS the fix)\n")
+        check("T4 rows render sorted by term key, note in parentheses, "
+              "omitted when empty",
+              rendered.strip().splitlines() == [
+                  "- anattā — uh-NUT-taa (Pali)",
+                  "- Ereignis — er-EYE-gnis (German; no concept node "
+                  "carries it)",
+                  "- Nāgārjuna — naa-GAAR-ju-na"], repr(rendered))
+        check("T4 a dictionary term with NO concept node is in the "
+              "protected set — a term the author ruled on aloud is by "
+              "construction a term of art",
+              "- Ereignis" in _pron_section(block_a3, "allusion)\n"),
+              _pron_section(block_a3, "allusion)\n"))
+        run_stdin(ws, json.dumps({"registry": "ledger — the count."}),
+                  "filter", "prelude", "metaphor", "02-terms.md")
+        gout = run(ws, "filter", "run", "metaphor", "02-terms.md")
+        check("T4 a GLOBAL filter's block A carries both sections too — a "
+              "motif family's own name is a protected term, and a "
+              "`replace` that swaps it for a synonym is precisely the harm",
+              "PROTECTED TERMS" in _block(gout, "A")
+              and "- anattā — uh-NUT-taa (Pali)" in _block(gout, "A"),
+              _block(gout, "A")[:400])
+        run(ws, "filter", "abandon", "metaphor", "02-terms.md")
+
+        # ================= T6 — protected_loss =======================
+        protected = ["Field", "Chid", "anattā", "Field of Choice"]
+        check("T6 'Field' → 'the field of choosing' IS a loss: the "
+              "capitalization rule is mention_pattern's, so the "
+              "lower-case survivor does not count as the term",
+              _fg.protected_loss("The Field is where it happens.",
+                                 "The field of choosing is where it "
+                                 "happens.", protected) == ["Field"], "")
+        check("T6 'field' → 'meadow' is NOT a loss — the ordinary word "
+              "was never the term",
+              _fg.protected_loss("a field of grass", "a meadow of grass",
+                                 protected) == [], "")
+        check("T6 dropping ONE of two mentions is NOT a loss — which is "
+              "exactly why this warns rather than refusing",
+              _fg.protected_loss("The Chid and the Chid again.",
+                                 "The Chid, once.", protected) == [], "")
+        before_calls = StubLLMHandler.REQUESTS
+        _fg.protected_loss("anattā here", "nothing here", protected)
+        check("T6 the function is pure and makes no model call",
+              StubLLMHandler.REQUESTS == before_calls, "")
+
+        # ================= E1 — protection reaches the door ==========
+        units = _filter_units(PRON_ESSAY)
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md",
+                  "--window", "5")
+        check("E1 the payload carries the essay's own terms under "
+              "PROTECTED TERMS · IN THIS ESSAY",
+              "- Chid" in _pron_section(_block(out, "A"), "IN THIS ESSAY\n"),
+              _block(out, "A"))
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'duplicate-words' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        losing = _filter_reply(
+            units, tuple(window),
+            replaces={2: "The mind is what looks out. It is not the Field, "
+                         "and the field it stands in is not the Field of "
+                         "Choice either."})
+        rec = run_stdin(ws, losing, "filter", "record", "02-terms.md")
+        check("E1 filter record WARNS by name when a replacement drops a "
+              "protected term the original carried",
+              "'Chid'" in rec and "PROTECTED TERMS" in rec, rec)
+        check("E1 ...and STAGES it anyway — the harness supplies the law, "
+              "it is not the editor",
+              api_filter_edit_count(db, mid, "02-terms.md") == 1
+              and "Staged anyway" in rec, rec)
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+        run(ws, "filter", "unmark", "02-terms.md") \
+            if "<<" in (ms / "02-terms.md").read_text() else None
+        for row in db.all("SELECT id FROM doc_threads WHERE "
+                          "manuscript_id = ? AND origin_type = 'filter'",
+                          (mid,)):
+            db.update("doc_threads", row["id"], {"state": "withdrawn"})
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md",
+                  "--window", "5")
+        keeping = _filter_reply(units, tuple(window))
+        rec2 = run_stdin(ws, keeping, "filter", "record", "02-terms.md")
+        check("E1 a reply that keeps the term produces NO warning",
+              "PROTECTED TERMS" not in rec2, rec2)
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+
+        # ================= T7 — the prelude reply's refusals ==========
+        def pron_rows() -> int:
+            return db.one("SELECT COUNT(*) AS n FROM knowledge_proposals "
+                          "WHERE manuscript_id = ? AND kind = "
+                          "'pronunciation'", (mid,))["n"]
+
+        def refuse(label: str, body, expect: str) -> None:
+            before = pron_rows()
+            out = run_stdin(ws, body if isinstance(body, str)
+                            else json.dumps(body),
+                            "filter", "prelude", "audio-friendly",
+                            "02-terms.md", expect_exit=True)
+            check(f"T7 {label}", expect in out, out)
+            check(f"T7 ...and nothing was created ({label})",
+                  pron_rows() == before, f"{before} -> {pron_rows()}")
+
+        refuse("a reply that is not a JSON object",
+               "[]", "not a JSON object")
+        refuse("a reply with no `pronunciations` list",
+               {"terms": []}, "must return a `pronunciations` list")
+        refuse("a term that is not in the essay verbatim — the anchoring "
+               "law, applied to the prelude",
+               {"pronunciations": [{"term": "Kierkegaard", "say": "KEER"}]},
+               "does not appear in the essay verbatim")
+        refuse("an entry with no pronunciation",
+               {"pronunciations": [{"term": "anattā", "say": ""}]},
+               "has no pronunciation")
+        refuse("a reserved marker in any field",
+               {"pronunciations": [{"term": "Chid", "say": "chit",
+                                    "note": "see <<this>>"}]},
+               "reserved grammar")
+        refuse("a newline in any field — a row is ONE LINE",
+               {"pronunciations": [{"term": "Chid", "say": "chit\nchit"}]},
+               "carries a newline")
+        refuse("two entries that are the same term under key()",
+               {"pronunciations": [{"term": "Chid", "say": "chit"},
+                                   {"term": "chid", "say": "kid"}]},
+               "are the same term")
+        refuse("a term the dictionary already carries — additions only",
+               {"pronunciations": [{"term": "anattā", "say": "AN-at-ta"}]},
+               "already in PRONUNCIATION DICTIONARY")
+        refuse("more than the cap in one reply — refused, never truncated",
+               {"pronunciations": [{"term": "Chid", "say": f"c{n}"}
+                                   for n in range(61)]},
+               "over the 60 cap")
+
+        # ================= E2 — the loop closes ======================
+        before_calls = StubLLMHandler.REQUESTS
+        pre = run_stdin(ws, "", "filter", "prelude", "audio-friendly",
+                        "02-terms.md")
+        check("E2 the prelude payload prints with no call made, and its "
+              "block C is the pronunciation contract rather than the "
+              "registry's",
+              "no call made" in pre
+              and "HARD TERMS FOUND IN THIS ESSAY" in _block(pre, "C")
+              and '{"pronunciations"' in _block(pre, "C")
+              and "registry" not in _block(pre, "C"), _block(pre, "C"))
+        hard = _pron_section(_block(pre, "C"),
+                             "already has it)\n")
+        check("E2 HARD TERMS is F1 and only F1: a non-ASCII LETTER, never "
+              "a curly apostrophe — Bṛhadāraṇyaka is in, Noether’s "
+              "Theorem is out, and a term the dictionary already carries "
+              "is out too",
+              hard.strip().splitlines() == ["- Bṛhadāraṇyaka"],
+              repr(hard))
+        check("E2 the prelude makes ZERO model calls on the chat path",
+              StubLLMHandler.REQUESTS == before_calls, "")
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Bṛhadāraṇyaka", "say": "bri-ha-DAA-ran-ya-ka",
+             "note": "Sanskrit"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md")
+        check("E2 one proposal is filed on the ORDINARY queue",
+              "1 pronunciation(s) proposed" in out
+              and "Bṛhadāraṇyaka" in out, out)
+        listed = run(ws, "proposal", "list")
+        check("E2 it reads on the queue with no new surface — "
+              "kind-agnostic list, describe's own summary",
+              "pronounce 'Bṛhadāraṇyaka' — bri-ha-DAA-ran-ya-ka" in listed,
+              listed)
+        pid = db.one("SELECT id FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "state = 'open'", (mid,))["id"]
+        acc = run(ws, "proposal", "accept", pid)
+        check("E2 accepting writes the row into pronunciations.md — the "
+              "adopt path, deterministically, never the model",
+              "written into pronunciations.md" in acc
+              and {"term": "Bṛhadāraṇyaka", "say": "bri-ha-DAA-ran-ya-ka",
+                   "note": "Sanskrit"}
+              in _pron.parse(dict_path.read_text())[0], acc)
+        check("E2 and it rewrote no line it did not add",
+              dict_path.read_text().startswith(PRON_SEED_ROWS),
+              dict_path.read_text())
+        pre2 = run_stdin(ws, "", "filter", "prelude", "audio-friendly",
+                         "02-terms.md", "--replace")
+        hard2 = _pron_section(_block(pre2, "C"), "already has it)\n")
+        check("E2 THE LOOP CLOSES: re-running the prelude flags nothing — "
+              "the term is settled, and the dictionary is both this "
+              "pass's output channel and its suppression list",
+              hard2.strip() == "(none)", repr(hard2))
+        check("E2 ...and the term is now in block A's PRONUNCIATION "
+              "DICTIONARY, told to the filter as settled",
+              "- Bṛhadāraṇyaka — bri-ha-DAA-ran-ya-ka (Sanskrit)"
+              in _block(pre2, "A"), _block(pre2, "A"))
+        aud = run(ws, "filter", "run", "audio-friendly", "02-terms.md")
+        check("E2 and `filter run audio-friendly` judges its units against "
+              "a payload that carries it",
+              "- Bṛhadāraṇyaka — bri-ha-DAA-ran-ya-ka (Sanskrit)"
+              in _block(aud, "A"), _block(aud, "A"))
+        check("E2 a second prelude ALSO re-proposes nothing rather than "
+              "asking again",
+              "0 pronunciation(s) proposed" in run_stdin(
+                  ws, json.dumps({"pronunciations": []}), "filter",
+                  "prelude", "audio-friendly", "02-terms.md", "--replace"),
+              "")
+
+        # ================= E8 — the prelude's own idempotency ========
+        out = run_stdin(ws, json.dumps({"pronunciations": []}), "filter",
+                        "prelude", "audio-friendly", "02-terms.md",
+                        expect_exit=True)
+        check("E8 a second prelude on the same active run REFUSES without "
+              "--replace, mirroring the registry's refusal",
+              "already ran its pronunciation prelude" in out
+              and "--replace" in out, out)
+
+        # ================= E4 — rejected never re-proposed ===========
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Chid", "say": "chit", "note": "Sanskrit"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md",
+            "--replace")
+        check("E4 a term above the F1 floor can still be proposed — the "
+              "list is a floor, not a ceiling",
+              "1 pronunciation(s) proposed" in out, out)
+        pid = db.one("SELECT id FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "state = 'open'", (mid,))["id"]
+        run(ws, "proposal", "dismiss", pid, "--why",
+            "everyone in this book's audience can say Chid")
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Chid", "say": "SHEED", "note": "a different guess"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md",
+            "--replace")
+        check("E4 a DIFFERENT respelling of a dismissed term is not "
+              "re-proposed — the guard is on the TERM, not the spelling, "
+              "which the content hash alone would have let straight past",
+              "0 pronunciation(s) proposed, 1 suppressed" in out
+              and "already settled, not re-asked: Chid" in out, out)
+        check("E4 ...and no second row was written",
+              db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "target = 'chid'", (mid,))["n"] == 1, "")
+        ev = db.one(
+            "SELECT metadata FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'proposal_review' AND signal = 'dismissed' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,))
+        check("E4 the dismissal reason is on the evidence stream VERBATIM",
+              _loads(ev["metadata"], {}).get("explanation")
+              == "everyone in this book's audience can say Chid",
+              str(ev["metadata"]))
+    finally:
+        server.shutdown()
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
     try:
@@ -6460,6 +6928,7 @@ def main_test() -> None:
         scenario_watcher_guard(root)
         scenario_testbench(root)
         scenario_filter(root)
+        scenario_pronunciations(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
