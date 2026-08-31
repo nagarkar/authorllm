@@ -6891,6 +6891,16 @@ def scenario_pronunciations(root: Path) -> None:
               db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
                      "manuscript_id = ? AND kind = 'pronunciation' AND "
                      "target = 'chid'", (mid,))["n"] == 1, "")
+        from authorlm import proposals as _prop
+        check("E4 ...and the guard that does it is DETERMINISTIC and "
+              "kind-specific: a prior row in ANY state settles the term. "
+              "The near-duplicate firewall would also catch this pair, "
+              "but only because its dedupe text is the term alone — it "
+              "is a similarity THRESHOLD, and this is not",
+              _prop._pronunciation_settled(db, mid, _pron.key("Chid"))
+              and _prop._pronunciation_settled(db, mid, _pron.key("chid"))
+              and not _prop._pronunciation_settled(
+                  db, mid, _pron.key("Līlā")), "")
         ev = db.one(
             "SELECT metadata FROM evidence WHERE manuscript_id = ? AND "
             "evidence_type = 'proposal_review' AND signal = 'dismissed' "
@@ -7037,6 +7047,221 @@ def scenario_pronunciations(root: Path) -> None:
         server.shutdown()
 
 
+def _pron_tab_tree(pairs: list[tuple[str, str]]) -> dict:
+    """A Docs tab tree: [(tab_id, title)] flat under one container."""
+    return {"tabs": [{
+        "tabProperties": {"tabId": "root", "title": "book"},
+        "childTabs": [{"tabProperties": {"tabId": tid, "title": title},
+                       "childTabs": []} for tid, title in pairs]}]}
+
+
+class _PronDocsService:
+    """The Docs API's read half: the tab tree, and nothing else."""
+
+    def __init__(self, tree):
+        self.tree = tree
+
+    def documents(self):
+        outer = self
+
+        class Docs:
+            @staticmethod
+            def get(documentId, includeTabsContent=False):
+                class R:
+                    @staticmethod
+                    def execute():
+                        return outer.tree
+                return R()
+        return Docs()
+
+
+class _PronDriveService:
+    """The Drive API's export half: one whole-master markdown blob."""
+
+    def __init__(self, export: str):
+        self.export = export
+
+    def files(self):
+        outer = self
+
+        class Files:
+            @staticmethod
+            def export(fileId, mimeType):
+                class R:
+                    @staticmethod
+                    def execute():
+                        return outer.export.encode("utf-8")
+                return R()
+        return Files()
+
+
+def scenario_pronunciation_bridge(root: Path) -> None:
+    """E5 and E7 — the Doc bridge (§15.22 §2.5 rows 19, 22-25).
+
+    Driven at the seam against recording doubles rather than through the
+    CLI: what is under test is `sync_tab_structure`, the pull's toc sync,
+    `rewrite_toc_from_doc` and the zero-rows guard, and each of those is
+    a function that takes a tab tree and a markdown export."""
+    print("Scenario PB — the pronunciation dictionary across the Doc bridge")
+    import json as _json
+
+    from authorlm import api as _api
+    from authorlm import gdocs as _gd
+    from authorlm import pronunciations as _pron
+    from authorlm.db import Database as _DB
+    from authorlm.structure import parse_toc_tree
+
+    ws = root / "pbridge"
+    ms = ws / "manuscript"
+    write(ms / "01-open.md", "# One\n\nThe first essay.\n")
+    write(ms / "02-next.md", "# Two\n\nThe second essay.\n")
+    write(ms / "toc.toml",
+          '[[chapter]]\nfile = "01-open.md"\n\n'
+          '[[chapter]]\nfile = "02-next.md"\n')
+    write(ms / _pron.FILENAME, PRON_SEED_ROWS)
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    db = _DB(ws / ".authorlm" / "authorlm.db")
+    manuscript = _api.get_manuscript(db)
+
+    bridge = _gd.manuscript_bridge(manuscript)
+    order = _gd._reading_order_files(bridge)
+    check("E7 the dictionary IS in the tab list — the ONE inversion — and "
+          "it is APPENDED LAST, after every essay",
+          order == ["01-open.md", "02-next.md", _pron.FILENAME], order)
+
+    # The mapping a push would have left behind: one tab per file,
+    # dictionary included.
+    tabs = [("t1", "01-open.md"), ("t2", "02-next.md"),
+            ("t3", _pron.FILENAME)]
+    links = {"_master_id": "master-1", "_container_tab": "root"}
+    for tid, title in tabs:
+        links[title] = {"tab_id": tid, "checked_out": False}
+    _gd._save_mapping(db, manuscript, {"gdocs": links})
+    docs = _PronDocsService(_pron_tab_tree(tabs))
+
+    # ---- E7 / site 23: sync_tab_structure -------------------------
+    state = _gd.sync_tab_structure(db, manuscript, docs)
+    check("E7 site 23: sync_tab_structure reports INSYNC with a mapped "
+          "dictionary tab present. Without the guard `linked` holds a "
+          "file `parse_toc_tree` never can, the two lists can never "
+          "agree, and tab-order sync stops working forever",
+          state == {"insync": True}, state)
+    saved = _gd._mapping(db, manuscript)["gdocs"].get("_tab_structure")
+    check("E7 ...and the recorded base carries the essays only, so the "
+          "next comparison starts from a list the toc can match",
+          [tuple(x) for x in saved] == [("01-open.md", None),
+                                        ("02-next.md", None)], saved)
+
+    # ---- E7 / site 25: rewrite_toc_from_doc -----------------------
+    toc_path = ms / "toc.toml"
+    before = toc_path.read_bytes()
+    _gd.rewrite_toc_from_doc(
+        manuscript, [("01-open.md", None), (_pron.FILENAME, None),
+                     ("02-next.md", None)],
+        parse_toc_tree(before.decode()))
+    entries = [n for n, _ in parse_toc_tree(toc_path.read_text())]
+    check("E7 site 25: rewrite_toc_from_doc NEVER writes the dictionary "
+          "into toc.toml, even handed a doc list that names it. That is "
+          "the one that does the most damage: a dictionary in toc.toml is "
+          "a CHAPTER, and every exclusion unravels at once",
+          _pron.FILENAME not in entries
+          and entries == ["01-open.md", "02-next.md"], entries)
+    toc_path.write_bytes(before)
+
+    # ---- E7 / site 24 + E5: the pull ------------------------------
+    def export_of(files: dict[str, str]) -> str:
+        # The container tab is the first boundary in the Docs export,
+        # exactly as walk_tabs reports it — split_tabbed_export matches
+        # positionally, so an export missing it splits into nothing.
+        return "# **book**\n\n" + "".join(
+            f"# **{name}**\n\n{text}\n" for name, text in files.items())
+
+    live = {"01-open.md": "# One\n\nThe first essay.\n",
+            "02-next.md": "# Two\n\nThe second essay.\n",
+            _pron.FILENAME: PRON_SEED_ROWS}
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of(live)), docs_service=docs, with_comments=False)
+    check("E5 a clean round trip: the Docs export of the dictionary tab "
+          "parses back to exactly the rows that went out",
+          _pron.parse((ms / _pron.FILENAME).read_text())[0]
+          == _pron.parse(PRON_SEED_ROWS)[0]
+          and _pron.FILENAME not in report["conflicts"]
+          and _pron.FILENAME not in report["missing"]
+          and _pron.FILENAME in (report["changed"] + report["unchanged"]),
+          report)
+    check("E7 site 24: a pull whose Doc tab order is unchanged does NOT "
+          "rewrite toc.toml, and does not report a conflict — the same "
+          "mismatched comparison as site 23, on the pull side",
+          not report.get("toc_updated") and not report.get("toc_conflict")
+          and toc_path.read_bytes() == before, report)
+    check("E7 ...and toc.toml still has no pronunciations.md chapter "
+          "after a full pull",
+          _pron.FILENAME not in
+          [n for n, _ in parse_toc_tree(toc_path.read_text())],
+          toc_path.read_text())
+
+    # A Docs export that mangled the table into bullet lines: the row
+    # count goes to ZERO, and this is the pull that would destroy the
+    # dictionary.
+    frozen = (ms / _pron.FILENAME).read_bytes()
+    mangled = ("# Pronunciations\n\nHow the terms in this book are said "
+               "aloud.\n\n- anattā uh-NUT-taa Pali\n- Nāgārjuna "
+               "naa-GAAR-ju-na\n- Ereignis er-EYE-gnis German\n")
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: mangled})),
+        docs_service=docs, with_comments=False)
+    check("E5 the zero-rows guard: a mangled export is SKIPPED and "
+          "reported by name",
+          report.get("sidecar_unparsable") == [_pron.FILENAME], report)
+    check("E5 ...and the local bytes are untouched — asserted by outcome, "
+          "the way push_doc's is_marked guard is",
+          (ms / _pron.FILENAME).read_bytes() == frozen,
+          (ms / _pron.FILENAME).read_text()[:200])
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: mangled})),
+        docs_service=docs, force=True, with_comments=False)
+    check("E5 ...and --force DOES NOT REACH PAST IT. 'Mostly "
+          "unreachable' is not a guard, and neither is a guard with a "
+          "flag that turns it off",
+          report.get("sidecar_unparsable") == [_pron.FILENAME]
+          and (ms / _pron.FILENAME).read_bytes() == frozen, report)
+
+    # FEWER rows is the author deleting a row in the Doc, which is
+    # legitimate and must work.
+    shorter = ("# Pronunciations\n\nHow the terms in this book are said "
+               "aloud.\n\n| Term | Say it | Note |\n| --- | --- | --- |\n"
+               "| anattā | uh-NUT-taa | Pali |\n")
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: shorter})),
+        docs_service=docs, with_comments=False)
+    check("E5 a pull that parses to FEWER rows is not guarded — that is "
+          "an author deleting a row in the Doc, and it must work",
+          not report.get("sidecar_unparsable")
+          and [r["term"] for r in
+               _pron.parse((ms / _pron.FILENAME).read_text())[0]]
+          == ["anattā"],
+          (ms / _pron.FILENAME).read_text())
+
+    # And the Docs shape itself: colons, bold, padding, escapes.
+    docsy = ("# Pronunciations\n\nHow the terms in this book are said "
+             "aloud.\n\n| **Term** | **Say it** | **Note** |\n"
+             "| :--- | :---: | --- |\n"
+             "|  anattā  |  uh-NUT-taa  | Pali |\n"
+             "| Śūnyatā | shoon-yuh-TAA | Sanskrit |\n"
+             "|  |  |  |\n")
+    _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: docsy})),
+        docs_service=docs, with_comments=False)
+    check("E5 a Docs-SHAPED export round-trips to the rows it means — "
+          "the parser's tolerance list is written against what Docs "
+          "actually emits, and normalize_markdown runs before it",
+          _pron.parse((ms / _pron.FILENAME).read_text())[0]
+          == [{"term": "anattā", "say": "uh-NUT-taa", "note": "Pali"},
+              {"term": "Śūnyatā", "say": "shoon-yuh-TAA",
+               "note": "Sanskrit"}],
+          (ms / _pron.FILENAME).read_text())
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-e2e-"))
     try:
@@ -7063,6 +7288,7 @@ def main_test() -> None:
         scenario_testbench(root)
         scenario_filter(root)
         scenario_pronunciations(root)
+        scenario_pronunciation_bridge(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
