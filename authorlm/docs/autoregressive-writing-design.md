@@ -2408,6 +2408,24 @@ and because a template needs a worked example. One sentence names STYLE LAW's
   hatch, and it is a better one.
 - **Refusing a reply that drops a protected term.** It warns. The harness
   supplies law; it is not the editor.
+- **Pointing the bench's live check at the author's real graph.** Found by the
+  live acceptance: `--check pronunciations` asserted "the protected set is
+  non-empty" against the testbench manuscript, which is registered
+  `--no-extract` and therefore has no graph at all — so that assertion could
+  never pass on its own, and its two siblings ("no retired name", "no label
+  kind") passed VACUOUSLY over empty sets and would have passed over a
+  completely broken derivation. Reading the author's real manuscript instead
+  was refused: `testbench.py`'s load-bearing rail is that nothing in it
+  resolves a manuscript by argument, and a live read would have to resolve one
+  nobody named — "the manuscript that is not the testbench" — making the
+  check's verdict depend on which manuscripts happen to be registered in the
+  workspace. `--setup` now seeds four concepts on the bench instead (one plain,
+  one non-ASCII, one label kind, one retired), the check asserts them BY NAME,
+  and the two vacuous assertions gained a precondition that the bench really
+  has a retired node and a label-kind node for them to be about. The
+  live-graph question is answered by the product rather than by the script,
+  and the measurement is recorded: `protected_terms` over the live SMSTTD graph
+  returns 313 nodes / 348 names, which is §1.6's own figure.
 - **Seeding the file from a filter path.** `pronunciations.md` appears on the
   first ACCEPTED proposal and never before. An empty table that materializes
   because a filter *ran* is a file in the author's vault they did not ask for,

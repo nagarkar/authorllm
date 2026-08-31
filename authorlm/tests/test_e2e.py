@@ -5471,20 +5471,45 @@ def scenario_testbench(root: Path) -> None:
 
         # --- the pronunciations check (§15.22) ---------------------------
         _pin_config(ws)
+        # WITH NO DICTIONARY AT ALL, first, and that ordering is the
+        # point. The first cut of this check asserted only "the protected
+        # set is non-empty" against a bench registered `--no-extract`,
+        # whose graph is empty by design — so it could never pass on its
+        # own. It passed here only because the test wrote a
+        # pronunciations.md moments earlier and list 3 (the dictionary's
+        # own terms) made the set non-empty. The check was green for a
+        # reason that had nothing to do with the derivation.
+        check("the bench has no dictionary yet — the case the check used "
+              "to be unable to pass",
+              not (msdir / "pronunciations.md").exists())
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "pronunciations")
+        check("the pronunciations check passes on a healthy bench with NO "
+              "dictionary, because --setup seeds the graph the derivation "
+              "runs over, and it asserts the seeded names BY NAME rather "
+              "than merely counting them",
+              "FAIL" not in out
+              and "carries the bench's vocabulary kinds BY NAME" in out
+              and "F1 admits all 16 non-ASCII-LETTER names" in out
+              and "F1 refuses the two whose only non-ASCII character is a "
+                  "curly apostrophe" in out, out)
+        check("...and the two assertions that used to pass VACUOUSLY over "
+              "empty sets now assert the bench really has a retired name "
+              "and a label-kind node for them to be about",
+              "the bench really HAS a retired name" in out
+              and "the bench really HAS a label-kind node" in out, out)
+        check("...and F1 runs over a name the DERIVATION produced, not "
+              "only over the recorded literals",
+              "F1 runs over a name the DERIVATION produced" in out, out)
         (msdir / "pronunciations.md").write_text(
             "# Pronunciations\n\nHow they are said.\n\n"
             "| Term | Say it | Note |\n| --- | --- | --- |\n"
             "| Nothing | NUH-thing | the book's own word |\n",
             encoding="utf-8")
-        before = StubLLMHandler.REQUESTS
         out = bench("--check", "pronunciations")
-        check("the pronunciations check passes on a healthy bench, and "
-              "asserts the F1 floor against REAL names rather than "
-              "invented ones",
-              "FAIL" not in out
-              and "F1 admits all 16 non-ASCII-LETTER names" in out
-              and "F1 refuses the two whose only non-ASCII character is a "
-                  "curly apostrophe" in out, out)
+        check("and it passes with a dictionary too, whose terms join the "
+              "protected set through list 3",
+              "FAIL" not in out, out)
         check("...and it is READ-ONLY: not one model call, and no verb "
               "that writes",
               StubLLMHandler.REQUESTS == before,
