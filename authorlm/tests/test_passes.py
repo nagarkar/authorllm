@@ -880,7 +880,8 @@ def _the_doc_transport_push(root: Path) -> None:
     before = (ms / "solo.md").read_bytes()
     observed_before = _rev.read_manuscript_files(ms)["solo.md"]
 
-    result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
 
     # --- F-D2: local holds OLD, unmarked, byte-identical --------------
     check("F-D2 the local file is BYTE-IDENTICAL to its pre-push text — "
@@ -956,7 +957,8 @@ def _the_doc_transport_push(root: Path) -> None:
     # --- a second push is refused, naming both exits ------------------
     raised2 = None
     try:
-        api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+        api.filter_push(db, manuscript, {}, "solo.md",
+                        services=lambda: (fake, fake))
     except ValueError as err:
         raised2 = str(err)
     check("a second push while forms are out refuses early and BY NAME "
@@ -972,7 +974,8 @@ def _the_doc_transport_push(root: Path) -> None:
     gdocs._save_mapping(db3, ms3, meta)
     raised3 = None
     try:
-        api.filter_push(db3, ms3, {}, "solo.md", fake3, fake3)
+        api.filter_push(db3, ms3, {}, "solo.md",
+                        services=lambda: (fake3, fake3))
     except ValueError as err:
         raised3 = str(err)
     check("F-D11 `filter push` refuses a CHECKED-OUT file, naming `doc "
@@ -1007,7 +1010,8 @@ def _the_push_is_partial_or_nothing(root: Path) -> None:
 
     gdocs.push_doc = _push_then_edit
     try:
-        result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+        result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
     finally:
         gdocs.push_doc = original
 
@@ -1039,7 +1043,8 @@ def _the_push_is_partial_or_nothing(root: Path) -> None:
 
     gdocs.push_doc = _push_then_wipe
     try:
-        result2 = api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+        result2 = api.filter_push(db2, ms2, {}, "solo.md",
+                                  services=lambda: (fake2, fake2))
     finally:
         gdocs.push_doc = original
     check("F-D4 a push where NOTHING landed leaves the transport "
@@ -1062,7 +1067,8 @@ def _twins_go_to_the_doc(root: Path) -> None:
     db, manuscript, ms, fake = _doc_run(
         root, "twins-push-ws", {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
     mid = manuscript["id"]
-    result = api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
     note = "\n".join(result["warnings"])
     check("§9.2 push says the twins exist — naming the shared text, both "
           "units, and the one input that misfiles the record",
@@ -1100,7 +1106,8 @@ def _the_doc_settle(root: Path) -> None:
         root, "settle-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED.",
                             6: "SIX AS PROPOSED."})
     mid = manuscript["id"]
-    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
     # The author, in the Doc: rewords one, leaves one alone, DELETES the
     # whole marked span of the third.
     _reword_in_tab(fake, "{{TWO AS PROPOSED.}}", "{{TWO, IN MY OWN WORDS.}}")
@@ -1169,7 +1176,8 @@ def _the_doc_settle(root: Path) -> None:
     db2, ms2, msdir2, fake2 = _doc_run(root, "conflict-ws",
                                        {2: "TWO AS PROPOSED."})
     mid2 = ms2["id"]
-    api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+    api.filter_push(db2, ms2, {}, "solo.md",
+                    services=lambda: (fake2, fake2))
     local_drift = (msdir2 / "solo.md").read_text().replace(
         "Omega closes the essay on a falling cadence.",
         "Omega closes, rewritten on disk and nowhere else.")
@@ -1207,7 +1215,8 @@ def _a_pull_between_push_and_settle(root: Path) -> None:
     db, manuscript, ms, fake = _doc_run(
         root, "pull-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
     mid = manuscript["id"]
-    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
     _reword_in_tab(fake, "{{TWO AS PROPOSED.}}", "{{TWO, REWORDED.}}")
     tab = next(t for t in fake.tabs if t["title"] == "solo.md")
     tab["body"] = tab["body"].replace(
@@ -1256,7 +1265,8 @@ def _twins_settle_by_position(root: Path) -> None:
         root, "twins-settle-ws",
         {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
     mid = manuscript["id"]
-    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
     _reword_in_tab(fake, "{{TWIN ONE REDONE.}}", "{{THE FIRST, MY WORDING.}}")
     result = api.filter_settle(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
@@ -1278,7 +1288,8 @@ def _twins_settle_by_position(root: Path) -> None:
         root, "twins-deleted-ws",
         {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
     mid2 = ms2["id"]
-    api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+    api.filter_push(db2, ms2, {}, "solo.md",
+                    services=lambda: (fake2, fake2))
     _reword_in_tab(
         fake2,
         "<<And so the wall stands, and the Dead do not pass.>>"
@@ -1361,7 +1372,8 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
         db2, ms2, msdir2, fake2 = _doc_run(
             root, "learn-doc", {2: "TWO AS PROPOSED.",
                                 4: "FOUR AS PROPOSED."})
-        api.filter_push(db2, ms2, {}, "solo.md", fake2, fake2)
+        api.filter_push(db2, ms2, {}, "solo.md",
+                    services=lambda: (fake2, fake2))
         _reword_in_tab(fake2, "{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}")
         _reword_in_tab(fake2, "{{FOUR AS PROPOSED.}}",
                        "{{FOUR, MY WORDING.}}")
@@ -1401,7 +1413,8 @@ def _recovery_while_forms_are_out(root: Path) -> None:
     db, manuscript, ms, fake = _doc_run(
         root, "recover-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
     mid = manuscript["id"]
-    api.filter_push(db, manuscript, {}, "solo.md", fake, fake)
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
     before = (ms / "solo.md").read_bytes()
 
     # --- F-D9: the DB refusal, where the byte guard is blind ----------
@@ -1511,6 +1524,174 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           "row, and asserting only the DB guard would leave it free to "
           "delete with the suite green",
           raised2 is not None and "mid-settle" in raised2, raised2)
+
+
+def _awkward_new_halves_through_the_doc(root: Path) -> None:
+    """F-D13 / F-D15 — the two shapes §4 and §8 flag as UNPROVEN through
+    a real Doc: a `{{new}}` half containing a blank line, and one
+    containing pandoc footnote syntax.
+
+    What can be asserted hermetically is asserted here. What CANNOT is
+    said out loud rather than faked: whether GOOGLE's markdown exporter
+    re-emits surgically INSERTED `[^3]` unchanged is a property of
+    Google's exporter, and a double that round-trips it by construction
+    would be the vacuous assertion §15.22 already recorded once. The
+    live probe is named below and deliberately not run — the suite makes
+    no network call and pops no OAuth window."""
+    print("§4 / RISK-2 / RISK-3: awkward {{new}} halves through the Doc:")
+
+    # --- F-D13: a `new` half split by a blank line -------------------
+    db, manuscript, ms, fake = _doc_run(
+        root, "split-ws",
+        {2: "The first half of a split replacement.\n\n"
+            "And the second half, a whole paragraph later."})
+    mid = manuscript["id"]
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    thread = api._run_threads(db, mid, _run_row(db, mid))[0]
+    landed = thread["state"] == "written"
+    settled_ok = None
+    if landed:
+        settle = api.filter_settle(db, manuscript, {}, "solo.md",
+                                   services=lambda: (fake, fake))
+        settled_ok = settle["forms"] == 1
+    check("F-D13 a `new` half containing a blank line either round-trips "
+          "verbatim (written, and the settle finds its form) OR fails "
+          "the read-back and stays `accepted` — the disjunction is the "
+          "claim, because there is no third outcome in which a thread is "
+          "`written` but its form is unfindable at settle",
+          (landed and settled_ok) or
+          (not landed and thread["state"] == "accepted"
+           and result["written"] == 0),
+          str({"state": thread["state"], "written": result["written"],
+               "settled_ok": settled_ok}))
+    if landed:
+        final = (ms / "solo.md").read_text()
+        check("F-D13 ...and on the branch that DID land, the finished "
+              "essay carries both halves and no marker",
+              "The first half of a split replacement." in final
+              and "And the second half, a whole paragraph later." in final
+              and "<<" not in final, final)
+
+    # --- F-D15: pandoc footnote syntax inside a `new` half -----------
+    db2, ms2, msdir2, fake2 = _doc_run(
+        root, "footnote-ws",
+        {2: "Alpha opens the essay, as the ledger records.[^3]"})
+    api.filter_push(db2, ms2, {}, "solo.md",
+                    services=lambda: (fake2, fake2))
+    wire = "\n".join(fake2.bodies)
+    check("F-D15 the footnote marker reaches the wire LITERALLY — the "
+          "surgical writer builds `insertText` requests carrying literal "
+          "characters and never passes them through `escape_footnotes`, "
+          "which is right, because nothing on that path parses markdown",
+          "[^3]" in wire and "\\\\[^3]" not in wire,
+          [b for b in fake2.bodies if "[^3]" in b][:1])
+    settle2 = api.filter_settle(db2, ms2, {}, "solo.md",
+                                services=lambda: (fake2, fake2))
+    final2 = (msdir2 / "solo.md").read_text()
+    check("F-D15 ...and it survives export→settle byte-identically "
+          "through this bridge: no backslash was added and none was "
+          "stripped",
+          settle2["forms"] == 1 and "as the ledger records.[^3]" in final2
+          and "\\[^3]" not in final2, final2)
+    print("  SKIPPED (live probe, no OAuth in this suite): whether "
+          "GOOGLE's markdown exporter re-emits a surgically INSERTED "
+          "`[^3]` unchanged. `normalize_markdown`'s _ESCAPE is what "
+          "makes the PUSHED round trip byte-clean; the inserted case is "
+          "outside that proof (design §4, RISK-2). Run it by hand: "
+          "`filter push` an essay whose new half carries [^3], then "
+          "`filter settle`, and compare. If it fails, the disposition is "
+          "a per-thread refusal at push naming the local road — NOT an "
+          "escape, which would re-create §15.22's pipe-escape failure in "
+          "a new place.")
+    print("  SKIPPED (live probe, same reason): whether a blank line "
+          "inside a {{new}} half survives Docs' own paragraph handling "
+          "(RISK-3). The read-back proof is the arbiter either way, and "
+          "the disjunction above is what holds regardless of which side "
+          "the real Doc falls on.")
+
+
+def _the_doc_road_through_the_cli(root: Path) -> None:
+    """Scenario FD — the whole doc road through the real CLI against the
+    fake Drive: push → (the author rewords one half in the tab) →
+    settle."""
+    import authorlm.gdocs as _gd
+
+    print("Scenario FD — the doc road, end to end through the CLI:")
+
+    ws = root / "fd-ws"
+    db, manuscript, ms, fake = _doc_run(
+        root, "fd-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
+    mid = manuscript["id"]
+    original = (ms / "solo.md").read_bytes()
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(["--workspace", str(ws), "filter", "push", "solo.md"])
+        pushed = out.getvalue()
+        check("FD push reports the count and the tab URL, and tells the "
+              "author the three things they need once: reword the green "
+              "halves, an untouched change is a yes, the disk keeps the "
+              "old text",
+              "2 change(s) written into solo.md's tab" in pushed
+              and "docs.google.com/document/d/doc-fake" in pushed
+              and "anything you leave alone is taken as a yes" in pushed
+              and "still holds solo.md" in pushed, pushed)
+        status = io.StringIO()
+        with contextlib.redirect_stdout(status):
+            cli_main(["--workspace", str(ws), "filter", "status",
+                      "solo.md"])
+        check("FD `filter status` shows the transport and the forms-out "
+              "count", "transport: doc; 2 form(s) out" in status.getvalue(),
+              status.getvalue())
+        check("FD the file on disk is still byte-identical",
+              (ms / "solo.md").read_bytes() == original)
+
+        _reword_in_tab(fake, "{{TWO AS PROPOSED.}}",
+                       "{{Two, as I would rather have it.}}")
+
+        out2 = io.StringIO()
+        with contextlib.redirect_stdout(out2):
+            cli_main(["--workspace", str(ws), "filter", "settle",
+                      "solo.md"])
+        settled = out2.getvalue()
+        final = (ms / "solo.md").read_text()
+        check("FD the settle finalizes both, says how many were in the "
+              "author's own wording, and says the tab keeps its marks "
+              "until the next doc push",
+              "Finalized: 2 change(s) made final in solo.md, 1 of them in "
+              "your wording rather than mine." in settled
+              and "Your next 'doc push solo.md' clears them." in settled,
+              settled)
+        check("FD ...and it still says nothing was filed against a goal",
+              "Nothing here was filed against any of your goals" in settled)
+        check("FD the finished essay carries the author's wording and no "
+              "marker",
+              "Two, as I would rather have it." in final
+              and "FOUR AS PROPOSED." in final and "<<" not in final, final)
+        versions = db.all(
+            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (mid,))
+        check("FD the settle was collected — the version history has the "
+              "finished essay", loads(versions[0]["files"], {}).get(
+                  "solo.md", "").find("Two, as I would rather have it.") >= 0)
+        settle_ids = [r["id"] for r in db.all(
+            "SELECT id FROM editorial_transitions WHERE manuscript_id = ? "
+            "AND version_after = ?", (mid, versions[0]["id"]))]
+        attached: set[str] = set()
+        for r in db.all("SELECT transition_ids FROM editorial_episodes "
+                        "WHERE manuscript_id = ?", (mid,)):
+            attached.update(loads(r["transition_ids"], []))
+        check("FD ...and under NO episode: a filter pass is hygiene, and "
+              "filing its transitions against whatever goal happened to "
+              "be open is the mis-attribution §15.17 records",
+              settle_ids and not any(t in attached for t in settle_ids),
+              str({"settle": settle_ids, "attached": sorted(attached)}))
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
 
 
 TEMPLATE_ESSAY = (
@@ -2831,6 +3012,8 @@ def main_test() -> None:
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)
         _recovery_while_forms_are_out(root)
+        _awkward_new_halves_through_the_doc(root)
+        _the_doc_road_through_the_cli(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

@@ -5427,6 +5427,19 @@ def scenario_testbench(root: Path) -> None:
               "refusal",
               "exactly the original with that one unit replaced" in out
               and "refuses and names the prior run" in out, out)
+        check("it asserts the DOC transport's refusals too — the honest, "
+              "partial answer §6 rules for it: every one reads the run's "
+              "own state, so none can reach the network even on a fully "
+              "authorized bridge",
+              "refuses 'filter push' by name" in out
+              and "refuses 'filter settle --pause' by name" in out
+              and "prints the run's transport" in out
+              and "names 'filter settle'" in out, out)
+        check("...and each of those is PAIRED with the same verb at the "
+              "other mode, so the section is proved to discriminate "
+              "rather than to pass whatever it is handed",
+              "the discrimination without which the refusal below proves "
+              "nothing" in out and "says the OTHER thing" in out, out)
         check("the check leaves the bench exactly as it found it",
               (msdir / tb.TARGET).read_bytes() == original,
               (msdir / tb.TARGET).read_text())

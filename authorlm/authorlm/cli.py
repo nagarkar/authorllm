@@ -3412,25 +3412,29 @@ def cmd_filter(args):
         if args.action == "push":
             if not args.file:
                 raise SystemExit("usage: authorlm filter push <essay.md>")
-            from . import gdocs as _gd
+            def _push_bridge():
+                from . import gdocs as _gd
 
-            try:
-                service = _gd.get_service(config, args.workspace,
-                                          interactive=True)
-                docs_service = _gd.get_docs_service(config, args.workspace,
-                                                    interactive=True)
-            except ValueError as err:
-                # The local road needs no credentials and is the DEFAULT
-                # and the recommendation — an author without a Doc bridge
-                # must never be left thinking the pass is unavailable.
-                sys.exit(f"error: {err}\nThe Doc road needs the [gdocs] "
-                         f"bridge. The local road does not: 'filter settle "
-                         f"{args.file} --pause' writes the same "
-                         f"<<old>>{{{{new}}}} forms into the file in your "
-                         f"vault, and 'filter settle {args.file}' finalizes "
-                         f"them.")
+                try:
+                    return (_gd.get_service(config, args.workspace,
+                                            interactive=True),
+                            _gd.get_docs_service(config, args.workspace,
+                                                 interactive=True))
+                except ValueError as err:
+                    # The local road needs no credentials and is the
+                    # DEFAULT and the recommendation — an author without
+                    # a Doc bridge must never be left thinking the pass
+                    # is unavailable.
+                    raise ValueError(
+                        f"{err}\nThe Doc road needs the [gdocs] bridge. "
+                        f"The local road does not: 'filter settle "
+                        f"{args.file} --pause' writes the same "
+                        f"<<old>>{{{{new}}}} forms into the file in your "
+                        f"vault, and 'filter settle {args.file}' "
+                        f"finalizes them.") from err
+
             result = api.filter_push(db, manuscript, config, args.file,
-                                     service, docs_service, name=args.name)
+                                     services=_push_bridge, name=args.name)
             _print_filter_warnings(result["warnings"])
             for t, why in result["failed"]:
                 print(ui.yellow(f"  could not write [{t['id'][:8]}]: {why}"

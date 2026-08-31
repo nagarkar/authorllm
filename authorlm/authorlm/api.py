@@ -4780,7 +4780,7 @@ def _twin_warning(accepted: list[dict]) -> str | None:
 
 
 def filter_push(db: Database, manuscript: dict, config: dict, file: str,
-                service, docs_service, name: str | None = None) -> dict:
+                services=None, name: str | None = None) -> dict:
     """The DOC transport verb (design-filter-doc-settle §2.3): write this
     run's accepted edits into the essay's tab of the master Doc as
     `<<old>>{{new}}` forms, through the same surgical writer `critique
@@ -4866,6 +4866,14 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     # 6. The surgical writer: a levelling push of the pristine local
     #    file, then one marked span per thread, highest anchor first,
     #    located by occurrence index, then the read-back proof.
+    #
+    #    The bridge is built HERE and not at the top, deliberately: every
+    #    refusal above is a state refusal that costs nothing, and a verb
+    #    that pops an OAuth consent window only to then tell the author
+    #    their run is on the other road has spent their attention for
+    #    nothing. It also keeps `tools/testbench.py` able to assert these
+    #    refusals with no key, no token and no network.
+    service, docs_service = _settle_services(services, rel)
     result = gdocs.write_pending_forms(db, manuscript, rel, accepted,
                                        service, docs_service)
     # 7. Written threads advance; FAILED threads stay `accepted` and are
@@ -4887,24 +4895,29 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
 
 
 def _settle_services(services, rel: str):
-    """The Drive/Docs pair, built only on the road that needs it.
+    """The Drive/Docs pair, built only at the moment a verb actually
+    needs it.
 
-    A callable, not two arguments: the LOCAL settle must work with no
-    credentials at all, so the doc bridge is never constructed — and
-    never able to pop a consent window — unless the run took the Doc
-    road. The refusal names both exits when it cannot be built."""
+    A callable, not two arguments, and called LAST rather than first.
+    The local settle must work with no credentials at all; and every
+    state refusal on the doc road — the wrong mode, forms already out, a
+    checked-out file, nothing accepted, a drifted paragraph — costs
+    nothing and must be reachable without a token, so that a verb never
+    pops an OAuth consent window only to then refuse, and so that
+    `tools/testbench.py` can assert those refusals with no key and no
+    network."""
     if services is None:
         raise ValueError(
-            f"the forms for {rel} are in the Google Doc and only the Doc "
-            f"can be read back, but no Doc bridge was supplied.")
+            f"{rel} needs the Google Doc bridge for this step, and none "
+            f"was supplied.")
     try:
         return services()
     except ValueError as err:
         raise ValueError(
-            f"{err}\nThe forms for {rel} are in the Doc and only the Doc "
-            f"can be read back. Authorize with 'doc auth', or take them "
-            f"out of the tab with 'filter unmark {rel} --force' — which "
-            f"loses any rewording you did there.") from err
+            f"{err}\nThe Doc road for {rel} needs the [gdocs] bridge. "
+            f"Authorize with 'doc auth'; or, if forms are already out in "
+            f"the tab, take them back with 'filter unmark {rel} --force' "
+            f"— which loses any rewording you did there.") from err
 
 
 def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
