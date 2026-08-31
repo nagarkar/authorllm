@@ -70,7 +70,12 @@ function scoreTone(score?: number): string {
 }
 
 function shortLabel(row: TriageRow): string {
-  return row.name || `${row.from_name} -${row.relation}-> ${row.to_name}`;
+  if (row.name) return row.name;
+  if (row.statement) {
+    const text = String(row.statement);
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  }
+  return `${row.from_name} -${row.relation}-> ${row.to_name}`;
 }
 
 /**
@@ -106,6 +111,7 @@ function cardKicker(type: TriageType, row: any): string {
 function cardTitle(type: TriageType, row: any): string {
   if (type === "concepts") return textValue(row.name);
   if (type === "proposals") return textValue(row.target_name);
+  if (type === "critique") return textValue(row.statement);
   return `${textValue(row.from_name)} -> ${textValue(row.to_name)}`;
 }
 
@@ -162,8 +168,10 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       if (!active) return;
       startTransition(() => {
         setSnapshot(data);
-        setProfileId(data.profile.id);
-        setProfileVersion(String(data.profile.version));
+        if (data.profile) {
+          setProfileId(data.profile.id);
+          setProfileVersion(String(data.profile.version));
+        }
         setSelected(new Set());
         setRecommendations({});
         setReviewState("any");
@@ -306,7 +314,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       key: column.id,
       title: column.label,
       width: column.width || 150,
-      group: `ANALYSIS / ${snapshot.profile.label.toUpperCase()}`,
+      group: `ANALYSIS / ${(snapshot.profile?.label ?? "").toUpperCase()}`,
       source: "analysis" as const,
       themeOverride: {bgCell: "#f2f7f3", bgHeader: "#dcebe2", textHeader: "#254d3a"},
     })),
@@ -681,6 +689,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
   }
 
   async function beginAnalysis(ids: string[]) {
+    if (!currentSnapshot.profile) return;
     setSyncPrompt(undefined);
     setError(undefined);
     setNotice(undefined);
@@ -691,8 +700,8 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         manuscript,
         triage_type: triageType,
         object_ids: ids,
-        profile_id: currentSnapshot.profile.id,
-        profile_version: currentSnapshot.profile.version,
+        profile_id: currentSnapshot.profile!.id,
+        profile_version: currentSnapshot.profile!.version,
       });
       const state = {
         runId: run.run_id, completed: 0, total: run.requested_ids.length,
@@ -820,7 +829,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       </header>
 
       <nav className="tab-rail" aria-label="Triage type">
-        {(["concepts", "edges", "proposals"] as TriageType[]).map((tab, i) => (
+        {(["concepts", "edges", "proposals", "critique"] as TriageType[]).map((tab, i) => (
           <button key={tab} className={!helpTab && triageType === tab ? "active" : ""}
                   disabled={!!analysis}
                   onClick={() => {
@@ -876,12 +885,12 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
           <label className={`refine-control ${mobileFiltersOpen ? "mobile-open" : ""}`}><span>Order</span><select value={sort} onChange={(event) => setSort(event.target.value)}>
             <option value="score-desc">Score: high to low</option><option value="name">Name</option>
           </select></label>
-          <label className={`profile-select refine-control ${mobileFiltersOpen ? "mobile-open" : ""}`}><span>Analyzer</span><select disabled={!!analysis} value={`${snapshot.profile.id}@${snapshot.profile.version}`} onChange={(event) => {
+          {snapshot.profile && <label className={`profile-select refine-control ${mobileFiltersOpen ? "mobile-open" : ""}`}><span>Analyzer</span><select disabled={!!analysis} value={`${snapshot.profile.id}@${snapshot.profile.version}`} onChange={(event) => {
             const [nextId, nextVersion] = event.target.value.split("@", 2);
             setProfileId(nextId); setProfileVersion(nextVersion); setFieldFilters({});
           }}>
             {snapshot.profiles.map((profile) => <option key={`${profile.id}@${profile.version}`} value={`${profile.id}@${profile.version}`}>{profile.label} v{profile.version}</option>)}
-          </select></label>
+          </select></label>}
           {filterDefs.map((filter) => filter.control === "select" ? (
             <label className={`schema-filter refine-control ${mobileFiltersOpen ? "mobile-open" : ""}`} key={filter.key}>
               <span>{filter.label}</span>
@@ -904,9 +913,11 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         </div>
         <div className="analysis-actions">
           <button className="button recommendation-button" onClick={() => void findRecommendations()} disabled={recommending || !!analysis}>{recommending ? "Finding..." : "Find safe recommendations"}</button>
+          {snapshot.profile && <>
           <button className="button quiet" onClick={() => askToAnalyze(analysisCandidates(false, true), false)} disabled={!selected.size || !!analysis}>Analyze selected</button>
           <button className="button ink" onClick={() => askToAnalyze(analysisCandidates(false), false)} disabled={!!analysis}>Analyze all</button>
           <button className="text-button" onClick={() => askToAnalyze(analysisCandidates(true), true)} disabled={!!analysis}>Reanalyze all</button>
+          </>}
         </div>
       </section>
 
@@ -1013,14 +1024,14 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         <span className="kicker">SHARED AUTHORLM HELP</span><h2>{snapshot.schema.label} triage</h2>
         <p>{snapshot.schema.help}</p>
         <div className="help-list">{snapshot.schema.actions.map((action) => <div key={action.id}><strong>{action.label}</strong><span>{action.help}</span></div>)}</div>
-        <hr /><h3>{snapshot.profile.label} v{snapshot.profile.version}</h3><p>{snapshot.profile.description}</p>
-        {snapshot.profile.model && <p><strong>Model:</strong> {snapshot.profile.model}</p>}
+        {snapshot.profile && <><hr /><h3>{snapshot.profile.label} v{snapshot.profile.version}</h3><p>{snapshot.profile.description}</p>
+        {snapshot.profile.model && <p><strong>Model:</strong> {snapshot.profile.model}</p>}</>}
         <small>Safe recommendations are deterministic and remain separate from your staged decisions. Stage a recommendation to adopt it as your pending decision; only Apply selected changes the graph. Selecting or deselecting rows never changes staged decisions. Analysis never becomes an author decision automatically.</small>
       </aside></div>}
 
       {drawer && <div className="overlay drawer-overlay" onMouseDown={() => setDrawer(undefined)}><aside className="panel evidence-panel" onMouseDown={(event) => event.stopPropagation()}>
         <button className="panel-close" onClick={() => setDrawer(undefined)}>Close</button>
-        <span className="kicker">ANALYSIS / {snapshot.profile.label}</span><h2>{shortLabel(drawer.row)}</h2>
+        <span className="kicker">ANALYSIS / {snapshot.profile?.label}</span><h2>{shortLabel(drawer.row)}</h2>
         {drawer.field === "why" ? <p className="large-copy">{drawer.row.analysis?.why}</p> : <>
           {drawer.field === "analysis" && <p className="large-copy">{drawer.row.analysis?.why}</p>}
           <div className="passage-list">

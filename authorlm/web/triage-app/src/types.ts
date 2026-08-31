@@ -1,4 +1,4 @@
-export type TriageType = "concepts" | "edges" | "proposals";
+export type TriageType = "concepts" | "edges" | "proposals" | "critique";
 
 export interface GroupBy {
   id: string;
@@ -93,6 +93,7 @@ export interface TriageRow {
   pending: boolean;
   lifecycle: string;
   name?: string;
+  statement?: string;
   from_name?: string;
   relation?: string;
   to_name?: string;
@@ -115,7 +116,7 @@ export interface Snapshot {
   manuscript: {id: string; name: string};
   manuscript_version: {id: string; version_no: number; checksum: string; local_dirty: boolean} | null;
   schema: TriageSchema;
-  profile: AnalyzerProfile;
+  profile: AnalyzerProfile | null;
   profiles: AnalyzerProfile[];
   rows: TriageRow[];
   incomplete_runs: Array<{

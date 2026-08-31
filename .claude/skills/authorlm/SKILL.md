@@ -541,6 +541,29 @@ feedback document):
    style elements), show the author the per-unit accounting, write the
    manifest to `<manuscript>/_critiques/`, then `import_critique`. Items
    land as PROPOSED with critic provenance (`sources` row) — never active.
+   **Dedupe is two-layered, and both layers are mandatory (ratified
+   2026-08-31: additional critiques must not duplicate critiques).**
+   - The VERB is deterministic: `import_manifest` skips (a) same-source
+     (unit, ordinal) re-imports and (b) any item whose normalized text
+     matches an existing critique item from ANY critic source in ANY
+     status — a later report can never re-litigate a ruled item or
+     double a pending one. Skips come back under `duplicates` with the
+     existing id/status/source: read them to the author in prose.
+   - The SESSION does the semantic layer the verb cannot: before writing
+     the manifest, check each candidate item against the existing
+     critique items (`list_critique_items` + prior verdicts, via the DB
+     if needed) and the ratified law. A PARAPHRASE of an item the author
+     already accepted, already rejected (their reason stands), or
+     already ratified as a style element is not imported as new — it is
+     listed in the per-unit accounting as a skip, with which existing
+     item covers it and, for rejections, the author's recorded reason.
+     Sharpened versions of a still-pending item may be imported; say
+     they supersede the older wording so triage rules once, not twice.
+   A report that supersedes an earlier one only re-rules the essays it
+   actually re-reviewed: offer the author a bulk rejection ("superseded
+   by the <date> report") for the older PENDING items on those essays
+   only — never touch decided items, and never assume supersession for
+   essays the new report did not receive.
 2. **Triage** — the author's verdicts, not the critic's authority, make
    items real. Surfaces, same division of labor as concepts:
    - Chat: `list_critique_items` (numbered; scope='manuscript' for the

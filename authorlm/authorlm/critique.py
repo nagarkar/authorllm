@@ -80,10 +80,40 @@ def _existing(db: Database, manuscript_id: str, table: str, source_id: str,
     )
 
 
+def _dedupe_key(text: str) -> str:
+    """Deterministic normalization for cross-source duplicate detection:
+    lowercase, markdown markup and punctuation stripped, whitespace
+    collapsed. Two items with the same key are the same critique item
+    regardless of which critic report or export format carried them."""
+    text = re.sub(r"[*_`\[\]{}()]", "", text.lower())
+    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _critic_items(db: Database, manuscript_id: str, table: str,
+                  text_column: str) -> dict[str, dict]:
+    """Every critique-sourced item of this kind, from ANY critic source,
+    in ANY status, keyed by its dedupe key. Verdicts already given (an
+    acceptance, a rejection with its reason) must not be re-litigated by
+    a later report restating the same item."""
+    rows = db.all(
+        f"SELECT t.id, t.{text_column} AS text, t.status, s.name AS source_name "
+        f"FROM {table} t JOIN sources s ON s.id = t.source_id "
+        "WHERE t.manuscript_id = ? AND s.kind = 'critic'",
+        (manuscript_id,),
+    )
+    return {_dedupe_key(row["text"]): dict(row) for row in rows}
+
+
 def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
-    """Load a critique manifest. Idempotent on (source, unit, ordinal):
-    re-importing skips items already present, so a corrected manifest can
-    be re-run safely.
+    """Load a critique manifest. Idempotent twice over, deterministically:
+    (1) on (source, unit, ordinal) — re-importing the same manifest skips
+    items already present, so a corrected manifest can be re-run safely;
+    (2) on normalized item text across ALL critic sources — a later report
+    restating an item an earlier report already carried (whatever its
+    verdict) is skipped and reported as a duplicate, so a new critique can
+    never re-litigate a ruled item or double a pending one. Duplicates are
+    returned under "duplicates" with the existing item's id and status.
 
     manifest = {
       "source": {"name": ..., "detail": ...},
@@ -99,7 +129,24 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
     src = manifest["source"]
     source_id = db.source("critic", src["name"], src.get("detail"))
     imported = {"intents": 0, "style_laws": 0, "skipped": 0}
+    duplicates: list[dict] = []
     errors: list[str] = []
+    seen_intents = _critic_items(db, manuscript_id, "declared_intents",
+                                 "statement")
+    seen_laws = _critic_items(db, manuscript_id, "style_laws", "statement")
+
+    def duplicate_of(item, seen):
+        match = seen.get(_dedupe_key(item["text"]))
+        if match and match["id"] is not None:
+            duplicates.append({
+                "unit": item["unit"], "ordinal": item["ordinal"],
+                "existing_id": match["id"], "status": match["status"],
+                "source": match["source_name"],
+            })
+            imported["skipped"] += 1
+            return True
+        return False
+
     for item in manifest["items"]:
         unit, ordinal = item["unit"], item["ordinal"]
         meta = json.dumps({"critique": {"unit": unit, "ordinal": ordinal}})
@@ -108,15 +155,22 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
                          unit, ordinal):
                 imported["skipped"] += 1
                 continue
+            if duplicate_of(item, seen_intents):
+                continue
             row = sessions.declare_intent(
                 db, manuscript_id, item["text"], scope=item.get("scope"),
                 status="proposed", source_id=source_id)
             db.update("declared_intents", row["id"], {"metadata": meta})
+            seen_intents[_dedupe_key(item["text"])] = {
+                "id": row["id"], "status": "proposed",
+                "source_name": src["name"]}
             imported["intents"] += 1
         elif item["kind"] == "style_element":
             if _existing(db, manuscript_id, "style_laws", source_id,
                          unit, ordinal):
                 imported["skipped"] += 1
+                continue
+            if duplicate_of(item, seen_laws):
                 continue
             guide = None
             if item.get("guide"):
@@ -133,10 +187,14 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
                 guide=guide, file=item.get("file"), notes=item.get("notes"),
                 status="proposed", source_id=source_id)
             db.update("style_laws", row["id"], {"metadata": meta})
+            seen_laws[_dedupe_key(item["text"])] = {
+                "id": row["id"], "status": "proposed",
+                "source_name": src["name"]}
             imported["style_laws"] += 1
         else:
             errors.append(f"unknown kind '{item['kind']}' ({unit} #{ordinal})")
-    return {**imported, "source_id": source_id, "errors": errors}
+    return {**imported, "source_id": source_id, "duplicates": duplicates,
+            "errors": errors}
 
 
 # ------------------------------------------------------------------ triage

@@ -961,6 +961,11 @@ def cmd_critique(args):
         print(f"Imported {result['intents']} intent(s) and "
               f"{result['style_laws']} style element(s) as proposed "
               f"({result['skipped']} already present, skipped).")
+        for dup in result.get("duplicates", []):
+            print(ui.dim(
+                f"duplicate: {dup['unit']} #{dup['ordinal']} restates "
+                f"{dup['existing_id']} ({dup['status']}, from "
+                f"'{dup['source']}') — skipped, verdict stands"))
         for err in result["errors"]:
             print(ui.yellow(f"warning: {err}"))
         if result["intents"] or result["style_laws"]:
