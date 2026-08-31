@@ -3572,8 +3572,11 @@ def cmd_lens(args):
         if not llm.enabled:
             raise SystemExit("lens run needs the LLM enabled — for an "
                              "external (Claude) pass, use lens register")
-        result = lenses.run_lens(db, manuscript, session, args.name,
-                                 args.file, llm)
+        try:
+            result = lenses.run_lens(db, manuscript, session, args.name,
+                                     args.file, llm)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         line = llm.stats_line()
     else:  # register — the door for externally produced findings
         raw = _stdin_text()
@@ -3587,8 +3590,12 @@ def cmd_lens(args):
             raise SystemExit('lens register expects JSON on stdin: '
                              '{"findings": [{"quote": "...", '
                              '"note": "..."}]}')
-        result = lenses.register_findings(db, manuscript, session,
-                                          args.name, args.file, findings)
+        try:
+            result = lenses.register_findings(db, manuscript, session,
+                                              args.name, args.file,
+                                              findings)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         line = None
     print(f"Lens '{result['lens']}' on {result['file']}: "
           f"{len(result['findings'])} finding(s)"

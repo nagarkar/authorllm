@@ -6899,6 +6899,140 @@ def scenario_pronunciations(root: Path) -> None:
               _loads(ev["metadata"], {}).get("explanation")
               == "everyone in this book's audience can say Chid",
               str(ev["metadata"]))
+
+        # ================= E3 — immutability across every path =======
+        # The Sponsor asked that no pass overwrite a validated row. It is
+        # not implemented as a rule: it is a CONSEQUENCE of there being
+        # exactly one writer (`proposals.adopt`). Asserted by outcome,
+        # against the file's BYTES, after every verb of the whole pass.
+        frozen = dict_path.read_bytes()
+        essay_before = (ms / "02-terms.md").read_bytes()
+
+        def untouched(verb: str) -> None:
+            check(f"E3 {verb} leaves pronunciations.md byte for byte",
+                  dict_path.read_bytes() == frozen,
+                  dict_path.read_text()[-200:])
+
+        run_stdin(ws, json.dumps({"pronunciations": []}), "filter",
+                  "prelude", "audio-friendly", "02-terms.md", "--replace")
+        untouched("filter prelude")
+        out = run(ws, "filter", "run", "audio-friendly", "02-terms.md")
+        untouched("filter run")
+        units = _filter_units((ms / "02-terms.md").read_text())
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'audio-friendly' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        run_stdin(ws, _filter_reply(units, tuple(window), replaces={
+            5: "A ledger counts, and nothing in it is an accusation, "
+               "which is the point of keeping one. Some transliterate "
+               "the word as chid, without its capital."},
+            state="the voice note: read once"),
+            "filter", "record", "02-terms.md")
+        untouched("filter record")
+        run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
+        untouched("filter triage")
+        run(ws, "filter", "settle", "02-terms.md", "--pause")
+        untouched("filter settle --pause")
+        marked = (ms / "02-terms.md").read_text()
+        (ms / "02-terms.md").write_text(
+            marked.replace("which is the point of keeping one",
+                           "which is why one is kept"))
+        untouched("a hand post-edit of the marked essay")
+        run(ws, "filter", "settle", "02-terms.md")
+        untouched("filter settle")
+        run(ws, "filter", "rollback", "02-terms.md")
+        untouched("filter rollback")
+        (ms / "02-terms.md").write_bytes(essay_before)
+        run(ws, "collect")
+        out = run(ws, "filter", "run", "audio-friendly", "02-terms.md",
+                  "--again")
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'audio-friendly' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        units = _filter_units((ms / "02-terms.md").read_text())
+        run_stdin(ws, _filter_reply(units, tuple(window), replaces={
+            5: "A ledger counts, and nothing in it is an accusation."},
+            state="the voice note: read twice"),
+            "filter", "record", "02-terms.md")
+        run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
+        run(ws, "filter", "settle", "02-terms.md", "--pause")
+        run(ws, "filter", "unmark", "02-terms.md")
+        untouched("filter unmark")
+        run(ws, "filter", "abandon", "audio-friendly", "02-terms.md")
+        untouched("filter abandon")
+        check("E3 nine verbs, and NOTHING in the system writes that file "
+              "except the author's own verdict at `proposal accept`",
+              dict_path.read_bytes() == frozen)
+        (ms / "02-terms.md").write_bytes(essay_before)
+        run(ws, "collect")
+
+        # ================= E6 — the exclusions, one each =============
+        check("E6 no essay_summaries row for the dictionary — it is not a "
+              "unit of the book",
+              db.one("SELECT COUNT(*) AS n FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = ?",
+                     (mid, _pron.FILENAME))["n"] == 0, "")
+        run(ws, "export", "md")
+        combined = next((ms / "_exports").glob("*.md")).read_text()
+        check("E6 absent from the exported book — the dictionary must "
+              "NEVER ship inside it",
+              "uh-NUT-taa" not in combined
+              and "# Pronunciations" not in combined, combined[:400])
+        _api.add_concept(db, manuscript, "Ereignis", kind="concept",
+                         notes="only ever named in the dictionary")
+        run(ws, "collect")
+        node = db.one("SELECT status, introduced_in FROM concept_nodes "
+                      "WHERE manuscript_id = ? AND name = 'Ereignis'",
+                      (mid,))
+        check("E6 a concept whose name appears ONLY in the dictionary does "
+              "not realize — the ratified toc.toml assertion, re-run for "
+              "the sidecar (otherwise the extractor mines a pronunciation "
+              "table for concepts)",
+              node["status"] == "declared" and node["introduced_in"] is None,
+              f"{node['status']} / {node['introduced_in']}")
+        out = run(ws, "filter", "run", "duplicate-words",
+                  _pron.FILENAME, expect_exit=True)
+        check("E6 `filter run` on the dictionary refuses BY NAME rather "
+              "than through the generic reading-order refusal",
+              "is the pronunciation dictionary, not an essay" in out
+              and "proposal review" in out, out)
+        run_stdin(ws, "Find the loose ends.\n", "lens", "add", "loose")
+        out = run(ws, "lens", "run", "loose", _pron.FILENAME,
+                  expect_exit=True)
+        check("E6 `lens run` refuses by name too — the site that accepts "
+              "toc.toml today, sharing one helper so the two cannot drift",
+              "is the pronunciation dictionary, not an essay" in out, out)
+        out = run(ws, "intent", "declare", "Say the Sanskrit right",
+                  "--scope", _pron.FILENAME, expect_exit=True)
+        check("E6 an intent scoped to the dictionary refuses — there is no "
+              "writing to route there",
+              "is the pronunciation dictionary, not an essay" in out, out)
+        brief = run(ws, "briefing")
+        check("E6 the briefing never reports it as missing from toc.toml — "
+              "`reading_order`'s unlisted list only covers CONTENT files",
+              _pron.FILENAME not in brief, brief)
+        version = db.one(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (mid,))
+        check("E6 BUT it IS in manuscript_versions.files — structure is "
+              "not content, and it is still the author's: versioned, "
+              "checksummed, diffable and rollback-able like any file",
+              _pron.FILENAME in _loads(version["files"], {}), "")
+        dict_path.write_text(
+            dict_path.read_text() + "| Līlā | LEE-laa | play |\n",
+            encoding="utf-8")
+        run(ws, "collect")
+        check("E6 ...and a hand edit of it produces an "
+              "editorial_transitions row — an added pronunciation is a "
+              "real editorial act",
+              db.one("SELECT COUNT(*) AS n FROM editorial_transitions "
+                     "WHERE manuscript_id = ? AND location LIKE ?",
+                     (mid, _pron.FILENAME + "%"))["n"] >= 1,
+              [r["location"] for r in db.all(
+                  "SELECT location FROM editorial_transitions WHERE "
+                  "manuscript_id = ?", (mid,))])
     finally:
         server.shutdown()
 
