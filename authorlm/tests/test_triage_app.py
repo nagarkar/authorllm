@@ -270,6 +270,17 @@ class TriageAppTest(unittest.TestCase):
         self.assertIn("reason", edge_actions["retype"])
         self.assertIn("reason", edge_actions["alias"])
 
+    def test_critique_revise_action_stays_hidden(self):
+        """c368224: Revise & accept is edit-in-place only — no action-bar
+        button. Removing `hidden` resurrects a second revise path that races
+        the Item column's `editable: "revise"` staging."""
+        schema = triage.TRIAGE_SCHEMAS["critique"]
+        revise = next(a for a in schema["actions"] if a["id"] == "revise")
+        self.assertTrue(revise.get("hidden"),
+                        "critique revise must stay hidden from the action bar")
+        statement = next(c for c in schema["columns"] if c["id"] == "statement")
+        self.assertEqual(statement.get("editable"), "revise")
+
     def test_staging_discards_reasons_for_actions_that_do_not_request_one(self):
         db, manuscript, *_ = self.fixture()
         concept = self.add_pending_concept(db, manuscript, "Keep without explanation")
