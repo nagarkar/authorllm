@@ -144,13 +144,13 @@ You audit a philosophy manuscript for internal consistency. For each
 numbered ITEM you receive a paragraph of the manuscript and the SETTLED
 claims (the author's ratified definitions and relationships) for the
 concepts that paragraph mentions. Your sole task: report where the
-paragraph CONTRADICTS a settled claim. Respect the author's framework —
+paragraph CONTRADICTS a resolved claim. Respect the author's framework —
 you are comparing the text against the author's own settled knowledge,
 never against outside views. Only clear contradictions; stylistic
 variation, elaboration, or partial coverage are NOT findings. Reply with
 JSON only:
 {"findings": [{"item": <n>, "concept": "<name>", "quote": "<verbatim
-sentence from the paragraph that conflicts>", "claim": "<the settled
+sentence from the paragraph that conflicts>", "claim": "<the resolved
 claim it conflicts with>", "why": "<one short sentence>"}]}
 Return {"findings": []} when nothing conflicts."""
 
@@ -188,7 +188,7 @@ def _claims_for(db: Database, mid: str, node: dict,
 def ontology(db: Database, manuscript: dict, llm,
              file: str | None = None) -> dict:
     """Narrowing auditor: check changed (or one file's) paragraphs against
-    the settled claims of the concepts they mention. Returns a summary;
+    the resolved claims of the concepts they mention. Returns a summary;
     findings land as `incongruence` proposals for the author's verdict."""
     mid = manuscript["id"]
     files = read_manuscript_files(Path(manuscript["path"]))

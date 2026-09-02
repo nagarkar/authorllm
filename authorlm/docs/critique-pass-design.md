@@ -436,7 +436,7 @@ Deviations / additions worth knowing:
     "critic-sourced OR carrying critique lineage" (`critique.FROM_CRITIC`).
     The pre-provenance backfill gave every row a source, so the older
     `source_id IS NOT NULL` test matched the author's own intents and
-    style laws too; `critique show --query` and the settled-item lookup
+    style laws too; `critique show --query` and the resolved-item lookup
     now use the same predicate as the list.
   - The MCP tool caps `items` at `limit` (50) while `tally` and `count`
     describe the whole filtered set: SMSTTD alone holds 267 settled

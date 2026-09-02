@@ -81,7 +81,7 @@ CLASS_HELP = {
 # statement is that the key set is closed again after it.
 PRELUDES = ("pronunciations",)
 
-KEYS = ("class", "state", "prelude", "summaries")
+KEYS = ("class", "state", "prelude", "summaries", "profiles")
 
 DELIMITER = "---"
 
@@ -175,6 +175,16 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
                 "a GLOBAL filter's prelude is its frozen registry, and "
                 "two outputs for one call is two preludes. Drop "
                 "`prelude` here, or make this filter sequential.")
+    profiles = meta.get("profiles", [])
+    if (not isinstance(profiles, list)
+            or not all(isinstance(k, str) and k.strip() for k in profiles)):
+        raise FilterError(
+            "`profiles` is a list of profile keys — e.g. "
+            "profiles = [\"audience\"]. Each names a declared profile whose "
+            "text the payload should carry. A key with no profile on record "
+            "renders as a labelled absence rather than refusing the run: a "
+            "filter must not become unrunnable because a declaration was "
+            "renamed.")
     summaries = meta.get("summaries", False)
     if not isinstance(summaries, bool):
         raise FilterError(
@@ -188,7 +198,8 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
         raise FilterError("a filter is its prompt — there is nothing "
                           "after the front matter.")
     return {"class": klass, "state": (state or "").strip(),
-            "prelude": prelude, "summaries": summaries}, body
+            "prelude": prelude, "summaries": summaries,
+            "profiles": [k.strip() for k in profiles]}, body
 
 
 def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:
@@ -239,11 +250,12 @@ def list_filters(manuscript: dict) -> list[dict]:
         except FilterError as err:
             out.append({"name": path.stem, "class": None, "state": "",
                         "prelude": None, "summaries": False,
-                        "summary": "", "error": str(err)})
+                        "profiles": [], "summary": "", "error": str(err)})
             continue
         out.append({"name": path.stem, "class": meta["class"],
                     "state": meta["state"], "prelude": meta["prelude"],
                     "summaries": meta["summaries"],
+                    "profiles": meta["profiles"],
                     "summary": summary_of(body), "error": None})
     return out
 
@@ -266,4 +278,5 @@ def show_filter(manuscript: dict, name: str) -> dict:
     return {"name": name, "path": str(path), "class": meta["class"],
             "state": meta["state"], "prelude": meta["prelude"],
             "summaries": meta["summaries"],
+            "profiles": meta["profiles"],
             "prompt": body, "class_help": CLASS_HELP[meta["class"]]}

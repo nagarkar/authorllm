@@ -1881,7 +1881,7 @@ def check_alias_guide_flip() -> None:
         mid = manuscript["id"]
         api.add_concept(db, manuscript, "FlipCanonical", kind="concept",
                         notes="the established term")
-        sentence = "We call it FlipBestowed, the settled name for FlipCanonical."
+        sentence = "We call it FlipBestowed, the resolved name for FlipCanonical."
         (ms / "01-flip.md").write_text(f"# Flip\n\n{sentence}\n")
 
         class NamingCeremonyLLM:
@@ -5171,7 +5171,7 @@ def check_provenance_verb() -> None:
               "start, plan, draft" in text, text)
         check("a beat drafted by one chat and settled by another is marked",
               "←" in text and "a beat drafted by one chat" in text, text)
-        check("a beat settled by its own proposer is not marked",
+        check("a beat resolved by its own proposer is not marked",
               text.count("←") == 2, text)      # the flag and the legend
         check("a pre-stamp row prints the backfill footnote, "
               "rather than rendering as unknown",
@@ -8711,7 +8711,7 @@ def main_test() -> None:
         stub.state["comments"]["c-nowhere"]["resolved"] = True
         cleared = push_doc(db, manuscript, "06-orrery.md", service=stub,
                            docs_service=stub)
-        check("a settled margin restores the rebuild path",
+        check("a resolved margin restores the rebuild path",
               "mode" not in cleared, str(cleared))
 
         # Critique pending forms are invisible to open_threads (author_comment
@@ -9235,9 +9235,9 @@ def main_test() -> None:
               closed["status"] == "resolved")
         try:
             api.resolve_improvement(db, task["id"], "dismiss", note="n/a")
-            check("a settled task cannot be re-transitioned", False)
+            check("a resolved task cannot be re-transitioned", False)
         except ValueError:
-            check("a settled task cannot be re-transitioned", True)
+            check("a resolved task cannot be re-transitioned", True)
 
         task2 = api.file_improvement(db, title="t2", evidence="e2", given="g2",
                                      observed="o2", expected="x2")

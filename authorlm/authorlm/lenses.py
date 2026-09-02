@@ -121,7 +121,7 @@ def _store_findings(db: Database, manuscript: dict, session: dict,
     within its unit. When it anchors cleanly, the harness builds `new`
     from the unit itself and stages a `doc_threads` row with
     `origin_type='lens'` through the same door the filters use — from
-    there `lens push` / `lens settle` give it the filter road's
+    there `lens push` / `lens resolve` give it the filter road's
     user-side workflow. An ambiguous or unanchorable replacement is
     REFUSED (reason reported per finding); the finding itself is still
     stored. Ruling on the finding and settling the edit stay

@@ -175,7 +175,7 @@ def has_replacement(text: str) -> bool:
     The predicate `staging.is_marked` is built on, and narrow for the same
     reason `strip_replacements` is: a file containing `{{title}}` is not
     mid-settle, and treating it as such refused its Doc push forever with
-    a message about a settle that does not exist."""
+    a message about a resolve that does not exist."""
     return PENDING.search(text) is not None
 
 

@@ -1107,7 +1107,7 @@ def _critique_decided(db: Database, manuscript: dict, args) -> None:
 
 
 def _critique_reason(db: Database, mid: str, args) -> None:
-    """Amend a settled item's recorded reason (stray keystrokes and
+    """Amend a resolved item's recorded reason (stray keystrokes and
     wholesale markers happen; the evidence stream must be correctable)."""
     if not (args.target and args.text):
         sys.exit('usage: critique reason <id-prefix> --text "the real why"')
@@ -1132,7 +1132,7 @@ def _critique_reason(db: Database, mid: str, args) -> None:
 
 
 def _critique_reopen(db: Database, mid: str, args) -> None:
-    """Send a settled item back to proposed."""
+    """Send a resolved item back to proposed."""
     if not args.target:
         sys.exit("usage: critique reopen <id-prefix>")
     kind, item = _critique_settled(db, mid, args.target)
@@ -1480,7 +1480,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
     # critique-resolve row). `episode=None` means "the session's most
     # recently created open episode, whatever goal it belongs to", so
-    # this collect used to file the settle's transitions against
+    # this collect used to file the resolve's transitions against
     # whichever intent happened to be open — making a completion report
     # say a substantive goal was served by an edit sweep. Settling
     # staged edits is hygiene, not goal-work: the version history, the
@@ -1514,7 +1514,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
 
 
 def _print_pattern_candidate(candidate: dict | None) -> None:
-    """The one line a settle's pattern candidate earns. The distiller
+    """The one line a resolve's pattern candidate earns. The distiller
     itself is `passes.settle_learnings`, shared by both passes and both
     filter transports; each CLI path owns its own output."""
     if candidate:
@@ -3245,8 +3245,8 @@ def cmd_filter(args):
     # FILE-first, because by then the author is talking about the essay
     # and not about the filter. The optional name stays legal on the
     # file-first verbs for the one case that needs it — two filters with
-    # active runs on the same essay — so `filter settle becker.md` and
-    # `filter settle duplicate-words becker.md` both read naturally.
+    # active runs on the same essay — so `filter resolve becker.md` and
+    # `filter resolve duplicate-words becker.md` both read naturally.
     if args.action not in ("add", "show", "prelude", "run") and \
             args.file is None and args.name is not None:
         args.name, args.file = None, args.name
@@ -3500,6 +3500,51 @@ def cmd_filter(args):
                              f"'filter triage {result['file']} --accept …'."))
             return
 
+        if args.action == "apply":
+            # RECORD then PUSH, under one name, because from the author's
+            # seat those are one act: the proposals reach the tab they rule
+            # them in. The DRAFTING step cannot be folded in here — in chat
+            # mode `filter run` makes no model call at all, the assistant
+            # answers the payload in the conversation, and no CLI process
+            # can stand in for that. So this wraps the two verbs that ARE
+            # mechanical and leaves the one that is judgment where it is.
+            if not args.file:
+                raise SystemExit(
+                    "usage: authorlm filter apply [<name>] <essay.md>  "
+                    "(the reply JSON on stdin)\n"
+                    "It records the reply and pushes the proposals into the "
+                    "essay's Doc tab in one step. Draft the reply against "
+                    "'filter run <name> <essay>' first.")
+            reply = _stdin_text()
+            if not reply:
+                raise SystemExit(
+                    "the reply JSON travels on stdin — nothing arrived. "
+                    "Nothing was staged, nothing was pushed, and the cursor "
+                    "did not move.")
+            result = api.filter_record(db, manuscript, config, args.file,
+                                       reply, name=args.name)
+            start, end = result["window"]
+            print(ui.green(
+                f"Recorded units {start}–{end}: {len(result['staged'])} "
+                f"proposal(s), {len(result['keeps'])} kept."))
+            _print_filter_warnings(result["warnings"])
+            if result["remaining"] > 0:
+                # Pushing a partial run would put half an essay's forms in
+                # the tab and commit the run to the Doc road before the rest
+                # of it has been judged. The road is chosen once, so it is
+                # chosen when the run is complete.
+                print(ui.dim(
+                    f"{result['remaining']} unit(s) left — nothing pushed "
+                    f"yet. 'filter run {result['run']['filter']} "
+                    f"{result['file']}' assembles the next window; the "
+                    f"apply that completes the run is the one that pushes."))
+                return
+            if not result["staged"]:
+                print(ui.dim("No proposals, so there is nothing to push and "
+                             "this run has taken no road."))
+                return
+            args.action = "push"          # fall through to the push branch
+
         if args.action == "push":
             if not args.file:
                 raise SystemExit("usage: authorlm filter push <essay.md>")
@@ -3518,10 +3563,10 @@ def cmd_filter(args):
                     # is unavailable.
                     raise ValueError(
                         f"{err}\nThe Doc road needs the [gdocs] bridge. "
-                        f"The local road does not: 'filter settle "
+                        f"The local road does not: 'filter resolve "
                         f"{args.file} --pause' writes the same "
                         f"<<old>>{{{{new}}}} forms into the file in your "
-                        f"vault, and 'filter settle {args.file}' "
+                        f"vault, and 'filter resolve {args.file}' "
                         f"finalizes them.") from err
 
             result = api.filter_push(db, manuscript, config, args.file,
@@ -3543,7 +3588,7 @@ def cmd_filter(args):
                 "The tab is where you rule on these: leave a change alone "
                 "to take it, empty its green half to turn it down, or "
                 "reword the green half to make it yours — your wording "
-                f"wins. Then 'filter settle {result['file']}' reads the "
+                f"wins. Then 'filter resolve {result['file']}' reads the "
                 "tab back and records every one of those verdicts."))
             if result["local_unchanged"]:
                 print(ui.dim(
@@ -3567,9 +3612,9 @@ def cmd_filter(args):
                     f"not push to Docs again until this is finished."))
             return
 
-        if args.action == "settle":
+        if args.action == "resolve":
             if not args.file:
-                raise SystemExit("usage: authorlm filter settle <essay.md> "
+                raise SystemExit("usage: authorlm filter resolve <essay.md> "
                                  "[--pause]")
             def _doc_bridge():
                 from . import gdocs as _gd
@@ -3582,7 +3627,7 @@ def cmd_filter(args):
             # A CALLABLE, not two arguments: the local road must work
             # with no credentials, so nothing here can pop a consent
             # window unless the run actually took the Doc road.
-            result = api.filter_settle(db, manuscript, config, args.file,
+            result = api.filter_resolve(db, manuscript, config, args.file,
                                        pause=args.pause, name=args.name,
                                        services=_doc_bridge)
             _print_filter_warnings(result["warnings"])
@@ -3590,7 +3635,7 @@ def cmd_filter(args):
                 print(ui.green(
                     f"Marked {result['file']} with {result['forms']} "
                     f"change(s) — open it and edit any of the {{{{new}}}} "
-                    f"halves you want to reword, then 'filter settle "
+                    f"halves you want to reword, then 'filter resolve "
                     f"{result['file']}' with no flag to finalize."))
                 print(ui.dim("The file will not push to Docs while it is "
                              "marked, and every observer still reads the "
@@ -3632,7 +3677,7 @@ def cmd_filter(args):
             if result.get("tab_still_marked"):
                 print(ui.dim(
                     f"The Doc tab still shows the struck-and-green marks: "
-                    f"a settle that also re-pushed could fail halfway on "
+                    f"a resolve that also re-pushed could fail halfway on "
                     f"the network after the evidence was recorded, so it "
                     f"does not. Your next 'doc push {result['file']}' "
                     f"clears them."))
@@ -3663,7 +3708,7 @@ def cmd_filter(args):
                 print(ui.green(
                     f"{result['file']}'s tab rebuilt clean; "
                     f"{result['reopened']} form(s) returned to 'accepted' "
-                    f"— 'filter settle' applies them, 'filter triage "
+                    f"— 'filter resolve' applies them, 'filter triage "
                     f"--undo' reopens them."))
                 print(ui.dim(
                     "The tab was rebuilt from the file on disk, so it now "
@@ -3675,7 +3720,7 @@ def cmd_filter(args):
             print(ui.green(
                 f"{result['file']} restored to its original text; "
                 f"{result['reopened']} form(s) returned to 'accepted' — "
-                f"'filter settle' applies them, 'filter triage --undo' "
+                f"'filter resolve' applies them, 'filter triage --undo' "
                 f"reopens them."))
             return
 
@@ -3780,11 +3825,11 @@ def cmd_lens(args):
                     f"This finding's edit is still open ({where}) — the "
                     f"verdict on the finding does not settle it. "
                     f"'lens push {gmeta.get('file', '<file>')}' / "
-                    f"'lens settle {gmeta.get('file', '<file>')}' run "
+                    f"'lens resolve {gmeta.get('file', '<file>')}' run "
                     f"the edit's own road."))
         return
 
-    if args.action in ("push", "settle"):
+    if args.action in ("push", "resolve"):
         target = args.name or args.file
         if not target:
             raise SystemExit(f"usage: authorlm lens {args.action} "
@@ -3812,9 +3857,9 @@ def cmd_lens(args):
                                     f"{gdocs_clamp(t['proposed_old'])}» "
                                     f"— {why}"))
                 print(ui.dim("Resolve them in the Doc, then "
-                             f"'lens settle {result['file']}'."))
+                             f"'lens resolve {result['file']}'."))
             else:
-                result = api.lens_settle(db, manuscript, config, target,
+                result = api.lens_resolve(db, manuscript, config, target,
                                          services=_doc_bridge)
                 _print_filter_warnings(result["warnings"])
                 print(ui.green(
@@ -3891,7 +3936,7 @@ def cmd_lens(args):
         print(ui.dim(f"{len(result['edits_staged'])} edit(s) staged — "
                      f"'lens push {result['file']}' writes them into the "
                      f"Doc tab as <<old>>{{{{new}}}} forms; "
-                     f"'lens settle {result['file']}' reads the tab "
+                     f"'lens resolve {result['file']}' reads the tab "
                      f"back. Ruling on a finding and settling its edit "
                      f"stay independent."))
     if result["findings"]:
@@ -5011,11 +5056,29 @@ def cmd_doc(args):
             sys.exit(f"error: {err}")
         try:
             if args.action == "push":
+                # The reader-load manifest is DERIVED, so it is recomputed
+                # here rather than stored: every push writes the current
+                # book, and a push is the only thing that writes it. It
+                # rides along on a single-file push too — one essay changing
+                # can move the whole curve, and a manifest tab that is only
+                # correct after a full push is a tab nobody can trust.
+                from . import manifest as mf
+
+                try:
+                    _mpath, _mrows = mf.refresh(db, manuscript)
+                    print(ui.dim(
+                        f"Manifest recomputed: {len(_mrows)} units, "
+                        f"{sum(len(r['debt']) for r in _mrows)} unmet "
+                        f"assumptions → {mf.FILENAME}"))
+                except Exception as err:   # never fatal to a push
+                    print(ui.dim(f"Manifest not recomputed: {err}"))
                 # One tab per file in a single master Doc; no file argument
                 # pushes the whole manuscript.
                 targets = ([args.name] if args.name
                            else gdocs._reading_order_files(
                                gdocs.manuscript_bridge(manuscript)))
+                if args.name and mf.FILENAME not in targets:
+                    targets.append(mf.FILENAME)
                 normalized_any = False
                 result = None
                 for target in targets:
@@ -5171,8 +5234,8 @@ def cmd_doc(args):
                     print(ui.yellow(
                         f"MID-SETTLE: {relpath} carries staged "
                         f"<<old>>{{{{new}}}} forms on disk — untouched. "
-                        f"Pulling would discard the settle. Finalize it "
-                        f"('filter settle {relpath}') or put the original "
+                        f"Pulling would discard the resolve. Finalize it "
+                        f"('filter resolve {relpath}') or put the original "
                         f"text back ('filter unmark {relpath}')."))
                 for relpath in result.get("sidecar_unparsable", []):
                     print(ui.yellow(
@@ -6561,7 +6624,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show / list --decided: search critique items by "
                         "text (statement, reason, or the critic's original)")
     p.add_argument("--decided", action="store_true",
-                   help="list: the settled items instead of the pending "
+                   help="list: the resolved items instead of the pending "
                         "queue — every past verdict with its reason "
                         "(narrow with --scope/--verdict/--query)")
     p.add_argument("--verdict",
@@ -6754,13 +6817,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="author-defined lenses (_lenses/*.md prompts): add, list, "
              "run <name> <file>, register (external findings on stdin), "
              "review <n>, push <file> (staged lens edits → Doc forms), "
-             "settle <file> (read the tab back)")
+             "resolve <file> (read the tab back)")
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
-                            "review", "push", "settle"])
+                            "review", "push", "resolve"])
     p.add_argument("name", nargs="?",
                    help="lens name (add/run/register), finding index "
-                        "(review), or manuscript file (push/settle)")
+                        "(review), or manuscript file (push/resolve)")
     p.add_argument("file", nargs="?", help="manuscript file (run/register)")
     p.add_argument("--accept", action="store_true")
     p.add_argument("--reject", action="store_true")
@@ -6787,24 +6850,32 @@ def build_parser() -> argparse.ArgumentParser:
             "the shipped config deliberately does not have. `--dry-run` "
             "is accepted as a no-op alias for muscle memory.\n\n"
             "TWO ROADS TO THE AUTHOR'S EYES, and the run picks one by "
-            "which verb it meets first. `filter settle <essay>` is the "
+            "which verb it meets first. `filter resolve <essay>` is the "
             "LOCAL road and the default: the changes are applied (or, "
             "with --pause, written into the file as <<old>>{{new}} forms "
             "to read in Obsidian). `filter push <essay>` is the DOC road: "
             "the same forms go into the essay's tab of the master Doc, "
             "struck-through and green, the file on disk keeps the OLD "
-            "text, and `filter settle <essay>` later reads the tab back. "
+            "text, and `filter resolve <essay>` later reads the tab back. "
             "Local is recommended — its whole state is described by the "
             "bytes on disk, and the Doc road's is not (a crash mid-recovery "
             "can leave forms in a tab that nothing on disk records; "
             "'doc push <essay>' rebuilds the tab from the pristine file). "
             "Once a run takes a road it keeps it; switching is "
-            "settle-then-rerun, never a flag."),
+            "resolve-then-rerun, never a flag. `filter apply [<name>] "
+            "<essay>` is `record` and `push` under one name — the reply "
+            "JSON on stdin, the proposals in the tab, one step. It does "
+            "NOT draft: in chat mode `filter run` makes no model call, the "
+            "assistant answers the payload in the conversation, and no CLI "
+            "process can stand in for that. A partial run records and does "
+            "not push, because the road is chosen once and a half-pushed "
+            "essay has chosen it early."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action",
                    choices=["add", "list", "show", "prelude", "run",
-                            "record", "edits", "triage", "push", "settle",
-                            "status", "unmark", "rollback", "abandon"])
+                            "record", "apply", "edits", "triage", "push",
+                            "resolve", "status", "unmark", "rollback",
+                            "abandon"])
     p.add_argument("name", nargs="?",
                    help="filter name (add/show/prelude/run); optional "
                         "elsewhere, to disambiguate two runs on one file")

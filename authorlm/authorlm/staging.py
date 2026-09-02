@@ -48,7 +48,7 @@ def is_marked(text: str) -> bool:
     `{{…}}` as an insertion, which is right for a Doc tab and wrong for
     a manuscript file — an essay containing `{{title}}` is not
     mid-settle, and treating it as such refused its Doc push forever
-    with a message about a settle that does not exist. A filter never
+    with a message about a resolve that does not exist. A filter never
     stages an insertion, so nothing this predicate guards is missed."""
     return th.has_replacement(text)
 
@@ -128,7 +128,7 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
     # unit 4 and now leaves it alone. Without this the stale row survived
     # as `proposed`, showed up in the next `filter edits` list under a
     # number the author would read as current, and could be accepted into
-    # a settle it was never part of.
+    # a resolve it was never part of.
     #
     # `passes.stage` does exactly this for the critique pass and for the
     # same reason; the door's two producers now agree about it.
@@ -229,7 +229,7 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
     marked = path.read_text(encoding="utf-8")
     # REPLACE forms only, for the third time and for the same reason: an
     # unmatched insertion form collapses to its old half, which for an
-    # insertion is the empty string — so a settle that looked at bare
+    # insertion is the empty string — so a resolve that looked at bare
     # `{{…}}` would DELETE the author's `{{title}}` from the finished
     # essay. The critique pass keeps both kinds, where both are its own.
     final, forms = passes.final_text_from_marked(marked, written=written,

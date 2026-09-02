@@ -938,7 +938,7 @@ shown it, grouped by how specific each goal is, with the primary marked:
 >
 > **Assistant:** Dropped. Two goals on this rewrite.
 
-**Approving the plan is what settles it.** The same "yes" that ratifies the beat
+**Approving the plan is what resolves it.** The same "yes" that ratifies the beat
 plan ratifies the list of goals — you see both together, and there is no second
 confirmation to give. After that the list is fixed: a goal you declare halfway
 through the rewrite is *reported* to you, never quietly added, and you say
@@ -1310,7 +1310,7 @@ It fills up like this:
 Two things worth knowing about that exchange.
 
 **The row is yours, and only yours.** Nothing in the system writes that file
-except your own yes. Not the filter, not the settle, not the rollback, not a
+except your own yes. Not the filter, not the resolve, not the rollback, not a
 Doc pull. A row you have written is settled and no pass will ever rewrite it.
 
 **A term I ask about is a term I will never ask about again.** Say no to one and
@@ -1460,7 +1460,7 @@ authorlm filter record <essay.md>             the reply JSON on stdin
 authorlm filter edits <essay.md>
 authorlm filter triage <essay.md> --accept 1 2 --reject 3 --reason "…"
 authorlm filter push <essay.md>               the staged edits → the Doc tab
-authorlm filter settle <essay.md> [--pause]   local road, or reads the tab back
+authorlm filter resolve <essay.md> [--pause]   local road, or reads the tab back
 authorlm filter status [<essay.md>]           incl. the run's transport
 authorlm filter unmark [--force] | rollback | abandon <essay.md>
 ```
@@ -1487,7 +1487,7 @@ run --dry-run` is accepted and does nothing, for the muscle memory.
 fraction of a cent — because the essay's text changed and a stale summary is a
 lie the next gate refuses. That is the only model call the whole flow makes, and
 it is announced with its usage line. It also marks the essays after this one
-`upstream_stale`, which the settle says out loud.
+`upstream_stale`, which the resolve says out loud.
 
 **Re-running.** A filter refuses to run on text it has already settled on,
 byte for byte, and names the prior run. `--again` looks anyway. It is

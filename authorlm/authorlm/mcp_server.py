@@ -503,7 +503,7 @@ def add_filter(name: str, prompt: str, manuscript: str | None = None) -> dict:
     envelope, each error naming what is wrong and the legal values.
 
     Creating a filter is curation, so it lives here; RUNNING one
-    (`filter run`/`prelude`/`record`/`settle`/`triage-flags`/`status`/
+    (`filter run`/`prelude`/`record`/`resolve`/`triage-flags`/`status`/
     `unmark`/`rollback`/`abandon`) stays CLI-only, the write loop's
     one-call-surface ruling — use list_filter_edits/triage_filter_edits
     for the conversational half of that loop instead."""
@@ -570,7 +570,7 @@ def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
     are already placed. `mode='doc'` means the author is reading and
     rewording those changes in the Google Doc right now: say so, do not
     offer to apply them, and name the CLI verb that ends the pause —
-    `authorlm filter settle <essay>`, which reads the tab back."""
+    `authorlm filter resolve <essay>`, which reads the tab back."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)

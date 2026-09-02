@@ -981,7 +981,7 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
 # The remedy each producer's pending forms are settled by. A refusal
 # that names the wrong verb is worse than a refusal that names none.
 _SETTLE_REMEDY = {"critique": "critique resolve {file}",
-                  "filter": "filter settle {file}"}
+                  "filter": "filter resolve {file}"}
 
 
 def forms_pending(db: Database, manuscript_id: str,
@@ -993,7 +993,7 @@ def forms_pending(db: Database, manuscript_id: str,
     `origin_type = 'critique'` only, so a file carrying a FILTER's
     written forms sailed past it and pushed its markers straight into
     the Doc — where the next pull would overwrite the local file and
-    silently discard the settle. Returning the origin rather than a bool
+    silently discard the resolve. Returning the origin rather than a bool
     is what lets the refusal name the right remedy."""
     row = db.one(
         "SELECT origin_type FROM doc_threads WHERE manuscript_id = ? "
@@ -1049,8 +1049,8 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"<<old>>{{{{new}}}} pending-change forms, which are staged "
             f"proposals and not the essay. Pushing them would put the "
             f"markers in the Doc, and the next pull would overwrite the "
-            f"local file and silently discard the settle. Finalize it "
-            f"('filter settle {relpath}') or put the original text back "
+            f"local file and silently discard the resolve. Finalize it "
+            f"('filter resolve {relpath}') or put the original text back "
             f"('filter unmark {relpath}') first.")
 
 
@@ -1141,11 +1141,15 @@ def _sidecar_would_be_emptied(relpath: str, incoming: str,
     it has. Deterministic, and it consults the sidecar's OWN parser
     rather than counting lines: what matters is whether the rows survive
     the round trip, not whether the bytes look like a table."""
-    from .structure import is_sidecar
-
-    if not is_sidecar(relpath):
-        return False
     from . import pronunciations as pron
+
+    # Scoped to the DICTIONARY by name, not to sidecars in general: this
+    # guard consults the pronunciation parser, and a second sidecar whose
+    # rows that parser cannot read would be judged empty on every push.
+    # `manifest.md` needs no guard of its own — it is derived, so the push
+    # that would "empty" it is the push that regenerates it.
+    if relpath != pron.FILENAME:
+        return False
 
     if not (current or "").strip():
         return False
@@ -1390,7 +1394,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
                           bridge: DocBridge | None = None) -> dict:
     """Fetch `file`'s pending-review text straight from the master Doc —
     the authoritative marked text for BOTH doc-transport settles
-    (`critique resolve` and a doc-mode `filter settle`), the
+    (`critique resolve` and a doc-mode `filter resolve`), the
     same way pull_doc does: whole-Doc markdown export + order-aware
     split_tabbed_export (never the textRun walk that critique_tab_text
     used, which discards headings/bold/lists/link targets — it-x7-1).
@@ -1599,13 +1603,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
         # A marked local file is MID-SETTLE: its bytes carry staged
         # <<old>>{{new}} proposals the author may have post-edited, and
-        # overwriting them with the tab would discard the settle without
+        # overwriting them with the tab would discard the resolve without
         # saying so. The checkout gate makes this mostly unreachable (a
         # marked file is not checked out, so nothing pulls it) — but
         # "mostly unreachable" is not a guard, and --force must not be
         # able to reach past it either. Skipped and reported by name,
         # the shape `conflicts` and `local_ahead` already use; the
-        # remedy is `filter settle` or `filter unmark`
+        # remedy is `filter resolve` or `filter unmark`
         # (filter-pass design §2.3).
         if staging_is_marked(current_raw):
             report.setdefault("marked", []).append(relpath)
@@ -2284,7 +2288,7 @@ def _locate_in_tab(docs_service, master_id: str, tab_id: str,
     searched for the same needle and both resolved to the same span; the
     descending write order then landed the second write INSIDE the
     wrapper the first had planted, and `threads.PENDING`, being
-    non-greedy, matched `<<<<old>>{{new}}` at settle and left the rest
+    non-greedy, matched `<<<<old>>{{new}}` at resolve and left the rest
     of the wrapper in the author's manuscript as literal text. Text
     corruption, not a cosmetic fault (design-filter-doc-settle §9.3)."""
     runs = _tab_runs(docs_service, master_id, tab_id)
@@ -2376,7 +2380,7 @@ GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
 # inside a paragraph-sized form was invisible). COLOR ONLY, never bold or
 # italics: the doc settle reads the whole-Doc MARKDOWN export, which
 # preserves bold as **…** — a bolded highlight would leak literal
-# asterisks into the settled prose. foregroundColor is proven invisible
+# asterisks into the resolved prose. foregroundColor is proven invisible
 # to that export (the green half already round-trips clean).
 RED_GONE = {"color": {"rgbColor": {"red": 0.8, "green": 0.1, "blue": 0.1}}}
 BLUE_NEW = {"color": {"rgbColor": {"red": 0.07, "green": 0.33, "blue": 0.8}}}
@@ -2508,7 +2512,7 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     breaks that, and this manuscript is full of refrains. Where the two
     counts diverge, the writer plants each form in the WRONG paragraph
     and the read-back proof cannot see it — the form IS present, just
-    not where it belongs — so the settle resolves every thread `cleaned`
+    not where it belongs — so the resolve resolves every thread `cleaned`
     and the manuscript is silently corrupted. A silent wrong write is
     strictly worse than the loud nesting failure this parameter exists
     to fix, so the counting universe is matched exactly.

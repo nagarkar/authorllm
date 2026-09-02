@@ -56,7 +56,7 @@ PROPOSAL_TRIAGE_HELP = (
     "reframed definition, a retired concept recurring, a rejected "
     "relationship argued again. Unlike concept and edge triage — which "
     "curate machine HYPOTHESES that were never settled — accepting here "
-    "overwrites a decision you already made, so the settled version wins by "
+    "overwrites a decision you already made, so the resolved version wins by "
     "default. Rows are grouped by concept because proposals against one "
     "concept are competing rewrites of a single note: pick at most one. "
     "Dismissal reasons are the highest-value evidence in the system — they "
@@ -202,11 +202,11 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
         ],
         "actions": [
             {"id": "accept", "label": "Accept",
-             "help": "Apply the proposal to the settled object."},
+             "help": "Apply the proposal to the resolved object."},
             {"id": "dismiss", "label": "Dismiss",
-             "help": "Keep the settled version. The reason is the evidence the "
+             "help": "Keep the resolved version. The reason is the evidence the "
                      "system learns from — give it verbatim.",
-             "reason": _optional_reason("Why is the settled version right?")},
+             "reason": _optional_reason("Why is the resolved version right?")},
             {"id": "edge", "label": "Kind, not identity",
              "help": "Alias proposals only: record 'canonical generalizes "
                      "alias' instead of merging the two concepts."},

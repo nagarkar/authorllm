@@ -484,6 +484,16 @@ Profile registry (key → standing rule):
   against the recorded ambition — the Rovelli/Hossenfelder "Big Idea"
   shelf, audio-first Rational Seekers — never against generic trade
   norms.
+- `audience` — consult for any question about PITCH: whether a passage
+  assumes too much or explains too much, whether a term needs a bridge,
+  whether a gloss is condescension. It records what the reader already
+  has and what they do not, and its standing test is the one to apply.
+  **Precedence, ratified 2026-09-02: where `audience` and `market`
+  disagree, `audience` governs DRAFTING and `market` governs
+  POSITIONING.** They answer different questions — who the prose may
+  assume it is talking to, versus who might buy the book — and the
+  reader-load filter and the pitch lens name `audience` in their front
+  matter so the payload carries it.
 
 **Registering a new aspect** (do all three, in order, when the author
 names one): (1) agree on the key and the standing rule in conversation;
@@ -561,7 +571,7 @@ feedback document):
    - The SESSION does the semantic layer the verb cannot: before writing
      the manifest, check each candidate item against the existing
      critique items (`list_critique_items` for what is still pending,
-     `list_critique_decisions` for the settled verdicts and the author's
+     `list_critique_decisions` for the resolved verdicts and the author's
      recorded reasons — never the DB) and the ratified law. A PARAPHRASE of an item the author
      already accepted, already rejected (their reason stands), or
      already ratified as a style element is not imported as new — it is
@@ -655,7 +665,7 @@ the harness builds `new` from the unit itself and stages a doc thread with
 `origin_type='lens'`; ambiguity is refused per finding, never guessed, and
 the finding itself is always kept. `lens push <essay>` then writes the
 staged lens edits into the essay's tab as `<<old>>{{new}}` forms and
-`lens settle <essay>` reads the tab back — the filter doc road's contract
+`lens resolve <essay>` reads the tab back — the filter doc road's contract
 verbatim: the tab is the review, untouched = accept, old-restored =
 decline, reworded (or hand-resolved) = the author's words win, one
 producer's forms per tab, evidence as `lens_edit` under no episode.
@@ -753,6 +763,33 @@ cross-essay (a motif used two ways, material that belongs in a different
 essay), because a filter can only replace a unit in place and can never
 move or cut one.
 
+**"APPLY FILTER X TO ESSAY Y" IS ONE INSTRUCTION, NOT THREE.** The author's
+words on the old behaviour: *"I don't know why we have three different verbs
+required in three different steps to do that one thing."* They are right.
+`run`, `record` and `push` are the state machine's steps, not theirs — they
+never type them, YOU do. When the author asks for a filter to be applied,
+carry the whole thing to the end in ONE turn: assemble the payload, draft the
+reply, `filter apply` (which records AND pushes), then read the proposals
+back to them as prose. Do not stop in the middle to ask which road, whether
+to push, or whether they would like to triage first. The Doc tab IS the
+review, and the point of the pass is that the proposals arrive where they
+will be ruled on.
+
+Four things legitimately interrupt that, and nothing else does:
+- a `global` filter, whose prelude must be drafted and frozen first;
+- a run needing more than one window — the apply that COMPLETES the run is
+  the one that pushes; say how many units are left and carry on;
+- the author having asked for the LOCAL road, which is `filter record` then
+  `filter resolve --pause`, never `apply`;
+- a genuine refusal from a verb, which is reported, never worked around.
+
+`authorlm filter apply [<name>] <essay>` (reply JSON on stdin) is `record`
+and `push` in one verb. The DRAFTING step is not in it and cannot be: in chat
+mode `filter run` makes no model call, YOU answer the payload in the
+conversation, and no CLI process can stand in for that. The numbered loop
+below is the machinery `apply` wraps — read it to know what happens, never as
+a script to walk the author through.
+
 The loop, per essay:
 1. `authorlm filter run <name> <essay>` (shell, no call). Read the
    payload. For a `global` filter, `filter prelude <name> <essay>` comes
@@ -766,23 +803,37 @@ The loop, per essay:
    autoregressive rather than N independent judgments. Copy each `echo`
    from the unit; a mismatch discards the whole reply and nothing is
    staged. Pipe the JSON into `authorlm filter record <essay>`.
-3. **Read the proposals back to the author as PROSE, by paragraph.**
-   Never show them the JSON, a payload, a unit index they did not ask
-   for, an id, or a flag name — the same discipline plan and digest
-   presentation already demand. Volunteer the one or two you are LEAST
-   sure about, by number: those are where their ruling changes the
-   outcome.
-4. Verdicts: `list_filter_edits` / `triage_filter_edits` in chat, or
-   `filter triage <essay> --accept … --reject … --reason "…"` in the
-   shell. **Take a rejection's reason in the author's own words,
+3. **`authorlm filter push <essay>` — ALWAYS, immediately after a
+   successful record (author ruling 2026-09-01, verbatim: "always add
+   these to the doc using the old/new syntax just like we do for
+   lenses ... the actual doc update should flow through the same
+   deterministic code path as lensing").** The Doc road is the standing
+   protocol for every filter run, not an option to offer: the staged
+   proposals go into the essay's tab as struck-through old text with the
+   new text in green, through the same forms pipeline `lens push` uses,
+   and the author rules on them THERE. Never apply a filter's edits
+   locally without being told to in as many words, and never hand-write
+   forms into a file or a tab — the verb is the only producer. Then
+   **summarize the proposals in chat VERY BRIEFLY**: one line per
+   changed paragraph saying which paragraph and what kind of repair, the
+   tab URL once, and the one or two you are least sure about. Not the
+   old and new text — the tab shows that. Never show JSON, a payload, a
+   unit index they did not ask for, an id, or a flag name.
+4. Verdicts happen in the tab (untouched = accept, green half emptied
+   = decline, reworded = the author's words win) and `filter resolve
+   <essay>` reads them back when the author says they are done. Chat
+   verdicts (`list_filter_edits` / `triage_filter_edits`, or `filter
+   triage <essay> --accept … --reject … --reason "…"` in the shell)
+   remain available for a change the author wants to knock out before
+   looking, and are never required. **Take a rejection's reason in the author's own words,
    verbatim.** It is the highest-value evidence the run produces: the
    next run of this filter on this essay is shown their reasons before
    it starts, which is most of what stops it proposing the same thing
    twice.
-5. `authorlm filter settle <essay>` applies the accepted edits directly
+5. `authorlm filter resolve <essay>` applies the accepted edits directly
    (the default: the triage verdict already IS the ruling). `--pause`
    instead writes `<<old>>{{new}}` forms into the local file for the
-   author to read and reword in Obsidian; `filter settle` with no flag
+   author to read and reword in Obsidian; `filter resolve` with no flag
    then finalizes, their words winning. While the file is marked it will
    not push to Docs and every observer still reads the original text;
    `filter unmark <essay>` is the way out. `filter rollback <essay>`
@@ -797,7 +848,7 @@ The loop, per essay:
 
    **Step 4 is OPTIONAL on this road, and usually skipped.** The tab IS
    the review: an untouched form is an acceptance, an emptied green half
-   is a decline, a reworded one is a modified acceptance, and the settle
+   is a decline, a reworded one is a modified acceptance, and the resolve
    records all three exactly as a CLI verdict would. So `filter push`
    takes the UNTRIAGED proposals out too — never make the author rule on
    everything in chat first and then again in the Doc. Only a change
@@ -809,7 +860,7 @@ The loop, per essay:
    - **An untouched form is an acceptance.** Leaving a change alone
      means taking it. Nothing needs to be marked "yes".
    - **Edit inside the `{{ }}` braces only. Leave `<< >>` alone.**
-     Editing the old half breaks the join, and the settle records that
+     Editing the old half breaks the join, and the resolve records that
      change as a decline — their text still survives, but the verdict on
      the record is wrong.
    - **When two changes replace identical paragraphs**, `filter push`
@@ -817,12 +868,16 @@ The loop, per essay:
      deleting one outright may attach the decline to the other twin. The
      manuscript text is never affected.
 
+   **Since 2026-09-01 the Doc road is the DEFAULT for filters** (step 3
+   above). The local-road paragraphs below describe the fallback the
+   author must ask for by name.
+
    A run takes ONE road and keeps it: a push makes it a doc run, a
    settle with no prior push makes it a local run, and switching is
-   settle-then-rerun rather than a flag. Only ONE producer's forms can
+   resolve-then-rerun rather than a flag. Only ONE producer's forms can
    be in an essay's tab at a time — a second filter's `filter push` on
    the same essay is refused by name, because two producers' forms in
-   one tab cannot be told apart at settle. Local stays the DEFAULT and
+   one tab cannot be told apart at resolve. Local stays the DEFAULT and
    the recommendation, because its whole state is described by the bytes
    on disk and the Doc road's is not — a crash between `filter unmark
    --force`'s withdraw and its rebuild can leave forms in a tab that

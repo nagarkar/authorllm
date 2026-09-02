@@ -788,13 +788,13 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
     Origin-agnostic apart from the `staged_threads` call it makes: both
     parameters default to today's values (filter-pass design §2.2).
 
-    `final_text` is the settled text the forms resolved into. When given,
+    `final_text` is the resolved text the forms resolved into. When given,
     a thread whose form is GONE from the marked text is not written off
     as a decline: the verdict is inferred from the text itself, because
     an author who resolved the form by hand — deleted the markers, kept
     the new prose — has accepted it (it-4c5a8038c304; author's ruling
     2026-08-31: old text still standing as-is → decline; old text gone →
-    acceptance, the settled text being the final wording). Without
+    acceptance, the resolved text being the final wording). Without
     `final_text` the old behavior stands: an unmatched form is a
     decline."""
     threads = staged_threads(db, manuscript_id, file, states=("written",),
@@ -840,7 +840,7 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                for t2 in threads for field in ("proposed_old", "proposed_new")
                if (t2[field] or "").strip()}
     for t in unmatched:
-        # The form is gone from the marked text. Without the settled
+        # The form is gone from the marked text. Without the resolved
         # text to consult, that reads as the author deleting the form
         # during the pause: a decline. WITH it, infer the verdict from
         # the prose (it-4c5a8038c304): an intact old paragraph is a
@@ -862,7 +862,7 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                            evidence_type=evidence_type)
             continue
         # Old gone, new not verbatim: a modified acceptance. The final
-        # wording is the settled text's closest paragraph; when nothing
+        # wording is the resolved text's closest paragraph; when nothing
         # comes close (the author folded the passage into other prose),
         # the acceptance is still recorded — their text won — with the
         # final marked unlocatable rather than guessed.
@@ -910,7 +910,7 @@ def settle_learnings(db: Database, manuscript: dict, diffs: list[dict],
     the filter pass; doc mode did not create that gap and must not be
     the only road that closes it (design-filter-doc-settle §1.2).
 
-    Fails soft: the distiller is best-effort and a settle is never
+    Fails soft: the distiller is best-effort and a resolve is never
     blocked by it. It runs on the GENERAL model tier, deliberately —
     the same client the critique pass uses, one code path rather than a
     second model-tier decision smuggled in under a learning-loop fix."""
@@ -924,5 +924,5 @@ def settle_learnings(db: Database, manuscript: dict, diffs: list[dict],
     try:
         return placement.distill_batch(db, manuscript, explanations,
                                        LLMClient(config))
-    except Exception:  # noqa: BLE001 — a settle is never blocked by this
+    except Exception:  # noqa: BLE001 — a resolve is never blocked by this
         return None

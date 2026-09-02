@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS knowledge_proposals (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     kind TEXT NOT NULL,           -- note_update | revival | edge_reproposal | belief_revival
-    target TEXT NOT NULL,         -- id of the settled object the proposal is against
+    target TEXT NOT NULL,         -- id of the resolved object the proposal is against
     payload TEXT NOT NULL,        -- JSON: current vs proposed
     content_hash TEXT NOT NULL,   -- dedupe: a dismissed proposal never returns verbatim
     source TEXT NOT NULL DEFAULT 'extraction',
@@ -377,7 +377,7 @@ CREATE TABLE IF NOT EXISTS filter_runs (
     cursor              INTEGER NOT NULL DEFAULT 0,   -- units recorded so far
     state               TEXT,            -- opaque carried text (sequential)
     registry            TEXT,            -- opaque frozen text (global prelude)
-    result_version_id   TEXT,            -- manuscript_versions.id produced at settle
+    result_version_id   TEXT,            -- manuscript_versions.id produced at resolve
     status              TEXT NOT NULL DEFAULT 'active'
                                          -- active | settled | abandoned
 );
