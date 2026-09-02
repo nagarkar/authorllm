@@ -703,6 +703,50 @@ nothing dry about it, it is the flow. `--native` is the billed path and
 refuses unless `[filtering]` is in config.toml, which it deliberately is
 not.
 
+**The cache breakpoints are a NATIVE-path mechanism; do not cite them to
+explain chat-mode cost.** The payload's four blocks (S law / A frame /
+B filtered prefix / C this window) have cache breakpoints after S and
+after A, and on `--native` that stable prefix is written once and
+re-read at cache-read rate. In chat mode there is NO model call, so no
+breakpoint applies: the only cost is how many times the payload is
+printed into the conversation, which is once per `filter run`
+invocation — once per WINDOW.
+
+**Do NOT pass `--window`, and say why if the author asks.** The default
+is the whole essay in one reply (`span = window if window else
+len(units)`), which is both the cheapest and the most autoregressive:
+unit N conditions on the run's own output for N−1 inside a single
+generation. `--window N` splits the run into ⌈units/N⌉ invocations and
+**re-prints block A every time** — with `summaries = true` that is tens
+of thousands of tokens again per window. The ONLY reason to reach for it
+is OUTPUT length: forty-odd rewritten paragraphs plus `why` and `ref` is
+a long generation and a truncated reply is refused whole. If that
+happens, `--window 15` and turn `summaries` off first. (`--from N` is a
+different flag and IS routine — it re-opens the window at unit N after a
+settle falsified the conditioning.)
+
+**`summaries = true` in a filter's front matter** adds the compressed
+summaries of the essays before and after this one to block A — un-gated,
+so a stale summary is shown and marked `!!` rather than refusing the
+run. It costs real tokens (on a mid-sized essay, block A grows roughly
+5×), so declare it only on a filter whose findings genuinely turn on
+what another essay already covers. Design reference §9.1a carries the
+measured numbers.
+
+**The payload already carries cross-essay DEFINITIONS without it.**
+`scoped_concepts(file=…)` selects a concept if it was introduced in this
+essay OR its name or alias appears in the essay's text — so a term
+defined in `metaphysic.md` and used in `hierarchy.md` arrives with its
+notes, its aliases, and the graph edges among the selected nodes. The
+limit worth knowing: an essay only receives the definition of a concept
+whose name it ALREADY WRITES. A concept the essay needs but has not yet
+named is absent, and the cheapest fix is to write the word in once by
+hand — every later payload then picks it up. Never reach for a lens
+merely to reference another essay; reach for one when the JUDGMENT is
+cross-essay (a motif used two ways, material that belongs in a different
+essay), because a filter can only replace a unit in place and can never
+move or cut one.
+
 The loop, per essay:
 1. `authorlm filter run <name> <essay>` (shell, no call). Read the
    payload. For a `global` filter, `filter prelude <name> <essay>` comes

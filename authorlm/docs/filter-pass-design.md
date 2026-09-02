@@ -70,6 +70,8 @@ Three reasons, in order of weight:
 ---
 class = "sequential"
 state = "a running ledger of words already flagged as repeated"
+summaries = false            # optional; see §9.1a
+prelude = "pronunciations"   # optional; sequential only
 ---
 
 # <the prompt, from here to the end of the file, verbatim>
@@ -84,6 +86,15 @@ state = "a running ledger of words already flagged as repeated"
   guessing about the author's editorial method.
 - `state` is optional, one line, **documentation only** — for `filter show`
   and for the payload. The harness never parses the state itself.
+- `prelude` is optional; the only legal value is `"pronunciations"`, and only
+  on a `sequential` filter (§15.22 §3.5). A `global` filter's prelude is its
+  registry and two outputs for one call is two preludes.
+- `summaries` is optional, a **boolean**, default `false` (§9.1a). It declares
+  whether the payload carries the compressed summaries of the OTHER essays,
+  before and after this one in the reading order. It is opt-in rather than
+  always-on because the cross-essay view costs real tokens in the cached
+  layer, and a filter whose jurisdiction is genuinely one essay should not
+  pay for it.
 - Any other key is refused **by name**, so a typo (`klass`, `type`) fails at
   the moment the author writes it rather than at the first run.
 - The prompt body is everything after the closing `---`; its first prose line
@@ -658,10 +669,13 @@ Block S  (system; cache breakpoint 1)
 Block A  (user; cache breakpoint 2)
   INTENTS                            in-scope active; emphasis only, never attribution
   VALIDATED BELIEFS                  sorted by statement, no confidence
-  CONCEPT NOTES                      api.scoped_concepts(file, text=capture), sorted
+  CONCEPT NOTES                      api.scoped_concepts(file, text=capture), sorted;
+                                     each node as `name (also: aliases) — notes`,
+                                     then the slice's EDGES as `from —relation→ to`
   PROTECTED TERMS                    every class: the derivation, §15.22 §1.1
   PRONUNCIATION DICTIONARY           every class: pronunciations.md, read live
   PRIOR RUNS OF THIS FILTER ON THIS FILE   dates, tallies, reasons verbatim
+  NEIGHBOURING ESSAYS                only when the filter declares summaries = true
   THE ESSAY                          global class only: every unit, numbered
   MOTIF REGISTRY                     global class only: the frozen prelude output
 
@@ -697,13 +711,78 @@ Two notes worth recording because they **invert** the write path's:
 - **`scoped_concepts(file=file)` works here and does not there.** A writeup
   truncates the essay to a placeholder, so the file-scoped graph slice is
   empty for the very file being drafted. A filter runs on an intact essay.
-- **There is no drafting context and no before/after summaries.** Requiring
-  `passes.summaries_ready` would make every filter run block on the book's
-  summary state — §14.1's defect wearing a new hat. The price is the
-  cross-essay view, and §0's jurisdiction boundary is how it is paid.
+- **There is no drafting context, and summaries are OPT-IN (§9.1a).**
+  Requiring `passes.summaries_ready` would make every filter run block on the
+  book's summary state — §14.1's defect wearing a new hat. That objection is
+  about GATING, not about value, so summaries were later admitted *un-gated*
+  behind a front-matter declaration: a stale summary is shown and marked, and
+  nothing about the book's summary state can refuse a run.
 
 `filter run` prints `payload.hashes` and `payload.sizes` per block, so a
 silent cache invalidator is findable and the author can audit what is sent.
+
+### 9.1a Summaries, the window, and what a run actually costs
+
+Two questions get asked every time someone meets this pass, and the answer to
+the second is counter-intuitive enough to be worth writing down once.
+
+**`summaries = true` — the cross-essay view, un-gated.** The section renders
+`summaries.before_after` verbatim: the essays settled BEFORE this one (their
+concepts are available here) and the ones AFTER (forward reference only). A
+summary that is missing, stale, deprecated or upstream-stale is **shown and
+marked** with the `!!` convention `write status` already uses. It is rendered
+into block A — the cached layer — because it is context about the BOOK, like
+the run history beside it, and because it must not move between the windows of
+one run. The declaration lives in front matter and is therefore frozen with the
+artifact, so the section can never appear or disappear mid-run.
+
+It is not free. On `SMSTTD/hierarchy.md`, 24 neighbouring summaries:
+
+| | block A | whole payload |
+|---|---|---|
+| `summaries = false` | 20,849 chars | ~12,200 tokens |
+| `summaries = true` | 97,158 chars | ~31,300 tokens |
+
+Block A grows 4.7×. Declare it on a filter whose findings genuinely turn on
+what another essay already covers; leave it off for a word ledger.
+
+**Where the cache breakpoints apply, and where they do not.** Breakpoint 1
+sits after block S, breakpoint 2 after block A. They are a **NATIVE-path**
+mechanism: on `--native` the stable prefix is written once at full input rate
+and re-read at cache-read rate on every subsequent call. **In chat mode there
+is no model call at all** (§9, and the flag polarity is inverted against
+`write draft`), so no breakpoint is in play. The only cost question in chat
+mode is *how many times the payload is printed into the conversation*, and
+that is once per `filter run` invocation — which is once per WINDOW.
+
+**The window, and why the default is the whole essay.**
+
+```python
+span = window if window and window > 0 else len(units)     # api.filter_run
+```
+
+`--window N` splits one run into ⌈units/N⌉ invocations, and **each invocation
+re-prints block A**. A transcript does not de-duplicate identical bytes
+appended later, so with `summaries = true` every extra window costs ~24K
+tokens again. The recommendation, plainly:
+
+- **Do not pass `--window`.** The default — the whole essay in one reply — is
+  the cheapest and the most autoregressive: unit N conditions on the run's own
+  output for N−1 inside a single generation, which is the ruling read
+  literally.
+- **Reach for it only when the reply cannot finish.** The constraint is OUTPUT
+  length, never input: forty-odd whole rewritten paragraphs plus `why` and
+  `ref` is a long generation, and a truncated reply is refused whole. If that
+  happens, `--window 15` or so, and turn `summaries` off first — windowing is
+  exactly what makes summaries expensive.
+- **On `--native` it is the opposite knob.** `_filter_native` sends ONE call
+  per invocation, so without `--window` the billed path is a single call and
+  the cached prefix is written once and never re-read — the breakpoints earn
+  nothing. `--window 1` is what produces the per-unit call structure they were
+  designed for, at higher input cost and with per-unit output headroom.
+- **`--from N` is a different flag and IS routine.** It re-opens the window at
+  unit N, and it is the documented remedy after a settle falsifies the
+  conditioning (§1.1).
 
 ### 9.2 The reply grammar
 

@@ -287,8 +287,65 @@ def _concept_notes(db: Database, manuscript: dict, file: str,
     for node in sorted(graph.get("nodes", []),
                        key=lambda n: n.get("name") or ""):
         notes = (node.get("notes") or "").strip() or "(no notes)"
-        lines.append(f"- {node['name']} — {notes}")
+        # ALIASES ride with the definition, not only with PROTECTED
+        # TERMS. A concept reached by an alternate name is the same
+        # concept, and a filter that cannot see the alias will read two
+        # names for one thing as two things.
+        aliases = [a for a in (node.get("aliases") or []) if a]
+        also = f" (also: {', '.join(sorted(aliases))})" if aliases else ""
+        lines.append(f"- {node['name']}{also} — {notes}")
+    # EDGES: the graph's own relations between the concepts this essay
+    # touches. `scoped_concepts` already restricts them to the selected
+    # nodes, so nothing here reaches outside the slice.
+    edges = [e.get("edge") for e in graph.get("edges", []) if e.get("edge")]
+    if edges:
+        lines.append("")
+        lines.append("Relations the author has recorded between them:")
+        lines.extend(f"- {e}" for e in sorted(edges))
     return "\n".join(lines)
+
+
+def _neighbour_summaries(db: Database, manuscript: dict, file: str) -> str:
+    """The compressed summaries of the essays before and after this one.
+
+    Rendered UNGATED, and that is the whole point of it existing here.
+    `passes.summaries_ready` blocks the write path on a stale or missing
+    summary; making a filter run depend on the book's summary state would
+    be §14.1's defect wearing a new hat. So a summary that is stale is
+    SHOWN and MARKED — the `!!` convention `write status` already uses —
+    and the reader decides how much to trust it. Nothing here can refuse
+    a run.
+
+    Declared per filter (`summaries = true`), never always: the
+    cross-essay view costs real tokens in the cached layer, and a filter
+    whose jurisdiction is genuinely one essay should not pay for it."""
+    from . import summaries as sums
+
+    try:
+        before, after = sums.before_after(db, manuscript, file)
+    except Exception:
+        # A summary read must never be able to take a filter run down.
+        return ""
+    def render(entries):
+        out = []
+        for e in entries:
+            body = (e.get("summary") or "").strip()
+            state = e.get("state") or ""
+            mark = "" if state == "fresh" else f"  !! summary {state}"
+            if not body:
+                out.append(f"[{e['file']}]{mark or '  !! no summary'}")
+                continue
+            out.append(f"[{e['file']}]{mark}\n{body}")
+        return "\n\n".join(out)
+    parts = []
+    if before:
+        parts.append("--- BEFORE this essay in the reading order "
+                     "(settled; their concepts are available here) ---\n"
+                     + render(before))
+    if after:
+        parts.append("--- AFTER this essay (forward reference only; never "
+                     "assume what they say) ---\n" + render(after))
+    return "\n\n".join(parts)
 
 
 def _is_protected(node: dict) -> bool:
@@ -624,7 +681,7 @@ def _essay_block(units: list[str]) -> str:
 
 def _frame_block(db: Database, manuscript: dict, run: dict,
                  units: list[str], text: str | None = None,
-                 dictionary: str = "") -> str:
+                 dictionary: str = "", summaries: bool = False) -> str:
     """Block A — the second cache breakpoint.
 
     THE ESSAY and MOTIF REGISTRY appear for a GLOBAL filter only. The
@@ -658,6 +715,17 @@ def _frame_block(db: Database, manuscript: dict, run: dict,
                  prior_runs(db, manuscript["id"], run["filter"], file,
                             exclude_run_id=run["id"])),
     ]
+    if summaries:
+        # Between the graph-derived sections and the essay sections: it
+        # is context about the BOOK, like the run history above it, not
+        # about this essay's text. The section is present for the life of
+        # a run or absent for the life of a run — the declaration is in
+        # front matter and frozen with the artifact — so it can never be
+        # a shape change mid-run.
+        sections.append(_section(
+            "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
+            "marked, and is still shown)",
+            _neighbour_summaries(db, manuscript, file)))
     if run["class"] == "global":
         sections.append(_section(f"THE ESSAY — {file} ({len(units)} units)",
                                  _essay_block(units)))
@@ -737,7 +805,7 @@ def _units_block(run: dict, units: list[str],
 def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
              units: list[str], window: tuple[int, int],
              threads: list[dict], text: str | None = None,
-             dictionary: str = "") -> Payload:
+             dictionary: str = "", summaries: bool = False) -> Payload:
     """The whole payload, from stored state only.
 
     `units` comes from the caller's ONE capture of the manuscript (the
@@ -758,7 +826,8 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
     is visible rather than mysterious."""
     return Payload(
         law=_law_block(db, manuscript["id"], run["file"], artifact_body),
-        frame=_frame_block(db, manuscript, run, units, text, dictionary),
+        frame=_frame_block(db, manuscript, run, units, text, dictionary,
+                           summaries),
         prefix=_prefix_block(run, units, window[0], threads),
         units=_units_block(run, units, window),
     )
@@ -767,7 +836,8 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
 def assemble_prelude(db: Database, manuscript: dict, run: dict,
                      artifact_body: str, units: list[str],
                      text: str | None = None, dictionary: str = "",
-                     kind: str = "registry") -> Payload:
+                     kind: str = "registry",
+                     summaries: bool = False) -> Payload:
     """The prelude payload. Blocks B and C exist and are labelled — a
     payload whose block count changes between the prelude and the units
     would be a different shape for the reader as well as for the cache.
@@ -794,6 +864,11 @@ def assemble_prelude(db: Database, manuscript: dict, run: dict,
         _section(f"THE ESSAY — {file} ({len(units)} units)",
                  _essay_block(units)),
     ]
+    if summaries:
+        sections.insert(-1, _section(
+            "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
+            "marked, and is still shown)",
+            _neighbour_summaries(db, manuscript, file)))
     if kind == PRONUNCIATION_PRELUDE:
         essay = text if text is not None else "\n\n".join(units)
         body = _section(HARD_TERMS_HEADER,

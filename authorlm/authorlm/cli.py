@@ -3197,6 +3197,12 @@ def cmd_filter(args):
                              f"'filter prelude {args.name} <essay.md>'; it "
                              f"proposes dictionary rows and judges no "
                              f"unit."))
+            if out.get("summaries"):
+                print(ui.dim("summaries = true — the payload carries "
+                             "the neighbouring essays' summaries in "
+                             "block A, stale ones marked and never "
+                             "blocking. It is worth real tokens; do "
+                             "not window a run that declares it."))
             return
 
         if args.action == "list":
@@ -3223,6 +3229,8 @@ def cmd_filter(args):
                 print(ui.dim(f"state: {shown['state']}"))
             if shown.get("prelude"):
                 print(ui.dim(f"prelude = {shown['prelude']}"))
+            if shown.get("summaries"):
+                print(ui.dim("summaries = true — neighbouring essay summaries in block A"))
             print()
             print(shown["prompt"])
             return

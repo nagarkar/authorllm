@@ -4310,7 +4310,8 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
     db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})
     run["metadata"] = json.dumps(run_meta)
     payload = fg.assemble(db, manuscript, run, body, units, (start, end),
-                          threads, text=text, dictionary=dictionary)
+                          threads, text=text, dictionary=dictionary,
+                          summaries=meta.get("summaries", False))
     if (meta.get("prelude") and not loads(run["metadata"], {}).get("prelude")):
         # Optional where the registry is required (§15.22 §3.1): a run
         # whose pronunciation prelude never ran is still a correct audio
@@ -4411,7 +4412,8 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
     if kind == fg.PRONUNCIATION_PRELUDE:
         return _pronunciation_prelude(db, manuscript, config, name, rel,
                                       text, dictionary, body, units, run,
-                                      warnings, replace, native, reply)
+                                      warnings, replace, native, reply,
+                                      meta.get("summaries", False))
     if (run["registry"] or "").strip() and not replace:
         raise ValueError(
             f"this run already has a frozen registry ({len(run['registry'])} "
@@ -4420,7 +4422,8 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             f"which invalidates this run's cached prefix and re-bills it on "
             f"the native path — pass --replace.")
     payload = fg.assemble_prelude(db, manuscript, run, body, units,
-                                  text=text, dictionary=dictionary)
+                                  text=text, dictionary=dictionary,
+                                  summaries=meta.get("summaries", False))
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),
@@ -4448,7 +4451,8 @@ def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,
                            name: str, rel: str, text: str, dictionary: str,
                            body: str, units: list[str], run: dict,
                            warnings: list[str], replace: bool,
-                           native: bool, reply: str | None) -> dict:
+                           native: bool, reply: str | None,
+                           summaries: bool = False) -> dict:
     """The sequential prelude's artifact is a PROPOSAL SET (§15.22 §3.5).
 
     Nothing enters block A, nothing is frozen into the run beyond
@@ -4474,7 +4478,8 @@ def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,
             f"{pron.FILENAME} — pass --replace.")
     payload = fg.assemble_prelude(db, manuscript, run, body, units,
                                   text=text, dictionary=dictionary,
-                                  kind=fg.PRONUNCIATION_PRELUDE)
+                                  kind=fg.PRONUNCIATION_PRELUDE,
+                                  summaries=summaries)
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),

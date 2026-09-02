@@ -81,7 +81,7 @@ CLASS_HELP = {
 # statement is that the key set is closed again after it.
 PRELUDES = ("pronunciations",)
 
-KEYS = ("class", "state", "prelude")
+KEYS = ("class", "state", "prelude", "summaries")
 
 DELIMITER = "---"
 
@@ -175,12 +175,20 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
                 "a GLOBAL filter's prelude is its frozen registry, and "
                 "two outputs for one call is two preludes. Drop "
                 "`prelude` here, or make this filter sequential.")
+    summaries = meta.get("summaries", False)
+    if not isinstance(summaries, bool):
+        raise FilterError(
+            "`summaries` is a boolean — true or false. It declares "
+            "whether this filter's payload carries the compressed "
+            "summaries of the OTHER essays, before and after this one in "
+            "the reading order. Default false: the cross-essay view is "
+            "worth real tokens, so a filter asks for it.")
     body = "\n".join(lines[end + 1:]).strip()
     if not body:
         raise FilterError("a filter is its prompt — there is nothing "
                           "after the front matter.")
     return {"class": klass, "state": (state or "").strip(),
-            "prelude": prelude}, body
+            "prelude": prelude, "summaries": summaries}, body
 
 
 def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:
@@ -230,10 +238,12 @@ def list_filters(manuscript: dict) -> list[dict]:
             meta, body = parse_front_matter(text)
         except FilterError as err:
             out.append({"name": path.stem, "class": None, "state": "",
-                        "prelude": None, "summary": "", "error": str(err)})
+                        "prelude": None, "summaries": False,
+                        "summary": "", "error": str(err)})
             continue
         out.append({"name": path.stem, "class": meta["class"],
                     "state": meta["state"], "prelude": meta["prelude"],
+                    "summaries": meta["summaries"],
                     "summary": summary_of(body), "error": None})
     return out
 
@@ -255,4 +265,5 @@ def show_filter(manuscript: dict, name: str) -> dict:
     meta, body = load_filter(manuscript, name)
     return {"name": name, "path": str(path), "class": meta["class"],
             "state": meta["state"], "prelude": meta["prelude"],
+            "summaries": meta["summaries"],
             "prompt": body, "class_help": CLASS_HELP[meta["class"]]}
