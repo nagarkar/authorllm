@@ -212,7 +212,7 @@ def publish_markdown(manuscript: dict, variant: str,
     a part of the book, built exactly like the whole.
     Returns (text, order, warnings)."""
     from .illus import (ILLUS_DIR, capture_embeds, parse_tag,
-                        slot_candidates, slot_key)
+                        candidates_for_slot, desc_hash, slot_key)
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
@@ -247,11 +247,19 @@ def publish_markdown(manuscript: dict, variant: str,
                 if variant == "stripped":
                     continue
                 key = slot_key(tag)
-                target = picks.get(key) if key else None
+                identity = key or (
+                    None if tag.get("ref") or tag.get("malformed_ref")
+                    else desc_hash(" ".join(tag["prompt"].split())))
+                target = picks.get(identity) if identity else None
                 if target and not (root / ILLUS_DIR / target).exists():
                     target = None
                 if target is None:
-                    cands = slot_candidates(root, key)
+                    slot = {
+                        **tag, "key": key,
+                        "desc_hash": desc_hash(
+                            " ".join(tag["prompt"].split())),
+                    }
+                    cands = candidates_for_slot(root, slot)
                     target = cands[-1]["name"] if cands else None
                 if target is None:
                     warnings.append(

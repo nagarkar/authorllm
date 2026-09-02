@@ -19,9 +19,15 @@ attached, which is the whole point (it-2e4a5ec3d809: rewording an INLINE
 slot used to orphan every image under it, because identity was the
 prompt hash). deschash and stylehash ride along as STALENESS MARKERS
 only — "which prompt text, under which figure law, was this made for" —
-never as identity. NN numbers the candidates of a slot, prefixed `i` for
-an image that was imported rather than rendered. The registry is derived
-entirely by scanning text + directory — no DB state.
+never as identity for new work. NN numbers the candidates of a slot,
+prefixed `i` for an image that was imported rather than rendered. The
+registry is derived entirely by scanning text + directory — no DB state.
+
+Legacy exception: art rendered before keys existed still lives under
+inline tags, named `slug-deschash-…`. For those plates only, prune /
+Doc-pull reembed / export still resolve by deschash so an upgrade cannot
+delete or drop the author's images. New renders always `ensure_key`
+first; the fallback never mints identity for fresh work.
 """
 
 from __future__ import annotations
@@ -300,6 +306,48 @@ def slot_key(slot: dict) -> str | None:
     return ref[:-3] if ref and ref.endswith(".md") else None
 
 
+def _tag_identity(tag: dict) -> str | None:
+    """Lookup key for embed prior maps and export picks: the slot key
+    when externalized, else the description hash for a legacy inline
+    tag that still carries pre-key art. Ref tags without a parseable
+    `.md` name have no identity."""
+    key = slot_key(tag)
+    if key:
+        return key
+    if tag.get("ref") or tag.get("malformed_ref"):
+        return None
+    prompt = tag.get("prompt") or ""
+    return desc_hash(" ".join(prompt.split())) if prompt.strip() else None
+
+
+def candidates_for_slot(root: Path, slot: dict) -> list[dict]:
+    """This slot's candidates: by key when externalized, by desc_hash
+    when still inline (legacy plates only — new art never lands on an
+    inline tag)."""
+    key = slot.get("key")
+    if key:
+        return slot_candidates(root, key)
+    dh = slot.get("desc_hash")
+    if not dh:
+        return []
+    return sorted((c for c in candidate_files(root) if c["desc"] == dh),
+                  key=lambda c: int(c["n"]))
+
+
+def _embedded_name(text: str, slot: dict) -> str | None:
+    """The embed filename under this slot's tag, if any. Keyed slots use
+    the key; legacy inline slots read the line directly under the tag."""
+    if slot.get("key"):
+        return embed_target(text, slot["key"])
+    from .revisions import EMBED_LINE
+
+    lines = text.split("\n")
+    i = int(slot["line"]) - 1
+    if 0 <= i < len(lines) - 1 and EMBED_LINE.match(lines[i + 1]):
+        return lines[i + 1].rsplit("/", 1)[-1].rstrip(") \t")
+    return None
+
+
 def scan_text(text: str, prompts: dict[str, str] | None = None) -> list[dict]:
     """Every slot declared in a text, in order: {prompt, excerpt,
     caption, ref, line} (1-based). For ref tags, `prompt` and the
@@ -517,7 +565,7 @@ def externalize_offers(root: Path, long_words: int = 50,
             if len(slot["prompt"].split()) > long_words:
                 reason = f"longer than {long_words} words"
             else:
-                cands = slot_candidates(root, slot["desc_hash"])
+                cands = candidates_for_slot(root, slot)
                 if cands:
                     oldest = min(
                         (root / ILLUS_DIR / c["name"]).stat().st_mtime
@@ -620,16 +668,23 @@ def slot_report(root: Path) -> dict:
     for rel, path in iter_manuscript_paths(root).items():
         for slot in scan_text(_read_manuscript_text(path, rel), prompts):
             slots.append({"file": rel, **slot})
-    held = {c["key"] for c in candidate_files(root)}
-    declared = {s["key"] for s in slots if s["key"]}
+    held_keys = {c["key"] for c in candidate_files(root)}
+    held_descs = {c["desc"] for c in candidate_files(root)}
+    declared_keys = {s["key"] for s in slots if s["key"]}
+    # Pre-key inline slots still own art named slug-deschash-… — their
+    # desc_hash is what keeps those files from reading as orphans.
+    declared_descs = {s["desc_hash"] for s in slots if not s["key"]}
     unrendered = [
         {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
          "caption": s.get("caption"), "ref": s.get("ref"), "key": s["key"],
          "desc_hash": s["desc_hash"]}
-        for s in slots if s["key"] not in held
+        for s in slots
+        if (s["key"] and s["key"] not in held_keys)
+        or (not s["key"] and s["desc_hash"] not in held_descs)
     ]
     orphaned = [c["name"] for c in candidate_files(root)
-                if c["key"] not in declared]
+                if c["key"] not in declared_keys
+                and c["desc"] not in declared_descs]
     malformed_refs = [
         {"file": s["file"], "line": s["line"], "prompt": s["prompt"]}
         for s in slots if s.get("malformed_ref")
@@ -869,8 +924,8 @@ def slot_status(db, manuscript: dict) -> list[dict]:
         text = path.read_text(encoding="utf-8")
         current = style_hash(illustration_law(db, manuscript["id"], rel))
         for slot in scan_text(text, prompts):
-            cands = slot_candidates(root, slot["key"])
-            embedded = embed_target(text, slot["key"]) if slot["key"] else None
+            cands = candidates_for_slot(root, slot)
+            embedded = _embedded_name(text, slot)
             state = "unrendered"
             if cands:
                 target = next((c for c in cands if c["name"] == embedded),
@@ -895,20 +950,27 @@ def prune(manuscript: dict) -> list[str]:
     vanished prompts. Explicit act only — render never deletes."""
     root = Path(manuscript["path"])
     keep: set[str] = set()
-    declared: set[str] = set()
+    declared_keys: set[str] = set()
+    declared_descs: set[str] = set()
     prompts = load_prompts(root)
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
         for slot in scan_text(text, prompts):
-            if not slot["key"]:
-                continue
-            declared.add(slot["key"])
-            target = embed_target(text, slot["key"])
+            if slot["key"]:
+                declared_keys.add(slot["key"])
+            else:
+                # Legacy inline art is still keyed by desc_hash in the
+                # filename; without this, prune deletes every pre-key
+                # plate the moment the author upgrades.
+                declared_descs.add(slot["desc_hash"])
+            target = _embedded_name(text, slot)
             if target:
                 keep.add(target)
     removed = []
     for candidate in candidate_files(root):
-        if candidate["name"] in keep and candidate["key"] in declared:
+        live = (candidate["key"] in declared_keys
+                or candidate["desc"] in declared_descs)
+        if candidate["name"] in keep and live:
             continue
         (root / ILLUS_DIR / candidate["name"]).unlink()
         removed.append(candidate["name"])
@@ -917,21 +979,23 @@ def prune(manuscript: dict) -> list[str]:
 
 def capture_embeds(text: str,
                    prompts: dict[str, str] | None = None) -> dict[str, str]:
-    """The pick state a text holds: {key: embedded candidate name}.
+    """The pick state a text holds: {identity: embedded candidate name}.
     Captured before a pull overwrites the file, so picks survive Doc
     round trips even though the Doc never carries embed lines. Keyed by
-    the slot KEY, not the description hash: the author reworks prompts
-    IN the Doc, and a hash-keyed capture lost the image on exactly that
-    move (it-2e4a5ec3d809). `prompts` is accepted and unused — the key
-    is in the tag, so no canonical text is needed to read it."""
+    the slot KEY when present; legacy inline tags fall back to
+    desc_hash so a Doc pull after the key migration cannot drop every
+    pre-key plate (it-2e4a5ec3d809 closed reword orphans for new work —
+    this keeps the upgrade from inventing a new orphan class). `prompts`
+    is accepted and unused — identity is in the tag itself."""
     from .revisions import EMBED_LINE
 
     lines = text.split("\n")
     out: dict[str, str] = {}
     for i, line in enumerate(lines[:-1]):
         tag = parse_tag(line)
-        if tag and slot_key(tag) and EMBED_LINE.match(lines[i + 1]):
-            out[slot_key(tag)] = (
+        identity = _tag_identity(tag) if tag else None
+        if identity and EMBED_LINE.match(lines[i + 1]):
+            out[identity] = (
                 lines[i + 1].rsplit("/", 1)[-1].rstrip(") \t"))
     return out
 
@@ -954,12 +1018,19 @@ def reembed(text: str, root: Path, prior: dict[str, str] | None = None) -> str:
             continue
         if i + 1 < len(lines) and EMBED_LINE.match(lines[i + 1]):
             continue  # already embedded
-        key = slot_key(tag)
-        name = prior.get(key) if key else None
+        identity = _tag_identity(tag)
+        name = prior.get(identity) if identity else None
         if name and not (root / ILLUS_DIR / name).exists():
             name = None
-        if name is None:
-            cands = slot_candidates(root, key)
+        if name is None and identity:
+            key = slot_key(tag)
+            if key:
+                cands = slot_candidates(root, key)
+            else:
+                cands = sorted(
+                    (c for c in candidate_files(root)
+                     if c["desc"] == identity),
+                    key=lambda c: int(c["n"]))
             name = cands[-1]["name"] if cands else None
         if name:
             out.append(f"![]({ILLUS_DIR}/{name})")

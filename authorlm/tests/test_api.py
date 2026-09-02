@@ -6371,6 +6371,38 @@ def main_test() -> None:
         check("a pick whose file is gone falls back to the newest candidate",
               illus_mod.embed_target(fallback, ekey) == cand2, fallback)
 
+        # Legacy inline art (rendered before slot keys): prune / Doc-pull
+        # reembed / slot_report must still see the plate. Without the
+        # desc_hash fallback, every pre-key image was orphaned and
+        # deleted on the first prune after upgrade.
+        legacy_root = root / "illus-legacy-inline"
+        (legacy_root / "_illustrations").mkdir(parents=True)
+        legacy_prompt = "a lone tracker kneeling in frost"
+        lh = illus_mod.desc_hash(legacy_prompt)
+        lslug = illus_mod.slug(legacy_prompt)
+        legacy_name = f"{lslug}-{lh}-ab12-01.png"
+        (legacy_root / "_illustrations" / legacy_name).write_bytes(b"")
+        legacy_text = (
+            f"# C\n\n[Illustration: {legacy_prompt}]\n"
+            f"![](_illustrations/{legacy_name})\n\nProse.\n")
+        (legacy_root / "ch.md").write_text(legacy_text)
+        legacy_prior = illus_mod.capture_embeds(legacy_text)
+        check("capture_embeds recovers a legacy inline pick by desc_hash",
+              legacy_prior == {lh: legacy_name}, legacy_prior)
+        doc_pulled = f"# C\n\n[Illustration: {legacy_prompt}]\n\nProse.\n"
+        restored = illus_mod.reembed(doc_pulled, legacy_root, legacy_prior)
+        check("Doc-pull reembed restores the legacy inline embed line",
+              f"![](_illustrations/{legacy_name})" in restored, restored)
+        leg_rep = illus_mod.slot_report(legacy_root)
+        check("legacy inline art is neither unrendered nor orphaned",
+              not leg_rep["unrendered"] and not leg_rep["orphaned"],
+              str(leg_rep))
+        removed_legacy = illus_mod.prune({"path": str(legacy_root)})
+        check("prune keeps the embedded legacy inline plate",
+              removed_legacy == []
+              and (legacy_root / "_illustrations" / legacy_name).exists(),
+              removed_legacy)
+
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
         # Doc state is tabs of literal markdown; the temp-import Doc is
