@@ -5224,6 +5224,194 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_filter_neighbour_payload() -> None:
+    """6eabcfb: filter payload carries opt-in neighbour summaries, and
+    CONCEPT NOTES render aliases + edges that scoped_concepts already
+    computed.
+
+    Three regressions worth pinning hermetically:
+
+    1. `summaries` front-matter is a closed boolean — default false, a
+       non-bool is refused at `filter add` time (not silently ignored).
+    2. CONCEPT NOTES show aliases beside the definition and edges under
+       a Relations stanza — without them a filter reads two names for
+       one concept as two concepts, and loses graph relations.
+    3. With `summaries=true`, NEIGHBOURING ESSAYS is present, ungated:
+       stale / missing summaries are marked with `!!` and still shown;
+       with the flag off the section is absent (no shape change for
+       filters that did not ask).
+    """
+    import hashlib
+
+    from authorlm import filtering as fg
+    from authorlm import filters as fl
+
+    def _hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    # --- front-matter key (pure, no DB) ---------------------------------
+    meta, body = fl.parse_front_matter(
+        '---\nclass = "sequential"\n---\n\n# Dupes\nFlag repeats.\n')
+    check("summaries defaults false when the key is omitted — a filter "
+          "that never asked does not pay for neighbour summaries",
+          meta["summaries"] is False and meta["class"] == "sequential"
+          and "Flag repeats" in body, str(meta))
+
+    meta_on, _ = fl.parse_front_matter(
+        '---\nclass = "sequential"\nsummaries = true\n---\n\n'
+        '# Context\nUse the book around this essay.\n')
+    check("`summaries = true` is accepted and frozen into the meta",
+          meta_on["summaries"] is True, str(meta_on))
+
+    try:
+        fl.parse_front_matter(
+            '---\nclass = "sequential"\nsummaries = "yes"\n---\n\n'
+            '# Bad\nNope.\n')
+        refused = False
+        refused_msg = ""
+    except fl.FilterError as err:
+        refused = True
+        refused_msg = str(err)
+    check("a non-boolean `summaries` is refused at parse time, naming "
+          "the key — never silently coerced",
+          refused and "`summaries` is a boolean" in refused_msg,
+          refused_msg)
+
+    # --- CONCEPT NOTES + neighbour section (hermetic manuscript) -------
+    root = Path(tempfile.mkdtemp(prefix="authorlm-filter-neighbours-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        text_before = "# Before\n\nEarlier groundwork.\n"
+        text_mid = (
+            "# Middle\n\n"
+            "Choice is the primitive. Field of Choice follows from it.\n")
+        text_after = "# After\n\nLater consequences.\n"
+        (ms / "01-before.md").write_text(text_before)
+        (ms / "02-middle.md").write_text(text_mid)
+        (ms / "03-after.md").write_text(text_after)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-before.md"\n\n'
+            '[[chapter]]\nfile = "02-middle.md"\n\n'
+            '[[chapter]]\nfile = "03-after.md"\n',
+            encoding="utf-8")
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.collect(db, manuscript, {})
+
+        api.add_concept(db, manuscript, "Choice",
+                        notes="the primitive act of distinguishing")
+        api.add_concept(db, manuscript, "Field of Choice",
+                        notes="where choosing happens")
+        api.alias_concept(db, manuscript, "Field of Choice",
+                          ["the Field"])
+        api.link_concepts(db, manuscript, "Choice", "depends_on",
+                          "Field of Choice")
+
+        notes = fg._concept_notes(db, manuscript, "02-middle.md", text_mid)
+        check("CONCEPT NOTES put aliases beside the definition — "
+              "'(also: …)' — so a filter cannot read two names as two "
+              "concepts",
+              "- Field of Choice (also: the Field) — where choosing "
+              "happens" in notes
+              and "- Choice — the primitive act of distinguishing" in notes,
+              notes)
+        check("CONCEPT NOTES render edges scoped to this essay under "
+              "Relations, not discard them after scoped_concepts "
+              "computed them",
+              "Relations the author has recorded between them:" in notes
+              and "Choice —depends_on→ Field of Choice" in notes, notes)
+
+        units = [p.strip() for p in text_mid.split("\n\n") if p.strip()]
+        run = {"id": "run-test", "filter": "dupes", "class": "sequential",
+               "file": "02-middle.md", "registry": None}
+        frame_off = fg._frame_block(db, manuscript, run, units,
+                                    text=text_mid, summaries=False)
+        check("without summaries, NEIGHBOURING ESSAYS is absent — the "
+              "section never appears for a filter that did not opt in",
+              "NEIGHBOURING ESSAYS" not in frame_off, frame_off[:400])
+
+        # Fresh before, stale after, empty-body "missing" via a file with
+        # a row whose hash matches but summary is blank — and a third
+        # neighbour is unnecessary; before_after already spans the book.
+        row_b = ko_fields("es")
+        row_b.update(manuscript_id=manuscript["id"], file="01-before.md",
+                     summary="Earlier groundwork, compressed.",
+                     source_hash=_hash(text_before),
+                     upstream_hash=_hash(""), upstream_stale=0)
+        db.insert("essay_summaries", row_b)
+        row_a = ko_fields("es")
+        row_a.update(manuscript_id=manuscript["id"], file="03-after.md",
+                     summary="An outdated reading of later consequences.",
+                     source_hash=_hash("not the current bytes"),
+                     upstream_hash=_hash(""), upstream_stale=0)
+        db.insert("essay_summaries", row_a)
+
+        frame_on = fg._frame_block(db, manuscript, run, units,
+                                   text=text_mid, summaries=True)
+        check("with summaries=true, NEIGHBOURING ESSAYS is present "
+              "between prior runs and any essay sections",
+              "NEIGHBOURING ESSAYS (compressed summaries — a stale one "
+              "is marked, and is still shown)" in frame_on, frame_on)
+        check("a FRESH neighbour summary is shown unmarked — no !!",
+              "[01-before.md]\nEarlier groundwork, compressed." in frame_on
+              and "!! summary" not in frame_on.split("[01-before.md]", 1)[1]
+                  .split("[03-after.md]", 1)[0],
+              frame_on)
+        check("a STALE neighbour summary is still SHOWN and marked "
+              "`!! summary stale` — ungated, never a refusal",
+              "[03-after.md]  !! summary stale\n"
+              "An outdated reading of later consequences." in frame_on,
+              frame_on)
+        check("BEFORE / AFTER banners name the reading-order contract",
+              "BEFORE this essay in the reading order" in frame_on
+              and "AFTER this essay (forward reference only" in frame_on,
+              frame_on)
+
+        # Empty body + non-fresh state → !! mark; empty + no state mark
+        # falls through to `!! no summary` when body is blank and mark
+        # would otherwise be empty. Direct render of missing-file case:
+        neighbours = fg._neighbour_summaries(db, manuscript, "02-middle.md")
+        check("_neighbour_summaries itself returns the marked before/"
+              "after text the frame section wraps",
+              "Earlier groundwork, compressed." in neighbours
+              and "!! summary stale" in neighbours, neighbours)
+
+        # Empty body on a current hash still marks — the reader sees the
+        # hole rather than a blank section pretending to be content.
+        db.update("essay_summaries", row_b["id"], {"summary": "   "})
+        blank = fg._neighbour_summaries(db, manuscript, "02-middle.md")
+        check("an empty neighbour summary body is marked "
+              "`!! no summary` when otherwise fresh — never a blank "
+              "section that looks like content",
+              "[01-before.md]  !! no summary" in blank, blank)
+
+        # list/show surface the new key so MCP/CLI cannot disagree with
+        # the artifact the author ratified.
+        fl.add_filter(
+            manuscript, "with-summaries",
+            '---\nclass = "sequential"\nsummaries = true\n---\n\n'
+            '# With\nCross-essay.\n')
+        listed = {f["name"]: f for f in fl.list_filters(manuscript)}
+        shown = fl.show_filter(manuscript, "with-summaries")
+        check("list_filters and show_filter both report summaries=true "
+              "for an opt-in artifact",
+              listed["with-summaries"]["summaries"] is True
+              and shown["summaries"] is True, str(listed.get("with-summaries")))
+
+        # A summary read must never take a filter run down: force a
+        # LookupError by asking about an unlisted file with no toc seat.
+        (ms / "orphan.md").write_text("# Orphan\n\nNot in toc.\n")
+        api.collect(db, manuscript, {})
+        empty = fg._neighbour_summaries(db, manuscript, "orphan.md")
+        check("an unlisted file's neighbour read returns empty rather "
+              "than raising — summaries stay ungated",
+              empty == "", repr(empty))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_client_resolution()
     check_client_stamps()
@@ -5257,6 +5445,7 @@ def main_test() -> None:
     check_unregister_safety()
     check_backup_on_active_session()
     check_summary_deprecation()
+    check_filter_neighbour_payload()
     check_alias_guard()
     check_alias_dedupe()
     check_note_group()
