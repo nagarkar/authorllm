@@ -22,6 +22,3 @@ authorlm/manuscripts/
 output/
 tmp/
 .ai-productionization/
-
-# A separate project with its own git repo, checked out inside this tree
-spiral-editor/
