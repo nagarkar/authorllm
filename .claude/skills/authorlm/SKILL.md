@@ -775,6 +775,18 @@ to push, or whether they would like to triage first. The Doc tab IS the
 review, and the point of the pass is that the proposals arrive where they
 will be ruled on.
 
+**A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS THE RESULT.** `filter
+resolve` deliberately does NOT re-push — a resolve that also pushed could
+fail halfway on the network after the evidence was already recorded, so
+the verb stops at the evidence. That is a reason to push SECOND, never a
+reason not to push. The author's words: *"Why do I need to remember to
+tell you to do a doc push every time I tell you to 'resolve'?"* So every
+`filter resolve` and `lens resolve` is followed by `doc push <essay>` in
+the same turn, without being asked. It also clears the struck-and-green
+marks the resolve leaves behind in the tab, which are otherwise still
+sitting there the next time the author opens the Doc. If the push fails,
+say so and retry the PUSH — the verdicts are already safe on disk.
+
 Four things legitimately interrupt that, and nothing else does:
 - a `global` filter, whose prelude must be drafted and frozen first;
 - a run needing more than one window — the apply that COMPLETES the run is

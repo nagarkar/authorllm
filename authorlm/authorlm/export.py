@@ -61,6 +61,96 @@ def namespace_footnotes(text: str, token: str) -> str:
     return _NOTE_LABEL.sub(lambda m: f"[^{token}-{m.group(1)}]", text)
 
 
+# ------------------------------------------------ per-output regions
+
+# Output names an [Omit:] / [Only:] tag may address. `doc` is the
+# push-only export Doc; `audio` is the stripped (audio-clean) markdown.
+OUTPUTS = ("pdf", "docx", "epub", "md", "doc", "audio")
+_REGION_OPEN = re.compile(
+    r"^\[(?P<kind>Omit|Only):\s*(?P<names>[^\]]*)\]\s*$", re.IGNORECASE)
+_REGION_CLOSE = re.compile(r"^\[/(?P<kind>Omit|Only)\]\s*$", re.IGNORECASE)
+
+
+def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
+    """The output names a build answers to: its format, plus `audio`
+    for the stripped variant (the audio-clean markdown)."""
+    names = {fmt}
+    if variant == "stripped":
+        names.add("audio")
+    return frozenset(names)
+
+
+def resolve_regions(text: str, outputs: frozenset[str] | set[str],
+                    where: str = "") -> str:
+    """Apply the full-line region tags for one build.
+
+        [Omit: audio, epub]  …  [/Omit]   dropped from the named outputs
+        [Only: audio]        …  [/Only]   kept for the named outputs only
+
+    Same grammar as [Illustration: …]: plain text on every road (Obsidian,
+    the Doc bridge, pandoc), resolved here alone. Regions nest; the tag
+    lines themselves never reach a reader. A structural fault — an
+    unknown output name, a stray or unmatched close, an unclosed region —
+    raises, naming the line: a typo must never silently include or
+    exclude a passage (docs/math-and-physics-guidelines.md §5)."""
+    wanted = set(outputs)
+    stack: list[tuple[str, bool]] = []   # (kind, this region keeps)
+    kept: list[str] = []
+    prefix = f"{where}:" if where else "line "
+    for lineno, line in enumerate(text.split("\n"), 1):
+        m = _REGION_OPEN.match(line)
+        if m:
+            kind = m.group("kind").lower()
+            names = {n.strip().lower()
+                     for n in re.split(r"[,\s]+", m.group("names")) if n.strip()}
+            unknown = sorted(names - set(OUTPUTS))
+            if unknown or not names:
+                raise ValueError(
+                    f"{prefix}{lineno}: [{kind.title()}:] names "
+                    f"{'no output' if not names else 'unknown output ' + ', '.join(unknown)}"
+                    f" (one of: {', '.join(OUTPUTS)})")
+            hit = bool(names & wanted)
+            stack.append((kind, hit if kind == "only" else not hit))
+            continue
+        m = _REGION_CLOSE.match(line)
+        if m:
+            kind = m.group("kind").lower()
+            if not stack or stack[-1][0] != kind:
+                raise ValueError(
+                    f"{prefix}{lineno}: [/{kind.title()}] closes nothing"
+                    + (f" (open region is [{stack[-1][0].title()}:])"
+                       if stack else ""))
+            stack.pop()
+            continue
+        if all(keep for _, keep in stack):
+            kept.append(line)
+    if stack:
+        raise ValueError(
+            f"{prefix}end of file: [{stack[-1][0].title()}:] never closed")
+    return "\n".join(kept)
+
+
+def strip_display_math(text: str) -> str:
+    """Drop display equations ($$ … $$, single-line by convention, or a
+    block opened and closed by lines carrying $$) — the audio default:
+    an equation read aloud by a synthetic voice is noise. Inline math
+    stays; the style guide keeps it to what a voice can say."""
+    out: list[str] = []
+    in_block = False
+    for line in text.split("\n"):
+        s = line.strip()
+        if in_block:
+            if "$$" in s:
+                in_block = False
+            continue
+        if s.startswith("$$"):
+            if not (len(s) > 2 and s.endswith("$$")):
+                in_block = True
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     """(combined text, ordered file names, files missing from toc.toml).
 
@@ -69,12 +159,14 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     prose stays exactly the author's. Footnote labels alone are
     namespaced per file (footnote_prefixes): they are only file-unique
     in the sources, and pandoc would bind colliding labels to one
-    definition across essays."""
+    definition across essays. Region tags resolve for the `doc` output."""
     files = read_manuscript_files(Path(manuscript["path"]))
     order, unlisted = reading_order(files)
     tokens = footnote_prefixes(order)
     parts = [namespace_footnotes(
-        normalize_markdown(files[name]).rstrip("\n"), tokens[name])
+        normalize_markdown(resolve_regions(
+            normalize_markdown(files[name]), {"doc"}, name)).rstrip("\n"),
+        tokens[name])
         for name in order]
     text = "\n\n".join(part for part in parts if part)
     return (text + "\n" if text else ""), order, unlisted
