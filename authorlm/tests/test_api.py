@@ -6074,22 +6074,65 @@ def main_test() -> None:
             "# C\n\n[Illustration: two turns in opposite order]\n")
         rep = slot_report(scratch)
         check("scan reports an unrendered slot with file and line",
-              rep["unrendered"] == [{"file": "ch.md", "line": 3,
-                                     "prompt": "two turns in opposite order"}]
+              [{k: v for k, v in rep["unrendered"][0].items()
+                if k in ("file", "line", "prompt")}]
+              == [{"file": "ch.md", "line": 3,
+                   "prompt": "two turns in opposite order"}]
               and not rep["orphaned"], str(rep))
+
+        # A slot's IDENTITY is its ref slug, minted at externalize. An
+        # inline slot has no key, so it can hold no art at all: the
+        # first image externalizes it first (it-2e4a5ec3d809).
+        from authorlm.illus import ensure_key, find_slot, slot_candidates
+        inline = find_slot(scratch, "two turns")[0]
+        check("an inline slot has no key and therefore no candidates",
+              inline["key"] is None
+              and slot_candidates(scratch, inline["key"]) == [])
+        keyed = ensure_key(scratch, inline)
+        check("ensure_key externalizes and mints the key from the ref",
+              keyed["key"] == "two-turns-in-opposite"
+              and keyed["ref"] == "two-turns-in-opposite.md"
+              and "⇢ two-turns-in-opposite.md"
+              in (scratch / "ch.md").read_text(), str(keyed))
+        check("ensure_key is idempotent on an already-keyed slot",
+              ensure_key(scratch, keyed) is keyed)
+
         ill_dir = scratch / "_illustrations"
-        ill_dir.mkdir()
         h = desc_hash("two turns in opposite order")
-        candidate = f"two-turns-in-opposite-{h}-0000-01.png"
+        candidate = f"{keyed['key']}-{h}-0000-01.png"
         (ill_dir / candidate).write_bytes(b"")
-        check("a matching candidate marks the slot rendered",
+        check("a candidate under the slot's key marks the slot rendered",
               not slot_report(scratch)["unrendered"])
-        (scratch / "ch.md").write_text(
-            "# C\n\n[Illustration: two turns, reworded]\n")
+
+        # THE REGRESSION. Rewording used to re-key the slot and orphan
+        # every image under it — the author reworks prompts constantly,
+        # and in the Doc, where nothing can warn them. The key lives in
+        # the tag, not in the prompt, so the art now survives a rewrite
+        # into something with no word in common.
+        (ill_dir / "prompts" / "two-turns-in-opposite.md").write_text(
+            "a bronze orrery under a shattered dome, nothing alike\n")
         rep = slot_report(scratch)
-        check("editing the prompt un-renders the slot and orphans the file",
-              rep["unrendered"][0]["prompt"] == "two turns, reworded"
-              and rep["orphaned"] == [candidate], str(rep))
+        check("rewording the description keeps the art attached",
+              not rep["unrendered"] and not rep["orphaned"], str(rep))
+        check("the reworded slot still resolves to its candidate",
+              [c["name"] for c in slot_candidates(
+                  scratch, find_slot(scratch, "orrery")[0]["key"])]
+              == [candidate], str(rep))
+        check("the stale marker records the description it was made for",
+              slot_candidates(scratch, keyed["key"])[0]["desc"] == h
+              and find_slot(scratch, "orrery")[0]["desc_hash"] != h)
+
+        # Deleting the SLOT still orphans its art — that is the honest
+        # signal, and it is now the only thing that produces one.
+        (scratch / "ch.md").write_text("# C\n\nno slot here\n")
+        check("deleting the slot orphans its candidate",
+              slot_report(scratch)["orphaned"] == [candidate],
+              str(slot_report(scratch)))
+        (scratch / "ch.md").write_text(
+            "# C\n\n[Illustration: a bronze orrery… "
+            "⇢ two-turns-in-opposite.md]\n")
+        check("restoring the tag re-attaches the art",
+              not slot_report(scratch)["orphaned"])
 
         # A `⇢` present but not matching the ref grammar (e.g. it doesn't
         # end in a bare 'name.md') must be reported loudly, never
@@ -6164,7 +6207,15 @@ def main_test() -> None:
             return tiny_png()
 
         slot = illus_mod.find_slot(ms, "forking path")[0]
+        # Mint the key explicitly and let collect absorb the externalize,
+        # so what follows tests the EMBED's invisibility and nothing else.
+        slot = illus_mod.ensure_key(ms, slot)
+        api.collect(db, manuscript, {})
         h = slot["desc_hash"]
+        check("externalizing to mint a key leaves the description hash "
+              "alone, so nothing already rendered is disturbed",
+              illus_mod.find_slot(ms, "forking path")[0]["desc_hash"] == h
+              and slot["key"] == "choice-as-a-forking", str(slot))
         r1 = illus_mod.render_slot(db, manuscript, slot, {},
                                    generator=fake_gen)
         first = f"choice-as-a-forking-{h}-0000-01.png"
@@ -6187,7 +6238,8 @@ def main_test() -> None:
               [n[-6:-4] for n in r2["written"]] == ["02", "03"]
               and r2["had_embed"]
               and illus_mod.embed_target(
-                  (ms / "01-choice.md").read_text(), h) == first, str(r2))
+                  (ms / "01-choice.md").read_text(),
+                  slot["key"]) == first, str(r2))
 
         api.add_style_law(db, manuscript, "illustration",
                               "woodcut, high-contrast linework",
@@ -6218,7 +6270,8 @@ def main_test() -> None:
               and assembled["law"] and assembled["law"] in
               assembled["composed"], str(assembled))
 
-        illus_mod.set_embed(ms / "01-choice.md", h, r3["written"][0])
+        illus_mod.set_embed(ms / "01-choice.md", slot["key"],
+                            r3["written"][0])
         removed = illus_mod.prune(manuscript)
         check("prune removes every unpicked candidate, keeps the pick",
               sorted(removed) == sorted([first,
@@ -6227,26 +6280,85 @@ def main_test() -> None:
               and (ms / "_illustrations" / r3["written"][0]).exists(),
               str(removed))
 
+        # --- import: art made elsewhere becomes a first-class candidate.
+        # The point of the door (it-2e4a5ec3d809): a system that can only
+        # consume its own renders cannot reuse an illustrator's work.
+        seed = root / "an-illustrator-plate.png"
+        seed.write_bytes(tiny_png())
+        imp = illus_mod.import_image(db, manuscript, slot, seed)
+        check("import lands under the slot's key, numbered i for imported",
+              imp["name"] == f"choice-as-a-forking-{h}-{shash}-i05.png"
+              and (ms / "_illustrations" / imp["name"]).exists()
+              and imp["had_embed"] is True, str(imp))
+        plate = (ms / "_illustrations" / imp["name"]).read_bytes()
+        check("an imported plate records where it came from",
+              b"authorlm:source" in plate
+              and b"an-illustrator-plate.png" in plate)
+        cands = illus_mod.slot_candidates(ms, slot["key"])
+        check("the import is a candidate like any other, marked imported",
+              [c["src"] for c in cands if c["name"] == imp["name"]] == ["i"]
+              and int(cands[-1]["n"]) == 5, str(cands))
+        illus_mod.set_embed(ms / "01-choice.md", slot["key"], imp["name"])
+        istatus = [s for s in illus_mod.slot_status(db, manuscript)
+                   if s["file"] == "01-choice.md"][0]
+        check("a slot standing on an imported plate reads as imported, "
+              "never as a render it is not",
+              istatus["state"] == "imported", str(istatus))
+        r4 = illus_mod.render_slot(db, manuscript, slot, {}, from_n=5,
+                                   generator=fake_gen)
+        check("an imported plate seeds a render like any other candidate",
+              gen_calls[-1][1] is not None
+              and r4["written"] == [
+                  f"choice-as-a-forking-{h}-{shash}-06.png"], str(r4))
+        (root / "notes.txt").write_text("not an image")
+        try:
+            illus_mod.import_image(db, manuscript, slot, root / "notes.txt")
+            refused = False
+        except ValueError:
+            refused = True
+        check("import refuses a file the manuscript could never embed",
+              refused)
+
+        # An import into an INLINE slot mints the key on the way in, the
+        # same as a render does — otherwise the plate would be named
+        # after a description and orphan on the next reword.
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n[Illustration: a bare hillside at first light]\n")
+        bare_slot = illus_mod.find_slot(ms, "bare hillside")[0]
+        check("the new slot starts inline, with no key", not bare_slot["key"])
+        imp2 = illus_mod.import_image(db, manuscript, bare_slot, seed)
+        check("importing into an inline slot externalizes it first",
+              imp2["ref"] == "a-bare-hillside-at.md"
+              and imp2["name"].startswith("a-bare-hillside-at-")
+              and imp2["name"].endswith("-i01.png")
+              and "⇢ a-bare-hillside-at.md"
+              in (ms / "01-choice.md").read_text()
+              and not imp2["had_embed"], str(imp2))
+
         # --- capture_embeds/reembed: the pick survives a Doc round trip ---
         embed_root = root / "illus-embed-scratch"
-        (embed_root / "_illustrations").mkdir(parents=True)
+        (embed_root / "_illustrations" / "prompts").mkdir(parents=True)
         (embed_root / "ch.md").write_text(
-            "# C\n\n[Illustration: a lone tracker]\n")
+            "# C\n\n[Illustration: a lone tracker ⇢ a-lone-tracker.md]\n")
+        (embed_root / "_illustrations" / "prompts"
+         / "a-lone-tracker.md").write_text("a lone tracker\n")
+        ekey = "a-lone-tracker"
         eh = illus_mod.desc_hash("a lone tracker")
-        cand1 = f"a-lone-tracker-{eh}-0000-01.png"
-        cand2 = f"a-lone-tracker-{eh}-0000-02.png"
+        cand1 = f"{ekey}-{eh}-0000-01.png"
+        cand2 = f"{ekey}-{eh}-0000-02.png"
         (embed_root / "_illustrations" / cand1).write_bytes(b"")
         (embed_root / "_illustrations" / cand2).write_bytes(b"")
         bare = (embed_root / "ch.md").read_text()
 
         never_picked = illus_mod.reembed(bare, embed_root)
         check("a never-picked slot falls back to the newest candidate",
-              illus_mod.embed_target(never_picked, eh) == cand2, never_picked)
+              illus_mod.embed_target(never_picked, ekey) == cand2, never_picked)
 
-        pick = {eh: cand1}
+        pick = {ekey: cand1}
         embedded = illus_mod.reembed(bare, embed_root, prior=pick)
         check("a prior pick wins over the newest candidate",
-              illus_mod.embed_target(embedded, eh) == cand1, embedded)
+              illus_mod.embed_target(embedded, ekey) == cand1, embedded)
         check("capture_embeds recovers the exact picked candidate",
               illus_mod.capture_embeds(embedded) == pick,
               illus_mod.capture_embeds(embedded))
@@ -6257,7 +6369,7 @@ def main_test() -> None:
         (embed_root / "_illustrations" / cand1).unlink()
         fallback = illus_mod.reembed(bare, embed_root, prior=pick)
         check("a pick whose file is gone falls back to the newest candidate",
-              illus_mod.embed_target(fallback, eh) == cand2, fallback)
+              illus_mod.embed_target(fallback, ekey) == cand2, fallback)
 
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
@@ -6679,24 +6791,40 @@ def main_test() -> None:
         # Embed round trip: the embed line never reaches the Doc, and a
         # pull restores the pinned pick under its tag.
         picked_name = r3["written"][0]
+        keyed_tag = ("[Illustration: choice as a forking path "
+                     "⇢ choice-as-a-forking.md]")
         (ms / "01-choice.md").write_text(
-            "# Title\n\n[Illustration: choice as a forking path]\n"
+            f"# Title\n\n{keyed_tag}\n"
             f"![](_illustrations/{picked_name})\n\nProse below.\n")
         push_doc(db, manuscript, "01-choice.md",
                  service=stub, docs_service=stub)
         tab_now = next(t["text"] for t in stub.state["docs"]["doc-2"]
                        if t["title"] == "01-choice.md")
         check("push keeps the tag but never the embed line",
-              "[Illustration: choice as a forking path]" in tab_now
-              and "_illustrations" not in tab_now, tab_now)
+              keyed_tag in tab_now
+              and "_illustrations/choice" not in tab_now, tab_now)
         stub.set_tab("01-choice.md", tab_now.replace(
             "Prose below.", "Prose below, edited in the Doc."))
         pull_doc(db, manuscript, "01-choice.md", service=stub)
         round_tripped = (ms / "01-choice.md").read_text()
         check("pull re-inserts the pinned embed under its tag",
-              f"[Illustration: choice as a forking path]\n"
-              f"![](_illustrations/{picked_name})" in round_tripped
+              f"{keyed_tag}\n![](_illustrations/{picked_name})"
+              in round_tripped
               and "edited in the Doc" in round_tripped, round_tripped)
+
+        # THE REGRESSION, at the door it actually came through: the
+        # author rewords a description IN THE DOC. The old capture was
+        # keyed by the description hash, so the reworded tag matched
+        # nothing and the pull dropped the picked image on the floor.
+        stub.set_tab("01-choice.md", tab_now.replace(
+            "choice as a forking path",
+            "a road parting under a low sky, nothing alike"))
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        reworded = (ms / "01-choice.md").read_text()
+        check("rewording the description in the Doc keeps the pinned "
+              "image through the pull",
+              f"![](_illustrations/{picked_name})" in reworded
+              and "a road parting under a low sky" in reworded, reworded)
 
         # --- session-start reconciliation: all four outcomes ---
         from authorlm.gdocs import reconcile
@@ -7431,10 +7559,15 @@ def main_test() -> None:
         from authorlm.export import (export_published, load_settings,
                                      publish_markdown, set_setting)
 
+        winding_tag = ("[Illustration: a winding path ⇢ a-winding-path.md"
+                       " | caption: The path]")
         (ms / "00-intro.md").write_text(
             "An opening epigraph.\n\n# Intro\n\nWelcome.\n\n"
-            "[Illustration: a winding path | caption: The path]\n\n"
+            f"{winding_tag}\n\n"
             "[Illustration: an unrendered idea]\n")
+        (ms / "_illustrations" / "prompts").mkdir(exist_ok=True)
+        (ms / "_illustrations" / "prompts"
+         / "a-winding-path.md").write_text("a winding path\n")
         path_hash = illus_mod.desc_hash("a winding path")
         winding = f"a-winding-path-{path_hash}-0000-01.png"
         (ms / "_illustrations" / winding).write_bytes(tiny_png())
@@ -7450,8 +7583,7 @@ def main_test() -> None:
               and "Welcome." in stripped_text)
         slots_text, _, _ = publish_markdown(manuscript, "slots")
         check("slots variant keeps tags verbatim as production notes",
-              "[Illustration: a winding path | caption: The path]"
-              in slots_text)
+              winding_tag in slots_text)
 
         set_setting(manuscript, "variant", "slots")
         check("export settings persist in _exports/settings.toml",
@@ -8242,7 +8374,7 @@ def main_test() -> None:
         illus_tab = next(t for t in master if t["title"] == ILLUS_TAB_TITLE)
         slug_tab = next(t for t in master if t["title"] == ref)
         check("full push mirrors the prompt file into the reserved tree",
-              prom["created"] == [ref] and not prom["updated"]
+              ref in prom["created"] and not prom["updated"]
               and slug_tab.get("parent") == illus_tab["id"]
               and illus_tab.get("parent") is None
               and slug_tab["text"].strip()
@@ -8391,14 +8523,14 @@ def main_test() -> None:
         from authorlm.illus import load_prompts
 
         orrery_slot = il.find_slot(ms, "reconsidered twice")[0]
-        cand = f"a-silver-orrery-{orrery_slot['desc_hash']}-0000-01.png"
+        cand = (f"{orrery_slot['key']}-{orrery_slot['desc_hash']}"
+                "-0000-01.png")
         (ms / "_illustrations" / cand).write_bytes(tiny_png())
-        ok_pin = il.set_embed(ms / "06-orrery.md",
-                              orrery_slot["desc_hash"], cand,
-                              il.load_prompts(ms))
-        check("set_embed finds an externalized slot by canonical hash",
-              ok_pin and f"![](_illustrations/{cand})"
-              in (ms / "06-orrery.md").read_text(), "")
+        ok_pin = il.set_embed(ms / "06-orrery.md", orrery_slot["key"], cand)
+        check("set_embed finds an externalized slot by its key",
+              ok_pin and orrery_slot["key"] == ref[:-3]
+              and f"![](_illustrations/{cand})"
+              in (ms / "06-orrery.md").read_text(), str(orrery_slot))
         fixes = il.maintain_excerpts(ms)
         check("maintenance mirrors the essay's pick into the prompt file",
               any(f.get("embed_synced") for f in fixes)
@@ -10488,6 +10620,7 @@ def main_test() -> None:
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
             "import_critique", "critique_status", "list_critique_items",
+            "list_critique_decisions",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
             # The filter pass's conversational pair (AQ). `filter run` is
             # deliberately NOT here — the same ruling the write loop

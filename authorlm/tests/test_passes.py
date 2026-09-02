@@ -1542,6 +1542,254 @@ def _the_doc_settle(root: Path) -> None:
     check("the run settled, on the doc road",
           result["run"]["status"] == "settled" and result["mode"] == "doc")
 
+
+def _a_hand_resolved_tab_settles_true(root: Path) -> None:
+    """it-4c5a8038c304 — the author resolves the forms BY HAND in the
+    Doc: deletes the markers and leaves the prose they want, instead of
+    editing inside the braces. The settle infers the verdicts from the
+    text itself (the author's ruling, 2026-08-31): old standing as-is →
+    decline; old gone → acceptance, the tab's prose being the final."""
+    print("it-4c5a8038c304: a hand-resolved tab settles as the author "
+          "ruled:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "handres-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED.",
+                             6: "SIX AS PROPOSED."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
+    # Unit 2: kept the new verbatim — markers deleted, plain prose left.
+    _reword_in_tab(
+        fake,
+        "<<Alpha opens the essay and says a thing worth saying twice.>>"
+        "{{TWO AS PROPOSED.}}",
+        "TWO AS PROPOSED.")
+    # Unit 4: kept the change but reworded it — markers deleted.
+    _reword_in_tab(
+        fake,
+        "<<Gamma follows, saying something else entirely.>>"
+        "{{FOUR AS PROPOSED.}}",
+        "FOUR AS PROPOSED, BUT IN MY OWN WORDS.")
+    # Unit 6: turned the change down — markers deleted, OLD text stands.
+    _reword_in_tab(
+        fake,
+        "<<Omega closes the essay on a falling cadence.>>"
+        "{{SIX AS PROPOSED.}}",
+        "Omega closes the essay on a falling cadence.")
+
+    result = api.filter_settle(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("old gone + new kept verbatim → cleaned (an acceptance), "
+          "NOT declined", rows[2] == "cleaned", str(rows))
+    check("old gone + new reworded → cleaned (a modified acceptance)",
+          rows[4] == "cleaned", str(rows))
+    check("old standing as-is → declined, exactly as before",
+          rows[6] == "declined", str(rows))
+    check("the manuscript carries what the author left in the tab",
+          "TWO AS PROPOSED." in final
+          and "FOUR AS PROPOSED, BUT IN MY OWN WORDS." in final
+          and "SIX AS PROPOSED." not in final
+          and "Omega closes the essay on a falling cadence." in final,
+          final)
+    check("the hand-rewording is recorded as a proposal→final diff, and "
+          "the thread's final wording is the author's",
+          len(result["diffs"]) == 1
+          and result["diffs"][0]["proposal"] == "FOUR AS PROPOSED."
+          and result["diffs"][0]["final"]
+          == "FOUR AS PROPOSED, BUT IN MY OWN WORDS.",
+          str(result["diffs"]))
+    ev = db.all("SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'filter_edit' ORDER BY created_at", (mid,))
+    check("the settle's evidence reads accept / revise / decline — the "
+          "verdicts the author actually gave",
+          sorted(r["signal"] for r in ev[-3:])
+          == ["declined", "resolved", "revised"],
+          str([r["signal"] for r in ev]))
+
+
+def _the_lens_door(root: Path) -> None:
+    """§7.2, built (2026-08-31) — a lens finding carrying a `replacement`
+    walks through the door: staged as origin_type='lens', pushed into the
+    tab as forms, settled back under the filter road's whole contract,
+    the hand-resolution inference included. Ambiguity is refused, never
+    guessed; findings and edits stay independent verdicts."""
+    from authorlm import lenses as _lenses
+
+    print("§7.2: the lens door — findings with replacements:")
+
+    ws = root / "lensdoor-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(DOC_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    _lenses.add_lens(manuscript, "door-lens", "# Door lens\nA test lens.")
+    session, _ = api.ensure_session(db, manuscript)
+    mid = manuscript["id"]
+
+    result = _lenses.register_findings(
+        db, manuscript, session, "door-lens", "solo.md", [
+            {"quote": "says a thing worth saying twice",
+             "note": "the phrase undercuts itself",
+             "replacement": "says a thing once, and well"},
+            {"quote": "Gamma follows, saying something else entirely.",
+             "note": "flat connective",
+             "replacement": "Gamma follows, and changes the subject."},
+            {"quote": "And so the wall stands, and the Dead do not pass.",
+             "note": "twin paragraphs",
+             "replacement": "AND SO REWORDED."},
+            {"quote": "Omega closes the essay on a falling cadence.",
+             "note": "a finding with no replacement stays a finding"},
+        ])
+    check("anchored replacements stage doc_threads rows; the ambiguous "
+          "twin quote is refused (never guessed); the plain finding "
+          "stages nothing",
+          len(result["edits_staged"]) == 2
+          and len(result["edits_refused"]) == 1
+          and "2 units" in result["edits_refused"][0]["reason"]
+          and len(result["findings"]) == 4, str(result["edits_refused"]))
+    check("the harness built `new` from the unit ITSELF — the quote "
+          "replaced inside the unit's own text, `old` never supplied by "
+          "the producer",
+          any(t["proposed_new"] ==
+              "Alpha opens the essay and says a thing once, and well."
+              for t in result["edits_staged"]),
+          str([t["proposed_new"] for t in result["edits_staged"]]))
+    linked = [json.loads(r["metadata"]).get("edit_thread")
+              for r in result["findings"]]
+    check("findings and their edits are linked, and only where an edit "
+          "was staged",
+          sum(1 for x in linked if x) == 2, str(linked))
+
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", DOC_ESSAY)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+
+    push = api.lens_push(db, manuscript, {}, "solo.md",
+                         services=lambda: (fake, fake))
+    check("lens push writes the staged edits as forms; local keeps the "
+          "OLD text",
+          push["written"] == 2 and push["local_unchanged"]
+          and "<<" in fake.tab_text("solo.md"), str(push))
+    try:
+        api.lens_push(db, manuscript, {}, "solo.md",
+                      services=lambda: (fake, fake))
+        raised = False
+    except ValueError as err:
+        raised = "already out" in str(err)
+    check("a second lens push refuses while forms are out", raised)
+
+    # The author, in the Doc: hand-resolves one form (markers deleted,
+    # new text kept) and rewords the other inside its braces.
+    _reword_in_tab(
+        fake,
+        "<<Alpha opens the essay and says a thing worth saying twice.>>"
+        "{{Alpha opens the essay and says a thing once, and well.}}",
+        "Alpha opens the essay and says a thing once, and well.")
+    _reword_in_tab(
+        fake,
+        "{{Gamma follows, and changes the subject.}}",
+        "{{Gamma follows, and turns the page.}}")
+
+    settle = api.lens_settle(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("both verdicts land true — the hand-resolved form is an "
+          "acceptance, the braces rewording a modified acceptance",
+          settle["accepted"] == 2 and settle["declined"] == 0
+          and "says a thing once, and well." in final
+          and "Gamma follows, and turns the page." in final, final)
+    check("the modified acceptance is the learnings feedstock",
+          len(settle["diffs"]) == 1
+          and settle["diffs"][0]["final"]
+          == "Gamma follows, and turns the page.", str(settle["diffs"]))
+    ev = db.all("SELECT * FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'lens_edit' ORDER BY created_at", (mid,))
+    check("evidence lands as lens_edit — the door's own stream, NO "
+          "episode",
+          sorted(r["signal"] for r in ev) == ["resolved", "revised"]
+          and all(r["episode_id"] is None for r in ev),
+          str([r["signal"] for r in ev]))
+
+
+def _the_changed_words_pop(root: Path) -> None:
+    """Author request 2026-08-31: a one-word edit inside a
+    paragraph-sized form was invisible in the Doc. The push now
+    word-diffs old vs new deterministically and colors the differing
+    words (red in the struck half, blue in the green half) — COLOR
+    only, because the settle reads the markdown export and bold would
+    leak literal asterisks into the settled prose."""
+    print("the changed words pop: word-diff highlights on the form:")
+
+    old = "From Nothing, the sermon derives two opposing Fields."
+    new = "From Nothing, the sermon proposes two opposing Fields."
+    reqs = gdocs._mark_replace_requests("tab-9", 100, 100 + len(old),
+                                        old, new)
+    base = reqs[:4]
+    hi = reqs[4:]
+    check("the base form requests are unchanged: insert-new, insert-<<, "
+          "strike, green",
+          len(base) == 4 and "insertText" in base[0]
+          and base[2]["updateTextStyle"]["textStyle"]["strikethrough"]
+          is True, str(base))
+    old_base = 100 + 2
+    new_base = 100 + 4 + len(old) + 2
+    d_start = old.index("derives")
+    p_start = new.index("proposes")
+    check("exactly one red span over 'derives' and one blue span over "
+          "'proposes', at the right utf-16 offsets inside the form",
+          len(hi) == 2
+          and hi[0]["updateTextStyle"]["range"]["startIndex"]
+          == old_base + d_start
+          and hi[0]["updateTextStyle"]["range"]["endIndex"]
+          == old_base + d_start + len("derives")
+          and hi[0]["updateTextStyle"]["textStyle"]["foregroundColor"]
+          == gdocs.RED_GONE
+          and hi[1]["updateTextStyle"]["range"]["startIndex"]
+          == new_base + p_start
+          and hi[1]["updateTextStyle"]["range"]["endIndex"]
+          == new_base + p_start + len("proposes")
+          and hi[1]["updateTextStyle"]["textStyle"]["foregroundColor"]
+          == gdocs.BLUE_NEW, str(hi))
+    check("color only — no highlight request touches bold or italics",
+          all(r["updateTextStyle"]["fields"] == "foregroundColor"
+              for r in hi), str(hi))
+
+    # A cut (words removed, nothing added on that side) highlights only
+    # the struck side.
+    old2 = "The claim stands. It repeats the image in plainer words."
+    new2 = "The claim stands."
+    _, spans = gdocs._word_diff_spans(old2, new2)
+    old_spans, _ = gdocs._word_diff_spans(old2, new2)
+    check("a pure cut yields red spans and no blue",
+          old_spans and not spans, str((old_spans, spans)))
+
+    # A rewrite where most words changed is all change and no signal:
+    # no highlights at all.
+    o3, n3 = gdocs._word_diff_spans(
+        "Alpha beta gamma delta epsilon.",
+        "Entirely different words in every position here.")
+    check("a mostly-rewritten form gets NO highlight — all-highlight is "
+          "no signal", o3 == [] and n3 == [], str((o3, n3)))
+    reqs3 = gdocs._mark_replace_requests(
+        "tab-9", 50, 80, "Alpha beta gamma delta epsilon.",
+        "Entirely different words in every position here.")
+    check("...and the form request list is exactly the base four",
+          len(reqs3) == 4, str(len(reqs3)))
+
     # --- F-D12: a genuine two-sided edit refuses, and moves nothing ---
     db2, ms2, msdir2, fake2 = _doc_run(root, "conflict-ws",
                                        {2: "TWO AS PROPOSED."})
@@ -3655,6 +3903,9 @@ def main_test() -> None:
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
         _the_doc_settle(root)
+        _a_hand_resolved_tab_settles_true(root)
+        _the_lens_door(root)
+        _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)

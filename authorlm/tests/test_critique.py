@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from authorlm import concepts, critique, sessions, styles  # noqa: E402
+from authorlm.critique import tally as crit_tally  # noqa: E402
 from authorlm.db import (Database, ko_fields, loads, PROVENANCE_TABLES)  # noqa: E402
 
 PASSED = 0
@@ -439,6 +440,47 @@ def test_import_and_triage(root: Path) -> None:
           db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
                  "AND evidence_type = 'critique_triage' AND signal = 'modified' "
                  "AND target LIKE '%→%'", (mid,))["n"] == 1)
+
+    settled = critique.decided(db, mid)
+    verdicts = {d["item"]["statement"]: d["verdict"] for d in settled}
+    check("decided() reads every verdict back — accept, reject, revise, "
+          "intents and elements alike",
+          crit_tally(settled) == {"accept": 2, "reject": 2, "revise": 1})
+    check("a rejected intent carries the author's reason back out",
+          [d["reason"] for d in settled if d["verdict"] == "reject"
+           and d["kind"] == "intent"]
+          == ["The exposition is deliberate; readers need it."])
+    check("a rejected element's reason comes from its metadata",
+          [d["reason"] for d in settled if d["verdict"] == "reject"
+           and d["kind"] == "element"] == ["Too broad as law."])
+    revision = [d for d in settled if d["verdict"] == "revise"][0]
+    check("a modified acceptance stays in the list under the author's "
+          "wording, with the critic's original as revised_from",
+          revision["revised_from"] == "Explain the Anagramma materially."
+          and verdicts["Explain the Anagramma in the Recapitulation only."]
+          == "revise")
+    check("nothing still proposed leaks into the decided list",
+          all(d["item"]["status"] != "proposed" for d in settled))
+    check("--verdict narrows to one answer",
+          {d["verdict"] for d in critique.decided(db, mid, verdict="reject")}
+          == {"reject"})
+    check("--query matches the reason, not only the statement",
+          [d["item"]["statement"]
+           for d in critique.decided(db, mid, query="deliberate")]
+          == ["Cut repeated exposition by 20 to 25 percent."])
+    check("--scope narrows to one essay's chain (elements are global law "
+          "and stay)",
+          {d["kind"] for d in
+           critique.decided(db, mid, scope="preface.md")} == {"intent", "element"})
+
+    author_own = ko_fields("di")
+    author_own.update(manuscript_id=mid, statement="My own retired plan.",
+                      status="rejected", outcome="changed my mind",
+                      scope=None, source_id=author)
+    db.insert("declared_intents", author_own)
+    check("the author's own settled intents are not critique verdicts",
+          "My own retired plan."
+          not in {d["item"]["statement"] for d in critique.decided(db, mid)})
 
     tallies = critique.status(db, mid)[0]
     check("status tallies reflect the verdicts",

@@ -382,6 +382,47 @@ def list_critique_items(scope: str | None = None,
 
 
 @mcp.tool()
+def list_critique_decisions(scope: str | None = None,
+                            verdict: str | None = None,
+                            query: str | None = None,
+                            limit: int = 50,
+                            manuscript: str | None = None) -> dict:
+    """Critique items the author has ALREADY answered, with the verdict
+    and the reason recorded at the time — "what did I decide about this,
+    and why?" without opening the database. The counterpart of
+    list_critique_items (which shows only what is still pending).
+    scope: an essay file, or 'manuscript' for manuscript-wide items;
+    verdict: 'accept' | 'reject' | 'revise'; query: matches the
+    statement, the reason, or the critic's original wording. `tally`
+    counts the FULL filtered set even when `items` is capped by `limit`
+    — a manuscript can carry hundreds of settled rejections, so narrow
+    with scope/verdict/query rather than raising the limit. A 'revise'
+    entry carries revised_from: the critic's wording before the author's
+    replaced it."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        rows = critique.decided(db, ms["id"], scope=scope, verdict=verdict,
+                                query=query, manuscript=ms)
+        items = []
+        for d in rows[:max(0, limit)]:
+            item, meta = d["item"], _loads(d["item"]["metadata"], {})
+            meta = meta.get("critique", {})
+            items.append({
+                "id": item["id"], "kind": d["kind"],
+                "unit": meta.get("unit"), "ordinal": meta.get("ordinal"),
+                "scope": item.get("scope") or item.get("file") or
+                ("guide" if item.get("guide_id") else "manuscript"),
+                "verdict": d["verdict"], "statement": item["statement"],
+                "reason": d["reason"], "revised_from": d["revised_from"],
+            })
+        return {"count": len(rows), "tally": critique.tally(rows),
+                "scope": scope, "verdict": verdict,
+                "truncated": len(items) < len(rows), "items": items}
+    return _guard(run)
+
+
+@mcp.tool()
 def triage_critique(operations: list[dict], scope: str | None = None,
                     manuscript: str | None = None) -> dict:
     """Record the author's verdicts on proposed critique items, in batch.

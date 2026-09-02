@@ -2372,14 +2372,61 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
 
 
 GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
+# The changed-word highlights (author request 2026-08-31: a one-word edit
+# inside a paragraph-sized form was invisible). COLOR ONLY, never bold or
+# italics: the doc settle reads the whole-Doc MARKDOWN export, which
+# preserves bold as **…** — a bolded highlight would leak literal
+# asterisks into the settled prose. foregroundColor is proven invisible
+# to that export (the green half already round-trips clean).
+RED_GONE = {"color": {"rgbColor": {"red": 0.8, "green": 0.1, "blue": 0.1}}}
+BLUE_NEW = {"color": {"rgbColor": {"red": 0.07, "green": 0.33, "blue": 0.8}}}
+
+
+def _word_diff_spans(old: str, new: str) -> tuple[list[tuple[int, int]],
+                                                  list[tuple[int, int]]]:
+    """Word-level diff of old vs new: two lists of (start16, end16)
+    utf-16 offset spans — the words of `old` that do not survive, and
+    the words of `new` that were not there. Deterministic (difflib on
+    whitespace tokens). When BOTH sides are mostly changed (a rewrite),
+    the highlight is noise rather than signal and both lists come back
+    empty — but a one-sided change stays highlighted: a cut that
+    removes most of the old half is exactly where the red must pop."""
+    import difflib
+    import re as _re
+
+    old_toks = list(_re.finditer(r"\S+", old))
+    new_toks = list(_re.finditer(r"\S+", new))
+    if not old_toks or not new_toks:
+        return [], []
+    sm = difflib.SequenceMatcher(None, [t.group() for t in old_toks],
+                                 [t.group() for t in new_toks])
+    old_spans, new_spans = [], []
+    old_changed = new_changed = 0
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        if i2 > i1:
+            old_changed += i2 - i1
+            old_spans.append((_utf16_len(old[:old_toks[i1].start()]),
+                              _utf16_len(old[:old_toks[i2 - 1].end()])))
+        if j2 > j1:
+            new_changed += j2 - j1
+            new_spans.append((_utf16_len(new[:new_toks[j1].start()]),
+                              _utf16_len(new[:new_toks[j2 - 1].end()])))
+    if (old_changed * 2 > len(old_toks)) and (new_changed * 2 > len(new_toks)):
+        return [], []
+    return old_spans, new_spans
 
 
 def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
                            new: str) -> list[dict]:
     """Requests turning the span [start,end) (holding `old`) into the
-    styled pending form <<old>>{{new}}: old struck through, new green."""
+    styled pending form <<old>>{{new}}: old struck through, new green —
+    and the DIFF made visible: the words of old that go are red, the
+    words of new that arrive are blue. Highlights ride after the base
+    styles so they win on their subranges; color only (see RED_GONE)."""
     old16 = _utf16_len(old)
-    return [
+    requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
                         "text": ">>" + "{{" + new + "}}"}},
         {"insertText": {"location": {"tabId": tab_id, "index": start},
@@ -2394,6 +2441,22 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
             "textStyle": {"foregroundColor": GREEN},
             "fields": "foregroundColor"}},
     ]
+    old_spans, new_spans = _word_diff_spans(old, new)
+    old_base = start + 2                      # first char of old text
+    new_base = start + 4 + old16 + 2          # first char of new text
+    for s16, e16 in old_spans:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": old_base + s16,
+                      "endIndex": old_base + e16},
+            "textStyle": {"foregroundColor": RED_GONE},
+            "fields": "foregroundColor"}})
+    for s16, e16 in new_spans:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": new_base + s16,
+                      "endIndex": new_base + e16},
+            "textStyle": {"foregroundColor": BLUE_NEW},
+            "fields": "foregroundColor"}})
+    return requests
 
 
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:

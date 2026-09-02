@@ -402,17 +402,34 @@ The check that this step is right is that the existing suite stays green
 staging entry point that takes source-derived `old`, the local transport, the
 direct apply, the rollback — and it *calls* `passes`; it moves nothing out.
 
-### 7.2 A lens finding walking through the door — specified, not built
+### 7.2 A lens finding walking through the door — BUILT 2026-08-31
 
 Give the lens finding schema one optional field, `replacement`. When present,
 `_store_findings` locates the unit containing the quote, **refuses the
 proposal if the quote occurs in more than one unit or more than once within
 its unit** (an unanchored `str.replace` picks an occurrence, and picking is
 guessing), builds `new`, and stages it with `origin_type='lens'`. Open
-question: whether ruling on the finding settles the edit. Default: they are
-independent, and `lens review --accept` prints a line saying the edit is
-still open. Two verdicts on one object is worse than one verdict that leaves
-work visible. Nothing built this stream.
+question, ruled at build time: whether ruling on the finding settles the
+edit. They are independent, and `lens review --accept` prints a line saying
+the edit is still open. Two verdicts on one object is worse than one verdict
+that leaves work visible.
+
+As built (author's order: "We want the same user-side workflow as filters
+once the lens runs"): the refusal reasons come back per finding
+(`edits_refused`, the finding itself always kept); an anchored edit stages
+through `staging.stage_edits` with owner = the lens name (re-registers
+replace in place; supersede withdraws unreached ordinals); the finding row
+carries `metadata.edit_thread` and the register/run output marks `[edit
+staged]`. Transport: `lens push <file>` / `lens settle <file>` — the filter
+doc road's contract verbatim (untriaged proposals go too, the tab is the
+review, one producer's forms per tab, hand-resolution verdict inference per
+it-4c5a8038c304, evidence as `lens_edit` under NO episode, settle does not
+re-push). Deliberately run-less: lens edits are file-scoped door threads;
+the door's own state machine is their whole lifecycle — no transport
+freeze, no unit coverage, no falsified prefix, and no `lens unmark` (the
+settle's inference makes the Doc road self-correcting, and `doc push`
+remains the tab rebuild). Encoded test:
+`tests/test_passes.py::_the_lens_door`.
 
 ---
 
@@ -985,8 +1002,9 @@ from a chat session, which is where the author actually rules.
   code; inventing a class is code, and says so.
 - **Filter ordering and composition.** Two filters do not commute and no
   order is enforced or recommended. That is editorial practice.
-- **The lens door.** Specified in §7.2 so that when it is built it is three
-  lines and not a refactor. Nothing built this stream.
+- **The lens door.** Specified in §7.2 so that when it was built it would be
+  small and not a refactor. Built 2026-08-31 on the author's order ("We want
+  the same user-side workflow as filters once the lens runs") — see §7.2.
 - **Parsing motif families out of the figure law (§15.22).** Two `[figure]`
   elements, two grammars, no schema, and both are sentences the author may
   reword at any ratification. The prompts point at the law instead, which is

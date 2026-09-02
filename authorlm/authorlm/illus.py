@@ -10,11 +10,18 @@ The tag IS the spec — plain prose that survives every push/pull and is
 never consumed or replaced. Rendered candidates live in _illustrations/
 (observation-invisible) named
 
-    <slug>-<deschash8>-<stylehash4>-<NN>.png
+    <key>-<deschash8>-<stylehash4>-<NN>.png
 
-where deschash covers the prompt part only (editing a caption never
-stales an image) and NN numbers the candidates of a slot. The registry
-is derived entirely by scanning text + directory — no DB state.
+where KEY is the slot's identity — the ref slug of its canonical prompt
+file, minted once at externalize and never recomputed. A description may
+afterwards be rewritten into something unrecognisable and the art stays
+attached, which is the whole point (it-2e4a5ec3d809: rewording an INLINE
+slot used to orphan every image under it, because identity was the
+prompt hash). deschash and stylehash ride along as STALENESS MARKERS
+only — "which prompt text, under which figure law, was this made for" —
+never as identity. NN numbers the candidates of a slot, prefixed `i` for
+an image that was imported rather than rendered. The registry is derived
+entirely by scanning text + directory — no DB state.
 """
 
 from __future__ import annotations
@@ -31,8 +38,8 @@ ILLUS_DIR = "_illustrations"
 _TAG = re.compile(r"\[Illustration:\s*(?P<body>.+?)\]\s*$", re.IGNORECASE)
 _CAPTION = re.compile(r"\s*\|\s*caption:\s*(?P<caption>.+)\s*$", re.IGNORECASE)
 _CANDIDATE = re.compile(
-    r"^(?P<slug>.+)-(?P<desc>[0-9a-f]{8})-(?P<style>[0-9a-f]{4})"
-    r"-(?P<n>\d{2})\.(?P<ext>png|jpe?g)$")
+    r"^(?P<key>.+)-(?P<desc>[0-9a-f]{8})-(?P<style>[0-9a-f]{4})"
+    r"-(?P<src>i?)(?P<n>\d{2})\.(?P<ext>png|jpe?g)$")
 # Google Docs markdown export renders pasted images as reference-style
 # links (`![][image1]`) plus, sometimes, a base64 definition line — both
 # useless outside the Doc and silently corrupting once pulled.
@@ -283,6 +290,16 @@ def slug(prompt: str) -> str:
     return "-".join(words[:4]) or "illustration"
 
 
+def slot_key(slot: dict) -> str | None:
+    """A slot's IDENTITY: the slug of its canonical prompt file, without
+    the .md. None until the slot is externalized — an inline slot has no
+    stable name to hang art on, so `render` and `import` externalize
+    first and mint one. The key never moves when the description is
+    edited; that is what distinguishes it from desc_hash, which does."""
+    ref = slot.get("ref")
+    return ref[:-3] if ref and ref.endswith(".md") else None
+
+
 def scan_text(text: str, prompts: dict[str, str] | None = None) -> list[dict]:
     """Every slot declared in a text, in order: {prompt, excerpt,
     caption, ref, line} (1-based). For ref tags, `prompt` and the
@@ -303,6 +320,7 @@ def scan_text(text: str, prompts: dict[str, str] | None = None) -> list[dict]:
             else:
                 slot["prompt"] = " ".join(full.split())
         slot["desc_hash"] = desc_hash(slot["prompt"])
+        slot["key"] = slot_key(slot)
         slots.append(slot)
     return slots
 
@@ -345,6 +363,66 @@ def externalize(root: Path, slot: dict) -> dict:
     path.write_text("\n".join(lines), encoding="utf-8")
     return {"file": slot["file"], "ref": name,
             "desc_hash": slot["desc_hash"]}
+
+
+def ensure_key(root: Path, slot: dict) -> dict:
+    """The slot, guaranteed to carry a key — externalizing it first if
+    it is still inline. The FIRST IMAGE is what mints a slot's key, so
+    this runs ahead of every render and every import. Naming art after a
+    description is what created the orphans this replaced, so an inline
+    slot never gets art: it gets a canonical prompt file, and the art is
+    named after that."""
+    if slot.get("key"):
+        return slot
+    if slot.get("ref"):
+        return {**slot, "key": slot_key(slot)}
+    out = externalize(Path(root), slot)
+    return {**slot, "ref": out["ref"], "key": out["ref"][:-3],
+            "excerpt": _excerpt_of(slot["prompt"])}
+
+
+def import_image(db, manuscript: dict, slot: dict, source) -> dict:
+    """Bring an image made OUTSIDE AuthorLM into a slot as a first-class
+    candidate: an illustrator's plate, a scan, a drawing drafted
+    elsewhere. It lands under the slot's key exactly like a render, so
+    every later verb — pick, render --from, prune, the Doc round trip —
+    treats it identically. The `i` in its number is a LABEL for the
+    reader (`illus list` must not call it a render it is not) and never
+    a permission: an import may stand as the final plate, seed a render,
+    or both. Existing work becomes reusable, which a system that could
+    only consume its own output could not do (it-2e4a5ec3d809).
+
+    The deschash and stylehash recorded are the ones current AT IMPORT —
+    what the slot was asking for when the image arrived, which is what a
+    later staleness check wants to know."""
+    root = Path(manuscript["path"])
+    source = Path(source).expanduser()
+    img = source.read_bytes()
+    if not (img.startswith(_PNG_SIG) or img.startswith(_JPEG_SIG)):
+        raise ValueError(f"{source.name} is not a PNG or a JPEG — "
+                         "convert it first; the store holds only what "
+                         "the manuscript can embed")
+    slot = ensure_key(root, slot)
+    shash = style_hash(illustration_law(db, manuscript["id"], slot["file"]))
+    existing = slot_candidates(root, slot["key"])
+    n = max((int(c["n"]) for c in existing), default=0) + 1
+    name = (f"{slot['key']}-{slot['desc_hash']}-{shash}"
+            f"-i{n:02d}.{image_ext(img)}")
+    directory = root / ILLUS_DIR
+    directory.mkdir(exist_ok=True)
+    (directory / name).write_bytes(image_with_metadata(img, {
+        "authorlm:prompt": slot["prompt"],
+        "authorlm:caption": slot.get("caption") or "",
+        "authorlm:source": f"imported from {source.name}",
+    }))
+    path = root / slot["file"]
+    embedded = embed_target(path.read_text(encoding="utf-8"), slot["key"])
+    if embedded is None:
+        set_embed(path, slot["key"], name)
+    return {"name": name, "key": slot["key"], "ref": slot["ref"],
+            "file": slot["file"], "n": n, "source": source.name,
+            "had_embed": embedded is not None,
+            "embedded": embedded or name}
 
 
 def _read_manuscript_text(path: Path, rel: str) -> str:
@@ -513,7 +591,11 @@ def craft_text(config: dict, workspace: str | None = None) -> str:
 
 
 def candidate_files(root: Path) -> list[dict]:
-    """Parsed candidate PNGs on disk: {name, slug, desc, style, n}."""
+    """Parsed candidate PNGs on disk: {name, key, desc, style, src, n}.
+    `src` is "i" for an imported image and "" for a native render — a
+    provenance LABEL for the reader, never a permission: an import is
+    pickable as the final plate, as a seed for `--from`, or anything
+    between."""
     directory = Path(root) / ILLUS_DIR
     if not directory.is_dir():
         return []
@@ -538,14 +620,16 @@ def slot_report(root: Path) -> dict:
     for rel, path in iter_manuscript_paths(root).items():
         for slot in scan_text(_read_manuscript_text(path, rel), prompts):
             slots.append({"file": rel, **slot})
-    rendered = {c["desc"] for c in candidate_files(root)}
-    declared = {s["desc_hash"] for s in slots}
+    held = {c["key"] for c in candidate_files(root)}
+    declared = {s["key"] for s in slots if s["key"]}
     unrendered = [
-        {"file": s["file"], "line": s["line"], "prompt": s["prompt"]}
-        for s in slots if s["desc_hash"] not in rendered
+        {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
+         "caption": s.get("caption"), "ref": s.get("ref"), "key": s["key"],
+         "desc_hash": s["desc_hash"]}
+        for s in slots if s["key"] not in held
     ]
     orphaned = [c["name"] for c in candidate_files(root)
-                if c["desc"] not in declared]
+                if c["key"] not in declared]
     malformed_refs = [
         {"file": s["file"], "line": s["line"], "prompt": s["prompt"]}
         for s in slots if s.get("malformed_ref")
@@ -596,10 +680,14 @@ def style_hash(law: str) -> str:
     return hashlib.sha256(law.encode("utf-8")).hexdigest()[:4]
 
 
-def slot_candidates(root: Path, deschash: str) -> list[dict]:
+def slot_candidates(root: Path, key: str | None) -> list[dict]:
     """This slot's candidates in render order (NN ascends across style
-    generations — a slot's numbering never resets)."""
-    return sorted((c for c in candidate_files(root) if c["desc"] == deschash),
+    AND description generations — a slot's numbering never resets).
+    A slot with no key has no candidates: nothing has been minted for it
+    yet."""
+    if not key:
+        return []
+    return sorted((c for c in candidate_files(root) if c["key"] == key),
                   key=lambda c: int(c["n"]))
 
 
@@ -649,30 +737,22 @@ def image_with_metadata(img: bytes, fields: dict[str, str]) -> bytes:
     return img  # unknown format — store untouched
 
 
-def _find_tag_line(lines: list[str], deschash: str,
-                   prompts: dict[str, str] | None = None) -> int | None:
-    """Index of the tag whose CANONICAL description hashes to deschash.
-    Ref tags carry only the excerpt inline, so identity needs the
-    prompts map (load_prompts) — without it an externalized slot is
-    invisible here."""
-    prompts = prompts or {}
+def _find_tag_line(lines: list[str], key: str) -> int | None:
+    """Index of the tag whose KEY is this one. The key is in the tag
+    itself (the ⇢ ref), so this needs no prompts map and — unlike the
+    old hash lookup — survives any rewriting of the description."""
     for i, line in enumerate(lines):
         tag = parse_tag(line)
-        if not tag:
-            continue
-        full = (prompts.get(tag["ref"], tag["prompt"]) if tag["ref"]
-                else tag["prompt"])
-        if desc_hash(" ".join(full.split())) == deschash:
+        if tag and slot_key(tag) == key:
             return i
     return None
 
 
-def embed_target(text: str, deschash: str,
-                 prompts: dict[str, str] | None = None) -> str | None:
+def embed_target(text: str, key: str) -> str | None:
     """The candidate filename the slot's embed line points at (the
     line directly under the tag), or None if not embedded."""
     lines = text.split("\n")
-    i = _find_tag_line(lines, deschash, prompts)
+    i = _find_tag_line(lines, key)
     if i is None or i + 1 >= len(lines):
         return None
     from .revisions import EMBED_LINE
@@ -682,8 +762,7 @@ def embed_target(text: str, deschash: str,
     return None
 
 
-def set_embed(path: Path, deschash: str, candidate_name: str,
-              prompts: dict[str, str] | None = None) -> bool:
+def set_embed(path: Path, key: str, candidate_name: str) -> bool:
     """Point the slot's embed line at a candidate — insert directly
     under the tag, or rewrite the existing embed. The embed is derived
     machinery: observation, push, and the beat loop never see it."""
@@ -691,7 +770,7 @@ def set_embed(path: Path, deschash: str, candidate_name: str,
 
     text = path.read_text(encoding="utf-8")
     lines = text.split("\n")
-    i = _find_tag_line(lines, deschash, prompts)
+    i = _find_tag_line(lines, key)
     if i is None:
         return False
     embed = f"![]({ILLUS_DIR}/{candidate_name})"
@@ -720,9 +799,11 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
                 from_n: int | None = None, count: int = 1,
                 generator=None) -> dict:
     """Render `count` new candidates for a slot. `from_n` passes an
-    existing candidate as the input image (continuity across a style
-    change). A slot with no embed yet gets one pointing at the newest
-    render; an existing embed is NEVER moved — that is `pick`'s job."""
+    existing candidate as the input image — continuity across a style
+    change, and the seed door for an imported plate. A slot with no
+    embed yet gets one pointing at the newest render; an existing embed
+    is NEVER moved — that is `pick`'s job. An inline slot is
+    EXTERNALIZED first: the first image is what mints a slot's key."""
     from datetime import datetime, timezone
 
     from .llm import DEFAULT_IMAGE_MODEL, generate_image, resolve_image_setting
@@ -730,6 +811,7 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     generator = generator or (lambda prompt, input_png:
                               generate_image(config, prompt, input_png))
     root = Path(manuscript["path"])
+    slot = ensure_key(root, slot)
     deschash = slot["desc_hash"]
     assembled = effective_prompt(db, manuscript, slot)
     shash = assembled["style_hash"]
@@ -737,13 +819,13 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
 
     input_png = None
     if from_n is not None:
-        source = next((c for c in slot_candidates(root, deschash)
+        source = next((c for c in slot_candidates(root, slot["key"])
                        if int(c["n"]) == from_n), None)
         if source is None:
             raise LookupError(f"slot has no candidate {from_n:02d}")
         input_png = (root / ILLUS_DIR / source["name"]).read_bytes()
 
-    existing = slot_candidates(root, deschash)
+    existing = slot_candidates(root, slot["key"])
     next_n = max((int(c["n"]) for c in existing), default=0) + 1
     directory = root / ILLUS_DIR
     directory.mkdir(exist_ok=True)
@@ -752,7 +834,7 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     written = []
     for offset in range(count):
         img = generator(prompt, input_png)
-        name = (f"{slug(slot['prompt'])}-{deschash}-{shash}"
+        name = (f"{slot['key']}-{deschash}-{shash}"
                 f"-{next_n + offset:02d}.{image_ext(img)}")
         payload = image_with_metadata(img, {
             "authorlm:prompt": slot["prompt"],
@@ -764,19 +846,22 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
         })
         (directory / name).write_bytes(payload)
         written.append(name)
-    prompts = load_prompts(root)
     embedded = embed_target((root / slot["file"]).read_text(encoding="utf-8"),
-                            deschash, prompts)
+                            slot["key"])
     if embedded is None:
-        set_embed(root / slot["file"], deschash, written[-1], prompts)
+        set_embed(root / slot["file"], slot["key"], written[-1])
     return {"written": written, "embedded": embedded or written[-1],
             "style_hash": shash, "had_embed": embedded is not None}
 
 
 def slot_status(db, manuscript: dict) -> list[dict]:
     """Every slot with its lifecycle state, for `illus list`:
-    unrendered | rendered | stale-style (embed predates the current
-    figure law) — plus the embedded candidate and candidate count."""
+    unrendered | rendered | imported (the standing plate came in from
+    outside rather than from a render) | stale-desc (the plate was made
+    for a description since rewritten) | stale-style (it predates the
+    current figure law). A plate can be behind on both; stale-desc wins
+    the label, being the larger divergence. Plus the embedded candidate
+    and the candidate count."""
     root = Path(manuscript["path"])
     out = []
     prompts = load_prompts(root)
@@ -784,20 +869,21 @@ def slot_status(db, manuscript: dict) -> list[dict]:
         text = path.read_text(encoding="utf-8")
         current = style_hash(illustration_law(db, manuscript["id"], rel))
         for slot in scan_text(text, prompts):
-            cands = slot_candidates(root, slot["desc_hash"])
-            embedded = embed_target(text, slot["desc_hash"], prompts)
+            cands = slot_candidates(root, slot["key"])
+            embedded = embed_target(text, slot["key"]) if slot["key"] else None
             state = "unrendered"
             if cands:
-                state = "rendered"
                 target = next((c for c in cands if c["name"] == embedded),
-                              None)
-                if target and target["style"] != current:
+                              None) or cands[-1]
+                state = "imported" if target["src"] else "rendered"
+                if target["style"] != current:
                     state = "stale-style"
-                elif not target and all(c["style"] != current for c in cands):
-                    state = "stale-style"
+                if target["desc"] != slot["desc_hash"]:
+                    state = "stale-desc"
             out.append({"file": rel, "line": slot["line"],
                         "prompt": slot["prompt"],
                         "caption": slot.get("caption"),
+                        "key": slot["key"],
                         "state": state, "candidates": len(cands),
                         "embedded": embedded,
                         "style_current": current})
@@ -814,13 +900,15 @@ def prune(manuscript: dict) -> list[str]:
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
         for slot in scan_text(text, prompts):
-            declared.add(slot["desc_hash"])
-            target = embed_target(text, slot["desc_hash"], prompts)
+            if not slot["key"]:
+                continue
+            declared.add(slot["key"])
+            target = embed_target(text, slot["key"])
             if target:
                 keep.add(target)
     removed = []
     for candidate in candidate_files(root):
-        if candidate["name"] in keep and candidate["desc"] in declared:
+        if candidate["name"] in keep and candidate["key"] in declared:
             continue
         (root / ILLUS_DIR / candidate["name"]).unlink()
         removed.append(candidate["name"])
@@ -829,20 +917,21 @@ def prune(manuscript: dict) -> list[str]:
 
 def capture_embeds(text: str,
                    prompts: dict[str, str] | None = None) -> dict[str, str]:
-    """The pick state a text holds: {desc_hash: embedded candidate name}.
+    """The pick state a text holds: {key: embedded candidate name}.
     Captured before a pull overwrites the file, so picks survive Doc
-    round trips even though the Doc never carries embed lines."""
+    round trips even though the Doc never carries embed lines. Keyed by
+    the slot KEY, not the description hash: the author reworks prompts
+    IN the Doc, and a hash-keyed capture lost the image on exactly that
+    move (it-2e4a5ec3d809). `prompts` is accepted and unused — the key
+    is in the tag, so no canonical text is needed to read it."""
     from .revisions import EMBED_LINE
 
-    prompts = prompts or {}
     lines = text.split("\n")
     out: dict[str, str] = {}
     for i, line in enumerate(lines[:-1]):
         tag = parse_tag(line)
-        if tag and EMBED_LINE.match(lines[i + 1]):
-            full = (prompts.get(tag["ref"], tag["prompt"])
-                    if tag["ref"] else tag["prompt"])
-            out[desc_hash(" ".join(full.split()))] = (
+        if tag and slot_key(tag) and EMBED_LINE.match(lines[i + 1]):
+            out[slot_key(tag)] = (
                 lines[i + 1].rsplit("/", 1)[-1].rstrip(") \t"))
     return out
 
@@ -856,7 +945,6 @@ def reembed(text: str, root: Path, prior: dict[str, str] | None = None) -> str:
 
     prior = prior or {}
     root = Path(root)
-    prompts = load_prompts(root)
     lines = text.split("\n")
     out: list[str] = []
     for i, line in enumerate(lines):
@@ -866,14 +954,12 @@ def reembed(text: str, root: Path, prior: dict[str, str] | None = None) -> str:
             continue
         if i + 1 < len(lines) and EMBED_LINE.match(lines[i + 1]):
             continue  # already embedded
-        full = (prompts.get(tag["ref"], tag["prompt"])
-                if tag["ref"] else tag["prompt"])
-        h = desc_hash(" ".join(full.split()))
-        name = prior.get(h)
+        key = slot_key(tag)
+        name = prior.get(key) if key else None
         if name and not (root / ILLUS_DIR / name).exists():
             name = None
         if name is None:
-            cands = slot_candidates(root, h)
+            cands = slot_candidates(root, key)
             name = cands[-1]["name"] if cands else None
         if name:
             out.append(f"![]({ILLUS_DIR}/{name})")

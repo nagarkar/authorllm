@@ -57,7 +57,8 @@ def is_marked(text: str) -> bool:
 
 def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                 source_text: str, entries: list[dict],
-                origin_type: str = "filter") -> list[dict]:
+                origin_type: str = "filter",
+                verb_stem: str = "filter") -> list[dict]:
     """Stage validated entries as `doc_threads` rows.
 
     `entries` carry `n`, `new`, `why` and an optional `ref`; **`old` is
@@ -104,11 +105,13 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                 # un-pend it silently and lift the push guard on a file
                 # whose bytes still carry the markers — the same rule
                 # `passes.stage` states for the Doc pause.
+                unmark = (f" or put the text back ('{verb_stem} unmark "
+                          f"{file}')" if verb_stem == "filter" else "")
                 raise ValueError(
                     f"{file}: a staged edit at unit {n} is already "
                     f"written into the file — settle it "
-                    f"('filter settle {file}') or put the text back "
-                    f"('filter unmark {file}') before re-staging.")
+                    f"('{verb_stem} settle {file}'){unmark} before "
+                    f"re-staging.")
             db.update("doc_threads", prior["id"], fields)
             row = {**prior, **fields}
         else:
@@ -233,7 +236,8 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
                                                  kinds=("replace",))
     diffs = passes.record_resolution(db, manuscript_id, file, forms,
                                      origin_type=origin_type,
-                                     evidence_type=evidence_type)
+                                     evidence_type=evidence_type,
+                                     final_text=final)
     return final, forms, diffs
 
 

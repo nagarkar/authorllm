@@ -211,8 +211,8 @@ def publish_markdown(manuscript: dict, variant: str,
     `only` narrows it to the named chapters and their TOC descendants —
     a part of the book, built exactly like the whole.
     Returns (text, order, warnings)."""
-    from .illus import (ILLUS_DIR, capture_embeds, desc_hash, parse_tag,
-                        slot_candidates)
+    from .illus import (ILLUS_DIR, capture_embeds, parse_tag,
+                        slot_candidates, slot_key)
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
@@ -246,12 +246,12 @@ def publish_markdown(manuscript: dict, variant: str,
                     continue
                 if variant == "stripped":
                     continue
-                h = desc_hash(tag["prompt"])
-                target = picks.get(h)
+                key = slot_key(tag)
+                target = picks.get(key) if key else None
                 if target and not (root / ILLUS_DIR / target).exists():
                     target = None
                 if target is None:
-                    cands = slot_candidates(root, h)
+                    cands = slot_candidates(root, key)
                     target = cands[-1]["name"] if cands else None
                 if target is None:
                     warnings.append(

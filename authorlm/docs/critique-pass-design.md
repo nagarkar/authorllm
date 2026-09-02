@@ -404,7 +404,7 @@ this section records where the build landed differently or added detail.
 | Stage | Landed as | Tests |
 |---|---|---|
 | 1 Schema/provenance | `sources`, `source_id`, intent `proposed`/`rejected` + `scope`, `essay_summaries`, `critique_passes`; `doc_threads` origin polymorphism (`origin_type`/`origin_id`, live rows migrated by table rebuild) | test_critique |
-| 2 Intake | `critique import/status/list/triage` (+ show/reason/reopen), MCP `import_critique`, `critique_status`, `list_critique_items`, `triage_critique`; briefing badge `critique_pending`; SMSTTD import audited: 338 doc items → 318 rows + 10 ratified exclusions, zero loss | test_critique |
+| 2 Intake | `critique import/status/list/triage` (+ show/reason/reopen, `list --decided`), MCP `import_critique`, `critique_status`, `list_critique_items`, `list_critique_decisions`, `triage_critique`; briefing badge `critique_pending`; SMSTTD import audited: 338 doc items → 318 rows + 10 ratified exclusions, zero loss | test_critique |
 | 3 Summaries | `summarize status/show/rebuild [file] [--all]`, `authorlm/prompts/summarizer.md`, mark-don't-cascade on collect, `[critique] summarizer_model`; `authorlm prompts` registry + `--help` notes on every LLM verb | test_summaries |
 | 4 Edit pass | `passes.py`; `authorlm/prompts/editor.md`; `critique run/edits/triage --edits/write/resolve/rollback`; grammar: `{{new}}`-only insertion form; MCP `list_critique_edits`, `triage_critique_edits`, `move_style_element`, `curate_concepts` op `revive`; `concept revive`, `style move` | test_passes |
 
@@ -423,6 +423,26 @@ Deviations / additions worth knowing:
   nesting the second write inside the first and leaving a literal
   `<<old>>{{new}}` in the finished manuscript. That was live here, not in
   the filter; see autoregressive-writing-design §15.23.
+
+- **Reading verdicts back (2026-08-31).** §3.3 specified how a verdict is
+  *recorded* but not how it is *read*, and the gap was being filled by
+  hand-written sqlite. `critique list --decided` (MCP
+  `list_critique_decisions`) is the mirror of the pending queue: same
+  scope chain, same order, filters on `--verdict` and `--query` (which
+  matches the reason and the critic's original wording, not just the
+  statement). Two consequences worth knowing:
+  - A *critique* item is one a critic proposed — but a modified
+    acceptance flips provenance to the author, so membership is
+    "critic-sourced OR carrying critique lineage" (`critique.FROM_CRITIC`).
+    The pre-provenance backfill gave every row a source, so the older
+    `source_id IS NOT NULL` test matched the author's own intents and
+    style laws too; `critique show --query` and the settled-item lookup
+    now use the same predicate as the list.
+  - The MCP tool caps `items` at `limit` (50) while `tally` and `count`
+    describe the whole filtered set: SMSTTD alone holds 267 settled
+    rejections, and the answer to a wide query is to narrow it, not to
+    pour the pile into the context window. The CLI is uncapped — a
+    terminal has scrollback.
 
 - **Verbs**: the design's `critique triage` (edits) is `critique triage
   --edits <essay>`; the intake triage keeps the bare form. Diff-write is

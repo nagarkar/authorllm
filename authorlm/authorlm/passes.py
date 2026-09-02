@@ -749,16 +749,54 @@ def final_text_from_marked(marked: str,
     return text, critique_forms
 
 
+def _closest_paragraph(text: str, probe: str,
+                       exclude: set[str] = frozenset()) -> str | None:
+    """The paragraph of `text` most similar to `probe`, whitespace-
+    normalized, or None when nothing comes close enough to trust
+    (ratio < 0.5). The hand-resolution inference below uses it to
+    locate the author's final wording for a form whose markers they
+    removed themselves. `exclude` holds paragraphs that cannot be the
+    answer — the batch's other proposals' old and new halves, which a
+    similar-looking probe would otherwise claim as its own."""
+    import difflib
+
+    probe_n = " ".join(probe.split())
+    best, best_ratio = None, 0.0
+    # Units are paragraphs, and a paragraph is one line in this
+    # pipeline's markdown — the Doc export separates them with single
+    # newlines, the local file with blank lines. Splitting on newlines
+    # serves both shapes.
+    for para in re.split(r"\n+", text):
+        p = " ".join(para.split())
+        if not p or p in exclude:
+            continue
+        ratio = difflib.SequenceMatcher(None, probe_n, p).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = p, ratio
+    return best if best_ratio >= 0.5 else None
+
+
 def record_resolution(db: Database, manuscript_id: str, file: str,
                       forms: list[dict],
                       origin_type: str = "critique",
-                      evidence_type: str = "critique_edit") -> list[dict]:
+                      evidence_type: str = "critique_edit",
+                      final_text: str | None = None) -> list[dict]:
     """Match the resolved forms back to their threads by proposal text;
     record proposal→final diffs as evidence; close the threads. Returns
     the modified-acceptance diffs (the learnings duty's feedstock).
 
     Origin-agnostic apart from the `staged_threads` call it makes: both
-    parameters default to today's values (filter-pass design §2.2)."""
+    parameters default to today's values (filter-pass design §2.2).
+
+    `final_text` is the settled text the forms resolved into. When given,
+    a thread whose form is GONE from the marked text is not written off
+    as a decline: the verdict is inferred from the text itself, because
+    an author who resolved the form by hand — deleted the markers, kept
+    the new prose — has accepted it (it-4c5a8038c304; author's ruling
+    2026-08-31: old text still standing as-is → decline; old text gone →
+    acceptance, the settled text being the final wording). Without
+    `final_text` the old behavior stands: an unmatched form is a
+    decline."""
     threads = staged_threads(db, manuscript_id, file, states=("written",),
                              origin_type=origin_type)
     diffs = []
@@ -796,11 +834,58 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
             db.update("doc_threads", match["id"], {"state": "cleaned"})
             _edit_evidence(db, manuscript_id, match, "resolved",
                            evidence_type=evidence_type)
+    norm_final = (" ".join(final_text.split())
+                  if final_text is not None else None)
+    claimed = {" ".join((t2[field] or "").split())
+               for t2 in threads for field in ("proposed_old", "proposed_new")
+               if (t2[field] or "").strip()}
     for t in unmatched:
-        # The author deleted the form outright during the pause: a decline.
-        db.update("doc_threads", t["id"], {"state": "declined"})
-        _edit_evidence(db, manuscript_id, t, "declined",
+        # The form is gone from the marked text. Without the settled
+        # text to consult, that reads as the author deleting the form
+        # during the pause: a decline. WITH it, infer the verdict from
+        # the prose (it-4c5a8038c304): an intact old paragraph is a
+        # decline; an old paragraph that is gone was accepted — by an
+        # author who resolved the form by hand instead of editing
+        # inside the braces. Insertions are excluded: their old half is
+        # the empty string, which is "present" in any text.
+        old = " ".join((t["proposed_old"] or "").split())
+        if norm_final is None or not old or old in norm_final:
+            db.update("doc_threads", t["id"], {"state": "declined"})
+            _edit_evidence(db, manuscript_id, t, "declined",
+                           evidence_type=evidence_type)
+            continue
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        if new and new in norm_final:
+            db.update("doc_threads", t["id"], {"state": "cleaned"})
+            _edit_evidence(db, manuscript_id, t, "resolved",
+                           evidence_type=evidence_type)
+            continue
+        # Old gone, new not verbatim: a modified acceptance. The final
+        # wording is the settled text's closest paragraph; when nothing
+        # comes close (the author folded the passage into other prose),
+        # the acceptance is still recorded — their text won — with the
+        # final marked unlocatable rather than guessed.
+        final_para = _closest_paragraph(final_text, proposed or old,
+                                        exclude=claimed)
+        meta = loads(t.get("metadata"), {}) or {}
+        meta.setdefault("original_new", proposed)
+        if final_para is None or final_para == new:
+            meta["final_unlocated"] = final_para is None
+            db.update("doc_threads", t["id"],
+                      {"state": "cleaned", "metadata": json.dumps(meta)})
+            _edit_evidence(db, manuscript_id,
+                           dict(t, metadata=json.dumps(meta)), "resolved",
+                           evidence_type=evidence_type)
+            continue
+        db.update("doc_threads", t["id"],
+                  {"state": "cleaned", "proposed_new": final_para,
+                   "metadata": json.dumps(meta)})
+        fresh = dict(t, proposed_new=final_para, metadata=json.dumps(meta))
+        _edit_evidence(db, manuscript_id, fresh, "revised",
                        evidence_type=evidence_type)
+        diffs.append({"file": file, "proposal": proposed,
+                      "final": final_para})
     return diffs
 
 

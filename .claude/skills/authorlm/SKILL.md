@@ -560,8 +560,9 @@ feedback document):
      existing id/status/source: read them to the author in prose.
    - The SESSION does the semantic layer the verb cannot: before writing
      the manifest, check each candidate item against the existing
-     critique items (`list_critique_items` + prior verdicts, via the DB
-     if needed) and the ratified law. A PARAPHRASE of an item the author
+     critique items (`list_critique_items` for what is still pending,
+     `list_critique_decisions` for the settled verdicts and the author's
+     recorded reasons — never the DB) and the ratified law. A PARAPHRASE of an item the author
      already accepted, already rejected (their reason stands), or
      already ratified as a style element is not imported as new — it is
      listed in the per-unit accounting as a skip, with which existing
@@ -627,8 +628,13 @@ blocks on) any left uncited or cited out of range. Then, per essay:
    leaving the local file untouched and the thread `written`. The next
    essay runs only when the author says so.
    `critique rollback <essay>` restores the pin (verdicts stay as evidence).
-`critique status` shows the pass table; `critique show/reason/reopen`
-answer "what did I decide?" and amend or reopen settled items without SQL.
+`critique status` shows the pass table. "What did I already decide, and
+why?" is answered without SQL by `critique list --decided [--scope FILE]
+[--verdict accept|reject|revise] [--query TEXT]` (chat:
+`list_critique_decisions`, same filters — narrow rather than raising
+`limit`, a manuscript can carry hundreds of settled rejections), and for
+one item by `critique show <id|--query>`; `critique reason` amends a
+recorded reason, `critique reopen` sends an item back to proposed.
 Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
