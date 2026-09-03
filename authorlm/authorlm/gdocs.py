@@ -1217,7 +1217,15 @@ def push_doc(db: Database, manuscript: dict, query: str,
             f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
     _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
-    if (threads_mod.open_threads(db, manuscript["id"], relpath)
+    # A tab carrying a table cannot be pushed by paragraph diff: the Docs
+    # API reports every cell as a paragraph while the markdown export
+    # carries the table as one block, so the two sides never align and
+    # diff_push refuses (seen on manifest.md the day tables started
+    # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
+    # comment anchors that a rebuild orphans are the known price.
+    has_table = bool(_TABLE_DELIM.search(path.read_text(encoding="utf-8")))
+    if not has_table and (
+            threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
         # AND every open comment anchor (it-77ef98f5289e), so tabs
