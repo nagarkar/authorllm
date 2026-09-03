@@ -3973,18 +3973,32 @@ def cmd_export(args):
         print(f"{args.key} = {settings[args.key]}")
         return
 
+    if args.action == "check":
+        problems = ex.check_manuscript(manuscript)
+        if not problems:
+            print("Every region tag resolves and every math span "
+                  "converts — the book is exportable.")
+            return
+        for problem in problems:
+            print(ui.yellow(problem))
+        raise SystemExit(1)
+
     try:
         chapters = [c for part in (args.chapters or [])
                     for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
                                      variant=args.variant,
                                      only=chapters or None,
-                                     print_ready=args.print_ready)
+                                     print_ready=args.print_ready,
+                                     profile=args.profile)
     except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
     if args.action == "pdf":
         print(ui.dim(f"  mode: {result['mode']}"))
+        if result.get("pages"):
+            print(ui.dim(f"  pages: {result['pages']}  "
+                         f"geometry: {result.get('geometry', '')}"))
     if chapters:
         print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
@@ -6928,7 +6942,8 @@ def build_parser() -> argparse.ArgumentParser:
              "with picked illustrations embedded; settings in "
              "_exports/settings.toml")
     p.add_argument("action",
-                   choices=["show", "set", "md", "docx", "epub", "pdf"])
+                   choices=["show", "set", "check", "md", "docx", "epub",
+                            "pdf"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
@@ -6939,6 +6954,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")
+    p.add_argument("--profile", choices=["book"], default=None,
+                   help="PDF only: 'book' builds a print interior at the "
+                        "manuscript's trim size (book class, mirrored "
+                        "margins with a KDP gutter, running heads, "
+                        "captions under the plates) — no review marks")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(

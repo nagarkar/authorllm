@@ -1,0 +1,27 @@
+% Book profile: presentation for a print interior. Loaded AFTER
+% pdf-header.tex, whose \providecommand hooks it redefines.
+\usepackage{fancyhdr}
+\usepackage{emptypage}      % blank versos before an opener carry nothing
+\usepackage{float}
+\floatplacement{figure}{H}  % a plate stays with the paragraph it follows
+\usepackage[labelformat=empty,font={small,it},skip=6pt]{caption}
+\usepackage{microtype}
+
+% Running heads: the book on the verso, the essay on the recto, the
+% folio centred in the foot. \AuthorLMRunningBook is set by the
+% exporter (header-includes) to the manuscript title.
+\providecommand{\AuthorLMRunningBook}{}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\itshape\AuthorLMRunningBook}
+\fancyhead[RO]{\small\itshape\nouppercase{\rightmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}}
+
+% Each file opens on a recto; the matter hooks switch folio style.
+\renewcommand{\AuthorLMEssayBreak}{\cleardoublepage}
+\renewcommand{\AuthorLMFrontMatter}{\frontmatter}
+\renewcommand{\AuthorLMMainMatter}{\mainmatter}
+\renewcommand{\AuthorLMBackMatter}{\backmatter}
+\renewcommand{\AuthorLMBookTitle}{\Huge}

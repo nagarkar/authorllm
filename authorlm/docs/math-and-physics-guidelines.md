@@ -185,30 +185,36 @@ the enclosed charge divided by the permittivity of free space.
 
 Measured 2026-09-02 against a physics sample pushed through every road.
 Nothing here needs a new library; pandoc, XeLaTeX, and the STIX Two
-Math font are installed.
+Math font are installed. The Doc-bridge question (markdown or DOCX on
+the wire) is answered in `doc-bridge-markdown-vs-docx.md`.
 
-- `publication/epub.yaml`: add `html-math-method: mathml`. Today the
-  EPUB writer falls back to plain HTML and emits raw TeX for any
+Done 2026-09-02:
+
+- `publication/epub.yaml` sets `html-math-method: mathml`. Before, the
+  EPUB writer fell back to plain HTML and emitted raw TeX for any
   equation with a fraction or an environment.
-- `gdocs.normalize_markdown`: protect `$...$` and `$$...$$` spans from
-  the backslash-escape strip and the bullet rewrite, add `=` and `+` to
-  the set of Docs-export escapes it removes (`\=` is a TeX accent and
-  corrupts every equation with an equals sign on pull), and canonicalize
-  display math to one line. The normalizer runs on local files before
-  PDF and EPUB export too, so this fix is for every road.
-- `gdocs.escape_footnotes` gets a twin for math: inside math spans,
-  double the backslash before punctuation (`\\`, `\{`, `\}`, `\|`, `\,`,
-  `\;`, `\!`) and escape `*`, so Google's importer hands back what was
-  sent.
-- `export.export_manuscript`: build the export Doc from the pandoc DOCX
-  rather than the markdown, so the Doc carries native equations.
-- `export` settings: a `pdf_mathfont` key mapped to pandoc's `mathfont`
-  variable, default `STIX Two Math`.
-- `export.publish_markdown`: resolve `[Omit:]` and `[Only:]` regions per
-  output, alongside illustration slots, and add `audio` as an output
-  name for the stripped variant.
-- Prompts: `beat-draft.md`, `filter-run.md`, and the critique prompts
-  gain the MathJax line that `guidance.py` already carries, plus the
-  subset in section 2.
-- A `check-math` command wrapping the pandoc check in section 2, run
-  over every content file, so a bad equation is caught before export.
+- `export.resolve_regions` resolves `[Omit:]` and `[Only:]` per output
+  in `publish_markdown` and in the export Doc's `combined_markdown`;
+  `export.strip_display_math` applies the audio default. Malformed tags
+  refuse the build by file and line.
+- Sections 1 to 3 and 5 are ratified as six laws in the SMSTTD house
+  style (formatting and rhetoric aspects, notes dated 2026-09-02).
+
+- `gdocs.normalize_markdown` lifts math spans out before the prose rules
+  run: every backslash inside math is TeX and survives; `=` joined the
+  Docs-export escapes stripped from prose (`\=` is a TeX accent and would
+  corrupt every equation with an equals sign); display math lays out on
+  one line. `gdocs.escape_math` (the twin of `escape_footnotes`) doubles
+  backslashes and escapes markdown-active characters inside math on the
+  way into Google's importer; `gdocs.unescape_export_math` strips the
+  exporter's escapes inside math on every pull. A hermetic test models
+  the measured importer and exporter and asserts a byte-clean round trip.
+- `export.export_manuscript` builds the export Doc from the pandoc DOCX
+  (`export.build_docx`), so the Doc carries native equations, footnotes,
+  and illustrations.
+- Export setting `pdf_mathfont`, default `STIX Two Math`.
+- `beat-draft.md`, `filter-run.md`, and `editor.md` carry the math
+  convention and the never-touch-a-backslash rule.
+- `authorlm export check` resolves every region tag for every output and
+  runs every math span through pandoc's TeX reader, naming the file and
+  the offending equation. Run it before any export.

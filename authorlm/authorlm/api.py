@@ -5253,6 +5253,26 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                             warnings, direct=True)
 
 
+def _write_resolved_text(path: Path, root: Path, final: str) -> str:
+    """Write a resolve's final text back to disk WITH its illustration
+    embed lines. The Doc never carries embed lines (push strips them),
+    so the text a filter or lens resolve reads back from a tab is
+    embed-free — and writing it as-is silently unlinked every rendered
+    illustration in the essay (the tag stayed, the picture under it
+    vanished from Obsidian; 15 slots across SMSTTD, 2026-09-02). The
+    ordinary pull re-inserts them; this is the same step, the prior
+    pick winning while its file exists."""
+    from . import gdocs
+    from .illus import capture_embeds, reembed
+
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = gdocs.normalize_markdown(final)
+    normalized = reembed(normalized, root, capture_embeds(prior))
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    return normalized
+
+
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
                      direct: bool = False,
@@ -5317,26 +5337,6 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             f"processed by this run. That is an ordinary open state, not "
             f"an error — nothing is blocked.")
     falsified = _falsified_prefix(db, mid, run)
-
-def _write_resolved_text(path: Path, root: Path, final: str) -> str:
-    """Write a resolve's final text back to disk WITH its illustration
-    embed lines. The Doc never carries embed lines (push strips them),
-    so the text a filter or lens resolve reads back from a tab is
-    embed-free — and writing it as-is silently unlinked every rendered
-    illustration in the essay (the tag stayed, the picture under it
-    vanished from Obsidian; 15 slots across SMSTTD, 2026-09-02). The
-    ordinary pull re-inserts them; this is the same step, the prior
-    pick winning while its file exists."""
-    from . import gdocs
-    from .illus import capture_embeds, reembed
-
-    prior = path.read_text(encoding="utf-8") if path.exists() else ""
-    normalized = gdocs.normalize_markdown(final)
-    normalized = reembed(normalized, root, capture_embeds(prior))
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
-    return normalized
-
 
     summary = {"rebuilt": False, "error": None, "usage": None}
     llm = sums.summarizer_llm(config)

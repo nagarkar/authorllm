@@ -39,12 +39,78 @@ MARKDOWN_MIME = "text/markdown"
 
 # ------------------------------------------------------------- normalizer
 
-_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|])")
+_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
+
+
+# ------------------------------------------------------------- math spans
+#
+# TeX math — $…$ inline, $$…$$ display (docs/math-and-physics-guidelines.md)
+# — is opaque to the normalizer: every backslash inside it is content,
+# so the Docs-export escape strip that is right for prose would gut a
+# `\\` row break or a `\{` brace. Spans are lifted out before the prose
+# rules run and put back after; only display layout is canonicalized
+# (one physical line — the Doc reflows a block to that anyway).
+_DISPLAY_MATH = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_INLINE_MATH = re.compile(
+    r"(?<![\\$])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?![\d$])")
+_MATH_SENTINEL = "\x00M%d\x00"
+_SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
+
+
+def map_math(text: str, fn) -> str:
+    """fn over the inside of every math span, delimiters excluded."""
+    text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
+    return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
+
+
+def _lift_math(text: str) -> tuple[str, list[str]]:
+    spans: list[str] = []
+
+    def display(m: re.Match) -> str:
+        spans.append("$$ " + " ".join(m.group(1).split()) + " $$")
+        return _MATH_SENTINEL % (len(spans) - 1)
+
+    def inline(m: re.Match) -> str:
+        spans.append(m.group(0))
+        return _MATH_SENTINEL % (len(spans) - 1)
+
+    text = _DISPLAY_MATH.sub(display, text)
+    return _INLINE_MATH.sub(inline, text), spans
+
+
+def _restore_math(text: str, spans: list[str]) -> str:
+    return _SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
+
+
+_MATH_ACTIVE = set("*_<>~|#[]`")
+
+
+def escape_math(markdown: str) -> str:
+    r"""Math spans for Google's markdown importer, which consumes one
+    backslash escape from every punctuation character it meets: a `\\`
+    row break, `\{`, `\|`, `\,` all lose their backslash, and bare `_`,
+    `*`, `<` can read as emphasis or HTML. Doubling every backslash and
+    escaping the markdown-active characters hands back exactly what was
+    sent (measured 2026-09-02). Apply ONLY to bytes handed to the
+    importer, exactly like escape_footnotes; the tab shows the TeX."""
+    def esc(body: str) -> str:
+        return "".join("\\\\" if c == "\\" else
+                       "\\" + c if c in _MATH_ACTIVE else c for c in body)
+    return map_math(markdown, esc)
+
+
+def unescape_export_math(markdown: str) -> str:
+    r"""Docs-export backslash escapes inside math spans — `\\frac` →
+    `\frac`, `\_` → `_`, `\=` → `=` (a real TeX accent, which would
+    corrupt every equation with an equals sign). Pull-side only:
+    normalize_markdown leaves math alone because on a local file every
+    backslash is TeX."""
+    return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
 
 
 def escape_footnotes(markdown: str) -> str:
@@ -67,6 +133,7 @@ def normalize_markdown(text: str) -> str:
     Idempotent: normalize(normalize(x)) == normalize(x)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ")           # NBSP → space
+    text, math = _lift_math(text)                # TeX is opaque from here
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
@@ -89,7 +156,7 @@ def normalize_markdown(text: str) -> str:
     text = re.sub(r"\n*^(---|\*\*\*|___)$\n*", r"\n\n---\n\n", text,
                   flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
-    text = text.strip("\n")
+    text = _restore_math(text.strip("\n"), math)
     return text + "\n" if text else ""
 
 
@@ -1183,7 +1250,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
     tab_id = entry["tab_id"]
 
     _rewrite_tab(service, docs_service, master_id, tab_id,
-                 escape_footnotes(normalized),
+                 escape_math(escape_footnotes(normalized)),
                  f"authorlm-temp-{Path(relpath).stem}")
     apply_tab_spacing(docs_service, master_id, tab_id,
                       doc_spacing(manuscript))
@@ -1498,7 +1565,8 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
 
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -1616,7 +1684,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -1938,7 +2007,8 @@ def reconcile(db: Database, manuscript: dict, service,
     except Exception as err:  # network, API — never block the session
         report["errors"].append({"file": "(master doc)", "error": str(err)})
         return report
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -3107,7 +3177,8 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     def tab_markdown() -> str:
         data = service.files().export(
             fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-        whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+        whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
         return normalize_markdown(
             split_tabbed_export(whole, boundaries, order=tab_order)
             .get(relpath, ""))
@@ -3164,7 +3235,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     "endIndex": end}}})
             if tag in ("replace", "insert") and j2 > j1:
                 chunk = "\n\n".join(local_paras[j1:j2]) + "\n"
-                chunk = escape_footnotes(chunk)
+                chunk = escape_math(escape_footnotes(chunk))
                 media = MediaInMemoryUpload(chunk.encode("utf-8"),
                                             mimetype=MARKDOWN_MIME)
                 temp = service.files().create(

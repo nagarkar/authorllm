@@ -6040,6 +6040,39 @@ def main_test() -> None:
               escape_footnotes("[Illustration: a fork | caption: x]")
               == "[Illustration: a fork | caption: x]")
 
+        # Math spans are opaque to the normalizer (every backslash is
+        # TeX); display math lays out on one line; the Doc road
+        # round-trips byte for byte via escape_math on the way in and
+        # unescape_export_math on the way out (measured 2026-09-02:
+        # Google's importer eats one backslash before any punctuation,
+        # its exporter escapes \ _ = + *).
+        from authorlm.gdocs import escape_math, unescape_export_math
+
+        tex = ("Sets $\\{a, b\\}$ and $\\|x\\|$, $x_1^2 \\, a^*$.\n\n"
+               "$$\n\\begin{aligned}\na &= b \\\\\n&= c\n\\end{aligned}\n$$\n")
+        canon = normalize_markdown(tex)
+        check("normalizer leaves TeX untouched and lays display math on "
+              "one line",
+              canon == ("Sets $\\{a, b\\}$ and $\\|x\\|$, $x_1^2 \\, a^*$.\n\n"
+                        "$$ \\begin{aligned} a &= b \\\\ &= c "
+                        "\\end{aligned} $$\n"), repr(canon))
+        check("prose escapes still strip outside math, not inside",
+              normalize_markdown("a \\- b $\\-$ \\=c")
+              == "a - b $\\-$ =c\n",
+              repr(normalize_markdown("a \\- b $\\-$ \\=c")))
+        check("a price is not math",
+              normalize_markdown("costs $5 and $10 \\- cheap")
+              == "costs $5 and $10 - cheap\n")
+        import re as _re_math
+        importer = lambda s: _re_math.sub(r"\\([!-/:-@\[-`{-~])", r"\1", s)
+        exporter = lambda s: _re_math.sub(r"([\\_=+*])", r"\\\1", s)
+        doc_text = importer(escape_math(canon))
+        check("escape_math hands the importer exactly the TeX",
+              doc_text == canon, repr(doc_text))
+        pulled = normalize_markdown(unescape_export_math(exporter(doc_text)))
+        check("math round-trips the Doc road byte for byte",
+              pulled == canon, repr(pulled))
+
         # An empty heading paragraph in the Doc (e.g. a blank Subtitle
         # line) must be dropped — never merged into the next heading
         # ('## ##', it-7b127d3164ff).
@@ -6395,7 +6428,7 @@ def main_test() -> None:
                 fid = f"doc-{self.state['counter']}"
                 if media_body is not None:  # markdown import (temp/export)
                     self.state["uploads"][fid] = media_body.getbytes(
-                        0, media_body.size()).decode("utf-8")
+                        0, media_body.size()).decode("utf-8", "replace")
                 elif (body or {}).get("mimeType") == FOLDER_MIME:
                     self.state["folders"].append(fid)
                 else:  # a native Doc, born with the blank default tab
@@ -6407,7 +6440,7 @@ def main_test() -> None:
 
             def update(self, fileId=None, media_body=None):
                 self.state["uploads"][fileId] = media_body.getbytes(
-                    0, media_body.size()).decode("utf-8")
+                    0, media_body.size()).decode("utf-8", "replace")
                 return FakeRequest({})
 
             def delete(self, fileId=None):
@@ -7479,7 +7512,9 @@ def main_test() -> None:
         local_only = export_manuscript(db, manuscript, service=None)
         export_path = ms / "_exports" / "book.md"
         check("export writes _exports/<name>.md even without Drive",
-              local_only["doc_id"] is None and export_path.read_text() == text)
+              local_only["doc_id"] is None
+              and "firmer road" in export_path.read_text()
+              and "Welcome." in export_path.read_text())
 
         # Footnote labels are only file-unique; concatenation must
         # namespace them or pandoc binds colliding labels to one
@@ -7522,26 +7557,36 @@ def main_test() -> None:
             '[[chapter]]\nfile = "01-choice.md"\n\n'
             '[[chapter]]\nfile = "00-intro.md"\n')
 
-        exported = export_manuscript(db, manuscript, service=stub)
-        check("export creates the manuscript Doc in the existing folder",
-              exported["created"] and exported["doc_id"] is not None
-              and stub.state["folders"] == ["doc-1"])
-        exported2 = export_manuscript(db, manuscript, service=stub)
-        check("re-export updates the same Doc (no new one)",
-              not exported2["created"]
-              and exported2["doc_id"] == exported["doc_id"])
+        # The export Doc is born from the pandoc DOCX (Drive converts
+        # Word equations, footnotes and images to native Doc objects,
+        # which the markdown importer cannot carry) — so the Drive half
+        # needs pandoc, like every other publishing output.
+        import shutil as _shutil_exp
+        if _shutil_exp.which("pandoc"):
+            exported = export_manuscript(db, manuscript, service=stub)
+            check("export creates the manuscript Doc in the existing folder",
+                  exported["created"] and exported["doc_id"] is not None
+                  and stub.state["folders"] == ["doc-1"])
+            check("the export Doc is uploaded as a DOCX built beside the md",
+                  (ms / "_exports" / "book.docx").exists()
+                  and stub.state["uploads"][exported["doc_id"]]
+                  .startswith("PK"))
+            exported2 = export_manuscript(db, manuscript, service=stub)
+            check("re-export updates the same Doc (no new one)",
+                  not exported2["created"]
+                  and exported2["doc_id"] == exported["doc_id"])
 
-        # A Doc deleted by hand in Drive is transient — recreated on export.
-        class Gone(Exception):
-            resp = type("R", (), {"status": 404})()
+            # A Doc deleted by hand in Drive is transient — recreated on export.
+            class Gone(Exception):
+                resp = type("R", (), {"status": 404})()
 
-        original_update = stub._files.update
-        stub._files.update = lambda fileId=None, media_body=None: (_ for _ in ()).throw(Gone())
-        exported3 = export_manuscript(db, manuscript, service=stub)
-        stub._files.update = original_update
-        check("a hand-deleted export Doc is recreated",
-              exported3["created"]
-              and exported3["doc_id"] != exported["doc_id"])
+            original_update = stub._files.update
+            stub._files.update = lambda fileId=None, media_body=None: (_ for _ in ()).throw(Gone())
+            exported3 = export_manuscript(db, manuscript, service=stub)
+            stub._files.update = original_update
+            check("a hand-deleted export Doc is recreated",
+                  exported3["created"]
+                  and exported3["doc_id"] != exported["doc_id"])
 
         titled = export_manuscript(db, manuscript, service=None, title="My Book")
         check("retitled export replaces the stale local file",
@@ -7584,6 +7629,70 @@ def main_test() -> None:
         slots_text, _, _ = publish_markdown(manuscript, "slots")
         check("slots variant keeps tags verbatim as production notes",
               winding_tag in slots_text)
+
+        # --- per-output regions: [Omit:] / [Only:] and the audio default ---
+        (ms / "03-physics.md").write_text(
+            "# Physics\n\nGauss's law in one line.\n\n"
+            "[Omit: audio, epub]\n"
+            "$$ \\nabla \\cdot \\mathbf{E} = \\frac{\\rho}{\\varepsilon_0} $$\n"
+            "[/Omit]\n\n"
+            "[Only: audio]\nSpoken: flux equals enclosed charge over "
+            "the permittivity.\n[/Only]\n\n"
+            "Bare display math:\n\n$$ E = mc^2 $$\n\n"
+            "And inline $E$ stays.\n")
+        pdf_text, _, _ = publish_markdown(manuscript, "images", fmt="pdf")
+        epub_text, _, _ = publish_markdown(manuscript, "images", fmt="epub")
+        audio_text, _, _ = publish_markdown(manuscript, "stripped", fmt="md")
+        md_text, _, _ = publish_markdown(manuscript, "images", fmt="md")
+        check("[Omit:] drops a region only from the named outputs",
+              "\\nabla" in pdf_text and "\\nabla" not in epub_text
+              and "\\nabla" not in audio_text, epub_text)
+        check("[Only:] keeps a region for the named outputs alone",
+              "Spoken:" in audio_text and "Spoken:" not in pdf_text
+              and "Spoken:" not in md_text, audio_text)
+        check("tag lines never reach a reader",
+              "[Omit" not in pdf_text and "[/Only" not in audio_text
+              and "[Only" not in md_text, md_text)
+        check("audio drops untagged display math and keeps inline math",
+              "mc^2" not in audio_text and "inline $E$ stays" in audio_text
+              and "mc^2" in epub_text, audio_text)
+        from authorlm.export import (combined_markdown, resolve_regions,
+                                     strip_display_math)
+        check("a multi-line $$ block is one display equation to audio",
+              strip_display_math("a\n$$\nx\n$$\nb") == "a\nb")
+        for bad, why in (("[Omit: audoi]\nx\n[/Omit]", "unknown output"),
+                         ("[Omit: pdf]\nx", "never closed"),
+                         ("x\n[/Only]", "closes nothing"),
+                         ("[Only: pdf]\nx\n[/Omit]", "closes nothing")):
+            try:
+                resolve_regions(bad, {"pdf"}, "f.md")
+                refused = ""
+            except ValueError as err:
+                refused = str(err)
+            check(f"a malformed region is refused, not guessed ({why})",
+                  why in refused and "f.md:" in refused, refused)
+        check("regions resolve for the export Doc as output 'doc'",
+              "\\nabla" in combined_markdown(manuscript)[0]
+              and "Spoken:" not in combined_markdown(manuscript)[0])
+        from authorlm.export import check_manuscript
+        clean_problems = check_manuscript(manuscript)
+        (ms / "04-bad.md").write_text(
+            "# Bad\n\n[Omit: audoi]\nx\n[/Omit]\n\n"
+            "Physics-package math $\\dv{x}{t}$ here.\n")
+        bad_problems = check_manuscript(manuscript)
+        check("export check passes a well-formed book",
+              not [p for p in clean_problems if not p.startswith("pandoc")],
+              clean_problems)
+        check("export check names a malformed region by file and line",
+              any(p.startswith("04-bad.md:3") and "unknown output" in p
+                  for p in bad_problems), bad_problems)
+        import shutil as _shutil_chk
+        if _shutil_chk.which("pandoc"):
+            check("export check names math outside the portable subset",
+                  any("04-bad.md: math outside" in p and "dv" in p
+                      for p in bad_problems), bad_problems)
+        (ms / "04-bad.md").unlink()
+        (ms / "03-physics.md").unlink()
 
         set_setting(manuscript, "variant", "slots")
         check("export settings persist in _exports/settings.toml",
@@ -7684,6 +7793,106 @@ def main_test() -> None:
             non_pdf_print_ready_refused = True
         check("publication interface restricts print-ready mode to PDF",
               non_pdf_print_ready_refused)
+
+        # --- print geometry: trim size + bleed are manuscript properties;
+        # the book profile is a print interior at that trim.
+        from authorlm.api import parse_trim_size
+        from authorlm.export import book_geometry, kdp_gutter
+
+        check("trim size parses every human spelling to inches",
+              parse_trim_size("6x9") == (6.0, 9.0)
+              and parse_trim_size("6 X 9") == (6.0, 9.0)
+              and parse_trim_size("6in x 9in") == (6.0, 9.0)
+              and parse_trim_size("5.5×8.5") == (5.5, 8.5)
+              and parse_trim_size("") == (0.0, 0.0))
+        try:
+            parse_trim_size("3x4")
+            tiny_trim_refused = False
+        except ValueError:
+            tiny_trim_refused = True
+        try:
+            parse_trim_size("six by nine")
+            word_trim_refused = False
+        except ValueError:
+            word_trim_refused = True
+        check("trim size refuses the unprintable and the unparseable",
+              tiny_trim_refused and word_trim_refused)
+        try:
+            export_published(db, manuscript, fmt="pdf", variant="images",
+                             profile="book")
+            book_without_trim_refused = False
+        except RuntimeError as err:
+            book_without_trim_refused = "trim size" in str(err)
+        check("book profile refuses to build without a trim size",
+              book_without_trim_refused)
+        try:
+            export_published(db, manuscript, fmt="epub", variant="images",
+                             profile="book")
+            book_non_pdf_refused = False
+        except ValueError:
+            book_non_pdf_refused = True
+        check("book profile is PDF-only", book_non_pdf_refused)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "manuscript", "set",
+                      "--trim-size", "6x9", "--bleed", "no"])
+        manuscript = api.get_manuscript(db)
+        identity = api.manuscript_metadata(manuscript)
+        check("trim size and bleed round-trip through the CLI and the "
+              "identity view",
+              manuscript["trim_width"] == 6.0
+              and manuscript["trim_height"] == 9.0
+              and manuscript["bleed"] == 0
+              and identity["trim_size"] == "6x9"
+              and identity["bleed"] is False)
+        check("the KDP gutter follows the page count",
+              kdp_gutter(38) == 0.375 and kdp_gutter(151) == 0.5
+              and kdp_gutter(500) == 0.625 and kdp_gutter(None) == 0.5
+              and kdp_gutter(5000) == 0.875)
+        check("book geometry is the trim plus gutter, growing with bleed",
+              book_geometry(6, 9, False, 38).startswith(
+                  "paperwidth=6in,paperheight=9in,inner=0.75in,"
+                  "outer=0.625in,top=0.75in,bottom=0.75in")
+              and book_geometry(6, 9, True, 200).startswith(
+                  "paperwidth=6.125in,paperheight=9.25in,inner=0.875in,"
+                  "outer=0.75in,top=0.875in,bottom=0.875in"))
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as book_run):
+            book_result = export_published(
+                db, manuscript, fmt="pdf", variant="images",
+                profile="book")
+        book_command = book_run.call_args.args[0]
+        book_defaults = [Path(book_command[i + 1]).name
+                         for i, arg in enumerate(book_command[:-1])
+                         if arg == "--defaults"]
+        book_vars = [book_command[i + 1]
+                     for i, arg in enumerate(book_command[:-1])
+                     if arg == "-V"]
+        book_markdown = Path(book_result["markdown"]).read_text()
+        check("book profile builds through book.yaml at the trim, with "
+              "no review marks and its own filename",
+              book_result["mode"] == "book"
+              and book_defaults == ["common.yaml", "book.yaml"]
+              and any(v.startswith("geometry=paperwidth=6in,paperheight=9in")
+                      for v in book_vars)
+              and any(v.startswith("header-includes=")
+                      and "AuthorLMRunningBook" in v for v in book_vars)
+              and "authorlm-review-copy=true" not in book_command
+              and Path(book_result["markdown"]).stem.endswith(" - book")
+              and any("no paperback ISBN" in w or "page count" in w
+                      for w in book_result["warnings"]),
+              str(book_command) + str(book_result["warnings"]))
+        check("the publishable markdown carries each file's matter",
+              "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
+              in book_markdown
+              and ".authorlm-essay .authorlm-matter-main}" in book_markdown,
+              book_markdown[:600])
+        book_args = _build_parser().parse_args(
+            ["export", "pdf", "--profile", "book"])
+        check("CLI exposes the book profile", book_args.profile == "book")
+        # Reset for the pandoc export test below, which asserts the
+        # review filenames.
+        api.update_manuscript_metadata(db, manuscript, trim_size="")
 
         import shutil as _shutil
         if _shutil.which("pandoc"):

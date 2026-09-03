@@ -1079,6 +1079,54 @@ run the CLI via Bash:
 After any pull, narrate what actually changed (`authorlm diff`), separating
 prose changes from formatting churn.
 
+### "Resolve all tabs" — one instruction, the whole Doc (ratified 2026-09-02)
+Trigger phrases, in the author's words: *resolve all tabs*, *resolve
+all in the google doc*, *resolve everything in the doc*, *settle the
+doc*, *resolve the doc*. Any of them means: bring the Doc down and
+settle EVERYTHING pending across every tab, in one pass, without asking
+"shall I pull?" or "shall I resolve X?" along the way. Ask only where a
+ratified rule already demands the author's word (rendering, a verdict
+the margin keywords don't settle, a footnote draft's ruling). Run it in
+this order — the order is load-bearing, because a pull that comes after
+a resolve overwrites the resolve:
+
+1. **Pull everything first, once.** `authorlm doc pull -m <manuscript>`
+   (no file = all tabs). This alone executes margin verdicts, harvests
+   comments to address, reconciles hand-made tabs, and reports new
+   illustration slots and open `[Footnote:]` tags. Never pull again
+   mid-pass; per-tab pulls are for a named tab only.
+2. **Narrate what came down** — `authorlm diff`, prose changes apart
+   from formatting churn — before touching anything.
+3. **Forms.** `authorlm filter status` and `authorlm critique status`
+   name the tabs carrying written forms. For each: `filter resolve
+   <essay>` / `critique resolve <essay>` (explicit, one at a time),
+   then `doc push <essay>` — A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS
+   THE RESULT. Refusals (broken join, no agreed base) are reported, not
+   forced.
+4. **Comments to address.** A text change implied → draft with the full
+   machinery, register with `doc propose`; a question → answer in chat.
+   Verdicts the author already gave in the margin were executed by
+   step 1; process the modified-acceptance diffs for the learnings duty.
+5. **Footnote tags** (docs/footnote-directive-design.md). Draft every
+   open tag in chat per §3 of that design, all at once, flags on
+   unverified sources; wait for the ruling; apply the agreed ones and
+   push. A declined tag stays open.
+6. **Illustrations.** New or changed descriptions get the prompt-critique
+   duty on the spot; unrendered slots and externalize offers are RELAYED
+   and rendering is offered, never started — consent rule unchanged.
+7. **Proposals and conflicts.** `list_proposals` and any tab-drift
+   conflicts from step 1 are put to the author as questions.
+8. **Close with one report**: what landed (per tab, pushed back), what
+   awaits the author's word (renders, footnote rulings, open questions),
+   and anything refused with the remedy verb. Confirm every tab that
+   was resolved was also pushed.
+
+What "resolve" never does: render an image, run a filter or critique
+pass that has not already been triaged, or auto-answer a margin thread
+whose reply was conversation rather than a verdict keyword. Those cost
+the author's money or words, and the ratified rules for each still hold
+inside this pass.
+
 ## Illustrations (tags in prose, candidates on disk, picks are pinned)
 The author declares an image as a single-line paragraph anywhere in the
 manuscript — `[Illustration: prompt | caption: optional reader-facing

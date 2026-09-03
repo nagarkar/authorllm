@@ -7,6 +7,10 @@ struck through, new text beside it) with your one-line reason, and they
 will accept, revise, or reject each one. Write so that a rejected proposal
 still taught the author something about the essay.
 
+Math spans (`$...$`, `$$...$$`) are TeX in the amsmath subset. A proposal
+that touches one keeps the delimiters and every backslash exactly; a
+proposal about the prose around an equation copies the equation verbatim.
+
 ## What you receive
 
 - THE CONTRACT — the law you write under, in this order of authority:
