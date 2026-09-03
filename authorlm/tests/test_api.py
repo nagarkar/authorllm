@@ -5224,7 +5224,208 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_lens_edit_entry_refusals() -> None:
+    """§7.2 lens door — `_edit_entry` refuses every unanchorable replace.
+
+    `_the_lens_door` (test_passes) locks the multi-unit ambiguity happy
+    path through push/settle. These edges are the ones that silently
+    corrupt a unit if the door ever guesses: whitespace-only matches,
+    within-unit twins, a unit already claimed in the batch, reserved
+    pending-form markers, emptying a unit, and a no-op replacement."""
+    from authorlm.lenses import _edit_entry
+
+    units = [
+        "Alpha opens the essay.",
+        "The wall stands. The wall stands.",
+        "Gamma follows, saying something else entirely.",
+        "Omega closes the essay on a falling cadence.",
+    ]
+    entry, reason = _edit_entry(
+        units, "Gamma follows, saying something else entirely.",
+        "Gamma follows, and changes the subject.", "note", set())
+    check("a verbatim unique quote anchors: unit n and new built from "
+          "the unit itself",
+          entry is not None and entry["n"] == 3
+          and entry["new"]
+          == "Gamma follows, and changes the subject."
+          and reason == "", str((entry, reason)))
+
+    _, reason = _edit_entry(
+        units, "Gamma  follows,\tsaying something else entirely.",
+        "rewritten", "note", set())
+    check("whitespace-only match is refused — surgical edit needs the "
+          "byte-exact quote",
+          "whitespace normalization" in reason, reason)
+
+    _, reason = _edit_entry(
+        units, "The wall stands.", "gone", "note", set())
+    check("a quote that repeats inside its unit is refused",
+          "more than once within its unit" in reason, reason)
+
+    _, reason = _edit_entry(
+        units, "Alpha opens the essay.", "Uno.", "note", {1})
+    check("a second edit into an already-taken unit is refused",
+          "already carries a staged edit" in reason, reason)
+
+    _, reason = _edit_entry(
+        units, "Alpha opens the essay.", "Alpha {{insert}}.", "note", set())
+    check("a replacement carrying reserved pending markers is refused",
+          "reserved markers" in reason, reason)
+
+    _, reason = _edit_entry(
+        ["Only this quote."], "Only this quote.", "", "note", set())
+    check("a replacement that would empty the unit is refused",
+          "leave the unit empty" in reason, reason)
+
+    _, reason = _edit_entry(
+        ["Only this quote."], "Only this quote.", "Only this quote.",
+        "note", set())
+    check("a no-op replacement (identical to the quote) is refused",
+          "identical to the quoted text" in reason, reason)
+
+
+def check_closest_paragraph_hand_resolve() -> None:
+    """`_closest_paragraph` drives hand-resolution final wording.
+
+    Wrong neighbour claim (sibling proposals) or a sub-0.5 guess would
+    invent a modified-acceptance that the author never wrote."""
+    from authorlm.passes import _closest_paragraph, record_resolution
+    from authorlm.db import Database
+
+    text = (
+        "Alpha opens the essay.\n\n"
+        "Beta follows carefully.\n\n"
+        "Gamma closes on a falling cadence.\n"
+    )
+    check("whitespace-normalized probe finds its paragraph",
+          _closest_paragraph(text, "Beta   follows\tcarefully.")
+          == "Beta follows carefully.")
+    check("exclude blocks claiming a sibling proposal's old/new half",
+          _closest_paragraph(
+              text, "Beta follows carefully.",
+              exclude={"Beta follows carefully."}) is None)
+    check("below the 0.5 trust bar returns None — never invent a final",
+          _closest_paragraph(
+              text, "Completely unrelated ziggurat prose about oranges.")
+          is None)
+    check("empty text returns None",
+          _closest_paragraph("", "Beta follows carefully.") is None)
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-unlocated-"))
+    try:
+        db = Database(root / "authorlm.db")
+        ms = ko_fields("ms")
+        ms.update(name="book", path=str(root / "m"))
+        db.insert("manuscripts", ms)
+        mid = ms["id"]
+
+        def _thread(old: str, new: str) -> dict:
+            row = ko_fields("dt")
+            row.update(
+                manuscript_id=mid, origin_type="filter",
+                origin_id=f"door:solo.md:{row['id'][:8]}",
+                file="solo.md", anchor_quote=None,
+                proposed_old=old, proposed_new=new, note="why",
+                state="written", our_reply_ids="[]",
+                last_author_reply_id=None, scope_kind="file",
+                scope_ref="solo.md",
+                metadata=json.dumps({
+                    "kind": "replace", "anchor_paragraph": 1,
+                    "original_new": new}))
+            db.insert("doc_threads", row)
+            return row
+
+        lost = _thread(
+            "The original claim about gravity.",
+            "The revised claim about gravity, carefully.")
+        diffs = record_resolution(
+            db, mid, "solo.md", forms=[], origin_type="filter",
+            evidence_type="filter_edit",
+            final_text=(
+                "An entirely different essay about music theory "
+                "and brass instruments.\n"))
+        row = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                          (lost["id"],)))
+        meta = loads(row["metadata"], {})
+        check("hand-resolve with no close paragraph accepts without "
+              "guessing a final — final_unlocated, no learnings diff",
+              row["state"] == "cleaned"
+              and meta.get("final_unlocated") is True
+              and diffs == []
+              and row["proposed_new"]
+              == "The revised claim about gravity, carefully.",
+              str((row["state"], meta, diffs)))
+
+        found = _thread(
+            "Alpha opens the essay.",
+            "Alpha opens, carefully revised.")
+        diffs2 = record_resolution(
+            db, mid, "solo.md", forms=[], origin_type="filter",
+            evidence_type="filter_edit",
+            final_text=(
+                "Alpha opens, carefully revised in the author's hand.\n\n"
+                "Beta stays.\n"))
+        row2 = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                           (found["id"],)))
+        check("hand-resolve locates a near-reword and records it as the "
+              "learnings feedstock",
+              row2["state"] == "cleaned"
+              and row2["proposed_new"]
+              == "Alpha opens, carefully revised in the author's hand."
+              and len(diffs2) == 1
+              and diffs2[0]["final"] == row2["proposed_new"]
+              and not loads(row2["metadata"], {}).get("final_unlocated"),
+              str((row2, diffs2)))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_verdict_of_later_fates() -> None:
+    """`verdict_of` reports today's standing, not the original accept.
+
+    A retired or abandoned critique item must not reappear as accept/
+    revise in `decided` — that would re-litigate a closed ruling."""
+    from authorlm.critique import verdict_of
+
+    v, reason, revised = verdict_of(
+        "intent",
+        {"status": "retired", "outcome": None,
+         "metadata": json.dumps({
+             "critique": {"original_text": "Cut the digression."}})})
+    check("retired reports as retired (not revise), keeping lineage",
+          v == "retired" and reason is None
+          and revised == "Cut the digression.", str((v, reason, revised)))
+
+    v, reason, revised = verdict_of(
+        "intent",
+        {"status": "abandoned", "outcome": "left for later",
+         "metadata": "{}"})
+    check("abandoned reports as abandoned with no invented reason",
+          v == "abandoned" and reason is None and revised is None,
+          str((v, reason, revised)))
+
+    v, reason, revised = verdict_of(
+        "intent",
+        {"status": "completed", "outcome": None,
+         "metadata": json.dumps({
+             "critique": {"original_text": "Explain the Anagramma."}})})
+    check("completed-with-lineage is still revise",
+          v == "revise" and revised == "Explain the Anagramma.",
+          str((v, reason, revised)))
+
+    v, reason, revised = verdict_of(
+        "element",
+        {"status": "rejected", "outcome": None,
+         "metadata": json.dumps({"rejection_reason": "Too broad as law."})})
+    check("rejected element reason comes from metadata, not outcome",
+          v == "reject" and reason == "Too broad as law."
+          and revised is None, str((v, reason, revised)))
+
+
 def main_test() -> None:
+    check_lens_edit_entry_refusals()
+    check_closest_paragraph_hand_resolve()
+    check_verdict_of_later_fates()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
