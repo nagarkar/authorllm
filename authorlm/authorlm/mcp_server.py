@@ -138,16 +138,22 @@ def set_manuscript_metadata(author: str | None = None,
                             copyright_owner: str | None = None,
                             paperback_isbn: str | None = None,
                             hardcover_isbn: str | None = None,
+                            trim_size: str | None = None,
+                            bleed: bool | None = None,
                             manuscript: str | None = None) -> dict:
-    """Set canonical publication identity: author, copyright owner, and/or
-    format-specific print ISBN-13 values. ISBNs are validated and normalized."""
+    """Set canonical publication identity: author, copyright owner,
+    format-specific print ISBN-13 values, and the print geometry — trim
+    size as WIDTHxHEIGHT inches (e.g. '6x9') and whether the interior
+    bleeds. ISBNs are validated and normalized; the trim size is checked
+    against the print range."""
     def run():
         db = _db()
         selected = _manuscript(db, manuscript)
         return api.update_manuscript_metadata(
             db, selected, author=author, copyright_owner=copyright_owner,
             paperback_isbn=paperback_isbn,
-            hardcover_isbn=hardcover_isbn)
+            hardcover_isbn=hardcover_isbn,
+            trim_size=trim_size, bleed=bleed)
     return _guard(run)
 
 

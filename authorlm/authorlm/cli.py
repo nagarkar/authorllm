@@ -220,7 +220,8 @@ def cmd_manuscript(args):
                 db, manuscript, author=args.author,
                 copyright_owner=args.copyright_owner,
                 paperback_isbn=args.paperback_isbn,
-                hardcover_isbn=args.hardcover_isbn)
+                hardcover_isbn=args.hardcover_isbn,
+                trim_size=args.trim_size, bleed=args.bleed)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -234,6 +235,10 @@ def cmd_manuscript(args):
           f"{identity['paperback_isbn'] or '(not set)'}")
     print("  hardcover_isbn: "
           f"{identity['hardcover_isbn'] or '(not set)'}")
+    print(f"  trim_size: {identity['trim_size'] or '(not set)'}"
+          + ("" if identity["trim_size"] else
+             "  — needed by 'export pdf --profile book'"))
+    print(f"  bleed: {'yes' if identity['bleed'] else 'no'}")
 
 
 def _manuscript_tables(db: Database) -> list[str]:
@@ -6546,6 +6551,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the paperback edition")
     p.add_argument("--hardcover-isbn", default=None,
                    help="ISBN-13 assigned to the hardcover edition")
+    p.add_argument("--trim-size", default=None, metavar="WxH",
+                   help="print trim size in inches, e.g. 6x9 (the book "
+                        "profile refuses to build without one)")
+    p.add_argument("--bleed", default=None, choices=["yes", "no"],
+                   help="whether the print interior bleeds to the page "
+                        "edge (adds 0.125in to the page on three sides)")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")

@@ -997,6 +997,30 @@ the PDF is for print or production; that switch removes all three review
 markers. EPUB and DOCX retain publication identity metadata but do not use
 page-dependent PDF review decoration.
 
+**Print geometry (2026-09-02).** Trim size and bleed are manuscript
+properties beside the ISBNs — `authorlm manuscript set --trim-size 6x9
+--bleed no` (inches; MCP `set_manuscript_metadata(trim_size=, bleed=)`).
+`authorlm export pdf --profile book` builds the KDP interior at that trim:
+book class, essays opening recto, mirrored margins with the gutter chosen
+from the page count (two passes when the band moves), running heads (book
+on the verso, essay on the recto), captions set small-italic under the
+plates with no "Figure N" label, no review marks, and a ` - book` suffix on
+the filename so it never overwrites the review copy. It REFUSES without a
+trim size — that is the one number nothing can default — and WARNS (never
+refuses) on KDP's asks: a non-standard trim, a missing paperback ISBN, a
+page count under 24 or over 828. Paper means PDF; EPUB is for e-readers
+only and no printer takes it.
+
+**Captions.** `[Illustration: … | caption: text]` is the reader-facing
+caption; it becomes the image alt text on export, which pandoc turns into
+a figure with a caption on EVERY road (EPUB figcaption, PDF figure
+caption). A slot without a caption gets a bare picture and no figure.
+Obsidian never shows alt text and the Doc shows only the tag, so the
+caption is visible locally only inside the tag — by the author's ruling
+(2026-09-02) that is fine and no CSS snippet is wanted. The ⇢ ref comes
+BEFORE ` | caption:` in the tag. Captions are book prose: the author
+asked for them once in one sitting; propose, never rewrite silently.
+
 ## Google Docs bridge (CLI, not MCP — by design)
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can
 open a browser). When the author asks to edit in / sync with Google Docs,

@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS manuscripts (
     author TEXT NOT NULL DEFAULT '',
     copyright_owner TEXT NOT NULL DEFAULT '',
     paperback_isbn TEXT NOT NULL DEFAULT '',
-    hardcover_isbn TEXT NOT NULL DEFAULT ''
+    hardcover_isbn TEXT NOT NULL DEFAULT '',
+    trim_width REAL NOT NULL DEFAULT 0,
+    trim_height REAL NOT NULL DEFAULT 0,
+    bleed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS manuscript_versions (
@@ -550,6 +553,19 @@ class Database:
         if "hardcover_isbn" not in manuscript_columns:
             self.conn.execute(
                 "ALTER TABLE manuscripts ADD COLUMN hardcover_isbn TEXT NOT NULL DEFAULT ''"
+            )
+        # Print geometry (the book profile): trim size in inches, and
+        # whether the interior bleeds. Manuscript properties, like the
+        # ISBNs — a trim size belongs to the edition, not to an export run.
+        if "trim_width" not in manuscript_columns:
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN trim_width REAL NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN trim_height REAL NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN bleed INTEGER NOT NULL DEFAULT 0"
             )
         if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(

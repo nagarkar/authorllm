@@ -137,7 +137,9 @@ def register_manuscript(db: Database, name: str, path: str,
                         author: str = "",
                         copyright_owner: str = "",
                         paperback_isbn: str = "",
-                        hardcover_isbn: str = "") -> dict:
+                        hardcover_isbn: str = "",
+                        trim_size: str = "",
+                        bleed: bool | str = False) -> dict:
     """Register one manuscript and its canonical publication identity."""
     root = Path(path).resolve()
     if not root.is_dir():
@@ -147,12 +149,15 @@ def register_manuscript(db: Database, name: str, path: str,
     paperback_isbn = _normalize_isbn13(paperback_isbn)
     hardcover_isbn = _normalize_isbn13(hardcover_isbn)
     _validate_format_isbns(paperback_isbn, hardcover_isbn)
+    trim_width, trim_height = parse_trim_size(trim_size)
     row = ko_fields("ms")
     row.update(
         name=name, path=str(root), author=author.strip(),
         copyright_owner=copyright_owner.strip(),
         paperback_isbn=paperback_isbn,
-        hardcover_isbn=hardcover_isbn)
+        hardcover_isbn=hardcover_isbn,
+        trim_width=trim_width, trim_height=trim_height,
+        bleed=int(parse_bleed(bleed)))
     db.insert("manuscripts", row)
     return dict(row)
 
@@ -167,7 +172,62 @@ def manuscript_metadata(manuscript: dict) -> dict:
         "copyright_owner": manuscript.get("copyright_owner", ""),
         "paperback_isbn": manuscript.get("paperback_isbn", ""),
         "hardcover_isbn": manuscript.get("hardcover_isbn", ""),
+        "trim_size": format_trim_size(manuscript.get("trim_width", 0),
+                                      manuscript.get("trim_height", 0)),
+        "trim_width": float(manuscript.get("trim_width", 0) or 0),
+        "trim_height": float(manuscript.get("trim_height", 0) or 0),
+        "bleed": bool(manuscript.get("bleed", 0)),
     }
+
+
+# KDP's standard paperback trim sizes, inches (width, height). A custom
+# size inside the accepted range still builds; the export only warns
+# that it is off the standard list, because a standard size is what
+# keeps the print run cheapest and the cover template available.
+KDP_TRIM_SIZES = (
+    (5, 8), (5.06, 7.81), (5.25, 8), (5.5, 8.5), (6, 9), (6.14, 9.21),
+    (6.69, 9.61), (7, 10), (7.44, 9.69), (7.5, 9.25), (8, 10),
+    (8.25, 6), (8.25, 8.25), (8.5, 8.5), (8.5, 11), (8.27, 11.69),
+)
+KDP_TRIM_MIN = (4.0, 6.0)
+KDP_TRIM_MAX = (8.5, 11.69)
+
+
+def parse_trim_size(value: str | None) -> tuple[float, float]:
+    """'6x9', '6 x 9', '6in x 9in', '6×9' → (6.0, 9.0) inches. Empty
+    clears (0, 0). Refuses anything outside KDP's accepted range."""
+    text = (value or "").strip().lower()
+    if not text:
+        return 0.0, 0.0
+    m = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*(?:in|\"|inch(?:es)?)?\s*[x×by]+\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:in|\"|inch(?:es)?)?", text)
+    if not m:
+        raise ValueError("trim size is WIDTHxHEIGHT in inches, e.g. 6x9")
+    width, height = float(m.group(1)), float(m.group(2))
+    if not (KDP_TRIM_MIN[0] <= width <= KDP_TRIM_MAX[0]
+            and KDP_TRIM_MIN[1] <= height <= KDP_TRIM_MAX[1]):
+        raise ValueError(
+            f"trim size {width:g}x{height:g} is outside the print range "
+            f"({KDP_TRIM_MIN[0]:g}x{KDP_TRIM_MIN[1]:g} to "
+            f"{KDP_TRIM_MAX[0]:g}x{KDP_TRIM_MAX[1]:g} inches)")
+    return width, height
+
+
+def format_trim_size(width, height) -> str:
+    width, height = float(width or 0), float(height or 0)
+    return f"{width:g}x{height:g}" if width and height else ""
+
+
+def parse_bleed(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in ("", "0", "no", "false", "off"):
+        return False
+    if text in ("1", "yes", "true", "on"):
+        return True
+    raise ValueError("bleed is yes or no")
 
 
 def _normalize_isbn13(value: str) -> str:
@@ -200,9 +260,16 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                author: str | None = None,
                                copyright_owner: str | None = None,
                                paperback_isbn: str | None = None,
-                               hardcover_isbn: str | None = None) -> dict:
+                               hardcover_isbn: str | None = None,
+                               trim_size: str | None = None,
+                               bleed: bool | str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata."""
     changes = {}
+    if trim_size is not None:
+        changes["trim_width"], changes["trim_height"] = parse_trim_size(
+            trim_size)
+    if bleed is not None:
+        changes["bleed"] = int(parse_bleed(bleed))
     if author is not None:
         changes["author"] = author.strip()
     if copyright_owner is not None:
@@ -214,7 +281,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
     if not changes:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
-            "and/or --hardcover-isbn")
+            "--hardcover-isbn, --trim-size, and/or --bleed")
     _validate_format_isbns(
         changes.get("paperback_isbn", manuscript.get("paperback_isbn", "")),
         changes.get("hardcover_isbn", manuscript.get("hardcover_isbn", "")))
