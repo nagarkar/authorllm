@@ -705,6 +705,55 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     return "\n\n".join(head + out) + "\n"
 
 
+def _thread_anchor(thread: dict) -> int | None:
+    """A staged edit's 1-based unit index, or None when the row predates
+    anchor metadata."""
+    meta = loads(thread.get("metadata"), {}) or {}
+    n = meta.get("anchor_paragraph")
+    try:
+        return int(n) if n is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _form_anchor(marked: str, form: dict) -> int:
+    """1-based paragraph index of a replace form in marked markdown.
+
+    Pending forms sit where the pristine unit sat, and each form is
+    itself one paragraph, so counting complete paragraphs before the
+    form's start recovers the unit index the surgical writer used —
+    including when an earlier twin's form has already been deleted by
+    hand (it-4c5a8038c304 + twins)."""
+    before = marked[: form["start"]]
+    if not before.strip():
+        return 1
+    return len(paragraphs_of(before)) + 1
+
+
+def _match_replace_thread(form: dict, unmatched: list[dict]) -> dict | None:
+    """Bind one replace form to its written thread.
+
+    Twins share a verbatim `proposed_old`, so first-old-wins silently
+    attributes a later twin's form to an earlier twin's row whenever the
+    earlier form is gone. Prefer the form's paragraph anchor (attached
+    by `final_text_from_marked`); then an exact new-half match; then the
+    legacy first-old fallback for rows with no anchor metadata."""
+    candidates = [t for t in unmatched if t["proposed_old"] == form["old"]]
+    if not candidates:
+        return None
+    anchor = form.get("anchor")
+    if anchor is not None:
+        by_anchor = next((t for t in candidates
+                          if _thread_anchor(t) == anchor), None)
+        if by_anchor is not None:
+            return by_anchor
+    exact = next((t for t in candidates
+                  if t["proposed_new"] == form["new"]), None)
+    if exact is not None:
+        return exact
+    return candidates[0]
+
+
 def final_text_from_marked(marked: str,
                            written: list[dict] | None = None,
                            kinds: tuple[str, ...] = ("replace", "insert")
@@ -719,7 +768,11 @@ def final_text_from_marked(marked: str,
     `("replace",)`: a filter never stages an insertion, and an unmatched
     insertion form collapses to its old half — which for an insertion is
     the empty string — so leaving bare `{{…}}` in scope would delete a
-    `{{title}}` the author wrote (filter-pass design §2.3)."""
+    `{{title}}` the author wrote (filter-pass design §2.3).
+
+    Matched replace forms carry `anchor` — the 1-based paragraph they
+    occupy — so `record_resolution` can bind twins by unit rather than
+    by first identical old half."""
     forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
     if not written:
         # No written threads: keep old for every form (nothing to approve).
@@ -731,8 +784,8 @@ def final_text_from_marked(marked: str,
     for form in forms:
         match = None
         if form["kind"] == "replace":
-            match = next((t for t in unmatched
-                          if t["proposed_old"] == form["old"]), None)
+            form = {**form, "anchor": _form_anchor(marked, form)}
+            match = _match_replace_thread(form, unmatched)
         elif insert_queue:
             match = insert_queue.pop(0)
         if match is None or match not in unmatched:
@@ -801,15 +854,16 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                              origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
-    # Replaces match by their verbatim OLD half (law). Insertions have no
-    # old half, so they match in document order among the insertion
-    # threads — the marked text was composed in that same order.
+    # Replaces bind by paragraph anchor when the form carries one
+    # (twins share a verbatim old half — first-old-wins crosses them).
+    # Insertions have no old half, so they match in document order among
+    # the insertion threads — the marked text was composed in that same
+    # order.
     insert_queue = [t for t in threads if t["proposed_old"] == ""]
     for form in forms:
         match = None
         if form["kind"] == "replace":
-            match = next((t for t in unmatched
-                          if t["proposed_old"] == form["old"]), None)
+            match = _match_replace_thread(form, unmatched)
         elif insert_queue:
             match = insert_queue.pop(0)
         if match is None or match not in unmatched:
@@ -836,6 +890,8 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                            evidence_type=evidence_type)
     norm_final = (" ".join(final_text.split())
                   if final_text is not None else None)
+    final_paras = (paragraphs_of(final_text)
+                   if final_text is not None else None)
     claimed = {" ".join((t2[field] or "").split())
                for t2 in threads for field in ("proposed_old", "proposed_new")
                if (t2[field] or "").strip()}
@@ -848,14 +904,44 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
         # author who resolved the form by hand instead of editing
         # inside the braces. Insertions are excluded: their old half is
         # the empty string, which is "present" in any text.
+        #
+        # Twins make "old still standing somewhere in the file" the
+        # wrong question — the declined twin's old IS still standing,
+        # at its own unit. Read the paragraph at THIS thread's anchor.
         old = " ".join((t["proposed_old"] or "").split())
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        n = _thread_anchor(t)
+        if (final_paras is not None and n is not None
+                and 1 <= n <= len(final_paras) and old):
+            standing = " ".join(final_paras[n - 1].split())
+            if standing == old:
+                db.update("doc_threads", t["id"], {"state": "declined"})
+                _edit_evidence(db, manuscript_id, t, "declined",
+                               evidence_type=evidence_type)
+                continue
+            if new and standing == new:
+                db.update("doc_threads", t["id"], {"state": "cleaned"})
+                _edit_evidence(db, manuscript_id, t, "resolved",
+                               evidence_type=evidence_type)
+                continue
+            meta = loads(t.get("metadata"), {}) or {}
+            meta.setdefault("original_new", proposed)
+            db.update("doc_threads", t["id"],
+                      {"state": "cleaned", "proposed_new": standing,
+                       "metadata": json.dumps(meta)})
+            fresh = dict(t, proposed_new=standing,
+                         metadata=json.dumps(meta))
+            _edit_evidence(db, manuscript_id, fresh, "revised",
+                           evidence_type=evidence_type)
+            diffs.append({"file": file, "proposal": proposed,
+                          "final": standing})
+            continue
         if norm_final is None or not old or old in norm_final:
             db.update("doc_threads", t["id"], {"state": "declined"})
             _edit_evidence(db, manuscript_id, t, "declined",
                            evidence_type=evidence_type)
             continue
-        proposed = t["proposed_new"] or ""
-        new = " ".join(proposed.split())
         if new and new in norm_final:
             db.update("doc_threads", t["id"], {"state": "cleaned"})
             _edit_evidence(db, manuscript_id, t, "resolved",

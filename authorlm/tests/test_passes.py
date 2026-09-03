@@ -269,10 +269,18 @@ class _SurgicalDocFake:
                 return _Req({"files": []})
 
             def export(self, fileId=None, mimeType=None):
+                # The tab body is the Docs model: each paragraph is one
+                # `\n`-terminated segment. Markdown export rejoins them
+                # with blank lines — the same shape Google's markdown
+                # export and `critique_tab_text` produce — so settle can
+                # recover unit indices. Splitting the body on blank
+                # lines (markdown `_paras`) would see a single blob and
+                # erase every twin's position.
+                def _md(body: str) -> str:
+                    paras = [ln for ln in body.split("\n") if ln.strip()]
+                    return "\n\n".join(paras) + ("\n" if paras else "")
                 whole = "\n".join(
-                    f"# **{t['title']}**\n\n"
-                    + "\n\n".join(outer._paras(t["body"]))
-                    + ("\n" if t["body"].strip() else "")
+                    f"# **{t['title']}**\n\n" + _md(t["body"])
                     for t in outer.tabs)
                 return _Req(whole.encode("utf-8"))
         return _Files()
@@ -1923,18 +1931,60 @@ def _twins_settle_by_position(root: Path) -> None:
           == 1
           and final2.index("And so the wall stands") < final2.index("Gamma")
           < final2.index("TWIN TWO REDONE."), final2)
-    states = sorted(t["state"] for t in api._run_threads(
-        db2, mid2, _run_row(db2, mid2)) if t["state"] in ("cleaned",
-                                                          "declined"))
-    check("F-D18 exactly one thread is `declined` and one `cleaned` — "
-          "the attribution is POSITIONAL BEST-EFFORT (RISK-6, accepted "
-          "by Sponsor ruling): which of two threads proposing changes to "
-          "identical text got the decline is not recoverable from a Doc "
-          "that carries no thread id",
-          states == ["cleaned", "declined"], str(states))
+    by_anchor = {
+        loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+        for t in api._run_threads(db2, mid2, _run_row(db2, mid2))
+        if t["state"] in ("cleaned", "declined")}
+    check("F-D18 the DELETED first twin is the decline and the surviving "
+          "second twin is the acceptance — bound by paragraph anchor, not "
+          "first-identical-old (RISK-6's 'best-effort' was the pre-anchor "
+          "matcher crossing them; the form's unit index recovers which "
+          "row owns the surviving span)",
+          by_anchor == {3: "declined", 5: "cleaned"}, str(by_anchor))
     check("F-D18 ...and the manuscript text is correct regardless, which "
           "is the half that was never allowed to be best-effort",
           "<<" not in final2 and "{{" not in final2, final2)
+
+    # --- Both twins hand-resolved: decline first, accept second -------
+    # Pre-fix, `old in norm_final` saw the declined twin's standing
+    # old text and marked BOTH rows declined — the accepted twin was
+    # lost to evidence even though its new prose sat in the file.
+    db3, ms3, msdir3, fake3 = _doc_run(
+        root, "twins-handres-ws",
+        {3: "TWIN ONE REDONE.", 5: "TWIN TWO REDONE."})
+    mid3 = ms3["id"]
+    api.filter_push(db3, ms3, {}, "solo.md",
+                    services=lambda: (fake3, fake3))
+    _reword_in_tab(
+        fake3,
+        "<<And so the wall stands, and the Dead do not pass.>>"
+        "{{TWIN ONE REDONE.}}",
+        "And so the wall stands, and the Dead do not pass.")
+    _reword_in_tab(
+        fake3,
+        "<<And so the wall stands, and the Dead do not pass.>>"
+        "{{TWIN TWO REDONE.}}",
+        "TWIN TWO REDONE.")
+    result3 = api.filter_settle(db3, ms3, {}, "solo.md",
+                                services=lambda: (fake3, fake3))
+    final3 = (msdir3 / "solo.md").read_text()
+    by_anchor3 = {
+        loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+        for t in api._run_threads(db3, mid3, _run_row(db3, mid3))
+        if t["state"] in ("cleaned", "declined")}
+    check("hand-resolved twins: decline at unit 3 and accept at unit 5 "
+          "land on THEIR own rows — not both declined because old still "
+          "stands somewhere in the file",
+          by_anchor3 == {3: "declined", 5: "cleaned"}, str(by_anchor3))
+    check("...and the manuscript carries old at the first twin and new "
+          "at the second",
+          final3.count("And so the wall stands, and the Dead do not pass.")
+          == 1
+          and "TWIN TWO REDONE." in final3
+          and "TWIN ONE REDONE." not in final3, final3)
+    check("settle counts match the author's verdicts",
+          result3["accepted"] == 1 and result3["declined"] == 1,
+          str(result3))
 
 
 def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
