@@ -5231,9 +5231,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                                          origin_type=FILTER_ORIGIN,
                                          evidence_type=FILTER_EVIDENCE,
                                          final_text=final)
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
 
     # NO episode (§1.8). Hygiene work has no goal to be filed under, and
     # `episode=None` would file it against whatever the author happens to
@@ -5252,6 +5250,26 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             f"processed by this run. That is an ordinary open state, not "
             f"an error — nothing is blocked.")
     falsified = _falsified_prefix(db, mid, run)
+
+def _write_resolved_text(path: Path, root: Path, final: str) -> str:
+    """Write a resolve's final text back to disk WITH its illustration
+    embed lines. The Doc never carries embed lines (push strips them),
+    so the text a filter or lens resolve reads back from a tab is
+    embed-free — and writing it as-is silently unlinked every rendered
+    illustration in the essay (the tag stayed, the picture under it
+    vanished from Obsidian; 15 slots across SMSTTD, 2026-09-02). The
+    ordinary pull re-inserts them; this is the same step, the prior
+    pick winning while its file exists."""
+    from . import gdocs
+    from .illus import capture_embeds, reembed
+
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = gdocs.normalize_markdown(final)
+    normalized = reembed(normalized, root, capture_embeds(prior))
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    return normalized
+
 
     summary = {"rebuilt": False, "error": None, "usage": None}
     llm = sums.summarizer_llm(config)
@@ -5432,9 +5450,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
                                      final_text=final)
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)

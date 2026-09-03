@@ -4353,6 +4353,36 @@ def scenario_transplant() -> None:
     check("horizontal rules survive transplant as --- paragraphs",
           hr_text == "Above.\n---\nBelow.\n", hr_text)
 
+    # Tables (it-08b8b0a0c737): a Docs table element must be rebuilt with
+    # insertTable and its cells filled last-to-first at the empty-table
+    # indices; text after the table must land after the whole table.
+    def _cell(text, **style):
+        return {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": text, "textStyle": style}}]}}]}
+    tbl_doc = {"body": {"content": [
+        {"paragraph": {"elements": [{"textRun": {"content": "Before.\n"}}]}},
+        {"table": {"rows": 2, "columns": 2, "tableRows": [
+            {"tableCells": [_cell("A\n", bold=True), _cell("B\n")]},
+            {"tableCells": [_cell("c\n"), _cell("dd\n")]}]}},
+        {"paragraph": {"elements": [{"textRun": {"content": "After.\n"}}]}},
+    ]}}
+    tbl_reqs = transplant_requests(tbl_doc, "t.x")
+    tables = [r["insertTable"] for r in tbl_reqs if "insertTable" in r]
+    check("a table element becomes one insertTable at the cursor",
+          tables == [{"rows": 2, "columns": 2,
+                      "location": {"tabId": "t.x", "index": 9}}], str(tables))
+    tbl_inserts = [(r["insertText"]["location"]["index"], r["insertText"]["text"])
+                   for r in tbl_reqs if "insertText" in r]
+    # empty 2x2 table: newline(1) + table start/end(2) + 2 rows x (1 + 2 cells x 2) = 13
+    check("cells fill last-to-first at empty-table indices, prose follows the table",
+          tbl_inserts == [(1, "Before.\n"), (20, "dd"), (18, "c"), (15, "B"),
+                          (13, "A"), (27, "After.\n")], str(tbl_inserts))
+    bolds = [r["updateTextStyle"]["range"] for r in tbl_reqs
+             if "updateTextStyle" in r
+             and r["updateTextStyle"]["textStyle"].get("bold") is True]
+    check("cell run styles are applied inside the cell",
+          bolds == [{"tabId": "t.x", "startIndex": 13, "endIndex": 14}], str(bolds))
+
     # Tab reordering: iterated single moves must converge to TOC order
     # under remove-then-insert semantics, and no-op once matched.
     from authorlm.gdocs import next_tab_move

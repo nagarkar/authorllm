@@ -26,7 +26,7 @@ import unicodedata
 
 FILENAME = "pronunciations.md"
 
-TITLE = "# Pronunciations"
+TITLE = "# **Pronunciations**"  # bold, like every chapter title: the Doc export bolds headings, and a plain one churned on every pull
 
 PREAMBLE = (
     "How the terms in this book are said aloud. AuthorLM proposes a row "

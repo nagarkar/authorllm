@@ -42,6 +42,7 @@ MARKDOWN_MIME = "text/markdown"
 _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
+_TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
 
@@ -69,6 +70,12 @@ def normalize_markdown(text: str) -> str:
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
+    # A Docs-exported table carries an aligned delimiter row (| :---- |);
+    # the canonical form is | --- | per column, so a table that round-trips
+    # through a tab is byte-identical to the one that was pushed.
+    text = _TABLE_DELIM.sub(
+        lambda m: "|" + "|".join(" --- " for _ in m.group(0).strip().split("|")[1:-1]) + "|",
+        text)
     # Doc-pasted images export as dangling ![][imageN] refs — churn, not
     # content. Stripping here (not just in pull) keeps push, pull, and
     # session-start reconciliation agreeing on the canonical text.
@@ -156,10 +163,91 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
 
     requests: list[dict] = []
     cursor = 1  # tab bodies start at index 1
+
+    def reset_style(start: int, end: int) -> dict:
+        return {"updateTextStyle": {
+            "range": {"tabId": tab_id,
+                      "startIndex": start, "endIndex": end},
+            "textStyle": {"bold": False, "italic": False,
+                          "underline": False},
+            "fields": "bold,italic,underline"}}
+
+    def run_style_requests(start: int, runs: list, limit: int) -> list[dict]:
+        out: list[dict] = []
+        offset = start
+        for run_text, text_style in runs:
+            end = min(offset + len(run_text), limit)
+            fields = {k: True for k in ("bold", "italic", "underline")
+                      if text_style.get(k)}
+            link = text_style.get("link", {}).get("url")
+            payload: dict = dict(fields)
+            if link:
+                payload["link"] = {"url": link}
+            if payload and run_text.strip() and end > offset:
+                out.append({"updateTextStyle": {
+                    "range": {"tabId": tab_id, "startIndex": offset,
+                              "endIndex": end},
+                    "textStyle": payload,
+                    "fields": ",".join(sorted(payload))}})
+            offset += len(run_text)
+        return out
+
     for element in doc.get("body", {}).get("content", []):
+        table = element.get("table")
+        if table:
+            # A markdown pipe table imports as a Docs table. It is rebuilt
+            # with insertTable and the cells filled afterwards (it-08b8b0a0c737:
+            # the pronunciation dictionary never reached its tab). Index
+            # arithmetic, measured on a Drive-imported table: insertTable
+            # puts a newline at `index` and the table at index + 1; the
+            # table costs 2 (start and end), each row 1, each cell 1 plus its paragraph
+            # (a lone newline while empty). Cell texts are inserted from
+            # the LAST cell backwards so every precomputed index stays
+            # valid; the cursor then advances by the empty layout plus
+            # every character inserted.
+            rows = table.get("tableRows", [])
+            ncols = max((len(r.get("tableCells", [])) for r in rows),
+                        default=0)
+            nrows = len(rows)
+            if not nrows or not ncols:
+                continue
+            requests.append({"insertTable": {
+                "rows": nrows, "columns": ncols,
+                "location": {"tabId": tab_id, "index": cursor}}})
+            table_start = cursor + 1
+            cells: list[tuple[int, str, list]] = []
+            for r, row in enumerate(rows):
+                row_start = table_start + 1 + r * (1 + 2 * ncols)
+                for c, cell in enumerate(row.get("tableCells", [])):
+                    para_index = row_start + 1 + c * 2 + 1
+                    runs = [(e["textRun"].get("content", ""),
+                             e["textRun"].get("textStyle", {}))
+                            for block in cell.get("content", [])
+                            if "paragraph" in block
+                            for e in block["paragraph"].get("elements", [])
+                            if "textRun" in e]
+                    text = "".join(t for t, _ in runs)
+                    if text.endswith("\n"):
+                        text = text[:-1]  # the cell's own paragraph ends it
+                    cells.append((para_index, text, runs))
+            inserted = 0
+            for para_index, text, runs in reversed(cells):
+                if not text:
+                    continue
+                requests.append({"insertText": {
+                    "location": {"tabId": tab_id, "index": para_index},
+                    "text": text}})
+                end = para_index + len(text)
+                requests.append(reset_style(para_index, end))
+                requests += run_style_requests(para_index, runs, end)
+                inserted += len(text)
+            # newline before the table (1) + table start and end markers (2)
+            # + rows and cells + every character inserted into the cells.
+            cursor += 3 + nrows * (1 + 2 * ncols) + inserted
+            continue
         paragraph = element.get("paragraph")
         if not paragraph:
-            continue  # section breaks, tables: not manuscript territory
+            continue  # section breaks: not manuscript territory
         style = paragraph.get("paragraphStyle", {}).get(
             "namedStyleType", "NORMAL_TEXT")
         runs = [(e["textRun"].get("content", ""),
@@ -175,14 +263,6 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
         # re-italicized an entire essay on every subsequent push. Every
         # insertion is therefore followed by an explicit style reset; the
         # temp doc's true run styles are applied after.
-        def reset_style(start: int, end: int) -> dict:
-            return {"updateTextStyle": {
-                "range": {"tabId": tab_id,
-                          "startIndex": start, "endIndex": end},
-                "textStyle": {"bold": False, "italic": False,
-                              "underline": False},
-                "fields": "bold,italic,underline"}}
-
         if any("horizontalRule" in e for e in paragraph.get("elements", [])):
             requests.append({"insertText": {
                 "location": {"tabId": tab_id, "index": cursor},
@@ -212,21 +292,7 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
                       "startIndex": start, "endIndex": cursor},
             "paragraphStyle": {"namedStyleType": style},
             "fields": "namedStyleType"}})
-        offset = start
-        for run_text, text_style in runs:
-            fields = {k: True for k in ("bold", "italic", "underline")
-                      if text_style.get(k)}
-            link = text_style.get("link", {}).get("url")
-            payload: dict = dict(fields)
-            if link:
-                payload["link"] = {"url": link}
-            if payload and run_text.strip():
-                requests.append({"updateTextStyle": {
-                    "range": {"tabId": tab_id, "startIndex": offset,
-                              "endIndex": offset + len(run_text)},
-                    "textStyle": payload,
-                    "fields": ",".join(sorted(payload))}})
-            offset += len(run_text)
+        requests += run_style_requests(start, runs, cursor)
         if paragraph.get("bullet"):
             preset = ("NUMBERED_DECIMAL_ALPHA_ROMAN"
                       if numbered(paragraph["bullet"].get("listId"))
