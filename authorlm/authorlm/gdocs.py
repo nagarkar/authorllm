@@ -2394,8 +2394,29 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _paragraphs_in_body(content: list) -> list[dict]:
+    """Structural paragraph elements from a Docs body, descending into
+    table cells. Top-level `item.get("paragraph")` alone misses every
+    cell; after tables started reaching tabs (transplant_requests),
+    `_tab_runs` / `_locate_in_tab` then mapped post-table prose onto
+    indices inside the table and planted forms in the wrong place."""
+    out: list[dict] = []
+    for item in content or []:
+        if "paragraph" in item:
+            out.append(item)
+            continue
+        table = item.get("table")
+        if not table:
+            continue
+        for row in table.get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                out.extend(_paragraphs_in_body(cell.get("content", [])))
+    return out
+
+
 def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]]:
-    """(doc_start_index, content) for every text run in a tab, in order."""
+    """(doc_start_index, content) for every text run in a tab, in order —
+    including runs inside table cells."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     runs: list[tuple[int, str]] = []
@@ -2403,8 +2424,9 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
                     for el in item.get("paragraph", {}).get("elements", []):
                         run = el.get("textRun")
                         if run and run.get("content"):
@@ -2443,15 +2465,37 @@ def _locate_in_tab(docs_service, master_id: str, tab_id: str,
         if offset < 0:
             return None
 
-    def doc_index(py_offset: int) -> int:
+    def doc_index_at(py_offset: int) -> int:
+        """Doc index of the character at `py_offset` in `full`.
+
+        Runs are not always contiguous in Doc index space: a table's
+        structural markers sit between the last cell run and the next
+        paragraph. Mapping a boundary with `<=` pinned the start of
+        post-table prose to the end of the preceding cell (and, before
+        `_tab_runs` walked cells, into the table itself)."""
         seen = 0
         for start, content in runs:
-            if py_offset <= seen + len(content):
+            if py_offset < seen + len(content):
                 return start + _utf16_len(content[: py_offset - seen])
             seen += len(content)
         raise ValueError("offset beyond tab text")
 
-    return doc_index(offset), doc_index(offset + len(needle))
+    def doc_index_end(py_offset: int) -> int:
+        """Exclusive end index for a span ending at `py_offset` in `full`."""
+        if py_offset <= 0:
+            return runs[0][0] if runs else 1
+        if py_offset > len(full):
+            raise ValueError("offset beyond tab text")
+        if py_offset == len(full):
+            start, content = runs[-1]
+            return start + _utf16_len(content)
+        # One past the last character of the span: that character's Doc
+        # index plus its UTF-16 width, so a gap after a cell is not
+        # swallowed into the range.
+        ch = full[py_offset - 1]
+        return doc_index_at(py_offset - 1) + _utf16_len(ch)
+
+    return doc_index_at(offset), doc_index_end(offset + len(needle))
 
 
 def propose_change(db: Database, manuscript: dict, comment_id: str,
@@ -2766,10 +2810,10 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
 
 def _tab_paragraph_texts(docs_service, master_id: str,
                          tab_id: str) -> list[str]:
-    """Non-empty paragraph strings from a tab, Docs trailing newlines
-    stripped. Blank separator paragraphs (transplant skips them on push)
-    are omitted — callers that need markdown structure must rejoin with
-    `\\n\\n`."""
+    """Non-empty paragraph strings from a tab (table cells included),
+    Docs trailing newlines stripped. Blank separator paragraphs
+    (transplant skips them on push) are omitted — callers that need
+    markdown structure must rejoin with `\\n\\n`."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     out: list[str] = []
@@ -2777,11 +2821,10 @@ def _tab_paragraph_texts(docs_service, master_id: str,
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
-                    paragraph = item.get("paragraph")
-                    if not paragraph:
-                        continue
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
+                    paragraph = item.get("paragraph") or {}
                     text = "".join(
                         el.get("textRun", {}).get("content", "")
                         for el in paragraph.get("elements", [])
