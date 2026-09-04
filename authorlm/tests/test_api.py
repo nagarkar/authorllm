@@ -5224,7 +5224,204 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_table_markdown_and_bleed() -> None:
+    """eea52e7 / 2885ca4 pure edges: Docs-aligned table delimiters and bleed
+    spellings. Both are silent corruption if wrong — a table that fails to
+    round-trip churns every pull, and a mis-parsed bleed flips print geometry."""
+    from authorlm.api import format_trim_size, parse_bleed
+    from authorlm.gdocs import normalize_markdown
+
+    aligned = ("| Term | Sound |\n"
+               "| :--- | ---: |\n"
+               "| Logos | LOH-gos |\n")
+    canon = normalize_markdown(aligned)
+    check("Docs-aligned table delimiters canonicalize to | --- |",
+          "| --- | --- |" in canon
+          and "| :--- | ---: |" not in canon
+          and "Logos" in canon, repr(canon))
+    check("a bare delimiter with no alignment markers is already canonical",
+          "| --- | --- |" in normalize_markdown(
+              "| A | B |\n| --- | --- |\n| 1 | 2 |\n"))
+
+    for yes in (True, "yes", "YES", "true", "on", "1"):
+        check(f"parse_bleed accepts {yes!r} as True",
+              parse_bleed(yes) is True, str(yes))
+    for no in (False, "", "no", "false", "off", "0", None):
+        check(f"parse_bleed accepts {no!r} as False",
+              parse_bleed(no) is False, str(no))
+    try:
+        parse_bleed("maybe")
+        refused = False
+    except ValueError as err:
+        refused = "yes or no" in str(err)
+    check("parse_bleed refuses anything that is not yes/no", refused)
+    check("format_trim_size clears and formats",
+          format_trim_size(0, 0) == ""
+          and format_trim_size(6, 9) == "6x9"
+          and format_trim_size(5.5, 8.5) == "5.5x8.5")
+
+
+def check_table_push_rebuild_gate() -> None:
+    """e21a4ac: a tab carrying a pipe table rebuilds even with open threads.
+
+    Surgical diff_push aligns Docs paragraphs with markdown paragraphs; a
+    table breaks that alignment (every cell is a paragraph on one side, one
+    block on the other), so push_doc must skip the surgical path whenever
+    _TABLE_DELIM matches. Without this gate, push refused on manifest.md
+    the day tables reached tabs (it-08b8b0a0c737)."""
+    import json as _json
+    from unittest import mock
+
+    from authorlm import gdocs as gdocs_mod
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-tbl-push-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "essay.md").write_text("# Essay\n\nProse only.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        row = db.one("SELECT * FROM manuscripts WHERE id = ?",
+                     (manuscript["id"],))
+        meta = _json.loads(row["metadata"] or "{}")
+        meta["gdocs"] = {
+            "_master_id": "doc-1", "_folder_id": "folder-1",
+            "essay.md": {"tab_id": "tab-1", "checked_out": True},
+        }
+        db.update("manuscripts", manuscript["id"],
+                  {"metadata": _json.dumps(meta)})
+        manuscript = api.get_manuscript(db)
+
+        routes: list[str] = []
+
+        def fake_diff(*_a, **_k):
+            routes.append("diff")
+            return {"mode": "diff", "ops": 0, "relpath": "essay.md"}
+
+        def fake_rewrite(*_a, **_k):
+            routes.append("rebuild")
+
+        patches = (
+            mock.patch.object(gdocs_mod, "forms_pending", return_value=None),
+            mock.patch.object(gdocs_mod, "_refuse_mid_rewrite"),
+            mock.patch.object(gdocs_mod.threads_mod, "open_threads",
+                              return_value=[{"id": "th-open"}]),
+            mock.patch.object(gdocs_mod, "comment_bearing",
+                              return_value=False),
+            mock.patch.object(gdocs_mod, "diff_push", side_effect=fake_diff),
+            mock.patch.object(gdocs_mod, "_rewrite_tab",
+                              side_effect=fake_rewrite),
+            mock.patch.object(gdocs_mod, "apply_tab_spacing"),
+            mock.patch.object(gdocs_mod, "escape_math",
+                              side_effect=lambda t: t),
+            mock.patch.object(gdocs_mod, "escape_footnotes",
+                              side_effect=lambda t: t),
+            mock.patch.object(gdocs_mod, "strip_embed_lines",
+                              side_effect=lambda t: t),
+            mock.patch.object(gdocs_mod, "doc_spacing", return_value={}),
+            mock.patch.object(gdocs_mod, "tab_url", return_value="http://x"),
+            mock.patch.object(gdocs_mod, "ensure_master",
+                              return_value="doc-1"),
+        )
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+
+            routes.clear()
+            (ms / "essay.md").write_text("# Essay\n\nProse only.\n")
+            out = gdocs_mod.push_doc(db, manuscript, "essay.md",
+                                     service=object(), docs_service=object())
+            check("open threads without a table still take the surgical path",
+                  routes == ["diff"] and out.get("mode") == "diff",
+                  str({"routes": routes, "out": out}))
+
+            routes.clear()
+            (ms / "essay.md").write_text(
+                "# Essay\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nProse.\n")
+            out = gdocs_mod.push_doc(db, manuscript, "essay.md",
+                                     service=object(), docs_service=object())
+            check("a pipe table forces rebuild even with open threads",
+                  routes == ["rebuild"] and "mode" not in out,
+                  str({"routes": routes, "out": out}))
+
+            routes.clear()
+            (ms / "essay.md").write_text(
+                "# Essay\n\n| A | B |\n| :--- | ---: |\n| 1 | 2 |\n")
+            out = gdocs_mod.push_doc(db, manuscript, "essay.md",
+                                     service=object(), docs_service=object())
+            check("Docs-aligned delimiter rows also force rebuild",
+                  routes == ["rebuild"] and "mode" not in out,
+                  str({"routes": routes, "out": out}))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_resolve_reembeds_illustrations() -> None:
+    """eea52e7: filter/lens resolve must re-insert embed lines on write-back.
+
+    The Doc never carries `![](_illustrations/…)` lines (push strips them).
+    Writing the resolved tab text as-is silently unlinked every rendered
+    illustration while leaving the [Illustration:] tag (15 slots across
+    SMSTTD, 2026-09-02). `_write_resolved_text` is the same reembed step
+    pull already does — prove the prior pick survives."""
+    from authorlm import illus as illus_mod
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-resolve-reembed-"))
+    try:
+        ms = root / "manuscript"
+        (ms / "_illustrations" / "prompts").mkdir(parents=True)
+        key = "a-lone-tracker"
+        prompt = "a lone tracker"
+        (ms / "_illustrations" / "prompts" / f"{key}.md").write_text(
+            prompt + "\n")
+        h = illus_mod.desc_hash(prompt)
+        pick = f"{key}-{h}-0000-01.png"
+        other = f"{key}-{h}-0000-02.png"
+        (ms / "_illustrations" / pick).write_bytes(b"")
+        (ms / "_illustrations" / other).write_bytes(b"")
+        prior = (
+            f"# Essay\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n"
+            f"![](_illustrations/{pick})\n\n"
+            f"Closing prose.\n")
+        path = ms / "essay.md"
+        path.write_text(prior)
+        # What a Doc settle hands back: the illustration tag, no embed.
+        from_doc = (
+            f"# Essay\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n\n"
+            f"Closing prose, resolved.\n")
+        written = api._write_resolved_text(path, ms, from_doc)
+        on_disk = path.read_text()
+        check("resolve write-back reembeds the prior pick under the tag",
+              illus_mod.embed_target(written, key) == pick
+              and illus_mod.embed_target(on_disk, key) == pick
+              and "Closing prose, resolved." in on_disk
+              and f"![](_illustrations/{pick})" in on_disk,
+              on_disk)
+        check("resolve write-back does not fall back to a newer candidate "
+              "when the prior pick's file still exists",
+              other not in on_disk, on_disk)
+        # Bare Doc text with no prior embeds still returns normalized text.
+        bare_path = ms / "bare.md"
+        bare_path.write_text("# Bare\n\nNo art.\n")
+        bare_out = api._write_resolved_text(bare_path, ms, "# Bare\n\nDone.\n")
+        check("resolve write-back without embeds is still a normal write",
+              bare_out.endswith("\n") and "Done." in bare_path.read_text()
+              and "_illustrations" not in bare_path.read_text(),
+              bare_path.read_text())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_table_markdown_and_bleed()
+    check_table_push_rebuild_gate()
+    check_resolve_reembeds_illustrations()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
