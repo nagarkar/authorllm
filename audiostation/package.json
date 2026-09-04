@@ -1,0 +1,36 @@
+{
+  "name": "editorllm-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:static": "tauri dev --no-watch",
+    "dev:log": "tauri dev --no-watch 2>&1 | tee /tmp/editorllm-dev.log",
+    "build": "tauri build",
+    "preview": "vite preview",
+    "vite:dev": "vite",
+    "vite:build": "vite build",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:ui": "vitest --ui",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-fs": "^2",
+    "@tauri-apps/plugin-process": "^2",
+    "@tauri-apps/plugin-shell": "^2",
+    "@tauri-apps/plugin-store": "^2",
+    "cargo": "^0.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitest/ui": "^3.2.4",
+    "happy-dom": "^16.8.1",
+    "typescript": "^5",
+    "vite": "^6",
+    "vitest": "^3.2.4"
+  }
+}
