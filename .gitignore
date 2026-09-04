@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Vite
+.vite/

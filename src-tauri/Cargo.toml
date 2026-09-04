@@ -1,0 +1,45 @@
+[package]
+name = "editorllm-desktop"
+version = "0.1.0"
+description = "EditorLLM Desktop — audio manifest editor"
+authors = []
+edition = "2021"
+
+# Prevent Cargo.lock from being auto-excluded in published crates.
+[lib]
+name = "editorllm_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-process = "2"
+tauri-plugin-log = "2"
+log = "0.4"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "native-tls"] }
+
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
