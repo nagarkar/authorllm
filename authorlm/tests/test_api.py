@@ -5224,7 +5224,202 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_export_region_nesting_and_kdp() -> None:
+    """465b491 / 65437ae edges the publish suite left thin: nested regions,
+    empty `[Omit:]` names, `publish_outputs`, and `kdp_checks`.
+
+    Flat Omit/Only happy paths and the four malformed refusals already live
+    inline in `main_test`. Nesting is the contract the docstring promises
+    ("Regions nest") and a silent include/exclude if the stack flips.
+    `kdp_checks` is warning-only — still the print-road surface authors
+    read before upload, and it had zero assertions."""
+    from authorlm.export import (KDP_MAX_PAGES, KDP_MIN_PAGES, kdp_checks,
+                                 publish_outputs, resolve_regions)
+
+    nested = (
+        "before\n"
+        "[Omit: audio]\n"
+        "outer drop for audio\n"
+        "[Only: pdf]\n"
+        "pdf only inside omit\n"
+        "[/Only]\n"
+        "still omitted from audio\n"
+        "[/Omit]\n"
+        "after\n")
+    pdf = resolve_regions(nested, {"pdf"})
+    audio = resolve_regions(nested, {"audio"})
+    epub = resolve_regions(nested, {"epub"})
+    check("nested [Only:] inside [Omit:] keeps the inner region for "
+          "its own outputs while the outer omit still applies",
+          "pdf only inside omit" in pdf
+          and "outer drop for audio" in pdf
+          and "still omitted from audio" in pdf
+          and "before" in pdf and "after" in pdf
+          and "pdf only inside omit" not in epub
+          and "outer drop for audio" in epub
+          and audio == "before\nafter\n",
+          repr({"pdf": pdf, "audio": audio, "epub": epub}))
+    check("nested tag lines never reach a reader",
+          "[Omit" not in pdf and "[Only" not in pdf and "[/" not in pdf)
+
+    try:
+        resolve_regions("[Omit:]\nx\n[/Omit]", {"pdf"}, "f.md")
+        empty_refused = ""
+    except ValueError as err:
+        empty_refused = str(err)
+    check("an empty [Omit:] name list is refused as 'no output', not "
+          "treated as omit-nothing",
+          "no output" in empty_refused and "f.md:" in empty_refused,
+          empty_refused)
+
+    check("publish_outputs names the format alone for a full build",
+          publish_outputs("pdf", "images") == frozenset({"pdf"}))
+    check("publish_outputs adds 'audio' for the stripped variant",
+          publish_outputs("md", "stripped") == frozenset({"md", "audio"}))
+
+    standard = kdp_checks(
+        {"trim_width": 6, "trim_height": 9, "paperback_isbn": ""}, 200)
+    check("kdp_checks warns when the paperback ISBN is missing",
+          any("paperback ISBN" in n for n in standard), standard)
+    check("a standard trim with a readable page count raises no trim "
+          "or page-bound warnings",
+          not any("not a standard KDP size" in n or "pages —" in n
+                  for n in standard), standard)
+
+    custom = kdp_checks(
+        {"trim_width": 5.1, "trim_height": 8,
+         "paperback_isbn": "9780000000000"}, 200)
+    check("kdp_checks warns on a custom (non-standard) trim size",
+          any("5.1x8" in n and "not a standard KDP size" in n
+              for n in custom), custom)
+
+    short = kdp_checks(
+        {"trim_width": 6, "trim_height": 9,
+         "paperback_isbn": "9780000000000"}, KDP_MIN_PAGES - 1)
+    long = kdp_checks(
+        {"trim_width": 6, "trim_height": 9,
+         "paperback_isbn": "9780000000000"}, KDP_MAX_PAGES + 1)
+    unread = kdp_checks(
+        {"trim_width": 6, "trim_height": 9,
+         "paperback_isbn": "9780000000000"}, None)
+    check("kdp_checks names an under-minimum page count",
+          any(f"{KDP_MIN_PAGES - 1} pages" in n and str(KDP_MIN_PAGES) in n
+              for n in short), short)
+    check("kdp_checks names an over-maximum page count",
+          any(f"{KDP_MAX_PAGES + 1} pages" in n and str(KDP_MAX_PAGES) in n
+              for n in long), long)
+    check("kdp_checks warns when the page count is unreadable",
+          any("page count unreadable" in n for n in unread), unread)
+
+
+def check_sidecar_emptied_guard() -> None:
+    """AT E5's zero-rows pull guard, pinned at the helper.
+
+    `_sidecar_would_be_emptied` is the highest-value line on the
+    dictionary Doc road (§15.22): a mangled Docs export that parses to
+    zero rows must not overwrite a local dictionary that still has rows.
+    E2E covers the pull report; this pins the pure predicate so a future
+    rewrite cannot widen the guard to every sidecar or treat a legitimate
+    one-row delete as a wipe."""
+    from authorlm import pronunciations as pron
+    from authorlm.gdocs import _sidecar_would_be_emptied
+
+    full = (
+        "# Pronunciations\n\n"
+        "| Term | Say it | Note |\n| --- | --- | --- |\n"
+        "| anattā | uh-NUT-taa | Pali |\n"
+        "| Nāgārjuna | naa-GAAR-ju-na | |\n")
+    one_row = (
+        "# Pronunciations\n\n"
+        "| Term | Say it | Note |\n| --- | --- | --- |\n"
+        "| anattā | uh-NUT-taa | Pali |\n")
+    mangled = ("# Pronunciations\n\n"
+               "- anattā uh-NUT-taa Pali\n"
+               "- Nāgārjuna naa-GAAR-ju-na\n")
+
+    check("a Docs export that parses to zero rows empties the dictionary",
+          _sidecar_would_be_emptied(pron.FILENAME, mangled, full) is True)
+    check("a legitimate one-row delete (fewer rows, still parsable) is "
+          "NOT an emptying — the author deleted a row in the Doc",
+          _sidecar_would_be_emptied(pron.FILENAME, one_row, full) is False)
+    check("the guard is scoped to pronunciations.md by name — other "
+          "files never trip the pronunciation parser",
+          _sidecar_would_be_emptied("essay.md", mangled, full) is False
+          and _sidecar_would_be_emptied("manifest.md", mangled, full)
+          is False)
+    check("an empty or missing local dictionary is never 'emptied' — "
+          "there is nothing to protect",
+          _sidecar_would_be_emptied(pron.FILENAME, mangled, "") is False
+          and _sidecar_would_be_emptied(pron.FILENAME, mangled, "   \n")
+          is False)
+    check("writing the same parsable rows back is not an emptying",
+          _sidecar_would_be_emptied(pron.FILENAME, full, full) is False)
+
+
+def check_pronunciation_term_signals() -> None:
+    """AT F1/F2 harness signals that Scenario PR only reaches through
+    assembled block A. Pin the pure predicates: a curly apostrophe is not
+    'hard to say', `Field`/`field` is a homophone not a pronunciation
+    problem, and `protected_loss` still sees a capitalized→lower rewrite
+    as a loss."""
+    from authorlm.filtering import (candidate_terms, hard_terms,
+                                    is_hard_to_say, protected_loss)
+
+    check("is_hard_to_say is letters-only: a curly apostrophe does not "
+          "make Noether’s Theorem hard",
+          is_hard_to_say("Noether’s Theorem") is False)
+    check("is_hard_to_say fires on non-ASCII letters (Bṛhadāraṇyaka, "
+          "anattā) and not on plain ASCII Field",
+          is_hard_to_say("Bṛhadāraṇyaka") is True
+          and is_hard_to_say("anattā") is True
+          and is_hard_to_say("Field") is False)
+
+    text_with_lower = (
+        "The Field is where it happens, and the field it opens is wide. "
+        "Noether’s Theorem holds. Bṛhadāraṇyaka says one thing. "
+        "Field of Choice is named once.")
+    protected = ["Field", "Field of Choice", "Noether’s Theorem",
+                 "Bṛhadāraṇyaka", "anattā"]
+    cands = candidate_terms(text_with_lower, protected, "")
+    check("candidate_terms drops single-word ASCII Field when lowercase "
+          "'field' also occurs — the homophone case, not a say-it problem",
+          "Field" not in cands
+          and "Field of Choice" in cands
+          and "Noether’s Theorem" in cands
+          and "Bṛhadāraṇyaka" in cands,
+          str(cands))
+    check("candidate_terms still keeps Field when the lowercase twin is "
+          "absent — capitalized-only use is a term of art",
+          candidate_terms("The Field is where it happens.",
+                          ["Field"], "") == ["Field"])
+
+    check("hard_terms is F1 over the essay: non-ASCII letters that occur "
+          "and are unset in the dictionary",
+          hard_terms(text_with_lower, protected, "") == ["Bṛhadāraṇyaka"],
+          str(hard_terms(text_with_lower, protected, "")))
+    dict_text = (
+        "| Term | Say it | Note |\n| --- | --- | --- |\n"
+        "| Bṛhadāraṇyaka | bri-ha-DAA-ran-ya-ka | Sanskrit |\n")
+    check("a dictionary row settles the hard term — hard_terms goes empty",
+          hard_terms(text_with_lower, protected, dict_text) == [])
+    check("a settled hard term also leaves candidate_terms",
+          "Bṛhadāraṇyaka" not in candidate_terms(
+              text_with_lower, protected, dict_text))
+
+    check("protected_loss sees 'Field' → 'the field of choosing' as a loss",
+          protected_loss("The Field is where it happens.",
+                         "the field of choosing is where it happens.",
+                         ["Field"]) == ["Field"])
+    check("protected_loss ignores a lowercase-only mention that was "
+          "never protected as a name",
+          protected_loss("a field of grass", "a meadow of grass",
+                         ["Field"]) == [])
+
+
 def main_test() -> None:
+    check_export_region_nesting_and_kdp()
+    check_sidecar_emptied_guard()
+    check_pronunciation_term_signals()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
