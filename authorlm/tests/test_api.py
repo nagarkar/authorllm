@@ -7660,6 +7660,33 @@ def main_test() -> None:
                                      strip_display_math)
         check("a multi-line $$ block is one display equation to audio",
               strip_display_math("a\n$$\nx\n$$\nb") == "a\nb")
+        # Unclosed / malformed $$ used to fail OPEN: everything after the
+        # opener vanished from the audio-clean export with no error
+        # (guidelines §6: malformed tags refuse by file and line).
+        for bad_math, why in (("a\n$$\nx\n\nb", "never closed"),
+                              ("a\n$$100 was the price.\nb",
+                               "lone $$ or a single-line")):
+            try:
+                strip_display_math(bad_math, "f.md")
+                refused = ""
+            except ValueError as err:
+                refused = str(err)
+            check(f"malformed display math is refused, not truncated ({why})",
+                  why in refused and "f.md:" in refused, refused)
+        # Plant an unclosed $$ in a content file and prove the audio
+        # export refuses rather than shipping a truncated chapter.
+        physics = (ms / "03-physics.md").read_text(encoding="utf-8")
+        (ms / "03-physics.md").write_text(
+            physics + "\n$$\norphan display\n", encoding="utf-8")
+        try:
+            publish_markdown(manuscript, "stripped", fmt="md")
+            trunc_refused = ""
+        except ValueError as err:
+            trunc_refused = str(err)
+        (ms / "03-physics.md").write_text(physics, encoding="utf-8")
+        check("audio export refuses an unclosed display-math block",
+              "03-physics.md:" in trunc_refused
+              and "never closed" in trunc_refused, trunc_refused)
         for bad, why in (("[Omit: audoi]\nx\n[/Omit]", "unknown output"),
                          ("[Omit: pdf]\nx", "never closed"),
                          ("x\n[/Only]", "closes nothing"),
@@ -7686,6 +7713,13 @@ def main_test() -> None:
         check("export check names a malformed region by file and line",
               any(p.startswith("04-bad.md:3") and "unknown output" in p
                   for p in bad_problems), bad_problems)
+        (ms / "05-math.md").write_text(
+            "# Math\n\nBefore.\n$$\nE = mc^2\n\n## After\nDone.\n")
+        math_problems = check_manuscript(manuscript)
+        (ms / "05-math.md").unlink()
+        check("export check names unclosed display math by file",
+              any("05-math.md:" in p and "never closed" in p
+                  for p in math_problems), math_problems)
         import shutil as _shutil_chk
         if _shutil_chk.which("pandoc"):
             check("export check names math outside the portable subset",
