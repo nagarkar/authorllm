@@ -5224,7 +5224,220 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_filter_validate_reply() -> None:
+    """`filtering.validate_reply` is the filter door's contract (§2.5).
+
+    Scenario F covers the same refusals through the CLI record path. This
+    pins the pure predicate so a silent soften (fuzzy echo, partial
+    accept, insert-as-replace) cannot ship without a hermetic failure —
+    and so the suite does not depend on the heavy e2e fixture to catch
+    it. A regression here stages the wrong units or moves the cursor on
+    a reply that should have been discarded whole."""
+    from authorlm.filtering import ReplyError, STATE_CAP, validate_reply
+    from authorlm.passes import echo_of
+
+    units = [
+        "Alpha one two three four five six.",
+        "Beta two three four five six seven.",
+        "Gamma three four five six seven eight.",
+    ]
+    window = (1, 3)
+
+    def keep(n: int, **extra) -> dict:
+        return {"n": n, "echo": echo_of(units[n - 1]), "action": "keep",
+                **extra}
+
+    def replace(n: int, new: str, **extra) -> dict:
+        return {"n": n, "echo": echo_of(units[n - 1]), "action": "replace",
+                "new": new, **extra}
+
+    ok = validate_reply(
+        {"units": [keep(1), replace(2, "Beta rewritten cleanly."),
+                   keep(3)], "state": "seen-beta"},
+        units, window, "sequential")
+    check("a well-formed sequential reply returns edits, keeps, and state",
+          ok == {"edits": [{"n": 2, "new": "Beta rewritten cleanly.",
+                            "why": "", "ref": None}],
+                 "keeps": [1, 3], "state": "seen-beta"}, str(ok))
+
+    noop = validate_reply(
+        {"units": [keep(1), replace(2, units[1]), keep(3)],
+         "state": "noop"},
+        units, window, "sequential")
+    check("a replace whose text equals the unit silently becomes a keep "
+          "(the only downgrade, never a refuse)",
+          noop["edits"] == [] and noop["keeps"] == [1, 2, 3], str(noop))
+
+    global_ok = validate_reply(
+        {"units": [keep(1), keep(2), keep(3)]},
+        units, window, "global")
+    check("a global filter may omit state",
+          global_ok["state"] is None and global_ok["keeps"] == [1, 2, 3],
+          str(global_ok))
+
+    def refuse(label: str, raw, klass: str = "sequential",
+               expect: str = "") -> None:
+        try:
+            validate_reply(raw, units, window, klass)
+            raised = ""
+        except ReplyError as err:
+            raised = str(err)
+        check(f"validate_reply refuses: {label}",
+              expect in raised and raised != "", raised)
+
+    refuse("not a JSON object", [], expect="not a JSON object")
+    refuse("no units list", {"state": "x"}, expect="no `units` list")
+    refuse("echo mismatch (anchoring law)",
+           {"units": [keep(1),
+                      {**replace(2, "x"), "echo": "Not the real echo"},
+                      keep(3)], "state": "x"},
+           expect="echo mismatch")
+    refuse("case-only echo difference",
+           {"units": [keep(1),
+                      {**replace(2, "x"),
+                       "echo": echo_of(units[1]).upper()},
+                      keep(3)], "state": "x"},
+           expect="echo mismatch")
+    refuse("missing unit in the window",
+           {"units": [keep(1), keep(3)], "state": "x"},
+           expect="missing n=2")
+    refuse("n outside the window",
+           {"units": [keep(1), keep(2), keep(3),
+                      {"n": 99, "echo": "x", "action": "keep"}],
+            "state": "x"},
+           expect="not in this window: n=99")
+    refuse("reserved << in the replacement",
+           {"units": [keep(1), replace(2, "Beta <<counts>>."), keep(3)],
+            "state": "x"},
+           expect="'<<'")
+    refuse("empty replacement (delete is not a filter judgment)",
+           {"units": [keep(1), replace(2, "   "), keep(3)], "state": "x"},
+           expect="not a filter's judgment")
+    refuse("action insert (a filter never adds a unit)",
+           {"units": [keep(1),
+                      {"n": 2, "echo": echo_of(units[1]),
+                       "action": "insert", "new": "extra"},
+                      keep(3)], "state": "x"},
+           expect="never ADDS a unit")
+    refuse("sequential reply with empty state",
+           {"units": [keep(1), keep(2), keep(3)], "state": "  "},
+           expect="must return its updated `state`")
+    refuse("state over the cap (refused, never truncated)",
+           {"units": [keep(1), keep(2), keep(3)],
+            "state": "x" * (STATE_CAP + 1)},
+           expect=f"over the {STATE_CAP:,} cap")
+
+
+def check_filtered_prefix_and_headings() -> None:
+    """The autoregressive prefix and the free heading flag.
+
+    `filtered_prefix` must show later windows the run's OWN edits, not
+    the original units — otherwise a word-ledger filter re-removes (or
+    declines to remove) what an earlier window already changed. Withdrawn
+    / rejected / declined rows must not poison that view. `is_heading` is
+    the only free signal prompts use to leave titles alone."""
+    from authorlm.filtering import filtered_prefix, is_heading
+
+    units = ["u1 original", "u2 original", "u3 original", "u4 original"]
+    threads = [
+        {"state": "accepted", "proposed_new": "U1 edited",
+         "metadata": '{"anchor_paragraph": 1}'},
+        {"state": "withdrawn", "proposed_new": "U2 gone",
+         "metadata": '{"anchor_paragraph": 2}'},
+        {"state": "proposed", "proposed_new": "U3 edited",
+         "metadata": '{"anchor_paragraph": 3}'},
+        {"state": "declined", "proposed_new": "U3 should not win",
+         "metadata": '{"anchor_paragraph": 3}'},
+    ]
+    prefix = filtered_prefix(units, 4, threads)
+    check("filtered_prefix shows accepted/proposed rewrites before the "
+          "window, keeps original text for withdrawn units, and ignores "
+          "a later declined twin",
+          prefix == ("[1] U1 edited\n\n"
+                     "[2] u2 original\n\n"
+                     "[3] U3 edited"),
+          prefix)
+    check("filtered_prefix is empty when the window starts at unit 1",
+          filtered_prefix(units, 1, threads) == "")
+    check("is_heading recognizes AT1–H6 with a space after the hashes",
+          is_heading("# Title") and is_heading("## Sub")
+          and is_heading("###### Deep")
+          and not is_heading("###NoSpace")
+          and not is_heading("plain prose")
+          and not is_heading(""))
+
+
+def check_sidecar_structural_guards() -> None:
+    """Sidecars are structural but never essays (AT/2-3, §15.22).
+
+    Filename-scoped `is_sidecar` keeps `pronunciations.md` and
+    `manifest.md` out of reading order / content_files / export, and
+    `refuse_sidecar` is the named refusal every filter/lens/critique
+    verb shares. Dropping either name from `SIDECAR_FILES`, or softening
+    the refusal, ships a sidecar inside the book or lets a filter mine
+    it as prose."""
+    from authorlm.structure import (SIDECAR_FILES, content_files, is_sidecar,
+                                    is_structural, reading_order,
+                                    refuse_sidecar)
+
+    check("SIDECAR_FILES is the pronunciation dictionary and the "
+          "manifest, flagged by filename alone",
+          SIDECAR_FILES == ("pronunciations.md", "manifest.md")
+          and is_sidecar("pronunciations.md")
+          and is_sidecar("manifest.md")
+          and not is_sidecar("01-essay.md")
+          and not is_sidecar("toc.toml"))
+    check("is_structural covers toc.toml AND every sidecar",
+          is_structural("toc.toml")
+          and is_structural("pronunciations.md")
+          and is_structural("manifest.md")
+          and not is_structural("01-essay.md"))
+    files = {
+        "toc.toml": '[[chapter]]\nfile = "01-essay.md"\n',
+        "01-essay.md": "Prose.\n",
+        "pronunciations.md": "| Term | Say |\n| --- | --- |\n",
+        "manifest.md": "| Slot | File |\n| --- | --- |\n",
+        "02-loose.md": "Loose.\n",
+    }
+    content = content_files(files)
+    order, unlisted = reading_order(files)
+    check("content_files and reading_order exclude both sidecars and toc",
+          "pronunciations.md" not in content
+          and "manifest.md" not in content
+          and "toc.toml" not in content
+          and "01-essay.md" in content
+          and "pronunciations.md" not in order
+          and "manifest.md" not in order
+          and order[0] == "01-essay.md",
+          f"content={list(content)} order={order} unlisted={unlisted}")
+    try:
+        refuse_sidecar("pronunciations.md")
+        refused = ""
+    except ValueError as err:
+        refused = str(err)
+    check("refuse_sidecar names the dictionary and points at proposal "
+          "review",
+          "pronunciation dictionary, not an essay" in refused
+          and "proposal review" in refused, refused)
+    try:
+        refuse_sidecar("manifest.md")
+        manifest_refused = False
+    except ValueError:
+        manifest_refused = True
+    check("refuse_sidecar also fires on the manifest sidecar",
+          manifest_refused)
+    try:
+        refuse_sidecar("01-essay.md")
+        essay_ok = True
+    except ValueError:
+        essay_ok = False
+    check("refuse_sidecar is a no-op for ordinary essays", essay_ok)
+
+
 def main_test() -> None:
+    check_filter_validate_reply()
+    check_filtered_prefix_and_headings()
+    check_sidecar_structural_guards()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
