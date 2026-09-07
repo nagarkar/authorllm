@@ -28,6 +28,7 @@ from . import triage as triage_service
 from . import ui
 from .briefing import build_briefing
 from . import beliefs as bel_mod
+from . import paths as paths_mod
 from .db import Database, ko_fields, loads
 from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
@@ -40,9 +41,85 @@ def _workspace(args) -> Path:
 
 
 def _open_db(args) -> Database:
-    data_dir = _workspace(args) / ".authorlm"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return Database(data_dir / "authorlm.db")
+    """Open the workspace database, or decide what a missing one means.
+
+    The database file is the tell, not the directory (macOS leaves an
+    empty folder under /Volumes after an unclean unmount). What to do
+    when it is absent depends on where the workspace came from:
+
+    - `.env` pointer or exported variable: a standing claim that a
+      database lives there. Missing means the volume is not mounted, or
+      the pointer is stale. Refuse; never offer to create — saying yes
+      one morning with the drive unplugged would fork the data.
+    - explicit `-w`: `init` may bootstrap there (that is what `-w … init`
+      means, and what every test fixture does); any other verb refuses.
+    - default home, no pointer: a fresh checkout. On a terminal, ask
+      permission and a location, record it in `.env`, create. Otherwise
+      refuse and name `authorlm setup`.
+    """
+    source = getattr(args, "workspace_source", "flag")
+    path = api.db_path(str(_workspace(args)))
+    if path.exists():
+        return api.open_db(str(_workspace(args)))
+    if source == "env":
+        sys.exit(f"error: .env points AUTHORLM_WORKSPACE at {_workspace(args)} "
+                 f"but there is no database at {path}.\n"
+                 "If it lives on an external volume, mount it and retry. "
+                 "To start a new database elsewhere: authorlm setup --workspace DIR")
+    if source == "flag":
+        if args.command == "init":
+            return api.open_db(str(_workspace(args)), create=True)
+        sys.exit(f"error: no database at {path}.\n"
+                 "Check the path, or run 'init' with this --workspace to start one.")
+    if not sys.stdin.isatty():
+        sys.exit(f"error: no database at {path} and no AUTHORLM_WORKSPACE in "
+                 f"{paths_mod.env_path()}.\nRun: authorlm setup --workspace DIR")
+    print(f"No AuthorLM database found (looked at {path}).")
+    if not _ask_yes("Create a new one?"):
+        sys.exit("Nothing created. Run 'authorlm setup --workspace DIR' when ready.")
+    chosen = input(f"Where should it live? [{_workspace(args)}] ").strip() or str(_workspace(args))
+    return _setup_workspace(Path(chosen).expanduser().resolve())
+
+
+def _ask_yes(question: str) -> bool:
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _setup_workspace(workspace: Path) -> Database:
+    """Record `workspace` as this checkout's AUTHORLM_WORKSPACE and create
+    its database. The pointer is written first so a crash between the
+    two leaves a pointer to an empty directory (which the guard reports)
+    rather than an orphan database nothing points at."""
+    env_file = paths_mod.set_env_value(paths_mod.WORKSPACE_ENV, str(workspace))
+    db = api.open_db(str(workspace), create=True)
+    print(f"Database created at {db.path}")
+    print(f"Recorded AUTHORLM_WORKSPACE={workspace} in {env_file}")
+    return db
+
+
+def cmd_setup(args):
+    """Point this checkout at a workspace and create its database.
+
+    Non-interactive when --workspace is given; asks otherwise. With a
+    database already there, only the pointer is (re)written — so moving
+    a workspace is: copy the directory, run setup with the new path."""
+    workspace = _workspace(args) if args.workspace_source == "flag" else None
+    if workspace is None:
+        if not sys.stdin.isatty():
+            sys.exit("usage: authorlm setup --workspace DIR")
+        default = Path.home()
+        chosen = input(f"Where should the workspace live? [{default}] ").strip()
+        workspace = Path(chosen).expanduser().resolve() if chosen else default
+    path = api.db_path(str(workspace))
+    if path.exists():
+        env_file = paths_mod.set_env_value(paths_mod.WORKSPACE_ENV, str(workspace))
+        print(f"Using existing database at {path}")
+        print(f"Recorded AUTHORLM_WORKSPACE={workspace} in {env_file}")
+        return
+    if not args.yes and sys.stdin.isatty() and not _ask_yes(
+            f"No database at {path}. Create it?"):
+        sys.exit("Nothing created.")
+    _setup_workspace(workspace)
 
 
 def _load_config(args) -> dict:
@@ -221,7 +298,10 @@ def cmd_manuscript(args):
                 copyright_owner=args.copyright_owner,
                 paperback_isbn=args.paperback_isbn,
                 hardcover_isbn=args.hardcover_isbn,
-                trim_size=args.trim_size, bleed=args.bleed)
+                trim_size=args.trim_size, bleed=args.bleed,
+                narrator=args.narrator, publisher=args.publisher,
+                copyright_year=args.copyright_year,
+                language=args.language)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -231,6 +311,11 @@ def cmd_manuscript(args):
     print(f"  author: {identity['author'] or '(not set)'}")
     print("  copyright_owner: "
           f"{identity['copyright_owner'] or '(not set)'}")
+    print(f"  copyright_year: {identity['copyright_year'] or '(not set)'}")
+    print(f"  publisher: {identity['publisher'] or '(not set)'}")
+    print(f"  narrator: {identity['narrator'] or '(not set)'}"
+          + ("" if identity["narrator"] else "  — needed by 'audio export'"))
+    print(f"  language: {identity['language'] or '(not set, en assumed)'}")
     print("  paperback_isbn: "
           f"{identity['paperback_isbn'] or '(not set)'}")
     print("  hardcover_isbn: "
@@ -2473,6 +2558,29 @@ def cmd_collect(args):
     report = api.collect(db, manuscript, _load_config(args),
                          auto=getattr(args, "auto", False))
     _print_collect_report(report)
+    return report
+
+
+def _print_open_directives(rows: list[dict]) -> None:
+    """The open [Footnote: …] / [Explain: …] tags, per file — collect's
+    report and `footnote list` / `explain list` alike."""
+    by_file: dict[str, list[dict]] = {}
+    for row in rows:
+        by_file.setdefault(row["file"], []).append(row)
+    for file, tags in by_file.items():
+        kinds = {}
+        for t in tags:
+            kinds[t["kind"]] = kinds.get(t["kind"], 0) + 1
+        summary = ", ".join(f"{n} open {k} tag{'s' if n != 1 else ''}"
+                            for k, n in kinds.items())
+        print(ui.yellow(f"{file}: {summary}"))
+        for t in tags:
+            label = f" | label: {t['label']}" if t.get("label") else ""
+            print(f"  • #{t['n']} line {t['line']}  "
+                  f"[{t['kind'].title()}: {t['gist']}{label}]")
+    if rows:
+        print(ui.dim("  Draft in chat; land with 'footnote apply' / "
+                     "'explain apply <file> --tag N --text …'."))
 
 
 def _print_collect_report(report):
@@ -2574,6 +2682,8 @@ def _print_collect_report(report):
                 f"«{offer['prompt']}…» is {offer['reason']} — "
                 "'illus externalize <fragment>' moves it to a prompts "
                 "file (renders survive)."))
+    if report.get("directives"):
+        _print_open_directives(report["directives"])
     if report.get("auto_analysis"):
         aa = report["auto_analysis"]
         print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
@@ -2616,6 +2726,107 @@ def _input_prefilled(prompt: str, initial: str) -> str:
         return input(prompt)
     finally:
         readline.set_startup_hook(None)
+
+
+def cmd_directive(args):
+    """`footnote|explain list|apply|resolve` — the inline directives'
+    verbs (docs/footnote-directive-design.md §5/§8,
+    docs/explain-directive-design.md). Drafting is chat. `apply` lands
+    the agreed text directly when the file is local, or writes it into
+    the Doc tab as <<tag>>{{new}} forms when the file is checked out —
+    local stays pristine — and `resolve` finishes that road."""
+    from pathlib import Path
+
+    from . import directives as dv
+
+    kind = args.command
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    root = Path(manuscript["path"])
+    if args.action == "list":
+        rows = dv.open_report(root, (kind,), [args.file] if args.file else None)
+        out = dv.pending(db, manuscript["id"], kind, args.file or None)
+        if not rows and not out:
+            print(f"No open [{kind.title()}: …] tags.")
+            return
+        _print_open_directives(rows)
+        by_file: dict[str, int] = {}
+        for t in out:
+            by_file[t["file"]] = by_file.get(t["file"], 0) + 1
+        for file, n in by_file.items():
+            print(ui.cyan(f"{file}: {n} {kind} form(s) out in the Doc tab — "
+                          f"'{kind} resolve {file}' when the author has "
+                          "ruled there."))
+        return
+    if args.action not in ("apply", "resolve"):
+        sys.exit(f"usage: {kind} list|apply|resolve [file]")
+    if not args.file:
+        sys.exit(f"usage: {kind} {args.action} <file>"
+                 + (" --tag N --text '…' [--tag N --text '…']…"
+                    if args.action == "apply" else ""))
+    config = _load_config(args)
+
+    def _services():
+        from . import gdocs as _gd
+
+        return (_gd.get_service(config, args.workspace, interactive=True),
+                _gd.get_docs_service(config, args.workspace, interactive=True))
+
+    try:
+        if args.action == "apply":
+            tags, texts = args.tag or [], args.text or []
+            if not tags or len(tags) != len(texts):
+                sys.exit(f"{kind} apply: give one --text for every --tag "
+                         f"({len(tags)} --tag, {len(texts)} --text)")
+            notes: dict[str, str] = {}
+            for spec in args.footnote or []:
+                handle, sep, note = spec.partition("=")
+                if not sep or not handle.strip():
+                    sys.exit(f"{kind} apply: --footnote takes TAG=TEXT, "
+                             f"where TAG is one of the --tag handles")
+                notes[handle.strip()] = note
+            unknown = set(notes) - {str(t).strip() for t in tags}
+            if unknown:
+                sys.exit(f"{kind} apply: --footnote names a tag not given "
+                         f"as --tag: {', '.join(sorted(unknown))}")
+            pairs = [(t, x, notes.get(str(t).strip())) for t, x in zip(tags, texts)]
+            result = dv.apply(db, manuscript, config, kind, args.file,
+                              pairs, services=_services)
+        else:
+            result = dv.resolve(db, manuscript, config, kind, args.file,
+                                services=_services)
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}")
+    if args.action == "resolve":
+        print(ui.green(f"resolved {args.file}: {result['forms']} form(s) read "
+                       f"back — {result['accepted']} landed, "
+                       f"{result['declined']} declined (tag left open)"))
+        for d in result["diffs"]:
+            print(ui.dim(f"  «{d['proposal'][:60]}» → «{d['final'][:60]}»"))
+        print(ui.dim(f"  Collected as v{result['version_no']} (no episode)."))
+        if result["url"]:
+            print(f"Pushed {args.file} → tab {ui.dim(ui.link(result['url']))}")
+        for w in result["warnings"]:
+            print(ui.yellow(f"warning: {w}"))
+        return
+    for row in result["landed"]:
+        head = (f"[^{row['label']}]" if row["label"]
+                else f"[{kind.title()}: {row['gist']}]")
+        verb = "Landed" if result["mode"] == "applied" else "Staged"
+        print(ui.green(f"{verb} {args.file}:{row['line']}  {head}"))
+        print(ui.dim("    " + row["text"].replace("\n", "\n    ")))
+        if row.get("footnote"):
+            print(ui.dim(f"    [^{row['label']}]: " + row["footnote"]))
+    for gist, why in result["failed"]:
+        print(ui.yellow(f"Not written: [{kind.title()}: {gist}] — {why}"))
+    if result["mode"] == "applied":
+        print(ui.dim(f"  Collected as v{result['version_no']} (no episode); "
+                     f"{len(result['landed'])} evidence row(s). 'doc push' "
+                     "carries it to the Doc when you next push."))
+    else:
+        print(f"Forms written to the tab {ui.dim(ui.link(result['url']))} — "
+              f"local file untouched. Edit or accept in the Doc, then "
+              f"'{kind} resolve {args.file}'.")
 
 
 def cmd_illus(args):
@@ -3771,7 +3982,10 @@ def cmd_lens(args):
         if not args.name or not prompt:
             raise SystemExit("usage: authorlm lens add <name>  "
                              "(the lens prompt on stdin)")
-        path = lenses.add_lens(manuscript, args.name, prompt)
+        try:
+            path = lenses.add_lens(manuscript, args.name, prompt)
+        except (lenses.LensError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         print(f"Lens '{args.name}' ratified → {path}")
         return
 
@@ -3783,6 +3997,15 @@ def cmd_lens(args):
             raise SystemExit(f"error: no lens '{args.name}' "
                              "('lens list' shows them).")
         print(ui.bold(f"Lens '{args.name}' — {path}"))
+        try:
+            meta, _body = lenses.parse_lens(path.read_text(encoding="utf-8"))
+            print(ui.dim(f"class {meta['class']}; inputs "
+                         f"{', '.join(meta['inputs'])}"
+                         + (f"; targets {', '.join(meta['targets'])}"
+                            if meta['targets'] else "")
+                         + f"; examples {meta['examples']}"))
+        except lenses.LensError as err:
+            print(ui.yellow(f"MALFORMED front matter: {err}"))
         print(path.read_text(encoding="utf-8").rstrip())
         return
 
@@ -3792,7 +4015,93 @@ def cmd_lens(args):
             print("No lenses defined. Create one: authorlm lens add "
                   "<name>  (prompt on stdin)")
         for row in rows:
-            print(f"  {row['name']}: {row['summary']}")
+            if row.get("error"):
+                print(f"  {row['name']}: MALFORMED — {row['error']}")
+                continue
+            tgt = f" → {','.join(row['targets'])}" if row["targets"] else ""
+            print(f"  {row['name']} [{row['class']}{tgt}]: {row['summary']}")
+        return
+    if args.action == "status":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm lens status <essay.md>")
+        try:
+            batches = lenses.status(db, manuscript, target)
+        except LookupError as err:
+            raise SystemExit(f"error: {err}")
+        if not batches:
+            print(f"No lens findings on {target}.")
+            return
+        for b in batches:
+            stale = (" STALE: " + ", ".join(sorted(set(b["stale"])))
+                     if b["stale"] else "")
+            states = ", ".join(f"{k} {v}" for k, v in sorted(b["states"].items()))
+            print(f"{b['lens']} ({b['source']}) {str(b['created_at'])[:16]} — "
+                  f"{b['count']} finding(s): {states}"
+                  + (f"; {b['unverified']} target quote(s) unverified"
+                     if b["unverified"] else "") + ui.yellow(stale))
+            for rule, n in sorted(b["rules"].items(), key=lambda kv: -kv[1]):
+                print(ui.dim(f"    {n:2d} × {rule}"))
+        return
+    if args.action == "sweep":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm lens sweep <essay.md> "
+                             "[--native] [--only a,b] [--skip a,b] [--out DIR]")
+        only = [x.strip() for x in (args.only or "").split(",") if x.strip()]
+        skip = [x.strip() for x in (args.skip or "").split(",") if x.strip()]
+        try:
+            names = lenses.sweep_order(manuscript, only or None, skip or None)
+        except LookupError as err:
+            raise SystemExit(f"error: {err}")
+        from pathlib import Path as _P
+        from .revisions import read_manuscript_files as _rmf
+        files = _rmf(_P(manuscript["path"]))
+        cache: dict = {}
+        session, _ = api.ensure_session(db, manuscript)
+        llm = api.LLMClient(_load_config(args)) if args.native else None
+        if llm is not None and not llm.enabled:
+            raise SystemExit("--native needs the LLM enabled in config")
+        batch_ids = []
+        outdir = _P(args.out) if args.out else None
+        if outdir:
+            outdir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            try:
+                payload = lenses.assemble(db, manuscript, name, target,
+                                          files=files, inputs_cache=cache)
+            except (LookupError, ValueError) as err:
+                print(ui.yellow(f"{name}: skipped — {err}"))
+                continue
+            if llm is None:
+                text = payload.render(name)
+                if outdir:
+                    dest = outdir / f"{name}.payload"
+                    dest.write_text(text, encoding="utf-8")
+                    print(f"{name}: payload → {dest} ({len(text):,} chars)")
+                else:
+                    print(text)
+                continue
+            result = lenses.run_lens(db, manuscript, session, name,
+                                     payload.file, llm, payload=payload)
+            batch_ids.append(result["batch_id"])
+            print(f"{name}: {len(result['findings'])} finding(s)"
+                  + (f", {result['dropped_ungrounded']} ungrounded dropped"
+                     if result["dropped_ungrounded"] else "")
+                  + (f", {len(result['refused_targets'])} refused (target "
+                     "not declared)" if result["refused_targets"] else ""))
+            for i, row in enumerate(result["findings"], start=1):
+                print(f"  [{i}] {row['suggestion']}")
+        if llm is not None:
+            linked = lenses.link_overlaps(db, batch_ids)
+            print(ui.dim(f"{linked} finding(s) cross-linked across lenses. "
+                         f"Verdicts: lens review <n> --accept|--reject "
+                         f"[--explain]; 'lens status {target}' for tallies."))
+            print(llm.stats_line() or "")
+        else:
+            print(ui.dim("No model call was made (the default). Answer each "
+                         "payload's contract and 'lens register <name> "
+                         f"{target} --reply <json>'; or re-run with --native."))
         return
 
     if args.action == "review":
@@ -3895,18 +4204,46 @@ def cmd_lens(args):
         raise SystemExit(f"usage: authorlm lens {args.action} <name> <file>")
     session, _ = api.ensure_session(db, manuscript)
     if args.action == "run":
+        try:
+            payload = lenses.assemble(db, manuscript, args.name, args.file)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
+        if not args.native:
+            # THE FLAG POLARITY (design §6, the ruled pattern): no call
+            # without --native. The payload is printed for the chat agent
+            # or a subagent to answer; 'lens register' stores the answer.
+            text = payload.render(args.name)
+            if args.out:
+                from pathlib import Path as _P
+                _P(args.out).write_text(text, encoding="utf-8")
+                print(f"payload → {args.out} ({len(text):,} chars; blocks "
+                      + ", ".join(f"{k} {len(v):,}" for k, v in payload.blocks)
+                      + "). No model call was made; answer block S's contract "
+                      f"and 'lens register {args.name} {payload.file} --reply "
+                      "<json>', or re-run with --native.")
+            else:
+                print(text)
+            return
         llm = api.LLMClient(_load_config(args))
         if not llm.enabled:
-            raise SystemExit("lens run needs the LLM enabled — for an "
-                             "external (Claude) pass, use lens register")
+            raise SystemExit("--native needs the LLM enabled — without it, "
+                             "'lens run' prints the payload for an external "
+                             "(Claude) pass, then 'lens register'")
         try:
             result = lenses.run_lens(db, manuscript, session, args.name,
-                                     args.file, llm)
+                                     payload.file, llm, payload=payload)
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         line = llm.stats_line()
     else:  # register — the door for externally produced findings
-        raw = _stdin_text()
+        if args.reply:
+            from pathlib import Path as _P
+            try:
+                raw = _P(args.reply).read_text(encoding="utf-8")
+            except OSError as err:
+                raise SystemExit(f"error: cannot read --reply: {err}")
+        else:
+            raw = _stdin_text()
         try:
             payload = _json.loads(raw) if raw else None
         except _json.JSONDecodeError as err:
@@ -3927,7 +4264,12 @@ def cmd_lens(args):
     print(f"Lens '{result['lens']}' on {result['file']}: "
           f"{len(result['findings'])} finding(s)"
           + (f", {result['dropped_ungrounded']} ungrounded dropped"
-             if result["dropped_ungrounded"] else "") + ".")
+             if result["dropped_ungrounded"] else "")
+          + (f", {len(result['refused_targets'])} refused for naming a "
+             "chapter the lens did not declare"
+             if result.get("refused_targets") else "") + ".")
+    for rt in result.get("refused_targets", []):
+        print(ui.yellow(f"  refused: «{rt['quote']}» → {rt['target']}"))
     for i, row in enumerate(result["findings"], start=1):
         meta = _json.loads(row.get("metadata") or "{}")
         tag = " [edit staged]" if meta.get("edit_thread") else ""
@@ -4007,6 +4349,236 @@ def cmd_export(args):
         print(ui.yellow(f"warning: {warning}"))
 
 
+def _confirm(prompt: str, yes: bool) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        raise SystemExit(ui.yellow(
+            f"{prompt} — no terminal to ask on; pass --yes to proceed"))
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def cmd_audio(args):
+    """The audiobook verbs (docs/audiobook-pipeline-design.md §11)."""
+    from . import audio
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    rest = list(args.rest or [])
+    try:
+        if args.action == "init":
+            result = audio.init(manuscript)
+            print(f"Wrote {result['config']} and {result['cast']}.")
+            print(ui.dim("  Both are yours now: AuthorLM reads them and never "
+                         "rewrites them (audio cast set writes one row)."))
+            return
+
+        if args.action == "export":
+            chapters = [c for part in (args.chapters or [])
+                        for c in part.split(",") if c.strip()]
+            result = audio.export(db, manuscript, only=chapters or None,
+                                  resolve_dictionary=not args.offline)
+            for path in result["written"]:
+                print(f"Wrote {path}.")
+            if result["unchanged"]:
+                print(ui.dim(f"  unchanged: {len(result['unchanged'])} file(s)"))
+            print(ui.dim(f"  {len(result['chapters'])} chapter(s), "
+                         f"{result['sections']} speech section(s), "
+                         f"{result['characters']:,} characters"))
+            for warning in result["warnings"]:
+                print(ui.yellow(f"warning: {warning}"))
+            return
+
+        if args.action == "check":
+            report = audio.check(db, manuscript)
+            for problem in report["problems"]:
+                print(ui.yellow(f"✗ {problem}"))
+            for warning in report["warnings"]:
+                print(ui.dim(f"  ! {warning}"))
+            if report["state"]:
+                print(f"Generated at {report.get('quality', '')} "
+                      "(audiostation's state, read-only):")
+                for stem, s in report["state"].items():
+                    mark = "stitched" if s["stitched"] else "not stitched"
+                    print(f"  {stem}: {s['generated']}/{s['total']} sections, "
+                          f"{mark}")
+            if report["ready"]:
+                print(ui.green("The audiobook's sources are ready. "
+                               "audiostation's ACX audit is the last gate."))
+            else:
+                raise SystemExit(1)
+
+        if args.action == "voices":
+            client = audio.ElevenLabs(audio.api_key())
+            result = audio.voices_gallery(manuscript, client,
+                                          search=args.search or "",
+                                          library=args.library,
+                                          limit=args.limit)
+            for v in result["voices"]:
+                labels = ", ".join(f"{k}: {val}" for k, val in
+                                   (v.get("labels") or {}).items() if val)
+                print(f"  {v['name']}  {v['voice_id']}"
+                      + (f"  — {labels}" if labels else ""))
+            print(f"{result['clips']} preview clip(s) → {result['page']}"
+                  "  ← publish this as an artifact")
+            return
+
+        if args.action == "audition":
+            if not args.cast:
+                raise SystemExit("usage: audio audition --cast KEY,KEY "
+                                 "(--text … | --file F --paragraphs N-M)")
+            if args.text:
+                text = args.text
+            elif args.file and args.paragraphs:
+                text = audio.audition_text(manuscript, args.file,
+                                           args.paragraphs)
+            else:
+                raise SystemExit("give --text, or --file F --paragraphs N-M")
+            candidates = [c.strip() for c in args.cast.split(",") if c.strip()]
+            chars = len(audio.normalize(text)) * len(candidates)
+            if not _confirm(f"This audition spends about {chars:,} "
+                            f"ElevenLabs characters ({len(candidates)} "
+                            f"voice(s) × {len(audio.normalize(text)):,}). "
+                            "Proceed?", args.yes):
+                print("Nothing rendered.")
+                return
+            overrides = {"stability": args.stability,
+                         "similarity": args.similarity, "speed": args.speed,
+                         "model": args.model}
+            client = audio.ElevenLabs(audio.api_key())
+            result = audio.audition(manuscript, client, candidates, text,
+                                    overrides=overrides,
+                                    quality=args.quality,
+                                    label=args.label or "")
+            for clip in result["clips"]:
+                print(f"  {clip['cast']}: {clip['path']}")
+            print(f"{result['characters']:,} characters → {result['page']}"
+                  "  ← publish this as an artifact")
+            return
+
+        if args.action == "cast":
+            if len(rest) < 2 or rest[0] != "set":
+                raise SystemExit("usage: audio cast set <key> --voice-id ID "
+                                 "[--voice NAME --model M --stability S "
+                                 "--similarity S --speed S --note N]")
+            key = rest[1]
+            if not args.voice_id:
+                raise SystemExit("audio cast set needs --voice-id")
+            root = audio.audio_dir(manuscript)
+            path = root / audio.CAST_FILENAME
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            existing, _w = audio.parse_cast(text)
+            row = next((r for r in existing if r["key"] == key), {})
+            new = {"key": key,
+                   "voice": args.voice if args.voice is not None else row.get("voice", ""),
+                   "voice_id": args.voice_id,
+                   "model": args.model if args.model is not None else row.get("model", ""),
+                   "stability": (f"{args.stability:g}" if args.stability is not None
+                                 else row.get("stability", "")),
+                   "similarity": (f"{args.similarity:g}" if args.similarity is not None
+                                  else row.get("similarity", "")),
+                   "speed": (f"{args.speed:g}" if args.speed is not None
+                             else row.get("speed", "")),
+                   "note": args.note if args.note is not None else row.get("note", "")}
+            root.mkdir(parents=True, exist_ok=True)
+            path.write_text(audio.set_cast_row(text, new), encoding="utf-8")
+            print(f"{'Updated' if row else 'Added'} cast '{key}' in "
+                  f"{path.relative_to(Path(manuscript['path']))}.")
+            return
+
+        if args.action == "say":
+            if not rest:
+                raise SystemExit("usage: audio say <term> [--say S[,S…]] "
+                                 "[--cast KEY] [--file F] [--dictionary] "
+                                 "[--settle] [--no-play]")
+            term = " ".join(rest)
+            says = [s.strip() for s in (args.say or "").split(",") if s.strip()]
+            client = audio.ElevenLabs(audio.api_key())
+            result = audio.say(manuscript, client, term, says=says or None,
+                               cast_key=args.cast, file=args.file,
+                               use_dictionary=args.dictionary,
+                               quality=args.quality)
+            ctx = result["context"]
+            print(f"{term} is said by {ctx['cast']} in {ctx['file']}: "
+                  f"«{ctx['sentence'][:120]}»")
+            for clip in result["clips"]:
+                print(f"  {clip['say'] or '(dictionary)'}: {clip['path']}")
+                if not args.no_play and sys.platform == "darwin":
+                    import subprocess
+                    subprocess.run(["afplay", clip["path"]], check=False)
+            print(f"{result['characters']} characters → {result['page']}")
+            if args.settle:
+                if len(says) != 1:
+                    raise SystemExit("--settle needs exactly one --say")
+                done = audio.settle_say(manuscript, term, says[0], args.note)
+                print(f"{'Added' if done['added'] else 'Updated'} "
+                      f"'{done['term']}' → {done['say']} in "
+                      f"{Path(done['path']).name}. Next: 'audio dictionary "
+                      f"push', then 'audio export'.")
+            elif says:
+                print(ui.dim(f"  to keep one: audio say {term} --say \"…\" "
+                             "--settle   (writes the pronunciations.md row)"))
+            return
+
+        if args.action == "dictionary":
+            if rest[:1] != ["push"]:
+                raise SystemExit("usage: audio dictionary push [--yes]")
+            client = audio.ElevenLabs(audio.api_key())
+            plan = audio.dictionary_plan(manuscript, client)
+            for line in audio.describe_plan(plan):
+                print(line)
+            if not (plan["create"] or plan["add"] or plan["change"]):
+                print(ui.green("Nothing to push."))
+                return
+            if not _confirm("Apply?", args.yes):
+                print("Nothing pushed.")
+                return
+            result = audio.dictionary_apply(plan, client)
+            print(f"Dictionary {result['id']} at version "
+                  f"{result['version_id']}: {result['added']} added, "
+                  f"{result['changed']} changed"
+                  + (" (created)" if result["created"] else "") + ".")
+            print(ui.dim("  Run 'audio export' to write the new version "
+                         "into audiobook.json."))
+            return
+    except (audio.AudioError, LookupError, RuntimeError) as err:
+        raise SystemExit(ui.yellow(f"audio {args.action}: {err}"))
+
+
+def cmd_audiostation(args):
+    """Open audiostation on the manuscript's `_audio/` folder."""
+    import subprocess
+
+    from . import audio
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    try:
+        launch = audio.audiostation_launch(manuscript)
+    except audio.AudioError as err:
+        raise SystemExit(ui.yellow(f"audiostation: {err}"))
+    if args.dry_run:
+        print(" ".join(launch["argv"]) + (f"   (in {launch['cwd']})"
+                                          if launch["cwd"] else ""))
+        return
+    if launch["mode"] == "dev":
+        print(ui.dim("No built audiostation found — starting the dev server "
+                     "(the first run compiles for a few minutes)."))
+    try:
+        subprocess.Popen(launch["argv"], cwd=launch["cwd"],
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL if launch["mode"] != "dev"
+                         else None,
+                         stderr=subprocess.DEVNULL if launch["mode"] != "dev"
+                         else None,
+                         start_new_session=True)
+    except OSError as err:
+        raise SystemExit(ui.yellow(f"audiostation: could not start "
+                                   f"{launch['argv'][0]}: {err}"))
+    print(f"audiostation ({launch['mode']}) → {launch['dir']}")
+
+
 # Verbs that send an LLM prompt announce it in --help and point at the
 # registry, so the words shaping the model are always one command away.
 #
@@ -4016,14 +4588,141 @@ def cmd_export(args):
 # construction.
 LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
              "analyze", "lens", "sweep", "illus", "summarize", "doc",
-             "belief", "critique", "triage-app",
+             "belief", "critique", "triage-app", "workbench",
              # `filter run --native` is the filter pass's one call, and
              # it is off by default — the verb still announces the prompt
              # it would send, because the CHAT path drafts under exactly
              # those rules.
              "filter",
+             # `interlocutor run` makes no call either — a subagent reads
+             # the payload — and announces the prompt for the same reason.
+             "interlocutor",
              # `write draft` is the write path's one LLM call.
              "write"}
+
+
+def cmd_interlocutor(args):
+    from pathlib import Path as _Path
+
+    from . import interlocutor as il
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+
+    try:
+        if args.action == "add":
+            text = _stdin_text()
+            if not args.name or not text:
+                raise SystemExit("usage: authorlm interlocutor add <name>  "
+                                 "(the artifact — front matter and prose — "
+                                 "on stdin)")
+            path, meta = il.add_interlocutor(manuscript, args.name, text)
+            print(f"Interlocutor '{args.name}' ratified → {path}")
+            print(ui.dim(f"  {len(meta['terms'])} term(s); engaged: "
+                         f"{', '.join(meta['engaged']) or 'none'}; position: "
+                         f"{', '.join(meta['position']) or 'none'}"))
+            return
+
+        if args.action == "show":
+            if not args.name:
+                raise SystemExit("usage: authorlm interlocutor show <name>")
+            path = il._path(manuscript, args.name)
+            if not path.is_file():
+                raise SystemExit(f"error: no interlocutor '{args.name}' "
+                                 "('interlocutor list' shows them).")
+            print(ui.bold(f"Interlocutor '{args.name}' — {path}"))
+            print(path.read_text(encoding="utf-8").rstrip())
+            return
+
+        if args.action == "list":
+            rows = il.list_interlocutors(manuscript)
+            if not rows:
+                print("No interlocutors defined. Create one: authorlm "
+                      "interlocutor add <name>  (artifact on stdin)")
+            for row in rows:
+                extra = []
+                if row["engaged"]:
+                    extra.append(f"engaged: {', '.join(row['engaged'])}")
+                if row["position"]:
+                    extra.append(f"position: {', '.join(row['position'])}")
+                tail = f" — {'; '.join(extra)}" if extra else ""
+                print(f"  {row['name']}: {row['summary']} "
+                      f"({row['terms']} terms){tail}")
+            return
+
+        if args.action == "draft":
+            if not args.name or not args.out:
+                raise SystemExit("usage: authorlm interlocutor draft <name> "
+                                 "--engaged <essay> --out <payload>")
+            result = il.build_draft_payload(db, manuscript, args.name,
+                                            args.engaged, _Path(args.out))
+            print(f"Draft payload for '{args.name}' → {result['out']} "
+                  f"({result['size']:,} chars). No model call.")
+            print(ui.dim(f"A subagent writes the artifact to "
+                         f"{result['artifact_path']}; the author reads it; "
+                         f"then 'interlocutor add {args.name}' with it on "
+                         "stdin."))
+            return
+
+        if args.action == "run":
+            if not args.name or not args.out:
+                raise SystemExit("usage: authorlm interlocutor run <name> "
+                                 "[--file <chapter>]... [--engaged <essay>]"
+                                 "... [--position <essay>]... --out <payload>")
+            result = il.build_payload(db, manuscript, args.name,
+                                      args.file or None, args.engaged,
+                                      args.position, _Path(args.out),
+                                      max_terms=args.max_terms,
+                                      max_per_term=args.max_per_term,
+                                      seed=args.seed)
+            print(f"Payload for '{args.name}' → {result['out']} "
+                  f"({result['size']:,} chars; scope: {result['scope']}; "
+                  f"{len(result['all_hits'])} unit(s) mention a term, "
+                  f"{len(result['hits'])} shown — "
+                  f"{len(result['sampled_terms'])} of "
+                  f"{len(result['all_terms'])} term(s), seed "
+                  f"{result['seed']}). No model call.")
+            print(ui.dim(f"  carried whole — position: "
+                         f"{', '.join(result['position']) or 'none'}; "
+                         f"engaged: {', '.join(result['engaged']) or 'none'}"))
+            print(ui.dim(f"A subagent writes {result['report_path']} and "
+                         f"{result['manifest_path']}; then 'interlocutor "
+                         f"import {args.name} {result['out']}'."))
+            return
+
+        # import
+        if not args.name or not args.target:
+            raise SystemExit("usage: authorlm interlocutor import <name> "
+                             "<payload>")
+        result = il.import_run(db, manuscript, args.name, _Path(args.target))
+        v = result["verdicts"]
+        kept_m = sum(1 for f in result["kept"]
+                     if f["kind"] == "misattribution")
+        print(f"Interlocutor '{args.name}': {sum(v.values())} objection(s) "
+              f"kept (addressed {v['addressed']}, partial {v['partial']}, "
+              f"unaddressed {v['unaddressed']}), {kept_m} "
+              f"misattribution(s); {len(result['dropped'])} finding(s) and "
+              f"{len(result['items_dropped'])} manifest item(s) dropped at "
+              "the gate.")
+        for d in result["dropped"]:
+            print(ui.dim(f"  dropped {d['id']} {d['title']}: {d['reason']}"))
+        for d in result["items_dropped"]:
+            print(ui.dim(f"  dropped item {d['unit'][:40]!r}: {d['reason']}"))
+        imp = result["imported"]
+        print(f"Report → {result['report']}\nManifest → {result['manifest']}")
+        print(f"Imported {imp['intents']} proposed intent(s) "
+              f"({imp['skipped']} already present, skipped).")
+        for dup in imp.get("duplicates", []):
+            print(ui.dim(f"  duplicate: {dup['unit']} restates "
+                         f"{dup['existing_id']} ({dup['status']}, from "
+                         f"'{dup['source']}') — skipped, verdict stands"))
+        for err in imp.get("errors", []):
+            print(ui.yellow(f"warning: {err}"))
+        if imp["intents"]:
+            print(ui.dim("Nothing is law yet — triage with 'critique triage "
+                         f"--scope <essay>' or list_critique_items."))
+    except (il.InterlocutorError, LookupError) as err:
+        raise SystemExit(f"error: {err}")
 
 
 def _stdin_text() -> str | None:
@@ -4180,7 +4879,8 @@ def _print_draft_usage(usage: dict) -> None:
             "two beats to find it."))
 
 
-def _write_draft(db, manuscript, config, prefix, dry_run: bool) -> None:
+def _write_draft(db, manuscript, config, prefix, dry_run: bool,
+                 out: str | None = None) -> None:
     """`write draft` — the beat-drafting verb's whole surface."""
     from .llm import DraftError
 
@@ -4201,13 +4901,28 @@ def _write_draft(db, manuscript, config, prefix, dry_run: bool) -> None:
         payload = result["payload"]
         _print_beat_spec(result["beat"])
         target = result["model"] or (
-            "no [writing] model configured — draft this payload in the "
-            "conversation, then register it with 'write propose --why …'")
+            "no [writing] model configured — hand this payload to a "
+            "drafter subagent with an empty context, then 'write critique' "
+            "and 'write propose --critique …'")
         print(ui.dim(f"Payload for {target} — no call made."))
         # Provenance, on the dry run too: the conversational drafting flow
         # drafts under this prompt's rules, so it has to be named where the
         # payload is printed and not only after a billed call.
         print(ui.dim(f"Prompt: {result['prompt_location']}"))
+        if out:
+            # The clean-context road: the payload goes to a file that a
+            # drafter with an empty context reads whole. The terminal gets
+            # the hashes only, so nothing of the payload lands in the
+            # orchestrating conversation.
+            body = "\n\n".join(f"───── block {name}\n{text}"
+                                for name, text in payload.blocks)
+            Path(out).write_text(body + "\n", encoding="utf-8")
+            for name, text in payload.blocks:
+                print(ui.dim(f"block {name} — {len(text):,} chars — "
+                             f"sha256 {payload.hashes[name][:12]}"))
+            print(f"Payload written to {out} ({sum(payload.sizes.values()):,} "
+                  f"chars). Assembly recorded for beat n={result['beat']['n']}.")
+            return
         for name, text in payload.blocks:
             print()
             print(ui.bold(f"───── block {name} — {len(text):,} chars — "
@@ -4432,12 +5147,109 @@ def cmd_write(args):
                 _print_accounting(result["accounting"])
         elif args.action == "draft":
             _write_draft(db, manuscript, config, prefix,
-                         dry_run=getattr(args, "dry_run", False))
+                         dry_run=getattr(args, "dry_run", False),
+                         out=getattr(args, "out", None))
+        elif args.action == "show":
+            from . import lint as lint_mod
+
+            result = api.write_show(db, manuscript, prefix=prefix)
+            marked = result["marked"]
+            omitted = 0
+            if getattr(args, "changed", False):
+                kept, omitted = lint_mod.changed_only(marked)
+                marked = "\n\n".join(kept)
+            if getattr(args, "html", False):
+                if getattr(args, "changed", False) and not kept:
+                    print('<p class="chg">No change against the original in '
+                          'this beat.</p>')
+                else:
+                    print(lint_mod.marked_html(marked))
+                    if omitted:
+                        print(f'<p class="note">{omitted} unchanged '
+                              f'paragraph(s) not shown.</p>')
+                return
+            _print_beat_spec(result["beat"])
+            if getattr(args, "plain", False):
+                print(result["draft"])
+            elif getattr(args, "changed", False) and not kept:
+                print("**No change against the original in this beat.**")
+            else:
+                print(marked)
+                if omitted:
+                    print(f"({omitted} unchanged paragraph(s) not shown.)")
+            if not getattr(args, "plain", False):
+                print()
+                print(ui.dim(
+                    "Bold = changed against the pinned original; a "
+                    "paragraph bold whole is new material. The essay's own "
+                    "bolding is not shown in this view."
+                    if result["rewrite"] else
+                    "Not a rewrite: the whole beat is new material."))
+        elif args.action == "landed":
+            result = api.write_landed(db, manuscript, prefix=prefix)
+            t = result["totals"]
+            print(ui.bold(f"{result['file']}: {t['exact']} paragraph(s) landed "
+                          f"exactly, {t['changed']} reworded, "
+                          f"{t['missing']} MISSING."))
+            for beat in result["beats"]:
+                flag = ui.yellow if beat["missing"] else ui.dim
+                print(flag(f"  beat n={beat['n']}: {beat['exact']} exact, "
+                           f"{beat['changed']} reworded, "
+                           f"{beat['missing']} missing"))
+                for para in beat["paragraphs"]:
+                    if para["verdict"] == "missing":
+                        print(ui.yellow(f"    MISSING: «{para['head']}…»"))
+            if result["extra"]:
+                print(ui.dim(f"  {len(result['extra'])} paragraph(s) in the "
+                             f"file match no accepted beat — the author's "
+                             f"own additions:"))
+                for para in result["extra"][:12]:
+                    print(ui.dim(f"    + «{para['head']}…»"))
+        elif args.action == "critique":
+            from . import lint as lint_mod
+
+            text = _stdin_text()
+            if not text:
+                sys.exit("write critique expects the draft on stdin")
+            result = api.write_critique(db, manuscript, text, prefix=prefix)
+            report = result["lint"]
+            if args.out:
+                Path(args.out).write_text(result["payload"] + "\n",
+                                          encoding="utf-8")
+                print(f"Critic payload written to {args.out} "
+                      f"({len(result['payload']):,} chars) for beat "
+                      f"n={result['beat']['n']}.")
+                print(ui.dim(f"Prompt: {result['prompt_location']}"))
+            else:
+                print(result["payload"])
+            summary = lint_mod.render(report, "LINT (deterministic)")
+            if report.errors:
+                print(ui.yellow(summary))
+                print(ui.yellow(
+                    f"{len(report.errors)} lint ERROR(s): write propose will "
+                    f"refuse this draft as it stands. Redraft, or "
+                    f"--lint-override \"<why>\"."))
+            elif report.warnings:
+                print(ui.dim(summary))
+            else:
+                print(ui.dim("Lint: clean."))
         elif args.action == "propose":
             text = _stdin_text()
-            result = api.write_propose(db, manuscript, text or "",
-                                       args.why or "", prefix=prefix)
+            critique = None
+            if args.critique:
+                critique = Path(args.critique).read_text(encoding="utf-8")
+            result = api.write_propose(
+                db, manuscript, text or "", args.why or "", prefix=prefix,
+                critique=critique, no_critic=args.no_critic,
+                lint_override=args.lint_override)
             _print_beat_spec(result["beat"])
+            gates = result.get("gates") or {}
+            if gates:
+                print(ui.dim("Gates: assembly fresh; lint "
+                             + (", ".join(gates.get("lint") or []) or "clean")
+                             + (f" (override: {gates['lint_override']})"
+                                if gates.get("lint_override") else "")
+                             + f"; critic {gates.get('critic')}."))
             print(f"Draft registered [{result['guidance_id'][:11]}] — "
                   "author verdict: accept / accept with reworded stdin / "
                   "reject --reason.")
@@ -6504,6 +7316,13 @@ def cmd_triage_app(args):
         port=args.port, open_browser=not args.no_open)
 
 
+def cmd_workbench(args):
+    from .workbench_server import run
+
+    run(args.workspace, getattr(args, "manuscript", None), host=args.host,
+        port=args.port, open_browser=not args.no_open)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="authorlm",
@@ -6512,16 +7331,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-w", "--workspace", default=None,
         help="directory holding AuthorLM's data — the .authorlm/ folder with "
-             "the database and config. Defaults to your home directory, so "
-             "all manuscripts share one database in ~/.authorlm regardless "
-             "of where you run the command")
+             "the database. Defaults to AUTHORLM_WORKSPACE from the "
+             "checkout's .env ('authorlm setup' writes it), else your home "
+             "directory. A missing database is an error, not an invitation: "
+             "only 'init' with -w, or 'setup', creates one")
     parser.add_argument("-m", "--manuscript", help="manuscript name (needed only if several exist)")
     # Accept --workspace/--manuscript after the subcommand too (e.g.
     # 'session start -m X'). SUPPRESS keeps the subparser from
     # clobbering a value given before the subcommand.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-w", "--workspace", default=argparse.SUPPRESS,
-                        help="data directory override (default: ~/.authorlm)")
+                        help="workspace override (default: AUTHORLM_WORKSPACE from .env, else ~)")
     common.add_argument("-m", "--manuscript", default=argparse.SUPPRESS,
                         help="manuscript name (needed only if several exist)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -6538,6 +7358,12 @@ def build_parser() -> argparse.ArgumentParser:
         return original_add_parser(name, *a, **kw)
 
     sub.add_parser = add_parser
+
+    p = sub.add_parser(
+        "setup", help="point this checkout at a workspace and create its database")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="create without asking (with --workspace)")
+    p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("init", help="register a manuscript directory")
     p.add_argument("--name", required=True)
@@ -6568,6 +7394,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--trim-size", default=None, metavar="WxH",
                    help="print trim size in inches, e.g. 6x9 (the book "
                         "profile refuses to build without one)")
+    p.add_argument("--narrator", default=None,
+                   help="the audiobook's narrator, for the credits and tags")
+    p.add_argument("--publisher", default=None,
+                   help="the publisher named in the closing credits")
+    p.add_argument("--copyright-year", default=None, metavar="YYYY",
+                   help="four-digit copyright year (empty clears)")
+    p.add_argument("--language", default=None, metavar="CODE",
+                   help="publication language, e.g. en or en-US")
     p.add_argument("--bleed", default=None, choices=["yes", "no"],
                    help="whether the print interior bleeds to the page "
                         "edge (adds 0.125in to the page on three sides)")
@@ -6596,6 +7430,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-open", action="store_true",
                    help="print the URL without opening a browser")
     p.set_defaults(func=cmd_triage_app)
+
+    p = sub.add_parser(
+        "workbench",
+        help="open the pronunciation workbench (audiobook)",
+        description="Serve the pronunciation workbench on a local port and "
+                    "open it: every word in pronunciations.md, every voice "
+                    "that says it, Regenerate and listen, Save, Push, Export. "
+                    "Nothing spends credits until Regenerate is pressed.")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="local interface to bind (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=0,
+                   help="local port (default: choose a free port)")
+    p.add_argument("--no-open", action="store_true",
+                   help="print the URL without opening a browser")
+    p.set_defaults(func=cmd_workbench)
 
     p = sub.add_parser("intent", help="declare/scope/complete/abandon/list "
                                       "writing intents")
@@ -6734,8 +7583,9 @@ def build_parser() -> argparse.ArgumentParser:
              "(docs/autoregressive-writing-design.md)")
     p.add_argument("action",
                    choices=["start", "plan", "intents", "status", "draft",
-                            "propose", "accept", "reject", "learn",
-                            "complete", "abandon", "digest"])
+                            "critique", "propose", "show", "landed", "accept",
+                            "reject", "learn", "complete", "abandon",
+                            "digest"])
     p.add_argument("params", nargs="*", help="start: <file>")
     p.add_argument("--intent", action="append", metavar="ID",
                    help="start: reach for these intents BY NAME, skipping "
@@ -6789,6 +7639,29 @@ def build_parser() -> argparse.ArgumentParser:
                         "sha256 per block, and make NO model call — the way "
                         "to audit what is sent and to find a silent cache "
                         "invalidator between two beats")
+    p.add_argument("--out", metavar="PATH",
+                   help="draft --dry-run / critique: write the payload to "
+                        "this file (for a clean-context drafter or critic) "
+                        "and print only its sizes and hashes")
+    p.add_argument("--critique", metavar="PATH",
+                   help="propose: the critic's report for this exact draft "
+                        "(VERDICT PASS required)")
+    p.add_argument("--no-critic", metavar="REASON", dest="no_critic",
+                   help="propose: skip the critic gate with a reason that is "
+                        "recorded (e.g. the author dictated the text)")
+    p.add_argument("--plain", action="store_true",
+                   help="show: the pending draft as registered, without the "
+                        "change marks")
+    p.add_argument("--changed", action="store_true",
+                   help="show: only the paragraphs that changed against the "
+                        "original, with a count of the ones left out")
+    p.add_argument("--html", action="store_true",
+                   help="show: the marked view as an HTML fragment "
+                        "(<span class=\"chg\"> on changed spans) for a "
+                        "colored rendering")
+    p.add_argument("--lint-override", metavar="REASON", dest="lint_override",
+                   help="propose: register despite lint ERRORs, with a reason "
+                        "that is recorded (a refrain, a quotation)")
     p.set_defaults(func=cmd_write)
 
     p = sub.add_parser("diff", help="colored diff between collected versions "
@@ -6845,11 +7718,27 @@ def build_parser() -> argparse.ArgumentParser:
              "resolve <file> (read the tab back)")
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
-                            "review", "push", "resolve"])
+                            "review", "push", "resolve", "status", "sweep"])
     p.add_argument("name", nargs="?",
-                   help="lens name (add/run/register), finding index "
-                        "(review), or manuscript file (push/resolve)")
+                   help="lens name (add/show/run/register), finding index "
+                        "(review), or manuscript file (push/resolve/"
+                        "status/sweep)")
     p.add_argument("file", nargs="?", help="manuscript file (run/register)")
+    p.add_argument("--native", action="store_true",
+                   help="run/sweep: make the model call on the configured "
+                        "[llm] model. WITHOUT it 'lens run' makes NO call: "
+                        "it prints the payload for the chat agent or a "
+                        "subagent to answer, then 'lens register'.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="no-op alias: 'lens run' already makes no call")
+    p.add_argument("--out", metavar="PATH",
+                   help="run/sweep: write the printed payload(s) to this "
+                        "path (sweep: a directory) instead of stdout")
+    p.add_argument("--reply", metavar="PATH",
+                   help="register: read the findings JSON from this file "
+                        "instead of stdin")
+    p.add_argument("--only", help="sweep: comma-separated lens names to run")
+    p.add_argument("--skip", help="sweep: comma-separated lens names to skip")
     p.add_argument("--accept", action="store_true")
     p.add_argument("--reject", action="store_true")
     p.add_argument("--modify", action="store_true")
@@ -6857,6 +7746,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explain", help="the author's reasoning, verbatim — "
                                      "the highest-value evidence")
     p.set_defaults(func=cmd_lens)
+
+    p = sub.add_parser(
+        "interlocutor",
+        help="a third-person critical reading of the whole book from inside "
+             "one tradition (_interlocutors/<name>.md, TOML front matter): "
+             "add, list, show <name>, draft <name> --engaged <essay> --out "
+             "<p> (bootstrap payload for a new critic), run <name> [--file "
+             "…] [--engaged …] [--position …] --out <p> (scan + payload, NO "
+             "model call — a subagent reads it), import <name> <p> (verify "
+             "the report beside the payload, land it in _critiques/, import "
+             "the manifest as proposed intents)")
+    p.add_argument("action",
+                   choices=["add", "list", "show", "draft", "run", "import"])
+    p.add_argument("name", nargs="?", help="interlocutor name")
+    p.add_argument("target", nargs="?",
+                   help="import: the payload path the run wrote")
+    p.add_argument("--file", action="append", default=[],
+                   help="run: narrow the scan to this chapter or part opener "
+                        "(repeatable)")
+    p.add_argument("--engaged", action="append", default=[],
+                   help="an essay that already engages this interlocutor, "
+                        "carried whole (repeatable; adds to the artifact's)")
+    p.add_argument("--position", action="append", default=[],
+                   help="an essay carried whole as the author's "
+                        "authoritative position (repeatable; adds to the "
+                        "artifact's)")
+    p.add_argument("--out", help="draft/run: where to write the payload")
+    p.add_argument("--max-terms", type=int, default=12,
+                   help="run: terms shown per run, sampled when more have "
+                        "hits (default 12; 0 = all)")
+    p.add_argument("--max-per-term", type=int, default=6,
+                   help="run: locations shown per term, sampled when more "
+                        "exist (default 6; 0 = all)")
+    p.add_argument("--seed", type=int,
+                   help="run: reproduce an earlier run's sample (the seed "
+                        "is printed and recorded in the report)")
+    p.set_defaults(func=cmd_interlocutor)
 
     p = sub.add_parser(
         "filter",
@@ -6960,6 +7886,127 @@ def build_parser() -> argparse.ArgumentParser:
                         "margins with a KDP gutter, running heads, "
                         "captions under the plates) — no review marks")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser(
+        "audio",
+        help="the audiobook: export the manifests audiostation generates "
+             "from, audition voices, keep the cast and the ElevenLabs "
+             "dictionary, check readiness (docs/audiobook-pipeline-design.md)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples by action:\n"
+               "  audio init                        seed _audio/audiobook.toml "
+               "and cast.md (once)\n"
+               "  audio export [--chapters F,F]     write audiobook.json and "
+               "chapters/*.json (only what changed)\n"
+               "  audio check                       is the audiobook ready, "
+               "from the sources to audiostation's state\n"
+               "  audio voices [--search WORDS] [--library]   free preview "
+               "clips into the audition gallery\n"
+               "  audio audition --cast narrator,3MTv… --file sermons.md "
+               "--paragraphs 3-5   paid clips on the book's words\n"
+               "  audio cast set herdsman --voice-id ID --voice 'Adam Stone' "
+               "--stability 0.65\n"
+               "  audio say Basilides --say \"buh-SIL-ih-deez,ba-SIL-i-deez\"   "
+               "hear each respelling in a real sentence, in its voice, "
+               "no dictionary push; --settle keeps one\n"
+               "  audio dictionary push             pronunciations.md → the "
+               "named ElevenLabs dictionary, after showing the diff")
+    p.add_argument("action",
+                   choices=["init", "export", "check", "voices", "audition",
+                            "cast", "dictionary", "say"])
+    p.add_argument("rest", nargs="*",
+                   help="cast set <key>; dictionary push; say <term>")
+    p.add_argument("--say", help="say: respelling(s) to try, comma-separated "
+                                 "(default: the table's)")
+    p.add_argument("--dictionary", action="store_true",
+                   help="say: render the untouched sentence with the pushed "
+                        "dictionary attached, to prove the rule fires")
+    p.add_argument("--settle", action="store_true",
+                   help="say: write the one --say into pronunciations.md")
+    p.add_argument("--no-play", action="store_true", dest="no_play",
+                   help="say: do not play the clips (afplay)")
+    p.add_argument("--chapters", action="append", metavar="FILE,FILE",
+                   help="export: rewrite only these chapter files")
+    p.add_argument("--offline", action="store_true",
+                   help="export: skip the ElevenLabs dictionary lookup")
+    p.add_argument("--search", help="voices: words to match (name, labels; "
+                                    "the library search with --library)")
+    p.add_argument("--library", action="store_true",
+                   help="voices: search the shared voice library instead "
+                        "of the account")
+    p.add_argument("--limit", type=int, default=12,
+                   help="voices: at most this many (default 12)")
+    p.add_argument("--cast", help="audition: cast keys or voice ids, "
+                                  "comma-separated")
+    p.add_argument("--text", help="audition: the words to render")
+    p.add_argument("--file", help="audition: take the words from this file")
+    p.add_argument("--paragraphs", help="audition: N or N-M paragraph "
+                                        "sections of --file")
+    p.add_argument("--label", help="audition: a word for the caption")
+    p.add_argument("--quality", default="mp3_44100_64",
+                   help="audition: output format (default mp3_44100_64)")
+    p.add_argument("--voice-id", dest="voice_id",
+                   help="cast set: the ElevenLabs voice id")
+    p.add_argument("--voice", help="cast set: the voice's display name")
+    p.add_argument("--model", help="cast set / audition: the model id")
+    p.add_argument("--stability", type=float)
+    p.add_argument("--similarity", type=float)
+    p.add_argument("--speed", type=float)
+    p.add_argument("--note", help="cast set: the role note")
+    p.add_argument("--yes", action="store_true",
+                   help="audition / dictionary push: skip the confirmation")
+    p.set_defaults(func=cmd_audio)
+
+    p = sub.add_parser(
+        "audiostation",
+        help="open the audiostation studio on this manuscript's _audio/ "
+             "folder (a built .app, else the dev server; AUDIOSTATION_APP "
+             "overrides)")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="print the launch command instead of running it")
+    p.set_defaults(func=cmd_audiostation)
+
+    for kind, what, example in (
+            ("footnote",
+             "[Footnote: gist | label: XX] tags — inline requests for a "
+             "footnote, drafted in chat, landed here: the tag becomes "
+             "[^label] and the definition joins the file's block",
+             "  footnote apply becker.md --tag 1 --text 'Ernest Becker, "
+             "*The Denial of Death* (1973), ch. 2.'"),
+            ("explain",
+             "[Explain: gist] tags — inline requests for an explanatory "
+             "passage, drafted in chat, landed here in place of the tag",
+             "  explain apply becker.md --tag 1 --text 'A vital lie is …'")):
+        p = sub.add_parser(
+            kind, help=what,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="examples by action:\n"
+                   f"  {kind} list [file]              open tags, per file "
+                   "(collect and doc pull report them too)\n"
+                   f"{example}\n"
+                   f"  {kind} apply <file> --tag 'gist excerpt' --text …  "
+                   "name the tag by an excerpt instead of its ordinal\n"
+                   "  several --tag/--text pairs ride one command\n"
+                   f"  {kind} resolve <file>            file checked out: "
+                   "apply wrote <<tag>>{{new}} forms into the tab; this "
+                   "reads the author's ruling back and lands it\n\n"
+                   f"docs/{kind}-directive-design.md")
+        p.add_argument("action", choices=["list", "apply", "resolve"])
+        p.add_argument("file", nargs="?",
+                       help="list: one file (default: all); apply/resolve: "
+                            "the file")
+        p.add_argument("--tag", action="append", metavar="N|EXCERPT",
+                       help="apply: the tag's ordinal in the file (first "
+                            "open tag is 1) or an unambiguous excerpt of "
+                            "its gist (repeatable, paired with --text)")
+        p.add_argument("--text", action="append", metavar="TEXT",
+                       help="apply: the agreed text for the preceding --tag")
+        p.add_argument("--footnote", action="append", metavar="TAG=TEXT",
+                       help="explain apply only: a companion footnote for "
+                            "the tag named by TAG (a --tag handle) — the "
+                            "passage lands with its superscript, the "
+                            "definition joins the file's block, same review")
+        p.set_defaults(func=cmd_directive)
 
     p = sub.add_parser(
         "illus",
@@ -7278,8 +8325,9 @@ def _dispatch(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     # Global home database: unless -w is given, data lives in ~/.authorlm so
     # every command works from any directory and manuscripts can live anywhere.
-    if getattr(args, "workspace", None) is None:
-        args.workspace = str(Path.home())
+    workspace, args.workspace_source = api.resolve_workspace(
+        getattr(args, "workspace", None))
+    args.workspace = str(workspace)
     # Destructure the concept subcommand's free-form positionals per action.
     if args.command == "concept":
         if args.action == "reject":

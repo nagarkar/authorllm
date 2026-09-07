@@ -1313,7 +1313,7 @@ def check_backup_and_restore() -> None:
         ms = ws / "manuscript"
         ms.mkdir(parents=True)
         (ms / "01-draft.md").write_text("# Draft\n\nSome text.\n")
-        db = api.open_db(str(ws))
+        db = api.open_db(str(ws), create=True)
         manuscript = api.register_manuscript(db, "book", str(ms))
         concept = _ko_fields("cn")
         concept.update(manuscript_id=manuscript["id"], name="Gravity",
@@ -1377,7 +1377,7 @@ def check_backup_and_restore() -> None:
         skip_ms = skip_ws / "manuscript"
         skip_ms.mkdir(parents=True)
         (skip_ms / "01.md").write_text("# hi\n")
-        skip_db = api.open_db(str(skip_ws))
+        skip_db = api.open_db(str(skip_ws), create=True)
         api.register_manuscript(skip_db, "book", str(skip_ms))
         first = backup.perform_backup(skip_db)
         check("the first-ever backup is never skipped",
@@ -1407,7 +1407,7 @@ def check_backup_and_restore() -> None:
         rot_ms = rot_ws / "manuscript"
         rot_ms.mkdir(parents=True)
         (rot_ms / "01.md").write_text("# hi\n")
-        rot_db = api.open_db(str(rot_ws))
+        rot_db = api.open_db(str(rot_ws), create=True)
         api.register_manuscript(rot_db, "book", str(rot_ms))
         made_paths = []
         for i in range(9):
@@ -1447,7 +1447,7 @@ def check_backup_and_restore() -> None:
         fail_ms = fail_ws / "manuscript"
         fail_ms.mkdir(parents=True)
         (fail_ms / "01.md").write_text("# hi\n")
-        fail_db = api.open_db(str(fail_ws))
+        fail_db = api.open_db(str(fail_ws), create=True)
         fail_manuscript = api.register_manuscript(fail_db, "book", str(fail_ms))
         data_dir = fail_db.path.parent  # <workspace>/.authorlm
         os.chmod(data_dir, 0o500)  # read+execute only: mkdir("backups") fails
@@ -1475,7 +1475,7 @@ def check_backup_and_restore() -> None:
         lat_ms = lat_ws / "manuscript"
         lat_ms.mkdir(parents=True)
         (lat_ms / "01.md").write_text("# hi\n")
-        lat_db = api.open_db(str(lat_ws))
+        lat_db = api.open_db(str(lat_ws), create=True)
         lat_manuscript = api.register_manuscript(lat_db, "book", str(lat_ms))
         # ~56 MB, matching ~/.authorlm/authorlm.db's real size (RFC OPS-4):
         # 60 rows of ~1 MB of text in manuscript_versions.files.
@@ -1509,7 +1509,7 @@ def check_backup_and_restore() -> None:
         corrupt_ms = corrupt_ws / "manuscript"
         corrupt_ms.mkdir(parents=True)
         (corrupt_ms / "01.md").write_text("# hi\n")
-        corrupt_db = api.open_db(str(corrupt_ws))
+        corrupt_db = api.open_db(str(corrupt_ws), create=True)
         corrupt_manuscript = api.register_manuscript(
             corrupt_db, "book", str(corrupt_ms))
         for i in range(3000):
@@ -2039,7 +2039,7 @@ def check_vanished_directory_guard() -> None:
         ms = ws / "manuscript"
         ms.mkdir(parents=True)
         (ms / "01.md").write_text("# Opening\n\nA placeholder paragraph.\n")
-        db = api.open_db(str(ws))
+        db = api.open_db(str(ws), create=True)
         manuscript = api.register_manuscript(db, "book", str(ms))
         api.collect(db, manuscript, {})  # v1 baseline, no concepts yet
 
@@ -2141,7 +2141,7 @@ def check_unregister_safety() -> None:
         ms = ws / "manuscript"
         ms.mkdir(parents=True)
         (ms / "01.md").write_text("# Opening\n\nGravity and Choice both appear.\n")
-        db = api.open_db(str(ws))
+        db = api.open_db(str(ws), create=True)
         manuscript = api.register_manuscript(db, "book", str(ms))
         api.add_concept(db, manuscript, "Gravity")
         choice = api.add_concept(db, manuscript, "Choice")
@@ -2296,7 +2296,7 @@ def check_backup_on_active_session() -> None:
         ms = ws / "manuscript"
         ms.mkdir(parents=True)
         (ms / "01.md").write_text("# hi\n")
-        db = api.open_db(str(ws))
+        db = api.open_db(str(ws), create=True)
         manuscript = api.register_manuscript(db, "book", str(ms))
 
         bses.start_session(db, manuscript["id"])
@@ -2362,7 +2362,7 @@ def check_summary_deprecation() -> None:
         text_b = "# B\n\nSecond essay, about to be edited.\n"
         (ms / "01-a.md").write_text(text_a)
         (ms / "02-b.md").write_text(text_b)
-        db = api.open_db(str(ws))
+        db = api.open_db(str(ws), create=True)
         manuscript = api.register_manuscript(db, "book", str(ms))
         api.collect(db, manuscript, {})
 
@@ -2656,6 +2656,207 @@ def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
     api.attach_style(db, manuscript, filename, "Connections essays")
     intent = api.declare_intent(db, manuscript, "Rework the Epictetus essay")["intent"]
     return root, ws, db, manuscript, intent
+
+
+def check_lint_and_propose_gates() -> None:
+    """The deterministic prose lint (authorlm/lint.py) and the three gates
+    on `write propose` (review 2026-09-06): a payload assembled since the
+    last change of state, no lint ERROR without a recorded override, and
+    an independent critic's PASS on this exact draft."""
+    import io
+    import json as _json
+
+    from authorlm import critic as crt
+    from authorlm import lint as lint_mod
+
+    # --- the lint, pure ------------------------------------------------
+    corpus = {"earlier.md": lint_mod.paragraphs(
+        "The guest who leaves with the hotel towels and the shopper who "
+        "leaves without paying do so because it helps them.")}
+    text = ("What is a population, exactly? Nothing is settled.\n\n"
+            "A hierarchy is the ordering by a hierarchy's metric.\n\n"
+            "The guest who leaves with the hotel towels and the shopper "
+            "who leaves without paying do so because it helps them.\n\n"
+            "It is a state — not a possession — and it is earned — daily.\n\n"
+            "Rank is therefore a state, not a possession. It is not a thing "
+            "given but a thing earned.")
+    report = lint_mod.lint_text(text, corpus=corpus,
+                                concepts=[("Hierarchy", "impulses.md")],
+                                this_file="later.md")
+    codes = {(f.code, f.severity) for f in report.findings}
+    check("lint: 'What' opener is an error",
+          ("what-opener", "error") in codes, str(codes))
+    check("lint: a term inside its own definition is an error",
+          ("term-in-definition", "error") in codes, str(codes))
+    check("lint: eight words verbatim from another essay is an error "
+          "naming the file and paragraph",
+          any(f.code == "overlap" and f.ref == "earlier.md ¶1"
+              for f in report.findings), str(report.findings))
+    check("lint: three em-dashes in one sentence is an error",
+          ("em-dash-stack", "error") in codes, str(codes))
+    check("lint: 'not X but Y' is a warning, 'X, not Y' only info",
+          ("this-not-that", "warning") in codes
+          and ("this-not-that", "info") in codes, str(codes))
+    check("lint: re-defining a concept another essay introduced is a warning",
+          any(f.code == "redefinition" and "impulses.md" in f.ref
+              for f in report.findings), str(report.findings))
+    clean = lint_mod.lint_text("Rank is a state. It is earned each day.")
+    check("lint: plain declarative prose is clean of errors",
+          not clean.errors, str(clean.findings))
+    before = lint_mod.lint_text("What is rank? A state.")
+    after = lint_mod.lint_text("What is rank? A state. What is a metric? A count.")
+    check("lint.delta reports only what an edit introduced",
+          [f.quote for f in lint_mod.delta(before, after).findings
+           if f.code == "what-opener"] == ["What is a metric?"],
+          str(lint_mod.delta(before, after).findings))
+    marked = lint_mod.mark_changes(
+        "Rank is a state. It is **earned** each beat.\n\nA wholly new paragraph.",
+        "Rank is a possession. It is earned each day.")
+    check("lint.mark_changes bolds only the changed spans and a new "
+          "paragraph whole, and drops the draft's own bold",
+          marked == "Rank is a **state.** It is earned each **beat.**\n\n"
+                    "**A wholly new paragraph.**", repr(marked))
+    grade = lint_mod.reading_grade(
+        "The guest takes hotel towels, and the shopper skips payment. "
+        "They do this to cope in a world they do not trust.")
+    check("lint: reading grade is computed for a paragraph",
+          grade is not None and 0 < grade < 12, str(grade))
+
+    # --- the critic's reply grammar ------------------------------------
+    parsed = crt.parse_report("VERDICT\nFAIL\n\nFINDINGS\n- L3 | «x» | why | fix\n")
+    check("critic: FAIL with findings parses",
+          parsed["verdict"] == "FAIL" and len(parsed["findings"]) == 1,
+          str(parsed))
+    check("critic: PASS parses",
+          crt.parse_report("VERDICT\nPASS\n")["verdict"] == "PASS")
+    for bad in ("looks fine to me", "VERDICT\nMAYBE", "VERDICT\nFAIL\n"):
+        try:
+            crt.parse_report(bad)
+            check(f"critic: {bad!r} is refused", False)
+        except crt.ReportError:
+            check(f"critic: {bad!r} is refused", True)
+
+    # --- the gates, on a live writeup ----------------------------------
+    root, ws, db, manuscript, intent = _writeup_fixture("authorlm-gates-")
+    config = {"llm": {"enabled": True}}
+    try:
+        api.ensure_session(db, manuscript)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_start(db, manuscript, {}, "01-epictetus.md",
+                            intent["id"][:8])
+            api.write_plan(db, manuscript, [
+                {"role": "opener", "concepts": [], "budget": 60,
+                 "notes": "claims the crux is prohairesis"},
+                {"role": "close", "notes": "claims the divergence is scope"},
+            ])
+        draft = "The crux is prohairesis. It names the boundary of choice."
+        try:
+            api.write_propose(db, manuscript, draft, "opener per the plan")
+            check("gate 1: propose refuses before any payload is assembled",
+                  False)
+        except ValueError as err:
+            check("gate 1: propose refuses before any payload is assembled",
+                  "no payload for beat n=1" in str(err), str(err))
+        with contextlib.redirect_stdout(io.StringIO()):
+            dry = api.write_draft(db, manuscript, config, dry_run=True)
+        meta = _json.loads(db.one("SELECT metadata FROM writeups")["metadata"])
+        check("dry run stamps the assembly with the beat, the sequence and "
+              "the block hashes",
+              meta["assembly"]["n"] == 1 and meta["assembly"]["seq"] == 1
+              and meta["assembly"]["hashes"] == dry["payload"].hashes,
+              str(meta.get("assembly")))
+        try:
+            api.write_propose(db, manuscript, draft, "opener per the plan")
+            check("gate 3: propose refuses without a critic", False)
+        except ValueError as err:
+            check("gate 3: propose refuses without a critic",
+                  "no critic has seen THIS draft" in str(err), str(err))
+        crit = api.write_critique(db, manuscript, draft)
+        payload = crit["payload"]
+        check("write critique assembles the checklist, the accepted text, "
+              "the lint and the draft",
+              "THE CHECKLIST" in payload and "ACCEPTED TEXT SO FAR" in payload
+              and "LINT" in payload and "THE DRAFT" in payload
+              and draft in payload and "VERDICT" in payload, payload[:300])
+        try:
+            api.write_propose(db, manuscript, draft, "opener per the plan",
+                              critique="VERDICT\nFAIL\n\nFINDINGS\n- LOGIC | «x» | y | z")
+            check("gate 3: a FAIL report refuses and names the findings", False)
+        except ValueError as err:
+            check("gate 3: a FAIL report refuses and names the findings",
+                  "FAIL" in str(err) and "LOGIC" in str(err), str(err))
+        try:
+            api.write_propose(db, manuscript, draft + " Extra words.",
+                              "opener per the plan", critique="VERDICT\nPASS")
+            check("gate 3: the critic must have seen THIS draft", False)
+        except ValueError as err:
+            check("gate 3: the critic must have seen THIS draft",
+                  "no critic has seen THIS draft" in str(err), str(err))
+        result = api.write_propose(db, manuscript, draft, "opener per the plan",
+                                   critique="VERDICT\nPASS")
+        row = db.one("SELECT metadata FROM guidance_history WHERE id = ?",
+                     (result["guidance_id"],))
+        gates = _json.loads(row["metadata"])["gates"]
+        check("a passing draft registers with its gates on the row",
+              gates["critic"] == "pass" and gates["assembly"] == dry["payload"].hashes,
+              str(gates))
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_reject(db, manuscript, "not the author's voice")
+        try:
+            api.write_propose(db, manuscript, draft, "opener per the plan",
+                              critique="VERDICT\nPASS")
+            check("gate 1: a verdict invalidates the assembly", False)
+        except ValueError as err:
+            check("gate 1: a verdict invalidates the assembly",
+                  "since the last change of state" in str(err), str(err))
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_draft(db, manuscript, config, dry_run=True)
+        bad = "What is the crux? The crux is prohairesis."
+        api.write_critique(db, manuscript, bad)
+        try:
+            api.write_propose(db, manuscript, bad, "opener", critique="VERDICT\nPASS")
+            check("gate 2: a lint ERROR refuses even with a critic's PASS", False)
+        except ValueError as err:
+            check("gate 2: a lint ERROR refuses even with a critic's PASS",
+                  "what-opener" in str(err), str(err))
+        result = api.write_propose(db, manuscript, bad, "opener",
+                                   critique="VERDICT\nPASS",
+                                   lint_override="the question is the author's own opener")
+        gates = _json.loads(db.one(
+            "SELECT metadata FROM guidance_history WHERE id = ?",
+            (result["guidance_id"],))["metadata"])["gates"]
+        check("gate 2: the override reason is recorded on the row",
+              gates["lint_override"].startswith("the question")
+              and "what-opener" in gates["lint"], str(gates))
+        dictated = api.write_propose(db, manuscript, "The author's own words.",
+                                     "dictated", no_critic="author dictated it")
+        check("dictated text needs neither payload nor critic, and says so",
+              _json.loads(db.one(
+                  "SELECT metadata FROM guidance_history WHERE id = ?",
+                  (dictated["guidance_id"],))["metadata"])["gates"]["critic"]
+              == "skipped: author dictated it")
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_learn(db, manuscript, "keep it plain")
+        meta = _json.loads(db.one("SELECT metadata FROM writeups")["metadata"])
+        check("a learning bumps the sequence too",
+              meta["seq"] > meta["assembly"]["seq"], str(meta))
+        # parallel-edit mode: accept the dictated beat, then pretend the
+        # author carried it into the Doc reworded and added a paragraph.
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.write_accept(db, manuscript, {})
+        landed = api.write_landed(
+            db, manuscript,
+            text="# Epictetus\n\nThe author's own words, carried over.\n\n"
+                 "A paragraph the author added in the Doc.\n")
+        check("write landed: a reworded beat counts as changed, never "
+              "missing, and the author's addition is reported as extra",
+              landed["totals"] == {"exact": 0, "changed": 1, "missing": 0}
+              and len(landed["extra"]) == 1, str(landed))
+        landed = api.write_landed(db, manuscript, text="# Epictetus\n\nSomething else entirely about rank.\n")
+        check("write landed: a beat absent from the pulled text is MISSING",
+              landed["totals"]["missing"] == 1, str(landed))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def check_intent_scope() -> None:
@@ -3292,7 +3493,8 @@ def check_briefing_active_writeups() -> None:
               str(entry))
 
         api.write_propose(db, manuscript, "The crux is prohairesis.",
-                          "realizes the crux; opener per the plan")
+                          "realizes the crux; opener per the plan",
+                          no_critic="fixture")
         pending = briefing_module.build_briefing(
             db, manuscript["id"])["active_writeups"][0]
         check("AB-1: a draft awaiting a verdict shows as pending",
@@ -3345,7 +3547,8 @@ def check_replan_settles_pending_proposal() -> None:
             {"role": "close", "notes": "claims the divergence is scope"},
         ])
         api.write_propose(db, manuscript, "The crux is prohairesis.",
-                          "realizes the crux; opener per the plan")
+                          "realizes the crux; opener per the plan",
+                          no_critic="fixture")
         try:
             api.write_plan(db, manuscript,
                            [{"role": "opener", "notes": "claims it differently"}],
@@ -3689,7 +3892,7 @@ def check_client_stamps() -> None:
         ms.mkdir(parents=True)
         (ms / "01-choice.md").write_text("# Opening\n\nEvery act begins.\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            db = api.open_db(str(ws))
+            db = api.open_db(str(ws), create=True)
             manuscript = api.register_manuscript(db, "book", str(ms))
 
         # --- 10. the session's client list is a LIST. ---
@@ -5224,11 +5427,355 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_directives() -> None:
+    """The inline directives — [Footnote: …] (design ratified 2026-09-02)
+    and [Explain: …] (docs/explain-directive-design.md): grammar, the
+    collect report, labels, landing, evidence, the checkout refusal,
+    and the export strip. Drafting is chat: nothing here calls a model."""
+    from authorlm import directives as dv
+    from authorlm import export as mexport
+
+    # --- grammar ---
+    text = ("# Essay\n\n"
+            "The vital lie.[Footnote: cite Becker ch. 2] It holds.[explain: "
+            "what Becker means by a vital lie] Then on.\n\n"
+            "[Explain: why the Field is not a substance]\n\n"
+            "In 1916.[FOOTNOTE: Jung's Seven Sermons date | label: RD]\n\n"
+            "An [Illustration: a tracker kneeling] is not a request, nor is\n"
+            "[Footnote: a tag split\nacross lines], nor [Explain:] alone.\n")
+    fn = dv.scan_text(text, "footnote")
+    ex = dv.scan_text(text, "explain")
+    check("footnote grammar: inline, case-insensitive keyword, optional "
+          "| label: override, never across lines, never an illustration tag",
+          [(t["n"], t["line"], t["gist"], t["label"]) for t in fn]
+          == [(1, 3, "cite Becker ch. 2", None),
+              (2, 7, "Jung's Seven Sermons date", "RD")], str(fn))
+    check("explain grammar: inline and standalone, never an empty gist",
+          [(t["n"], t["line"], t["gist"], t["standalone"]) for t in ex]
+          == [(1, 3, "what Becker means by a vital lie", False),
+              (2, 5, "why the Field is not a substance", True)], str(ex))
+    check("a tag's paragraph rides with it (the evidence row's anchor)",
+          fn[0]["paragraph"].startswith("The vital lie.")
+          and ex[1]["paragraph"] == "[Explain: why the Field is not a substance]")
+    stripped, removed = dv.strip_tags(text)
+    check("exports strip every kind of tag — inline without disturbing the "
+          "sentence's spacing, standalone with its whole line",
+          "The vital lie. It holds. Then on.\n\nIn 1916.\n\nAn [Illustration"
+          in stripped and "[Footnote: a tag split" in stripped
+          and [r["kind"] for r in removed] == ["footnote", "explain",
+                                               "explain", "footnote"],
+          repr(stripped))
+    check("--tag resolves by ordinal or by an unambiguous gist excerpt, "
+          "and refuses an ambiguous one by naming the candidates",
+          dv.find_tag(fn, 2)["gist"] == "Jung's Seven Sermons date"
+          and dv.find_tag(fn, "becker")["n"] == 1
+          and _raises(lambda: dv.find_tag(fn, "e"), "matches 2 tags")
+          and _raises(lambda: dv.find_tag(fn, 9), "no open tag #9"))
+
+    # --- labels (footnote design §4) ---
+    god = "# God\n\nA claim.[^F1]\n\n[^F1]: One.\n\n[^F19]: Nineteen.\n"
+    check("a file with footnotes continues its series; a file with none "
+          "takes its stem's first letter; | label: overrides the letters "
+          "and takes that series' next number",
+          dv.next_label(god, "god") == "F20"
+          and dv.next_label("# B\n\nNo notes.\n", "becker") == "B1"
+          and dv.next_label(god, "god", "RD") == "RD1"
+          and dv.next_label(god + "\n[^RD3]: x\n", "god", "rd") == "RD4")
+
+    # --- the pass, end to end (no model anywhere) ---
+    root = Path(tempfile.mkdtemp(prefix="authorlm-directives-"))
+    try:
+        ms_dir = root / "manuscript"
+        ms_dir.mkdir()
+        becker = ("# Becker\n\n"
+                  "What Becker called the vital lie.[Footnote: cite Becker, "
+                  "ch. 2] The armour holds.[Explain: what a vital lie is] "
+                  "Nothing else.\n\n"
+                  "[Explain: why the armour must fail]\n\n"
+                  "A last word.[Footnote: Jung's date | label: RD]\n")
+        (ms_dir / "becker.md").write_text(becker)
+        (ms_dir / "god.md").write_text(
+            "# God\n\nA claim.[^F1] Another.[Footnote: source for the claim]\n\n"
+            "[^F1]: One.\n\n[^F19]: Nineteen,\n    continued.\n")
+        (ms_dir / "quiet.md").write_text("# Quiet\n\nNo request here.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(root), "init", "--name", "directives",
+                      "--path", str(ms_dir)])
+        db = api.open_db(str(root))
+        ms = api.get_manuscript(db)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            base = api.collect(db, ms, {})
+        rows = base.get("directives") or []
+        check("collect REPORTS the open tags per file, kind by kind, and "
+              "drafts nothing (footnote design §2)",
+              sorted((r["kind"], r["file"], r["n"]) for r in rows)
+              == [("explain", "becker.md", 1), ("explain", "becker.md", 2),
+                  ("footnote", "becker.md", 1), ("footnote", "becker.md", 2),
+                  ("footnote", "god.md", 1)]
+              and (ms_dir / "becker.md").read_text() == becker, str(rows))
+        check("get_status carries the same report (§8)",
+              len(api.status(db, ms)["directives"]) == 5)
+        check("compact_collect carries it to the MCP surface",
+              len(api.compact_collect(base)["directives"]) == 5)
+        v0 = base["version_no"]
+
+        # Footnotes: two in one command, series minted in document order.
+        rep = dv.apply(db, ms, {}, "footnote", "becker.md",
+                       [(2, "C. G. Jung, *Septem Sermones ad Mortuos* (1916)."),
+                        ("cite Becker", "Ernest Becker, *The Denial of Death* "
+                                        "(New York: Free Press, 1973), ch. 2.")])
+        out = (ms_dir / "becker.md").read_text()
+        check("apply lands the superscript at the tag's exact position, the "
+              "new file's letter is its stem's, and several --tag/--text "
+              "pairs ride one command in document order",
+              "the vital lie.[^B1] The armour holds." in out
+              and "A last word.[^RD1]\n" in out
+              and out.endswith("[^B1]: Ernest Becker, *The Denial of Death* "
+                               "(New York: Free Press, 1973), ch. 2.\n\n"
+                               "[^RD1]: C. G. Jung, *Septem Sermones ad "
+                               "Mortuos* (1916).\n")
+              and [(r["n"], r["label"]) for r in rep["landed"]]
+              == [(1, "B1"), (2, "RD1")]
+              and rep["version_no"] == v0 + 1 and rep["mode"] == "applied"
+              and rep["url"] is None,
+              repr(out) + str(rep))
+        check("the tag is consumed and the explain tags are untouched",
+              "[Footnote:" not in out and out.count("[Explain:") == 2)
+        check("a footnote apply refuses a companion footnote — the tag IS "
+              "the footnote",
+              _raises(lambda: dv.apply(db, ms, {}, "footnote", "god.md",
+                                       [(1, "x", "y")]),
+                      "rides only on an explain apply"))
+
+        # A definition joins AFTER the last definition and its indented
+        # continuation, blank-line separated (§5), continuing the series.
+        rep = dv.apply(db, ms, {}, "footnote", "god.md",
+                       [(1, "The source.\nA second paragraph of it.")])
+        god_out = (ms_dir / "god.md").read_text()
+        check("a file with footnotes continues its series and the definition "
+              "joins after the last one — continuation lines indented",
+              "Another.[^F20]\n" in god_out
+              and god_out.endswith("[^F19]: Nineteen,\n    continued.\n\n"
+                                   "[^F20]: The source.\n"
+                                   "    A second paragraph of it.\n"),
+              repr(god_out))
+
+        # Explain: inline continues the paragraph, standalone becomes one.
+        rep = dv.apply(db, ms, {}, "explain", "becker.md",
+                       [(1, "A vital lie is the armour a person keeps against "
+                            "the fact of death.",
+                         "Ernest Becker, *The Denial of Death* (1973), ch. 2."),
+                        ("armour must fail", "Armour is worn, and what is "
+                                             "worn is felt.")])
+        out = (ms_dir / "becker.md").read_text()
+        check("an explain passage replaces its tag in place — inline with a "
+              "supplied space, standalone as its own paragraph — and a "
+              "companion footnote lands its superscript at the passage's "
+              "end and its definition in the file's series, one review",
+              "The armour holds. A vital lie is the armour a person keeps "
+              "against the fact of death.[^RD2] Nothing else.\n\n"
+              "Armour is worn, and what is worn is felt.\n\n"
+              "A last word.[^RD1]" in out and "[Explain:" not in out
+              and out.endswith("[^RD1]: C. G. Jung, *Septem Sermones ad "
+                               "Mortuos* (1916).\n\n[^RD2]: Ernest Becker, "
+                               "*The Denial of Death* (1973), ch. 2.\n")
+              # RD, not B: the file's last definition set the series
+              # (footnote design §4 — an override carries forward).
+              and [(r["label"], bool(r["footnote"])) for r in rep["landed"]]
+              == [("RD2", True), (None, False)], repr(out))
+        rows = db.all("SELECT * FROM doc_threads WHERE manuscript_id = ? "
+                      "ORDER BY created_at, origin_id", (ms["id"],))
+        check("one evidence row per landing: origin_type is the kind, the "
+              "tag as old, the landed text as new, the gist as note",
+              sorted(r["origin_type"] for r in rows)
+              == ["explain", "explain", "footnote", "footnote", "footnote"]
+              and any(r["proposed_old"] == "[Footnote: cite Becker, ch. 2]"
+                      and r["proposed_new"].startswith("[^B1]: Ernest")
+                      and r["note"] == "cite Becker, ch. 2"
+                      and r["state"] == "applied"
+                      and loads(r["metadata"], {})["label"] == "B1"
+                      for r in rows), str([dict(r) for r in rows][:1]))
+        check("every landing is its own version under no episode",
+              api.collect(db, ms, {}).get("unchanged")
+              and db.one("SELECT COUNT(*) AS n FROM manuscript_versions "
+                         "WHERE manuscript_id = ?", (ms["id"],))["n"] == v0 + 3)
+        check("nothing open remains; a file with no tag was never touched",
+              dv.open_report(ms_dir) == []
+              and (ms_dir / "quiet.md").read_text() == "# Quiet\n\nNo request here.\n")
+
+        # Refusals: empty text, reserved grammar, a tag in the text, a
+        # consumed tag, an unknown file.
+        (ms_dir / "becker.md").write_text(becker)
+        for pairs, why in (
+                ([(1, "  ")], "the text is empty"),
+                ([(1, "<<a>>{{b}}")], "reserved grammar"),
+                ([(1, "see [Explain: more]")], "carries a tag"),
+                ([(1, "a"), ("cite Becker", "b")], "named twice"),
+                ([(9, "a")], "no open tag #9")):
+            check(f"apply refuses: {why}",
+                  _raises(lambda: dv.apply(db, ms, {}, "footnote", "becker.md",
+                                           pairs), why))
+        check("apply refuses an unknown file and a file with no open tag",
+              _raises(lambda: dv.apply(db, ms, {}, "explain", "nope.md",
+                                       [(1, "x")]), "no manuscript file")
+              and _raises(lambda: dv.apply(db, ms, {}, "explain", "quiet.md",
+                                           [(1, "x")]), "no open [Explain"))
+        check("a refusal writes nothing", (ms_dir / "becker.md").read_text() == becker)
+
+        # Checked out to the Doc, no Google service: refused before writing.
+        from authorlm import gdocs as _gd
+
+        meta = _gd._mapping(db, ms)
+        bridge = _gd.manuscript_bridge(ms)
+        meta.setdefault(bridge.meta_key, {})["becker.md"] = {
+            "tab_id": "t1", "checked_out": True}
+        _gd._save_mapping(db, ms, meta)
+        check("a checked-out file is refused when nothing can push the "
+              "result — the Doc is the working copy",
+              _raises(lambda: dv.apply(db, ms, {}, "footnote", "becker.md",
+                                       [(1, "x")]), "checked out to Google Docs")
+              and (ms_dir / "becker.md").read_text() == becker)
+        meta[bridge.meta_key]["becker.md"]["checked_out"] = False
+        _gd._save_mapping(db, ms, meta)
+
+        # Exports: the tag never reaches a reader.
+        (ms_dir / "toc.toml").write_text('[[chapters]]\nfile = "becker.md"\n\n'
+                                         '[[chapters]]\nfile = "god.md"\n')
+        out, _order, warnings = mexport.publish_markdown(ms, "stripped")
+        check("every export strips an unresolved tag and warns, naming the "
+              "file, the kind, and the gist",
+              "[Footnote:" not in out and "[Explain:" not in out
+              and any("becker.md: unresolved [Footnote: cite Becker, ch. 2]" in w
+                      for w in warnings)
+              and any("becker.md: unresolved [Explain: what a vital lie is]" in w
+                      for w in warnings), str(warnings[:3]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _raises(fn, fragment: str) -> bool:
+    try:
+        fn()
+    except Exception as err:                            # noqa: BLE001
+        return fragment in str(err)
+    return False
+
+
+def check_workspace_guard() -> None:
+    """Opening never invents a database (the phantom ~/.authorlm/.authorlm
+    case): where the workspace came from decides what a missing file
+    means. Runs against a pinned .env so the checkout's own is untouched."""
+    from authorlm import paths as _paths
+    print("workspace guard: a missing database is a decision, not a mkdir")
+
+    # resolve(): the workspace is reported resolved, and macOS tmp is a symlink
+    root = Path(tempfile.mkdtemp(prefix="authorlm-wsguard-")).resolve()
+    saved = {k: os.environ.get(k) for k in ("AUTHORLM_ENV", "AUTHORLM_WORKSPACE", "HOME")}
+    env_file = root / "checkout" / ".env"
+    env_file.parent.mkdir()
+    env_file.write_text("GEMINI_API_KEY=keep-me\n")
+    os.environ["AUTHORLM_ENV"] = str(env_file)
+    os.environ.pop("AUTHORLM_WORKSPACE", None)
+    os.environ["HOME"] = str(root / "home")
+    (root / "home").mkdir()
+
+    def run(*argv: str) -> tuple[str, str | None]:
+        buf = io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stdout(buf):
+                cli_main(list(argv))
+        except SystemExit as err:
+            code = err.code
+        return buf.getvalue(), code
+
+    try:
+        # 1. api.open_db refuses a fresh directory unless asked to create.
+        raised = None
+        try:
+            api.open_db(str(root / "fresh"))
+        except api.MissingDatabase as err:
+            raised = err
+        check("open_db raises MissingDatabase instead of creating",
+              raised is not None and not (root / "fresh" / ".authorlm").exists(),
+              f"{raised!r}")
+        check("MissingDatabase names the file it expected",
+              raised is not None and raised.path == root / "fresh" / ".authorlm" / "authorlm.db")
+        check("MissingDatabase is a RuntimeError, which the MCP guard renders as a tool error",
+              isinstance(raised, RuntimeError))
+
+        # 2. explicit -w: init bootstraps; any other verb refuses.
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01.md").write_text("# One\n\nText.\n")
+        _, code = run("--workspace", str(ws), "manuscript", "show")
+        check("-w on a fresh dir: a non-init verb refuses",
+              isinstance(code, str) and "no database" in code and "init" in code, f"{code}")
+        check("...and creates nothing (logs may appear; the database file is the tell)",
+              not api.db_path(ws).exists())
+        _, code = run("--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms), "--no-extract")
+        check("-w init creates the database", code is None and api.db_path(ws).exists(), f"{code}")
+
+        # 3. no pointer, no database, no terminal: refuse and name setup.
+        _, code = run("manuscript", "show")
+        check("default home without a database refuses off a terminal",
+              isinstance(code, str) and "setup" in code, f"{code}")
+        check("...and no database appeared under HOME", not api.db_path(root / "home").exists())
+
+        # 4. setup --workspace onto an existing database writes only the pointer.
+        out, code = run("setup", "--workspace", str(ws))
+        check("setup records the pointer", code is None and "Recorded AUTHORLM_WORKSPACE" in out, out)
+        text = env_file.read_text()
+        check(".env keeps the author's keys byte-for-byte and gains the pointer",
+              text == f"GEMINI_API_KEY=keep-me\nAUTHORLM_WORKSPACE={ws}\n", text)
+        out, code = run("manuscript", "show")
+        check("the pointer resolves the workspace without -w",
+              code is None and "book" in out, f"{code} {out}")
+
+        # 5. the pointer is a claim: with the file gone, refuse and never offer to create.
+        shutil.move(str(ws), str(root / "ws.unmounted"))
+        ws.mkdir()  # macOS leaves an empty mount point behind
+        _, code = run("manuscript", "show")
+        check("pointer + missing file reads as an unmounted volume, not a fresh install",
+              isinstance(code, str) and "mount" in code and "AUTHORLM_WORKSPACE" in code, f"{code}")
+        check("an empty directory at the pointer does not pass as a database",
+              not api.db_path(ws).exists())
+        _, code = run("init", "--name", "again", "--path", str(ms), "--no-extract")
+        check("even init refuses under a stale pointer", isinstance(code, str) and "mount" in code, f"{code}")
+        check("...and still creates nothing", not api.db_path(ws).exists())
+        shutil.rmtree(ws)  # the stand-in mount point (plus any logs the refusals wrote)
+        shutil.move(str(root / "ws.unmounted"), str(ws))
+
+        # 6. setup -y elsewhere: new database, pointer rewritten in place, keys intact.
+        ws2 = root / "ws2"
+        out, code = run("setup", "--workspace", str(ws2), "--yes")
+        check("setup --yes creates a new workspace", code is None and api.db_path(ws2).exists(), f"{code} {out}")
+        text = env_file.read_text()
+        check("the pointer line is replaced, not duplicated",
+              text == f"GEMINI_API_KEY=keep-me\nAUTHORLM_WORKSPACE={ws2}\n", text)
+
+        # 7. explicit -w beats the pointer.
+        out, code = run("--workspace", str(ws), "manuscript", "show")
+        check("-w overrides the .env pointer", code is None and "book" in out, f"{code} {out}")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_directives()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
     check_db_perf_log()
+    check_lint_and_propose_gates()
     check_intent_scope()
     check_scope_evidence()
     check_placeholder_reader_paths()
@@ -5264,6 +5811,7 @@ def main_test() -> None:
     check_alias_guide_flip()
     check_alias_retired_guard()
     check_digest_schema()
+    check_workspace_guard()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"
@@ -5566,7 +6114,7 @@ def main_test() -> None:
         dt_root = root / "dt-ws"
         dt_ms = dt_root / "manuscript"
         dt_ms.mkdir(parents=True)
-        dt_db = api.open_db(str(dt_root))
+        dt_db = api.open_db(str(dt_root), create=True)
 
         # Paragraph reorder: difflib has no "moved" concept, so swapping two
         # adjacent paragraphs is reported as the moved paragraph's text
@@ -7745,11 +8293,12 @@ def main_test() -> None:
                       for item in pdf_metadata),
               str(pdf_command))
         check("PDF export starts the whole essay before its epigraph",
-              "::: {.authorlm-file .authorlm-essay}\n"
+              "::: {.authorlm-file .authorlm-essay .authorlm-matter-main}\n"
               "An opening epigraph.\n\n# Intro"
               in pdf_markdown, pdf_markdown)
         check("Pandoc input carries semantics, never writer markup",
-              "::: {.authorlm-file .authorlm-title-page}" in pdf_markdown
+              "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
+              in pdf_markdown
               and "# **The Book**" in pdf_markdown
               and "# Intro" in pdf_markdown
               and "\\Huge" not in pdf_markdown
@@ -7993,7 +8542,8 @@ def main_test() -> None:
                   and Path(whole["markdown"]).exists(), str(scoped))
             check("EPUB uses semantic file breaks and declarative CSS",
                   "authorlm-file + .authorlm-file" in css
-                  and 'class="authorlm-file authorlm-essay"' in xhtml
+                  and ('class="authorlm-file authorlm-essay '
+                       'authorlm-matter-main"') in xhtml
                   and xhtml.index("An opening epigraph.")
                   < xhtml.index("Intro"), xhtml[:1000])
             check("EPUB metadata carries canonical publication identity",
@@ -8363,7 +8913,9 @@ def main_test() -> None:
               len(run["findings"]) == 1 and run["dropped_ungrounded"] == 1
               and run["findings"][0]["kind"] == "lens"
               and "THE LENS" in lens_llm.system
-              and "never caused; it causes" in lens_llm.system, str(run))
+              # the GLOSSARY (concept notes) is block A of the USER message
+              # since the cross-chapter design; the lens itself stays in S
+              and "never caused; it causes" in lens_llm.user, str(run))
         verdict = api.review(db, manuscript, session, 1, "rejected",
                              "Assertion is fine here — the sermon register "
                              "argues by declaration.", kinds=("lens",))
@@ -8381,6 +8933,212 @@ def main_test() -> None:
               and registered["dropped_ungrounded"] == 1
               and _json.loads(registered["findings"][0]["metadata"])[
                   "source"] == "external")
+
+        # --- lens architecture: front matter, inputs, targets, payload,
+        #     finding provenance, status, sweep (lens-architecture-design)
+        lens_root = root / "lens-ws"
+        lms = lens_root / "manuscript"
+        (lms / "_lenses").mkdir(parents=True)
+        (lms / "_profiles").mkdir()
+        (lms / "_filters").mkdir()
+        filler = " ".join(["The walker keeps walking and the road keeps "
+                           "asking."] * 45)  # ~450 words: a chapter, not a card
+        dup = ("This one sentence is repeated verbatim across two "
+               "chapters of the fixture book.")
+        (lms / "00-card.md").write_text("# Part One\n\nA short card.\n")
+        (lms / "01-first.md").write_text(
+            f"# **The First Ground**\n\nGround is where a Choice stands. {dup}\n\n"
+            f"{filler}\n")
+        (lms / "02-second.md").write_text(
+            f"# **Second Steps**\n\nThe essay on The First Ground laid the "
+            f"Ground; the paper on Ledger never existed. Every Beat counts. "
+            f"{dup}\n\n{filler}\n")
+        (lms / "03-hymn.md").write_text("# Hymn\n\nHarken, ye dead.\n")
+        (lms / "04-last.md").write_text(
+            f"# **Last Words**\n\nA Beat is one cleaving and its answer.\n\n"
+            f"{filler}\n")
+        (lms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "00-card.md"\n'
+            '[[chapter]]\nfile = "01-first.md"\n'
+            '[[chapter]]\nfile = "02-second.md"\n'
+            '[[chapter]]\nfile = "03-hymn.md"\nregister = "protected"\n'
+            '[[chapter]]\nfile = "04-last.md"\n')
+        (lms / "_profiles" / "audience.md").write_text(
+            "Reads long books; does not have Sanskrit.\n")
+        (lms / "_profiles" / "chapter-aliases.toml").write_text(
+            '[aliases]\n"01-first.md" = ["First Ground"]\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(lens_root), "init", "--name",
+                      "lensbook", "--path", str(lms)])
+        ldb = api.open_db(str(lens_root))
+        lm = api.get_manuscript(ldb)
+        api.collect(ldb, lm, {})
+        lsession, _ = api.ensure_session(ldb, lm)
+        api.add_concept(ldb, lm, "Ground", notes="where a Choice stands")
+        api.add_concept(ldb, lm, "Beat", notes="one cleaving and its answer")
+        for cname, where in (("Ground", "01-first.md"), ("Beat", "04-last.md")):
+            ldb.update("concept_nodes",
+                       ldb.one("SELECT id FROM concept_nodes WHERE "
+                               "manuscript_id = ? AND name = ?",
+                               (lm["id"], cname))["id"],
+                       {"introduced_in": where, "status": "realized"})
+
+        meta, body = lenses.parse_lens("# Plain\n\nFlag X.\n")
+        check("a bare prompt is a chapter lens reading the glossary",
+              meta["class"] == "chapter" and meta["inputs"] == ["glossary"]
+              and meta["targets"] == [] and body.startswith("# Plain"))
+        for bad, why in ((
+                '---\nklass = "chapter"\n---\n# X\n', "unknown key"), (
+                '---\nclass = "chapter"\ntargets = ["pointers"]\n---\n# X\n',
+                "chapter lens with targets"), (
+                '---\nclass = "cross-chapter"\n---\n# X\n',
+                "cross-chapter without targets"), (
+                '---\ninputs = ["summaries"]\n---\n# X\n',
+                "summaries are not an input"), (
+                '---\nclass = "chapter"\n# X\n', "unclosed front matter")):
+            try:
+                lenses.parse_lens(bad)
+                check(f"front matter refuses: {why}", False, bad)
+            except lenses.LensError:
+                check(f"front matter refuses: {why}", True)
+        xc_text = ('---\nclass = "cross-chapter"\n'
+                   'inputs = ["glossary", "audience", "scheme", "registers", '
+                   '"passes", "reading-order"]\n'
+                   'targets = ["pointers", "neighbours", "earlier", "book"]\n'
+                   '---\n# Cross lens\n\n## Examples\n\n### Flag — Old example\n'
+                   '> q\n\n## The lens\n\nFlag a passage when:\n'
+                   '- **A pointer misses.** text\n- **A term arrives early.** text\n')
+        lenses.add_lens(lm, "xc", xc_text)
+        lenses.add_lens(lm, "plain", "# Plain\n\nFlag sentences that assert.\n")
+        listed = {l["name"]: l for l in lenses.list_lenses(lm)}
+        check("lens list carries class and targets",
+              listed["xc"]["class"] == "cross-chapter"
+              and listed["xc"]["targets"] == ["pointers", "neighbours",
+                                              "earlier", "book"]
+              and listed["plain"]["class"] == "chapter", str(listed))
+        check("flag_rules reads bold bullets and Flag headings",
+              lenses.flag_rules(xc_text) == ["A pointer misses",
+                                             "A term arrives early",
+                                             "Old example"],
+              str(lenses.flag_rules(xc_text)))
+        check("strip_examples removes the Examples section only",
+              "Old example" not in lenses.strip_examples(xc_text.split("---\n", 2)[2])
+              and "A pointer misses" in lenses.strip_examples(
+                  xc_text.split("---\n", 2)[2]))
+
+        plain_p = lenses.assemble(ldb, lm, "plain", "02-second.md")
+        check("a chapter lens has no T block and no target files",
+              plain_p.targets == "" and plain_p.target_files == {}
+              and "GLOSSARY" in plain_p.inputs
+              and "[introduced in 01-first.md]" in plain_p.inputs
+              and "THE CHAPTER — 02-second.md" in plain_p.essay, plain_p.inputs)
+        xc_p = lenses.assemble(ldb, lm, "xc", "02-second.md")
+        T = xc_p.targets
+        check("pointer resolved by title (case-sensitive) and carried as text",
+              "--- 01-first.md — The First Ground" in T
+              and "01-first.md" in xc_p.target_files
+              and "04-last.md" in T, T[:600])
+        check("framed reference to no chapter is listed unresolved",
+              "POINTERS UNRESOLVED" in T and "Ledger" in T, T[:800])
+        check("neighbours skip the card and the short protected hymn",
+              lenses.neighbours(
+                  lenses.read_manuscript_files(lms), "02-second.md")
+              == ["01-first.md", "04-last.md"])
+        check("TERMS INTRODUCED LATER/EARLIER come from the graph and the "
+              "reading order",
+              "- Beat — 04-last.md" in T and "- Ground — 01-first.md" in T, T)
+        check("verbatim recurrence found across chapters at zero tokens",
+              dup in T and "also in 01-first.md" in T, T)
+        check("reading order marks the card and this chapter; registers list "
+              "the protected hymn",
+              "[card]" in xc_p.inputs and "THIS CHAPTER" in xc_p.inputs
+              and "03-hymn.md" in xc_p.inputs.split("PROTECTED REGISTERS")[1],
+              xc_p.inputs)
+        check("AUDIENCE PROFILE rendered; ORGANIZING SCHEME a labelled absence",
+              "does not have Sanskrit" in xc_p.inputs
+              and "(no profile on record" in xc_p.inputs, xc_p.inputs)
+        check("no summary reaches any block",
+              "summar" not in (xc_p.law + xc_p.inputs + xc_p.targets).lower()
+              or "no summary" in xc_p.law.lower())
+        check("payload hashes are per block and the render names them",
+              set(xc_p.hashes) == {"S", "A", "T", "E"}
+              and "block T" in xc_p.render("xc") and "sha256" in xc_p.render("xc"))
+        try:
+            lenses.assemble(ldb, lm, "plain", "03-hymn.md")
+            check("a lens refuses to run on a protected register", False)
+        except ValueError as err:
+            check("a lens refuses to run on a protected register",
+                  "protected register" in str(err))
+
+        q2 = "Every Beat counts."
+        xc_llm = FakeLLM({"findings": [
+            {"quote": q2, "note": "Beat arrives early.",
+             "rule": "A term arrives early.",
+             "target_file": "04-last.md",
+             "target_quote": "A Beat is one cleaving and its answer."},
+            {"quote": q2, "note": "unverified target quote",
+             "rule": "made-up rule", "target_file": "01-first.md",
+             "target_quote": "words that are not there"},
+            {"quote": q2, "note": "undeclared chapter", "target_file": "nope.md"},
+            {"quote": "nowhere at all", "note": "ungrounded"},
+        ]})
+        xr = lenses.run_lens(ldb, lm, lsession, "xc", "02-second.md", xc_llm)
+        metas = [_json.loads(r["metadata"]) for r in xr["findings"]]
+        check("native run sends the four blocks and gates the reply",
+              "block S" not in xc_llm.system and "THE LENS" in xc_llm.system
+              and "THE CHAPTER — 02-second.md" in xc_llm.user
+              and "--- 01-first.md" in xc_llm.user
+              and len(xr["findings"]) == 2 and xr["dropped_ungrounded"] == 1
+              and xr["refused_targets"] == [{"quote": q2, "target": "nope.md"}],
+              str(xr))
+        check("finding provenance: essay sha, target shas, known rule, "
+              "verified and unverified target quotes",
+              metas[0]["essay_sha"] == xc_p.essay_sha
+              and set(metas[0]["targets"]) == set(xc_p.target_files)
+              and metas[0]["rule"] == "A term arrives early"
+              and metas[0]["rule_known"] is True
+              and "target_unverified" not in metas[0]
+              and metas[1]["rule_known"] is False
+              and metas[1]["target_unverified"], str(metas))
+        st = lenses.status(ldb, lm, "02-second.md")
+        check("lens status tallies rules and is fresh",
+              len(st) == 1 and st[0]["count"] == 2 and st[0]["stale"] == []
+              and st[0]["rules"]["A term arrives early"] == 1
+              and st[0]["unverified"] == 1, str(st))
+        (lms / "01-first.md").write_text(
+            (lms / "01-first.md").read_text() + "\nA new closing line.\n")
+        st2 = lenses.status(ldb, lm, "02-second.md")
+        check("a changed target marks the batch STALE by byte comparison",
+              st2[0]["stale"] == ["01-first.md"], str(st2))
+        reg = lenses.register_findings(
+            ldb, lm, lsession, "xc", "02-second.md",
+            [{"quote": q2, "note": "external, declared target",
+              "target_file": "01-first.md"},
+             {"quote": q2, "note": "external, undeclared", "target_file": "x.md"}])
+        check("register re-assembles the payload and refuses undeclared targets",
+              len(reg["findings"]) == 1 and len(reg["refused_targets"]) == 1
+              and _json.loads(reg["findings"][0]["metadata"])["source"]
+              == "external", str(reg))
+        pl = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
+                             FakeLLM({"findings": [
+                                 {"quote": "Every Beat", "note": "asserts"}]}))
+        linked = lenses.link_overlaps(ldb, [xr["batch_id"], pl["batch_id"]])
+        pl_meta = _json.loads(ldb.one(
+            "SELECT metadata FROM guidance_history WHERE id = ?",
+            (pl["findings"][0]["id"],))["metadata"])
+        check("sweep cross-links overlapping quotes across lenses",
+              linked >= 1 and pl_meta["also_flagged_by"][0]["lens"] == "xc",
+              str(pl_meta))
+        check("sweep order: ratified names first, then alphabetical; only/skip",
+              lenses.sweep_order(lm) == ["plain", "xc"]
+              and lenses.sweep_order(lm, only=["xc"]) == ["xc"]
+              and lenses.sweep_order(lm, skip=["xc"]) == ["plain"])
+        with contextlib.redirect_stdout(io.StringIO()) as lens_out:
+            cli_main(["--workspace", str(lens_root), "lens", "run", "xc",
+                      "02-second.md"])
+        check("`lens run` without --native prints the payload and calls nothing",
+              "no model call was made" in lens_out.getvalue()
+              and "block T" in lens_out.getvalue(), lens_out.getvalue()[:300])
 
         # --- illustration placement pipeline: scan → stage → triage ---
         from authorlm import placement
@@ -10828,6 +11586,10 @@ def main_test() -> None:
             "attach_style", "get_style", "get_profile", "run_sweep",
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
+            # The inline directives (footnote, explain): the tag report
+            # and the landing verb — drafting is chat, by design.
+            "list_footnote_tags", "apply_footnote", "resolve_footnotes",
+            "list_explain_tags", "apply_explain", "resolve_explains",
             "import_critique", "critique_status", "list_critique_items",
             "list_critique_decisions",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
@@ -10841,7 +11603,17 @@ def main_test() -> None:
             # (run/prelude/record/settle/…) stay CLI-only by the same
             # one-call-surface ruling as `filter run` above.
             "add_filter", "list_filters", "show_filter",
-            "move_style_law", "open_triage_app", "triage_app_request",
+            "move_style_law",
+            # The audiobook (audiobook-pipeline-design §11): the export,
+            # the readiness report, free voice discovery, the paid
+            # audition (confirm-gated), the cast row, the dictionary push
+            # (confirm-gated). `audio init` is CLI-only: a one-time seed.
+            "export_audio", "audio_readiness", "list_voices",
+            "audition_voices", "set_cast", "push_pronunciations", "say_term",
+            # The Triage App and the pronunciation workbench are NOT here:
+            # each is a local page served by its CLI verb (`triage-app`,
+            # `workbench`). The MCP App road was removed 2026-09-04 — it
+            # never rendered in the client the author uses.
         }
         check("MCP exposes the full hand-curated tool set",
               expected == tool_names,
