@@ -147,7 +147,7 @@ essay_summaries
 - **Rebuild at confirm:** `critique resolve` rebuilds the essay's summary
   as part of the gate, so processing in reading order keeps every "before"
   summary fresh by construction.
-- `authorlm summarize --rebuild` — full sequential pass (campaign start,
+- `authorlm summarize rebuild` — full sequential pass (campaign start,
   and after structural changes: reorders, new essays).
 - **The summarizer prompt is a checked-in repo artifact** (reviewable and
   ratifiable like style law), not buried in code.
@@ -329,7 +329,7 @@ Per-essay critic items triage **just-in-time** at that essay's pass start.
 2. One sitting: triage the **global** material (~25 items — ten global
    changes, strands, architecture proposal) — this sets the law every
    essay pass consults.
-3. `summarize --rebuild` — initial full sequential pass.
+3. `summarize rebuild` — initial full sequential pass.
 4. Essays in toc order, gated per §5.1, advanced manually.
 
 ---

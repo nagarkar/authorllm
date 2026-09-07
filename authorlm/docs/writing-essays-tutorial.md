@@ -1191,7 +1191,7 @@ the billed mode is on, and it is what the conversational drafting reads.
 Without any model configured at all, the summary rebuild fails loudly rather
 than quietly degrading — see §13's fourth entry.
 
-**The filter pass (§12) costs one summarizer call per settle, on the cheap
+**The filter pass (§12) costs one summarizer call per resolve, on the cheap
 tier — and a SECOND call, on the general model, only when you reworded at least
 two of the proposals.** That second one is the pattern hunt: two rewrites doing
 the same thing is a rule you may be enacting, and it is put up for your ruling
@@ -1483,7 +1483,7 @@ use — backwards, and not worth churning every habit to fix. `filter run` was
 chat-first from its first line, so the free path needed no flag at all. `filter
 run --dry-run` is accepted and does nothing, for the muscle memory.
 
-**What it costs.** One summarizer call per settle, on the cheap tier — a
+**What it costs.** One summarizer call per resolve, on the cheap tier — a
 fraction of a cent — because the essay's text changed and a stale summary is a
 lie the next gate refuses. That is the only model call the whole flow makes, and
 it is announced with its usage line. It also marks the essays after this one
