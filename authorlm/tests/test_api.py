@@ -9119,6 +9119,23 @@ def main_test() -> None:
               len(reg["findings"]) == 1 and len(reg["refused_targets"]) == 1
               and _json.loads(reg["findings"][0]["metadata"])["source"]
               == "external", str(reg))
+        from authorlm import directives as _dir
+        fn = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
+                             FakeLLM({"findings": [
+                                 {"quote": "Every Beat counts.",
+                                  "note": "a count stated as fact",
+                                  "footnote": "cite the [census] table\nfor the count"}]}))
+        fn_thread = ldb.one("SELECT * FROM doc_threads WHERE id = ?",
+                            (_json.loads(fn["findings"][0]["metadata"])["edit_thread"],))
+        planted = fn_thread["proposed_new"]
+        check("a `footnote` gist plants the author's tag after the quote as a "
+              "staged edit — one line, brackets neutralized, never a drafted note",
+              len(fn["edits_staged"]) == 1
+              and "Every Beat counts.[Footnote: cite the (census) table for the count]"
+              in planted
+              and len(_dir.scan_text(planted, "footnote")) == 1
+              and _json.loads(fn["findings"][0]["metadata"])["footnote"]
+              == "cite the (census) table for the count", planted)
         pl = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
                              FakeLLM({"findings": [
                                  {"quote": "Every Beat", "note": "asserts"}]}))

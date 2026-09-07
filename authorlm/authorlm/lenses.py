@@ -282,8 +282,15 @@ falls under, in the lens's own words. Reply with JSON only:
 "note": "<the finding, in the shape the lens asks for>",
 "rule": "<the Flag rule's heading, as written in S>",
 "replacement": "<optional: the quote's substitute within its paragraph>",
+"footnote": "<optional: the GIST of a footnote the quoted sentence should carry — a source to be supplied, a qualification — never the finished text>",
 "target_file": "<optional: a file named in T>",
 "target_quote": "<optional: verbatim sentence(s) from that file>"}]}
+
+Footnotes are requested, never written. Where the repair is a source the
+author must supply, or a qualification that would break the sentence's
+stride, give `footnote` the gist; the harness plants a [Footnote: gist] tag
+after the quoted sentence and the author's footnote road drafts the text.
+Do not invent a citation in a note or a replacement.
 """
 
 
@@ -761,6 +768,17 @@ def assemble(db: Database, manuscript: dict, name: str, file: str,
 RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
 
 
+def _footnote_gist(raw) -> str:
+    """A finding's `footnote` gist, made safe for the tag grammar: one
+    line, no brackets (a tag never nests and never spans lines), no
+    reserved markers. Empty when there is nothing to plant."""
+    gist = " ".join(str(raw or "").split())
+    gist = gist.replace("[", "(").replace("]", ")")
+    for m in RESERVED_MARKERS:
+        gist = gist.replace(m, "")
+    return gist.strip()
+
+
 def _edit_entry(units: list[str], raw_quote: str, replacement: str,
                 note: str, taken_units: set[int]) -> tuple[dict | None, str]:
     """Anchor one finding's `replacement` to its unit, or refuse.
@@ -877,9 +895,17 @@ def _store_findings(db: Database, manuscript: dict, session: dict,
                 if tq not in tflat:
                     meta["target_unverified"] = ("target quote is not "
                                                  "verbatim in the target")
-        if "replacement" in f:
-            entry, reason = _edit_entry(units, raw_quote,
-                                        str(f.get("replacement") or ""),
+        gist = _footnote_gist(f.get("footnote"))
+        if gist:
+            meta["footnote"] = gist
+        if "replacement" in f or gist:
+            replacement = str(f.get("replacement") or raw_quote)
+            if gist and "[footnote:" not in replacement.lower():
+                # Planted, never drafted (footnote design §0, §12): the
+                # tag is the author's own request grammar, inert until
+                # the footnote road resolves it.
+                replacement = replacement.rstrip() + f"[Footnote: {gist}]"
+            entry, reason = _edit_entry(units, raw_quote, replacement,
                                         note, taken_units)
             if entry is None:
                 meta["edit_refused"] = reason

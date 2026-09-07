@@ -19,6 +19,15 @@ For each unit in THE UNITS you return either `keep` or `replace`.
 - You may not add a unit and you may not delete one. A `replace` whose text is
   empty is refused. A `replace` may contain a blank line, which splits the unit in
   two — only when this filter's concern calls for it.
+- **Footnotes are planted, never written.** Where a unit's fault is a missing
+  source, or a qualification that belongs in a note rather than the sentence,
+  do not write the footnote and do not invent a citation: plant the author's
+  request tag `[Footnote: <gist>]` immediately after the sentence, inside the
+  replacement, and leave the sentence otherwise as it stands. The gist says
+  what the note should supply (what a sufficient citation looks like; the
+  qualification in a phrase), never the finished text. Collect reports the
+  open tag and the footnote road drafts it with the author. A tag never spans
+  a line and never contains a bracket.
 - STYLE LAW is binding and outranks your instinct in every case. It is the
   author's ratified law, printed whole, one element per line with its aspect in
   brackets — so when a filter tells you to work from "the established motif

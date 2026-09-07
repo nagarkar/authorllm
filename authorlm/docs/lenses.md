@@ -2,7 +2,7 @@
 
 Repo record of the lens artifacts installed in `manuscripts/SMSTTD/_lenses/` (gitignored manuscript data — this file is the checked-in canonical copy, same pattern as the filter appendix in filter-pass-design.md). The live artifact is what runs; on any re-ratification update both.
 
-Rewritten 2026-09-06 as eight book-agnostic lenses (from the earlier five: historical-reach → evidence-reach; metaphor-as-mechanism → illustration-as-argument; pitch + repetition-across-parts → audience-pitch; uncited-apparatus → unsourced-claims; the consistency draft → framework-consistency and cross-references; through-line and validity-and-objections new). Each opens with TOML front matter (docs/lens-architecture-design.md §3), then verbatim Flag/Keep examples from the manuscript and author-made repairs mined from its revision history, then the rules, which refer only to the runner's INPUTS. The rules never name summaries; where a rule needs another chapter, the authority is that chapter's text in block T.
+Rewritten 2026-09-06 as eight book-agnostic lenses (from the earlier five: historical-reach → evidence-reach; metaphor-as-mechanism → illustration-as-argument; pitch + repetition-across-parts → audience-pitch; uncited-apparatus → unsourced-claims; the consistency draft → framework-consistency and cross-references; through-line and validity-and-objections new). Each opens with TOML front matter (docs/lens-architecture-design.md §3), then verbatim Flag/Keep examples from the manuscript and author-made repairs mined from its revision history, then the rules, which refer only to the runner's INPUTS. The rules never name summaries; where a rule needs another chapter, the authority is that chapter's text in block T. Footnotes are requested with a `footnote` gist, never written (footnote-directive-design §12).
 
 Sweep order: framework-consistency, cross-references, through-line, validity-and-objections, evidence-reach, illustration-as-argument, audience-pitch, unsourced-claims.
 
@@ -994,7 +994,7 @@ Refuse to flag:
 - the declared thesis of a named work, attributed to the work as a whole — the work is the location;
 - a passage whose running text gives work and location, with the original words where the gloss is free.
 
-For each finding, state the passage (file and sentence), the category from the list above, which reader would check it (a classicist, a physicist, the named author's own readers), and what a sufficient citation looks like — a work and a location, not "see the literature". Name a real work only when you are sure it exists; otherwise describe the kind of source (a critical edition, a census table, a dictionary entry). Never invent a citation. Then stop.
+For each finding, state the passage (file and sentence), the category from the list above, which reader would check it (a classicist, a physicist, the named author's own readers), and what a sufficient citation looks like — a work and a location, not "see the literature". Name a real work only when you are sure it exists; otherwise describe the kind of source (a critical edition, a census table, a dictionary entry). Never invent a citation. Where a source is wanted and you cannot supply a verified one, request it: set the finding's `footnote` to what a sufficient citation looks like, and the harness plants a `[Footnote: …]` tag after the sentence for the author's footnote road to draft. Then stop.
 ```
 
 ## `validity-and-objections`

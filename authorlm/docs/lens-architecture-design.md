@@ -161,6 +161,7 @@ filter beat, as measured on 2026-09-06.
   "note":         "<the finding>",
   "rule":         "<the Flag rule's heading, verbatim from the lens>",
   "replacement":  "<optional — §7.2 door, essay only>",
+  "footnote":     "<optional — the gist of a footnote the sentence should carry; the door plants [Footnote: gist] after the quote as a staged edit (footnote design §12)>",
   "target_file":  "<optional — a chapter in block T>",
   "target_quote": "<optional — verbatim, from that chapter>"
 }]}

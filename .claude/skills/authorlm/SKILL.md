@@ -819,6 +819,23 @@ claim; misattributions (mischaracterizations included) are reported apart
 from objections; a contested reading is never an error; there is NO memory
 between runs — a re-run is a fresh report and the author reconciles by eye.
 
+**From finding to paragraph: the fixes ride the FILTER road, never a chat
+draft (author ruling 2026-09-06, after a chat draft broke five style
+laws).** When the author asks for the fixes, write one `global` filter per
+run, `_filters/<critic>-objections.md`, whose prompt carries the surviving
+findings — passage, what the tradition holds, missing premise, repair —
+grouped by file, with a prelude that maps the findings naming THE ESSAY to
+unit numbers and marks QUESTION any repair needing a fact the report lacks
+(that unit is `keep`, question in `why`). Read it to the author as prose,
+`filter add` on their yes, then run it as beats, one per essay the report
+touched, exactly as the filter pass below says: prelude → run to a payload →
+clean-context drafter subagent → `filter apply` → the brief prose summary →
+the author settles in the tab. The filter's list is closed, and the
+objection-and-answer format is refused in its prose. Never paste proposed
+replacement prose into the conversation as "surgical fixes": the payload
+carries STYLE LAW and PROTECTED TERMS and the record step lints; the
+conversation carries none of that.
+
 **A new critic** (after Epictetus): `authorlm interlocutor draft <name>
 --engaged <essay> --out $S/<name>.draft -m <ms>`; a subagent with the
 prompt "Read `<payload>` in full and write the artifact it asks for to the
@@ -1079,6 +1096,22 @@ occasion for this rule: on 2026-09-06 a merged hierarchy.md was
 "verified" mechanically, and a second reader then found a run of
 introduced-but-undeployed distinctions the checklist repairs had left
 behind.
+
+**FOOTNOTES ARE PLANTED, NEVER WRITTEN — by every producer (author
+ruling 2026-09-06: "a standard thing this filter does, for all
+interlocutors").** A filter's replacement, a lens finding's `footnote`
+gist, and an interlocutor report's `Footnote:` line all end in the same
+place: the author's own request tag `[Footnote: <gist>]` planted right
+after the sentence, inside the proposed text. The gist says what the note
+should supply (what a sufficient citation looks like; the qualification in
+a phrase); the finished note is drafted on the footnote road
+(footnote-directive-design §3): collect reports the open tag, the chat
+drafts against the file's own footnotes and the anchor sentence, the
+author rules, `footnote apply` lands it. Nothing in any producer invents a
+citation — the REJECTED law of 2026-09-03 stands. The lens harness composes
+the tag from a `footnote` gist when no replacement is given; the filter
+drafter writes it into `new` itself; an interlocutor's follow-through
+objections filter carries the report's gist into the unit it repairs.
 
 **A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS THE RESULT.** `filter
 resolve` deliberately does NOT re-push — a resolve that also pushed could

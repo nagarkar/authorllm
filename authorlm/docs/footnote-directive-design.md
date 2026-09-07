@@ -1,6 +1,13 @@
 # Footnote Directive — Design Reference
 
-Grilled and ratified 2026-09-02. Build not started. This is the reference
+Grilled and ratified 2026-09-02. Built 2026-09-03 in
+`authorlm/directives.py` (shared with the explain directive —
+`explain-directive-design.md`). One amendment, ratified 2026-09-03:
+§5's two transports are chosen by the file's CHECKOUT, not by a flag —
+a checked-out file always takes the pause (forms in the tab, local
+pristine, `footnote resolve` lands the ruling); a local file always
+takes the direct apply; there is no `--pause` flag and no local-file
+pause. §7's laws were ruled 2026-09-03 (two ratified, one rejected). This is the reference
 for the `[Footnote: …]` directive: a shorthand instruction written in the
 prose, drafted into a real `[^label]` footnote by the chat collaborator,
 landed by the CLI.
@@ -81,12 +88,12 @@ redrafts. No separate LLM call, no revise verb. The author's reasons are
 recorded verbatim as evidence when they state a principle
 (`review_suggestion`), never by force of habit.
 
-**Citations.** The draft may name a well-known source, edition, or
-section from the model's own knowledge, and must mark each such claim
-*unverified* in chat. The manuscript receives clean text only after the
-author has ruled; the flag lives in the conversation, never in the file.
-A citation the author supplied in the tag or that already appears in the
-manuscript needs no flag.
+**The anchor governs (ratified 2026-09-03).** The footnote is
+constructed from where it is requested: it supports the claim that came
+just before it. The drafter reads that sentence first; the gist says
+how the footnote serves it. The citation discipline first proposed here
+(verified sources only, unverified flags in chat) was rejected by the
+author — see §7.
 
 **Decline.** A declined draft leaves the tag untouched and open; collect
 keeps reporting it. Nothing is deleted on a "no".
@@ -137,15 +144,21 @@ illustration slots, which are kept as production notes: a shorthand
 instruction inside a sentence reads as damage, and a reviewer cannot act
 on it.
 
-## 7. Style laws (to ratify at build, SMSTTD house style)
+## 7. Style laws (ruled 2026-09-03, SMSTTD house style)
 
-- (structure) A footnote carries what the sentence cannot: a source, a
-  term's etymology, a qualification that would break the paragraph's
-  stride. It never continues the argument.
-- (citation) A footnote drafted from a `[Footnote:]` tag cites only
-  what the tag, the manuscript, or a source the author has verified
-  supplies; a source proposed from general knowledge is flagged
-  unverified in chat and never lands unflagged-but-unchecked.
+- (structure, RATIFIED — se-c2f0d46573d3) A footnote carries what the
+  sentence cannot: a source, a term's etymology, a qualification that
+  would break the paragraph's stride. It never continues the argument.
+- (structure, RATIFIED — se-d7c06e353446, the author's words) A footnote
+  is constructed from where it is requested in the text: it supports
+  the claim that came just before it.
+- (citation, REJECTED) A footnote drafted from a `[Footnote:]` tag cites
+  only what the tag, the manuscript, or a source the author has
+  verified supplies; a source proposed from general knowledge is flagged
+  unverified in chat and never lands unflagged-but-unchecked. The
+  author's reason, verbatim: "The footnote should be constructed based
+  on where it is requested in the text. It should be supporting the
+  claim that came just before it."
 
 ## 8. Verbs, tools, and the SKILL
 
@@ -154,7 +167,8 @@ on it.
   `resolve_footnotes`; the tag report joins `get_status`.
 - `.claude/skills/authorlm/SKILL.md` gains "resolve the footnotes in
   <file>": assemble (§3), draft in chat, wait for the ruling, then one
-  `apply_footnote` per agreed footnote, then confirm the push.
+  `apply_footnote` per agreed footnote, then confirm the push. (Built:
+  one `apply_footnote` per file carrying every agreed text.)
 
 ## 9. Example rows
 
@@ -199,3 +213,29 @@ on it.
 - No triage-app queue: one candidate per tag has nothing to compare.
 - No renumbering of existing footnotes; series only ever extend.
 - No full-line tag form; a footnote has one anchor.
+
+## 12. Producers plant tags (ruled 2026-09-06)
+
+The author's ruling: footnotes are "a standard thing this filter does, for
+all interlocutors". Every producer that proposes prose may plant the tag,
+and none drafts the note:
+
+- **Filters.** `prompts/filter-run.md` instructs the drafter: where a unit's
+  fault is a missing source or a qualification a note should carry, plant
+  `[Footnote: <gist>]` after the sentence inside `new`, leave the sentence
+  as it stands, invent nothing. The reply validator already admits the tag
+  (only `<< >> {{ }}` are reserved), and `record`'s lint reports it.
+- **Lenses.** A finding may carry `footnote: <gist>`; the door composes
+  `quote + [Footnote: gist]` as the replacement when none is given (or
+  appends the tag to a given one) and stages it through §7.2 of the
+  filter-pass design; the gist is recorded on the finding
+  (`lens-architecture-design.md` §5). `unsourced-claims` asks for exactly
+  this where it cannot supply a verified source.
+- **Interlocutors.** The report contract (`prompts/interlocutor.md`) gains
+  an optional `Footnote:` line per finding; `parse_report` reads it, and
+  the follow-through objections filter (interlocutor design §3.6) carries
+  the gist into the unit it repairs, where the filter rule above plants it.
+
+The tag is inert until the footnote road resolves it (§2–§5), so a planted
+request costs nothing until the author says what the note should say.
+
