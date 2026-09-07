@@ -445,3 +445,42 @@ distiller matching, not by the promotion bar, so volume needs no special
 handling: more dismissals accumulate faster on the SAME belief. Caveat: most
 replayed reasons were the pre-fix truncated ones, so live performance should
 be better, not worse.
+
+
+## The interlocutor — a tradition reads the whole book
+Full design in `interlocutor-design.md` (ratified 2026-09-06). A
+third-person critical reading of the manuscript from inside a named
+tradition (Epictetus, Basilides, Plato, Shankara …), run as a
+clean-context Claude subagent from a deterministic payload and landing on
+the critique road: the report in `_critiques/`, each `partial` or
+`unaddressed` objection and each misattribution a PROPOSED intent with
+critic provenance. Decisions worth keeping: it is not a lens (whole-book,
+report-shaped, wants a triageable pile); the fabrication guard moves from
+inputs to citations (no locus, no objection); the term scan is
+deterministic and ratified in the artifact, with the BOOK'S own words
+mapped by the author, never by the subagent; "addressed by inference"
+counts as addressed and no essay is asked to answer a critic point by
+point; no memory between runs (rejected: stable objection keys and a delta
+section — the author reconciles by eye); intents only (rejected: objection
+concept nodes, a triage burden). Built 2026-09-06: `interlocutor.py`,
+`prompts/interlocutor.md`, `prompts/interlocutor-draft.md`,
+`tests/test_interlocutor.py`.
+
+## Cross-chapter lenses on deterministic inputs
+Full design in `lens-architecture-design.md` (ratified and built
+2026-09-06). A lens carries TOML front matter: `class` (chapter |
+cross-chapter), `inputs` (glossary, audience, scheme, registers, passes,
+reading-order), `targets` (pointers, neighbours, earlier, book),
+`examples` (prompt | omit); a bare prompt keeps its old meaning. One
+payload of four hashed blocks (S lens, A inputs, T target chapters and
+zero-token derived lists, E essay) serves both roads: `lens run` prints
+it and makes no call (polarity matched to `filter run`), `--native`
+sends it to `[llm]`, `lens register` stores an external answer after
+re-assembling the payload and refusing findings that name an undeclared
+chapter. Findings carry `rule`, optional `target_file`/`target_quote`
+(gated verbatim against the target), the essay's sha and every target's
+sha; `lens status` calls a batch STALE by byte comparison; `lens sweep`
+runs the roster in ratified order with block A shared and cross-links
+overlapping quotes. Rejected: summaries as the cross-chapter authority
+(derived, rebuilt on every settle — the ruling that started this);
+whole-book payloads; model-based pointer resolution; a second store.

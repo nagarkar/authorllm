@@ -97,10 +97,12 @@ record their reaction (with their reasoning verbatim) as evidence.
 ## The beat loop (`authorlm write` — beat-by-beat co-writing)
 When the author wants a chapter written or rewritten beat by beat (design:
 `docs/autoregressive-writing-design.md`, §13 for the two use cases below),
-`write draft --dry-run` assembles the payload and names the registered
-prompt, YOU draft the beat in the conversation against them, and
-`write propose --why …` registers it; the CLI is also the state machine and
-evidence channel; you orchestrate and relay. Run the verbs via Bash; prose
+`write draft --dry-run --out` assembles the payload to a file, a DRAFTER
+SUBAGENT with an empty context answers it, `write critique --out` assembles
+the critic's payload and a CRITIC SUBAGENT rules on the draft, and
+`write propose --critique …` registers it (step 3); the CLI is also the
+state machine and evidence channel; you orchestrate and relay, and you
+never draft a beat in this conversation. Run the verbs via Bash; prose
 and plan JSON travel over stdin (heredocs).
 
 **We cannot make things up.** This is the author's constraint, verbatim, and
@@ -320,54 +322,115 @@ not re-ask at each beat.
    plan's ORDERING is where "reorder for better flow" happens. A beat that
    discovers mid-draft that it needs an ungrounded fact triggers
    `write plan --replace` or a question to the author — never an invention.
-3. **Draft — in the conversation, against the dry-run payload.** This is the default
-   and the only path you take unless the author says otherwise (author ruling
-   2026-08-30: the pinned drafting model bills the Anthropic API per beat, and
-   `[writing]` is deliberately absent from `authorlm/config.toml` so that no beat can
-   bill it by accident). Three steps, in order:
+3. **Draft — NEVER in this conversation (ratified 2026-09-06).** The
+   drafter and the critic are SUBAGENTS with empty contexts; you
+   orchestrate and never draft. The review of 69 recorded rejections
+   found the two faults this fixes: drafting inside the orchestrating
+   window let the drafter skip the payload and draft from memory (Sep 5:
+   "are you even looking at the prior beats?"), and nothing checked a
+   beat before the author did. Every step below is CLI or a subagent;
+   `write propose` REFUSES a beat that did not travel this road.
+   Use `$S` for the session scratchpad and `N` for the beat number.
 
-   a. **Get the payload.** `authorlm write draft --dry-run -m <ms>`. It makes NO model
-      call and costs nothing. It assembles and prints exactly what the drafting model
-      would have been sent — style law, validated beliefs, the DRAFTING CONTEXT, the
-      brief, the digest, the ratified plan, the concept notes for every concept the
-      plan names, the accepted text so far, this beat's spec, the learnings, and the
-      author's last verdict — as labelled blocks with a sha256 per block, and it names
-      the registered prompt `authorlm/prompts/beat-draft.md`. This is the machinery
-      assembly step: do NOT gather it by hand, and do not substitute a `get_style` /
-      `get_concepts` sweep of your own — the point of the verb is that the payload is
-      deterministic and the author can reproduce it.
+   a. **Payload to a file.** `authorlm write draft --dry-run --out
+      $S/beat-N.payload -m <ms>`. No model call; it prints only sizes and
+      hashes and RECORDS that the payload for this beat was assembled
+      under the current state. Do not read the payload into this
+      conversation and do not gather its parts by hand.
+   b. **Drafter subagent.** Spawn one (Agent tool, default model, fresh
+      context) with exactly this prompt, paths filled in:
 
-   b. **Draft the beat yourself, against that payload verbatim, under
-      `authorlm/prompts/beat-draft.md`'s rules.** Read the prompt file; it is law for
-      this step exactly as it is for the model. In particular: ground the beat ONLY in
-      the six permitted inputs the dry-run printed (this beat's spec, the brief, the
-      digest, the DRAFTING CONTEXT's BEFORE block, the concept notes, the accepted text
-      so far) and in nothing else — not your general knowledge, not a citation or date
-      or attribution that is not in a block; treat any `!!` line in the context as
-      unreliable; obey the STYLE LAW block as binding law over your instinct; write to
-      the beat's stated word budget (under is better than over); run the prompt's
-      SELF-CHECK — beat spec, style law, graph, grounding traced item by item, word
-      count against budget — and fix the draft rather than reporting a failed check;
-      and never emit the characters `<<` or `>>`, which are reserved grammar in the
-      document pipeline.
+      > You are the beat drafter for a philosophy manuscript. Read
+      > `<$S/beat-N.payload>` in full. It holds the prompt you work under
+      > and every block you may draw on, and it is your entire world: use
+      > nothing you know from elsewhere, read no other file, run no other
+      > tool, ask no questions. Reply in exactly the shape the payload's
+      > OUTPUT CONTRACT demands (WHY / SELF-CHECK / DRAFT, or BLOCKED /
+      > QUESTION). Write your reply to `<$S/beat-N.reply>` and say nothing
+      > else.
 
-      If the beat cannot be written without a fact no block supplies, do not write it.
-      That is the BLOCKED shape: nothing gets registered, and there is a question for
-      the author. Ask it. The answer usually becomes `write plan --replace` on that
-      beat. This is the one failure the whole loop exists to prevent.
+      A BLOCKED reply is a question for the author; nothing is registered.
+   c. **Extract the draft.** `awk 'f{print} /^DRAFT$/{f=1}'
+      $S/beat-N.reply > $S/beat-N.draft`.
+   d. **Critic payload.** `authorlm write critique --out $S/beat-N.critic
+      -m <ms> < $S/beat-N.draft`. Deterministic, no model call: the laws
+      and learnings as a numbered checklist, the accepted text, protected
+      terms, the concept notes, the eight passages elsewhere in the book
+      the draft most resembles, the LINT report, and the draft. It prints
+      the lint summary: a lint ERROR (a sentence opening with "What", a
+      term inside its own definition, three em-dashes in a sentence, eight
+      words verbatim from the book) means REDRAFT NOW — go to (f) with the
+      lint lines as the findings; do not spend a critic on it.
+   e. **Critic subagent.** Spawn one (Agent tool, the DEFAULT model,
+      fresh context) with exactly this prompt. Not Sonnet: on the first
+      trial (good-choice.md, 2026-09-06) Sonnet returned three casing
+      false positives in four runs, each costing a two-minute loop, and
+      the default model's judgment on what counts as a law is the whole
+      point of the check.
 
-   c. **Register it.** `authorlm write propose --why "<which concepts it realizes,
-      which precedent it follows>"` exactly as before, the draft on stdin. `--why` is
-      mandatory and you **cite the grounding BY ID**. Then put the draft and its WHY to
-      the author for a verdict; step 4 is unchanged.
+      > You are the beat critic. Read `<$S/beat-N.critic>` in full; it holds
+      > the prompt you work under and everything you may use. Use nothing
+      > else, read no other file, run no other tool. Reply in exactly the
+      > shape its OUTPUT CONTRACT demands (VERDICT, then FINDINGS when
+      > FAIL). Write your reply to `<$S/beat-N.report>` and say nothing
+      > else.
 
-   Drafting in the conversation is also how you handle a beat the author is dictating,
-   and wording they ask for mid-beat ("make that sentence harder") — same route, same
-   evidence.
+   f. **Redraft on FAIL, at most twice.** Spawn the drafter again with the
+      prompt from (b) plus: "Then read `<$S/beat-N.report>`, the critic's
+      findings on the previous draft at `<$S/beat-N.draft>`. Fix every
+      finding. The rest of the payload still governs." Then (c), (d), (e)
+      again. After two FAILs, stop: bring the author the draft AND the
+      critic's open findings in one line each, and register it with
+      `--no-critic "critic still fails: <the findings, briefly>"` so the
+      row records it.
+   g. **Register.** `authorlm write propose --why "<concepts by id,
+      precedent>" --critique $S/beat-N.report -m <ms> < $S/beat-N.draft`.
+      The verb checks three things and refuses otherwise: the payload was
+      assembled since the last verdict/replan/learning, the lint has no
+      ERROR, and the critic saw THIS draft and said PASS. A refusal names
+      the missing step; do it, never work around it.
+   h. **Show the author ONLY the changed paragraphs.** Run `authorlm
+      write show --changed -m <ms>` and paste its output as the beat:
+      every span that differs from the pinned original is in bold, a
+      paragraph with no counterpart is bold whole (new material), the
+      unchanged paragraphs are left out with a one-line count, and the
+      essay's own bold is hidden in this view (author rulings 2026-09-06:
+      "bold the changed sections in each beat"; "you don't have to print
+      all the unchanged paragraphs, I only need to see the changed
+      paragraphs"). **A beat with no change is said so, plainly, in
+      orange (or bold): "No change against the original in this beat."**
+      Never skip the showing: every beat is shown, even a verbatim one.
+      Say what the marks mean in one line the first time. Add the
+      WHY in one sentence and, in one more line, what the critic caught
+      and the redraft fixed (or that it passed clean). Never the payload,
+      the report, a hash or a path. For a new essay there is no original
+      and `write show` says so; present the plain draft.
+      **Color when the surface allows it (author ruling 2026-09-06: "more
+      than bold, like an orange color for dark theme").** When an inline
+      widget tool is available (`show_widget`), render `authorlm write
+      show --changed --html` inside it: a `<div>` with the essay's serif face, the
+      `.chg` spans in orange (`#e8963c` on dark, `#b85c00` on light, via
+      `prefers-color-scheme`), a one-line legend, no other styling. Paste
+      the bold markdown as well, so the beat is also in the transcript.
+
+   **Dictation.** When the author supplies the text themselves ("write
+   exactly this", a reworded beat), it was conditioned on nothing:
+   register it with `write propose --no-critic "author dictated"` (the
+   reason is recorded on the row). The lint still runs; a lint ERROR on
+   the author's own words is shown to them, and `--lint-override "<their
+   why>"` registers it — never edit their words to satisfy the lint.
+
+   **The lint is law made mechanical, not a judgment.** Its ERRORs encode
+   ratified laws (no "What" openers, no term in its own definition, no
+   stacked em-dashes, nothing verbatim from the book). Its warnings
+   ("not X but Y", a definitional sentence about a concept another essay
+   introduced, a sentence over 40 words, a reading grade above 13) are
+   for the critic to weigh. An override is evidence and needs a reason.
 
    **The billed verb is the exception, not the default.** `authorlm write draft`
    without `--dry-run` sends the payload to the pinned `[writing]` model, self-checks
-   in the same call, and registers the result through the ordinary propose path. Reach
+   in the same call, and registers the result through the ordinary propose path
+   (bypassing the chat-road gates: it assembled its own payload). Reach
    for it ONLY when the author explicitly asks for the pinned model, and **say that it
    bills the Anthropic API per beat before you run it**. As shipped it refuses — there
    is no `[writing]` section — and the refusal names the exact TOML to paste and the
@@ -462,6 +525,34 @@ pull) — but propose/accept are gated while the file is checked out, and
 after a pull that changed the text a pending draft was conditioned on,
 re-propose rather than let the author accept a stale draft.
 
+**Parallel-edit mode (author ruling 2026-09-06, on good-choice.md).** The
+author's words: *"I'm making edits in the doc in parallel. In this mode I
+don't want the filter to write locally and push to the doc at the end. I
+want the filter to keep sharing content here, and pull from the doc at
+the end to make sure all the sections were updated. They may not be
+updated exactly."* The author says so once; from then on, for that
+writeup:
+- The DOC is the author's working copy. They carry each accepted beat
+  into the Doc by hand, reworded as they like, while the loop runs. The
+  local file still receives the accepted beats (that is the record the
+  verdicts hang off) but it is NOT the essay any more.
+- **Never `doc push` that essay**, during the writeup or after it: a push
+  would overwrite what they typed. `write accept` never pushes, so the
+  only way to break this is to reach for `doc push` yourself. Don't.
+- Beats keep arriving HERE (step 3h), one at a time, verdicts as usual.
+- **At the end, the Doc wins:** `authorlm doc pull <essay> --force -m
+  <ms>` (the local accepted text stays in version history), then
+  `authorlm write landed -m <ms>` — a deterministic check that looks for
+  every accepted beat in the pulled text paragraph by paragraph and
+  reports each as landed exactly, reworded, or MISSING, plus the
+  paragraphs the author added that match no beat. Read the MISSING ones
+  to the author by their opening words; reworded is not a fault, it is
+  their words winning. Only then `write complete`.
+- The same rule governs a FILTER run when the author says they are
+  editing in parallel: no `filter push`; read the proposals here, take
+  chat verdicts (`list_filter_edits` / `triage_filter_edits`), and end
+  with `doc pull --force` rather than `filter resolve` writing locally.
+
 ## Profiles (declared context, never law)
 `get_profile` serves author-declared context stored in `_profiles/`
 (observation-invisible) and synced with a separate workspace Doc
@@ -505,8 +596,10 @@ explicitly asks for it.
 ## Triage at scale (interactive app)
 Conversational triage captures reasoning — reserve it for items the author
 would hesitate on; their explanations are the evidence that seeds policies.
-When a bulk pile has built up, open the hosted interface with
-`open_triage_app`; it keeps deterministic graph data, LLM assessments, and
+When a bulk pile has built up, open the local app with `authorlm
+triage-app -m <manuscript>` (run it in the background from Bash; it serves
+the page on a loopback port and opens the browser — there is no MCP tool
+for it since 2026-09-04); it keeps deterministic graph data, LLM assessments, and
 author decisions visibly separate. Analysis never starts on open and never
 becomes a decision automatically. **Find safe recommendations** runs the same
 zero-token rules as deterministic CLI triage; recommendations remain transient
@@ -649,6 +742,105 @@ Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
+## The interlocutor (a tradition reads the whole book)
+Design reference: `docs/interlocutor-design.md`. An **interlocutor** is a
+third-person critical reading of the WHOLE book from inside one tradition
+— Epictetus, Basilides, Plato, Shankara. It is not a lens (a lens reads one
+essay and reports findings) and it rides the critique road: its report
+lands in `_critiques/` and every improvement it asks for becomes a PROPOSED
+intent with critic provenance, triaged like any critic's (`critique
+triage --scope <essay>`, `list_critique_items`). Nothing is law until the
+author rules.
+
+The artifact is `_interlocutors/<name>.md`: TOML front matter (`terms`,
+two kinds — the tradition's own vocabulary and the BOOK'S words the author
+declares adjacent, each with a reason; `engaged`, essays that already
+engage this critic; `position`, essays carried whole as the author's
+authoritative position) and then the prose: the corpus declaration, where
+to start, the refusals. The author reads and ratifies it before it runs,
+like every lens. **The concept comparison is the author's input, never a
+subagent's guess**: a critic with an essay that engages it uses that essay;
+a critic without one waits for the author's rough comparison, and
+`interlocutor draft` refuses without `--engaged`.
+
+**"Run Epictetus on the book" is ONE instruction.** Carry it to the end in
+one turn, the way a filter is applied. With `$S` the scratchpad:
+
+1. `authorlm interlocutor run epictetus --out $S/epictetus.payload -m <ms>`
+   (`--file <chapter|part>` narrows a follow-up run after one essay was
+   revised; `--engaged` / `--position` ADD essays to the artifact's own
+   lists). Deterministic: the term scan, the toc with summaries, the
+   position and engaged essays whole, the concept notes for the book terms
+   that hit, the mentions, the manuscript root, the output contract. No
+   model call. Do not read the payload into this conversation.
+   **The mentions are a SAMPLE** (author ruling 2026-09-06): at most 12
+   terms and 6 locations per term, drawn fresh each run so a re-run
+   surfaces new paragraphs and new insights; the coverage table tells the
+   critic where the rest live. The seed is printed and recorded in the
+   report — mention it in one clause when you read the report back, and
+   pass `--seed N` only when the author asks to reproduce a run.
+   `--max-terms 0 --max-per-term 0` shows everything.
+2. Spawn ONE subagent (Agent tool, the DEFAULT model, fresh context):
+
+   > You are the interlocutor for a philosophy manuscript. Read
+   > `<$S/epictetus.payload>` in full. It holds the prompt you work under,
+   > the tradition you read from, and everything you may use; you may
+   > also open whole files under its MANUSCRIPT ROOT, and every one you
+   > open goes in your Baseline. Use no web and no other tool. Write the
+   > two files its WRITE TO block names, in exactly the shape its OUTPUT
+   > CONTRACT demands, and say nothing else.
+
+3. `authorlm interlocutor import epictetus $S/epictetus.payload -m <ms>` —
+   automatically, in the same turn. It verifies the Baseline against disk
+   (a false baseline REFUSES the whole import), drops any finding whose
+   quote is not verbatim in the named file or whose heading has no locus
+   (counted, listed in the report header), joins the manifest to the
+   surviving findings (an `addressed` objection yields no item), prepends
+   the deterministic mentions block, lands report and manifest in
+   `_critiques/<date>-interlocutor-<name>.{md,json}`, and imports the
+   manifest as proposed intents.
+4. **Read the report back as prose, BY ESSAY**, then give the two paths.
+   For each essay: which objections are open against it (`partial` or
+   `unaddressed`), the literature name and locus of each, and the one
+   sentence it asks for; then the misattributions and their repairs; then
+   the `addressed` objections in one line each so the author knows what is
+   covered — including the by-inference ones, whose inference is in the
+   report for checking. Any `[check]` locus is a to-do for the author; say
+   so. Never the payload, the manifest, or a hash.
+
+Rulings the contract encodes, so you can answer for them: "addressed"
+includes ADDRESSED BY INFERENCE — the book need not name the objection if
+its theory as stated entails the answer (the author: "I don't want to keep
+saying 'Plato's objection A: my response to A' all through these
+non-fiction essays"); an improvement supplies a premise or restates a
+claim, never asks for that dialogue; the Sermons are read as claims the
+book makes and the repair always points at the essay that defends the
+claim; misattributions (mischaracterizations included) are reported apart
+from objections; a contested reading is never an error; there is NO memory
+between runs — a re-run is a fresh report and the author reconciles by eye.
+
+**A new critic** (after Epictetus): `authorlm interlocutor draft <name>
+--engaged <essay> --out $S/<name>.draft -m <ms>`; a subagent with the
+prompt "Read `<payload>` in full and write the artifact it asks for to the
+path in WRITE TO; use nothing else and say nothing else"; then read the
+artifact TO THE AUTHOR AS PROSE — the corpus it claims, the book terms it
+maps and why, the refusals — and only on their yes `authorlm interlocutor
+add <name> < $S/<name>.draft.artifact.md`. An artifact the author has not
+read is one they cannot rule on.
+**Propose the position; never ask an open question about it** (author
+ruling 2026-09-06). The author's position is a property of the book, not
+of one critic: `interlocutor list` shows what every installed artifact
+carries as `position`, the draft payload's POSITION ON RECORD block seeds
+the new artifact with it, and you put it to the author in the same breath
+as the rest of the reading — "the other critics carry the Recapitulation
+and the Metaphysic as your position; same here?" — naming any file one
+critic carries and the others do not. When the author names a different
+position for one critic, ask once whether the change is for that critic
+or for all of them, and edit the other artifacts if it is for all. Ratified order of first use: Epictetus,
+then Becker, then Nietzsche, then Basilides; Plato waits for the author's
+rough comparison. The checked-in canonical copies live in
+`docs/interlocutors.md`, the lenses' pattern.
+
 ## The filter pass (one concern, one essay, unit by unit)
 Design reference: `docs/filter-pass-design.md`. A **lens** reads one essay
 whole and reports findings. A **filter** reads one essay UNIT BY UNIT and
@@ -763,6 +955,11 @@ cross-essay (a motif used two ways, material that belongs in a different
 essay), because a filter can only replace a unit in place and can never
 move or cut one.
 
+**Unless the author has declared parallel-edit mode** (see the beat loop:
+the Doc is their working copy, nothing pushes, the Doc is pulled with
+`--force` at the end and `write landed` checks what landed), the
+following holds.
+
 **"APPLY FILTER X TO ESSAY Y" IS ONE INSTRUCTION, NOT THREE.** The author's
 words on the old behaviour: *"I don't know why we have three different verbs
 required in three different steps to do that one thing."* They are right.
@@ -774,6 +971,114 @@ back to them as prose. Do not stop in the middle to ask which road, whether
 to push, or whether they would like to triage first. The Doc tab IS the
 review, and the point of the pass is that the proposals arrive where they
 will be ruled on.
+
+**"FILTER THE ESSAY" IS A SEQUENCE OF BEATS, ONE FILTER PER KIND OF FIX
+(author ruling 2026-09-06, verbatim: "A filter will typically do beats, one
+for the various fixes that are required").** A filter pass on an essay is
+never one filter. When the author says "filter the essay", or hands over a
+list of what is wrong with it, first sort the problems by which installed
+filter OWNS each concern (`filter list`; each artifact's "does not count"
+section names the owner of what it refuses), and say the sort back in one
+breath: these items go to modal-register, these to claim-status, these to
+nothing installed. Then run the owning filters as BEATS, one after another,
+each beat carried to the end in one turn exactly as the paragraph above
+says: run → subagent draft → `filter apply` → the brief prose summary →
+the author settles in the tab → `filter resolve` + `doc push` → the next
+beat starts. Only one producer's forms may sit in a tab at a time, so a
+beat's push waits for the previous beat's resolve; name the next beat and
+wait for the author's word that the tab is settled. Never record several
+filters against the same text to save a round trip — an earlier beat's
+accepted edits leave the later replies' whole-unit replacements stale, and
+a stale `new` would overwrite what the author just accepted. Order the
+beats by the fixes the author actually asked for, then the standing sweeps
+(duplicate-words, audio-friendly, image-then-paraphrase, reader-load,
+modal-register, claim-status) as the essay's state warrants. A problem no
+installed filter owns is reported as such in the sort, WITH a filter
+proposed for it (read to the author as prose and ratified before `filter
+add`) — never handed back as "outside the filter's concern" with nothing
+offered.
+
+**A chat verdict on a pushed proposal is NOT reachable by number.** Once
+`filter apply` has put the forms in the tab, `filter edits` lists nothing
+and `filter triage --reject N` answers "no edit N (there are 0)"; a
+`filter resolve` run right after that reads the untouched form as an
+ACCEPTANCE and finalizes it. (This happened on 2026-09-06: the author had
+refused a proposal in chat, the triage silently missed, the resolve
+accepted it, and the push carried it to the Doc; recovery was `doc pull`,
+`filter rollback`, `doc push`, and the accepted verdict stayed on the
+record.) So when the author refuses a proposal in chat AFTER the push,
+do not resolve: either empty that form's green half in the tab yourself
+before the resolve, or record the refusal BEFORE the apply by running
+`filter record` then `filter triage --reject` and only then `filter push`.
+A triage result that reads "there are 0" is a stop, never a step.
+
+**THE STANDING POST-MERGE STEP: after the author merges a revision, read
+the essay WHOLE before saying "verified" (author ruling 2026-09-06).**
+"Pull and verify" means two verifications, and the reply names which
+were done. The first is mechanical: footnote anchors and definitions
+paired, no bare numeric anchors, internal references plain roman, no
+reserved characters, no "What" openers, typos. The second is
+argumentative, and it is the one that gets skipped: re-read the merged
+essay from the top and, for every distinction the essay introduces (a
+definition, a scheme of tests, a scoping such as "within one lifetime"),
+list where it is stated, where it is grounded, and every example,
+enumeration, and condition that should carry it — then report the places
+where it was introduced and not deployed. Check every "the shape of the
+argument" pointer to another essay against that essay's summary
+(`summarize` keeps them on file): the pointer must compress the target's
+mechanism, not only its definitions. Treat ratified concept notes and
+style laws as constraints on MEANING in this pass: a sentence that quotes
+a note verbatim and undermines the essay's own argument is a finding, not
+compliance. The lenses for this pass are the eight installed on 2026-09-06
+(`lens list`), rewritten book-agnostic from the earlier five after an
+independent review; each opens with verbatim Flag/Keep examples from the
+manuscript and a rules section that refers only to the runner's INPUTS
+(AUDIENCE PROFILE, GLOSSARY = the concept notes, ORGANIZING SCHEME,
+PROTECTED REGISTERS = the Sermons, SENTENCE-LEVEL PASSES = the filters).
+**Lenses run independently and never on summaries** (author ruling
+2026-09-06, built the same day: docs/lens-architecture-design.md). A lens
+declares in TOML front matter its `class` (`chapter` — the essay against
+itself; `cross-chapter` — the essay against the TEXT of other chapters),
+its `inputs` (glossary = the concept notes with where each term was
+introduced; audience = `_profiles/audience.md`; scheme =
+`_profiles/scheme.md`; registers = toc entries with `register =
+"protected"`; passes = the filter roster; reading-order) and, for a
+cross-chapter lens, its `targets`: `pointers` (chapters the essay names,
+resolved by title and `_profiles/chapter-aliases.toml`, their full text
+carried), `neighbours` (nearest full chapters either side), `earlier`
+(TERMS INTRODUCED LATER/EARLIER, from the graph), `book` (verbatim
+recurrences and concept realizations, zero tokens). No key renders a
+summary and none ever will; a finding about another chapter names it
+from block T and quotes it, and the quote is checked against that file.
+**THE FLAG POLARITY MATCHES `filter run`:** `lens run <name> <essay>`
+makes NO model call — it prints four hashed blocks (S lens, A inputs, T
+targets, E essay) for a subagent to answer; `lens run --native` sends the
+same blocks to the `[llm]` model. Say which way round it is the first time
+a session reaches for it. The lens road, one turn, same shape as the
+filter beat: `lens run <name> <essay> --out $S/<name>.payload`; spawn an
+empty-context drafter ("read the payload in full; it is your entire
+world; answer block S's contract; write the JSON to <reply>"); `lens
+register <name> <essay> --reply <json>` (it re-assembles the payload and
+REFUSES a finding naming a chapter the lens did not declare); then relay
+the findings as prose and hand verdicts to `lens review <n>`. `lens sweep
+<essay> [--native] [--only a,b] [--skip a,b] [--out DIR]` runs the roster
+in the ratified order with block A assembled once and cross-links
+findings whose quotes overlap across lenses. `lens status <essay>` shows
+each batch's per-rule tallies, unverified target quotes, and STALE where
+the essay or a target has changed since (byte comparison, not a
+summary). A lens refuses to run ON a protected register. `lens run` on
+hierarchy.md measures 5K–60K tokens of payload depending on class (a
+pointer lens carries six chapters); native is cents, the subagent road a
+fifth of a filter beat.
+**A lens file's Examples section is living evidence:
+when the author rules an example wrong or moves the line, edit the lens
+file at once and record the reasoning in authorlm afterward.** A filter cannot see any
+of this, because none of it is unit-local. Only after both passes
+does the reply say "verified", and it says which pass found what. The
+occasion for this rule: on 2026-09-06 a merged hierarchy.md was
+"verified" mechanically, and a second reader then found a run of
+introduced-but-undeployed distinctions the checklist repairs had left
+behind.
 
 **A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS THE RESULT.** `filter
 resolve` deliberately does NOT re-push — a resolve that also pushed could
@@ -810,11 +1115,22 @@ The loop, per essay:
    matter declares `prelude = "pronunciations"` the same verb runs the
    dictionary diff instead (below); it is OPTIONAL, and `filter run`
    prints one line and proceeds if it has not been run.
-2. Draft the reply **in one message**: one entry per unit, IN ORDER,
-   carrying the state forward as you go — that is what makes the pass
-   autoregressive rather than N independent judgments. Copy each `echo`
-   from the unit; a mismatch discards the whole reply and nothing is
-   staged. Pipe the JSON into `authorlm filter record <essay>`.
+2. **The reply is drafted by a subagent with an empty context, never in
+   this conversation (same rule as the beat loop, ratified 2026-09-06).**
+   Send the payload to a file — `authorlm filter run <name> <essay> -m
+   <ms> > $S/<name>-<essay>.payload` — and spawn a drafter (Agent tool,
+   default model) with: "Read `<payload file>` in full; it is your entire
+   world — use nothing you know from elsewhere, read no other file, run
+   no other tool. Answer it exactly as its Reply section demands: one
+   entry per unit, in order, the state carried forward, each `echo`
+   copied. Write the JSON, and nothing else, to `<reply file>`." Then
+   pipe that file into `authorlm filter apply` (or `record`). A mismatched
+   `echo` discards the whole reply and nothing is staged. `record` now
+   also LINTS every replacement for what it introduces (a "What" opener,
+   a term inside its own definition, stacked em-dashes, a verbatim run
+   from another essay, a re-definition) and warns by unit — read those
+   warnings to the author with the protected-term ones; they are usually
+   the proposals worth looking at first.
 3. **`authorlm filter push <essay>` — ALWAYS, immediately after a
    successful record (author ruling 2026-09-01, verbatim: "always add
    these to the doc using the old/new syntax just like we do for
@@ -978,6 +1294,85 @@ any state — a dismissal is final, and the remedy if they change their
 mind is to write the row in `pronunciations.md` themselves. So propose
 the ones a narrator would actually stumble over, and leave the rest.
 
+## The audiobook (`authorlm audio …` — AuthorLM produces, audiostation generates)
+
+Design: `docs/audiobook-pipeline-design.md`. AuthorLM writes the
+manifests in `_audio/` (`audiobook.json`, `chapters/*.json`); the
+**audiostation** desktop app (`audiostation/`) generates, stitches,
+audits and packages. Nothing in chat generates chapter audio, and the only
+ElevenLabs speech AuthorLM ever requests is an audition clip.
+
+**Casting is three layers.** `voice = "key"` on a chapter in `toc.toml`
+(the essay default; invisible in the Doc), rows in `_audio/cast.md`
+(what each role sounds like), and rare full-line `[Voice: key |
+speed=0.92]` tags in the prose for the exceptions. The tag goes to the
+Doc like every other tag so the pull survives, and is stripped from
+every reader output. The paragraph is the unit of audio: a speaker
+change inside a paragraph is resolved by splitting the paragraph, never
+by an inline marker. Keep the tag count low — the author edits in the
+Doc with a screen reader.
+
+**The audition protocol (voices → shortlist → the book's own words):**
+
+1. **Free first.** `list_voices` (`audio voices --search "deep british
+   narrator"`, `--library` for the shared library) downloads preview
+   clips into `_audio/auditions/audition.html`. Publish that page as an
+   artifact; the author listens and names a shortlist in chat.
+2. **Then paid, on the author's words.** `audition_voices` with the
+   shortlist and `file` + `paragraphs` (the paragraphs that will
+   actually be generated) or `text`. Without `confirm=True` it returns
+   the character cost — read it to the author and wait for a yes. Never
+   audition on paid clips before a free pass has narrowed the field.
+3. **One parameter per round.** Vary stability or speed, not both.
+   Industry practice is one setting per voice for the whole book;
+   drama comes from the prose.
+4. **Settle on the author's word.** Propose the row as prose; `set_cast`
+   only after they have heard the clip and said so.
+5. **Cast the passages afterwards.** The casting filter (`cast = true`
+   in its front matter; `filter run casting <file>`) proposes `[Voice:]`
+   tags that name only real rows, through the ordinary filter loop.
+
+**Pronunciations → ElevenLabs.** `push_pronunciations` (`audio
+dictionary push`) shows the plan first — rows to add, readings that
+changed, remote-only rules left alone — and applies only with
+`confirm=True`. The dictionary is named in `audiobook.toml`; the model
+there decides alias (multilingual v2 and most others) versus phoneme
+(`eleven_flash_v2`, `eleven_v3`) rules. After a push, `export_audio`
+writes the new version into `audiobook.json`.
+
+**Settling a pronunciation by ear.** `say_term` (`audio say`) renders the
+word's own sentence, in the voice of the section that says it, with each
+respelling substituted inline as the alias rule would — no dictionary
+push, about 150 characters per clip. `authorlm workbench -m <manuscript>`
+(run in the background from Bash, like `triage-app`; it serves the page
+on a loopback port and opens the browser) is the same loop as a local
+page: every word, every voice that says it, a respelling box, Regenerate
+and listen in one of three modes (the respelling as written; **the
+voice's default with no rule at all**; via the pushed dictionary), Save
+to `pronunciations.md`, **Remove from dictionary** (added 2026-09-04:
+when the default sounds better, drops the row and exactly that one
+remote rule, then Export), Push, Export. The sentence each voice reads
+is editable there, and rendered clips persist across reloads (indexed in
+`_audio/auditions/say/workbench-clips.json`). There is no MCP
+tool for it since 2026-09-04: the MCP App road never rendered in the
+author's client and was removed. You cannot hear the clips: propose
+respellings from spelling and etymology (plain syllables, stressed one in
+CAPS, never IPA), then act on what the author reports hearing. A row is
+written only on the author's word (`settle`, or their Save).
+
+**Readiness.** `audio_readiness` (`audio check`) is the one report from
+the sources to audiostation's state: metadata, `about.md`, cover, cast
+keys, unresolved tags, dictionary drift, retail sample length, stale
+exports, and how much is generated per chapter. audiostation's ACX audit
+is the last gate on the audio itself.
+
+`audio init` (CLI only, once) seeds `audiobook.toml` and `cast.md`;
+after that AuthorLM reads them and writes only a cast row on request.
+Every text rule (gaps, heading voice, footnotes, inline math) is a key in
+`audiobook.toml`, never a flag. Narrator, publisher, copyright year and
+language are manuscript metadata (`set_manuscript_metadata`), set only
+from the author's explicit words.
+
 ## Publication identity and review PDFs
 Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
 manuscript metadata, never export settings or inferred editorial beliefs.
@@ -1097,20 +1492,25 @@ a resolve overwrites the resolve:
    mid-pass; per-tab pulls are for a named tab only.
 2. **Narrate what came down** — `authorlm diff`, prose changes apart
    from formatting churn — before touching anything.
-3. **Forms.** `authorlm filter status` and `authorlm critique status`
-   name the tabs carrying written forms. For each: `filter resolve
-   <essay>` / `critique resolve <essay>` (explicit, one at a time),
-   then `doc push <essay>` — A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS
-   THE RESULT. Refusals (broken join, no agreed base) are reported, not
-   forced.
+3. **Forms.** `authorlm filter status`, `authorlm critique status`,
+   `footnote list`, and `explain list` name the tabs carrying written
+   forms. For each: `filter resolve <essay>` / `critique resolve
+   <essay>` / `footnote resolve <essay>` / `explain resolve <essay>`
+   (explicit, one at a time), then `doc push <essay>` — A RESOLVE IS
+   NOT FINISHED UNTIL THE DOC HAS THE RESULT (the directive resolves
+   push themselves). Refusals (broken join, no agreed base) are
+   reported, not forced.
 4. **Comments to address.** A text change implied → draft with the full
    machinery, register with `doc propose`; a question → answer in chat.
    Verdicts the author already gave in the margin were executed by
    step 1; process the modified-acceptance diffs for the learnings duty.
-5. **Footnote tags** (docs/footnote-directive-design.md). Draft every
-   open tag in chat per §3 of that design, all at once, flags on
-   unverified sources; wait for the ruling; apply the agreed ones and
-   push. A declined tag stays open.
+5. **Footnote and explain tags** (docs/footnote-directive-design.md,
+   docs/explain-directive-design.md). Draft every open tag in chat per
+   §3 of the footnote design, all at once, each from the claim before
+   its anchor. The pull cleared the checkouts, so an apply here lands DIRECTLY —
+   wait for the ruling in chat first. A file the author keeps checked
+   out takes the Doc road instead: apply writes the forms into the tab
+   and the ruling happens there. A declined tag stays open.
 6. **Illustrations.** New or changed descriptions get the prompt-critique
    duty on the spot; unrendered slots and externalize offers are RELAYED
    and rendering is offered, never started — consent rule unchanged.
@@ -1232,6 +1632,71 @@ Two standing duties:
   UNPROMPTED once two independent instances exist (the margin-learnings
   duty, extended); candidates go through the same decline-by-default
   scoped distiller and the author's ratification.
+
+## Inline directives (`[Footnote: …]`, `[Explain: …]` — drafted in chat, landed by apply)
+The author writes a request INTO the prose, in their shorthand, where
+the result belongs: `…the vital lie.[Footnote: cite Becker ch. 2 |
+label: RD]` (the superscript lands exactly there) or `…holds.[Explain:
+what a vital lie is]` inline, or `[Explain: …]` alone on a line (a
+paragraph of its own). Both tags are CONSUMED on apply. Collect and
+`doc pull` REPORT the open tags per file (`directives` rows on the
+collect report and on `get_status`; `list_footnote_tags` /
+`list_explain_tags` on demand); no LLM runs and nothing is drafted
+unasked (footnote design §2, ratified 2026-09-02; explain follows it —
+`docs/explain-directive-design.md`).
+
+**"Resolve the footnotes/explanations in <file>" is ONE instruction,
+end to end.** Assemble with the tools you have: `get_style(file)` (the
+citation, lexicon, and footnote laws are binding), `get_concepts`
+scoped to the file then by name for the concepts the anchor paragraph
+touches, the file's existing `[^X]:` definitions verbatim as voice
+exemplars (footnotes), and the essay with the tag marked. Draft one
+text per tag and show them in chat. **A footnote is constructed from
+where it is requested: read the sentence before the anchor first — the
+footnote supports THAT claim, and the gist says how** (house law,
+ratified 2026-09-03). It carries what the sentence cannot — a source, an
+etymology, a qualification — and never continues the argument (house
+law). An explanation is the author's prose at that position, explaining
+what the gist names and nothing more. The proposed citation rule
+(verified sources only, unverified flags) was REJECTED by the author on
+2026-09-03: the anchor claim governs the draft, not the source
+discipline. The author reacts; build on the criticism and redraft in chat — no separate
+LLM call, no revise verb. Their stated reasons are evidence
+(`review_suggestion`) when they state a principle, never by habit.
+**Companion footnote (ratified 2026-09-03):** while drafting an
+explanation, apply the footnote structure law to the gist — a source,
+an etymology, a qualification that would break the paragraph's stride
+belongs in a footnote, not in the passage. When one is warranted, draft
+it beside the passage — supporting the claim it hangs on — and pass it
+as `footnote` in the same `apply_explain` item (CLI `--footnote
+TAG=TEXT`): the passage lands with the superscript at its end and the
+definition in the file's block, one review, no second `[Footnote:]`
+round. Never invent a footnote the gist did not call for.
+Then ONE `apply_footnote` / `apply_explain` per file carrying every
+agreed text as `items: [{tag, text, footnote?}]` (`tag` is the ordinal in the
+file — first open tag is 1 — or an unambiguous gist excerpt); the CLI
+`footnote apply` / `explain apply <file> --tag N --text …` takes several
+pairs at once. **Two roads, chosen by the file's checkout state
+(ratified 2026-09-03):**
+- **Not checked out** → direct apply. The tag becomes `[^label]` with
+  `[^label]: …` appended after the file's last definition (series
+  continues; a new file takes its stem's letter; `| label:` overrides),
+  or the explain passage lands in place. Evidence row (`doc_threads`,
+  origin `footnote`/`explain`), collected under no episode; `doc push`
+  carries it later.
+- **Checked out to the Doc** → the tab is the review surface, as for
+  every other machine proposal. Apply writes `<<[Footnote: …]>>{{[^B1]}}`
+  at the anchor and `{{[^B1]: …}}` after the last paragraph (explain:
+  `<<[Explain: …]>>{{passage}}`); the LOCAL FILE STAYS PRISTINE. The
+  author edits the green half or deletes the form in the Doc; then
+  `resolve_footnotes` / `resolve_explains <file>` (CLI `footnote
+  resolve`) reads the tab back, lands their edits, records evidence,
+  collects under no episode, and pushes the tab clean. A deleted form is
+  a decline: the tag stays open. While forms are out, a second apply on
+  that file — either kind — is refused until it is resolved; `doc push`
+  refuses too and names the resolve verb.
+A declined draft leaves the tag open; nothing is deleted on a "no".
+Exports strip an unresolved tag and warn.
 
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
