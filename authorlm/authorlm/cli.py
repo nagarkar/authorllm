@@ -4021,6 +4021,40 @@ def cmd_lens(args):
             tgt = f" → {','.join(row['targets'])}" if row["targets"] else ""
             print(f"  {row['name']} [{row['class']}{tgt}]: {row['summary']}")
         return
+    if args.action == "findings":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm lens findings <essay.md> [--all]")
+        try:
+            rows = lenses.findings(db, manuscript, target, all_states=args.all)
+        except LookupError as err:
+            raise SystemExit(f"error: {err}")
+        if not rows:
+            print(f"No {'lens findings' if args.all else 'open lens findings'} "
+                  f"on {target}.")
+            return
+        for r in rows:
+            tags = []
+            if r["edit_thread"]:
+                tags.append("edit staged")
+            if r["footnote"]:
+                tags.append("footnote requested")
+            if r["also_flagged_by"]:
+                tags.append("also: " + ", ".join(r["also_flagged_by"]))
+            if r["target_file"]:
+                tags.append(f"→ {r['target_file']}")
+            if not r["present"]:
+                tags.append("QUOTE NO LONGER IN FILE")
+            print(f"{r['id'][:11]}  [{r['lens']}] "
+                  + (f"{r['rule']} " if r["rule"] else "")
+                  + (f"({', '.join(tags)})" if tags else "")
+                  + ("" if r["state"] == "proposed" else f"  {r['state']}"))
+            print(f"    On “{(r['quote'] or '')[:160]}”")
+            note = r["note"].split("] ", 1)[-1]
+            print(ui.dim(f"    {note[:400]}"))
+        print(ui.dim("Verdicts: lens review <gd-id> --accept|--reject "
+                     "[--explain \"why\"] (the id prefix printed above)."))
+        return
     if args.action == "status":
         target = args.name or args.file
         if not target:
@@ -4109,12 +4143,15 @@ def cmd_lens(args):
                                      ("rejected", args.reject),
                                      ("modified", args.modify),
                                      ("deferred", args.defer)) if on]
-        if not args.name or not args.name.isdigit() or len(decisions) != 1:
-            raise SystemExit("usage: authorlm lens review <n> "
+        by_id = bool(args.name) and args.name.startswith("gd-")
+        if not args.name or not (args.name.isdigit() or by_id) \
+                or len(decisions) != 1:
+            raise SystemExit("usage: authorlm lens review <n | gd-id> "
                              "--accept|--reject|--modify|--defer "
-                             '[--explain "why"]')
+                             '[--explain "why"]  (ids from lens findings)')
         session, _ = api.ensure_session(db, manuscript)
-        result = api.review(db, manuscript, session, int(args.name),
+        result = api.review(db, manuscript, session,
+                            args.name if by_id else int(args.name),
                             decisions[0], args.explain,
                             llm=api.LLMClient(_load_config(args)),
                             kinds=(lenses.LENS_KIND,))
@@ -7718,7 +7755,10 @@ def build_parser() -> argparse.ArgumentParser:
              "resolve <file> (read the tab back)")
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
-                            "review", "push", "resolve", "status", "sweep"])
+                            "review", "push", "resolve", "status", "sweep",
+                            "findings"])
+    p.add_argument("--all", action="store_true",
+                   help="findings: include reviewed findings, not only open ones")
     p.add_argument("name", nargs="?",
                    help="lens name (add/show/run/register), finding index "
                         "(review), or manuscript file (push/resolve/"

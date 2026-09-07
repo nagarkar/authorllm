@@ -17,6 +17,7 @@ import contextlib
 import difflib
 import io
 import json
+import os
 import re
 import sys
 from collections.abc import Sequence
@@ -74,11 +75,56 @@ __all__ = [
 
 # ------------------------------------------------------------- foundations
 
-def open_db(workspace: str | None = None) -> Database:
-    base = Path(workspace).resolve() if workspace else Path.home()
-    data_dir = base / ".authorlm"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return Database(data_dir / "authorlm.db")
+class MissingDatabase(RuntimeError):
+    """The workspace has no database file, and the caller did not ask to
+    create one. A RuntimeError so the MCP guard renders it as a tool error
+    instead of crashing the server; `.path` is the file that was expected."""
+
+    def __init__(self, path: Path, message: str):
+        super().__init__(message)
+        self.path = path
+
+
+def resolve_workspace(workspace: str | None = None) -> tuple[Path, str]:
+    """The workspace directory and where it came from.
+
+    Precedence: an explicit argument (the CLI's `-w`), then the
+    `AUTHORLM_WORKSPACE` environment variable — a real export or the
+    checkout's `.env`, which `paths.load_env` reads first — then the
+    home directory. The source matters as much as the path: a `.env`
+    pointer is a standing claim that a database exists there, so a
+    missing file under it means an unmounted drive, not a fresh install
+    (`cli._open_db`)."""
+    from . import paths
+
+    if workspace:
+        return Path(workspace).expanduser().resolve(), "flag"
+    paths.load_env()
+    pointed = os.environ.get(paths.WORKSPACE_ENV, "").strip()
+    if pointed:
+        return Path(pointed).expanduser().resolve(), "env"
+    return Path.home(), "default"
+
+
+def db_path(workspace: str | Path | None = None) -> Path:
+    base = resolve_workspace(str(workspace) if workspace else None)[0]
+    return base / ".authorlm" / "authorlm.db"
+
+
+def open_db(workspace: str | None = None, *, create: bool = False) -> Database:
+    """Open the workspace's database. Refuses to invent one: opening used
+    to mkdir and run the schema unconditionally, which is how a typo'd
+    `-w` or an unmounted volume produced a silent, empty second database.
+    Now the file must exist unless `create=True`, which only the verbs
+    that mean to start a workspace pass (`init` with an explicit `-w`,
+    `setup`, and tests building a fixture)."""
+    path = db_path(workspace)
+    if not path.exists() and not create:
+        raise MissingDatabase(
+            path, f"no database at {path}. Run 'authorlm setup' to create "
+                  f"one, or mount the volume that holds it.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return Database(path)
 
 
 def load_config(workspace: str | None = None) -> dict:
@@ -177,7 +223,33 @@ def manuscript_metadata(manuscript: dict) -> dict:
         "trim_width": float(manuscript.get("trim_width", 0) or 0),
         "trim_height": float(manuscript.get("trim_height", 0) or 0),
         "bleed": bool(manuscript.get("bleed", 0)),
+        "narrator": manuscript.get("narrator", "") or "",
+        "publisher": manuscript.get("publisher", "") or "",
+        "copyright_year": int(manuscript.get("copyright_year", 0) or 0),
+        "language": manuscript.get("language", "") or "",
     }
+
+
+def parse_copyright_year(value) -> int:
+    """A four-digit year, or 0 to clear. Refuses anything else."""
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if not re.fullmatch(r"\d{4}", text):
+        raise ValueError("copyright year is four digits, e.g. 2026")
+    return int(text)
+
+
+def parse_language(value: str) -> str:
+    """A BCP-47-shaped language tag ('en', 'en-US'), lowercased subtag
+    first; empty clears."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", text):
+        raise ValueError("language is a code such as 'en' or 'en-US'")
+    head, _, rest = text.partition("-")
+    return head.lower() + (f"-{rest}" if rest else "")
 
 
 # KDP's standard paperback trim sizes, inches (width, height). A custom
@@ -262,7 +334,11 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                paperback_isbn: str | None = None,
                                hardcover_isbn: str | None = None,
                                trim_size: str | None = None,
-                               bleed: bool | str | None = None) -> dict:
+                               bleed: bool | str | None = None,
+                               narrator: str | None = None,
+                               publisher: str | None = None,
+                               copyright_year: int | str | None = None,
+                               language: str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata."""
     changes = {}
     if trim_size is not None:
@@ -278,10 +354,19 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         changes["paperback_isbn"] = _normalize_isbn13(paperback_isbn)
     if hardcover_isbn is not None:
         changes["hardcover_isbn"] = _normalize_isbn13(hardcover_isbn)
+    if narrator is not None:
+        changes["narrator"] = narrator.strip()
+    if publisher is not None:
+        changes["publisher"] = publisher.strip()
+    if copyright_year is not None:
+        changes["copyright_year"] = parse_copyright_year(copyright_year)
+    if language is not None:
+        changes["language"] = parse_language(language)
     if not changes:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
-            "--hardcover-isbn, --trim-size, and/or --bleed")
+            "--hardcover-isbn, --trim-size, --bleed, --narrator, "
+            "--publisher, --copyright-year, and/or --language")
     _validate_format_isbns(
         changes.get("paperback_isbn", manuscript.get("paperback_isbn", "")),
         changes.get("hardcover_isbn", manuscript.get("hardcover_isbn", "")))
@@ -324,10 +409,20 @@ def status(db: Database, manuscript: dict) -> dict:
             "evidence", "knowledge_proposals",
         )
     }
+    # Open [Footnote: …] / [Explain: …] tags ride here (footnote design
+    # §8): the author learns about an undrafted request without having
+    # to remember to ask.
+    from . import directives
+
+    try:
+        open_tags = directives.open_report(Path(manuscript["path"]))
+    except OSError:
+        open_tags = []
     return {
         "manuscript": manuscript_metadata(manuscript),
         "session": dict(session) if session else None,
         "counts": counts,
+        "directives": open_tags,
     }
 
 
@@ -961,6 +1056,20 @@ def collect(db: Database, manuscript: dict, config: dict,
                     "new_edges": len(summary.get("edges", [])),
                     "proposed": summary.get("proposed", 0),
                 }
+
+    # Inline directives — [Footnote: …] and [Explain: …] — are REPORTED
+    # here, beside the illustration slots, and never drafted (footnote
+    # design §2): no LLM runs at collect and nothing is written unasked.
+    # Drafting is chat; `footnote apply` / `explain apply` land the
+    # author's ruling.
+    try:
+        from . import directives
+
+        open_tags = directives.open_report(Path(manuscript["path"]))
+    except OSError:
+        open_tags = []
+    if open_tags:
+        report["directives"] = open_tags
     return report
 
 
@@ -993,6 +1102,28 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
     # must not hijack "the latest batch".
     kinds = kinds or GUIDANCE_KINDS
     kinds_sql = ", ".join("?" for _ in kinds)
+    if isinstance(index, str) and index.startswith("gd-"):
+        # A finding named by its id (or an unambiguous prefix): the way
+        # to reach any open lens finding after a sweep has left several
+        # batches behind the "latest" one (lens-architecture design §6).
+        hits = db.all(
+            f"SELECT * FROM guidance_history WHERE manuscript_id = ? "
+            f"AND kind IN ({kinds_sql}) AND id LIKE ?",
+            (manuscript["id"], *kinds, index + "%"))
+        if len(hits) != 1:
+            raise LookupError(f"'{index}' matches {len(hits)} finding(s)")
+        guidance = hits[0]
+        if guidance["state"] != "proposed":
+            raise ValueError(f"finding {index} was already reviewed "
+                             f"({guidance['state']})")
+        episode = db.one(
+            "SELECT * FROM editorial_episodes WHERE session_id = ? "
+            "AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+            (session["id"],))
+        result = bel.record_review(
+            db, manuscript["id"], dict(guidance), decision, explanation,
+            episode["id"] if episode else None, llm=llm)
+        return result
     latest_batch = db.one(
         f"SELECT batch_id FROM guidance_history WHERE session_id = ? "
         f"AND kind IN ({kinds_sql}) "
@@ -2026,6 +2157,10 @@ def write_plan(db: Database, manuscript: dict, beats: list,
     kept = plan[:writeup["cursor"]] if replace else []
     new_plan = kept + fresh
     meta["next_n"] = next_n
+    # A plan change invalidates every payload assembled before it: the
+    # drafter must see the specs the author actually ratified (the Sep 5
+    # root cause — beats drafted from a plan written before any ruling).
+    meta["seq"] = int(meta.get("seq", 0)) + 1
     db.update("writeups", writeup["id"],
               {"plan": json.dumps(new_plan), "metadata": json.dumps(meta)})
     return {"writeup_id": writeup["id"], "kept": len(kept),
@@ -2396,11 +2531,188 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
     }
 
 
+def _bump_seq(db: Database, writeup: dict) -> int:
+    """Advance the writeup's state sequence. Every event that changes what
+    a drafter must see — a verdict, a replan, a learning — bumps it, and
+    a payload assembled under an older sequence is stale by definition.
+    This is the mechanical form of the author's ruling (2026-09-05):
+    "the whole point of the workflow is to take into account everything
+    that has happened so far."
+    """
+    meta = loads(writeup["metadata"], {})
+    meta["seq"] = int(meta.get("seq", 0)) + 1
+    db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+    writeup["metadata"] = json.dumps(meta)
+    return meta["seq"]
+
+
+def _stamp_assembly(db: Database, writeup: dict, beat: dict,
+                    payload) -> None:
+    """`write draft --dry-run` records that the payload for THIS beat was
+    assembled under the CURRENT sequence. `write propose` refuses without
+    it."""
+    meta = loads(writeup["metadata"], {})
+    meta["assembly"] = {"n": beat["n"], "seq": int(meta.get("seq", 0)),
+                        "at": now_iso(), "hashes": payload.hashes}
+    db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+    writeup["metadata"] = json.dumps(meta)
+
+
+def _assembly_gate(writeup: dict, beat: dict, verb: str) -> dict:
+    meta = loads(writeup["metadata"], {})
+    stamp = meta.get("assembly") or {}
+    seq = int(meta.get("seq", 0))
+    if stamp.get("n") == beat["n"] and int(stamp.get("seq", -1)) == seq:
+        return stamp
+    if stamp:
+        why = ("a verdict, a replan or a learning has happened since"
+               if stamp.get("n") == beat["n"]
+               else f"it was assembled for beat n={stamp.get('n')}")
+    else:
+        why = "none has been assembled for this writeup"
+    raise ValueError(
+        f"{verb} refused: no payload for beat n={beat['n']} has been "
+        f"assembled since the last change of state ({why}). Run "
+        f"'write draft --dry-run' first — the drafter must see the "
+        f"current accepted text, the current plan and the author's last "
+        f"verdict, not a recollection of them.")
+
+
+def write_show(db: Database, manuscript: dict, prefix: str | None = None
+               ) -> dict:
+    """The pending proposal for the current beat, plain and MARKED: every
+    span that differs from the pinned original in bold, a paragraph with
+    no counterpart bold whole (author ruling 2026-09-06: "bold the
+    changed sections in each beat"). Presentation only; no writes."""
+    from . import lint as lint_mod
+
+    writeup = _writeup(db, manuscript, prefix)
+    beat = _current_beat(writeup)
+    proposal = _beat_proposal(db, writeup, beat["n"])
+    if not proposal:
+        raise LookupError(f"nothing proposed for beat {beat['n']} — "
+                          "write propose first")
+    original = _version_text(db, writeup.get("source_version_id"),
+                             writeup["file"])
+    if original and is_placeholder(original):
+        original = None
+    draft = proposal["suggestion"]
+    marked = (lint_mod.mark_changes(draft, original) if original
+              else f"**{draft.strip()}**")
+    return {"beat": beat, "draft": draft, "marked": marked,
+            "why": proposal["explanation"], "rewrite": bool(original),
+            "guidance_id": proposal["id"]}
+
+
+LANDED_EXACT = 0.92
+LANDED_CHANGED = 0.40
+
+
+def write_landed(db: Database, manuscript: dict, prefix: str | None = None,
+                 text: str | None = None) -> dict:
+    """Parallel-edit mode's closing check (author ruling 2026-09-06): the
+    author carried the beats into the Doc by hand while the loop ran, the
+    Doc was pulled with the Doc winning, and now every ACCEPTED beat is
+    looked for in the file — paragraph by paragraph, by word-sequence
+    similarity. `exact` ≥ LANDED_EXACT, `changed` ≥ LANDED_CHANGED (the
+    author reworded it, their words win), else `missing`. Paragraphs of
+    the file that match no accepted beat are the author's own additions
+    and are reported as `extra`, never as faults. Read-only."""
+    from . import lint as lint_mod
+
+    writeup = _writeup(db, manuscript, prefix)
+    rows = db.all(
+        "SELECT * FROM guidance_history WHERE batch_id = ? AND kind = ? "
+        "AND state IN ('accepted', 'modified') "
+        "ORDER BY batch_index, created_at", (writeup["id"], BEAT_KIND))
+    if text is None:
+        path = Path(manuscript["path"]) / writeup["file"]
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+    doc_paras = lint_mod.paragraphs(text)
+    matched: set[int] = set()
+    beats = []
+    for row in rows:
+        meta = loads(row["metadata"], {})
+        accepted = (meta.get("accepted_text") if row["state"] == "modified"
+                    else row["suggestion"]) or ""
+        entry = {"n": row["batch_index"], "exact": 0, "changed": 0,
+                 "missing": 0, "paragraphs": [], "state": row["state"]}
+        for unit in lint_mod.paragraphs(accepted):
+            k, ratio = lint_mod.best_match(unit, doc_paras)
+            if k is not None and ratio >= LANDED_EXACT:
+                verdict = "exact"
+            elif k is not None and ratio >= LANDED_CHANGED:
+                verdict = "changed"
+            else:
+                verdict, k = "missing", None
+            if k is not None:
+                matched.add(k)
+            entry[verdict] += 1
+            entry["paragraphs"].append(
+                {"verdict": verdict, "ratio": ratio, "doc_index": k,
+                 "head": " ".join(unit.split())[:90]})
+        beats.append(entry)
+    extra = [{"doc_index": k, "head": " ".join(p.split())[:90]}
+             for k, p in enumerate(doc_paras) if k not in matched
+             and not lint_mod.is_heading(p)]
+    return {"writeup_id": writeup["id"], "file": writeup["file"],
+            "beats": beats, "extra": extra,
+            "totals": {"exact": sum(b["exact"] for b in beats),
+                       "changed": sum(b["changed"] for b in beats),
+                       "missing": sum(b["missing"] for b in beats)}}
+
+
+def write_critique(db: Database, manuscript: dict, text: str,
+                   prefix: str | None = None) -> dict:
+    """Assemble the critic's payload for one draft of the current beat —
+    deterministic, no model call — and stamp the writeup with the draft's
+    hash so `write propose` can require that the critic saw THIS draft
+    under THIS state. Returns the payload text and the lint report."""
+    from . import critic as crt
+    from . import lint as lint_mod
+
+    writeup = _writeup(db, manuscript, prefix)
+    if writeup["status"] != "active":
+        raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
+    if not text or not text.strip():
+        raise ValueError("no draft text on stdin")
+    beat = _current_beat(writeup)
+    _assembly_gate(writeup, beat, "write critique")
+    report = crt.lint_draft(db, manuscript, writeup["file"], text)
+    payload = crt.assemble(db, manuscript, writeup, beat, text, report)
+    meta = loads(writeup["metadata"], {})
+    meta["critique"] = {"n": beat["n"], "seq": int(meta.get("seq", 0)),
+                        "draft_sha": lint_mod.sha(text), "at": now_iso()}
+    db.update("writeups", writeup["id"], {"metadata": json.dumps(meta)})
+    return {"writeup_id": writeup["id"], "beat": beat, "payload": payload,
+            "lint": report, "prompt_location": crt.prompt_location()}
+
+
 def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
-                  prefix: str | None = None) -> dict:
+                  prefix: str | None = None, *, critique: str | None = None,
+                  no_critic: str | None = None,
+                  lint_override: str | None = None,
+                  gated: bool = True) -> dict:
     """Register a draft for the current beat as a reviewable item. The
     explanation is mandatory — which concepts the draft realizes, what
-    precedent it follows — because that is what verdict evidence hangs off."""
+    precedent it follows — because that is what verdict evidence hangs off.
+
+    Three gates stand in front of the row when `gated` (the chat-mode
+    road; the native `write draft` call assembles its own payload and
+    passes `gated=False`):
+
+    1. a payload was assembled for this beat since the last change of
+       state (`_assembly_gate`);
+    2. the deterministic lint has no ERROR — or `lint_override` names why
+       the flagged text stands (a refrain, a quotation), recorded on the
+       row as evidence;
+    3. an independent critic passed THIS draft (`critique` is the report,
+       `write critique` stamped the hash) — or `no_critic` names why the
+       beat goes to the author unchecked (the author dictated it), also
+       recorded."""
+    from . import critic as crt
+    from . import lint as lint_mod
+
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
@@ -2411,6 +2723,54 @@ def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
         raise ValueError("--why is required: which concepts this draft "
                          "realizes, which precedent it follows, length vs budget")
     beat = _current_beat(writeup)
+    provenance: dict = {}
+    if gated:
+        dictated = bool((no_critic or "").strip())
+        if not dictated:
+            # Text the author dictated was conditioned on nothing, so it
+            # needs no payload and no critic; the reason is recorded. A
+            # DRAFTED beat needs both.
+            stamp = _assembly_gate(writeup, beat, "write propose")
+            provenance["assembly"] = stamp.get("hashes")
+        report = crt.lint_draft(db, manuscript, writeup["file"], text)
+        provenance["lint"] = report.codes()
+        if report.errors:
+            if not (lint_override or "").strip():
+                rendered = lint_mod.render(
+                    lint_mod.Report(report.errors), "LINT ERRORS")
+                raise ValueError(
+                    f"write propose refused — the draft breaks a ratified "
+                    f"law mechanically:\n{rendered}\nFix the draft, or "
+                    f"pass --lint-override \"<why this text stands>\" "
+                    f"(recorded as evidence).")
+            provenance["lint_override"] = lint_override.strip()
+        meta = loads(writeup["metadata"], {})
+        seen = meta.get("critique") or {}
+        fresh = (seen.get("n") == beat["n"]
+                 and int(seen.get("seq", -1)) == int(meta.get("seq", 0))
+                 and seen.get("draft_sha") == lint_mod.sha(text))
+        if (no_critic or "").strip():
+            provenance["critic"] = f"skipped: {no_critic.strip()}"
+        else:
+            if not fresh:
+                raise ValueError(
+                    "write propose refused: no critic has seen THIS draft "
+                    "under the current state. Run 'write critique' with "
+                    "the draft on stdin, have the critic (a clean-context "
+                    "subagent) answer it, and pass the report with "
+                    "--critique <file>; or --no-critic \"<why>\" when the "
+                    "author dictated the text.")
+            if not (critique or "").strip():
+                raise ValueError(
+                    "write propose refused: --critique <file> (the critic's "
+                    "report) is required, or --no-critic \"<why>\".")
+            parsed = crt.parse_report(critique)
+            if parsed["verdict"] != "PASS":
+                raise ValueError(
+                    "write propose refused: the critic's verdict is FAIL. "
+                    "Redraft against its findings and run 'write critique' "
+                    "again:\n  - " + "\n  - ".join(parsed["findings"]))
+            provenance["critic"] = "pass"
     session, _ = ensure_session(db, manuscript)
     # A redraft supersedes the pending proposal; reviewed rows are history.
     db.conn.execute(
@@ -2427,9 +2787,13 @@ def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
         suggestion=text.strip(), explanation=explanation.strip(),
         state="proposed",
     )
+    if provenance:
+        row_meta = loads(row.get("metadata"), {})
+        row_meta["gates"] = provenance
+        row["metadata"] = json.dumps(row_meta)
     db.insert("guidance_history", row)
-    return {"writeup_id": writeup["id"], "beat": beat, "guidance_id": row["id"]}
-
+    return {"writeup_id": writeup["id"], "beat": beat, "guidance_id": row["id"],
+            "gates": provenance}
 
 def cache_cold(client, first_draft: bool, cache_read: int) -> bool:
     """Whether this draft should print §4's loud zero-cache-reads warning.
@@ -2521,6 +2885,7 @@ def write_draft(db: Database, manuscript: dict, config: dict,
         # The model is REPORTED when `[writing]` names one (reading a name
         # is not a gate) and is None when it does not.
         named = ((config.get("writing", {}) or {}).get("model") or "").strip()
+        _stamp_assembly(db, writeup, beat, payload)
         return {**info, "model": named or None, "model_changed_from": None,
                 "dry_run": True, "payload": payload}
     client = llm_mod.writing_llm(config)   # refuses on [writing]; key in draft()
@@ -2550,7 +2915,8 @@ def write_draft(db: Database, manuscript: dict, config: dict,
     # mandatory --why, supersede-on-redraft, the verdict evidence and the
     # policy reinforcement are byte-for-byte what `write propose` makes.
     proposal = write_propose(db, manuscript, text=parsed.text,
-                             explanation=parsed.why, prefix=prefix)
+                             explanation=parsed.why, prefix=prefix,
+                             gated=False)
 
     # Bookkeeping AFTER the row exists. Recording it first would leave a
     # writeup claiming to have been drafted by a model on a beat that was
@@ -2628,6 +2994,7 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     )
     plan = loads(writeup["plan"], [])
     db.update("writeups", writeup["id"], {"cursor": writeup["cursor"] + 1})
+    _bump_seq(db, writeup)
     done = writeup["cursor"] + 1 >= len(plan)
     next_beat = plan[writeup["cursor"] + 1] if not done else None
     return {"decision": decision, "beat": beat, "collect": report,
@@ -2657,6 +3024,7 @@ def write_reject(db: Database, manuscript: dict, reason: str,
         db, manuscript["id"], dict(proposal), "rejected", reason.strip(),
         episode["id"], llm=llm,
     )
+    _bump_seq(db, writeup)
     return {"beat": beat, "review": review_result,
             "note": "cursor unchanged — redraft with the reason in context"}
 
@@ -2672,6 +3040,7 @@ def write_learn(db: Database, manuscript: dict, lesson: str,
     learnings = loads(writeup["learnings"], [])
     learnings.append(lesson.strip())
     db.update("writeups", writeup["id"], {"learnings": json.dumps(learnings)})
+    _bump_seq(db, writeup)
     return {"writeup_id": writeup["id"], "learnings": learnings}
 
 
@@ -3672,6 +4041,8 @@ def compact_collect(report: dict) -> dict:
         out["auto_analysis"] = report["auto_analysis"]
     if "illustrations" in report:
         out["illustrations"] = report["illustrations"]
+    if "directives" in report:
+        out["directives"] = report["directives"]
     if "suggestions_stale" in report:
         out["suggestions_stale"] = report["suggestions_stale"]
     return out
@@ -4102,6 +4473,15 @@ def _dictionary_text(manuscript: dict) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
+def _cast_text(manuscript: dict) -> str:
+    """`_audio/cast.md`'s bytes, or "" — read live like the dictionary,
+    for a filter whose front matter declares `cast = true`."""
+    from . import audio
+
+    path = audio.audio_dir(manuscript) / audio.CAST_FILENAME
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
 def _active_filter_run(db: Database, manuscript_id: str, name: str,
                        file: str) -> dict | None:
     row = db.one(
@@ -4381,7 +4761,9 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
     payload = fg.assemble(db, manuscript, run, body, units, (start, end),
                           threads, text=text, dictionary=dictionary,
                           summaries=meta.get("summaries", False),
-                          profiles=meta.get("profiles") or [])
+                          profiles=meta.get("profiles") or [],
+                          cast=(_cast_text(manuscript)
+                                if meta.get("cast") else None))
     if (meta.get("prelude") and not loads(run["metadata"], {}).get("prelude")):
         # Optional where the registry is required (§15.22 §3.1): a run
         # whose pronunciation prelude never ran is still a correct audio
@@ -4650,6 +5032,33 @@ def filter_record(db: Database, manuscript: dict, config: dict,
                 f"PROTECTED TERMS, the author's own vocabulary. Staged "
                 f"anyway; the harness supplies the law, it is not the "
                 f"editor. Reject it at triage if the term should stand.")
+    # The deterministic prose lint, on the DELTA: a replacement answers
+    # only for what it introduces, never for what the author's own unit
+    # already carried. Warns, never blocks — same footing as the
+    # protected-term check above.
+    if result["edits"]:
+        from . import lint as lint_mod
+        from .structure import content_files
+
+        corpus = lint_mod.corpus_from_files(
+            content_files(read_manuscript_files(Path(manuscript["path"]))),
+            exclude=rel)
+        concepts = [(r["name"], r["introduced_in"]) for r in db.all(
+            "SELECT name, introduced_in FROM concept_nodes WHERE "
+            "manuscript_id = ? AND kind = 'concept' AND introduced_in IS "
+            "NOT NULL", (mid,))]
+        for edit in result["edits"]:
+            old_unit = units[edit["n"] - 1]
+            before = lint_mod.lint_text(old_unit, corpus=corpus,
+                                        concepts=concepts, this_file=rel)
+            after = lint_mod.lint_text(edit["new"], corpus=corpus,
+                                       concepts=concepts, this_file=rel)
+            for f in lint_mod.delta(before, after).findings:
+                if f.severity == "info":
+                    continue
+                warnings.append(
+                    f"unit {edit['n']}: the replacement introduces "
+                    f"{f.code} — {f.message}: «{' '.join(f.quote.split())[:140]}»")
     if covered >= 8 and share >= PROMPT_FAULT_SHARE:
         warnings.append(
             f"{len(result['edits'])} proposals on {covered} units. A "

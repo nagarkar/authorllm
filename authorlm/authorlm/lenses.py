@@ -1011,6 +1011,41 @@ def status(db: Database, manuscript: dict, file: str) -> list[dict]:
     return sorted(batches.values(), key=lambda b: b["created_at"] or "")
 
 
+def findings(db: Database, manuscript: dict, file: str,
+             all_states: bool = False) -> list[dict]:
+    """Every lens finding on this file (open ones by default), oldest
+    first, with the handle `lens review` takes: the row id. The listing
+    is what makes a sweep's eight batches reviewable — `review <n>` sees
+    only the latest batch."""
+    files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    flat = " ".join(files[rel].split()).lower()
+    out = []
+    for r in (dict(x) for x in db.all(
+            "SELECT * FROM guidance_history WHERE manuscript_id = ? "
+            "AND kind = ? ORDER BY created_at, batch_index",
+            (manuscript["id"], LENS_KIND))):
+        meta = loads(r.get("metadata"), {}) or {}
+        if meta.get("file") != rel:
+            continue
+        if not all_states and r["state"] != "proposed":
+            continue
+        quote = meta.get("quote") or ""
+        out.append({"id": r["id"], "state": r["state"], "lens": meta.get("lens"),
+                    "rule": meta.get("rule"), "quote": quote,
+                    # A finding whose passage has since been rewritten is
+                    # visible as such, so it can be dismissed rather than
+                    # puzzled over.
+                    "present": bool(quote) and quote.lower() in flat,
+                    "note": r["suggestion"], "created_at": r.get("created_at"),
+                    "edit_thread": meta.get("edit_thread"),
+                    "footnote": meta.get("footnote"),
+                    "target_file": meta.get("target_file"),
+                    "also_flagged_by": [a.get("lens") for a in
+                                        meta.get("also_flagged_by", [])]})
+    return out
+
+
 # ------------------------------------------------------------- sweep
 
 def sweep_order(manuscript: dict, only: list[str] | None = None,

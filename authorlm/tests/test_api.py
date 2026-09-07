@@ -9146,6 +9146,22 @@ def main_test() -> None:
         check("sweep cross-links overlapping quotes across lenses",
               linked >= 1 and pl_meta["also_flagged_by"][0]["lens"] == "xc",
               str(pl_meta))
+        open_f = lenses.findings(ldb, lm, "02-second.md")
+        check("lens findings lists every open finding on the file with its id "
+              "and lens, oldest first",
+              len(open_f) == 5 and open_f[0]["lens"] == "xc"
+              and all(f["present"] for f in open_f)
+              and open_f[0]["id"].startswith("gd-")
+              and all(f["state"] == "proposed" for f in open_f), str(open_f))
+        by_id = api.review(ldb, lm, lsession, open_f[0]["id"][:11], "rejected",
+                           "the beat is defined two chapters on, by design",
+                           kinds=("lens",))
+        check("lens review by finding id reaches a finding outside the latest "
+              "batch",
+              by_id["review"]["decision"] == "rejected"
+              and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
+                          (open_f[0]["id"],))["state"] != "proposed"
+              and len(lenses.findings(ldb, lm, "02-second.md")) == 4)
         check("sweep order: ratified names first, then alphabetical; only/skip",
               lenses.sweep_order(lm) == ["plain", "xc"]
               and lenses.sweep_order(lm, only=["xc"]) == ["xc"]
