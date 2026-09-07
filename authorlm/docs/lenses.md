@@ -2,7 +2,7 @@
 
 Repo record of the lens artifacts installed in `manuscripts/SMSTTD/_lenses/` (gitignored manuscript data — this file is the checked-in canonical copy, same pattern as the filter appendix in filter-pass-design.md). The live artifact is what runs; on any re-ratification update both.
 
-Rewritten 2026-09-06 as eight book-agnostic lenses (from the earlier five: historical-reach → evidence-reach; metaphor-as-mechanism → illustration-as-argument; pitch + repetition-across-parts → audience-pitch; uncited-apparatus → unsourced-claims; the consistency draft → framework-consistency and cross-references; through-line and validity-and-objections new). Each opens with TOML front matter (docs/lens-architecture-design.md §3), then verbatim Flag/Keep examples from the manuscript and author-made repairs mined from its revision history, then the rules, which refer only to the runner's INPUTS. The rules never name summaries; where a rule needs another chapter, the authority is that chapter's text in block T. Footnotes are requested with a `footnote` gist, never written (footnote-directive-design §12).
+Rewritten 2026-09-06 as eight book-agnostic lenses (from the earlier five: historical-reach → evidence-reach; metaphor-as-mechanism → illustration-as-argument; pitch + repetition-across-parts → audience-pitch; uncited-apparatus → unsourced-claims; the consistency draft → framework-consistency and cross-references; through-line and validity-and-objections new). Each opens with TOML front matter (docs/lens-architecture-design.md §3), then verbatim Flag/Keep examples from the manuscript and author-made repairs mined from its revision history, then the rules, which refer only to the runner's INPUTS and close with REWRITE OR JUDGMENT (design §12). The rules never name summaries; where a rule needs another chapter, the authority is that chapter's text in block T. Footnotes are requested with a `footnote` gist, never written (footnote-directive-design §12).
 
 Sweep order: framework-consistency, cross-references, through-line, validity-and-objections, evidence-reach, illustration-as-argument, audience-pitch, unsourced-claims.
 
@@ -168,6 +168,16 @@ Refuse to flag:
 - **The ORGANIZING SCHEME item named by the chapter assigned to it.** Naming the item it strikes is that chapter's work.
 
 For each finding, state four things and stop: which chapter and where in it; what the reader is assumed to have or to lack, and where the book supplied it — the chapter, by name — or that it never does; for the "too little" pole, where the earlier telling lives (chapter and section, by name) and what the passage adds, saying "nothing" if that is the honest answer; and whether the fault is too much or too little.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `cross-references`
@@ -324,9 +334,19 @@ and the section it sits in; the chapter it points to and, from its own text, wha
 sentence, whether a missing mechanism, an unkept or circular promise, two
 senses of one term, or a misstatement; and what closing the gap requires (a
 sentence naming the mechanism, a redirected or withdrawn promise, a different
-word, a restored quotation), left as a finding where the fix is a judgment.
+word, a restored quotation), given as `judgment` where the fix is a decision only the author can make.
 Do not write the target chapter's argument yourself; the finding names what
 is missing, it does not supply it.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `evidence-reach`
@@ -468,6 +488,16 @@ For each finding, state three things and stop:
 3. **The smallest concession that closes the gap**: a declared frame, a narrowed scope, a named selection, or a stated objection. Prefer the frame: one sentence at the head of a section licenses everything under it; narrowing each claim costs paragraphs.
 
 Where the gap found is also the chapter's strongest objection, say so in one line and leave the rest to the validity-and-objections lens.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `framework-consistency`
@@ -592,7 +622,17 @@ Refuse to flag:
 - which of its allowed senses a bare set-noun (a people, a class, a population) carries in one sentence; the SENTENCE-LEVEL PASS that keeps the ledger of set-noun senses owns that. This lens sees a set-noun only where the chapter stipulated one sense and a later passage contradicts the stipulation;
 - anything else a SENTENCE-LEVEL PASS owns: word choice, mood, duplication, register, punctuation. This lens sees only what spans paragraphs.
 
-For each finding, state the passage verbatim, the distinction it fails to carry and the section where that distinction was introduced, and in one sentence what carrying it would require; where the fix is mechanical (a missing scoping word, a dropped clause of a test) supply the replacement sentence, and where it is a judgment write "judgment finding", and stop.
+For each finding, state the passage verbatim, the distinction it fails to carry and the section where that distinction was introduced, and in one sentence what carrying it would require; where the fix is mechanical (a missing scoping word, a dropped clause of a test) supply the replacement sentence, and where it is a judgment give the decision as `judgment`, and stop.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `illustration-as-argument`
@@ -718,6 +758,16 @@ Refuse to flag:
 A figure used against itself within this chapter, or a mixed figure, is a SENTENCE-LEVEL PASS (metaphor consistency): point there. A claim whose support is non-figurative but thin, or whose conclusion does not follow, is another lens's.
 
 For each finding, state the passage; what the illustration is trusted to prove; where the claim's support is (this passage, the deferred passage, nowhere); whether a stated premise — from the GLOSSARY, from this chapter, or one the author would have to add — could carry the claim without the figure, naming the GLOSSARY term if one stands behind it; for an example, the claim it actually instantiates; for a two-mechanism figure, both mechanisms and both locations. Do not draft the rewrite or judge the claim's truth. Then stop.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `through-line`
@@ -824,9 +874,19 @@ Refuse to flag:
 - **Anything in a PROTECTED REGISTER.** A voice that proclaims by design has no through-line to keep.
 - **The seam between two paragraphs.** A hard turn, a missing bridge, a one-line paragraph that dangles: a SENTENCE-LEVEL PASS owns that. Report the paragraph only if the section around it serves no claim.
 
-Everything this lens finds is judgment-shaped — a claim to choose, a section to cut or grow, a paragraph to move — and stays a finding; it never carries a replacement.
+Most of what this lens finds is a judgment — a claim to choose, a section to cut or grow, a paragraph to move — and is stated as the structural move the author must decide. Where the cure is a sentence — an announcing sentence, a thesis marked as one, a closing verb corrected against the section list — propose it as the rewrite.
 
 For each finding, state three things and stop: the chapter's claim as you wrote it in your first sentence; where the fault is — section and passage — and which of the five it is (no claim, dead section, inverted weight, broken promise, wrong order), with the claim it fails against; and the smallest structural move that would cure it: cut, move before or after a named section, shrink or grow, retitle, or announce. Name the move; do not draft it.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `unsourced-claims`
@@ -995,6 +1055,16 @@ Refuse to flag:
 - a passage whose running text gives work and location, with the original words where the gloss is free.
 
 For each finding, state the passage (file and sentence), the category from the list above, which reader would check it (a classicist, a physicist, the named author's own readers), and what a sufficient citation looks like — a work and a location, not "see the literature". Name a real work only when you are sure it exists; otherwise describe the kind of source (a critical edition, a census table, a dictionary entry). Never invent a citation. Where a source is wanted and you cannot supply a verified one, request it: set the finding's `footnote` to what a sufficient citation looks like, and the harness plants a `[Footnote: …]` tag after the sentence for the author's footnote road to draft. Then stop.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```
 
 ## `validity-and-objections`
@@ -1144,4 +1214,14 @@ For each finding, state four things and stop:
 4. **The smallest repair**: a premise stated, a sense held, a leg answered or conceded, a conclusion narrowed. Prefer the concession where the chapter's material cannot answer: a gap conceded in the chapter's own voice is no longer a gap a reader can open against it.
 
 Where the strongest objection a critic would raise against the chapter's main conclusion appears nowhere in the chapter, say so in one closing sentence, at the strength a critic would give it. Where that objection simply *is* a gap another lens has found (a claim its evidence does not reach, an image doing a premise's work), say so plainly: the chapter owes it a statement and either an answer or a concession.
+
+REWRITE OR JUDGMENT (ruled 2026-09-06). Every finding proposes its repair as
+`replacement` whenever the chapter, the GLOSSARY, and the target chapters
+supply what the sentence needs: a wrong word, a misstated credit, a missing
+clause, a dropped scoping, a frame sentence, a corrected pointer. Reserve
+`judgment` for a repair that is a decision the author alone can make — cut
+or move a section, choose between two claims the chapter makes, supply a
+fact the payload does not contain, add an argument that does not yet exist —
+and state that decision in one clause. A finding with neither is a note the
+author cannot act on in the Doc, and is a fault of the reply.
 ```

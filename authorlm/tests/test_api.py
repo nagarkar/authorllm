@@ -8951,7 +8951,7 @@ def main_test() -> None:
             f"{filler}\n")
         (lms / "02-second.md").write_text(
             f"# **Second Steps**\n\nThe essay on The First Ground laid the "
-            f"Ground; the paper on Ledger never existed. Every Beat counts. "
+            f"Ground; the paper on Ledger never existed. Every Beat counts.\n\n"
             f"{dup}\n\n{filler}\n")
         (lms / "03-hymn.md").write_text("# Hymn\n\nHarken, ye dead.\n")
         (lms / "04-last.md").write_text(
@@ -9162,6 +9162,105 @@ def main_test() -> None:
               and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
                           (open_f[0]["id"],))["state"] != "proposed"
               and len(lenses.findings(ldb, lm, "02-second.md")) == 4)
+        # --- judgments: planted as tags, ruled in the tab, repaired after
+        jr = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
+                             FakeLLM({"findings": [
+                                 {"quote": "Every Beat counts.",
+                                  "note": "the section that follows argues nothing",
+                                  "judgment": "cut the Beat paragraph or give it a claim"}]}))
+        j_meta = _json.loads(jr["findings"][0]["metadata"])
+        j_thread = ldb.one("SELECT * FROM doc_threads WHERE id = ?",
+                           (j_meta["edit_thread"],))
+        j_new = j_thread["proposed_new"]
+        check("a `judgment` plants a [Judgment: …] tag after the quote, "
+              "carrying the lens and the finding id",
+              len(jr["edits_staged"]) == 1
+              and f"Every Beat counts.[Judgment: plain — cut the Beat paragraph "
+                  f"or give it a claim | id: {jr['findings'][0]['id'][:11]}]" in j_new
+              and len(_dir.scan_text(j_new, "judgment")) == 1
+              and j_meta["judgment"].startswith("cut the Beat"), j_new)
+        stripped, removed = _dir.strip_tags(j_new)
+        check("exports strip a judgment tag like any directive",
+              "[Judgment" not in stripped and removed[0]["kind"] == "judgment")
+        try:
+            _dir.apply(ldb, lm, {}, "judgment", "02-second.md", [(1, "x")])
+            check("directive apply refuses the judgment kind", False)
+        except ValueError as err:
+            check("directive apply refuses the judgment kind",
+                  "lens repair" in str(err))
+        n_threads = ldb.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                            "manuscript_id = ? AND origin_type = 'lens' AND "
+                            "file = '02-second.md'", (lm["id"],))["n"]
+        check("each lens batch owns its own threads — a re-run never "
+              "overwrites forms already staged or out in the tab",
+              n_threads == 2, str(n_threads))
+        # the tab's ruling reaches the finding
+        ldb.update("doc_threads", j_thread["id"], {"state": "declined"})
+        ldb.update("doc_threads", fn_thread["id"], {"state": "cleaned"})
+        pv = lenses.propagate_verdicts(
+            ldb, lm, [dict(ldb.one("SELECT * FROM doc_threads WHERE id = ?", (i,)))
+                      for i in (j_thread["id"], fn_thread["id"])])
+        check("a deleted judgment tag rejects its finding; a kept form accepts it",
+              pv == {"accepted": 1, "rejected": 1}
+              and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
+                          (jr["findings"][0]["id"],))["state"] == "rejected"
+              and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
+                          (fn["findings"][0]["id"],))["state"] == "accepted",
+              str(pv))
+        # an accepted judgment stands in the file as a tag; repair acts on it
+        jr2 = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
+                              FakeLLM({"findings": [
+                                  {"quote": "Every Beat counts.",
+                                   "note": "structure", "judgment": "move this claim"},
+                                  {"quote": dup, "note": "needs a fact",
+                                   "judgment": "which census counted it"}]}))
+        j2 = {_json.loads(r["metadata"])["judgment"]: r for r in jr2["findings"]}
+        second = (lms / "02-second.md").read_text()
+        for r in jr2["findings"]:
+            th = ldb.one("SELECT * FROM doc_threads WHERE id = ?",
+                         (_json.loads(r["metadata"])["edit_thread"],))
+            second = second.replace(th["proposed_old"], th["proposed_new"])
+        (lms / "02-second.md").write_text(second)
+        rp = lenses.assemble_repair(ldb, lm, "02-second.md")
+        check("repair payload lists each accepted judgment with its unit and finding",
+              len(rp.tags) == 2 and all(t["finding"] for t in rp.tags)
+              and "THE JUDGMENTS" in rp.judgments and "STYLE LAW" in rp.law
+              and "GLOSSARY" in rp.inputs and "[Judgment:" in rp.essay, rp.judgments[:400])
+        mv = j2["move this claim"]["id"]; fact = j2["which census counted it"]["id"]
+        tag_mv = next(t for t in rp.tags if t["id"] == mv[:11])
+        rr = lenses.record_repairs(ldb, lm, lsession, "02-second.md", {"repairs": [
+            {"id": mv[:11], "action": "rewrite",
+             "new": tag_mv["unit"].replace(tag_mv["raw"], "").replace(
+                 "Every Beat counts.", "Every Beat is counted, and the count is the claim.")},
+            {"id": fact[:11], "action": "question",
+             "text": "Which census counted the sentence?"},
+            {"id": mv[:11], "action": "rewrite", "new": "still [Judgment: x | id: y] here"},
+            {"id": "gd-nope", "action": "rewrite", "new": "x"},
+        ]}, payload=rp)
+        check("repair stages a rewrite with the tag gone, returns the question, "
+              "and refuses a rewrite that still carries a tag or names no judgment",
+              len(rr["staged"]) == 1
+              and "[Judgment" not in rr["staged"][0]["proposed_new"]
+              and "the count is the claim" in rr["staged"][0]["proposed_new"]
+              and rr["questions"][0]["text"].startswith("Which census")
+              and len(rr["refused"]) == 2, str(rr))
+        ri = lenses.record_repairs(ldb, lm, lsession, "02-second.md", {"repairs": [
+            {"id": fact[:11], "action": "intent",
+             "text": "Add the census count and its source to the second chapter"}]},
+            payload=rp)
+        check("a structural repair files a scoped intent and stages the tag's removal",
+              len(ri["intents"]) == 1 and ri["intents"][0]["intent"].startswith("di-")
+              and len(ri["staged"]) == 1
+              and "[Judgment" not in ri["staged"][0]["proposed_new"]
+              and api.get_intent(ldb, ri["intents"][0]["intent"])["scope"] == "02-second.md"
+              if hasattr(api, "get_intent") else len(ri["intents"]) == 1, str(ri))
+        dm = lenses.dismiss_judgments(ldb, lm, "02-second.md", [fact[:11]],
+                                      "the count is illustrative")
+        check("dismissal rejects the finding with the reason and stages the "
+              "tag's removal",
+              dm["dismissed"] == [fact[:11]] and len(dm["staged"]) == 1
+              and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
+                          (fact,))["state"] == "rejected", str(dm))
         check("sweep order: ratified names first, then alphabetical; only/skip",
               lenses.sweep_order(lm) == ["plain", "xc"]
               and lenses.sweep_order(lm, only=["xc"]) == ["xc"]

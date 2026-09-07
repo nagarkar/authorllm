@@ -742,6 +742,34 @@ Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 
+## The knobs table (every new filter, lens, or interlocutor)
+**Author ruling 2026-09-06: "Whenever I ask you to create a filter or
+interlocutor or a lens, always give me a table like this of all the
+knobs."** When you present an artifact for ratification, the reading as
+prose is followed by ONE table: every setting the artifact or its run
+exposes, where it is set, and the value you propose. Never a list, never
+prose for this part; the author tunes by row. The rows an interlocutor
+carries (a filter or lens carries the subset that applies):
+
+| Knob | Where | Proposed |
+|---|---|---|
+| Position essays | artifact `position`; suggested from what is on record | … |
+| Engaged essays | artifact `engaged`; `--engaged` adds per run | … |
+| Terms, tradition kind | artifact `[[terms]]` | … |
+| Terms, book kind (the author's mapping) | artifact `[[terms]]` with `reason` | … |
+| Corpus in scope / out of scope | artifact prose | … |
+| Sampling | `--max-terms` (book terms; tradition terms always shown), `--max-per-term`, `--seed` | 12 / 6 / fresh |
+| Scope of the run | `--file` (a chapter or a part opener) | whole book |
+| Locus honesty | `[sure]` / `[check]` on every finding | required |
+| Where the fixes land | one global filter per run, one beat per essay named | on the author's yes |
+
+For a FILTER the rows are: class, state (sequential) or registry
+(global), `summaries`, `profiles`, `cast`, the essays it runs on, the
+closed list of units it may touch, its boundaries, how it fixes. For a
+LENS: native or subagent, the files it runs on, its boundaries, whether
+findings may carry a `replacement`. Fill every row; a row with no value
+is a decision the author has not been offered.
+
 ## The interlocutor (a tradition reads the whole book)
 Design reference: `docs/interlocutor-design.md`. An **interlocutor** is a
 third-person critical reading of the WHOLE book from inside one tradition
@@ -757,11 +785,11 @@ two kinds — the tradition's own vocabulary and the BOOK'S words the author
 declares adjacent, each with a reason; `engaged`, essays that already
 engage this critic; `position`, essays carried whole as the author's
 authoritative position) and then the prose: the corpus declaration, where
-to start, the refusals. The author reads and ratifies it before it runs,
+to start, the boundaries. The author reads and ratifies it before it runs,
 like every lens. **The concept comparison is the author's input, never a
 subagent's guess**: a critic with an essay that engages it uses that essay;
 a critic without one waits for the author's rough comparison, and
-`interlocutor draft` refuses without `--engaged`.
+`interlocutor draft` declines without `--engaged`.
 
 **"Run Epictetus on the book" is ONE instruction.** Carry it to the end in
 one turn, the way a filter is applied. With `$S` the scratchpad:
@@ -831,7 +859,7 @@ unit numbers and marks QUESTION any repair needing a fact the report lacks
 touched, exactly as the filter pass below says: prelude → run to a payload →
 clean-context drafter subagent → `filter apply` → the brief prose summary →
 the author settles in the tab. The filter's list is closed, and the
-objection-and-answer format is refused in its prose. Never paste proposed
+objection-and-answer format is declined in its prose. Never paste proposed
 replacement prose into the conversation as "surgical fixes": the payload
 carries STYLE LAW and PROTECTED TERMS and the record step lints; the
 conversation carries none of that.
@@ -841,7 +869,7 @@ conversation carries none of that.
 prompt "Read `<payload>` in full and write the artifact it asks for to the
 path in WRITE TO; use nothing else and say nothing else"; then read the
 artifact TO THE AUTHOR AS PROSE — the corpus it claims, the book terms it
-maps and why, the refusals — and only on their yes `authorlm interlocutor
+maps and why, the boundaries — and only on their yes `authorlm interlocutor
 add <name> < $S/<name>.draft.artifact.md`. An artifact the author has not
 read is one they cannot rule on.
 **Propose the position; never ask an open question about it** (author
@@ -1015,6 +1043,8 @@ proposed for it (read to the author as prose and ratified before `filter
 add`) — never handed back as "outside the filter's concern" with nothing
 offered.
 
+**A partial push is recovered in three verbs, never by hand** (2026-09-06, the first italic-bearing essay on the Doc road): when `filter push` refuses because some of a run's forms are already out, run `filter unmark <essay> --force` (the tab is rebuilt from the pristine file and the written threads return to accepted — say that anything typed into the tab since the push is gone), then `doc pull <essay> --no-comments` (the rebuild checks the file out; a clean round trip clears it), then `filter push <essay>` writes them all. Paragraphs with italics or bold now anchor on the Doc road (filter-pass design §9.4); a form the markdown export cannot give back is taken out and reported, not left in the tab.
+
 **A chat verdict on a pushed proposal is NOT reachable by number.** Once
 `filter apply` has put the forms in the tab, `filter edits` lists nothing
 and `filter triage --reject N` answers "no edit N (there are 0)"; a
@@ -1080,15 +1110,27 @@ REFUSES a finding naming a chapter the lens did not declare); then relay
 the findings as prose and hand verdicts to `lens review <n>`. `lens sweep
 <essay> [--native] [--only a,b] [--skip a,b] [--out DIR]` runs the roster
 in the ratified order with block A assembled once and cross-links
-findings whose quotes overlap across lenses. **What reaches the Doc, and what does not:** a lens finding that
-carries a rewrite (`replacement`) or a footnote gist is staged as a
-pending edit and PUSHED to the tab in the same turn by `run --native`,
-`register`, and `sweep --native` (`--no-push` for the local road); a
-finding with no new text — most judgment findings — never reaches the
-Doc, because the pending-change grammar has nothing to show, and the
-bridge cannot create an anchored comment. Read those with `lens findings
-<essay>` and rule with `lens review <gd-id>`; never tell the author to
-look for them in the tab. `lens status <essay>` shows
+findings whose quotes overlap across lenses. **Every finding reaches the Doc, and the tab is where it is ruled
+(author ruling 2026-09-06).** A finding is a REWRITE whenever the payload
+suffices (a wrong word, a misstated credit, a dropped clause, a corrected
+pointer) and is staged as an old/new form; a footnote gist plants a
+`[Footnote: …]` tag; a JUDGMENT — a decision only the author can make: cut
+or move a section, choose between two claims, supply a fact the payload
+lacks, add an argument — plants `[Judgment: <lens> — <decision> | id:
+gd-…]` after the sentence as a green insertion. `run --native`,
+`register`, `sweep --native`, and `repair` push what they staged in the
+same turn (`--no-push` for the local road). In the tab: leaving a form or
+a tag alone ACCEPTS the finding, emptying the green half or deleting the
+tag REJECTS it, and `lens resolve` carries that verdict to the finding —
+never ask for a second ruling in chat. An accepted judgment then stands in
+the file as an open `[Judgment: …]` directive (collect reports it, exports
+strip it); `lens repair <essay>` is one turn on the filter road's pattern:
+print the payload (`--out`), an empty-context subagent answers it with a
+rewrite, a question, or an intent per judgment, `lens repair --reply`
+stages and pushes the rewrites, relays the questions, files the intents.
+`lens repair --dismiss <ids> --reason "…"` rejects from chat. `lens
+findings <essay>` lists every open finding with its id; `lens review
+<gd-id>` is the chat verdict for the rare case the tab cannot carry. `lens status <essay>` shows
 each batch's per-rule tallies, unverified target quotes, and STALE where
 the essay or a target has changed since (byte comparison, not a
 summary). A lens refuses to run ON a protected register. `lens run` on
@@ -1158,6 +1200,15 @@ The loop, per essay:
    prints one line and proceeds if it has not been run.
 2. **The reply is drafted by a subagent with an empty context, never in
    this conversation (same rule as the beat loop, ratified 2026-09-06).**
+   **Every drafter prompt carries the brevity rule (author ruling
+   2026-09-06, on a filter beat: "make the points very briefly and make
+   it as dense as possible with as little difficult language as
+   possible … you've been trained on a lot of philosophical writing,
+   which tends to be highly convoluted. We don't want that"). Append to
+   the drafter's instruction, verbatim: "Say each point once, in the
+   fewest plain words that carry it. Add nothing the claim does not
+   need. A short concrete sentence beats an abstract one." The same
+   line goes into every filter artifact's How-to-fix section you write.**
    Send the payload to a file — `authorlm filter run <name> <essay> -m
    <ms> > $S/<name>-<essay>.payload` — and spawn a drafter (Agent tool,
    default model) with: "Read `<payload file>` in full; it is your entire

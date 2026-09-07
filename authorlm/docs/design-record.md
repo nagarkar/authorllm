@@ -484,3 +484,8 @@ runs the roster in ratified order with block A shared and cross-links
 overlapping quotes. Rejected: summaries as the cross-chapter authority
 (derived, rebuilt on every settle — the ruling that started this);
 whole-book payloads; model-based pointer resolution; a second store.
+Amended the same day (§12 of the design): findings are rewrites by
+default; a `judgment` is planted as a [Judgment: …] tag, ruled in the tab
+(delete = reject, keep = accept, the form's verdict reaching the finding),
+and repaired by `lens repair` (rewrite | question | intent).
+

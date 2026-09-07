@@ -5820,12 +5820,10 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
     threads = staging.door_threads(
         db, mid, rel, states=("proposed", "accepted", "rejected", "written"),
         origin_type=LENS_ORIGIN)
+    # Lens forms already out in the tab are the SAME producer: more of
+    # them may join (a sweep after a sweep, a repair after a resolve);
+    # the writer refuses per thread where a unit already carries one.
     already = [t for t in threads if t["state"] == "written"]
-    if already:
-        raise ValueError(
-            f"{len(already)} lens form(s) are already out in {rel}'s tab — "
-            f"pushing again would mark a tab that still carries them. "
-            f"Finalize first ('lens resolve {rel}').")
     mine = {t["id"] for t in threads}
     outside = [dict(r) for r in db.all(
         "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
@@ -5852,6 +5850,9 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
                else " — a lens finding stages an edit only when it "
                     "carries a `replacement`."))
     warnings: list[str] = []
+    if already:
+        warnings.append(f"{len(already)} lens form(s) were already out in "
+                        f"the tab and stay there; the new ones join them.")
     warnings.append(
         f"All {len(pushable)} lens change(s) go to the Doc. The tab is "
         f"the review: leave a change alone to take it, empty its green "
@@ -5934,6 +5935,11 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
     states = [t["state"] for t in after.values()]
+    # The form IS the finding's verdict (author ruling 2026-09-06): a
+    # kept form accepts the finding, an emptied one — a deleted judgment
+    # tag — rejects it.
+    from . import lenses as _lenses
+    verdicts = _lenses.propagate_verdicts(db, manuscript, after.values())
     summary = {"rebuilt": False, "error": None, "usage": None}
     llm = sums.summarizer_llm(config)
     if llm.enabled:
@@ -5947,7 +5953,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
             "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "warnings": warnings,
             "summary": summary, "pattern_candidate": candidate,
-            "tab_still_marked": True}
+            "findings": verdicts, "tab_still_marked": True}
 
 
 def filter_unmark(db: Database, manuscript: dict, file: str,

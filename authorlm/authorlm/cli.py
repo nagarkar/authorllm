@@ -4071,6 +4071,8 @@ def cmd_lens(args):
                 tags.append("edit staged")
             if r["footnote"]:
                 tags.append("footnote requested")
+            if r.get("judgment"):
+                tags.append("judgment")
             if r["also_flagged_by"]:
                 tags.append("also: " + ", ".join(r["also_flagged_by"]))
             if r["target_file"]:
@@ -4086,6 +4088,73 @@ def cmd_lens(args):
             print(ui.dim(f"    {note[:400]}"))
         print(ui.dim("Verdicts: lens review <gd-id> --accept|--reject "
                      "[--explain \"why\"] (the id prefix printed above)."))
+        return
+    if args.action == "repair":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm lens repair <essay.md> [--native | "
+                             "--reply <json> | --dismiss <ids> --reason …] "
+                             "[--out PATH] [--no-push]")
+        session, _ = api.ensure_session(db, manuscript)
+        if args.dismiss:
+            if not args.reason:
+                raise SystemExit("--dismiss needs --reason, the author's words")
+            ids = [x.strip() for x in args.dismiss.split(",") if x.strip()]
+            try:
+                res = lenses.dismiss_judgments(db, manuscript, target, ids,
+                                               args.reason)
+            except LookupError as err:
+                raise SystemExit(f"error: {err}")
+            print(f"Dismissed {len(res['dismissed'])} judgment(s)"
+                  + (f"; not found: {', '.join(res['missing'])}"
+                     if res["missing"] else "") + ".")
+            _lens_autopush(db, manuscript, args, res["file"], len(res["staged"]))
+            return
+        try:
+            payload = lenses.assemble_repair(db, manuscript, target)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
+        reply = None
+        if args.reply:
+            from pathlib import Path as _P
+            try:
+                reply = _json.loads(_P(args.reply).read_text(encoding="utf-8"))
+            except (OSError, _json.JSONDecodeError) as err:
+                raise SystemExit(f"error: cannot read --reply: {err}")
+        elif args.native:
+            llm = api.LLMClient(_load_config(args))
+            if not llm.enabled:
+                raise SystemExit("--native needs the LLM enabled in config")
+            reply = llm.complete_json(payload.system, payload.user)
+            if not isinstance(reply, dict):
+                raise SystemExit("the model returned no usable reply; re-run, "
+                                 "or answer the printed payload and --reply")
+        else:
+            text = payload.render()
+            if args.out:
+                from pathlib import Path as _P
+                _P(args.out).write_text(text, encoding="utf-8")
+                print(f"repair payload → {args.out} ({len(text):,} chars; "
+                      f"{len(payload.tags)} judgment(s)). No model call was "
+                      f"made; answer it and 'lens repair {payload.file} "
+                      "--reply <json>', or re-run with --native.")
+            else:
+                print(text)
+            return
+        res = lenses.record_repairs(db, manuscript, session, target, reply,
+                                    payload=payload)
+        print(f"Repair of {res['file']}: {len(res['staged'])} rewrite(s) staged, "
+              f"{len(res['questions'])} question(s), {len(res['intents'])} "
+              f"intent(s) filed, {len(res['refused'])} refused.")
+        for q in res["questions"]:
+            print(ui.yellow(f"  question on {q['id']} (unit {q['n']}): {q['text']}"))
+        for i in res["intents"]:
+            print(f"  intent {i['intent'][:9]} ← {i['id']}: {i['text']}")
+        for r in res["refused"]:
+            print(ui.yellow(f"  refused {r['id']}: {r['reason']}"))
+        if args.native:
+            print(llm.stats_line() or "")
+        _lens_autopush(db, manuscript, args, res["file"], len(res["staged"]))
         return
     if args.action == "status":
         target = args.name or args.file
@@ -4260,6 +4329,12 @@ def cmd_lens(args):
                 for d in result["diffs"]:
                     print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
                                  f"«{gdocs_clamp(d['final'])}»"))
+                fv = result.get("findings") or {}
+                if fv.get("accepted") or fv.get("rejected"):
+                    print(ui.dim(f"Findings ruled by the tab: {fv['accepted']} "
+                                 f"accepted, {fv['rejected']} rejected. Accepted "
+                                 f"judgments now stand as [Judgment: …] tags — "
+                                 f"'lens repair {result['file']}' acts on them."))
                 if result["summary"]["rebuilt"]:
                     print("summary rebuilt; downstream marked "
                           "upstream_stale")
@@ -7795,7 +7870,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
                             "review", "push", "resolve", "status", "sweep",
-                            "findings"])
+                            "findings", "repair"])
+    p.add_argument("--dismiss", metavar="IDS",
+                   help="repair: comma-separated judgment finding ids to "
+                        "dismiss (with --reason); their tags are removed")
+    p.add_argument("--reason", help="repair --dismiss: the author's reason, "
+                                    "verbatim")
     p.add_argument("--all", action="store_true",
                    help="findings: include reviewed findings, not only open ones")
     p.add_argument("name", nargs="?",

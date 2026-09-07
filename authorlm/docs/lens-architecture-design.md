@@ -162,6 +162,7 @@ filter beat, as measured on 2026-09-06.
   "rule":         "<the Flag rule's heading, verbatim from the lens>",
   "replacement":  "<optional — §7.2 door, essay only>",
   "footnote":     "<optional — the gist of a footnote the sentence should carry; the door plants [Footnote: gist] after the quote as a staged edit (footnote design §12)>",
+  "judgment":     "<optional — ONLY when no replacement can be written from the payload: the decision the author alone can make, one clause; the door plants [Judgment: lens — clause | id: gd-…] after the quote as a staged edit>",
   "target_file":  "<optional — a chapter in block T>",
   "target_quote": "<optional — verbatim, from that chapter>"
 }]}
@@ -287,3 +288,34 @@ reasoning recorded afterward; nothing in the verbs writes to a lens file.
 7. Skill update: the payload-to-subagent protocol for lenses, same shape as
    filters; docs/lenses.md refreshed with the eight artifacts and their front
    matter.
+
+## 12. Judgments: ruled in the tab, repaired after (built 2026-09-06)
+
+The author's ruling, after the first sweep left fifteen findings with no new
+text: a finding is a rewrite whenever the payload suffices, and "judgment" is
+reserved for a repair only the author can decide — cut or move a section,
+choose between two claims, supply a fact the payload lacks, add an argument
+that does not exist. Every lens's rules now say so (REWRITE OR JUDGMENT), and
+the harness preamble says it to every model.
+
+A judgment travels the same road as every other proposal: the door plants
+the author's own request tag after the quoted sentence,
+`…sentence.[Judgment: <lens> — <decision> | id: gd-…]`, as a staged edit;
+the surgical push shows it as a green insertion with nothing struck. **In
+the tab, deleting the tag rejects the finding and leaving it accepts it**;
+`lens resolve` propagates the form's verdict to the finding through
+`record_review` (`propagate_verdicts`), for rewrites as well — the form is
+the finding's verdict. An accepted judgment then stands in the file as an
+open `[Judgment: …]` directive (kind added to `directives.py`: collect
+reports it, exports strip it, `apply` refuses it) until `lens repair
+<essay>` acts on it: a payload of STYLE LAW, PROTECTED TERMS, GLOSSARY, each
+judgment with its finding, its unit, and the target chapter it named, and
+the essay; the reply, per judgment, is a `rewrite` (the whole unit, tag
+gone, staged and pushed as a form), a `question` (the one fact needed,
+returned to the author), or an `intent` (a structural change filed as a
+scoped intent, the tag's removal staged). `lens repair --dismiss <ids>
+--reason` rejects from chat and stages the tag's removal. Lens threads are
+keyed by batch rather than lens name so a re-run never overwrites forms
+already out in a tab, and `lens push` lets new lens forms join ones already
+out.
+

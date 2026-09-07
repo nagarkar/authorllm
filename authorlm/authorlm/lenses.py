@@ -283,8 +283,20 @@ falls under, in the lens's own words. Reply with JSON only:
 "rule": "<the Flag rule's heading, as written in S>",
 "replacement": "<optional: the quote's substitute within its paragraph>",
 "footnote": "<optional: the GIST of a footnote the quoted sentence should carry — a source to be supplied, a qualification — never the finished text>",
+"judgment": "<optional: ONLY when no replacement can be written from S, A, T and E — the decision the author alone can make, in one clause>",
 "target_file": "<optional: a file named in T>",
 "target_quote": "<optional: verbatim sentence(s) from that file>"}]}
+
+REWRITE OR JUDGMENT. Every finding proposes its repair as `replacement`
+whenever the chapter, the GLOSSARY, and the target chapters supply what the
+sentence needs: a wrong word, a misstated credit, a missing clause, a dropped
+scoping, a frame sentence, a corrected pointer. Reserve `judgment` for a
+repair that is a decision the author alone can make — cut or move a section,
+choose between two claims the chapter makes, supply a fact the payload does
+not contain, add an argument that does not yet exist — and state that
+decision in one clause; the harness plants it as a [Judgment: …] tag at the
+sentence for the author to keep or delete. A finding with neither is a note
+the author cannot act on in the Doc, and is a fault of the reply.
 
 Footnotes are requested, never written. Where the repair is a source the
 author must supply, or a qualification that would break the sentence's
@@ -898,6 +910,10 @@ def _store_findings(db: Database, manuscript: dict, session: dict,
         gist = _footnote_gist(f.get("footnote"))
         if gist:
             meta["footnote"] = gist
+        judgment = _footnote_gist(f.get("judgment"))
+        if judgment:
+            meta["judgment"] = judgment
+        replacement = None
         if "replacement" in f or gist:
             replacement = str(f.get("replacement") or raw_quote)
             if gist and "[footnote:" not in replacement.lower():
@@ -905,6 +921,15 @@ def _store_findings(db: Database, manuscript: dict, session: dict,
                 # tag is the author's own request grammar, inert until
                 # the footnote road resolves it.
                 replacement = replacement.rstrip() + f"[Footnote: {gist}]"
+        elif judgment:
+            # A judgment is planted the same way: the sentence unchanged,
+            # the decision it needs beside it, the finding's id in the
+            # tag so `lens repair` can find its way back. Deleting the
+            # tag in the tab rejects the finding; leaving it accepts it.
+            replacement = (raw_quote.rstrip()
+                           + f"[Judgment: {lens_name} — {judgment} "
+                             f"| id: {row['id'][:11]}]")
+        if replacement is not None:
             entry, reason = _edit_entry(units, raw_quote, replacement,
                                         note, taken_units)
             if entry is None:
@@ -918,9 +943,12 @@ def _store_findings(db: Database, manuscript: dict, session: dict,
         stored.append(row)
     edits = []
     if entries:
+        # The owner is the BATCH, not the lens: stage_edits keys threads
+        # by owner:file:ordinal and replaces in place on a re-run, which
+        # for a lens would overwrite forms already out in the tab.
         staged = staging.stage_edits(
-            db, manuscript["id"], lens_name, relpath, file_text,
-            [e for e, _ in entries], origin_type=LENS_ORIGIN,
+            db, manuscript["id"], f"{lens_name}@{batch_id[3:11]}", relpath,
+            file_text, [e for e, _ in entries], origin_type=LENS_ORIGIN,
             verb_stem="lens")
         by_n = {loads(t["metadata"], {}).get("anchor_paragraph"): t
                 for t in staged}
@@ -969,6 +997,263 @@ def register_findings(db: Database, manuscript: dict, session: dict,
     return _store_findings(db, manuscript, session, name, payload.file,
                            files[payload.file], findings, source="external",
                            payload=payload, lens_body=body)
+
+
+# ------------------------------------------------------ verdicts → findings
+
+def propagate_verdicts(db: Database, manuscript: dict, threads) -> dict:
+    """A resolved lens form IS its finding's verdict: a cleaned (accepted)
+    form accepts the finding, a declined form (the green half emptied —
+    for a judgment tag, the tag deleted) rejects it. Recorded through
+    record_review, so the evidence stream is the same as a chat verdict.
+    Only findings still `proposed` are touched."""
+    from . import beliefs as bel
+    mid = manuscript["id"]
+    out = {"accepted": 0, "rejected": 0}
+    for t in threads:
+        t = dict(t)
+        if t.get("state") not in ("cleaned", "declined"):
+            continue
+        decision = "accepted" if t["state"] == "cleaned" else "rejected"
+        rows = db.all(
+            "SELECT * FROM guidance_history WHERE manuscript_id = ? AND "
+            "kind = ? AND state = 'proposed' AND metadata LIKE ?",
+            (mid, LENS_KIND, f'%"edit_thread": "{t["id"]}"%'))
+        for r in rows:
+            meta = loads(r["metadata"], {}) or {}
+            what = "judgment" if meta.get("judgment") else "rewrite"
+            bel.record_review(db, mid, dict(r), decision,
+                              f"{what} {decision} in the Doc tab", None,
+                              llm=None)
+            out[decision] += 1
+    return out
+
+
+# ------------------------------------------------------------ repair
+
+JUDGMENT_ID = re.compile(r"\|\s*id:\s*(gd-[0-9a-f]+)")
+
+REPAIR_SYSTEM = """\
+You are repairing ONE chapter of a nonfiction manuscript at exactly the
+places where its author ACCEPTED a lens's judgment. Each accepted judgment
+stands in the text as a [Judgment: …] tag after the sentence it concerns.
+Blocks:
+
+S — this contract, then STYLE LAW (binding, outranks your instinct) and
+    PROTECTED TERMS (never substitute, re-word, or re-capitalize one).
+A — GLOSSARY: the author's settled definitions.
+J — THE JUDGMENTS: for each, its id, the lens and rule, the finding in
+    full, the paragraph that carries the tag (the unit you may rewrite),
+    and, where the finding named another chapter, that chapter's text.
+E — THE CHAPTER, whole, tags in place.
+
+For each judgment answer with exactly one action:
+- "rewrite": `new` is the WHOLE unit rewritten under STYLE LAW, the tag
+  removed, and nothing changed beyond what the judgment requires.
+- "question": `text` is the one fact you would need and do not have —
+  because it is not in S, A, J or E. Never guess it.
+- "intent": `text` is a structural change no rewrite can carry (cut or move
+  a section, add an argument or a section), stated as a work order in one
+  sentence; the tag will be removed and the work order filed.
+Never invent a fact, a citation, or a quotation. Never emit << >> {{ or }}.
+Reply with JSON only:
+{"repairs": [{"id": "gd-…", "action": "rewrite" | "question" | "intent",
+"new": "<the whole unit, for rewrite>", "text": "<for question or intent>"}]}
+"""
+
+
+@dataclass(frozen=True)
+class RepairPayload:
+    law: str
+    inputs: str
+    judgments: str
+    essay: str
+    file: str
+    tags: list          # [{id, n, unit, gist, raw, finding}]
+
+    @property
+    def system(self) -> str:
+        return self.law
+
+    @property
+    def user(self) -> str:
+        return "\n".join(b for b in (self.inputs, self.judgments, self.essay) if b)
+
+    @property
+    def blocks(self) -> list[tuple[str, str]]:
+        return [("S", self.law), ("A", self.inputs),
+                ("J", self.judgments), ("E", self.essay)]
+
+    def render(self) -> str:
+        out = [f"lens repair on {self.file} — {len(self.tags)} accepted "
+               f"judgment(s); no model call was made. Answer block S's "
+               f"contract and pipe the JSON into 'lens repair {self.file} "
+               f"--reply <json>'; or run again with --native."]
+        for label, text in self.blocks:
+            if text:
+                out.append(f"\n───── block {label} — {len(text):,} chars — "
+                           f"sha256 {_sha(text)}\n")
+                out.append(text.rstrip("\n"))
+        return "\n".join(out) + "\n"
+
+
+def judgment_tags(db: Database, manuscript: dict, files: dict[str, str],
+                  rel: str) -> list[dict]:
+    """Every open [Judgment: …] tag in the file, with the unit that
+    carries it and the finding its id names (None when the id is
+    missing or unknown — a hand-written tag is still a work order)."""
+    from . import directives, passes
+    text = files[rel]
+    units = passes.paragraphs_of(text)
+    out = []
+    for tag in directives.scan_text(text, "judgment"):
+        m = JUDGMENT_ID.search(tag["gist"])
+        finding = None
+        fid = m.group(1) if m else None
+        if fid:
+            row = db.one("SELECT * FROM guidance_history WHERE manuscript_id = ? "
+                         "AND id LIKE ?", (manuscript["id"], fid + "%"))
+            finding = dict(row) if row else None
+        n = next((i for i, u in enumerate(units, 1) if tag["raw"] in u), None)
+        out.append({"id": fid, "n": n, "unit": units[n - 1] if n else "",
+                    "gist": tag["gist"], "raw": tag["raw"], "finding": finding})
+    return out
+
+
+def assemble_repair(db: Database, manuscript: dict, file: str,
+                    files: dict[str, str] | None = None) -> RepairPayload:
+    from . import filtering
+    from . import styles as st
+    from .structure import refuse_sidecar
+    refuse_sidecar(Path(file).name)
+    if files is None:
+        files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    text = files[rel]
+    tags = judgment_tags(db, manuscript, files, rel)
+    if not tags:
+        raise LookupError(f"{rel} carries no open [Judgment: …] tag — nothing "
+                          "to repair. Accepted judgments arrive at 'lens "
+                          "resolve'; a deleted tag was a rejection.")
+    law = (REPAIR_SYSTEM + "\n"
+           + _section("STYLE LAW", st.render(db, manuscript["id"], rel))
+           + _section("PROTECTED TERMS", filtering._protected_block(
+               filtering.protected_terms(db, manuscript, rel, text=text))))
+    inputs = _section("GLOSSARY", _glossary(db, manuscript, rel, text))
+    parts = []
+    for t in tags:
+        f = t["finding"] or {}
+        meta = loads(f.get("metadata"), {}) or {}
+        block = [f"--- judgment {t['id'] or '(no id)'} — unit {t['n']} ---",
+                 f"lens: {meta.get('lens', '?')}; rule: {meta.get('rule', '?')}",
+                 f"tag: {t['raw']}",
+                 f"finding: {f.get('explanation') or t['gist']}",
+                 "unit (rewrite this whole paragraph, tag removed):",
+                 t["unit"]]
+        tf = meta.get("target_file")
+        if tf and tf in files:
+            block.append(f"target chapter {tf} — sha256 {_sha(files[tf])}:")
+            block.append(files[tf].rstrip())
+        parts.append("\n".join(block) + "\n")
+    judgments = "THE JUDGMENTS\n" + "\n".join(parts)
+    essay = _section(f"THE CHAPTER — {rel} — sha256 {_sha(text)}", text)
+    return RepairPayload(law=law, inputs=inputs, judgments=judgments,
+                         essay=essay, file=rel, tags=tags)
+
+
+def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
+                   reply, payload: RepairPayload | None = None) -> dict:
+    """Land a repair reply: rewrites are staged through the door (the tag
+    gone from the new unit), questions are returned for the author,
+    intents are declared scoped to the essay and their tag removal is
+    staged. A `new` that still carries the tag, carries reserved
+    markers, or is empty is refused by id."""
+    from . import api, staging
+    if payload is None:
+        payload = assemble_repair(db, manuscript, file)
+    files = read_manuscript_files(Path(manuscript["path"]))
+    rel = payload.file
+    text = files[rel]
+    by_id = {t["id"]: t for t in payload.tags if t["id"]}
+    items = (reply or {}).get("repairs", []) if isinstance(reply, dict) else []
+    batch = new_id("lr")
+    entries, questions, intents, refused = [], [], [], []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("id") or "").strip()
+        tag = by_id.get(fid) or next((t for t in payload.tags
+                                       if t["id"] and t["id"].startswith(fid)),
+                                      None)
+        if tag is None or tag["n"] is None:
+            refused.append({"id": fid, "reason": "no such judgment in the file"})
+            continue
+        action = it.get("action")
+        if action == "rewrite":
+            new = str(it.get("new") or "").strip()
+            if not new or "[judgment:" in new.lower() \
+                    or any(m in new for m in RESERVED_MARKERS):
+                refused.append({"id": fid, "reason": "rewrite is empty, still "
+                                "carries the tag, or carries reserved markers"})
+                continue
+            entries.append({"n": tag["n"], "new": new,
+                            "why": f"repair of {fid}: {str(it.get('text') or '')}"
+                                   .rstrip(": ")})
+        elif action == "question":
+            questions.append({"id": fid, "n": tag["n"],
+                              "text": str(it.get("text") or "").strip()})
+        elif action == "intent":
+            statement = str(it.get("text") or "").strip()
+            if not statement:
+                refused.append({"id": fid, "reason": "intent without a statement"})
+                continue
+            declared = api.declare_intent(db, manuscript, statement, scope=rel)
+            intents.append({"id": fid, "intent": declared["intent"]["id"],
+                            "text": statement})
+            entries.append({"n": tag["n"], "new": _remove_tag(tag["unit"], tag["raw"]),
+                            "why": f"{fid} filed as intent "
+                                   f"{declared['intent']['id']}: {statement}"})
+        else:
+            refused.append({"id": fid, "reason": f"unknown action {action!r}"})
+    staged = []
+    if entries:
+        staged = staging.stage_edits(db, manuscript["id"], f"repair@{batch[3:11]}",
+                                     rel, text, entries, origin_type=LENS_ORIGIN,
+                                     verb_stem="lens")
+    return {"file": rel, "batch_id": batch, "staged": staged,
+            "questions": questions, "intents": intents, "refused": refused}
+
+
+def _remove_tag(unit: str, raw: str) -> str:
+    out = unit.replace(raw, "")
+    return re.sub(r"[ \t]+\n", "\n", re.sub(r"  +", " ", out)).strip()
+
+
+def dismiss_judgments(db: Database, manuscript: dict, file: str,
+                      ids: list[str], reason: str) -> dict:
+    """The author's dismissal from chat: the finding is rejected with
+    the reason verbatim and the tag's removal is staged as a form."""
+    from . import beliefs as bel, staging
+    files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    tags = judgment_tags(db, manuscript, files, rel)
+    entries, done, missing = [], [], []
+    for want in ids:
+        tag = next((t for t in tags if t["id"] and t["id"].startswith(want)), None)
+        if tag is None or tag["n"] is None:
+            missing.append(want)
+            continue
+        f = tag["finding"]
+        if f and f["state"] == "proposed":
+            bel.record_review(db, manuscript["id"], dict(f), "rejected", reason,
+                              None, llm=None)
+        entries.append({"n": tag["n"], "new": _remove_tag(tag["unit"], tag["raw"]),
+                        "why": f"dismissed: {reason}"})
+        done.append(tag["id"])
+    staged = staging.stage_edits(db, manuscript["id"], f"dismiss@{new_id('ld')[3:11]}",
+                                 rel, files[rel], entries, origin_type=LENS_ORIGIN,
+                                 verb_stem="lens") if entries else []
+    return {"file": rel, "dismissed": done, "missing": missing, "staged": staged}
 
 
 # ------------------------------------------------------------ status
@@ -1040,6 +1325,7 @@ def findings(db: Database, manuscript: dict, file: str,
                     "note": r["suggestion"], "created_at": r.get("created_at"),
                     "edit_thread": meta.get("edit_thread"),
                     "footnote": meta.get("footnote"),
+                    "judgment": meta.get("judgment"),
                     "target_file": meta.get("target_file"),
                     "also_flagged_by": [a.get("lens") for a in
                                         meta.get("also_flagged_by", [])]})
