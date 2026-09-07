@@ -5224,7 +5224,119 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_parse_prelude_and_reply_json() -> None:
+    """`filtering.parse_prelude` freezes the global-run registry.
+
+    Every later unit is judged against those bytes. An empty registry,
+    reserved pending-form markers inside it, or a chat-path reply that is
+    not JSON must refuse whole — a soft parse would let two windows drift
+    off different coordination objects with no signal. `reply_json` is the
+    chat door into the same predicate (fenced blocks tolerated)."""
+    from authorlm.filtering import ReplyError, parse_prelude, reply_json
+
+    ok = parse_prelude({"registry": "  keep these terms aligned  "})
+    check("parse_prelude returns the stripped registry text",
+          ok == "keep these terms aligned", ok)
+
+    def refuse(label: str, raw, expect: str) -> None:
+        try:
+            parse_prelude(raw)
+            raised = ""
+        except ReplyError as err:
+            raised = str(err)
+        check(f"parse_prelude refuses: {label}",
+              expect in raised and raised != "", raised)
+
+    refuse("not a JSON object", ["registry"], "not a JSON object")
+    refuse("missing registry key", {"state": "x"}, "non-empty `registry`")
+    refuse("empty registry string", {"registry": "   "},
+           "non-empty `registry`")
+    refuse("non-string registry", {"registry": {"nested": True}},
+           "non-empty `registry`")
+    for marker in ("<<", ">>", "{{", "}}"):
+        refuse(f"reserved marker {marker!r} in the registry",
+               {"registry": f"ledger with {marker} inside"},
+               repr(marker))
+
+    parsed = reply_json('{"registry": "from chat"}')
+    check("reply_json accepts bare JSON from the chat path",
+          parsed == {"registry": "from chat"}, str(parsed))
+    fenced = reply_json("```json\n{\"registry\": \"fenced\"}\n```")
+    check("reply_json strips a fenced block the prompt forbids",
+          fenced == {"registry": "fenced"}, str(fenced))
+    chained = parse_prelude(reply_json(
+        "```\n{\"registry\": \"prelude via chat\"}\n```"))
+    check("chat reply_json then parse_prelude is the prelude door",
+          chained == "prelude via chat", chained)
+    try:
+        reply_json("not json at all")
+        bad = ""
+    except ReplyError as err:
+        bad = str(err)
+    check("reply_json refuses invalid JSON with a head snippet",
+          "not valid JSON" in bad and "not json at all" in bad, bad)
+
+
+def check_doc_sidecar_sync_guards() -> None:
+    """Doc-bridge sidecar guards that e2e Scenario PB covers only once.
+
+    Guard 3 (`rewrite_toc_from_doc`) must never write a sidecar into
+    toc.toml — that makes the dictionary a CHAPTER and every reading-order
+    exclusion unravels. `_reading_order_files` is the one inversion: the
+    dictionary IS appended last so it gets a Doc tab. Either softens and
+    the pronunciation dictionary ships inside the book or vanishes from
+    the author's working surface."""
+    import tempfile as _tempfile
+
+    from authorlm.gdocs import DocBridge, _reading_order_files, rewrite_toc_from_doc
+    from authorlm.structure import parse_toc_tree
+
+    root = Path(_tempfile.mkdtemp(prefix="authorlm-sidecar-sync-"))
+    try:
+        ms = root / "manuscript"
+        ms.mkdir()
+        (ms / "01-open.md").write_text("# One\n\nEssay.\n", encoding="utf-8")
+        (ms / "02-next.md").write_text("# Two\n\nEssay.\n", encoding="utf-8")
+        (ms / "pronunciations.md").write_text(
+            "# Pronunciations\n\n| Term | Say it | Note |\n"
+            "| --- | --- | --- |\n| anattā | uh-NUT-taa | Pali |\n",
+            encoding="utf-8")
+        (ms / "manifest.md").write_text(
+            "| Slot | File |\n| --- | --- |\n", encoding="utf-8")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-open.md"\n\n'
+            '[[chapter]]\nfile = "02-next.md"\n', encoding="utf-8")
+
+        order = _reading_order_files(DocBridge(
+            "gdocs", ms, "book", toc_sync=True, rich_manifest=True))
+        check("_reading_order_files appends both sidecars LAST after essays",
+              order == ["01-open.md", "02-next.md",
+                        "manifest.md", "pronunciations.md"],
+              str(order))
+
+        before = (ms / "toc.toml").read_bytes()
+        new_tree = rewrite_toc_from_doc(
+            {"path": str(ms)},
+            [("01-open.md", None), ("pronunciations.md", None),
+             ("manifest.md", None), ("02-next.md", None)],
+            parse_toc_tree(before.decode()))
+        names = [n for n, _ in new_tree]
+        rewritten = (ms / "toc.toml").read_text(encoding="utf-8")
+        check("rewrite_toc_from_doc never writes a sidecar into toc.toml",
+              "pronunciations.md" not in names
+              and "manifest.md" not in names
+              and names == ["01-open.md", "02-next.md"],
+              str(names))
+        check("...and the on-disk toc.toml stays free of sidecar chapters",
+              "pronunciations.md" not in rewritten
+              and "manifest.md" not in rewritten, rewritten)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_parse_prelude_and_reply_json()
+    check_doc_sidecar_sync_guards()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
@@ -7745,11 +7857,12 @@ def main_test() -> None:
                       for item in pdf_metadata),
               str(pdf_command))
         check("PDF export starts the whole essay before its epigraph",
-              "::: {.authorlm-file .authorlm-essay}\n"
+              "::: {.authorlm-file .authorlm-essay .authorlm-matter-main}\n"
               "An opening epigraph.\n\n# Intro"
               in pdf_markdown, pdf_markdown)
         check("Pandoc input carries semantics, never writer markup",
-              "::: {.authorlm-file .authorlm-title-page}" in pdf_markdown
+              "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
+              in pdf_markdown
               and "# **The Book**" in pdf_markdown
               and "# Intro" in pdf_markdown
               and "\\Huge" not in pdf_markdown
