@@ -9261,6 +9261,13 @@ def main_test() -> None:
               dm["dismissed"] == [fact[:11]] and len(dm["staged"]) == 1
               and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
                           (fact,))["state"] == "rejected", str(dm))
+        opu_chosen, opu_deferred = lenses.one_per_unit([
+            {"id": "b", "created_at": "2", "metadata": '{"anchor_paragraph": 3}'},
+            {"id": "a", "created_at": "1", "metadata": '{"anchor_paragraph": 3}'},
+            {"id": "c", "created_at": "3", "metadata": '{"anchor_paragraph": 5}'}])
+        check("one form per paragraph goes to the tab; the rest stay staged",
+              [t["id"] for t in opu_chosen] == ["a", "c"]
+              and [t["id"] for t in opu_deferred] == ["b"])
         check("sweep order: ratified names first, then alphabetical; only/skip",
               lenses.sweep_order(lm) == ["plain", "xc"]
               and lenses.sweep_order(lm, only=["xc"]) == ["xc"]

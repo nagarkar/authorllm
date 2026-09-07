@@ -999,6 +999,34 @@ def register_findings(db: Database, manuscript: dict, session: dict,
                            payload=payload, lens_body=body)
 
 
+# ------------------------------------------------------ one form per unit
+
+def one_per_unit(threads: list[dict]) -> tuple[list[dict], list[dict]]:
+    """The tab carries ONE form per paragraph. Several lenses rewriting
+    the same unit is common (a sweep); the earliest-staged form goes,
+    the rest stay staged for the next push after the author's ruling.
+    Returns (chosen, deferred), both in staging order."""
+    chosen: dict[int, dict] = {}
+    deferred: list[dict] = []
+    for t in sorted(threads, key=lambda t: (t.get("created_at") or "", t["id"])):
+        n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
+        if n in chosen:
+            deferred.append(t)
+        else:
+            chosen[n] = t
+    return list(chosen.values()), deferred
+
+
+def forms_out(db: Database, manuscript: dict, file: str) -> int:
+    """How many lens forms are out in this file's tab right now."""
+    from . import staging
+    files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    return len(staging.door_threads(db, manuscript["id"], rel,
+                                    states=("written",),
+                                    origin_type=LENS_ORIGIN))
+
+
 # ------------------------------------------------------ verdicts → findings
 
 def propagate_verdicts(db: Database, manuscript: dict, threads) -> dict:

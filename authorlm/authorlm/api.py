@@ -5802,7 +5802,7 @@ def _file_run_mode(db: Database, manuscript_id: str, rel: str) -> str | None:
 
 
 def lens_push(db: Database, manuscript: dict, config: dict, file: str,
-              services=None) -> dict:
+              services=None, supersede: bool = False) -> dict:
     """The lens door's DOC transport (filter-pass design §7.2, built
     2026-08-31): write the staged lens edits for this file into its tab
     as `<<old>>{{new}}` forms — the same surgical writer, the same
@@ -5820,10 +5820,35 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
     threads = staging.door_threads(
         db, mid, rel, states=("proposed", "accepted", "rejected", "written"),
         origin_type=LENS_ORIGIN)
-    # Lens forms already out in the tab are the SAME producer: more of
-    # them may join (a sweep after a sweep, a repair after a resolve);
-    # the writer refuses per thread where a unit already carries one.
+    from . import lenses as _lenses
+    # Forms already out cannot be joined: writing new forms rebuilds the
+    # tab, and a rebuild wipes any rewording the author typed inside the
+    # old ones. Two exits, named; `supersede` is the author's choice.
     already = [t for t in threads if t["state"] == "written"]
+    if already and not supersede:
+        raise ValueError(
+            f"{len(already)} lens form(s) are already out in {rel}'s tab. "
+            f"Either rule on them there and 'lens resolve {rel}', or "
+            f"'lens push {rel} --supersede' to withdraw them (their forms "
+            f"leave the tab, which is rebuilt from the file; any rewording "
+            f"you typed inside them is lost) and push the new ones.")
+    if already:
+        for t in already:
+            meta = loads(t.get("metadata"), {}) or {}
+            meta["superseded"] = True
+            db.update("doc_threads", t["id"],
+                      {"state": "withdrawn", "metadata": json.dumps(meta)})
+        service, docs_service = _resolve_services(services, rel)
+        gdocs.push_doc(db, manuscript, rel, service=service,
+                       docs_service=docs_service)
+    # A push (or a rebuild) leaves the file checked out to the Doc; the
+    # next push clears that by pulling the tab down, which is the
+    # standing protocol and brings any Doc-side edit with it.
+    if (gdocs.doc_status(db, manuscript).get(rel) or {}).get("checked_out"):
+        service, docs_service = _resolve_services(services, rel)
+        gdocs.pull_doc(db, manuscript, query=rel, service=service,
+                       docs_service=docs_service, with_comments=False)
+    threads = [t for t in threads if t["state"] != "withdrawn"]
     mine = {t["id"] for t in threads}
     outside = [dict(r) for r in db.all(
         "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
@@ -5851,8 +5876,14 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
                     "carries a `replacement`."))
     warnings: list[str] = []
     if already:
-        warnings.append(f"{len(already)} lens form(s) were already out in "
-                        f"the tab and stay there; the new ones join them.")
+        warnings.append(f"{len(already)} lens form(s) already out were "
+                        f"withdrawn (superseded) and the tab rebuilt first.")
+    pushable, deferred = _lenses.one_per_unit(pushable)
+    if deferred:
+        warnings.append(
+            f"{len(deferred)} form(s) rewrite a paragraph another form "
+            f"already claims; they stay staged and go in the next push "
+            f"after 'lens resolve {rel}'.")
     warnings.append(
         f"All {len(pushable)} lens change(s) go to the Doc. The tab is "
         f"the review: leave a change alone to take it, empty its green "

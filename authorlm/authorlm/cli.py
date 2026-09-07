@@ -3983,11 +3983,16 @@ def _lens_autopush(db, manuscript, args, target: str, staged: int) -> None:
                 _gd.get_docs_service(config, args.workspace, interactive=True))
     try:
         result = api.lens_push(db, manuscript, config, target,
-                               services=_doc_bridge)
+                               services=_doc_bridge,
+                               supersede=getattr(args, "supersede", False))
     except (LookupError, ValueError, RuntimeError) as err:
         print(ui.yellow(f"staged {staged} edit(s) but the push did not land: "
                         f"{err} — 'lens push {target}' retries."))
         return
+    _print_filter_warnings(result["warnings"])
+    for t, why in result["failed"]:
+        print(ui.yellow(f"  failed to land: «{gdocs_clamp(t['proposed_old'])}» "
+                        f"— {why}"))
     print(ui.green(f"Pushed {result['written']} lens form(s) into "
                    f"{result['file']}'s tab → {result['url']}"))
     print(ui.dim("Findings WITHOUT a rewrite do not reach the Doc — they are "
@@ -4189,6 +4194,15 @@ def cmd_lens(args):
             names = lenses.sweep_order(manuscript, only or None, skip or None)
         except LookupError as err:
             raise SystemExit(f"error: {err}")
+        if args.native and not args.no_push and not args.supersede:
+            out_now = lenses.forms_out(db, manuscript, target)
+            if out_now:
+                raise SystemExit(
+                    f"{out_now} lens form(s) are already out in {target}'s "
+                    f"tab. Rule on them there and 'lens resolve {target}' "
+                    f"first, or re-run with --supersede to withdraw them, "
+                    f"before spending eight model calls on a sweep whose "
+                    f"forms could not land.")
         from pathlib import Path as _P
         from .revisions import read_manuscript_files as _rmf
         files = _rmf(_P(manuscript["path"]))
@@ -4304,7 +4318,8 @@ def cmd_lens(args):
         try:
             if args.action == "push":
                 result = api.lens_push(db, manuscript, config, target,
-                                       services=_doc_bridge)
+                                       services=_doc_bridge,
+                                       supersede=args.supersede)
                 _print_filter_warnings(result["warnings"])
                 print(ui.green(
                     f"Pushed {result['written']} lens form(s) into "
@@ -7896,6 +7911,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reply", metavar="PATH",
                    help="register: read the findings JSON from this file "
                         "instead of stdin")
+    p.add_argument("--supersede", action="store_true",
+                   help="push/sweep/repair: withdraw lens forms already out "
+                        "in the tab (any rewording typed inside them is "
+                        "lost) and push the new ones")
     p.add_argument("--no-push", action="store_true",
                    help="run --native / register / sweep --native: record the "
                         "staged edits but do not push them to the Doc tab "
