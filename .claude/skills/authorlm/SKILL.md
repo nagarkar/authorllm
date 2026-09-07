@@ -1080,7 +1080,15 @@ REFUSES a finding naming a chapter the lens did not declare); then relay
 the findings as prose and hand verdicts to `lens review <n>`. `lens sweep
 <essay> [--native] [--only a,b] [--skip a,b] [--out DIR]` runs the roster
 in the ratified order with block A assembled once and cross-links
-findings whose quotes overlap across lenses. `lens status <essay>` shows
+findings whose quotes overlap across lenses. **What reaches the Doc, and what does not:** a lens finding that
+carries a rewrite (`replacement`) or a footnote gist is staged as a
+pending edit and PUSHED to the tab in the same turn by `run --native`,
+`register`, and `sweep --native` (`--no-push` for the local road); a
+finding with no new text — most judgment findings — never reaches the
+Doc, because the pending-change grammar has nothing to show, and the
+bridge cannot create an anchored comment. Read those with `lens findings
+<essay>` and rule with `lens review <gd-id>`; never tell the author to
+look for them in the tab. `lens status <essay>` shows
 each batch's per-rule tallies, unverified target quotes, and STALE where
 the essay or a target has changed since (byte comparison, not a
 summary). A lens refuses to run ON a protected register. `lens run` on

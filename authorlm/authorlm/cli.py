@@ -3963,6 +3963,38 @@ def cmd_filter(args):
         sys.exit(f"error: {err}")
 
 
+def _lens_autopush(db, manuscript, args, target: str, staged: int) -> None:
+    """The Doc road is the standing protocol (author ruling 2026-09-01:
+    "always add these to the doc using the old/new syntax"): every lens
+    verb that stages an edit pushes it in the same turn unless --no-push.
+    A push failure is reported, never fatal — the edits are safe on disk
+    and 'lens push <essay>' retries."""
+    from . import api
+    if not staged or getattr(args, "no_push", False):
+        if staged:
+            print(ui.dim(f"{staged} edit(s) staged and NOT pushed (--no-push); "
+                         f"'lens push {target}' sends them to the tab."))
+        return
+    config = _load_config(args)
+
+    def _doc_bridge():
+        from . import gdocs as _gd
+        return (_gd.get_service(config, args.workspace, interactive=True),
+                _gd.get_docs_service(config, args.workspace, interactive=True))
+    try:
+        result = api.lens_push(db, manuscript, config, target,
+                               services=_doc_bridge)
+    except (LookupError, ValueError, RuntimeError) as err:
+        print(ui.yellow(f"staged {staged} edit(s) but the push did not land: "
+                        f"{err} — 'lens push {target}' retries."))
+        return
+    print(ui.green(f"Pushed {result['written']} lens form(s) into "
+                   f"{result['file']}'s tab → {result['url']}"))
+    print(ui.dim("Findings WITHOUT a rewrite do not reach the Doc — they are "
+                 f"judgment findings; read them with 'lens findings {target}' "
+                 "and rule with 'lens review <gd-id>'."))
+
+
 def gdocs_clamp(text: str, limit: int = 90) -> str:
     from .gdocs import clamp
 
@@ -4097,6 +4129,7 @@ def cmd_lens(args):
         if llm is not None and not llm.enabled:
             raise SystemExit("--native needs the LLM enabled in config")
         batch_ids = []
+        staged_total = 0
         outdir = _P(args.out) if args.out else None
         if outdir:
             outdir.mkdir(parents=True, exist_ok=True)
@@ -4119,7 +4152,10 @@ def cmd_lens(args):
             result = lenses.run_lens(db, manuscript, session, name,
                                      payload.file, llm, payload=payload)
             batch_ids.append(result["batch_id"])
+            staged_total += len(result["edits_staged"])
             print(f"{name}: {len(result['findings'])} finding(s)"
+                  + (f", {len(result['edits_staged'])} edit(s) staged"
+                     if result["edits_staged"] else "")
                   + (f", {result['dropped_ungrounded']} ungrounded dropped"
                      if result["dropped_ungrounded"] else "")
                   + (f", {len(result['refused_targets'])} refused (target "
@@ -4129,9 +4165,10 @@ def cmd_lens(args):
         if llm is not None:
             linked = lenses.link_overlaps(db, batch_ids)
             print(ui.dim(f"{linked} finding(s) cross-linked across lenses. "
-                         f"Verdicts: lens review <n> --accept|--reject "
-                         f"[--explain]; 'lens status {target}' for tallies."))
+                         f"Verdicts: 'lens findings {target}' then lens review "
+                         f"<gd-id> --accept|--reject [--explain]."))
             print(llm.stats_line() or "")
+            _lens_autopush(db, manuscript, args, target, staged_total)
         else:
             print(ui.dim("No model call was made (the default). Answer each "
                          "payload's contract and 'lens register <name> "
@@ -4307,6 +4344,8 @@ def cmd_lens(args):
              if result.get("refused_targets") else "") + ".")
     for rt in result.get("refused_targets", []):
         print(ui.yellow(f"  refused: «{rt['quote']}» → {rt['target']}"))
+    _lens_autopush(db, manuscript, args, result["file"],
+                   len(result.get("edits_staged", [])))
     for i, row in enumerate(result["findings"], start=1):
         meta = _json.loads(row.get("metadata") or "{}")
         tag = " [edit staged]" if meta.get("edit_thread") else ""
@@ -7777,6 +7816,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reply", metavar="PATH",
                    help="register: read the findings JSON from this file "
                         "instead of stdin")
+    p.add_argument("--no-push", action="store_true",
+                   help="run --native / register / sweep --native: record the "
+                        "staged edits but do not push them to the Doc tab "
+                        "(the local road; the Doc road is the default)")
     p.add_argument("--only", help="sweep: comma-separated lens names to run")
     p.add_argument("--skip", help="sweep: comma-separated lens names to skip")
     p.add_argument("--accept", action="store_true")
