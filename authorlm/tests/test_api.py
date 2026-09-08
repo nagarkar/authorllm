@@ -9274,13 +9274,11 @@ def main_test() -> None:
         items = [("a.md", "the ground of all things is a ground"),
                  ("b.md", "Here Ground is named as a term."),
                  ("c.md", "Ground again.")]
-        check("primary_location prefers the term-of-art mention over casual "
-              "lowercase reuse in an earlier chapter",
+        check("primary_location is the first occurrence of the word in reading "
+              "order, any casing — the author's rule, nothing finer",
               _cg.primary_location(items, {"name": "Ground", "aliases": "[]"})
-              == "b.md")
-        check("primary_location falls back to the plain word when the term "
-              "never appears capitalized",
-              _cg.primary_location(items, {"name": "Thing", "aliases": "[]"})
+              == "a.md"
+              and _cg.primary_location(items, {"name": "Thing", "aliases": "[]"})
               == "a.md"
               and _cg.primary_location(items, {"name": "Absent", "aliases": "[]"})
               is None)

@@ -265,21 +265,23 @@ _word_pattern = concept_pattern
 
 def primary_location(items: list[tuple[str, str]], node) -> str | None:
     """THE rule for where a concept was introduced, deterministic and
-    author-free (ruled 2026-09-07): the first file in READING ORDER whose
-    text carries the concept as a term of art (`mention_pattern`, so a
-    capitalized single-word term is not found in casual lowercase prose),
-    and failing that the first file that carries the word at all. None
-    when no file does. Every writer of `introduced_in` goes through here
+    author-free (ruled 2026-09-07, the author's words: "the first mention
+    of the term"): the first file in READING ORDER whose text carries the
+    concept's name or an alias as a word, any casing, plurals tolerated
+    (`concept_pattern`). Nothing finer: preferring the capitalized
+    term-of-art mention pulled Measurement and Trajectory forward into
+    the Metaphysic, where the book's essays had long used the word, and
+    that is the misattribution the ruling exists to end. None when no
+    file carries it. Every writer of `introduced_in` goes through here
     and every collect re-derives it; the author never triages it."""
     names = (list(node) if isinstance(node, (list, tuple, set))
              else node_names(dict(node)))
     if not names:
         return None
-    for make in (mention_pattern, concept_pattern):
-        pats = [make(n) for n in names]
-        for fname, text in items:
-            if any(p.search(text) for p in pats):
-                return fname
+    pats = [concept_pattern(n) for n in names]
+    for fname, text in items:
+        if any(p.search(text) for p in pats):
+            return fname
     return None
 
 
