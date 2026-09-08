@@ -263,6 +263,26 @@ def mention_pattern(name: str) -> re.Pattern:
 _word_pattern = concept_pattern
 
 
+def primary_location(items: list[tuple[str, str]], node) -> str | None:
+    """THE rule for where a concept was introduced, deterministic and
+    author-free (ruled 2026-09-07): the first file in READING ORDER whose
+    text carries the concept as a term of art (`mention_pattern`, so a
+    capitalized single-word term is not found in casual lowercase prose),
+    and failing that the first file that carries the word at all. None
+    when no file does. Every writer of `introduced_in` goes through here
+    and every collect re-derives it; the author never triages it."""
+    names = (list(node) if isinstance(node, (list, tuple, set))
+             else node_names(dict(node)))
+    if not names:
+        return None
+    for make in (mention_pattern, concept_pattern):
+        pats = [make(n) for n in names]
+        for fname, text in items:
+            if any(p.search(text) for p in pats):
+                return fname
+    return None
+
+
 def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[dict]:
     """Mark declared concepts as realized when they appear in text.
     Returns newly realized concept rows."""
@@ -278,21 +298,20 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status = 'declared'",
         (manuscript_id,),
     ):
-        patterns = [_word_pattern(n) for n in node_names(node)]
-        for fname, text in items:
-            if any(p.search(text) for p in patterns):
-                meta = loads(node["metadata"], {})
-                meta.update(realized_at=version["created_at"], realized_version=version["id"])
-                db.update(
-                    "concept_nodes", node["id"],
-                    {
-                        "status": "realized",
-                        "introduced_in": fname,
-                        "metadata": json.dumps(meta),
-                    },
-                )
-                realized.append({**dict(node), "status": "realized", "introduced_in": fname})
-                break
+        fname = primary_location(items, node)
+        if fname is None:
+            continue
+        meta = loads(node["metadata"], {})
+        meta.update(realized_at=version["created_at"], realized_version=version["id"])
+        db.update(
+            "concept_nodes", node["id"],
+            {
+                "status": "realized",
+                "introduced_in": fname,
+                "metadata": json.dumps(meta),
+            },
+        )
+        realized.append({**dict(node), "status": "realized", "introduced_in": fname})
     return realized
 
 
@@ -315,25 +334,16 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status = 'realized'",
         (manuscript_id,),
     ):
-        pattern = _word_pattern(node["name"])
-        current_first = next(
-            (name for name, text in items if pattern.search(text)), None
-        )
+        current_first = primary_location(items, node)
         if current_first is None:
             vanished.append(dict(node))
             continue
         old = node["introduced_in"]
-        old_text = files.get(old, "") if old else ""
-        order = [name for name, _ in items]
-        earlier = (old in order and current_first in order
-                   and order.index(current_first) < order.index(old))
-        # Definition precedence follows the text (module doctrine): the
-        # first reading-order location IS the primary location. So the
-        # pointer moves EARLIER whenever an earlier chapter carries the
-        # term (2026-09-07: commensurability stayed pinned to the
-        # appendix while the essay that defines it came first), and moves
-        # later only when the recorded chapter has lost the term.
-        if current_first != old and (earlier or not pattern.search(old_text)):
+        # Definition precedence follows the text, unconditionally (ruled
+        # 2026-09-07 after commensurability, Caste and hierarchy stayed
+        # pinned to later chapters): the pointer IS the first reading-order
+        # mention, re-derived at every collect, never triaged.
+        if current_first != old:
             db.update("concept_nodes", node["id"], {"introduced_in": current_first})
             repointed.append({"name": node["name"], "old": old, "new": current_first})
     return repointed, vanished

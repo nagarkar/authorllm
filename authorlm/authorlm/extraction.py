@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from . import adjudication, proposals, prompt_registry
-from .concepts import (NODE_KINDS, add_concept, concept_pattern, get_concept,
+from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, node_names, scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
@@ -910,10 +910,20 @@ def extract_concepts(
         if before is None:
             # Machine-extracted nodes are hypotheses awaiting the author's
             # confirmation, exactly like inferred edges (§21.7).
+            # Where it was introduced is NOT the file that was mined: it is
+            # the first reading-order mention across the whole manuscript,
+            # stamped now (ruled 2026-09-07) so no window exists in which
+            # a term is attributed to an essay that merely repeats it.
+            if disk_files is None:
+                disk_files = read_manuscript_files(Path(manuscript["path"]))
+            from .structure import ordered_items as _ordered
+            primary = primary_location(_ordered(disk_files), node)
             db.update(
                 "concept_nodes", node["id"],
-                {"metadata": json.dumps({"origin": "extracted", "confirmed": False})},
+                {"metadata": json.dumps({"origin": "extracted", "confirmed": False}),
+                 "introduced_in": primary},
             )
+            node = {**dict(node), "introduced_in": primary}
             new_nodes.append(node)
         elif (
             notes

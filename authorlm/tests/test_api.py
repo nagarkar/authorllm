@@ -9268,6 +9268,33 @@ def main_test() -> None:
         check("one form per paragraph goes to the tab; the rest stay staged",
               [t["id"] for t in opu_chosen] == ["a", "c"]
               and [t["id"] for t in opu_deferred] == ["b"])
+        # --- introduced_in is deterministic: first reading-order mention,
+        #     term of art first, re-derived at every collect, never triaged
+        from authorlm import concepts as _cg
+        items = [("a.md", "the ground of all things is a ground"),
+                 ("b.md", "Here Ground is named as a term."),
+                 ("c.md", "Ground again.")]
+        check("primary_location prefers the term-of-art mention over casual "
+              "lowercase reuse in an earlier chapter",
+              _cg.primary_location(items, {"name": "Ground", "aliases": "[]"})
+              == "b.md")
+        check("primary_location falls back to the plain word when the term "
+              "never appears capitalized",
+              _cg.primary_location(items, {"name": "Thing", "aliases": "[]"})
+              == "a.md"
+              and _cg.primary_location(items, {"name": "Absent", "aliases": "[]"})
+              is None)
+        ldb.update("concept_nodes",
+                   ldb.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
+                           "AND name = 'Ground'", (lm["id"],))["id"],
+                   {"introduced_in": "04-last.md"})
+        lv = ldb.one("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+                     "ORDER BY created_at DESC LIMIT 1", (lm["id"],))
+        moved, _van = _cg.rescan_primary_locations(ldb, lm["id"], dict(lv))
+        check("the re-scan moves a pointer to the first mention unconditionally, "
+              "even when the old chapter still carries the term",
+              any(m["name"] == "Ground" and m["new"] == "01-first.md"
+                  for m in moved), str(moved))
         check("sweep order: ratified names first, then alphabetical; only/skip",
               lenses.sweep_order(lm) == ["plain", "xc"]
               and lenses.sweep_order(lm, only=["xc"]) == ["xc"]
