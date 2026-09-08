@@ -710,8 +710,12 @@ def _targets_block(db: Database, manuscript: dict, files: dict[str, str],
         later, earlier = terms_by_introduction(db, manuscript, files, rel,
                                                text)
         parts.append(_section(
-            "TERMS INTRODUCED LATER (named here, first introduced after this "
-            "chapter in reading order — the ramp check, from the graph)",
+            "TERMS INTRODUCED LATER (named here; the graph records their first "
+            "introduction AFTER this chapter in reading order. A LEAD, NOT A "
+            "VERDICT: a term this chapter itself defines on its own page is "
+            "supplied by this chapter, whatever the graph says — read E "
+            "before flagging, and never flag a term at the sentence that "
+            "defines it)",
             "\n".join(f"- {c} — {w}" for c, w in later) if later else "(none)"))
         parts.append(_section(
             "TERMS INTRODUCED EARLIER (concept — the chapter that supplied it)",

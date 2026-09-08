@@ -1123,7 +1123,7 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
         result = bel.record_review(
             db, manuscript["id"], dict(guidance), decision, explanation,
             episode["id"] if episode else None, llm=llm)
-        return result
+        return {"guidance": dict(guidance), **result}
     latest_batch = db.one(
         f"SELECT batch_id FROM guidance_history WHERE session_id = ? "
         f"AND kind IN ({kinds_sql}) "
@@ -5878,7 +5878,30 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
     if already:
         warnings.append(f"{len(already)} lens form(s) already out were "
                         f"withdrawn (superseded) and the tab rebuilt first.")
-    pushable, deferred = _lenses.one_per_unit(pushable)
+    path = Path(manuscript["path"]) / rel
+    disk = path.read_text(encoding="utf-8")
+    # A form whose old text is no longer in the file (the paragraph was
+    # rewritten by an accepted form or by the author) can never land:
+    # it goes STALE, its finding left as it is, instead of being retried
+    # on every push.
+    fresh, stale = [], []
+    for t in pushable:
+        if t["proposed_old"] in disk:
+            fresh.append(t)
+        else:
+            meta = loads(t.get("metadata"), {}) or {}
+            meta["stale_reason"] = "old text no longer in the file"
+            db.update("doc_threads", t["id"],
+                      {"state": "stale", "metadata": json.dumps(meta)})
+            stale.append(t)
+    if stale:
+        warnings.append(f"{len(stale)} staged form(s) went stale: the "
+                        f"paragraph they rewrote has since changed.")
+    pushable, deferred = _lenses.one_per_unit(fresh)
+    if not pushable:
+        raise LookupError(f"no staged lens edit on {rel} can go to the Doc "
+                          f"now: {len(stale)} went stale, {len(deferred)} "
+                          f"deferred.")
     if deferred:
         warnings.append(
             f"{len(deferred)} form(s) rewrite a paragraph another form "

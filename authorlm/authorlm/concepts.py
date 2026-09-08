@@ -324,7 +324,16 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
             continue
         old = node["introduced_in"]
         old_text = files.get(old, "") if old else ""
-        if current_first != old and not pattern.search(old_text):
+        order = [name for name, _ in items]
+        earlier = (old in order and current_first in order
+                   and order.index(current_first) < order.index(old))
+        # Definition precedence follows the text (module doctrine): the
+        # first reading-order location IS the primary location. So the
+        # pointer moves EARLIER whenever an earlier chapter carries the
+        # term (2026-09-07: commensurability stayed pinned to the
+        # appendix while the essay that defines it came first), and moves
+        # later only when the recorded chapter has lost the term.
+        if current_first != old and (earlier or not pattern.search(old_text)):
             db.update("concept_nodes", node["id"], {"introduced_in": current_first})
             repointed.append({"name": node["name"], "old": old, "new": current_first})
     return repointed, vanished
