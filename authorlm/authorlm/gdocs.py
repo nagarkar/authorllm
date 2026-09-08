@@ -80,6 +80,17 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         return _MATH_SENTINEL % (len(spans) - 1)
 
     text = _DISPLAY_MATH.sub(display, text)
+    # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
+    # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
+    # normalized bytes back to disk, so the damage is permanent. Keep
+    # the remnant opaque (byte-identical aside from the file's trailing
+    # newline, which normalize re-adds) until a closer exists.
+    if "$$" in text:
+        at = text.index("$$")
+        head, tail = text[:at], text[at:]
+        head = _INLINE_MATH.sub(inline, head)
+        spans.append(tail.rstrip("\n"))
+        return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
     return _INLINE_MATH.sub(inline, text), spans
 
 
