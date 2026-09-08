@@ -5224,7 +5224,166 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_doc_sidecar_structure_guards() -> None:
+    """Sidecar guards 1 and 2 on the TOC↔tab sync (§15.22 §2.5 rows 23–24).
+
+    Both sidecars have Doc tabs (`_reading_order_files` appends them) but
+    can never appear in `toc.toml`. Comparing an unfiltered Doc list
+    against the TOC permanently reports `unsynced` / `conflict`, and a
+    false `doc_moved` on pull hands the dictionary to
+    `rewrite_toc_from_doc`. Guard 3 (rewrite itself) is covered by the
+    open routine PR that hermeticizes Scenario PB's site 25; these two
+    are the sync call sites that e2e exercises only for
+    `pronunciations.md`.
+    """
+    from authorlm import pronunciations as pron
+    from authorlm.gdocs import (_mapping, _save_mapping, pull_doc,
+                                sync_tab_structure)
+    from authorlm.structure import SIDECAR_FILES, parse_toc_tree
+
+    class _DocsService:
+        def __init__(self, tree):
+            self.tree = tree
+
+        def documents(self):
+            outer = self
+
+            class Docs:
+                @staticmethod
+                def get(documentId, includeTabsContent=False):
+                    class R:
+                        @staticmethod
+                        def execute():
+                            return outer.tree
+                    return R()
+            return Docs()
+
+    class _DriveService:
+        def __init__(self, export: str):
+            self.export = export
+
+        def files(self):
+            outer = self
+
+            class Files:
+                @staticmethod
+                def export(fileId, mimeType):
+                    class R:
+                        @staticmethod
+                        def execute():
+                            return outer.export.encode("utf-8")
+                    return R()
+            return Files()
+
+    def tab_tree(pairs):
+        return {"tabs": [{
+            "tabProperties": {"tabId": "root", "title": "book"},
+            "childTabs": [
+                {"tabProperties": {"tabId": tid, "title": title},
+                 "childTabs": []}
+                for tid, title in pairs]}]}
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-sidecar-struct-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-open.md").write_text("# One\n\nThe first essay.\n",
+                                       encoding="utf-8")
+        (ms / "02-next.md").write_text("# Two\n\nThe second essay.\n",
+                                       encoding="utf-8")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-open.md"\n\n'
+            '[[chapter]]\nfile = "02-next.md"\n', encoding="utf-8")
+        (ms / pron.FILENAME).write_text(
+            "# Pronunciations\n\n"
+            "How the terms in this book are said aloud.\n\n"
+            "| Term | Say it | Note |\n"
+            "| --- | --- | --- |\n"
+            "| anattā | uh-NUT-taa | Pali |\n", encoding="utf-8")
+        (ms / "manifest.md").write_text(
+            "| Slot | File |\n| --- | --- |\n| a | 01-open.md |\n",
+            encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+
+        # Mapping a push leaves behind: essays + both sidecars as tabs.
+        tabs = [("t1", "01-open.md"), ("t2", "02-next.md"),
+                ("t3", pron.FILENAME), ("t4", "manifest.md")]
+        links = {"_master_id": "master-1", "_container_tab": "root"}
+        for tid, title in tabs:
+            links[title] = {"tab_id": tid, "checked_out": False}
+        _save_mapping(db, manuscript, {"gdocs": links})
+        docs = _DocsService(tab_tree(tabs))
+
+        # --- Guard 1 / site 23: sync_tab_structure -----------------
+        state = sync_tab_structure(db, manuscript, docs)
+        check("sync_tab_structure stays insync with both sidecar tabs "
+              "mapped (guard 1 / doc_pairs half)",
+              state == {"insync": True}, str(state))
+        saved = _mapping(db, manuscript)["gdocs"].get("_tab_structure")
+        check("...and the recorded base is essays only — never a sidecar",
+              [tuple(x) for x in saved] == [("01-open.md", None),
+                                            ("02-next.md", None)]
+              and all(name not in {n for n, _ in
+                                   [tuple(x) for x in saved]}
+                      for name in SIDECAR_FILES),
+              str(saved))
+
+        # Desired half: a hand-listed (or pre-guard) toc.toml that names
+        # a sidecar must still compare as insync once filtered.
+        toc_path = ms / "toc.toml"
+        clean_toc = toc_path.read_bytes()
+        toc_path.write_text(
+            clean_toc.decode()
+            + f'\n[[chapter]]\nfile = "{pron.FILENAME}"\n'
+            + '\n[[chapter]]\nfile = "manifest.md"\n',
+            encoding="utf-8")
+        state = sync_tab_structure(db, manuscript, docs)
+        check("sync_tab_structure stays insync when toc.toml names "
+              "sidecars (guard 1 / desired half)",
+              state == {"insync": True}, str(state))
+        toc_path.write_bytes(clean_toc)
+
+        # --- Guard 2 / site 24: pull_doc TOC sync ------------------
+        def export_of(files: dict[str, str]) -> str:
+            return "# **book**\n\n" + "".join(
+                f"# **{name}**\n\n{text}\n"
+                for name, text in files.items())
+
+        live = {
+            "01-open.md": "# One\n\nThe first essay.\n",
+            "02-next.md": "# Two\n\nThe second essay.\n",
+            pron.FILENAME: (ms / pron.FILENAME).read_text(encoding="utf-8"),
+            "manifest.md": (ms / "manifest.md").read_text(encoding="utf-8"),
+        }
+        before = toc_path.read_bytes()
+        report = pull_doc(
+            db, manuscript,
+            service=_DriveService(export_of(live)),
+            docs_service=docs, with_comments=False)
+        entries = [n for n, _ in parse_toc_tree(
+            toc_path.read_text(encoding="utf-8"))]
+        check("pull with sidecar tabs does not rewrite toc.toml or "
+              "report a conflict (guard 2)",
+              not report.get("toc_updated")
+              and not report.get("toc_conflict")
+              and not report.get("toc_ahead")
+              and toc_path.read_bytes() == before,
+              str(report))
+        check("...and toc.toml still names only essays after the pull",
+              entries == ["01-open.md", "02-next.md"]
+              and all(name not in entries for name in SIDECAR_FILES),
+              str(entries))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_doc_sidecar_structure_guards()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
@@ -7745,11 +7904,12 @@ def main_test() -> None:
                       for item in pdf_metadata),
               str(pdf_command))
         check("PDF export starts the whole essay before its epigraph",
-              "::: {.authorlm-file .authorlm-essay}\n"
+              "::: {.authorlm-file .authorlm-essay .authorlm-matter-main}\n"
               "An opening epigraph.\n\n# Intro"
               in pdf_markdown, pdf_markdown)
         check("Pandoc input carries semantics, never writer markup",
-              "::: {.authorlm-file .authorlm-title-page}" in pdf_markdown
+              "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
+              in pdf_markdown
               and "# **The Book**" in pdf_markdown
               and "# Intro" in pdf_markdown
               and "\\Huge" not in pdf_markdown
