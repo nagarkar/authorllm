@@ -5919,8 +5919,6 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
     twin_note = _twin_warning(pushable)
     if twin_note:
         warnings.append(twin_note)
-    path = Path(manuscript["path"]) / rel
-    disk = path.read_text(encoding="utf-8")
     passes.compose_marked_text(disk, pushable)
     service, docs_service = _resolve_services(services, rel)
     result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
@@ -5935,6 +5933,36 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
             "failed": [(t, why) for t, why in result["failed"]],
             "warnings": warnings,
             "local_unchanged": path.read_text(encoding="utf-8") == disk}
+
+
+def lens_unmark(db: Database, manuscript: dict, file: str,
+                force: bool = False, services=None) -> dict:
+    """Take the lens forms back out of the tab: every written lens thread
+    returns to its pre-push state and the tab is REBUILT from the local
+    file. Like `filter unmark --force`, the rebuild is whole-tab: any
+    rewording typed inside the forms, and any other edit made in the tab
+    since the push, is lost — so it refuses without `force`, naming the
+    exit that keeps such edits (`doc pull` first)."""
+    from . import gdocs
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    written = staging.door_threads(db, mid, rel, states=("written",),
+                                   origin_type=LENS_ORIGIN)
+    if not written:
+        raise LookupError(f"no lens forms are out in {rel}'s tab.")
+    if not force:
+        raise ValueError(
+            f"{len(written)} lens form(s) are out in {rel}'s tab, and taking "
+            f"them back out REBUILDS THE WHOLE TAB from the local file: any "
+            f"rewording typed inside them and any other edit made in the tab "
+            f"since the push is lost. To keep an edit made OUTSIDE the "
+            f"forms, 'doc pull {rel}' first. Then re-run with --force.")
+    for t in written:
+        db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
+    service, docs_service = _resolve_services(services, rel)
+    gdocs.push_doc(db, manuscript, rel, service=service,
+                   docs_service=docs_service)
+    return {"file": rel, "reopened": len(written)}
 
 
 def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,

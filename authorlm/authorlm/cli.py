@@ -4094,6 +4094,24 @@ def cmd_lens(args):
         print(ui.dim("Verdicts: lens review <gd-id> --accept|--reject "
                      "[--explain \"why\"] (the id prefix printed above)."))
         return
+    if args.action == "unmark":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm lens unmark <essay.md> [--force]")
+        config = _load_config(args)
+        def _doc_bridge():
+            from . import gdocs as _gd
+            return (_gd.get_service(config, args.workspace, interactive=True),
+                    _gd.get_docs_service(config, args.workspace,
+                                         interactive=True))
+        try:
+            res = api.lens_unmark(db, manuscript, target, force=args.force,
+                                  services=_doc_bridge)
+        except (LookupError, ValueError, RuntimeError) as err:
+            raise SystemExit(f"error: {err}")
+        print(ui.green(f"{res['reopened']} lens form(s) returned to staged; "
+                       f"{res['file']}'s tab rebuilt from the file."))
+        return
     if args.action == "repair":
         target = args.name or args.file
         if not target:
@@ -7885,7 +7903,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
                             "review", "push", "resolve", "status", "sweep",
-                            "findings", "repair"])
+                            "findings", "repair", "unmark"])
+    p.add_argument("--force", action="store_true",
+                   help="unmark: rebuild the tab from the file even though "
+                        "that loses edits typed in the tab since the push")
     p.add_argument("--dismiss", metavar="IDS",
                    help="repair: comma-separated judgment finding ids to "
                         "dismiss (with --reason); their tags are removed")
