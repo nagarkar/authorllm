@@ -5224,7 +5224,229 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_reader_load_manifest() -> None:
+    """`authorlm.manifest` is the derived reader-load report refreshed on
+    every Doc push (4689b52). No hermetic suite covered it: alias collapse,
+    first-unmet debt arithmetic, and stale-row marking are easy to break
+    silently while the sidecar still looks like a table.
+
+    Debt is FIRST unmet appearance (assumes − everything earlier essays
+    introduced OR assumed). A regression that recounts standing debt, drops
+    alias normalization, or hides stale summaries ships a wrong on-ramp."""
+    from authorlm import manifest as man
+    from authorlm.summaries import _hash
+
+    # Pure helpers — no DB.
+    check("normalize strips markdown, articles, trailing dots, and drops "
+          "terms under three characters",
+          man._normalize("**The Dharma**.", {}) == "Dharma"
+          and man._normalize("`ab`", {}) is None
+          and man._normalize("  karma  ", {}) == "karma")
+    check("normalize collapses graph aliases (and bare names) to the "
+          "concept's own name",
+          man._normalize("The Dharma", {"dharma": "Dharma"}) == "Dharma"
+          and man._normalize("dharma", {"dharma": "Dharma"}) == "Dharma"
+          and man._normalize("unknown term", {"dharma": "Dharma"})
+          == "unknown term")
+
+    summary = (
+        "CLAIM: an essay about choice.\n"
+        "INTRODUCES: Free Will; **Agency**.\n"
+        "ASSUMES: the Dharma, karma and Intent.\n"
+        "AFTER: nothing else.\n"
+    )
+    canon = {"dharma": "Dharma", "free will": "Free Will"}
+    check("field parses INTRODUCES / ASSUMES lists, collapses aliases, "
+          "and ignores later labelled sections",
+          set(man._field(summary, "INTRODUCES", canon))
+          == {"Free Will", "Agency"}
+          and set(man._field(summary, "ASSUMES", canon))
+          == {"Dharma", "karma", "Intent"},
+          str(man._field(summary, "ASSUMES", canon)))
+    check("field treats a 'none' body as empty and a missing label as empty",
+          man._field("ASSUMES: none.\nINTRODUCES: X.\n", "ASSUMES", {}) == []
+          and man._field("", "ASSUMES", {}) == []
+          and man._field("CLAIM: hi.\n", "INTRODUCES", {}) == [])
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-reader-manifest-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        text_a = "# Seed\n\nIntroduces the Dharma for later essays.\n"
+        text_b = "# Choice\n\nAssumes the Dharma and Free Will.\n"
+        text_c = "# Later\n\nAssumes Intent; introduces Intent.\n"
+        text_d = "# Cap\n\nAssumes Intent again after it was supplied.\n"
+        (ms / "01-seed.md").write_text(text_a)
+        (ms / "02-choice.md").write_text(text_b)
+        (ms / "03-later.md").write_text(text_c)
+        (ms / "04-cap.md").write_text(text_d)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "01-seed.md"\n\n'
+            '[[chapter]]\nfile = "02-choice.md"\n\n'
+            '[[chapter]]\nfile = "03-later.md"\n\n'
+            '[[chapter]]\nfile = "04-cap.md"\n')
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        api.collect(db, manuscript, {})
+        mid = manuscript["id"]
+
+        api.add_concept(db, manuscript, "Dharma", kind="concept")
+        # Alias must not begin with an article: `_normalize` strips
+        # the/a/an before the canon lookup, so "the Law" would miss
+        # a stored alias key "the law" and remain unmet debt as "Law".
+        api.alias_concept(db, manuscript, "Dharma", ["Dhamma"])
+        api.add_concept(db, manuscript, "Free Will", kind="concept")
+        retired = api.add_concept(db, manuscript, "RetiredThing",
+                                  kind="concept")
+        db.update("concept_nodes", retired["id"], {"status": "retired"})
+
+        def _insert(file: str, text: str, summary: str,
+                    upstream_stale: int = 0) -> None:
+            row = ko_fields("es")
+            row.update(manuscript_id=mid, file=file, summary=summary,
+                       source_hash=_hash(text), upstream_hash=_hash(""),
+                       upstream_stale=upstream_stale)
+            db.insert("essay_summaries", row)
+
+        _insert("01-seed.md", text_a,
+                "INTRODUCES: Dharma.\nASSUMES: none.\n")
+        _insert("02-choice.md", text_b,
+                "INTRODUCES: Free Will.\n"
+                "ASSUMES: Dhamma; Agency.\n")  # Dhamma → Dharma via alias
+        _insert("03-later.md", text_c,
+                "INTRODUCES: Intent.\nASSUMES: Dharma; Intent.\n",
+                upstream_stale=1)
+        _insert("04-cap.md", text_d,
+                "INTRODUCES: none.\nASSUMES: Intent.\n")
+
+        rows = {r["file"]: r for r in man.compute(db, manuscript)}
+        check("seed introduces Dharma with no unmet debt",
+              rows["01-seed.md"]["introduces"] == 1
+              and rows["01-seed.md"]["debt"] == []
+              and rows["01-seed.md"]["state"] == "fresh",
+              str(rows["01-seed.md"]))
+        check("choice's alias 'Dhamma' collapses to Dharma (already "
+              "supplied) so only Agency is unmet debt",
+              rows["02-choice.md"]["debt"] == ["Agency"]
+              and rows["02-choice.md"]["introduces"] == 1,
+              str(rows["02-choice.md"]))
+        check("later's first unmet Intent is debt even when the same "
+              "essay also introduces it; Dharma is already supplied; "
+              "state carries upstream_stale",
+              rows["03-later.md"]["debt"] == ["Intent"]
+              and rows["03-later.md"]["introduces"] == 1
+              and rows["03-later.md"]["state"] == "upstream_stale",
+              str(rows["03-later.md"]))
+        check("a later essay that re-assumes Intent finds it already "
+              "supplied (introduces|assumes both feed the running set)",
+              rows["04-cap.md"]["debt"] == []
+              and rows["04-cap.md"]["introduces"] == 0,
+              str(rows["04-cap.md"]))
+        check("word counts come from disk bytes, not the summary",
+              rows["01-seed.md"]["words"] == len(text_a.split())
+              and rows["02-choice.md"]["words"] == len(text_b.split()),
+              str({k: rows[k]["words"] for k in rows}))
+
+        canon = man._canonical_names(db, mid)
+        check("canonical map includes aliases and excludes retired concepts",
+              canon.get("dharma") == "Dharma"
+              and canon.get("dhamma") == "Dharma"
+              and "retiredthing" not in canon,
+              str(canon))
+
+        rendered = man.render([])
+        check("empty render names the rebuild remedy and carries the "
+              "generated header",
+              man._HEADER in rendered
+              and "summarize rebuild" in rendered
+              and "No essay summaries" in rendered, rendered)
+
+        path, out_rows = man.refresh(db, manuscript)
+        text = path.read_text(encoding="utf-8")
+        check("refresh writes manifest.md under the manuscript root",
+              path == ms / man.FILENAME and path.is_file(), str(path))
+        check("refresh render marks non-fresh rows and lists first unmet "
+              "debts by essay",
+              "!! upstream_stale" in text
+              and "**02-choice.md** — Agency" in text
+              and "**03-later.md**" in text and "Intent" in text
+              and "01-seed.md" in text
+              and man._HEADER in text, text)
+        check("refresh returns the computed rows",
+              [r["file"] for r in out_rows]
+              == ["01-seed.md", "02-choice.md", "03-later.md", "04-cap.md"],
+              str(out_rows))
+
+        path.write_text("hand edit that must die\n", encoding="utf-8")
+        man.refresh(db, manuscript)
+        check("refresh overwrites hand edits — the sidecar is derived, "
+              "never a source of truth",
+              "hand edit that must die" not in path.read_text(encoding="utf-8")
+              and man._HEADER in path.read_text(encoding="utf-8"))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_transplant_table_layout() -> None:
+    """Table transplant index arithmetic (eea52e7 / it-08b8b0a0c737).
+
+    Scenario T already covers this in e2e; the hermetic suite must pin the
+    same layout so a primary-suite run catches a cursor drift that would
+    plant cell text on top of prose (or leave tables as skipped elements).
+    Wrong indices corrupt every tab that carries a pipe table — including
+    the pronunciation dictionary and the reader-load manifest."""
+    from authorlm.gdocs import transplant_requests
+
+    def _cell(text, **style):
+        return {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": text, "textStyle": style}}]}}]}
+
+    tbl_doc = {"body": {"content": [
+        {"paragraph": {"elements": [{"textRun": {"content": "Before.\n"}}]}},
+        {"table": {"rows": 2, "columns": 2, "tableRows": [
+            {"tableCells": [_cell("A\n", bold=True), _cell("B\n")]},
+            {"tableCells": [_cell("c\n"), _cell("dd\n")]}]}},
+        {"paragraph": {"elements": [{"textRun": {"content": "After.\n"}}]}},
+    ]}}
+    tbl_reqs = transplant_requests(tbl_doc, "t.x")
+    tables = [r["insertTable"] for r in tbl_reqs if "insertTable" in r]
+    check("transplant emits one insertTable at the post-prose cursor",
+          tables == [{"rows": 2, "columns": 2,
+                      "location": {"tabId": "t.x", "index": 9}}],
+          str(tables))
+    tbl_inserts = [(r["insertText"]["location"]["index"],
+                    r["insertText"]["text"])
+                   for r in tbl_reqs if "insertText" in r]
+    check("cells fill last-to-first at empty-table indices; prose after "
+          "the table lands after the whole layout",
+          tbl_inserts == [(1, "Before.\n"), (20, "dd"), (18, "c"), (15, "B"),
+                          (13, "A"), (27, "After.\n")],
+          str(tbl_inserts))
+    bolds = [r["updateTextStyle"]["range"] for r in tbl_reqs
+             if "updateTextStyle" in r
+             and r["updateTextStyle"]["textStyle"].get("bold") is True]
+    check("cell run styles apply inside the cell, not on surrounding prose",
+          bolds == [{"tabId": "t.x", "startIndex": 13, "endIndex": 14}],
+          str(bolds))
+
+    empty = transplant_requests(
+        {"body": {"content": [
+            {"table": {"rows": 0, "columns": 2, "tableRows": []}},
+            {"paragraph": {"elements": [
+                {"textRun": {"content": "Only.\n"}}]}}]}},
+        "t.x")
+    check("an empty table element is skipped (no insertTable) so prose "
+          "still transplants",
+          not any("insertTable" in r for r in empty)
+          and [("insertText" in r and r["insertText"]["text"] == "Only.\n")
+               for r in empty].count(True) == 1,
+          str(empty))
+
+
 def main_test() -> None:
+    check_reader_load_manifest()
+    check_transplant_table_layout()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
