@@ -705,46 +705,86 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     return "\n\n".join(head + out) + "\n"
 
 
+def _paragraph_isolated_insert(text: str, form: dict) -> bool:
+    """True when a bare `{{…}}` sits alone as its own paragraph — the
+    shape critique insertions are planted in. Inline `{{title}}` in
+    author prose shares the INSERTION regex but is not this shape."""
+    start, end = form["start"], form["end"]
+    para_start = text.rfind("\n\n", 0, start)
+    para_start = 0 if para_start < 0 else para_start + 2
+    para_end = text.find("\n\n", end)
+    para_end = len(text) if para_end < 0 else para_end
+    return text[para_start:para_end].strip() == text[start:end]
+
+
 def final_text_from_marked(marked: str,
                            written: list[dict] | None = None,
                            kinds: tuple[str, ...] = ("replace", "insert")
                            ) -> tuple[str, list[dict]]:
     """Resolve: written forms keep their CURRENT {{new}} half (author
-    post-edits win); any other pending form on the tab (e.g. an open
-    margin-thread proposal) collapses to OLD so resolve never silently
-    approves foreign grammar. Returns (final_text, matched_forms).
+    post-edits win); any other pending REPLACE form on the tab (e.g. an
+    open margin-thread proposal) collapses to OLD so resolve never
+    silently approves foreign grammar. Returns (final_text, matched_forms).
 
     `kinds` restricts which forms are CONSIDERED, and defaults to both,
-    so the critique pass is unchanged. The local settle transport passes
-    `("replace",)`: a filter never stages an insertion, and an unmatched
-    insertion form collapses to its old half — which for an insertion is
-    the empty string — so leaving bare `{{…}}` in scope would delete a
-    `{{title}}` the author wrote (filter-pass design §2.3)."""
+    so the critique pass can settle insertions. The local settle
+    transport passes `("replace",)`: a filter never stages an insertion.
+
+    Unmatched bare `{{…}}` must NOT collapse to the empty old half —
+    that deleted author prose like `{{title}}` / `{{a, b}}` that was
+    pushed to the Doc as ordinary text (the same hazard filter-pass
+    design §2.3 named for the local road). Critique insertions are
+    matched by proposed_new first; post-edited ones fall back FIFO only
+    among paragraph-isolated forms, never against inline braces."""
     forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
     if not written:
-        # No written threads: keep old for every form (nothing to approve).
-        return th.strip_pending(marked)[0], []
+        # No written threads: keep old for every REPLACE form (nothing
+        # to approve). Do not run strip_pending — it would delete every
+        # bare {{…}}, including author prose that rode in on push.
+        text, _ = th.strip_replacements(marked)
+        return text, []
     unmatched = list(written)
-    insert_queue = [t for t in written if t["proposed_old"] == ""]
     critique_forms = []
     keep_new: set[tuple[int, int]] = set()
+    # Pass 1: exact matches (replaces by old half; inserts by new half).
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
                           if t["proposed_old"] == form["old"]), None)
-        elif insert_queue:
-            match = insert_queue.pop(0)
+        elif form["kind"] == "insert":
+            match = next((t for t in unmatched
+                          if t["proposed_old"] == ""
+                          and t["proposed_new"] == form["new"]), None)
         if match is None or match not in unmatched:
             continue
         unmatched.remove(match)
         critique_forms.append(form)
         keep_new.add((form["start"], form["end"]))
-    # Rebuild from the end so indices stay valid: matched → new, else → old.
+    # Pass 2: post-edited critique insertions — FIFO only among forms
+    # that are paragraph-isolated (the planted shape). Inline author
+    # braces never enter this queue, so they cannot steal a thread.
+    remaining_threads = [t for t in unmatched if t["proposed_old"] == ""]
+    remaining_forms = [
+        f for f in forms
+        if f["kind"] == "insert"
+        and (f["start"], f["end"]) not in keep_new
+        and _paragraph_isolated_insert(marked, f)]
+    for form, match in zip(remaining_forms, remaining_threads):
+        unmatched.remove(match)
+        critique_forms.append(form)
+        keep_new.add((form["start"], form["end"]))
+    # Rebuild from the end so indices stay valid: matched → new;
+    # unmatched replace → old; unmatched insert → leave intact.
     text = marked
     for form in sorted(forms, key=lambda f: f["start"], reverse=True):
         span = (form["start"], form["end"])
-        replacement = (form["new"] if span in keep_new else form["old"])
+        if span in keep_new:
+            replacement = form["new"]
+        elif form["kind"] == "insert":
+            continue
+        else:
+            replacement = form["old"]
         text = text[: form["start"]] + replacement + text[form["end"]:]
     return text, critique_forms
 
@@ -801,17 +841,22 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                              origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
-    # Replaces match by their verbatim OLD half (law). Insertions have no
-    # old half, so they match in document order among the insertion
-    # threads — the marked text was composed in that same order.
-    insert_queue = [t for t in threads if t["proposed_old"] == ""]
+    # Replaces match by their verbatim OLD half (law). Insertions match
+    # by proposed_new first (so an inline {{title}} the author wrote
+    # cannot steal a thread); post-edited insertions fall back FIFO
+    # among the remaining insertion threads.
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
                           if t["proposed_old"] == form["old"]), None)
-        elif insert_queue:
-            match = insert_queue.pop(0)
+        elif form["kind"] == "insert":
+            match = next((t for t in unmatched
+                          if t["proposed_old"] == ""
+                          and t["proposed_new"] == form["new"]), None)
+            if match is None:
+                match = next((t for t in unmatched
+                              if t["proposed_old"] == ""), None)
         if match is None or match not in unmatched:
             continue
         unmatched.remove(match)

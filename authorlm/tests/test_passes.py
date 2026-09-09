@@ -2639,6 +2639,48 @@ def _braces_are_the_authors(root: Path) -> None:
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
 
+    # The Doc-side twin of the same hazard: author braces that rode to
+    # the tab on push must survive critique resolve. Before the fix,
+    # final_text_from_marked treated every bare {{…}} as an unmatched
+    # insertion and collapsed it to "" — silent permanent deletion of
+    # {{title}} / {{a, b}} on every resolve that also carried a replace.
+    marked_doc = (
+        TEMPLATE_ESSAY.replace(
+            "The point is that a brace is only a brace.",
+            _th.render_pending("The point is that a brace is only a brace.",
+                               "A brace is only a brace."))
+        + "\n{{A bridging paragraph, new.}}\n")
+    written = [
+        {"id": "t-rep", "proposed_old":
+         "The point is that a brace is only a brace.",
+         "proposed_new": "A brace is only a brace.", "metadata": "{}"},
+        {"id": "t-ins", "proposed_old": "",
+         "proposed_new": "A bridging paragraph, new.", "metadata":
+         json.dumps({"kind": "insert"})},
+    ]
+    final, matched = passes.final_text_from_marked(marked_doc, written=written)
+    check("critique resolve keeps author {{title}} / {{a, b}} on the Doc "
+          "road — they are prose, not unmatched insertions",
+          "{{title}}" in final and "{{author.name}}" in final
+          and "{{a, b}}" in final
+          and "A brace is only a brace." in final
+          and "A bridging paragraph, new." in final
+          and "<<" not in final, repr(final))
+    # Author post-edits the planted insertion; inline braces still must
+    # not steal the insert thread (FIFO used to assign {{title}} first).
+    edited = marked_doc.replace("{{A bridging paragraph, new.}}",
+                                "{{A bridging paragraph, in my voice.}}")
+    final2, matched2 = passes.final_text_from_marked(edited, written=written)
+    check("a post-edited paragraph insertion still resolves, and inline "
+          "author braces still survive (no FIFO steal)",
+          "{{title}}" in final2 and "{{a, b}}" in final2
+          and "A bridging paragraph, in my voice." in final2
+          and "A bridging paragraph, new." not in final2
+          and any(f["kind"] == "insert"
+                  and f["new"] == "A bridging paragraph, in my voice."
+                  for f in matched2),
+          repr(final2))
+
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
