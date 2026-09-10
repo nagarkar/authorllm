@@ -5937,11 +5937,12 @@ def scenario_filter(root: Path) -> None:
               "the source unit — read from the file, never from the reply",
               [r["proposed_old"] for r in rows] == [units[1], units[3]],
               [r["proposed_old"][:40] for r in rows])
-        check("F22 and its origin_id is the shared {owner}:{file}:{ordinal}"
-              " shape",
+        check("F22 and its origin_id is keyed on the UNIT "
+              "({owner}:{file}:{n}), so a later window cannot recycle "
+              "ordinals 1..k and overwrite earlier proposals",
               [r["origin_id"] for r in rows]
-              == [f"{run_row['id']}:02-wall.md:1",
-                  f"{run_row['id']}:02-wall.md:2"],
+              == [f"{run_row['id']}:02-wall.md:2",
+                  f"{run_row['id']}:02-wall.md:4"],
               [r["origin_id"] for r in rows])
         from authorlm import passes as _passes
         check("F23 passes.staged_threads with the DEFAULT origin_type "
@@ -6180,10 +6181,39 @@ def scenario_filter(root: Path) -> None:
         check("F9 ...and the carried STATE is rendered into block C for "
               "the next window",
               "ledger: (empty)" in _block(w2, "C"), _block(w2, "C"))
-        # Back to the one-window shape the F41 assertion below is about:
-        # this run must settle having covered only units 1-5.
+        # Record window 2 against the window filter_run just opened.
+        # Earlier-window proposals must SURVIVE: the pre-fix door keyed
+        # origin_id on reply ordinal, so this call overwrote :1 with the
+        # new edit and withdrew :2.
+        w2_bounds = tuple(_loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE id = ?",
+            (db.one("SELECT id FROM filter_runs WHERE manuscript_id = ? "
+                    "AND filter = 'duplicate-words' AND status = 'active'",
+                    (mid,))["id"],))["metadata"], {})["window"])
+        run_stdin(ws, _filter_reply(fresh, w2_bounds, replaces={
+            w2_bounds[0]: "A later-window rewrite that must not erase "
+                          "earlier ones."}),
+            "filter", "record", "02-wall.md")
+        open_after_w2 = [dict(r) for r in db.all(
+            "SELECT proposed_new, state, origin_id FROM doc_threads "
+            "WHERE manuscript_id = ? AND origin_type = 'filter' AND "
+            "state = 'proposed' ORDER BY origin_id", (mid,))]
+        news = {r["proposed_new"] for r in open_after_w2}
+        check("recording a LATER window keeps earlier windows' proposals "
+              "(unit-keyed origin_id + window-scoped supersede) — without "
+              "this, --window N silently destroyed staged triage work",
+              "The wall stands once, and the Dead cannot pass it." in news
+              and "A later-window rewrite that must not erase earlier ones."
+              in news
+              and len(open_after_w2) == 2,
+              [(r["origin_id"], r["proposed_new"][:50]) for r in open_after_w2])
+        # Fresh one-window run for the F41 settle assertion below.
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
         run(ws, "filter", "run", "duplicate-words", "02-wall.md",
-            "--from", "1", "--window", "5")
+            "--again", "--window", "5")
+        run_stdin(ws, _filter_reply(fresh, (1, 5), replaces={
+            2: "The wall stands once, and the Dead cannot pass it."}),
+            "filter", "record", "02-wall.md")
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
         out = run(ws, "filter", "resolve", "02-wall.md")
         check(f"F41 a run that covered 5 of {len(fresh)} units settles, "

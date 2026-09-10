@@ -58,7 +58,8 @@ def is_marked(text: str) -> bool:
 def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                 source_text: str, entries: list[dict],
                 origin_type: str = "filter",
-                verb_stem: str = "filter") -> list[dict]:
+                verb_stem: str = "filter",
+                window: tuple[int, int] | None = None) -> list[dict]:
     """Stage validated entries as `doc_threads` rows.
 
     `entries` carry `n`, `new`, `why` and an optional `ref`; **`old` is
@@ -68,11 +69,18 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
     drift, because the text they claim to replace is the text that is
     actually there.
 
-    `origin_id` is `{owner}:{file}:{ordinal}` — the shape `passes.stage`
-    already builds — so a re-run over the same units REPLACES in place
-    under the existing UNIQUE (manuscript_id, origin_type, origin_id)
-    constraint rather than colliding with it. Entries are ordered by
-    unit, so the ordinal is stable across re-runs of the same window.
+    `origin_id` is `{owner}:{file}:{n}` — keyed on the UNIT, not on
+    "how many edits this reply happened to carry". A filter run with
+    `--window N` records several replies against one owner; ordinal
+    keys recycled from 1 on every record, so window 2 overwrote and
+    withdrew window 1's proposals (silent loss of staged triage work).
+    Unit keys replace in place across re-records of the same unit and
+    leave other windows alone.
+
+    `window`, when given, scopes SUPERSEDE to that unit range: a
+    re-record that drops a proposal for unit 4 withdraws only unit 4,
+    never a proposal staged for unit 12 in a later window. Lenses pass
+    no window (whole-file re-register): unreached units still supersede.
     """
     units = passes.paragraphs_of(source_text)
     prefix = f"{owner_id}:{file}:"
@@ -83,10 +91,10 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
             (manuscript_id, origin_type, file, prefix + "%"))}
     staged: list[dict] = []
     used: set[str] = set()
-    for ordinal, entry in enumerate(sorted(entries, key=lambda e: e["n"]), 1):
+    for entry in sorted(entries, key=lambda e: e["n"]):
         n = entry["n"]
         old = units[n - 1]
-        origin_id = f"{prefix}{ordinal}"
+        origin_id = f"{prefix}{n}"
         meta = {"kind": "replace", "anchor_paragraph": n,
                 "intent_id": None, "original_new": entry["new"],
                 "ref": entry.get("ref") or None, "unit": n}
@@ -122,25 +130,26 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
             db.insert("doc_threads", row)
         staged.append(row)
         used.add(origin_id)
-    # SUPERSEDE. A re-record of the same window is the authoritative
-    # answer for it, so an ordinal the new reply did not reach is a
-    # proposal that no longer exists — the model changed its mind about
-    # unit 4 and now leaves it alone. Without this the stale row survived
-    # as `proposed`, showed up in the next `filter edits` list under a
-    # number the author would read as current, and could be accepted into
-    # a resolve it was never part of.
-    #
-    # `passes.stage` does exactly this for the critique pass and for the
-    # same reason; the door's two producers now agree about it.
+    # SUPERSEDE within the answered window. A re-record that no longer
+    # proposes unit 4 withdraws unit 4; a later window's record must
+    # not touch earlier windows' rows. Without a window (lens
+    # re-register) every unreached unit under this owner supersedes,
+    # matching the whole-file replace contract.
     #
     # Written rows are NOT withdrawn: those are forms the author is
     # reading in the file right now, and the re-stage above has already
     # refused rather than reaching one.
     for origin_id, prior in existing.items():
-        if origin_id not in used and prior["state"] in ("proposed",
+        if origin_id in used or prior["state"] not in ("proposed",
                                                         "accepted",
                                                         "rejected"):
-            db.update("doc_threads", prior["id"], {"state": "withdrawn"})
+            continue
+        if window is not None:
+            meta = loads(prior.get("metadata"), {}) or {}
+            unit = meta.get("unit") or meta.get("anchor_paragraph")
+            if unit is None or not (window[0] <= int(unit) <= window[1]):
+                continue
+        db.update("doc_threads", prior["id"], {"state": "withdrawn"})
     return staged
 
 
