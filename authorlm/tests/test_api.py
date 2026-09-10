@@ -5224,7 +5224,318 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_parse_pronunciations() -> None:
+    """Pronunciation prelude reply door — refuse whole, never part.
+
+    Softening here stages hallucinated or corrupting dictionary rows into
+    proposals → pronunciations.md. Cap, essay-anchor, reserved markers,
+    newlines/pipes, NFC/casefold dupes, and already-settled terms each
+    discard the WHOLE reply (filtering.parse_pronunciations)."""
+    from authorlm import pronunciations as pron
+    from authorlm.filtering import (
+        PRONUNCIATION_CAP, ReplyError, parse_pronunciations)
+
+    essay = "Nāgārjuna argues that Śūnyatā is not a thing."
+    happy = parse_pronunciations(
+        {"pronunciations": [
+            {"term": "Nāgārjuna", "say": "nah-GAHR-joo-nah",
+             "note": "Sanskrit"}]},
+        essay)
+    check("parse_pronunciations admits one verbatim term",
+          happy == [{"term": "Nāgārjuna", "say": "nah-GAHR-joo-nah",
+                     "note": "Sanskrit"}],
+          repr(happy))
+    check("parse_pronunciations admits an empty list (nothing hard)",
+          parse_pronunciations({"pronunciations": []}, essay) == [])
+
+    def refuses(label, raw, text=essay, dictionary=""):
+        try:
+            parse_pronunciations(raw, text, dictionary=dictionary)
+            ok = False
+            msg = "did not raise"
+        except ReplyError as err:
+            ok, msg = True, str(err)
+        check(label, ok, msg)
+
+    refuses("parse_pronunciations refuses a non-object reply",
+            ["not", "an", "object"])
+    refuses("parse_pronunciations refuses a missing pronunciations list",
+            {"pronunciations": "oops"})
+    # Cap check runs before per-item essay anchoring — pad with a term
+    # that is in the essay so a softener cannot claim "only bad terms".
+    over = [{"term": "Nāgārjuna", "say": f"say-{i}", "note": ""}
+            for i in range(PRONUNCIATION_CAP + 1)]
+    refuses("parse_pronunciations refuses over the PRONUNCIATION_CAP "
+            "(never truncates)",
+            {"pronunciations": over})
+    refuses("parse_pronunciations refuses a term absent from the essay",
+            {"pronunciations": [
+                {"term": "anattā", "say": "uh-NAT-tah", "note": ""}]})
+    refuses("parse_pronunciations refuses an empty say",
+            {"pronunciations": [
+                {"term": "Nāgārjuna", "say": "  ", "note": ""}]})
+    refuses("parse_pronunciations refuses reserved pending markers",
+            {"pronunciations": [
+                {"term": "Nāgārjuna", "say": "nah <<GAHR>>", "note": ""}]})
+    refuses("parse_pronunciations refuses a newline in a field",
+            {"pronunciations": [
+                {"term": "Nāgārjuna", "say": "nah\nGAHR", "note": ""}]})
+    refuses("parse_pronunciations refuses a pipe (table column separator)",
+            {"pronunciations": [
+                {"term": "Nāgārjuna", "say": "nah|GAHR", "note": ""}]})
+    # NFC + casefold identity: precomposed vs decomposed + case variants
+    # are one term, and two rows for one term poison the dictionary.
+    composed = "café"
+    decomposed = "cafe\u0301"
+    nfc_essay = f"The word {composed} appears once."
+    refuses("parse_pronunciations refuses NFC/casefold duplicate terms",
+            {"pronunciations": [
+                {"term": composed, "say": "ka-FAY", "note": ""},
+                {"term": decomposed.upper(), "say": "ka-FAY", "note": ""}]},
+            text=nfc_essay)
+    settled = pron.render(
+        [{"term": "Nāgārjuna", "say": "settled", "note": ""}])
+    refuses("parse_pronunciations refuses a term already in the dictionary",
+            {"pronunciations": [
+                {"term": "Nāgārjuna", "say": "nah-GAHR-joo-nah",
+                 "note": ""}]},
+            dictionary=settled)
+
+
+def check_filter_front_matter_doors() -> None:
+    """Filter artifact front-matter validation at `filter add` time.
+
+    Wrong class, unknown keys, prelude-on-global, and bad `profiles`
+    shapes must refuse loudly where the author wrote them — not surface
+    later as a harness that behaves unlike the ratified prompt.
+    (`summaries` true/false/non-bool belongs to a sibling coverage PR.)"""
+    from authorlm.filters import FilterError, parse_front_matter
+
+    def ok(label, text, expect_meta=None):
+        meta, body = parse_front_matter(text)
+        check(label,
+              bool(body)
+              and (expect_meta is None
+                   or all(meta.get(k) == v for k, v in expect_meta.items())),
+              repr((meta, body)))
+
+    def refuses(label, text, needle=""):
+        try:
+            parse_front_matter(text)
+            raised, msg = False, "did not raise"
+        except FilterError as err:
+            raised, msg = True, str(err)
+        check(label, raised and (needle in msg if needle else True), msg)
+
+    ok("parse_front_matter admits sequential with pronunciations prelude",
+       '---\nclass = "sequential"\nprelude = "pronunciations"\n---\n\n'
+       'Judge each unit.\n',
+       {"class": "sequential", "prelude": "pronunciations",
+        "summaries": False, "profiles": []})
+    ok("parse_front_matter admits global without a prelude",
+       '---\nclass = "global"\nstate = "ledger"\n---\n\nJudge.\n',
+       {"class": "global", "state": "ledger", "prelude": None})
+    ok("parse_front_matter strips and keeps profile keys",
+       '---\nclass = "sequential"\nprofiles = ["audience", " voice "]\n---\n\n'
+       'x\n',
+       {"profiles": ["audience", "voice"]})
+
+    refuses("parse_front_matter refuses a missing opening delimiter",
+            'class = "sequential"\n---\n\nprompt\n', "---")
+    refuses("parse_front_matter refuses an unclosed front matter",
+            '---\nclass = "sequential"\n\nprompt\n', "closed")
+    refuses("parse_front_matter refuses invalid TOML",
+            '---\nclass = sequential\n---\n\nprompt\n', "TOML")
+    refuses("parse_front_matter refuses a missing class",
+            '---\nstate = "x"\n---\n\nprompt\n', "class")
+    refuses("parse_front_matter refuses an unknown class",
+            '---\nclass = "whole-file"\n---\n\nprompt\n', "whole-file")
+    refuses("parse_front_matter refuses an unknown key (typo klass)",
+            '---\nclass = "sequential"\nklass = "x"\n---\n\nprompt\n',
+            "klass")
+    refuses("parse_front_matter refuses prelude on a global filter",
+            '---\nclass = "global"\nprelude = "pronunciations"\n---\n\n'
+            'prompt\n',
+            "GLOBAL")
+    refuses("parse_front_matter refuses an unknown prelude name",
+            '---\nclass = "sequential"\nprelude = "registry"\n---\n\n'
+            'prompt\n',
+            "prelude")
+    refuses("parse_front_matter refuses profiles that are not a string list",
+            '---\nclass = "sequential"\nprofiles = "audience"\n---\n\n'
+            'prompt\n',
+            "profiles")
+    refuses("parse_front_matter refuses an empty prompt body",
+            '---\nclass = "sequential"\n---\n\n', "prompt")
+
+
+def check_insert_toc_entry() -> None:
+    """Pure-text toc registration used by `write complete` (RISK K3).
+
+    A serialize round-trip would drop hand comments and unknown attrs.
+    Hermetic port of e2e A10/F3/F4 — the blast radius is every new essay
+    the loop registers."""
+    from authorlm.structure import insert_toc_entry, parse_toc_tree
+
+    commented = ('# hand comment, must survive\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "a.md"\n'
+                 'illustrations = "3"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "b.md"\n'
+                 '\n'
+                 '[[chapter]]\n'
+                 'file = "c.md"\n'
+                 'parent = "b.md"\n')
+    inserted, stanza = insert_toc_entry(commented, "new.md", "c.md")
+    check("insert_toc_entry stanza inherits anchor parent, not matter",
+          'file = "new.md"' in stanza and 'parent = "b.md"' in stanza
+          and "matter" not in stanza, stanza)
+    check("insert_toc_entry lands after the named anchor",
+          [n for n, _ in parse_toc_tree(inserted)]
+          == ["a.md", "b.md", "c.md", "new.md"],
+          str(parse_toc_tree(inserted)))
+    check("insert_toc_entry preserves hand comments and unknown attrs",
+          "# hand comment, must survive" in inserted
+          and 'illustrations = "3"' in inserted, inserted)
+
+    at_start, start_stanza = insert_toc_entry(commented, "new.md", "start")
+    check("insert_toc_entry PLACEMENT_START opens the book without parent",
+          [n for n, _ in parse_toc_tree(at_start)]
+          == ["new.md", "a.md", "b.md", "c.md"]
+          and "parent" not in start_stanza, at_start)
+    check("insert_toc_entry missing anchor returns None (no guess)",
+          insert_toc_entry(commented, "new.md", "nope.md") is None)
+    same, empty = insert_toc_entry(commented, "a.md", "c.md")
+    check("insert_toc_entry is idempotent when the file is already listed",
+          same == commented and empty == "", same)
+
+    gap = ('[[chapter]]\n'
+           'file = "a.md"\n'
+           '\n'
+           '# this comment annotates b.md, not whatever precedes it\n'
+           '[[chapter]]\n'
+           'file = "b.md"\n')
+    gap_inserted, _ = insert_toc_entry(gap, "new.md", "a.md")
+    lines = gap_inserted.splitlines()
+    check("insert_toc_entry keeps gap comments with the table below them",
+          lines.index('file = "new.md"')
+          < lines.index('# this comment annotates b.md, not whatever precedes it')
+          < lines.index('file = "b.md"'),
+          gap_inserted)
+
+    lf_result, lf_stanza = insert_toc_entry(commented, "new.md", "c.md")
+    crlf_result, crlf_stanza = insert_toc_entry(
+        commented.replace("\n", "\r\n"), "new.md", "c.md")
+    check("insert_toc_entry keeps a CRLF toc as CRLF (no silent LF rewrite)",
+          "\r\n" in crlf_result
+          and crlf_result.replace("\r\n", "").count("\n") == 0
+          and "\r\n" in crlf_stanza and "\r" not in lf_stanza
+          and crlf_result.replace("\r\n", "\n") == lf_result,
+          repr(crlf_result[:80]))
+
+
+def check_protected_terms() -> None:
+    """Deterministic protected-vocabulary derivation for every filter window.
+
+    Wrong kind/status gates, missing aliases, or a dictionary term that
+    never joins the lexicon silently conditions every unit edit against
+    the wrong vocabulary. Sort is raw-name codepoint order (no casefold)."""
+    from authorlm.filtering import protected_terms
+    from authorlm import pronunciations as pron
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-prot-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-choice.md").write_text(
+            "# Opening\n\nGravity appears here. Choice does too.\n"
+            "An aside about Field.\n")
+        (ms / "02-other.md").write_text(
+            "# Other\n\nOnly Resonance lives here.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+
+        gravity = api.add_concept(db, manuscript, "Gravity", kind="concept")
+        api.alias_concept(db, manuscript, "Gravity", ["gravitation"])
+        choice = api.add_concept(db, manuscript, "Choice", kind="concept")
+        # Non-protected kind: must never enter in_essay / lexicon.
+        api.add_concept(db, manuscript, "Field", kind="example")
+        # Protected kind, wrong status: hypothesis is not declared/realized.
+        hypo = api.add_concept(db, manuscript, "Hypothesis", kind="concept")
+        db.update("concept_nodes", hypo["id"], {"status": "hypothesis"})
+        # Protected elsewhere in the book — lexicon yes, this essay no.
+        api.add_concept(db, manuscript, "Resonance", kind="metaphor")
+        # Retired must stay out even if the name still sits in the prose.
+        api.add_concept(db, manuscript, "Vanished", kind="concept")
+        api.retire_concept(db, manuscript, "Vanished")
+        assert gravity["status"] == "declared"
+        assert choice["status"] == "declared"
+
+        dictionary = pron.render(
+            [{"term": "Śūnyatā", "say": "shoon-YAH-tah", "note": ""}])
+        terms = protected_terms(
+            db, manuscript, "01-choice.md",
+            text=(ms / "01-choice.md").read_text(),
+            dictionary=dictionary)
+
+        in_names = [n for n, _ in terms["in_essay"]]
+        check("protected_terms in_essay is gated on kind+status and file scope",
+              in_names == ["Choice", "Gravity"]
+              and "Field" not in in_names
+              and "Hypothesis" not in in_names
+              and "Resonance" not in in_names
+              and "Vanished" not in in_names
+              and "Śūnyatā" not in in_names,
+              repr(terms["in_essay"]))
+        gravity_aliases = dict(terms["in_essay"])["Gravity"]
+        check("protected_terms carries sorted aliases on the in_essay row",
+              gravity_aliases == ["gravitation"], repr(gravity_aliases))
+        check("protected_terms lexicon includes whole-book protected names, "
+              "aliases, and dictionary terms",
+              terms["lexicon"]
+              == ["Choice", "Gravity", "Resonance", "gravitation", "Śūnyatā"],
+              repr(terms["lexicon"]))
+        check("protected_terms all is the union, sorted on raw name",
+              terms["all"] == ["Choice", "Gravity", "Resonance",
+                               "gravitation", "Śūnyatā"],
+              repr(terms["all"]))
+        # Sort stability: raw codepoint, not casefold — "Zebra" before "apple"
+        # would fail if someone casefolds; pin with ASCII that differs by case.
+        api.add_concept(db, manuscript, "apple", kind="concept")
+        api.add_concept(db, manuscript, "Zebra", kind="concept")
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text() + "Zebra and apple.\n")
+        terms2 = protected_terms(
+            db, manuscript, "01-choice.md",
+            text=(ms / "01-choice.md").read_text(),
+            dictionary="")
+        lex = terms2["lexicon"]
+        check("protected_terms sorts lexicon by raw codepoint (Zebra before apple)",
+              lex.index("Zebra") < lex.index("apple"), repr(lex))
+
+        missing = protected_terms(
+            db, manuscript, "no-such.md", text="", dictionary=dictionary)
+        check("protected_terms unknown file yields empty in_essay; lexicon stays",
+              missing["in_essay"] == []
+              and "Śūnyatā" in missing["lexicon"]
+              and "Gravity" in missing["lexicon"],
+              repr(missing))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_parse_pronunciations()
+    check_filter_front_matter_doors()
+    check_insert_toc_entry()
+    check_protected_terms()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
