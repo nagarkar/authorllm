@@ -99,6 +99,95 @@ def check_show_verbs() -> None:
               "show" in choices, f"{verb} actions: {choices}")
 
 
+def check_chapter_stats_syllables_and_fre() -> None:
+    """Publisher-facing ASL/AWL/FRE on every Doc-push manifest.
+
+    Hermetic coverage beyond the placeholder/`fre is not None` doors in
+    `check_placeholder_reader_paths` and the mid-range e2e sample: a
+    silent-e regression or a missing 0–100 clamp quietly warps every
+    chapter's FRE without failing a push."""
+    from authorlm.gdocs import _syllables, chapter_stats
+
+    check("empty / punct-only words count as zero syllables",
+          _syllables("") == 0 and _syllables("...") == 0
+          and _syllables("—") == 0)
+    check("silent trailing e drops one vowel group when >1 remain",
+          _syllables("make") == 1 and _syllables("create") == 1
+          and _syllables("created") == 2 and _syllables("people") == 1,
+          f"make={_syllables('make')} create={_syllables('create')} "
+          f"created={_syllables('created')} people={_syllables('people')}")
+    check("polysyllables keep every vowel group (no silent-e)",
+          _syllables("psychology") == 4
+          and _syllables("incomprehensibility") == 8,
+          f"psychology={_syllables('psychology')} "
+          f"incomprehensibility={_syllables('incomprehensibility')}")
+    check("trailing sentence punctuation is stripped before counting",
+          _syllables("table.") == 1 and _syllables("create!") == 1
+          and _syllables("psychology?") == 4)
+
+    check("empty / heading-only / digits-only chapters yield no stats",
+          chapter_stats("") == {}
+          and chapter_stats("# Just A Heading\n") == {}
+          and chapter_stats("123 456 789\n") == {})
+    check("placeholder still yields {} (noise must not reach the manifest)",
+          chapter_stats(api.PLACEHOLDER) == {})
+
+    easy = chapter_stats("I am. I am. I am.\n")
+    hard = chapter_stats(
+        "The incomprehensibility of epistemological methodological "
+        "interdisciplinary characterization fundamentally undermines "
+        "extraordinarily sophisticated conceptualization.\n")
+    mid = chapter_stats(
+        "# Heading\n\nThe cat sat on the mat. It was warm. "
+        "Everything considered, the philosophical implications "
+        "remained extraordinarily complicated.\n")
+    check("easy short sentences clamp FRE at 100",
+          easy.get("fre") == 100.0, str(easy))
+    check("hard polysyllabic prose clamps FRE at 0",
+          hard.get("fre") == 0.0, str(hard))
+    check("mid-range prose stays inside the clamp with a sensible ASL",
+          mid and 5 < mid["asl"] < 7 and 0 < mid["fre"] < 100, str(mid))
+
+
+def check_latex_escape_and_map_math() -> None:
+    """Book-profile running-head escape + shared math-span walker.
+
+    `_latex_escape` feeds `\\AuthorLMRunningBook` on every
+    `export pdf --profile book`; an unescaped `& % _ $` in the title
+    breaks the LaTeX build. `map_math` is the shared walker under
+    escape/unescape on every Doc math push/pull."""
+    from authorlm.export import _latex_escape
+    from authorlm.gdocs import map_math
+
+    raw = r'Title & Co_ $100% {x} #1 ~^\\'
+    out = _latex_escape(raw)
+    check("LaTeX specials in a running-head title are escaped",
+          r"\&" in out and r"\_" in out and r"\$" in out and r"\%" in out
+          and r"\{" in out and r"\}" in out and r"\#" in out
+          and r"\textasciitilde{}" in out
+          and r"\textasciicircum{}" in out
+          and r"\textbackslash{}" in out,
+          out)
+    check("ordinary letters in the title stay untouched",
+          out.startswith("Title ") and "Co" in out
+          and "100" in out, out)
+    # Character-wise table: applying twice re-escapes backslashes of the
+    # first pass — callers must escape once. Pin that contract.
+    once = _latex_escape("a&b")
+    check("escape-once contract: a second pass changes the bytes",
+          once == r"a\&b" and _latex_escape(once) != once, f"once={once!r}")
+
+    tagged = map_math(r"before $a_b$ mid $$x\\y$$ after",
+                      lambda body: f"<{body}>")
+    check("map_math transforms insides only; delimiters stay put",
+          tagged == r"before $<a_b>$ mid $$<x\\y>$$ after", tagged)
+    check("map_math leaves non-math prose alone",
+          map_math("no math here", lambda body: "X") == "no math here")
+    check("display spans are walked before inline ($$…$$ not $…$…$…$)",
+          map_math(r"$$a$b$$", lambda body: f"[{body}]") == r"$$[a$b]$$",
+          map_math(r"$$a$b$$", lambda body: f"[{body}]"))
+
+
 def check_broken_pipe() -> None:
     """`authorlm <listing> | head` must exit quietly.
 
@@ -5225,6 +5314,8 @@ def check_provenance_verb() -> None:
 
 
 def main_test() -> None:
+    check_chapter_stats_syllables_and_fre()
+    check_latex_escape_and_map_math()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
