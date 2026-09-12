@@ -7039,6 +7039,29 @@ def main_test() -> None:
               == ("Para one.\n\ninserted paragraph\n\n"
                   "swapped\n\nPara three.\n"),
               th.approved_text(with_insert))
+        # Author braces reach the tab via push; bare-INSERTION collapse
+        # used to delete them on pull/reconcile (silent auto-pull when
+        # local still matched pushed_hash). Paragraph insertions only.
+        author_braces = (
+            "A template substitutes {{title}} and writes {{a, b}}.\n\n"
+            "Energy $E={{mc}}^2$.\n")
+        brace_stripped, brace_warns = th.strip_pending(author_braces)
+        check("strip_pending leaves author {{…}} / TeX braces intact "
+              "with no marker warning",
+              brace_stripped == author_braces and brace_warns == [],
+              repr((brace_stripped, brace_warns)))
+        head_insert = "{{lead insert}}\n\n" + author_braces
+        head_stripped, _ = th.strip_pending(head_insert)
+        check("strip_pending still drops a start-of-text critique "
+              "insertion while keeping author braces below it",
+              head_stripped == author_braces
+              and "{{title}}" in head_stripped,
+              repr(head_stripped))
+        check("approved_text unwraps paragraph insertions but does not "
+              "eat inline author braces",
+              th.approved_text(head_insert)
+              == "lead insert\n\n" + author_braces,
+              th.approved_text(head_insert))
         forms = th.pending_forms(with_insert)
         check("pending_forms lists replace + insert once each, doc order",
               [(f["kind"], f["old"], f["new"]) for f in forms]

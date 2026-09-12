@@ -2594,23 +2594,24 @@ TEMPLATE_ESSAY = (
 
 
 def _braces_are_the_authors(root: Path) -> None:
-    """AQ/FU-A — the local canonicalizer is the REPLACE form ONLY.
+    """AQ/FU-A — author `{{…}}` is prose on BOTH seams.
 
-    `strip_pending` is the DOC canonicalizer: in a Doc tab nothing put
-    `{{…}}` there but AuthorLM, so a bare one is a critique-pass
-    insertion and deleting it is ratified. Pointed at LOCAL files that
-    rule inverts — `{{title}}`, `{{a, b}}`, a Handlebars sample in an
-    essay ABOUT templating are the author's own prose — and the broad
-    strip deleted every one of them from everything the system observes,
-    silently, because once they were gone there was nothing left to warn
-    about. `is_marked` tripped on them too, refusing the file's Doc push
+    Local observation uses `strip_replacements` (replace forms only).
+    Doc pull/reconcile uses `strip_pending`, which must drop critique
+    paragraph insertions but leave inline author braces alone — they
+    reach the tab via `doc push`, and collapsing them made reconcile
+    auto-pull a gutted essay whenever local still matched `pushed_hash`.
+    `is_marked` must not trip on braces either, or Doc push refuses
     forever with a message about a resolve that does not exist.
 
     A filter never stages an insertion (`insert` is refused by the
-    recorder), so narrowing loses nothing this seam exists for."""
+    recorder), so the local narrowing loses nothing this seam exists for."""
+    import hashlib
+
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
     from authorlm import threads as _th
+    from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
 
@@ -2636,6 +2637,35 @@ def _braces_are_the_authors(root: Path) -> None:
           "matter",
           _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
           _th.strip_replacements(TEMPLATE_ESSAY)[1])
+    doc_stripped, doc_warns = _th.strip_pending(TEMPLATE_ESSAY)
+    check("strip_pending (Doc pull/reconcile) leaves author braces intact "
+          "— the tab holds the pushed essay, not only AuthorLM forms",
+          doc_stripped == TEMPLATE_ESSAY and doc_warns == [],
+          repr((doc_stripped, doc_warns)))
+    with_math = TEMPLATE_ESSAY + "Energy $E={{mc}}^2$.\n"
+    math_stripped, _ = _th.strip_pending(with_math)
+    check("...including TeX grouping braces that math push carries intact",
+          "$E={{mc}}^2$" in math_stripped, repr(math_stripped))
+    mixed = (TEMPLATE_ESSAY.rstrip() + "\n\n{{critique insertion}}\n\n"
+             "Trailing prose.\n")
+    mixed_stripped, _ = _th.strip_pending(mixed)
+    check("...while still dropping a critique paragraph insertion "
+          "byte-clean, braces in the surrounding prose untouched",
+          "{{title}}" in mixed_stripped
+          and "{{a, b}}" in mixed_stripped
+          and "{{critique insertion}}" not in mixed_stripped
+          and "Trailing prose." in mixed_stripped,
+          repr(mixed_stripped))
+    # Reconcile's auto-pull fires when local_hash == pushed_hash and the
+    # stripped tab differs. After a clean push those two sides must agree.
+    pushed = normalize_markdown(TEMPLATE_ESSAY)
+    base = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    tab_canon = _th.strip_pending(pushed)[0]
+    local_hash = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    check("reconcile would NOT auto-pull after a clean brace-bearing push "
+          "— stripped tab equals local, so session-start cannot gut "
+          "{{title}} / {{a, b}}",
+          local_hash == base and tab_canon == pushed, repr(tab_canon))
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
 
