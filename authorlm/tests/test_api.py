@@ -5224,7 +5224,263 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_shift_requests_and_md_paragraphs() -> None:
+    """Surgical diff_push rebases transplant requests to a live cursor.
+
+    Wrong index math plants tables and prose at the wrong Doc offsets
+    (silent corruption once tables reach tabs). `_md_paragraphs` is the
+    markdown half of that alignment — blank-line splits, never single
+    newlines."""
+    from authorlm.gdocs import _md_paragraphs, _shift_requests
+
+    base = [{
+        "insertText": {"location": {"tabId": "t1", "index": 1},
+                       "text": "hi"},
+        "updateTextStyle": {
+            "range": {"tabId": "t1", "startIndex": 1, "endIndex": 3},
+            "textStyle": {"bold": True},
+            "fields": "bold"},
+        "updateParagraphStyle": {
+            "range": {"startIndex": 1, "endIndex": 4},
+            "paragraphStyle": {
+                "spaceBelow": {"magnitude": 6, "unit": "PT"}},
+            "fields": "spaceBelow"},
+    }]
+    shifted = _shift_requests(base, 10)
+    loc = shifted[0]["insertText"]["location"]
+    rng = shifted[0]["updateTextStyle"]["range"]
+    para = shifted[0]["updateParagraphStyle"]
+    check("shift_requests adds delta to index/startIndex/endIndex",
+          loc["index"] == 11 and rng["startIndex"] == 11
+          and rng["endIndex"] == 13
+          and para["range"]["startIndex"] == 11
+          and para["range"]["endIndex"] == 14,
+          str(shifted))
+    check("shift_requests leaves non-index ints and strings alone",
+          loc["tabId"] == "t1"
+          and para["paragraphStyle"]["spaceBelow"]["magnitude"] == 6
+          and shifted[0]["insertText"]["text"] == "hi",
+          str(shifted))
+    nested = _shift_requests([{"batch": base}], -1)
+    check("shift_requests walks nested request lists",
+          nested[0]["batch"][0]["insertText"]["location"]["index"] == 0
+          and (nested[0]["batch"][0]["updateTextStyle"]["range"]
+               ["endIndex"] == 2),
+          str(nested))
+    check("shift_requests delta=0 is identity",
+          _shift_requests(base, 0) == base)
+
+    check("md_paragraphs splits on blank lines and drops empties",
+          _md_paragraphs("a\n\nb\n\n\nc") == ["a", "b", "c"])
+    check("md_paragraphs keeps a single-newline body as one paragraph",
+          _md_paragraphs("line one\nline two") == ["line one\nline two"])
+
+
+def check_filter_status_predicates() -> None:
+    """Filter status/warn predicates: uncovered units, falsified prefix,
+    and twin warning (RISK-6). Wrong signals push the author to delete
+    the wrong marked span or believe a partial run is finished."""
+    import json as _json
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from authorlm import api
+    from authorlm.db import ko_fields
+    from authorlm.gdocs import clamp
+
+    check("uncovered_units is empty when the cursor finished the essay",
+          api._uncovered_units({"cursor": 5, "unit_count": 5}) == [])
+    check("uncovered_units names the open tail as one inclusive range",
+          api._uncovered_units({"cursor": 2, "unit_count": 5})
+          == [(3, 5)])
+
+    check("twin_warning is silent on an empty accepted set",
+          api._twin_warning([]) is None)
+    check("twin_warning ignores distinct proposed_old text",
+          api._twin_warning([
+              {"proposed_old": "alpha paragraph.",
+               "metadata": _json.dumps({"anchor_paragraph": 1})},
+              {"proposed_old": "beta paragraph.",
+               "metadata": _json.dumps({"anchor_paragraph": 2})},
+          ]) is None)
+    check("twin_warning ignores empty proposed_old (inserts never twin)",
+          api._twin_warning([
+              {"proposed_old": "",
+               "metadata": _json.dumps({"anchor_paragraph": 1})},
+              {"proposed_old": "",
+               "metadata": _json.dumps({"anchor_paragraph": 2})},
+          ]) is None)
+    same = "The same paragraph, word for word."
+    twin = api._twin_warning([
+        {"proposed_old": same,
+         "metadata": _json.dumps({"anchor_paragraph": 4})},
+        {"proposed_old": same,
+         "metadata": _json.dumps({"anchor_paragraph": 7})},
+    ])
+    check("twin_warning names the units and clamps the shared old text",
+          twin is not None
+          and "units 4 and 7" in twin
+          and clamp(same) in twin
+          and "DELETING" in twin,
+          twin or "")
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-filter-status-"))
+    try:
+        ws = root / "ws"
+        ws.mkdir()
+        ms = ws / "book"
+        ms.mkdir()
+        (ms / "01-essay.md").write_text("# Essay\n\nBody.\n")
+        db = api.open_db(ws)
+        manuscript = api.register_manuscript(db, "book", str(ms))
+        mid = manuscript["id"]
+        run_row = ko_fields("fr")
+        run_row.update(
+            manuscript_id=mid, filter="clarity", file="01-essay.md",
+            source_version_id=None, unit_count=5, cursor=2, state=None,
+            registry=None, result_version_id=None, status="active")
+        run_row["class"] = "sequential"
+        db.insert("filter_runs", run_row)
+        run = dict(db.one("SELECT * FROM filter_runs WHERE id = ?",
+                          (run_row["id"],)))
+
+        def _thread(unit: int, state: str) -> None:
+            row = ko_fields("dt")
+            row.update(
+                manuscript_id=mid, origin_type=api.FILTER_ORIGIN,
+                origin_id=f"{run['id']}:01-essay.md:{unit}",
+                file="01-essay.md", anchor_quote=None,
+                proposed_old=f"unit {unit} old",
+                proposed_new=f"unit {unit} new", note="n",
+                state=state, our_reply_ids="[]",
+                last_author_reply_id=None, scope_kind="file",
+                scope_ref="01-essay.md",
+                metadata=_json.dumps({"anchor_paragraph": unit,
+                                      "kind": "replace"}))
+            db.insert("doc_threads", row)
+
+        check("falsified_prefix skips non-sequential runs",
+              api._falsified_prefix(
+                  db, mid, {**run, "class": "global"}) == [])
+
+        _thread(2, "rejected")
+        _thread(3, "proposed")
+        _thread(4, "accepted")
+        _thread(5, "withdrawn")
+        falsified = api._falsified_prefix(db, mid, run)
+        check("falsified_prefix reports a rejected unit's live downstream",
+              falsified == [{"n": 2, "downstream": [3, 4]}],
+              str(falsified))
+        # A later rejection with only withdrawn/nothing after must not appear.
+        _thread(6, "rejected")
+        falsified2 = api._falsified_prefix(db, mid, run)
+        check("falsified_prefix omits rejects that have no live downstream",
+              falsified2 == [{"n": 2, "downstream": [3, 4]}],
+              str(falsified2))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_locate_quote_and_clamp() -> None:
+    """Margin-comment attribution: ambiguous or missing quotes stay
+    unattributed — guessing plants proposals on the wrong file."""
+    from authorlm.gdocs import clamp, locate_quote
+
+    files = {
+        "01-choice.md": (
+            "# Choice\n\n"
+            "A quite distinctive paragraph about agency.\n\n"
+            "## Later\n\n"
+            "Something else entirely.\n"),
+        "02-wall.md": (
+            "# Wall\n\n"
+            "Unrelated prose about stone.\n"),
+    }
+    rel, heading = locate_quote(files, "quite distinctive paragraph")
+    check("locate_quote returns the sole matching file and nearest heading",
+          rel == "01-choice.md" and heading == "Choice",
+          f"{rel!r} / {heading!r}")
+    shared = {
+        "a.md": "# A\n\nshared unique phrase here.\n",
+        "b.md": "# B\n\nshared unique phrase here.\n",
+    }
+    check("locate_quote refuses when two files match",
+          locate_quote(shared, "shared unique phrase") == (None, None))
+    check("locate_quote refuses missing and empty quotes",
+          locate_quote(files, "no such text anywhere") == (None, None)
+          and locate_quote(files, "") == (None, None)
+          and locate_quote(files, "   ") == (None, None))
+    under = locate_quote(files, "Something else entirely")
+    check("locate_quote's nearest heading is the one above the hit",
+          under == ("01-choice.md", "Later"), str(under))
+
+    check("clamp flattens whitespace without truncating short text",
+          clamp("  hello\n  world  ") == "hello world")
+    long = "x" * 80
+    clipped = clamp(long, limit=60)
+    check("clamp truncates long text with an ellipsis at the limit",
+          len(clipped) == 60 and clipped.endswith("…")
+          and clipped.startswith("x" * 59),
+          clipped)
+
+
+def check_image_ext_and_metadata() -> None:
+    """Illustration store honesty: magic bytes pick the extension, and
+    prompt metadata rides inside the image without corrupting IHDR/SOI."""
+    import struct
+    import zlib
+
+    from authorlm.illus import image_ext, image_with_metadata
+
+    ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    ihdr = (struct.pack(">I", 13) + b"IHDR" + ihdr_data
+            + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF))
+    iend = (struct.pack(">I", 0) + b"IEND"
+            + struct.pack(">I", zlib.crc32(b"IEND") & 0xFFFFFFFF))
+    png = b"\x89PNG\r\n\x1a\n" + ihdr + iend
+    jpeg = b"\xff\xd8\xff\xd9"
+    garbage = b"not-an-image"
+
+    check("image_ext reads PNG and JPEG magic; unknown defaults to png",
+          image_ext(png) == "png"
+          and image_ext(jpeg) == "jpg"
+          and image_ext(garbage) == "png")
+
+    tagged_png = image_with_metadata(png, {"prompt": "draw a sphere",
+                                           "empty": ""})
+    check("image_with_metadata inserts PNG iTXt after IHDR, skips empties",
+          tagged_png.startswith(b"\x89PNG\r\n\x1a\n")
+          and tagged_png[8:8 + 4 + 4 + 13 + 4] == png[8:8 + 4 + 4 + 13 + 4]
+          and b"iTXt" in tagged_png and b"prompt" in tagged_png
+          and b"draw a sphere" in tagged_png
+          and b"empty" not in tagged_png
+          and image_ext(tagged_png) == "png",
+          repr(tagged_png[:80]))
+
+    tagged_jpg = image_with_metadata(jpeg, {"prompt": "draw a cube",
+                                            "skip": ""})
+    check("image_with_metadata inserts JPEG COM after SOI, skips empties",
+          tagged_jpg.startswith(b"\xff\xd8\xff\xfe")
+          and b"prompt: draw a cube" in tagged_jpg
+          and b"skip" not in tagged_jpg
+          and tagged_jpg.endswith(b"\xff\xd9")
+          and image_ext(tagged_jpg) == "jpg",
+          repr(tagged_jpg))
+    body = b"prompt: draw a cube"
+    length = struct.unpack(">H", tagged_jpg[4:6])[0]
+    check("JPEG COM length prefix covers the comment body",
+          length == len(body) + 2, f"length={length} body={len(body)}")
+
+    check("image_with_metadata leaves unknown formats untouched",
+          image_with_metadata(garbage, {"prompt": "x"}) == garbage)
+
+
 def main_test() -> None:
+    check_shift_requests_and_md_paragraphs()
+    check_filter_status_predicates()
+    check_locate_quote_and_clamp()
+    check_image_ext_and_metadata()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
