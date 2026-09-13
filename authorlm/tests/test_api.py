@@ -5224,7 +5224,121 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_table_open_margin_refuse() -> None:
+    """Table-forced rebuild must not silently wipe live margin forms.
+
+    e21a4ac made pipe-table tabs rebuild (surgical cannot align cell
+    paragraphs with markdown table blocks). Rebuild orphans Drive
+    comment anchors — known price — but open margin threads plant
+    <<old>>{{new}} forms the author may have reworded in the Doc.
+    forms_pending only sees critique/filter `written`; without a refuse
+    here, doc push / reconcile auto-push destroys those forms.
+    """
+    import unittest.mock as mock
+
+    from authorlm import gdocs as gdocs_mod
+
+    print("table + open margin thread → refuse (not silent rebuild wipe):")
+    root = Path(tempfile.mkdtemp(prefix="authorlm-table-margin-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "book"
+        ms.mkdir(parents=True)
+        (ms / "solo.md").write_text(
+            "# Solo\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nProse.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        mid = manuscript["id"]
+        db.update("manuscripts", mid, {"metadata": json.dumps({
+            "gdocs": {"_master_id": "doc-1",
+                      "solo.md": {"tab_id": "tab-1", "checked_out": False,
+                                  "pushed_hash": "deadbeefdeadbeef"}}})})
+        manuscript = api.get_manuscript(db)
+
+        routes: list[str] = []
+
+        def fake_diff(*_a, **_k):
+            routes.append("surgical")
+            return {"relpath": "solo.md", "mode": "diff", "ops": 0}
+
+        def fake_rewrite(*_a, **_k):
+            routes.append("rebuild")
+
+        th = ko_fields("dt")
+        th.update(manuscript_id=mid, origin_type="author_comment",
+                  origin_id="c1", file="solo.md",
+                  proposed_old="Prose.", proposed_new="Prose, post-edited.",
+                  note="n", state="proposed", our_reply_ids="[]")
+        db.insert("doc_threads", th)
+        with mock.patch.object(gdocs_mod, "forms_pending", return_value=None), \
+             mock.patch.object(gdocs_mod, "_refuse_mid_rewrite"), \
+             mock.patch.object(gdocs_mod, "comment_bearing",
+                               return_value=False), \
+             mock.patch.object(gdocs_mod, "diff_push", side_effect=fake_diff), \
+             mock.patch.object(gdocs_mod, "_rewrite_tab",
+                               side_effect=fake_rewrite):
+            raised = None
+            try:
+                gdocs_mod.push_doc(db, manuscript, "solo.md",
+                                   service=object(), docs_service=object())
+            except LookupError as err:
+                raised = str(err)
+        check("table + open margin thread refuses before any Doc write",
+              raised is not None and "markdown table" in raised
+              and "open margin thread" in raised and routes == [],
+              str({"raised": raised, "routes": routes}))
+
+        db.update("doc_threads", th["id"], {"state": "cleaned"})
+        routes.clear()
+        with mock.patch.object(gdocs_mod, "forms_pending", return_value=None), \
+             mock.patch.object(gdocs_mod, "_refuse_mid_rewrite"), \
+             mock.patch.object(gdocs_mod, "comment_bearing",
+                               return_value=False), \
+             mock.patch.object(gdocs_mod, "diff_push", side_effect=fake_diff), \
+             mock.patch.object(gdocs_mod, "_rewrite_tab",
+                               side_effect=fake_rewrite), \
+             mock.patch.object(gdocs_mod, "ensure_master",
+                               return_value="doc-1"), \
+             mock.patch.object(gdocs_mod, "apply_tab_spacing"), \
+             mock.patch.object(gdocs_mod, "_save_mapping"), \
+             mock.patch.object(gdocs_mod, "_mapping", return_value={
+                 "gdocs": {"_master_id": "doc-1",
+                           "solo.md": {"tab_id": "tab-1"}}}):
+            out = gdocs_mod.push_doc(db, manuscript, "solo.md",
+                                     service=object(), docs_service=object())
+        check("table alone still rebuilds (no open margin forms)",
+              routes == ["rebuild"] and "mode" not in out,
+              str({"routes": routes, "out": out}))
+
+        routes.clear()
+        with mock.patch.object(gdocs_mod, "forms_pending", return_value=None), \
+             mock.patch.object(gdocs_mod, "_refuse_mid_rewrite"), \
+             mock.patch.object(gdocs_mod, "comment_bearing",
+                               return_value=True), \
+             mock.patch.object(gdocs_mod, "diff_push", side_effect=fake_diff), \
+             mock.patch.object(gdocs_mod, "_rewrite_tab",
+                               side_effect=fake_rewrite), \
+             mock.patch.object(gdocs_mod, "ensure_master",
+                               return_value="doc-1"), \
+             mock.patch.object(gdocs_mod, "apply_tab_spacing"), \
+             mock.patch.object(gdocs_mod, "_save_mapping"), \
+             mock.patch.object(gdocs_mod, "_mapping", return_value={
+                 "gdocs": {"_master_id": "doc-1",
+                           "solo.md": {"tab_id": "tab-1"}}}):
+            gdocs_mod.push_doc(db, manuscript, "solo.md",
+                               service=object(), docs_service=object())
+        check("table + Drive comments only still rebuilds "
+              "(known comment-anchor price)",
+              routes == ["rebuild"], str(routes))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_table_open_margin_refuse()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
@@ -8964,6 +9078,55 @@ def main_test() -> None:
               and "{{A bridging insert the author refined.}}" in tab_after,
               str({"raised": raised, "tab": tab_after[:120]}))
         db.update("doc_threads", crit["id"], {"state": "cleaned"})
+
+        # Table + open margin thread: rebuild would wipe live <<>>{{}}
+        # forms (and any in-Doc {{new}} post-edits). forms_pending only
+        # sees state='written'; open_threads are proposed/conversation.
+        # e21a4ac forced rebuild for tables; that must REFUSE when a
+        # margin thread still holds forms, not silently destroy them.
+        table_essay = (
+            "# Orrery\n\n"
+            "| planet | metal |\n"
+            "| --- | --- |\n"
+            "| Mars | brass |\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        (ms / "06-orrery.md").write_text(table_essay)
+        pending_margin = (
+            "# Orrery\n\n"
+            "| planet | metal |\n"
+            "| --- | --- |\n"
+            "| Mars | brass |\n\n"
+            "<<A distinctive orrery sentence to anchor a comment.>>"
+            "{{A distinctive orrery sentence, post-edited in Docs.}}\n")
+        stub.set_tab("06-orrery.md", pending_margin)
+        margin = _ko_dt("dt")
+        margin.update(
+            manuscript_id=manuscript["id"], origin_type="author_comment",
+            origin_id="c-table-form", file="06-orrery.md",
+            proposed_old="A distinctive orrery sentence to anchor a comment.",
+            proposed_new="A distinctive orrery sentence, post-edited in Docs.",
+            note="margin", state="proposed", our_reply_ids="[]",
+            metadata="{}")
+        db.insert("doc_threads", margin)
+        tab_before_m = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                            if t["title"] == "06-orrery.md")
+        raised_m = None
+        try:
+            push_doc(db, manuscript, "06-orrery.md", service=stub,
+                     docs_service=stub)
+        except LookupError as err:
+            raised_m = str(err)
+        tab_after_m = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                           if t["title"] == "06-orrery.md")
+        check("push refuses table rebuild while open margin forms live "
+              "(no wipe of in-Doc {{new}} post-edits)",
+              raised_m is not None
+              and "markdown table" in raised_m
+              and "open margin thread" in raised_m
+              and tab_after_m == tab_before_m
+              and "post-edited in Docs" in tab_after_m,
+              str({"raised": raised_m, "tab": tab_after_m[:160]}))
+        db.update("doc_threads", margin["id"], {"state": "cleaned"})
 
         # --- session start is no longer blind to the margin ---
         stub.add_comment("c-fresh", "distinctive orrery sentence",

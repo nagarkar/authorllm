@@ -1223,9 +1223,26 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # diff_push refuses (seen on manifest.md the day tables started
     # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
     # comment anchors that a rebuild orphans are the known price.
+    #
+    # Open margin threads are NOT the same price. They plant live
+    # <<old>>{{new}} forms in the tab (and the author may have reworded
+    # the {{new}} half there). A rebuild wipes those forms — the same
+    # class of loss `forms_pending` already refuses for critique/filter
+    # `written` state. Surgical cannot run on a table, so refuse loudly
+    # rather than silently destroy the pending review. Drive comments
+    # with no pending form still take the rebuild (anchor orphaning only).
     has_table = bool(_TABLE_DELIM.search(path.read_text(encoding="utf-8")))
+    open_margin = threads_mod.open_threads(db, manuscript["id"], relpath)
+    if has_table and open_margin:
+        raise LookupError(
+            f"'{relpath}' has a markdown table and {len(open_margin)} open "
+            f"margin thread(s) with pending <<>>{{{{}}}} forms in the Doc. "
+            f"A table forces a full-tab rebuild, which would wipe those "
+            f"forms and any in-Doc rewording of the {{{{new}}}} half. "
+            f"Settle or withdraw the threads before pushing "
+            f"('doc pull' advances verdicts), or remove the table.")
     if not has_table and (
-            threads_mod.open_threads(db, manuscript["id"], relpath)
+            open_margin
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
         # AND every open comment anchor (it-77ef98f5289e), so tabs
