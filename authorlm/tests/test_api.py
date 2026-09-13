@@ -5224,7 +5224,157 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_validate_dispositions() -> None:
+    """Per-point digest verdicts (design §13.2): only `kept`/`removed`,
+    removals need a reason, and only real point ids + plan beats land.
+
+    A bad payload that slips past this gate poisons 'What Was Removed and
+    Why' and later accounting — unexplained removals teach nothing."""
+    writeup = {"plan": json.dumps([{"n": 1}, {"n": 2}])}
+    digest = {
+        "points": [{"id": "p1", "claim": "one"}, {"id": "p2", "claim": "two"}],
+        "examples": [{"id": "x1", "text": "not a point"}],
+    }
+
+    clean = api._validate_dispositions(writeup, digest, {
+        "p1": {"disposition": "kept", "beat": 1},
+        "p2": {"disposition": "removed", "reason": "out of scope"},
+    })
+    check("kept + removed with reason + beat are accepted",
+          clean == {
+              "p1": {"disposition": "kept", "beat": 1},
+              "p2": {"disposition": "removed", "reason": "out of scope"},
+          },
+          repr(clean))
+
+    def refuses(payload, needle: str) -> None:
+        try:
+            api._validate_dispositions(writeup, digest, payload)
+            raised, message = False, ""
+        except ValueError as err:
+            raised, message = True, str(err)
+        check(f"disposition payload refused ({needle})",
+              raised and needle in message, message)
+
+    refuses({}, "JSON object")
+    refuses({"p2": {"disposition": "removed"}}, "removal needs a reason")
+    refuses({"p1": {"disposition": "deferred"}}, "must be one of")
+    refuses({"p9": {"disposition": "kept"}}, "not a point in the stored")
+    refuses({"x1": {"disposition": "kept"}}, "not a point id")
+    refuses({"p1": {"disposition": "kept", "beat": 99}}, "not an n")
+    refuses({"p1": {"disposition": "kept", "beat": True}}, "not an n")
+
+
+def check_fit_inventory() -> None:
+    """KNOWN CONCEPTS prefix must fit inside max_chars with the body.
+
+    TrackA/2: the inventory rode free above the extraction cap and pushed
+    payloads past 24k. When both cannot fit, the inventory drops from the
+    end — never the manuscript body."""
+    from authorlm.extraction import _fit_inventory
+
+    names = ["Alpha", "Beta", "Gamma", "Delta"]
+    short = _fit_inventory(list(names), max_chars=10_000, body_len=100)
+    check("a short inventory is unchanged when budget allows",
+          short == "; ".join(names), short)
+
+    # Header is "KNOWN CONCEPTS: \n\n" (17 chars). With body_len near the
+    # cap, budget collapses and names drop from the end until the join fits.
+    tight = _fit_inventory(list(names), max_chars=130, body_len=100)
+    check("overflow drops names from the end until the prefix fits",
+          tight in ("", "Alpha", "Alpha; Beta", "Alpha; Beta; Gamma")
+          and tight != "; ".join(names),
+          tight)
+    check("the trimmed join never exceeds the remaining budget",
+          len(tight) <= max(0, 130 - 100 - len("KNOWN CONCEPTS: \n\n")),
+          f"len={len(tight)!r} tight={tight!r}")
+
+    overfull = _fit_inventory(["HugeConcept"], max_chars=50, body_len=50)
+    check("when the body alone fills the cap, inventory is empty",
+          overfull == "", repr(overfull))
+    check("an empty name list stays empty",
+          _fit_inventory([], max_chars=100, body_len=10) == "")
+
+
+def check_support_evidence_type() -> None:
+    """INV-2: only episode-analysis stays machine-flagged on evidence rows.
+
+    `_derive_supporting` excludes `episode_analysis`. Mis-tagging that
+    source as `author_review` lets machine noise promote beliefs."""
+    from authorlm.beliefs import _support_evidence_type
+
+    check("episode-analysis maps to episode_analysis",
+          _support_evidence_type("episode-analysis") == "episode_analysis")
+    check("margin-thread is author_review",
+          _support_evidence_type("margin-thread") == "author_review")
+    check("None is author_review",
+          _support_evidence_type(None) == "author_review")
+    check("an unknown source stays author_review",
+          _support_evidence_type("distiller") == "author_review")
+    check("near-miss spelling does not get the machine tag",
+          _support_evidence_type("episode_analysis") == "author_review")
+
+
+def check_adjudication_quote_location() -> None:
+    """Quotes must come from prose, not the KNOWN CONCEPTS index line.
+
+    Taking evidence from the inventory prefix (or treating a heading-only
+    term as unlocatable) sends the wrong passage to the author and model."""
+    from authorlm.adjudication import (
+        _quote_for, _sentences, _strip_known_concepts,
+    )
+
+    raw = ("KNOWN CONCEPTS: Gravity; Choice\n\n"
+           "# Opening\n\n"
+           "Gravity bends light. Choice begins every act.\n")
+    stripped = _strip_known_concepts(raw)
+    check("KNOWN CONCEPTS prefix is stripped before locating",
+          not stripped.startswith("KNOWN CONCEPTS:")
+          and "Gravity bends light." in stripped,
+          stripped)
+    check("text without the prefix is unchanged",
+          _strip_known_concepts("# Only prose\n\nHello.") == "# Only prose\n\nHello.")
+
+    sentences = _sentences(stripped)
+    quoted = _quote_for("Gravity", sentences)
+    check("a body hit returns a labelled neighbour quote",
+          quoted is not None and "Gravity bends light." in quoted
+          and "[# Opening]" in quoted,
+          repr(quoted))
+
+    heading_only = _sentences(
+        "# **The Metaphysic**\n\nSomething else entirely lives here.\n")
+    heading_quote = _quote_for("The Metaphysic", heading_only)
+    check("a heading-only term is still located",
+          heading_quote is not None and "The Metaphysic" in heading_quote,
+          repr(heading_quote))
+    check("a missing name returns None, not a fabricated quote",
+          _quote_for("Unobtanium", sentences) is None)
+
+
+def check_marker_present() -> None:
+    """Leftover mid-rewrite marker inside hand-edited prose is detectable.
+
+    Distinct from `is_placeholder` (whole-file exact match). write_status /
+    filter_run warn or refuse on this weaker signal — missing it hides a
+    stuck rewrite; false positives block clean files."""
+    marker = api.MARKER
+    check("clean prose has no marker",
+          not api.marker_present("# Essay\n\nBody text.\n"))
+    check("marker inside edited prose is present",
+          api.marker_present(f"# Essay\n\n{marker}\n\nKept draft.\n"))
+    check("whole-file placeholder is still a placeholder",
+          api.is_placeholder(api.PLACEHOLDER))
+    check("marker-bearing edited text is NOT a placeholder",
+          not api.is_placeholder(f"Author kept this.\n{marker}\n"))
+
+
 def main_test() -> None:
+    check_validate_dispositions()
+    check_fit_inventory()
+    check_support_evidence_type()
+    check_adjudication_quote_location()
+    check_marker_present()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
