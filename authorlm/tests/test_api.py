@@ -5224,7 +5224,158 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_changed_paragraph_text() -> None:
+    """Proposal attention is only the rewritten prose paragraphs.
+
+    Structural files (TOC / sidecars) must not enter the scope, and
+    unchanged paragraphs must stay out — otherwise settled knowledge is
+    re-litigated against TOC edits or noise the author never touched."""
+    from authorlm.extraction import _changed_paragraph_text, _changed_sections
+
+    old = {
+        "01-choice.md": "# Opening\n\nSame paragraph.\n\nRetired prose.",
+        "toc.toml": "[[chapter]]\nfile = \"01-choice.md\"\n",
+        "pronunciations.md": "| term | ipa |\n| --- | --- |\n| old | /o/ |\n",
+    }
+    new = {
+        "01-choice.md": "# Opening\n\nSame paragraph.\n\nBrand new claim.",
+        "toc.toml": (
+            "[[chapter]]\nfile = \"01-choice.md\"\n"
+            "[[chapter]]\nfile = \"02-next.md\"\n"
+        ),
+        "pronunciations.md": "| term | ipa |\n| --- | --- |\n| new | /n/ |\n",
+    }
+    target = {"01-choice.md", "toc.toml", "pronunciations.md"}
+    changed = _changed_paragraph_text(old, new, target)
+    check("only the rewritten essay paragraph enters attention",
+          changed == "Brand new claim.", repr(changed))
+    check("TOC and sidecar rewrites are ignored as structure",
+          "[[chapter]]" not in changed and "| term |" not in changed
+          and "/n/" not in changed,
+          changed)
+    check("unchanged paragraphs stay out of the attention scope",
+          "Same paragraph." not in changed)
+    check("deleted paragraphs do not appear as attention text",
+          "Retired prose." not in changed)
+    check("an empty target yields empty attention text",
+          _changed_paragraph_text(old, new, set()) == "")
+
+    sections = _changed_sections(
+        "# One\n\nKept.\n\n# Two\n\nOld.",
+        "# One\n\nKept.\n\n# Two\n\nRewritten.",
+    )
+    check("changed sections are heading-scoped, not whole-file",
+          sections == ["# Two\n\nRewritten."], repr(sections))
+    check("moved-but-unchanged sections are not reported",
+          _changed_sections(
+              "# A\n\nBody.\n\n# B\n\nOther.",
+              "# B\n\nOther.\n\n# A\n\nBody.",
+          ) == [])
+
+
+def check_critique_dedupe_key() -> None:
+    """Cross-source critique duplicates collapse on normalized text.
+
+    Markup, punctuation, and case must not re-open a ruled item when a
+    later critic report restates the same complaint."""
+    from authorlm.critique import _dedupe_key
+
+    check("markdown emphasis and punctuation collapse to the same key",
+          _dedupe_key("  **Hello,** world!! ") == "hello world")
+    check("case folding is part of the identity",
+          _dedupe_key("Hello World") == _dedupe_key("hello world"))
+    check("whitespace runs collapse",
+          _dedupe_key("too   many\tspaces") == "too many spaces")
+    check("distinct prose stays distinct",
+          _dedupe_key("cut the digression") != _dedupe_key("keep the digression"))
+    check("empty / punctuation-only text keys to empty",
+          _dedupe_key("***!!!***") == "")
+
+
+def check_illustration_slot_key() -> None:
+    """Externalized illustration identity is the prompt ref without .md.
+
+    Inline slots have no stable key; render/import must externalize first.
+    Confusing this with desc_hash would re-key art whenever the prompt
+    text is edited."""
+    from authorlm.illus import desc_hash, slot_key
+
+    check("a .md ref yields the slug key without the extension",
+          slot_key({"ref": "gravity-well.md"}) == "gravity-well")
+    check("an inline slot with no ref has no key",
+          slot_key({"ref": None, "prompt": "draw gravity"}) is None)
+    check("a missing ref field has no key",
+          slot_key({"prompt": "draw gravity"}) is None)
+    check("a non-.md ref is not a key",
+          slot_key({"ref": "gravity-well.txt"}) is None)
+    # Stability contrast: editing the prompt changes desc_hash, not key.
+    before = desc_hash("a deep well of gravity")
+    after = desc_hash("a deep well of gravity, revised")
+    check("desc_hash moves when the prompt text is edited",
+          before != after)
+    check("slot_key stays pinned to the external ref across prompt edits",
+          slot_key({"ref": "gravity-well.md", "prompt": "a deep well of gravity"})
+          == slot_key({"ref": "gravity-well.md",
+                       "prompt": "a deep well of gravity, revised"}))
+
+
+def check_doc_filename() -> None:
+    """Mechanical chapter names must be filesystem-safe and extensioned.
+
+    Unsafe characters or a blank name would create colliding / unopenable
+    paths under the manuscript root."""
+    from authorlm.docs import doc_filename
+
+    check("spaces become hyphens and .md is appended",
+          doc_filename("  My Chapter ") == "My-Chapter.md")
+    check("path and shell-hostile characters are replaced",
+          doc_filename('a/b:c?"d|e.md') == "a-b-c--d-e.md",
+          doc_filename('a/b:c?"d|e.md'))
+    check("an existing markdown extension is preserved",
+          doc_filename("notes.markdown") == "notes.markdown")
+    check("a .txt name keeps its extension",
+          doc_filename("notes.txt") == "notes.txt")
+    try:
+        doc_filename("   ")
+        empty_refused, empty_msg = False, ""
+    except ValueError as err:
+        empty_refused, empty_msg = True, str(err)
+    check("an empty name is refused",
+          empty_refused and "empty document name" in empty_msg, empty_msg)
+
+
+def check_mentioned_in() -> None:
+    """Groundedness uses the first file that word-boundary-matches a name.
+
+    Plural/alias-tolerant hits gate edge admission and sweep reports —
+    a false miss drops a real link; a false hit keeps ungrounded noise."""
+    from authorlm.hygiene import mentioned_in
+
+    files = {
+        "01-choice.md": "Every act begins with choice.",
+        "02-gravity.md": "Gravity bends light across fields.",
+    }
+    check("the first matching file wins",
+          mentioned_in(files, ["Gravity"]) == "02-gravity.md")
+    check("a miss returns None",
+          mentioned_in(files, ["Unobtanium"]) is None)
+    check("simple plurals still count as a mention",
+          mentioned_in({"a.md": "many fields appear"}, ["field"]) == "a.md")
+    check("y/ies plurals still count as a mention",
+          mentioned_in({"a.md": "the trajectories matter"},
+                       ["trajectory"]) == "a.md")
+    check("empty names are ignored rather than matching everything",
+          mentioned_in({"a.md": "Gravity"}, ["", "Unobtanium"]) is None)
+    check("substring-inside-a-word is not a mention",
+          mentioned_in({"a.md": "gravitational"}, ["Gravity"]) is None)
+
+
 def main_test() -> None:
+    check_changed_paragraph_text()
+    check_critique_dedupe_key()
+    check_illustration_slot_key()
+    check_doc_filename()
+    check_mentioned_in()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
