@@ -19,9 +19,9 @@ no evidence, it abstains.
 - **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
 - **Google Docs bridge** (`doc push/pull`, reconciliation):
   `pip install google-api-python-client google-auth-httplib2
-  google-auth-oauthlib`, plus an OAuth client secret in
-  `~/.authorlm/config.toml` under `[gdocs]` (one-time `authorlm doc auth`
-  opens the consent browser).
+  google-auth-oauthlib`, plus an OAuth client secret path in
+  `authorlm/config.toml` under `[gdocs]` (one-time `authorlm doc auth`
+  opens the consent browser; the token cache lives in workspace state).
 - **Publishing exports** (docx/epub/pdf with embedded illustrations):
   `pandoc` — `brew install pandoc` on macOS. PDF additionally needs a
   TeX distribution with `xelatex` (MacTeX / TeX Live); the 8-bit
@@ -31,12 +31,15 @@ no evidence, it abstains.
   whole-book export. PDF and EPUB presentation is declared in the packaged
   `authorlm/publication/` Pandoc profiles (shared structure filter, LaTeX PDF
   typography, and EPUB CSS), while manuscript export values remain in
-  `_exports/settings.toml`.
-  Author, copyright owner, paperback ISBN, and hardcover ISBN are canonical
-  manuscript metadata, set with `authorlm manuscript set`. ISBN-13 values are
-  validated and stored as digits. PDF export is a confidential review copy by
-  default (notice page, footer, and watermark); `--print-ready` explicitly
-  produces the clean production PDF.
+  `_exports/settings.toml`. Combined single-doc exports rewrite footnote
+  labels per file (`[^1]` → `[^p-1]` for `preface.md`) so pandoc cannot
+  bind colliding labels across essays; reader numbering is unchanged.
+  Author, copyright owner, paperback ISBN, hardcover ISBN, trim size, and
+  bleed are canonical manuscript metadata, set with `authorlm manuscript set`.
+  ISBN-13 values are validated and stored as digits. PDF export is a
+  confidential review copy by default (notice page, footer, and watermark);
+  `--print-ready` produces the clean production PDF; `--profile book` builds
+  a KDP print interior at the manuscript's trim size (refuses without one).
 
 ## Install / build
 
@@ -54,12 +57,20 @@ npm run build` from `web/triage-app/`. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
-AuthorLM keeps **one global database in `~/.authorlm/`** (the database and
-`config.toml`), so `authorlm` works from any directory and manuscripts can
-live anywhere — register them with relative or absolute paths (they're
-stored absolute). `-w/--workspace <dir>` overrides the data location, which
-is mainly how the hermetic tests isolate themselves. `python3 main.py …`
-still works identically.
+AuthorLM keeps **three homes** for three kinds of file (`authorlm/paths.py`):
+
+| Home | What | Default |
+| :--- | :--- | :--- |
+| **Project config** | Decisions: `config.toml`, `illustration-craft.md` | beside the package (`authorlm/config.toml`) |
+| **Workspace state** | SQLite DB, OAuth token, backups, logs | `~/.authorlm/` |
+| **Secrets** | API keys in `.env` | beside `config.toml` (gitignored) |
+
+Overrides: `AUTHORLM_CONFIG`, `AUTHORLM_CRAFT`, `AUTHORLM_ENV`, and
+`-w/--workspace` for state. CLI and MCP both load project config via
+`paths.config_path()` after `paths.load_env()` — same story on every
+surface. `authorlm` works from any directory; manuscripts can live
+anywhere (paths stored absolute). `python3 main.py …` still works
+identically.
 
 For bash tab completion (commands, actions, flags, `--kind` values, and
 manuscript names after `-m`), add to `~/.bash_profile`:
@@ -160,8 +171,8 @@ outstanding questions.
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
-| `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, format-specific ISBN-13 fields, `--trim-size WxH`, `--bleed yes\|no`); the CLI and MCP tools share this record |
+| `export show/set/md/docx/epub/pdf` | Publishing exports via pandoc; settings in `_exports/settings.toml`. `--chapters a,b` builds those TOC subtrees into their own files alongside the whole-book export. PDF: review marks on by default; `--print-ready` omits them; `--profile book` builds a KDP interior at the manuscript trim (see Publishing exports). Combined exports namespace per-file footnote labels so pandoc cannot collide `[^1]` across essays |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
 | `extract [file…] [--full] [--edges-only]` | LLM-extract concepts and relationships — incremental by default (only files changed since last extraction); `--edges-only` re-mines relationships among existing concepts without touching the concept inventory |
 | `session start` / `session end` | Authoring session; opens with the learning briefing, closes with learning velocity |
@@ -184,12 +195,15 @@ outstanding questions.
 | `diff [vN [vM]] [file]` | Colored unified diff between collected versions (default: the last two) |
 | `plan` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents |
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
-| `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
-| `doc create-manuscript` | Combine every chapter (reading order per `toc.md`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `doc push/pull <file>`, `doc auth` | Google Docs bridge: reconciled tabs travel as markdown (tables survive transplant; equations/footnotes/images do not — see docs/doc-bridge-markdown-vs-docx.md). `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in project `config.toml`; `doc auth` runs the one-time browser consent. Local files remain the system of record |
+| `doc create-manuscript` | Combine every chapter (reading order per `toc.toml`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). The export Doc is built from pandoc DOCX so reviewers see native equations/footnotes/illustrations. Works without Drive auth — the Doc half is skipped with a note. Footnote labels are namespaced per file on combine |
+| `critique import/status/list/triage/…` | External critique campaign: import → triage global law → summarize → per-essay `run` → `triage --edits` → `write` → Docs review → `resolve` (design: docs/critique-pass-design.md). PDF reports: ingest with `tools/pdf2md.py` first |
+| `summarize status/show/rebuild` | Essay summaries — autoregressive working memory in TOC order; rebuild marks downstream stale unless `--all`. Positional verb is `summarize rebuild` (not `--rebuild`) |
+| `filter add/list/run/apply/push/resolve` | Author-defined unit-by-unit filters (`_filters/*.md`): `run` prints the payload (no model call); `apply` is record+push under one name; `--native` is the billed path. Two resolve roads — local (default) or Doc via `filter push` then `filter resolve` (design: docs/filter-pass-design.md) |
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
-| `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
+| `lens add/list/run/register/review/resolve` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence; finishing a pass uses `resolve` (same verb as critique/filter) |
 | `guide` | Generate explained suggestions, or abstain |
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
 | `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
@@ -254,6 +268,121 @@ evidence; explained verdicts (`doc decide … --reason`) can seed scoped
 candidate policies through a decline-by-default distiller.
 Design: docs/margin-threads-design.md.
 
+## Critique pass (operator walkthrough)
+
+External editorial reports become proposed intents / style / objections,
+then an essay-by-essay edit pass. Design: docs/critique-pass-design.md.
+
+```bash
+authorlm critique import report.json     # sources row + proposed items
+authorlm critique triage --scope manuscript   # one sitting: global law
+authorlm summarize rebuild               # or: summarize rebuild --all
+authorlm critique run preface.md         # stage edits (TOC order)
+authorlm critique triage --edits preface.md   # k/r/e/u/s/x
+authorlm critique write preface.md       # <<old>>{{new}} into the Doc tab
+# …read in Docs, reword greens if you want…
+authorlm critique resolve preface.md     # confirmation gate; advance manually
+authorlm critique rollback preface.md    # restore pin; keep evidence
+```
+
+Constraints worth knowing:
+
+- One active pass per manuscript; advance is manual (resolve essay N, then
+  `run` essay N+1).
+- `critique run` preflight refuses unconfirmed scoped items unless
+  `--force` (proceeds *without* them, never with them).
+- Diff-write is its own verb (`write`) so the Doc changes when you say so.
+- Verdict keys match other triage loops: `k` accept, `r` reject, `e`
+  edit+accept, `u` undo, `s` skip, `x`/`q` quit.
+
+## Filter pass (operator walkthrough)
+
+A filter reads one essay **unit by unit** and proposes an edit per unit
+(`_filters/<name>.md`). Unlike `write draft`, `filter run` makes **no**
+model call by default — it prints the payload for chat drafting.
+`--native` is the billed path and needs a `[filtering]` config section
+the shipped config deliberately omits. Design: docs/filter-pass-design.md.
+
+```bash
+# Ratify a filter artifact (front matter + prompt on stdin):
+authorlm filter add my-filter < _filters/my-filter.md
+authorlm filter run my-filter essay.md   # print payload; no LLM bill
+# …draft in chat, then pipe the model's reply:
+authorlm filter record essay.md < reply.json
+authorlm filter triage essay.md          # verdicts on staged proposals
+# Local road (default — recommended):
+authorlm filter resolve essay.md --pause # <<old>>{{new}} in the file
+authorlm filter resolve essay.md         # apply accepted forms
+# Doc road (forms in the tab; disk keeps OLD text until resolve):
+authorlm filter push essay.md
+authorlm filter resolve essay.md         # reads the TAB back, never a pull
+# Or record + push under one name (chat drafting still needs filter run first):
+authorlm filter apply my-filter essay.md < reply.json
+```
+
+Pitfalls:
+
+- Finishing a pass is always `resolve` (same verb as critique and lens).
+  The adjective "settled" still appears in payloads and state names.
+- The run freezes its **transport** at the first of `resolve` / `push`;
+  switching roads is resolve-then-rerun, never a flag.
+- Local state is the bytes on disk; Doc-road crashes can leave forms in a
+  tab that nothing on disk records — `doc push <essay>` rebuilds the tab
+  from the pristine file.
+- `filter push` refuses an already-occupied tab (early, by name).
+- `filter unmark` on the Doc road requires `--force` (destroys in-tab
+  rewording).
+- Neighbouring essay summaries are **opt-in** (`summaries = true` in the
+  filter front matter). They cost real tokens and must not be combined
+  with a small `--window`.
+- A filter with `prelude = "pronunciations"` proposes rows for
+  `<manuscript>/pronunciations.md` (Doc-mirrored sidecar; never ships in
+  the book) — it does not judge units. See docs/writing-essays-tutorial.md.
+
+## Publishing exports
+
+```bash
+authorlm manuscript set --trim-size 6x9 --bleed no
+authorlm export show
+authorlm export set title "My Book"
+authorlm export check                    # region tags + math spans
+authorlm export md                       # also: docx | epub | pdf
+authorlm export pdf --chapters ascending,indic
+authorlm export pdf --print-ready
+authorlm export pdf --profile book       # KDP interior; needs trim size
+```
+
+Settings live in `_exports/settings.toml`. Combined markdown
+(`export md` / `doc create-manuscript` / pandoc inputs) namespaces
+footnote labels per file: shortest unique stem prefix
+(`preface.md` → `p`, `indic.md`/`indication.md` → `indic`/`indica`), so
+`[^1]` becomes `[^p-1]`. Labels never render — only the collision goes
+away. Source files are untouched; only the combined artifact is rewritten.
+
+PDF profiles:
+
+| Profile | How | Marks | Geometry |
+| :--- | :--- | :--- | :--- |
+| `review` (default) | `export pdf` | notice + footer + watermark | packaged PDF profile |
+| `print` | `export pdf --print-ready` | none | same as review |
+| `book` | `export pdf --profile book` | none | manuscript trim; mirrored margins + KDP gutter; ` - book` filename suffix |
+
+The book profile **refuses** without `--trim-size`; it **warns** (never
+refuses) on non-standard trim, missing paperback ISBN, or page count
+outside 24–828. Math/region rules: docs/math-and-physics-guidelines.md.
+
+## Ingesting PDFs (critique reports, references)
+
+```bash
+python3 tools/pdf2md.py report.pdf                 # writes report.md alongside
+python3 tools/pdf2md.py book.pdf -o notes.md --pages 12-40
+```
+
+Text-layer pages extract directly; image-only pages OCR via Apple Vision
+(macOS). Needs `pymupdf`; OCR needs `pyobjc-framework-Vision`. Multi-column
+layouts are not untangled. Page markers (`<!-- p.N -->`) keep quotes
+traceable. Critique intake: convert the PDF, then `critique import`.
+
 ## How learning works
 
 - **Accepting / modifying** a suggestion strengthens the policies it relied
@@ -274,27 +403,46 @@ model LiteLLM supports. For Gemini:
 
 ```bash
 pip install litellm
-export GEMINI_API_KEY=...        # add to your shell profile to persist
+# put the key in authorlm/.env (preferred) or export it in your shell
+echo 'GEMINI_API_KEY=...' >> authorlm/.env
 ```
 
-Create `.authorlm/config.toml` in your workspace (TOML — comments with `#`
-are native):
+Edit the **project** config at `authorlm/config.toml` (not under
+`~/.authorlm/` — that directory is workspace state only):
 
 ```toml
-# AuthorLM configuration
+# AuthorLM configuration — decisions, versioned with the code
 [llm]
 enabled = true
 model = "gemini/gemini-2.5-flash"
 ```
 
+**Reading order & the TOC.** A `toc.toml` in the manuscript root is
+structural, not prose: ordered `[[chapter]]` tables define the
+authoritative reading order used by prerequisite checks, definition
+precedence (a concept's primary location is its first reading-order
+appearance; if that text is deleted, the location re-points and you're
+told), plan placement, hierarchical extraction, critique sequencing, and
+exports.
 
-**Reading order & the TOC.** A `toc.md` in the manuscript root is
-structural, not prose: its ordered file references (e.g. `1. preface.md`)
-define the authoritative reading order used by prerequisite checks,
-definition precedence (a concept's primary location is its first
-reading-order appearance; if that text is deleted, the location re-points
-and you're told), plan placement, and hierarchical extraction. Files not
-listed fall back to alphabetical order and are flagged in the briefing.
+```toml
+[[chapter]]
+file = "title.md"
+matter = "front"
+
+[[chapter]]
+file = "preface.md"
+matter = "front"
+
+[[chapter]]
+file = "chapter1.md"   # matter defaults to main; use parent = "…" for nesting
+```
+
+`matter` is `front` | `main` (default) | `back`. Files not listed fall
+back to alphabetical order and are flagged in the briefing. Without a
+parseable `toc.toml`, reading order is alphabetical. `toc.toml` is
+versioned like any file but excluded from concept scanning.
+
 Concepts whose text vanishes entirely become proposals: adopt retires
 them, dismiss keeps them as declared placeholders. Full extractions larger
 than `extraction_max_chars` run hierarchically — one bounded pass per file
