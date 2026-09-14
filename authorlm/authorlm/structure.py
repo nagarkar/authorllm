@@ -70,7 +70,7 @@ def is_structural(name: str) -> bool:
 def refuse_sidecar(name: str) -> None:
     """The named refusal, shared by every verb that could be pointed at
     the dictionary and must not run on it: `filter run|prelude|record|
-    settle`, `lens run`, and `intent --scope`.
+    resolve`, `lens run`, and `intent --scope`.
 
     Every one of these ALREADY refuses through the generic
     "not in the manuscript's reading order" path — the sidecar is out of

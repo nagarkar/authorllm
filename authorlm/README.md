@@ -262,11 +262,15 @@ keyword in the margin ("go ahead", "lgtm" / "no", "revert"), edits the
 green text first if they wish (modified acceptance — their words win),
 or resolves the thread to withdraw the proposal. The next pull executes
 the verdict, closes the thread with a receipt, and mirrors the result
-locally. Pushes on thread-bearing tabs are surgical paragraph diffs
-(read-back proven), so anchors survive. Every terminal verdict lands as
-evidence; explained verdicts (`doc decide … --reason`) can seed scoped
-candidate policies through a decline-by-default distiller.
-Design: docs/margin-threads-design.md.
+locally. Push path depends on the tab's content: thread- or
+comment-bearing tabs without tables push by surgical paragraph diff
+(read-back proven), so anchors survive; a tab that contains a markdown
+pipe table always rebuilds wholesale — Docs cell paragraphs and the
+markdown table block never align for diff, so anchors on that tab are
+orphaned (known price; resolve open threads before pushing). Every
+terminal verdict lands as evidence; explained verdicts
+(`doc decide … --reason`) can seed scoped candidate policies through a
+decline-by-default distiller. Design: docs/margin-threads-design.md.
 
 ## Critique pass (operator walkthrough)
 
@@ -374,8 +378,9 @@ outside 24–828. Math/region rules: docs/math-and-physics-guidelines.md.
 ## Ingesting PDFs (critique reports, references)
 
 ```bash
-python3 tools/pdf2md.py report.pdf                 # writes report.md alongside
-python3 tools/pdf2md.py book.pdf -o notes.md --pages 12-40
+# from the repo root (or cd authorlm && python3 tools/pdf2md.py …):
+python3 authorlm/tools/pdf2md.py report.pdf           # writes report.md alongside
+python3 authorlm/tools/pdf2md.py book.pdf -o notes.md --pages 12-40
 ```
 
 Text-layer pages extract directly; image-only pages OCR via Apple Vision

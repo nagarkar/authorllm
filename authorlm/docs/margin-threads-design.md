@@ -129,12 +129,19 @@ re-proposing", and a fresh proposal is drafted against current text.
   ends byte-equivalent to local, PROVEN by a re-export read-back;
   mismatch → one retry → loud conflict, never a silent rebuild).
   Anchors on unchanged text survive by construction.
-- SHIPPED (step 3): thread-bearing tabs push surgically by paragraph
-  diff (export-space diff, positional paragraph mapping, temp-doc
-  imports for changed paragraphs, read-back proof with one retry);
-  edits overlapping a pending span refuse loudly. Tabs without open
-  threads keep the battle-tested rebuild push. The interim
-  defer-general-pushes rule is lifted.
+- SHIPPED (step 3): thread- or comment-bearing tabs **without tables**
+  push surgically by paragraph diff (export-space diff, positional
+  paragraph mapping, temp-doc imports for changed paragraphs,
+  read-back proof with one retry); edits overlapping a pending span
+  refuse loudly. Tabs without open threads keep the battle-tested
+  rebuild push. The interim defer-general-pushes rule is lifted.
+- SHIPPED (2026-09-03, it-08b8b0a0c737 / e21a4ac): a tab whose local
+  markdown contains a pipe-table delimiter row **always rebuilds**,
+  even when threads or comments are open. Docs reports every cell as a
+  paragraph while the markdown export carries the table as one block,
+  so the two sides never align and `diff_push` refuses. Comment anchors
+  orphaned by that rebuild are the known price — resolve open threads
+  before pushing a table-bearing file.
 - Checkout semantics unchanged.
 
 ## Evidence (the third channel)

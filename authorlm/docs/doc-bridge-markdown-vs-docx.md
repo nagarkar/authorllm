@@ -43,6 +43,15 @@ transplants. Whatever the converter produces, only what the transplant
 carries reaches the tab. Today that is text runs, bold, italic, underline, links, headings, bullets, and (since 2026-09-03, it-08b8b0a0c737) tables, rebuilt with `insertTable` and filled cell by cell. Equations, footnotes, and images are dropped at that step whether the source was markdown or
 DOCX.
 
+**Push path once a tab holds a table.** Thread- and comment-bearing tabs
+normally push by surgical paragraph diff so margin anchors survive. A
+tab whose local markdown contains a pipe-table delimiter cannot: Docs
+reports every cell as a paragraph while the markdown export carries the
+table as one block, so the sides never align and `diff_push` refuses.
+`push_doc` therefore rebuilds that tab wholesale (e21a4ac). Resolve open
+threads before pushing a table-bearing file — the rebuild orphans their
+anchors.
+
 ## What DOCX would change, step by step
 
 **Import into the temp Doc.** DOCX carries equations (as native Docs
