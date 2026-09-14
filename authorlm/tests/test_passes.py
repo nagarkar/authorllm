@@ -2100,9 +2100,9 @@ def _recovery_while_forms_are_out(root: Path) -> None:
     result = api.filter_unmark(db, manuscript, "solo.md", force=True,
                                services=lambda: (fake, fake))
     tab = fake.tab_text("solo.md")
-    check("F-D10 the tab is rebuilt CLEAN — the threads return to "
-          "`accepted` first, which is what lifts `push_doc`'s own "
-          "forms_pending refusal, and only then does the push run",
+    check("F-D10 the tab is rebuilt CLEAN — force_rebuild skips "
+          "forms_pending and the surgical path, then threads return to "
+          "`accepted`",
           "<<" not in tab and "{{" not in tab
           and "Alpha opens the essay" in tab, tab)
     check("F-D10 ...and a rebuild really reached the wire",
