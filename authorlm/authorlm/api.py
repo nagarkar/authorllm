@@ -5599,14 +5599,22 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
                 f"marked passages, run 'doc pull {rel}' first: it brings "
                 f"that edit down to the file and leaves the tab and the "
                 f"forms alone. Then re-run with --force.")
-        # Withdraw FIRST: `push_doc`'s DB guard refuses while any form is
-        # `written`, and it is right to. Returning the threads to their
-        # PRE-PUSH state is what lifts it.
-        for t in written:
-            db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
+        # Rebuild FIRST, while threads are still `written`. Ordinary
+        # `push_doc` would refuse on forms_pending, and with open Doc
+        # comments it would take the surgical path — which treats
+        # strip_pending(tab)==local as a no-op and leaves the markers
+        # in place. Demoting threads before that push left the Doc
+        # marked, forms_pending false, and unmark unretryable.
+        # `force_rebuild` is the contract `--force` already promised:
+        # wipe the whole tab from the pristine local file (comment
+        # anchors are the known price). Only then return threads to
+        # their pre-push state so a failed rebuild leaves them
+        # `written` and retryable.
         service, docs_service = _resolve_services(services, rel)
         gdocs.push_doc(db, manuscript, rel, service=service,
-                       docs_service=docs_service)
+                       docs_service=docs_service, force_rebuild=True)
+        for t in written:
+            db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
         return {"file": rel, "reopened": len(written), "mode": "doc",
                 "text": path.read_text(encoding="utf-8"),
                 "marker_warnings": []}

@@ -1555,6 +1555,20 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-rollback")
     (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
+    # Rebuild the tab BEFORE withdrawing threads. `force_rebuild` skips
+    # forms_pending and the surgical path so open comments cannot leave
+    # leftover <<>>{{}} forms after threads are already gone. A failed
+    # push then still has `written` rows to retry against.
+    try:
+        service = gdocs.get_service(config, args.workspace, interactive=True)
+        docs_service = gdocs.get_docs_service(config, args.workspace,
+                                              interactive=True)
+        gdocs.push_doc(db, manuscript, file, service=service,
+                       docs_service=docs_service, force_rebuild=True)
+        print(ui.dim("Doc tab restored."))
+    except ValueError as err:
+        print(ui.yellow(f"local restored; Doc not reachable ({err}) — "
+                        f"'doc push {file}' when it is."))
     for t in passes.staged_threads(db, mid, file,
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
@@ -1575,16 +1589,6 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="critique-rollback",
                     episode=api.NO_EPISODE)
-    try:
-        service = gdocs.get_service(config, args.workspace, interactive=True)
-        docs_service = gdocs.get_docs_service(config, args.workspace,
-                                              interactive=True)
-        gdocs.push_doc(db, manuscript, file, service=service,
-                       docs_service=docs_service)
-        print(ui.dim("Doc tab restored."))
-    except ValueError as err:
-        print(ui.yellow(f"local restored; Doc not reachable ({err}) — "
-                        f"'doc push {file}' when it is."))
     passes.set_essay_state(db, p, file, "pending")
     print(ui.green(f"rolled back {file}") + ui.dim(
         " — verdicts kept as evidence; re-run when ready."))

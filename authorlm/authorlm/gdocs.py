@@ -1202,10 +1202,20 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
 
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
-             docs_service=None, bridge: DocBridge | None = None) -> dict:
+             docs_service=None, bridge: DocBridge | None = None,
+             force_rebuild: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
-    → transplant into the tab → temp deleted. Marks the file checked out."""
+    → transplant into the tab → temp deleted. Marks the file checked out.
+
+    `force_rebuild` skips the pending-forms gate and the surgical path.
+    Only recovery verbs that already promised a whole-tab wipe may set
+    it — today `filter unmark --force` (and critique rollback's Doc
+    restore). Open comment anchors are the known price of that rebuild;
+    surgical diff_push cannot clear leftover `<<>>{{}}` forms when
+    strip_pending(tab) still equals local (the common case after a
+    filter push), and would leave the Doc marked after the caller had
+    already moved threads off `written`."""
     import hashlib
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -1223,7 +1233,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # row — so the two are ordered most-informative first, and both are
     # separately reachable (filter-pass design §2.3 / F31).
     origin = forms_pending(db, manuscript["id"], relpath)
-    if origin:
+    if origin and not force_rebuild:
         remedy = _SETTLE_REMEDY.get(origin, "settle the staged edits")
         raise LookupError(
             f"'{relpath}' has {origin} pending forms — "
@@ -1237,9 +1247,9 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
     # comment anchors that a rebuild orphans are the known price.
     has_table = bool(_TABLE_DELIM.search(path.read_text(encoding="utf-8")))
-    if not has_table and (
+    if (not force_rebuild and not has_table and (
             threads_mod.open_threads(db, manuscript["id"], relpath)
-            or comment_bearing(db, manuscript, bridge, relpath, service)):
+            or comment_bearing(db, manuscript, bridge, relpath, service))):
         # Surgical path: a rebuild would orphan the open margin threads
         # AND every open comment anchor (it-77ef98f5289e), so tabs
         # carrying either push by paragraph diff instead — anchors on

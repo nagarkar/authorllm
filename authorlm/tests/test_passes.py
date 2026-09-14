@@ -2123,6 +2123,62 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           elsewhere not in tab
           and "Omega closes the essay on a falling cadence." in tab, tab)
 
+    # --- open comments must not leave markers after unmark --force ---
+    # Ordinary push_doc routes through surgical diff_push when comments
+    # are open. strip_pending(tab)==local is a no-op that leaves <<>>{{}}
+    # in place; demoting threads first made that state unretryable.
+    db_oc, ms_oc, msdir_oc, fake_oc = _doc_run(
+        root, "unmark-open-comments-ws", {2: "TWO UNDER COMMENT."})
+    api.filter_push(db_oc, ms_oc, {}, "solo.md",
+                    services=lambda: (fake_oc, fake_oc))
+    assert "<<" in fake_oc.tab_text("solo.md")
+    bodies_oc = len(fake_oc.bodies)
+    real_bearing = gdocs.comment_bearing
+    gdocs.comment_bearing = lambda *a, **k: True
+    try:
+        oc = api.filter_unmark(db_oc, ms_oc, "solo.md", force=True,
+                               services=lambda: (fake_oc, fake_oc))
+    finally:
+        gdocs.comment_bearing = real_bearing
+    tab_oc = fake_oc.tab_text("solo.md")
+    states_oc = [t["state"] for t in api._run_threads(
+        db_oc, ms_oc["id"], _run_row(db_oc, ms_oc["id"]))]
+    check("unmark --force with open comments rebuilds the tab CLEAN "
+          "(force_rebuild), not a surgical no-op that leaves markers",
+          "<<" not in tab_oc and "{{" not in tab_oc
+          and "TWO UNDER COMMENT" not in tab_oc
+          and "Alpha opens the essay" in tab_oc, tab_oc)
+    check("...and a rebuild really reached the wire despite open comments",
+          len(fake_oc.bodies) > bodies_oc)
+    check("...and verdicts survive at accepted after the forced rebuild",
+          oc["reopened"] >= 1 and states_oc.count("accepted") >= 1
+          and "written" not in states_oc, str(states_oc))
+
+    # Crash-safety: if the rebuild raises, threads stay `written`.
+    db_fail, ms_fail, _msdir_fail, fake_fail = _doc_run(
+        root, "unmark-rebuild-fail-ws", {2: "TWO THEN FAIL."})
+    api.filter_push(db_fail, ms_fail, {}, "solo.md",
+                    services=lambda: (fake_fail, fake_fail))
+    real_push = gdocs.push_doc
+    def _boom(*a, **k):
+        raise LookupError("simulated rebuild failure")
+    gdocs.push_doc = _boom
+    raised_fail = None
+    try:
+        api.filter_unmark(db_fail, ms_fail, "solo.md", force=True,
+                          services=lambda: (fake_fail, fake_fail))
+    except LookupError as err:
+        raised_fail = str(err)
+    finally:
+        gdocs.push_doc = real_push
+    states_fail = [t["state"] for t in api._run_threads(
+        db_fail, ms_fail["id"], _run_row(db_fail, ms_fail["id"]))]
+    check("unmark --force that fails mid-rebuild leaves threads `written` "
+          "(retryable) — never demotes first",
+          raised_fail is not None and "simulated rebuild failure" in raised_fail
+          and states_fail.count("written") >= 1
+          and "accepted" not in states_fail, str(states_fail))
+
     # --- P2a: the remedy the refusal names is REAL, not a slogan ------
     db3, ms3, msdir3, fake3 = _doc_run(root, "recover-pull-ws",
                                        {2: "TWO AS PROPOSED."})
