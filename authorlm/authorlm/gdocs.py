@@ -55,7 +55,16 @@ _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
 # `\\` row break or a `\{` brace. Spans are lifted out before the prose
 # rules run and put back after; only display layout is canonicalized
 # (one physical line — the Doc reflows a block to that anyway).
-_DISPLAY_MATH = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+#
+# Display math is LINE-BOUNDED, never mid-prose. An anywhere-in-text
+# `$$…$$` regex pairs a money-slang `$$` (or `$$` inside an illustration
+# prompt) with a later real display delimiter and collapses every
+# intervening paragraph into one "math" span — then push_doc writes the
+# damage back. Match the authorial forms only: a whole-line `$$…$$`, or a
+# multi-line block opened and closed by a lone `$$`.
+_DISPLAY_MATH_LINE = re.compile(r"^\$\$(.+?)\$\$[ \t]*$", re.MULTILINE)
+_DISPLAY_MATH_BLOCK = re.compile(
+    r"^\$\$[ \t]*$\n(.*?)^\$\$[ \t]*$", re.MULTILINE | re.DOTALL)
 _INLINE_MATH = re.compile(
     r"(?<![\\$])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?![\d$])")
 _MATH_SENTINEL = "\x00M%d\x00"
@@ -64,7 +73,10 @@ _SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
 
 def map_math(text: str, fn) -> str:
     """fn over the inside of every math span, delimiters excluded."""
-    text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
+    text = _DISPLAY_MATH_BLOCK.sub(
+        lambda m: "$$\n" + fn(m.group(1)) + "\n$$", text)
+    text = _DISPLAY_MATH_LINE.sub(
+        lambda m: "$$" + fn(m.group(1)) + "$$", text)
     return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
 
 
@@ -79,7 +91,8 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(m.group(0))
         return _MATH_SENTINEL % (len(spans) - 1)
 
-    text = _DISPLAY_MATH.sub(display, text)
+    text = _DISPLAY_MATH_BLOCK.sub(display, text)
+    text = _DISPLAY_MATH_LINE.sub(display, text)
     return _INLINE_MATH.sub(inline, text), spans
 
 

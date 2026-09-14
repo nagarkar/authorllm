@@ -6073,6 +6073,39 @@ def main_test() -> None:
         check("math round-trips the Doc road byte for byte",
               pulled == canon, repr(pulled))
 
+        # Display math is line-bounded. A mid-prose `$$` (money slang,
+        # or inside an illustration prompt) must NOT pair with a later
+        # real display delimiter — the old anywhere-`$$…$$` regex
+        # collapsed every intervening paragraph into one math span and
+        # push_doc wrote the damage back.
+        money = ("It costs $$ to fix.\n\n"
+                 "Some important argument here that must not vanish.\n\n"
+                 "$$ E = mc^2 $$\n\n"
+                 "Aftermath.\n")
+        money_out = normalize_markdown(money)
+        check("mid-prose $$ does not swallow following paragraphs into "
+              "display math",
+              money_out == ("It costs $$ to fix.\n\n"
+                            "Some important argument here that must not "
+                            "vanish.\n\n"
+                            "$$ E = mc^2 $$\n\n"
+                            "Aftermath.\n"),
+              repr(money_out))
+        illus_money = (
+            "[Illustration: a machine that costs $$ to run "
+            "| caption: The machine]\n\n"
+            "The machine matters for the argument.\n\n"
+            "$$ \\nabla \\cdot \\mathbf{E} = 0 $$\n")
+        illus_out = normalize_markdown(illus_money)
+        check("$$ inside an illustration prompt does not absorb the "
+              "essay that follows",
+              illus_out == (
+                  "[Illustration: a machine that costs $$ to run "
+                  "| caption: The machine]\n\n"
+                  "The machine matters for the argument.\n\n"
+                  "$$ \\nabla \\cdot \\mathbf{E} = 0 $$\n"),
+              repr(illus_out))
+
         # An empty heading paragraph in the Doc (e.g. a blank Subtitle
         # line) must be dropped — never merged into the next heading
         # ('## ##', it-7b127d3164ff).
