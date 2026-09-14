@@ -5,18 +5,20 @@ here because the decisions (jurisdictions, rejected alternatives)
 outlive the build. Implementation status of the co-writing loop
 lives in autoregressive-writing-design.md §11.
 
-## Tab hierarchy and reordering from toc.md (gdocs)
-`reading_order` (structure.py) parses toc.md as a flat filename list —
-indentation never enters the parse — and `ensure_master` (gdocs.py) sends
-`addDocumentTab` with only a title, never `parentTabId`. Consequences:
-nested toc entries push as flat sibling tabs, and toc order is honored
-only at tab-creation time — reordering toc.md later never repositions
-existing tabs. Design: toc.md indentation defines tab hierarchy (nested
-entries become child tabs via `parentTabId`); `ensure_master` diffs the
-Doc's tab tree against the toc tree on every push and repositions /
-re-parents existing tabs to match, rather than only appending missing
-ones. Ratified 2026-07-27; build when a manuscript actually nests its
-chapters.
+## Tab hierarchy and reordering from the TOC (gdocs)
+**Built today:** `reading_order` (structure.py) parses `toc.toml` —
+ordered `[[chapter]]` tables with optional `parent` / `matter` — and
+`ensure_master` (gdocs.py) sends `addDocumentTab` with only a title,
+never `parentTabId`. Nested `parent` links therefore still push as flat
+sibling tabs; toc order is honored at tab-creation time, and later
+reorders do not reposition existing tabs until a full rebuild path runs.
+
+**Still backlog (ratified 2026-07-27):** make `ensure_master` diff the
+Doc's tab tree against the toc tree on every push and re-parent via
+`parentTabId`, rather than only appending missing ones. Build when a
+manuscript actually nests its chapters. (Pre-toml design text spoke of
+`toc.md` indentation; the structural source of truth is now
+`toc.toml`.)
 
 
 ## Autoregressive paragraph-level co-writing loop
@@ -95,7 +97,7 @@ authority on what tabs exist; the stable key is the tab ID (survives
 renames), titles are display names. On every pull, classify_tabs
 (gdocs.py) reconciles: unknown '*.md' tab with no local file → ADOPTED
 (new essay materializes on that same pull; output tells the author to
-place it in toc.md); unknown '*.md' tab matching an existing file or link
+place it in toc.toml); unknown '*.md' tab matching an existing file or link
 → RE-ADOPTED (relinked; the push-base is dropped, so content drift
 surfaces as a CONFLICT — never the no-base Doc-wins default, because when
 both sides hold content, choosing is the author's call); known id with a
