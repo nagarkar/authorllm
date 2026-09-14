@@ -38,11 +38,23 @@ _NOTE_LABEL = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
 
 def footnote_prefixes(names: list[str]) -> dict[str, str]:
-    """Per-file namespace tokens for footnote labels in combined exports:
-    the shortest unique prefix of each file's stem — the first letter,
-    extended to k+1 letters wherever two files collide on their first k
-    (the author's scheme, it-9e6b7613a5c5). An exhausted stem uses its
-    whole self; file names are unique, so the map is collision-free."""
+    """Per-file namespace tokens for footnote labels in combined exports.
+
+    Each token is `{index}-{prefix}` where `index` is the file's position
+    in `names` (reading order) and `prefix` is the shortest unique prefix
+    of the stem — the author's scheme (it-9e6b7613a5c5), first letter,
+    extended wherever two stems share a prefix.
+
+    The leading index is load-bearing. Stem prefixes alone are NOT
+    collision-free under a hyphen join: with `good.md`, `good-choice.md`
+    and `good-life.md` the tokens are `good` / `good-c` / `good-l`, and
+    `[^c-1]` in the first file namespaces to the same `[^good-c-1]` as
+    `[^1]` in the second — pandoc then binds both to one definition and
+    a footnote silently points at the wrong note (or loses one body).
+    Labels and stem prefixes share the alphabet `[A-Za-z0-9_-]`, so no
+    single join character inside that alphabet is injective; the index
+    makes the left side unique regardless of label shape. An exhausted
+    stem uses its whole self."""
     stems = {name: Path(name).stem for name in names}
     tokens: dict[str, str] = {}
     for name, stem in stems.items():
@@ -51,13 +63,16 @@ def footnote_prefixes(names: list[str]) -> dict[str, str]:
         while k < len(stem) and any(o[:k] == stem[:k] for o in others):
             k += 1
         tokens[name] = stem[:k]
-    return tokens
+    # Reading-order index first — see docstring. `names` may contain
+    # duplicates only if the caller is broken; first wins.
+    return {name: f"{i}-{tokens[name]}" for i, name in enumerate(names)}
 
 
 def namespace_footnotes(text: str, token: str) -> str:
     """[^X] → [^token-X] on every reference and definition, so labels
     stay unique after concatenation. Labels never render — the reader's
-    footnote numbering is untouched; only the collision goes away."""
+    footnote numbering is untouched; only the collision goes away.
+    `token` must be unique across files (footnote_prefixes)."""
     return _NOTE_LABEL.sub(lambda m: f"[^{token}-{m.group(1)}]", text)
 
 
@@ -157,9 +172,10 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     Pure concatenation of the normalized content files in reading order —
     no added headings or separators; the combination is mechanical, the
     prose stays exactly the author's. Footnote labels alone are
-    namespaced per file (footnote_prefixes): they are only file-unique
-    in the sources, and pandoc would bind colliding labels to one
-    definition across essays. Region tags resolve for the `doc` output."""
+    namespaced per file (footnote_prefixes: reading-order index plus
+    shortest unique stem prefix): they are only file-unique in the
+    sources, and pandoc would bind colliding labels to one definition
+    across essays. Region tags resolve for the `doc` output."""
     files = read_manuscript_files(Path(manuscript["path"]))
     order, unlisted = reading_order(files)
     tokens = footnote_prefixes(order)

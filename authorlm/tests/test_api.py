@@ -7556,15 +7556,30 @@ def main_test() -> None:
         # letter by letter on collision (the author's scheme).
         from authorlm.export import footnote_prefixes, namespace_footnotes
 
-        toks = footnote_prefixes(
-            ["recapitulation.md", "rebirth.md", "redemption.md",
-             "god.md", "good-choice.md", "good-life.md", "kindness.md"])
-        check("footnote prefixes extend letterwise until unique",
-              toks == {"recapitulation.md": "rec", "rebirth.md": "reb",
-                       "redemption.md": "red", "god.md": "god",
-                       "good-choice.md": "good-c",
-                       "good-life.md": "good-l", "kindness.md": "k"},
+        order_names = ["recapitulation.md", "rebirth.md", "redemption.md",
+                       "god.md", "good-choice.md", "good-life.md",
+                       "kindness.md"]
+        toks = footnote_prefixes(order_names)
+        check("footnote prefixes extend letterwise until unique, "
+              "indexed by reading order",
+              toks == {"recapitulation.md": "0-rec", "rebirth.md": "1-reb",
+                       "redemption.md": "2-red", "god.md": "3-god",
+                       "good-choice.md": "4-good-c",
+                       "good-life.md": "5-good-l", "kindness.md": "6-k"},
               toks)
+        # Stem prefixes alone collide under a hyphen join: good + c-1 and
+        # good-c + 1 both yielded good-c-1. The leading index keeps them
+        # apart even for that adversarial label shape.
+        cross = footnote_prefixes(
+            ["good.md", "good-choice.md", "good-life.md"])
+        check("indexed tokens keep good[^c-1] apart from good-choice[^1]",
+              namespace_footnotes("[^c-1]", cross["good.md"])
+              != namespace_footnotes("[^1]", cross["good-choice.md"])
+              and namespace_footnotes("[^c-1]", cross["good.md"])
+              == "[^0-good-c-1]"
+              and namespace_footnotes("[^1]", cross["good-choice.md"])
+              == "[^1-good-c-1]",
+              cross)
         noted = "The herd [^E1] persists.\n\n[^E1]: A note.\n"
         check("namespace_footnotes rewrites refs and definitions",
               namespace_footnotes(noted, "k")
@@ -7581,9 +7596,11 @@ def main_test() -> None:
         collided, _, _ = combined_markdown(api.get_manuscript(db))
         import re as _re
         labels = _re.findall(r"\[\^([A-Za-z0-9_-]+)\]", collided)
+        defs = _re.findall(r"\[\^([A-Za-z0-9_-]+)\]:", collided)
         check("combined export carries no duplicate footnote labels",
               len(set(labels)) * 2 == len(labels)  # each label: 1 ref + 1 def
-              and "02-E1" in labels and "03-E1" in labels, labels)
+              and len(defs) == len(set(defs))
+              and "2-02-E1" in labels and "3-03-E1" in labels, labels)
         for name in ("02-kind.md", "03-rank.md"):
             (ms / name).unlink()
         (ms / "toc.toml").write_text(
