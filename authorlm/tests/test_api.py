@@ -5224,7 +5224,281 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_mention_pattern() -> None:
+    """Capitalized single-word terms of art keep their case on mention.
+
+    First-mention / prerequisite scans must not treat casual English
+    ('time and space') as the declared concept ('Space'). Multi-word
+    names stay case-insensitive via concept_pattern."""
+    from authorlm.concepts import mention_pattern
+
+    space = mention_pattern("Space")
+    check("a capitalized single-word term hits its capitalized form",
+          bool(space.search("ye name it Space")))
+    check("the same word in casual lowercase is not a term-of-art hit",
+          space.search("time and space") is None)
+    check("plurals of a capitalized term still count",
+          bool(mention_pattern("Field").search("the Fields open")))
+    check("a y-ending capitalized term accepts ies plurals",
+          bool(mention_pattern("Trajectory").search("Trajectories bend")))
+    check("multi-word names stay case-insensitive",
+          bool(mention_pattern("the herdsman").search("The Herdsman walks")))
+    check("an uncapitalized single-word name is case-insensitive",
+          bool(mention_pattern("gravity").search("Gravity bends light")))
+
+
+def check_pick_primary_and_members_view() -> None:
+    """Most-specific intent wins; same-tier ties are left unbroken.
+
+    Wrong primary rewrites drafting framing; a machine-broken tie would
+    silently pick a standing goal the author never chose. `_members_view`
+    is the byte-stable render order for block A."""
+    root = Path(tempfile.mkdtemp(prefix="authorlm-primary-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "part.md").write_text("# Part\n", encoding="utf-8")
+        (ms / "01-a.md").write_text("# A\n", encoding="utf-8")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "part.md"\n'
+            '[[chapter]]\nfile = "01-a.md"\nparent = "part.md"\n',
+            encoding="utf-8",
+        )
+        manuscript = {"path": str(ms), "id": "m-primary"}
+
+        primary, cands = api._pick_primary(
+            manuscript, "01-a.md",
+            [{"id": "wide", "scope": None},
+             {"id": "file", "scope": "01-a.md"},
+             {"id": "chap", "scope": "part.md"}],
+        )
+        check("file scope beats chapter and manuscript for primary",
+              primary == "file" and cands == ["file"],
+              f"{primary!r} {cands!r}")
+
+        primary, cands = api._pick_primary(
+            manuscript, "01-a.md",
+            [{"id": "z-file", "scope": "01-a.md"},
+             {"id": "a-file", "scope": "01-a.md"}],
+        )
+        check("two file-tier members leave primary unset (a tie)",
+              primary is None and cands == ["a-file", "z-file"],
+              f"{primary!r} {cands!r}")
+        check("an empty member list yields no primary",
+              api._pick_primary(manuscript, "01-a.md", []) == (None, []))
+
+        view = api._members_view({
+            "members": [
+                {"id": "m", "tier": "manuscript", "role": "secondary"},
+                {"id": "f", "tier": "file", "role": "primary"},
+                {"id": "c", "tier": "chapter", "role": "secondary"},
+                {"id": "x", "tier": "weird", "role": "secondary"},
+            ],
+        })
+        check("members_view: primary first, then tier rank, then id",
+              [m["id"] for m in view] == ["f", "c", "m", "x"],
+              [m["id"] for m in view])
+        check("members_view tolerates a missing members list",
+              api._members_view({}) == [])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_intent_dispositions() -> None:
+    """At complete: deferred / served / unserved, with untagged beats serving all.
+
+    Mis-tallying here lies about which goals the essay served and pollutes
+    each intent's served_by history."""
+    tagged = {
+        "plan": json.dumps([{"intents": ["a"]}, {"intents": ["b"]}]),
+        "cursor": 1,
+    }
+    block = {"members": [{"id": "a"}, {"id": "b"}], "deferred": {}}
+    by_id = {d["id"]: d for d in api._intent_dispositions(tagged, block)}
+    check("a tagged accepted beat serves only the listed member",
+          by_id["a"]["disposition"] == "served"
+          and by_id["b"]["disposition"] == "unserved"
+          and by_id["a"]["beats"] == 1,
+          str(by_id))
+
+    untagged = {"plan": json.dumps([{"intents": []}]), "cursor": 1}
+    by_id = {d["id"]: d for d in api._intent_dispositions(untagged, block)}
+    check("an untagged accepted beat serves every member",
+          by_id["a"]["disposition"] == "served"
+          and by_id["b"]["disposition"] == "served")
+
+    deferred = {
+        "members": [{"id": "a"}, {"id": "b"}],
+        "deferred": {"b": {"reason": "later"}},
+    }
+    by_id = {d["id"]: d for d in api._intent_dispositions(untagged, deferred)}
+    check("deferred wins over an otherwise-served member",
+          by_id["b"]["disposition"] == "deferred"
+          and by_id["b"]["reason"] == "later"
+          and by_id["a"]["disposition"] == "served",
+          str(by_id))
+    check("an empty intent block yields no dispositions",
+          api._intent_dispositions(tagged, {}) == [])
+
+
+def check_refuse_mid_rewrite() -> None:
+    """Doc push refuses placeholder and pending-form bytes on the raw file.
+
+    Softening either guard makes the Doc authoritative over text that is
+    not the essay yet, or plants <<>>{{}} markers into the working copy."""
+    from authorlm.gdocs import _refuse_mid_rewrite
+
+    try:
+        _refuse_mid_rewrite("01-a.md", api.PLACEHOLDER)
+        ph_refused, ph_msg = False, ""
+    except LookupError as err:
+        ph_refused, ph_msg = True, str(err)
+    check("a placeholder file is refused before Doc push",
+          ph_refused and "write complete" in ph_msg
+          and "write abandon" in ph_msg, ph_msg)
+
+    try:
+        _refuse_mid_rewrite("01-a.md", "Lead <<old>>{{new}} Trailing")
+        mk_refused, mk_msg = False, ""
+    except LookupError as err:
+        mk_refused, mk_msg = True, str(err)
+    check("pending-form bytes are refused before Doc push",
+          mk_refused and "filter resolve" in mk_msg
+          and "filter unmark" in mk_msg, mk_msg)
+
+    try:
+        _refuse_mid_rewrite("01-a.md", "An essay with {{title}} braces only.")
+        bare_ok = True
+    except LookupError:
+        bare_ok = False
+    check("bare {{…}} braces alone are not mid-settle", bare_ok)
+
+    try:
+        _refuse_mid_rewrite("01-a.md", "Finished prose with no markers.")
+        clean_ok = True
+    except LookupError:
+        clean_ok = False
+    check("clean prose is allowed through the mid-rewrite guard", clean_ok)
+
+
+def check_prefix_choice() -> None:
+    """CLI concept triage resolves by exact name or unambiguous prefix ≥2.
+
+    Single-letter input stays reserved for triage keys; wrong hits retire
+    or retype the wrong concept."""
+    from authorlm.cli import _prefix_choice
+
+    options = ["gravity", "gradation", "field"]
+    check("an exact name wins even when a shorter prefix would also match",
+          _prefix_choice("gravity", options) == ("gravity", []))
+    check("an unambiguous prefix of length ≥2 resolves",
+          _prefix_choice("fi", options) == ("field", []))
+    check("a single letter is refused (triage keys stay reserved)",
+          _prefix_choice("g", options) == (None, []))
+    check("an ambiguous prefix returns every match, unsorted choice None",
+          _prefix_choice("gra", options) == (None, ["gradation", "gravity"]))
+    check("a miss returns no match and an empty ambiguity list",
+          _prefix_choice("zz", options) == (None, []))
+
+
+def check_resolve_or_new_and_match() -> None:
+    """Essay targets resolve uniquely; --new only invents when unmatched.
+
+    Softening this turns typos into new writeups, or silently rewrites an
+    existing essay the author meant to leave alone."""
+    from authorlm.docs import _match
+    from authorlm.revisions import iter_manuscript_paths
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-resolve-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "01-choice.md").write_text("# Choice\n", encoding="utf-8")
+        (ms / "02-gravity.md").write_text("# Gravity\n", encoding="utf-8")
+        manuscript = {"path": str(ms), "id": "m-resolve"}
+        candidates = iter_manuscript_paths(ms)
+
+        check("exact relpath match wins",
+              _match(candidates, "01-choice.md").name == "01-choice.md")
+        check("a unique substring resolves case-insensitively",
+              _match(candidates, "CHOICE").name == "01-choice.md")
+        try:
+            _match(candidates, "0")
+            ambig_refused, ambig_msg = False, ""
+        except LookupError as err:
+            ambig_refused, ambig_msg = True, str(err)
+        check("an ambiguous substring is refused",
+              ambig_refused and "ambiguous" in ambig_msg, ambig_msg)
+        try:
+            _match(candidates, "nope")
+            miss_refused = False
+        except LookupError:
+            miss_refused = True
+        check("a complete miss is refused", miss_refused)
+
+        check("without --new, an existing name resolves to its relpath",
+              api._resolve_or_new(manuscript, "01-choice.md", False)
+              == "01-choice.md")
+        check("--new invents a normalized filename when nothing matches",
+              api._resolve_or_new(manuscript, "Brand New", True)
+              == "Brand-New.md")
+        try:
+            api._resolve_or_new(manuscript, "01-choice.md", True)
+            exists_refused, exists_msg = False, ""
+        except ValueError as err:
+            exists_refused, exists_msg = True, str(err)
+        check("existing name + --new is refused rather than rewritten",
+              exists_refused and "already exists" in exists_msg
+              and "drop --new" in exists_msg, exists_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_section_payloads() -> None:
+    """Extraction packs labelled units under the char cap without truncating.
+
+    Oversized chunks must split (section, then hard) so the model still
+    sees every byte of changed prose."""
+    from authorlm.extraction import _section_payloads
+
+    small = _section_payloads(
+        [("01-a.md", "# One\n\nBody.\n\n# Two\n\nMore.")], 10_000)
+    check("a small unit becomes one labelled payload",
+          small == ["=== 01-a.md ===\n# One\n\nBody.\n\n# Two\n\nMore."],
+          repr(small))
+
+    oversize = "x" * 50
+    hard = _section_payloads([("big.md", oversize)], 40)
+    check("an oversized chunk hard-splits rather than truncating",
+          len(hard) == 2
+          and all(p.startswith("=== big.md ===\n") for p in hard)
+          and "".join(p.split("\n", 1)[1] for p in hard) == oversize,
+          repr(hard))
+
+    # Two sections that each fit alone but not together under a tight cap.
+    left = "# A\n\n" + ("a" * 20)
+    right = "# B\n\n" + ("b" * 20)
+    chunk = f"{left}\n\n{right}"
+    # Label overhead is short; cap just under combined section size so the
+    # section-boundary split fires before the hard split.
+    label = "=== ch.md ===\n"
+    cap = len(label) + len(left) + 5
+    split = _section_payloads([("ch.md", chunk)], cap)
+    check("oversized multi-section chunks split at section boundaries first",
+          len(split) >= 2
+          and left in split[0]
+          and right in "".join(split),
+          repr(split))
+
+
 def main_test() -> None:
+    check_mention_pattern()
+    check_pick_primary_and_members_view()
+    check_intent_dispositions()
+    check_refuse_mid_rewrite()
+    check_prefix_choice()
+    check_resolve_or_new_and_match()
+    check_section_payloads()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
