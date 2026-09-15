@@ -5045,7 +5045,11 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #    on this road (F-D2).
     path = Path(manuscript["path"]) / rel
     disk = path.read_text(encoding="utf-8")
-    passes.compose_marked_text(disk, pushable)
+    # Same embed-free universe staging numbered against — a blank-line
+    # embed unit on disk would make compose's per-anchor equality check
+    # false-refuse (or, for duplicate refrains, pass the wrong unit).
+    from .revisions import strip_embed_lines
+    passes.compose_marked_text(strip_embed_lines(disk), pushable)
     # 6. The surgical writer: a levelling push of the pristine local
     #    file, then one marked span per thread, highest anchor first,
     #    located by occurrence index, then the read-back proof.
@@ -5222,13 +5226,26 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
         run = _freeze_run_mode(db, run, "local")
     # The file's OWN bytes, read directly: the resolve code owns the
     # pending-change grammar, and it is the only code in the system that
-    # is allowed to see markers.
+    # is allowed to see markers. Compose against the embed-free units
+    # staging used, then put embeds back — glued pairs via reembed,
+    # blank-line orphans via restore_orphan_embeds. Otherwise a
+    # blank-line embed unit shifts every later anchor and the form
+    # lands on the wrong twin (or compose false-refuses drift).
+    from .revisions import strip_embed_lines, restore_orphan_embeds
+    from .illus import capture_embeds, reembed
+
     disk = path.read_text(encoding="utf-8")
-    marked = staging.mark_local(path, disk, accepted) if pause else \
-        passes.compose_marked_text(disk, accepted)
+    root = Path(manuscript["path"])
+    prior = capture_embeds(disk)
+    composed = passes.compose_marked_text(strip_embed_lines(disk), accepted)
+    marked = restore_orphan_embeds(
+        disk, reembed(composed, root, prior))
+    if not marked.endswith("\n"):
+        marked += "\n"
     for t in accepted:
         db.update("doc_threads", t["id"], {"state": "written"})
     if pause:
+        path.write_text(marked, encoding="utf-8")
         # The read-back assertion: the forms must be present VERBATIM in
         # the bytes we just wrote, or the mark is undone and the resolve
         # refuses. Nothing is left half-marked.
@@ -5261,13 +5278,17 @@ def _write_resolved_text(path: Path, root: Path, final: str) -> str:
     illustration in the essay (the tag stayed, the picture under it
     vanished from Obsidian; 15 slots across SMSTTD, 2026-09-02). The
     ordinary pull re-inserts them; this is the same step, the prior
-    pick winning while its file exists."""
+    pick winning while its file exists. Blank-line orphan embeds
+    (invisible to capture_embeds) are merged back too."""
     from . import gdocs
     from .illus import capture_embeds, reembed
+    from .revisions import restore_orphan_embeds
 
     prior = path.read_text(encoding="utf-8") if path.exists() else ""
     normalized = gdocs.normalize_markdown(final)
     normalized = reembed(normalized, root, capture_embeds(prior))
+    if prior:
+        normalized = restore_orphan_embeds(prior, normalized)
     path.write_text(normalized if normalized.endswith("\n")
                     else normalized + "\n", encoding="utf-8")
     return normalized
@@ -5457,7 +5478,8 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
         warnings.append(twin_note)
     path = Path(manuscript["path"]) / rel
     disk = path.read_text(encoding="utf-8")
-    passes.compose_marked_text(disk, pushable)
+    from .revisions import strip_embed_lines
+    passes.compose_marked_text(strip_embed_lines(disk), pushable)
     service, docs_service = _resolve_services(services, rel)
     result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
                                        service, docs_service)

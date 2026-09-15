@@ -59,6 +59,49 @@ def strip_embed_lines(text: str) -> str:
     return "\n".join(lines)
 
 
+def restore_orphan_embeds(prior: str, text: str) -> str:
+    """Re-insert blank-line-bounded embed lines that `capture_embeds`
+    cannot see.
+
+    Ordinary render shape is tag then embed on the next line — 
+    `capture_embeds` / `reembed` handle that. An author-edited (or
+    orphan) blank line between them makes the embed its own paragraph:
+    strip drops it, capture_embeds skips it, and a resolve that wrote
+    the embed-free Doc text back would delete every such pick. Match
+    each prior `tag / blank / embed` triple by the tag line and put the
+    embed back when the new text still has that tag without one."""
+    from .illus import parse_tag
+
+    prior_lines = prior.split("\n")
+    orphans_after: dict[str, str] = {}
+    i = 0
+    while i < len(prior_lines) - 2:
+        if (parse_tag(prior_lines[i])
+                and not prior_lines[i + 1].strip()
+                and EMBED_LINE.match(prior_lines[i + 2])):
+            orphans_after[prior_lines[i]] = prior_lines[i + 2]
+            i += 3
+            continue
+        i += 1
+    if not orphans_after:
+        return text
+    out: list[str] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        out.append(lines[i])
+        emb = orphans_after.get(lines[i])
+        if emb:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if not (j < len(lines) and EMBED_LINE.match(lines[j])):
+                out.append("")
+                out.append(emb)
+        i += 1
+    return "\n".join(out)
+
+
 def iter_manuscript_paths(root: Path) -> dict[str, Path]:
     """Manuscript files by relative path. Directories whose name starts with
     '.' or '_' are invisible to observation — this keeps editor internals

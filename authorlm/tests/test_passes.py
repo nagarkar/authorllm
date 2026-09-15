@@ -964,6 +964,105 @@ def _a_paragraph_that_contains_another(root: Path) -> None:
           and len(forced["failed"]) == 1, tab2)
 
 
+EMBED_SKEW_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha",
+    "[Illustration: pic 0]",
+    "![](_illustrations/p0.png)",
+    "Alpha",
+    "[Illustration: pic 1]",
+    "![](_illustrations/p1.png)",
+    "Alpha",
+    "[Illustration: pic 2]",
+    "![](_illustrations/p2.png)",
+    "Alpha",
+    "Beta",
+    "Alpha",
+]) + "\n"
+
+
+def _embed_blank_lines_skew_occurrence(root: Path) -> None:
+    """Blank-line embed paragraphs shift raw-disk unit indices vs the
+    embed-stripped universe staging and the leveled Doc share.
+
+    `write_pending_forms` used to count `_occurrence` on raw disk. A
+    later identical refrain then undercounted — the form landed on an
+    earlier twin, read-back still passed, resolve silently edited the
+    wrong span. The hazard is real whenever an embed sits on its own
+    blank-line-bounded paragraph (author edit, orphan line)."""
+    from authorlm.revisions import strip_embed_lines
+
+    print("P-embed: blank-line embeds must not skew occurrence:")
+
+    stripped = strip_embed_lines(EMBED_SKEW_ESSAY)
+    sp = passes.paragraphs_of(stripped)
+    rp = passes.paragraphs_of(EMBED_SKEW_ESSAY)
+    last_n = next(i for i in range(len(sp), 0, -1) if sp[i - 1] == "Alpha")
+    so = gdocs._occurrence(sp, last_n, "Alpha")
+    ro = gdocs._occurrence(rp, last_n, "Alpha")
+    check("the fixture really is the hazard: stripped and raw disagree "
+          "on the last Alpha's occurrence (§14.8)",
+          so != ro and so > ro, f"stripped_occ={so} raw_occ={ro} n={last_n}")
+    check("...and raw unit n is NOT the target Alpha (it is an embed "
+          "or earlier content) — that is the index skew",
+          rp[last_n - 1] != "Alpha", repr(rp[last_n - 1]))
+
+    ws = root / "embed-skew-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(EMBED_SKEW_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    api.filter_add(manuscript, "duplicate-words", DOC_FILTER)
+    api.filter_run(db, manuscript, {}, "duplicate-words", "solo.md")
+    # Stage against STRIPPED units — the universe filter_record uses.
+    api.filter_record(db, manuscript, {}, "solo.md",
+                      _filter_reply(sp, {last_n: "ALPHA-LAST."}))
+    staged = api.filter_edits(db, manuscript, "solo.md")
+    api.filter_triage(db, manuscript, "solo.md",
+                      [{"item": str(i["n"]), "verdict": "accept"}
+                       for i in staged["items"]])
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", EMBED_SKEW_ESSAY)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+
+    result = api.filter_push(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    check("P-embed the push landed the one form",
+          result["written"] == 1 and not result["failed"],
+          str({"written": result["written"], "failed": result["failed"]}))
+    # The last Alpha is after Beta in the leveled tab.
+    check("P-embed the form sits on the LAST Alpha (after Beta), not an "
+          "earlier twin — that is the silent wrong plant this fixes",
+          tab.index("Beta") < tab.index("{{ALPHA-LAST.}}")
+          and tab.count("<<Alpha>>") == 1, tab)
+
+    settle = api.filter_resolve(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("P-embed resolve edits only the last Alpha; earlier Alphas and "
+          "Beta survive; illustration tags stay",
+          final.index("Beta") < final.index("ALPHA-LAST.")
+          and final.count("\nAlpha\n") == 4  # four earlier Alphas unchanged
+          and "[Illustration: pic 0]" in final
+          and settle["forms"] == 1, final)
+    check("P-embed ...and blank-line orphan embeds are still on disk "
+          "(restore_orphan_embeds), not dropped by the strip/compose",
+          "![](_illustrations/p0.png)" in final
+          and "![](_illustrations/p2.png)" in final, final)
+
+
 def _the_doc_is_the_review(root: Path) -> None:
     """The Sponsor-intent correction (2026-08-30): `filter push` takes
     UNTRIAGED proposals to the Doc, because the tab is the review.
@@ -3895,6 +3994,7 @@ def main_test() -> None:
         _identical_old_halves(root)
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
+        _embed_blank_lines_skew_occurrence(root)
         _the_doc_is_the_review(root)
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)

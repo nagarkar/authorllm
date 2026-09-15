@@ -2665,14 +2665,20 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     it, and count the matches that BEGIN before that — which is exactly
     how many the locator will step over on its way there.
 
-    Computed from the LOCAL paragraph list, which is byte-identical to
-    the tab because the levelling `push_doc` has just put it there, and
-    correct only in company with the DESCENDING write order: when unit n
-    is written, every paragraph before it is still pristine, so a match
-    before it is still where it was. Paragraphs AFTER n may already be
-    wrapped — their old text still occurs inside the wrapper — but they
-    sit past n and cannot shift a lower occurrence index. Descending
-    order and occurrence-from-original are jointly correct or not at all
+    Computed from the LOCAL paragraph list AFTER embed lines are
+    stripped — the same universe the levelling `push_doc` just wrote
+    into the tab (embeds are local derived machinery the Doc never
+    carries) and the same universe staging / filter capture numbered
+    `anchor_paragraph` against. Counting on raw-disk paragraphs that
+    still hold blank-line embed units undercounts when a later refrain
+    is the target: the form lands on an earlier twin, read-back still
+    passes, and resolve silently edits the wrong span. Correct only in
+    company with the DESCENDING write order: when unit n is written,
+    every paragraph before it is still pristine, so a match before it
+    is still where it was. Paragraphs AFTER n may already be wrapped —
+    their old text still occurs inside the wrapper — but they sit past
+    n and cannot shift a lower occurrence index. Descending order and
+    occurrence-from-original are jointly correct or not at all
     (design-filter-doc-settle §9.3)."""
     if n <= 0 or not needle:
         return 0
@@ -2700,7 +2706,7 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     named in the signature — the threads arrive as an argument and the
     caller owns their state transitions — which is why this took a
     rename and not an `origin_type` parameter."""
-    from .revisions import _paragraphs
+    from .revisions import _paragraphs, strip_embed_lines
 
     bridge = bridge or manuscript_bridge(manuscript)
     push_doc(db, manuscript, file, service=service,
@@ -2711,7 +2717,13 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     tab_id = (links.get(file) or {}).get("tab_id")
     if not (master_id and tab_id):
         raise LookupError(f"'{file}' has no tab in the master Doc")
-    text = (bridge.root / file).read_text(encoding="utf-8")
+    # Embed-free paragraphs: staging and filter capture number units
+    # through read_manuscript_files (which strips embed lines), and the
+    # levelling push above stripped them from the tab. Raw-disk
+    # paragraphs that still carry blank-line embed units are a DIFFERENT
+    # universe — occurrence undercounts and the form lands on an earlier
+    # twin (silent wrong plant; read-back still passes).
+    text = strip_embed_lines((bridge.root / file).read_text(encoding="utf-8"))
     paragraphs = _paragraphs(text)
     # EVERY thread handed in is written. The caller chooses the set and
     # owns the state transitions — which is what the two producers now

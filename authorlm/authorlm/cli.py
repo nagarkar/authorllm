@@ -1395,10 +1395,12 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     # Compose locally first — this is where a drifted paragraph fails
-    # loudly, before any Doc write.
+    # loudly, before any Doc write. Embed-free: same universe critique
+    # staging numbered against (build_context → read_manuscript_files).
+    from authorlm.revisions import strip_embed_lines
     text = (Path(manuscript["path"]) / file).read_text(encoding="utf-8")
     try:
-        passes.compose_marked_text(text, threads)
+        passes.compose_marked_text(strip_embed_lines(text), threads)
     except ValueError as err:
         sys.exit(f"error: {err}")
     # `accepted`, not `threads`: the writer no longer filters by state,
