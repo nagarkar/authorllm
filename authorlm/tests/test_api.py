@@ -5224,7 +5224,142 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_node_names_and_aliases() -> None:
+    """Primary name + aliases are the full mention surface for a concept.
+
+    Softening this drops aliases from groundedness scans / lookups, or
+    invents names from malformed alias JSON."""
+    from authorlm.concepts import node_aliases, node_names
+
+    check("missing aliases field yields an empty list",
+          node_aliases({}) == [])
+    check("null / empty / invalid JSON aliases yield []",
+          node_aliases({"aliases": None}) == []
+          and node_aliases({"aliases": ""}) == []
+          and node_aliases({"aliases": "not-json"}) == [])
+    check("a JSON alias list round-trips",
+          node_aliases({"aliases": '["g", "G-force"]'}) == ["g", "G-force"])
+    check("node_names is primary name then aliases, in order",
+          node_names({"name": "Gravity", "aliases": '["g"]'})
+          == ["Gravity", "g"])
+    check("a concept with no aliases is just its primary name",
+          node_names({"name": "Field", "aliases": "[]"}) == ["Field"])
+
+
+def check_filter_summary_of() -> None:
+    """filter list prints the first prose line — never hashes or front matter.
+
+    Wrong unwrapping makes the operator UI show `## Title` or YAML, and
+    silent truncation must stay at 100 chars so the listing stays scannable."""
+    from authorlm.filters import summary_of
+
+    check("a leading markdown heading is unwrapped",
+          summary_of("# Title\n\nBody.\n") == "Title")
+    check("the first prose line wins over later headings",
+          summary_of("plain first\n# ignored") == "plain first")
+    check("blank / whitespace-only bodies yield an empty summary",
+          summary_of("") == "" and summary_of("\n\n  \n") == "")
+    check("a long first line is clipped to 100 characters",
+          summary_of("x" * 200) == "x" * 100)
+    check("ATX ## headings unwrap the same way as #",
+          summary_of("##  Spaced heading\n") == "Spaced heading")
+
+
+def check_existing_illustration_tags() -> None:
+    """Placement sweep reads only whole-line [Illustration: …] prompts.
+
+    Mis-parsing here marks live proposals stale (or keeps dead ones) when
+    the revise/width suffix is present, or invents tags from prose."""
+    from authorlm.placement import _existing_tags
+
+    text = (
+        "[Illustration: cat]\n"
+        "prose that mentions [Illustration: fake]\n"
+        "[Illustration: dog | wide]\n"
+        "  [Illustration:  bird  ]\n"
+        "[not a tag]\n"
+    )
+    check("whole-line illustration tags yield their prompts, stripped",
+          _existing_tags(text) == ["cat", "dog", "bird"],
+          str(_existing_tags(text)))
+    check("inline brackets and non-tag lines are ignored",
+          "fake" not in _existing_tags(text)
+          and "not a tag" not in _existing_tags(text))
+    check("empty text yields no tags",
+          _existing_tags("") == [])
+
+
+def check_obsidian_note_name() -> None:
+    """Obsidian stubs / wikilinks sanitize unsafe filename characters.
+
+    Collisions and empty names must still produce a usable stub name —
+    otherwise export drops concepts or writes paths Obsidian cannot open."""
+    from authorlm.obsidian import note_name
+
+    check("path / wiki / shell metacharacters become hyphens",
+          note_name('A/B:C*?"<>|#^[x]') == "A-B-C---------x-")
+    check("an empty or whitespace-only name falls back to 'concept'",
+          note_name("") == "concept" and note_name("   ") == "concept")
+    check("a safe name is unchanged",
+          note_name("Gravity") == "Gravity")
+
+
+def check_resolve_member_prefix() -> None:
+    """Intent-block member targeting resolves by unique id substring.
+
+    Ambiguity must raise; a miss returns None — wrong hits revise or
+    complete the wrong member of a multi-intent writeup."""
+    block = {"members": [
+        {"id": "abc123"}, {"id": "abd999"}, {"id": "zzz"},
+    ]}
+    check("an exact id resolves",
+          api._resolve_member_prefix(block, "abc123") == "abc123")
+    check("a unique substring resolves (not startswith-only)",
+          api._resolve_member_prefix(block, "bc12") == "abc123")
+    check("an unambiguous short token resolves",
+          api._resolve_member_prefix(block, "zz") == "zzz")
+    try:
+        api._resolve_member_prefix(block, "ab")
+        ambig_ok, ambig_msg = False, ""
+    except LookupError as err:
+        ambig_ok, ambig_msg = True, str(err)
+    check("an ambiguous substring is refused with a count",
+          ambig_ok and "ambiguous" in ambig_msg and "2 members" in ambig_msg,
+          ambig_msg)
+    check("a miss returns None rather than inventing",
+          api._resolve_member_prefix(block, "nope") is None)
+    check("a block with no members misses cleanly",
+          api._resolve_member_prefix({}, "x") is None)
+
+
+def check_has_replacement() -> None:
+    """Mid-settle is only <<old>>{{new}} — bare {{…}} is author prose / TeX.
+
+    Broadening this refuses Doc push forever on essays with {{title}} or
+    math braces; narrowing it plants markers into the Doc."""
+    from authorlm.threads import has_replacement
+
+    check("a replace form is mid-settle",
+          has_replacement("Lead <<old>>{{new}} Tail"))
+    check("a ~~-wrapped replace form is still mid-settle",
+          has_replacement("~~<<old>>~~{{new}}"))
+    check("bare {{…}} braces alone are not a replacement",
+          not has_replacement("An essay with {{title}} braces."))
+    check("a critique insertion {{new}} alone is not has_replacement",
+          not has_replacement("Lead\n\n{{new para}}\n\nTail"))
+    check("an unbalanced << alone is not a replacement form",
+          not has_replacement("Lead <<alone Tail"))
+    check("clean prose is not mid-settle",
+          not has_replacement("Finished prose with no markers."))
+
+
 def main_test() -> None:
+    check_node_names_and_aliases()
+    check_filter_summary_of()
+    check_existing_illustration_tags()
+    check_obsidian_note_name()
+    check_resolve_member_prefix()
+    check_has_replacement()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
