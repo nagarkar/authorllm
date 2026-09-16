@@ -88,15 +88,33 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
         [Only: audio]        …  [/Only]   kept for the named outputs only
 
     Same grammar as [Illustration: …]: plain text on every road (Obsidian,
-    the Doc bridge, pandoc), resolved here alone. Regions nest; the tag
-    lines themselves never reach a reader. A structural fault — an
-    unknown output name, a stray or unmatched close, an unclosed region —
-    raises, naming the line: a typo must never silently include or
-    exclude a passage (docs/math-and-physics-guidelines.md §5)."""
+    the Doc bridge, pandoc), resolved here alone. Regions nest — an
+    `[Only:]` inside an `[Omit:]` is the audio substitution pattern
+    (docs/math-and-physics-guidelines.md §5): the inner Only re-includes
+    its body for the named outputs even when an outer Omit would drop
+    them. The tag lines themselves never reach a reader. A structural
+    fault — an unknown output name, a stray or unmatched close, an
+    unclosed region — raises, naming the line: a typo must never
+    silently include or exclude a passage."""
     wanted = set(outputs)
-    stack: list[tuple[str, bool]] = []   # (kind, this region keeps)
+    # (kind, allows): Only stores hit; Omit stores not-hit.
+    stack: list[tuple[str, bool]] = []
     kept: list[str] = []
     prefix = f"{where}:" if where else "line "
+
+    def _line_kept() -> bool:
+        # Walk outside-in. Omit that hits this build hides; Only then
+        # resets visibility to its own hit — so Only-inside-Omit can
+        # substitute a spoken paraphrase without the conjunctive
+        # all()-of-frames rule deleting both halves.
+        visible = True
+        for kind, allows in stack:
+            if kind == "only":
+                visible = allows
+            elif not allows:
+                visible = False
+        return visible
+
     for lineno, line in enumerate(text.split("\n"), 1):
         m = _REGION_OPEN.match(line)
         if m:
@@ -122,7 +140,7 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
                        if stack else ""))
             stack.pop()
             continue
-        if all(keep for _, keep in stack):
+        if _line_kept():
             kept.append(line)
     if stack:
         raise ValueError(

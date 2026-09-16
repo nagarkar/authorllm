@@ -7650,14 +7650,37 @@ def main_test() -> None:
         check("[Only:] keeps a region for the named outputs alone",
               "Spoken:" in audio_text and "Spoken:" not in pdf_text
               and "Spoken:" not in md_text, audio_text)
+        from authorlm.export import (combined_markdown, resolve_regions,
+                                     strip_display_math)
+        # Nested Only-inside-Omit is the documented substitution pattern
+        # (math-and-physics-guidelines §5). Conjunctive all()-of-frames
+        # deleted both halves for audio; Only must re-include its body.
+        nested_sub = (
+            "Lead-in.\n\n"
+            "[Omit: audio]\n"
+            "$$ \\nabla \\cdot \\mathbf{E} = 0 $$\n"
+            "[Only: audio]\n"
+            "Nested spoken: divergence of E is zero.\n"
+            "[/Only]\n"
+            "[/Omit]\n\n"
+            "Tail.\n")
+        nested_audio = resolve_regions(nested_sub, {"audio"})
+        nested_pdf = resolve_regions(nested_sub, {"pdf"})
+        check("Only inside Omit keeps the audio substitute",
+              "Nested spoken:" in nested_audio
+              and "\\nabla" not in nested_audio
+              and "Lead-in." in nested_audio and "Tail." in nested_audio,
+              nested_audio)
+        check("Only inside Omit still drops the substitute from print",
+              "Nested spoken:" not in nested_pdf
+              and "\\nabla" in nested_pdf
+              and "Lead-in." in nested_pdf, nested_pdf)
         check("tag lines never reach a reader",
               "[Omit" not in pdf_text and "[/Only" not in audio_text
               and "[Only" not in md_text, md_text)
         check("audio drops untagged display math and keeps inline math",
               "mc^2" not in audio_text and "inline $E$ stays" in audio_text
               and "mc^2" in epub_text, audio_text)
-        from authorlm.export import (combined_markdown, resolve_regions,
-                                     strip_display_math)
         check("a multi-line $$ block is one display equation to audio",
               strip_display_math("a\n$$\nx\n$$\nb") == "a\nb")
         for bad, why in (("[Omit: audoi]\nx\n[/Omit]", "unknown output"),
