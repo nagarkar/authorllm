@@ -1187,12 +1187,34 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"('filter unmark {relpath}') first.")
 
 
+def _tab_has_replace_forms(docs_service, master_id: str, tab_id: str) -> bool:
+    """True when a tab's live text still carries a `<<old>>{{new}}` form.
+
+    The rebuild path's last line of defence when `forms_pending` is
+    blind: a Docs timeout after `batchUpdate` committed the forms but
+    before the caller marked threads `written` leaves the tab holding
+    live forms (possibly author-reworded) while the database says the
+    pause is over. Session-start reconcile then strip-compares the tab
+    to local, sees "in sync" / "local ahead", and auto-pushes — a
+    rebuild that silently destroys the rewording. Looking at the tab
+    itself catches that desync. Replace forms only: a bare `{{…}}` is
+    indistinguishable from author prose (`{{title}}`, set notation)."""
+    text = "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
+    return threads_mod.has_replacement(text)
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
-             docs_service=None, bridge: DocBridge | None = None) -> dict:
+             docs_service=None, bridge: DocBridge | None = None,
+             leveling: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
-    → transplant into the tab → temp deleted. Marks the file checked out."""
+    → transplant into the tab → temp deleted. Marks the file checked out.
+
+    `leveling=True` is only for `write_pending_forms`, which must rebuild
+    over any leftover tab forms before planting a fresh pause. Ordinary
+    pushes (including reconcile auto-push) keep `leveling=False` so an
+    orphaned tab form cannot be wiped by a desync."""
     import hashlib
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -1240,6 +1262,26 @@ def push_doc(db: Database, manuscript: dict, query: str,
         result.update(doc_id=master, url=tab_url(master, tab),
                       created=False, locally_normalized=False)
         return result
+    # Orphan-form guard (rebuild only). `forms_pending` is blind when a
+    # Docs timeout committed tab forms but the caller never marked
+    # threads `written`. Without this, reconcile auto-push and ordinary
+    # `doc push` rebuild the tab from local OLD and wipe any in-Doc
+    # rewording of the green halves. Leveling for a fresh pause must
+    # still be able to clear leftovers — that call passes leveling=True.
+    if not leveling and docs_service is not None:
+        meta_guard = _mapping(db, manuscript)
+        links_guard = meta_guard.get(bridge.meta_key, {})
+        master_guard = links_guard.get("_master_id")
+        tab_guard = (links_guard.get(relpath) or {}).get("tab_id")
+        if (master_guard and tab_guard
+                and _tab_has_replace_forms(docs_service, master_guard,
+                                           tab_guard)):
+            raise LookupError(
+                f"'{relpath}'s Doc tab still carries <<old>>{{{{new}}}} "
+                f"pending forms, but none are recorded as written — a "
+                f"rebuild would wipe any in-Doc rewording. Settle the "
+                f"open pause, or discard the tab forms with the "
+                f"producer's unmark/rollback before pushing.")
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
     locally_normalized = normalized != text
@@ -2703,8 +2745,12 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
+    # Leveling MUST rebuild even when the tab still carries orphan forms
+    # from a prior interrupted write — that is the one push that is
+    # allowed to clear them. Ordinary pushes refuse instead (see
+    # push_doc's orphan-form guard).
     push_doc(db, manuscript, file, service=service,
-             docs_service=docs_service, bridge=bridge)
+             docs_service=docs_service, bridge=bridge, leveling=True)
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
     master_id = links.get("_master_id")
@@ -2750,10 +2796,22 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                                                  t["proposed_new"])
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": requests}).execute()
+            # Eagerly record `written` BEFORE read-back. Google has
+            # committed the form; if the next documents.get times out
+            # (or the process dies before the caller updates state),
+            # forms_pending must already see this row — otherwise a
+            # later rebuild treats the pause as over and wipes any
+            # author rewording of the green half. Callers still set
+            # producer metadata (pushed_from, essay state) on the
+            # returned list; a redundant state='written' is a no-op.
+            db.update("doc_threads", t["id"], {"state": "written"})
             written.append(t)
         except Exception as err:  # noqa: BLE001 — per-thread, keep going
             failed.append((t, str(err)))
     # Read-back proof: every written form must be present verbatim.
+    # On miss we keep the DB row as `written` (forms_pending stays
+    # armed) and only drop it from the success list — demoting would
+    # recreate the timeout-after-commit desync this eager mark closes.
     full = "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
     for t in list(written):
         form = threads_mod.render_pending(t["proposed_old"], t["proposed_new"])

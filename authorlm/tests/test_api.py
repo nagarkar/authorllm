@@ -6481,7 +6481,7 @@ def main_test() -> None:
             def __init__(self, state):
                 self.state = state
 
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, **_kw):
                 if documentId in self.state["uploads"]:
                     content = [{"paragraph": {"elements": [
                         {"textRun": {"content": line + "\n"}}]}}
@@ -8963,6 +8963,43 @@ def main_test() -> None:
               and "post-edited in Docs" in tab_after
               and "{{A bridging insert the author refined.}}" in tab_after,
               str({"raised": raised, "tab": tab_after[:120]}))
+        # Timeout-after-commit desync: Doc still has the (possibly
+        # author-reworded) forms, but the DB never recorded `written`
+        # (documents.get timed out after batchUpdate, or the process
+        # died before the caller updated state). forms_pending is blind;
+        # without the tab-side orphan guard, rebuild would wipe the
+        # rewording — including via session-start reconcile auto-push.
+        db.update("doc_threads", crit["id"], {"state": "accepted"})
+        stub.set_tab("06-orrery.md", pending_tab)
+        orphan_before = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                             if t["title"] == "06-orrery.md")
+        orphan_raised = None
+        try:
+            push_doc(db, manuscript, "06-orrery.md", service=stub,
+                     docs_service=stub)
+        except LookupError as err:
+            orphan_raised = str(err)
+        orphan_after = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                            if t["title"] == "06-orrery.md")
+        check("push refuses orphan tab forms when DB is not written "
+              "(timeout-after-commit desync — no wipe of rewording)",
+              orphan_raised is not None
+              and "none are recorded as written" in orphan_raised
+              and "rewording" in orphan_raised
+              and orphan_after == orphan_before
+              and "post-edited in Docs" in orphan_after,
+              str({"raised": orphan_raised, "tab": orphan_after[:120]}))
+        # Leveling for a fresh write_pending_forms pause must still
+        # clear leftovers — the one push allowed to rebuild over them.
+        leveled = push_doc(db, manuscript, "06-orrery.md", service=stub,
+                           docs_service=stub, leveling=True)
+        leveled_tab = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                           if t["title"] == "06-orrery.md")
+        check("leveling=True rebuilds over orphan forms (fresh pause)",
+              leveled is not None
+              and "post-edited in Docs" not in leveled_tab
+              and "<<" not in leveled_tab,
+              leveled_tab[:160])
         db.update("doc_threads", crit["id"], {"state": "cleaned"})
 
         # --- session start is no longer blind to the margin ---
