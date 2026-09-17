@@ -2801,10 +2801,17 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
             # (or the process dies before the caller updates state),
             # forms_pending must already see this row — otherwise a
             # later rebuild treats the pause as over and wipes any
-            # author rewording of the green half. Callers still set
-            # producer metadata (pushed_from, essay state) on the
-            # returned list; a redundant state='written' is a no-op.
-            db.update("doc_threads", t["id"], {"state": "written"})
+            # author rewording of the green half. Stamp pushed_from
+            # from the in-memory prior state here too: on read-back
+            # miss the thread stays written but leaves the success
+            # list, so the caller never writes metadata — without
+            # this, filter unmark would invent `accepted` for an
+            # untriaged proposal. Callers may still re-stamp.
+            meta = loads(t.get("metadata"), {}) or {}
+            if "pushed_from" not in meta:
+                meta["pushed_from"] = t["state"]
+            db.update("doc_threads", t["id"],
+                      {"state": "written", "metadata": json.dumps(meta)})
             written.append(t)
         except Exception as err:  # noqa: BLE001 — per-thread, keep going
             failed.append((t, str(err)))
