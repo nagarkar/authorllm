@@ -5224,7 +5224,176 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_pronunciation_block_lines() -> None:
+    """Filter payload dictionary lines are sorted, settled, and noted.
+
+    Mis-render here quietly misconditions every filter run: empty say must
+    read as unsettled, notes stay parenthetical, and sort is by key()."""
+    from authorlm.pronunciations import SEED, add_row, block_lines, terms
+
+    text = SEED
+    text = add_row(text, {"term": "Zebra", "say": "zee-bruh", "note": "animal"})
+    text = add_row(text, {"term": "Apple", "say": "ap-uhl", "note": ""})
+    text = add_row(text, {"term": "beta", "say": "", "note": "pending"})
+    lines = block_lines(text)
+    check("dictionary body lines are sorted by key(term)",
+          lines == [
+              "- Apple — ap-uhl",
+              "- beta — (not settled yet) (pending)",
+              "- Zebra — zee-bruh (animal)",
+          ],
+          str(lines))
+    check("an empty say is rendered as (not settled yet)",
+          any("(not settled yet)" in ln for ln in lines))
+    check("an empty note omits the parenthetical",
+          lines[0] == "- Apple — ap-uhl")
+    check("terms() preserves author spelling in table order",
+          terms(text) == ["Zebra", "Apple", "beta"],
+          str(terms(text)))
+    check("an empty / seed-only dictionary yields no body lines",
+          block_lines("") == [] and block_lines(SEED) == [])
+
+
+def check_toc_chapters_liberal_parse() -> None:
+    """Broken toc.toml degrades to [] — never raises — so order falls back.
+
+    A raise or silent mis-parse breaks reading order and scope ancestry."""
+    from authorlm.structure import _toc_chapters
+
+    good = (
+        '[[chapter]]\nfile = "a.md"\n\n'
+        '[[chapter]]\nfile = "b.md"\nparent = "a.md"\n'
+    )
+    check("well-formed chapters keep file (+ optional parent) order",
+          _toc_chapters(good)
+          == [{"file": "a.md"}, {"file": "b.md", "parent": "a.md"}])
+    check("entries without a file key are dropped",
+          _toc_chapters('[[chapter]]\nparent = "x.md"\n') == [])
+    check("invalid TOML degrades to [] rather than raising",
+          _toc_chapters("[[chapter]\nfile = oops") == [])
+    check("a non-table chapter value yields no chapters",
+          _toc_chapters('chapter = ["a.md"]\n') == [])
+    check("empty text is an empty chapter list",
+          _toc_chapters("") == [])
+
+
+def check_illustration_scan_text() -> None:
+    """scan_text inventories whole-line tags in order, resolving refs.
+
+    Missed/mis-resolved tags drift slot inventory, missing_ref, and
+    desc_hash before render/collect."""
+    from authorlm.illus import desc_hash, scan_text, _excerpt_of
+
+    text = (
+        "Lead prose\n"
+        "[Illustration: a red lantern]\n"
+        "inline [Illustration: fake] ignored\n"
+        "[Illustration: excerpt ⇢ lamp.md | caption: Night]\n"
+        "[Illustration: missing ⇢ gone.md]\n"
+    )
+    prompts = {"lamp.md": "  a long  canonical  lantern  description  here  "}
+    slots = scan_text(text, prompts)
+    check("whole-line tags are inventoried in document order",
+          len(slots) == 3
+          and [s["line"] for s in slots] == [2, 4, 5],
+          str([(s["line"], s.get("ref")) for s in slots]))
+    check("an inline tag is ignored",
+          all(s["prompt"] != "fake" for s in slots))
+    check("an inline slot keeps its prompt and has no key yet",
+          slots[0]["prompt"] == "a red lantern"
+          and slots[0]["ref"] is None
+          and slots[0]["key"] is None
+          and slots[0]["desc_hash"] == desc_hash("a red lantern"))
+    check("a resolved ref replaces the excerpt with the canonical prompt",
+          slots[1]["ref"] == "lamp.md"
+          and slots[1]["prompt"] == "a long canonical lantern description here"
+          and slots[1]["caption"] == "Night"
+          and slots[1]["key"] == "lamp"
+          and "missing_ref" not in slots[1])
+    check("a missing ref keeps the excerpt and flags missing_ref",
+          slots[2]["missing_ref"] is True
+          and slots[2]["prompt"] == "missing"
+          and slots[2]["key"] == "gone")
+    check("_excerpt_of trims to N words and ellipsizes when longer",
+          _excerpt_of("one two three four five six seven eight nine", 8)
+          == "one two three four five six seven eight…"
+          and _excerpt_of("short", 8) == "short")
+
+
+def check_extraction_is_in_flight() -> None:
+    """Extraction must refuse the mid-rewrite placeholder as prose.
+
+    Mining it pollutes the concept graph with the rewrite notice itself."""
+    from authorlm.api import PLACEHOLDER
+    from authorlm.extraction import is_in_flight
+
+    check("the exact placeholder is in-flight",
+          is_in_flight(PLACEHOLDER))
+    check("edge whitespace around the placeholder is still in-flight",
+          is_in_flight("\n" + PLACEHOLDER + "\n  "))
+    check("hand-edited text that merely mentions the marker is not in-flight",
+          not is_in_flight(
+              PLACEHOLDER.strip() + "\n\nAuthor kept drafting here.\n"))
+    check("ordinary prose is not in-flight",
+          not is_in_flight("# Chapter\n\nGravity bends light.\n"))
+    check("empty text is not in-flight",
+          not is_in_flight(""))
+
+
+def check_proposal_content_hash() -> None:
+    """Proposal dedupe hashes canonical JSON — key order must not fork ids.
+
+    Broken hashing floods or drops open proposals on alias/note noise."""
+    from authorlm.proposals import _content_hash
+
+    a = _content_hash({"kind": "alias", "name": "g", "of": "Gravity"})
+    b = _content_hash({"of": "Gravity", "name": "g", "kind": "alias"})
+    c = _content_hash({"kind": "alias", "name": "G", "of": "Gravity"})
+    check("key order does not change the content hash",
+          a == b and len(a) == 16)
+    check("a material field change yields a different hash",
+          a != c)
+    check("nested payloads are stable under key reordering",
+          _content_hash({"x": {"b": 1, "a": 2}})
+          == _content_hash({"x": {"a": 2, "b": 1}}))
+    check("an empty payload hashes deterministically",
+          _content_hash({}) == _content_hash({})
+          and len(_content_hash({})) == 16)
+
+
+def check_usage_clamped_delta() -> None:
+    """Usage ledger deltas never invent negative spend on discontinuity.
+
+    Under-credit or negative messages would corrupt budget and reports."""
+    from authorlm.clients import _clamped_delta
+
+    recomputed = {"messages": 10, "in": 100, "out": 50,
+                  "cache_read": 5, "cache_write": 1}
+    stored = {"messages": 4, "in": 40, "out": 60,
+              "cache_read": 5, "cache_write": 0}
+    delta = _clamped_delta(recomputed, stored)
+    check("positive deltas are recomputed minus stored",
+          delta["messages"] == 6 and delta["in"] == 60
+          and delta["cache_write"] == 1)
+    check("a stored value ahead of recomputed clamps to zero, never negative",
+          delta["out"] == 0 and delta["cache_read"] == 0)
+    check("keys absent from stored count as zero",
+          _clamped_delta({"messages": 3}, {}) == {"messages": 3})
+    check("keys only in stored are ignored (recomputed is the universe)",
+          "extra" not in _clamped_delta({"messages": 1},
+                                        {"messages": 0, "extra": 9}))
+    check("an identical snapshot yields an all-zero delta",
+          _clamped_delta(recomputed, recomputed)
+          == {k: 0 for k in recomputed})
+
+
 def main_test() -> None:
+    check_pronunciation_block_lines()
+    check_toc_chapters_liberal_parse()
+    check_illustration_scan_text()
+    check_extraction_is_in_flight()
+    check_proposal_content_hash()
+    check_usage_clamped_delta()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
