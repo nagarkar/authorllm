@@ -3194,7 +3194,12 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     for attempt in (1, 2):
         tab_md = tab_markdown()
         tab_paras = _md_paragraphs(tab_md)
-        canonical = [threads_mod.strip_pending(p)[0].strip("\n")
+        # strip_replacements, not strip_pending: author prose like
+        # {{title}} / {{a, b}} is ordinary on both sides. strip_pending
+        # would collapse those on the tab to "" and make a byte-identical
+        # essay look like drift — then the raw-tab `{{` guard refuses the
+        # surgical push forever (filter-pass design §2.3).
+        canonical = [threads_mod.strip_replacements(p)[0].strip("\n")
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
         if canonical == local_paras:
@@ -3282,7 +3287,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": flat}).execute()
 
-        verify = [threads_mod.strip_pending(p)[0].strip("\n")
+        verify = [threads_mod.strip_replacements(p)[0].strip("\n")
                   for p in _md_paragraphs(tab_markdown())]
         if verify == local_paras:
             if flat:

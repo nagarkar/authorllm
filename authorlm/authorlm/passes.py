@@ -705,6 +705,15 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     return "\n\n".join(head + out) + "\n"
 
 
+# Docs styles the {{new}} half green. Deleting that run (natural decline
+# in the tab) removes the braces with the text and leaves a bare
+# <<old>> — not a PENDING form, so the rebuild below would otherwise
+# write the markers into the manuscript. Optional ~~ wrappers match the
+# strikethrough export PENDING already accepts.
+_ORPHAN_REPLACE = re.compile(
+    r"(?:~~)?<<(?P<old>.*?)>>(?:~~)?(?!\s*\{\{)", re.DOTALL)
+
+
 def final_text_from_marked(marked: str,
                            written: list[dict] | None = None,
                            kinds: tuple[str, ...] = ("replace", "insert")
@@ -713,6 +722,11 @@ def final_text_from_marked(marked: str,
     post-edits win); any other pending form on the tab (e.g. an open
     margin-thread proposal) collapses to OLD so resolve never silently
     approves foreign grammar. Returns (final_text, matched_forms).
+
+    An emptied green half is a decline (filter-pass design §8.3): the
+    form stays unmatched so `record_resolution` records it, and the
+    rebuild keeps OLD (or drops an emptied insertion). A bare `<<old>>`
+    left after Docs deleted the green run collapses the same way.
 
     `kinds` restricts which forms are CONSIDERED, and defaults to both,
     so the critique pass is unchanged. The local settle transport passes
@@ -737,6 +751,10 @@ def final_text_from_marked(marked: str,
             match = insert_queue.pop(0)
         if match is None or match not in unmatched:
             continue
+        # Emptied {{}} is the documented Doc decline, not an accepted
+        # empty rewrite. Leave the thread unmatched for record_resolution.
+        if not (form.get("new") or "").strip():
+            continue
         unmatched.remove(match)
         critique_forms.append(form)
         keep_new.add((form["start"], form["end"]))
@@ -746,6 +764,8 @@ def final_text_from_marked(marked: str,
         span = (form["start"], form["end"])
         replacement = (form["new"] if span in keep_new else form["old"])
         text = text[: form["start"]] + replacement + text[form["end"]:]
+    # Natural Docs decline deletes the green {{…}} run and leaves <<old>>.
+    text = _ORPHAN_REPLACE.sub(lambda m: m.group("old"), text)
     return text, critique_forms
 
 
