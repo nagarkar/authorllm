@@ -5224,7 +5224,316 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_manuscript_root_gate() -> None:
+    """A vanished/unreadable root must refuse before any empty-looking read.
+
+    `read_manuscript_files` returns {} for a missing root; without this
+    gate that looks like the author deleted every file and can mass-retire
+    concepts. Integration coverage lives in check_vanished_directory_guard;
+    this pins the pure predicate itself."""
+    from authorlm.revisions import (ManuscriptRootUnreadable,
+                                    check_manuscript_root)
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-msroot-"))
+    try:
+        missing = root / "gone"
+        raised = None
+        try:
+            check_manuscript_root(missing)
+        except ManuscriptRootUnreadable as err:
+            raised = err
+        check("a missing path raises ManuscriptRootUnreadable",
+              isinstance(raised, ManuscriptRootUnreadable)
+              and "not a readable directory" in str(raised),
+              repr(raised))
+
+        as_file = root / "not-a-dir"
+        as_file.write_text("x\n", encoding="utf-8")
+        raised = None
+        try:
+            check_manuscript_root(as_file)
+        except ManuscriptRootUnreadable as err:
+            raised = err
+        check("a file path raises ManuscriptRootUnreadable",
+              isinstance(raised, ManuscriptRootUnreadable), repr(raised))
+
+        empty = root / "empty"
+        empty.mkdir()
+        check_manuscript_root(empty)
+        check("an empty but present directory is accepted", True)
+
+        check_manuscript_root(root)
+        check("a normal directory is accepted", True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_writeup_accounting() -> None:
+    """Digest removal accounting tallies kept / removed / unaccounted once.
+
+    Shared by write_digest --show, write_status, and write_complete — a
+    wrong bucket silently lies about whether every point was disposed."""
+    from authorlm.api import _accounting
+
+    bare = {"metadata": "{}"}
+    check("a writeup with no digest yields no accounting",
+          _accounting(bare) is None)
+
+    meta = {
+        "digest": {
+            "points": [
+                {"id": "p1", "claim": "first"},
+                {"id": "p2", "claim": "second"},
+                {"id": "p3", "claim": "third"},
+            ],
+        },
+        "dispositions": {
+            "p1": {"disposition": "kept"},
+            "p2": {"disposition": "removed", "reason": "off-topic"},
+            # p3 deliberately absent → unaccounted
+            "pX": {"disposition": "kept"},  # not a point id; ignored
+        },
+    }
+    tallied = _accounting({"metadata": json.dumps(meta)})
+    check("kept / removed / unaccounted partition the digest point ids",
+          tallied == {
+              "kept": ["p1"],
+              "removed": ["p2"],
+              "unaccounted": ["p3"],
+              "point_count": 3,
+              "claims": {"p1": "first", "p2": "second", "p3": "third"},
+          },
+          str(tallied))
+
+    empty_points = _accounting({"metadata": json.dumps({
+        "digest": {"points": []}, "dispositions": {"p1": {"disposition": "kept"}},
+    })})
+    check("an empty points list is a zero tally, not None",
+          empty_points == {"kept": [], "removed": [], "unaccounted": [],
+                           "point_count": 0, "claims": {}},
+          str(empty_points))
+
+    other = _accounting({"metadata": json.dumps({
+        "digest": {"points": [{"id": "p1", "claim": "c"}]},
+        "dispositions": {"p1": {"disposition": "deferred"}},
+    })})
+    check("a present disposition key is 'accounted' even when not kept/"
+          "removed — unaccounted means missing from the map, not an "
+          "unknown verdict string",
+          other["unaccounted"] == []
+          and other["kept"] == [] and other["removed"] == []
+          and other["point_count"] == 1,
+          str(other))
+
+    absent_disp = _accounting({"metadata": json.dumps({
+        "digest": {"points": [{"id": "p1", "claim": "c"},
+                              {"id": "p2", "claim": "d"}]},
+    })})
+    check("missing dispositions map means every point is unaccounted",
+          absent_disp["unaccounted"] == ["p1", "p2"]
+          and absent_disp["point_count"] == 2,
+          str(absent_disp))
+
+
+def check_scope_ruling_shape() -> None:
+    """One scope_history entry is the author's decision record.
+
+    Book-wide rulings are from=None,to=None — existence is the decision;
+    drifting the shape would send deliberate book-wide choices back to the
+    triage sheet as 'no place'."""
+    from authorlm.api import _scope_ruling
+    from authorlm import clients as _clients
+
+    ruling = _scope_ruling(None, None)
+    check("a book-wide ruling records both ends as null",
+          ruling["from"] is None and ruling["to"] is None)
+    check("every ruling stamps when and which client decided",
+          isinstance(ruling["at"], str) and "T" in ruling["at"]
+          and isinstance(ruling["by"], dict)
+          and set(ruling["by"]) >= {"engine", "session", "precision"},
+          str(ruling))
+    check("the by stamp matches clients.current().key()",
+          ruling["by"] == _clients.current().key(), str(ruling["by"]))
+
+    moved = _scope_ruling("01.md", None)
+    check("a file→manuscript-wide move keeps from/to distinct",
+          moved["from"] == "01.md" and moved["to"] is None)
+    retargeted = _scope_ruling("01.md", "02.md")
+    check("a file→file retarget records both paths",
+          retargeted["from"] == "01.md" and retargeted["to"] == "02.md")
+
+
+def check_client_parse_ts() -> None:
+    """Client marker timestamps parse both Z and offset forms, or refuse.
+
+    A false None makes a live marker look dead; a false parse makes a
+    stale one look current — both corrupt provenance sweep and enrichment."""
+    from authorlm.clients import _parse_ts
+
+    check("non-strings are refused",
+          _parse_ts(None) is None and _parse_ts(123) is None
+          and _parse_ts({"ts": "x"}) is None)
+    check("empty / garbage strings are refused",
+          _parse_ts("") is None and _parse_ts("not-a-date") is None
+          and _parse_ts("2026-09-18") is None)
+
+    zulu = _parse_ts("2026-09-18T10:15:28.417000Z")
+    check("fractional Zulu timestamps parse as aware UTC",
+          zulu is not None and zulu.tzinfo is not None
+          and zulu.year == 2026 and zulu.month == 9 and zulu.day == 18
+          and zulu.hour == 10 and zulu.minute == 15, str(zulu))
+
+    whole = _parse_ts("2026-09-18T10:15:28Z")
+    check("whole-second Zulu timestamps parse",
+          whole is not None and whole.second == 28, str(whole))
+
+    offset = _parse_ts("2026-09-18T12:15:28+02:00")
+    check("explicit-offset timestamps keep their offset",
+          offset is not None and offset.utcoffset() is not None
+          and int(offset.utcoffset().total_seconds()) == 2 * 3600,
+          str(offset))
+
+    # Naive forms are not in _TS_FORMATS (every accepted format carries Z
+    # or %z). Pin that so a future naive acceptance still forces UTC.
+    check("formats without a timezone designator are refused (not assumed)",
+          _parse_ts("2026-09-18T10:15:28") is None)
+
+
+def check_budget_day_total() -> None:
+    """day_total = on-disk day base + max(pending, 0) — never shrinks spend.
+
+    A negative pending (ledger discontinuity) must not under-count the day
+    and quietly defeat warn_at / enforce."""
+    import datetime as _dt
+
+    from authorlm import budget, clients, usage
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-daytotal-"))
+    try:
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        ws = root / "ws"
+        (ws / ".authorlm").mkdir(parents=True)
+        previous_workspace = clients._STATE["workspace"]
+        clients.configure(workspace=str(ws))
+        folder = usage.log_dir(str(ws))
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / usage.FILENAME).write_text(
+            json.dumps({
+                "ts": f"{today}T09:00:00+00:00", "kind": "api",
+                "invocation": "collect",
+                "calls": {"llm|zz/s": [1, 1, 1, 0, 0, 0.40]},
+                "replays": 0, "est_cost_usd": 0.40, "cost_complete": True,
+            }) + "\n"
+            + json.dumps({
+                "ts": f"{today}T10:00:00+00:00", "kind": "api",
+                "invocation": "draft",
+                "calls": {"llm|zz/s": [1, 1, 1, 0, 0, 0.25]},
+                "replays": 0, "est_cost_usd": 0.25, "cost_complete": True,
+            }) + "\n",
+            encoding="utf-8")
+        budget.reset()
+        check("day_base sums today's api est_cost_usd lines",
+              abs(budget.day_base(folder) - 0.65) < 1e-9,
+              str(budget.day_base(folder)))
+        check("day_total with pending=0 equals day_base",
+              abs(budget.day_total(folder, 0.0) - 0.65) < 1e-9)
+        check("positive pending adds to the day total",
+              abs(budget.day_total(folder, 0.10) - 0.75) < 1e-9)
+        check("negative pending clamps to zero — never shrinks the day",
+              abs(budget.day_total(folder, -5.0) - 0.65) < 1e-9,
+              str(budget.day_total(folder, -5.0)))
+        empty = root / "empty-ledger"
+        empty.mkdir()
+        budget.reset()
+        check("an empty ledger directory totals zero (+ pending clamp)",
+              budget.day_total(empty, -1.0) == 0.0
+              and abs(budget.day_total(empty, 0.2) - 0.2) < 1e-9)
+    finally:
+        budget.reset()
+        usage.reset()
+        clients._STATE["workspace"] = previous_workspace
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_resolve_beat_tags() -> None:
+    """Beat intent tags resolve to exactly one member id, in place.
+
+    A dangling or ambiguous tag makes disposition reports decorative —
+    the beat looks untagged and every member looks unserved."""
+    from authorlm.api import _resolve_beat_tags
+
+    block = {"members": [{"id": "di-aaaa1111aaa"},
+                         {"id": "di-bbbb2222bbb"}]}
+    beats = [
+        {"role": "opener", "budget": 60},
+        {"role": "close", "intents": ["aaaa"], "budget": 40},
+    ]
+    _resolve_beat_tags(block, beats)
+    check("absent intents are skipped",
+          "intents" not in beats[0])
+    check("a unique prefix resolves in place to the full member id",
+          beats[1]["intents"] == ["di-aaaa1111aaa"], str(beats[1]))
+
+    for label, tags, needle in (
+            ("non-list intents", "aaaa", "must be an array"),
+            ("unknown tag", ["zzzz"], "not a member"),
+            ("ambiguous substring", ["di-"], "not a member"),
+    ):
+        bad = [{"role": "x", "intents": tags}]
+        raised = None
+        try:
+            _resolve_beat_tags(block, bad)
+        except ValueError as err:
+            raised = str(err)
+        check(f"refuses {label}",
+              raised is not None and needle in raised, str(raised))
+
+    multi = [{"role": "x", "intents": ["aaaa", "bbbb"]}]
+    _resolve_beat_tags(block, multi)
+    check("multiple unique tags all resolve",
+          multi[0]["intents"] == ["di-aaaa1111aaa", "di-bbbb2222bbb"],
+          str(multi[0]))
+
+
+def check_concept_pattern_plurals() -> None:
+    """Realization matching tolerates simple English plurals, not stems.
+
+    Under-matching leaves concepts declared forever; over-matching (Field
+    → Fielding) falsely realizes names from unrelated prose."""
+    from authorlm.concepts import concept_pattern
+
+    field = concept_pattern("Field")
+    check("Field matches Field and fields, case-insensitively",
+          bool(field.search("a Field appears"))
+          and bool(field.search("many fields open"))
+          and bool(field.search("FIELDS")))
+    check("Field does not match Fielding or fieldwork as the whole word",
+          not field.search("Fielding the ball")
+          and not field.search("fieldwork continues"))
+
+    klass = concept_pattern("class")
+    check("class matches classes via the optional e?s plural",
+          bool(klass.search("one class")) and bool(klass.search("two classes")))
+
+    traj = concept_pattern("trajectory")
+    check("y-stem names match -y and -ies",
+          bool(traj.search("a trajectory"))
+          and bool(traj.search("several trajectories"))
+          and not traj.search("trajector"))
+
+    empty = concept_pattern("")
+    check("an empty name still compiles a usable (if vacuous) pattern",
+          isinstance(empty.pattern, str))
+
+
 def main_test() -> None:
+    check_manuscript_root_gate()
+    check_writeup_accounting()
+    check_scope_ruling_shape()
+    check_client_parse_ts()
+    check_budget_day_total()
+    check_resolve_beat_tags()
+    check_concept_pattern_plurals()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
