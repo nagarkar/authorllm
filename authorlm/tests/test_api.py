@@ -5224,7 +5224,217 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_scope_target() -> None:
+    """Exactly one place, resolved: essay / chapter opener / book-wide.
+
+    Drifting the XOR, the leaf-as-chapter refusal, or the sidecar refuse
+    silently misroutes every future writeup that binds the intent."""
+    from unittest.mock import patch
+
+    from authorlm.api import _scope_target
+
+    # XOR needs no disk — refuse before resolving.
+    for label, kwargs in (
+            ("no place", {}),
+            ("two places (scope + book)",
+             {"scope": "a.md", "manuscript_wide": True}),
+            ("two places (chapter + book)",
+             {"chapter": "a.md", "manuscript_wide": True}),
+            ("two places (scope + chapter)",
+             {"scope": "a.md", "chapter": "b.md"}),
+            ("all three",
+             {"scope": "a.md", "chapter": "b.md", "manuscript_wide": True}),
+    ):
+        raised = None
+        try:
+            _scope_target({"path": "/unused"},
+                          kwargs.get("scope"), kwargs.get("chapter"),
+                          bool(kwargs.get("manuscript_wide")))
+        except ValueError as err:
+            raised = str(err)
+        check(f"_scope_target refuses {label}",
+              raised is not None and "exactly one place" in raised,
+              str(raised))
+
+    check("manuscript-wide resolves to None (absent scope IS the place)",
+          _scope_target({"path": "/unused"}, None, None, True) is None)
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-scopetarget-"))
+    try:
+        ms = root / "manuscript"
+        ms.mkdir()
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "part.md"\n\n'
+            '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "loose.md"\n',
+            encoding="utf-8")
+        for name in ("part.md", "alpha.md", "beta.md", "loose.md",
+                     "pronunciations.md", "manifest.md"):
+            (ms / name).write_text(f"# {name}\n\nText.\n", encoding="utf-8")
+        manuscript = {"path": str(ms)}
+
+        check("--scope names the essay itself",
+              _scope_target(manuscript, "alpha.md", None, False)
+              == "alpha.md")
+        check("--scope accepts a unique substring match",
+              _scope_target(manuscript, "loose", None, False) == "loose.md")
+        check("--chapter on a part opener returns the opener path",
+              _scope_target(manuscript, None, "part.md", False) == "part.md")
+
+        raised = None
+        try:
+            _scope_target(manuscript, None, "loose.md", False)
+        except ValueError as err:
+            raised = str(err)
+        check("--chapter on a leaf refuses: the word would name nothing",
+              raised is not None and "no essays beneath it" in raised,
+              str(raised))
+
+        for sidecar in ("pronunciations.md", "manifest.md"):
+            raised = None
+            try:
+                _scope_target(manuscript, sidecar, None, False)
+            except ValueError as err:
+                raised = str(err)
+            check(f"--scope refuses sidecar {sidecar}",
+                  raised is not None
+                  and "pronunciation dictionary" in raised,
+                  str(raised))
+
+        # Isolation: the chapter path must consult disk TOC, not a fake.
+        with patch("authorlm.revisions.read_manuscript_files",
+                   return_value={"toc.toml": ""}):
+            raised = None
+            try:
+                _scope_target(manuscript, None, "part.md", False)
+            except ValueError as err:
+                raised = str(err)
+            check("empty TOC makes every --chapter look like a leaf",
+                  raised is not None and "no essays beneath it" in raised,
+                  str(raised))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_scale_models() -> None:
+    """Discontinuity path: pass through, drop, or collapse per-model split.
+
+    Apportioning a clamped total would invent a per-model breakdown the
+    ledger never observed — the report would lie about which model spent."""
+    from authorlm.clients import _scale_models
+
+    models = {"claude-x": [10, 100, 50, 5, 1],
+              "claude-y": [2, 20, 10, 0, 0]}
+    recomputed = {"messages": 12, "in": 120, "out": 60,
+                  "cache_read": 5, "cache_write": 1}
+
+    full = dict(recomputed)
+    check("when delta equals the whole file, the models dict passes through",
+          _scale_models(models, recomputed, full) == models)
+
+    zero = {k: 0 for k in recomputed}
+    check("a zero clamped delta drops the models breakdown entirely",
+          _scale_models(models, recomputed, zero) == {})
+
+    partial = {"messages": 3, "in": 30, "out": 15,
+               "cache_read": 1, "cache_write": 0}
+    collapsed = _scale_models(models, recomputed, partial)
+    check("a partial delta collapses to a single '(recomputed)' bucket "
+          "carrying the clamped totals — never invents a split",
+          collapsed == {"(recomputed)": [3, 30, 15, 1, 0]},
+          str(collapsed))
+
+    # One key short of equality still counts as partial (not pass-through).
+    almost = dict(recomputed)
+    almost["messages"] = recomputed["messages"] - 1
+    check("any single-key shortfall collapses rather than passing through",
+          _scale_models(models, recomputed, almost)
+          == {"(recomputed)": [almost["messages"], almost["in"],
+                               almost["out"], almost["cache_read"],
+                               almost["cache_write"]]})
+
+
+def check_pid_alive() -> None:
+    """Live/dead host_pid probes: gone is False; anything else is live.
+
+    A false death kills a live client marker; a false life keeps a stale
+    marker forever — both corrupt provenance sweep and enrichment."""
+    import subprocess
+    from unittest.mock import patch
+
+    from authorlm.clients import _pid_alive
+
+    check("missing / non-int pid assumes live (age decides)",
+          _pid_alive(None) and _pid_alive("not-a-pid")
+          and _pid_alive({"pid": 1}) and _pid_alive(""))
+    check("non-positive pids assume live",
+          _pid_alive(0) and _pid_alive(-1) and _pid_alive("-3"))
+
+    check("this test process is alive",
+          _pid_alive(os.getpid()) and _pid_alive(str(os.getpid())))
+
+    child = subprocess.Popen(
+        [os.environ.get("SHELL", "bash"), "-c", "exec sleep 60"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    dead_pid = child.pid
+    child.kill()
+    child.wait()
+    check("a reaped child pid is not alive",
+          not _pid_alive(dead_pid), str(dead_pid))
+
+    with patch("authorlm.clients.os.kill", side_effect=PermissionError):
+        check("PermissionError assumes live (process we do not own)",
+              _pid_alive(1))
+    with patch("authorlm.clients.os.kill", side_effect=OSError("unsupported")):
+        check("other kill failures assume live (not evidence of death)",
+              _pid_alive(1))
+    with patch("authorlm.clients.os.kill", side_effect=ProcessLookupError):
+        check("ProcessLookupError is the only hard death signal",
+              not _pid_alive(1))
+
+
+def check_marker_is_live() -> None:
+    """Marker liveness: parseable stamp within TTL, and optional pid probe.
+
+    Composes _parse_ts + _pid_alive — a regression here drops live clients
+    from enrichment or keeps ghosts after the host process exits."""
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from authorlm.clients import marker_is_live
+
+    now = datetime(2026, 9, 19, 12, 0, 0, tzinfo=timezone.utc)
+    now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale = (now - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    check("missing / unparseable stamp is dead",
+          not marker_is_live({}, now=now_s)
+          and not marker_is_live({"updated_at": "nope"}, now=now_s))
+    check("a fresh stamp with no pid check is live",
+          marker_is_live({"updated_at": fresh}, now=now_s, check_pid=False))
+    check("a stamp past TTL is dead even with check_pid off",
+          not marker_is_live({"updated_at": stale}, now=now_s,
+                             check_pid=False, ttl_hours=24))
+    check("started_at is accepted when updated_at is absent",
+          marker_is_live({"started_at": fresh}, now=now_s, check_pid=False))
+
+    with patch("authorlm.clients._pid_alive", return_value=False):
+        check("a dead host_pid kills an otherwise-fresh marker",
+              not marker_is_live({"updated_at": fresh, "host_pid": 99999},
+                                 now=now_s, check_pid=True))
+    with patch("authorlm.clients._pid_alive", return_value=True):
+        check("a live host_pid keeps a fresh marker",
+              marker_is_live({"updated_at": fresh, "host_pid": os.getpid()},
+                             now=now_s, check_pid=True))
+
+
 def main_test() -> None:
+    check_scope_target()
+    check_scale_models()
+    check_pid_alive()
+    check_marker_is_live()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
