@@ -2454,6 +2454,15 @@ def _locate_in_tab(docs_service, master_id: str, tab_id: str,
     return doc_index(offset), doc_index(offset + len(needle))
 
 
+def _tab_has_replace_forms(docs_service, master_id: str, tab_id: str) -> bool:
+    """True when a tab's live text still carries a `<<old>>{{new}}` form.
+
+    Replace forms only: a bare `{{…}}` is indistinguishable from author
+    prose (`{{title}}`, set notation) and must not trip this guard."""
+    text = "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
+    return threads_mod.has_replacement(text)
+
+
 def propose_change(db: Database, manuscript: dict, comment_id: str,
                    old: str, new: str, note: str,
                    service=None, docs_service=None,
@@ -2490,6 +2499,16 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
     if not (master_id and tab_id):
         raise LookupError(f"'{relpath}' has no tab in the master Doc")
 
+    # Refuse when the tab already carries a replace form. Substring
+    # locate finds `old` inside `<<old>>{{…}}`, and planting wraps again
+    # (`<<<<…>>{{…}}>>{{…}}`). Read-back still passes; resolve then
+    # writes residual markers into the essay. Same hole as the
+    # post-leveling guard in `write_pending_forms`.
+    if _tab_has_replace_forms(docs_service, master_id, tab_id):
+        raise LookupError(
+            f"'{relpath}'s Doc tab already carries <<old>>{{{{new}}}} "
+            f"pending forms — settle or discard them before proposing "
+            f"another change (planting on top would nest the wrappers)")
     span = _locate_in_tab(docs_service, master_id, tab_id, old)
     if span is None:
         raise LookupError(
@@ -2711,6 +2730,22 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     tab_id = (links.get(file) or {}).get("tab_id")
     if not (master_id and tab_id):
         raise LookupError(f"'{file}' has no tab in the master Doc")
+    # After leveling: refuse if the tab still carries a replace form.
+    # Open margin threads force the surgical push path; `strip_pending`
+    # collapses `<<P>>{{margin}}` to `P`, so leveling reports ops=0 and
+    # PRESERVES the margin form. `forms_pending` only sees state=
+    # `written`, so author_comment rows in `proposed` are invisible to
+    # every producer-overlap guard. Substring locate then finds `P`
+    # inside the wrapper, plants on top (`<<<<…>>{{…}}>>{{…}}`),
+    # read-back still passes, and resolve writes residual markers into
+    # the essay. Loud refusal here is the only safe door.
+    if _tab_has_replace_forms(docs_service, master_id, tab_id):
+        raise LookupError(
+            f"'{file}'s Doc tab already carries <<old>>{{{{new}}}} "
+            f"pending forms (open margin threads, or a prior pause). "
+            f"Settle or discard them before planting filter/critique/"
+            f"lens forms — planting on top would nest the wrappers and "
+            f"corrupt the essay at resolve")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
     # EVERY thread handed in is written. The caller chooses the set and
