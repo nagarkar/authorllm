@@ -76,6 +76,23 @@ def list_lenses(manuscript: dict) -> list[dict]:
 RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
 
 
+def _quote_is_word_fragment(unit: str, quote: str) -> bool:
+    """True when the unique `quote` span sits inside a larger word.
+
+    `str.replace` would still rewrite that span (e.g. quote `form` inside
+    `formalism` → `structurealism`). The door refuses that rewrite: an
+    edit must replace a free-standing occurrence, not a syllable of a
+    longer token. Boundaries are alphanumeric — punctuation, spaces, and
+    string edges all count as free-standing."""
+    start = unit.find(quote)
+    if start < 0:
+        return False
+    end = start + len(quote)
+    left = start > 0 and unit[start - 1].isalnum()
+    right = end < len(unit) and unit[end].isalnum()
+    return left or right
+
+
 def _edit_entry(units: list[str], raw_quote: str, replacement: str,
                 note: str, taken_units: set[int]) -> tuple[dict | None, str]:
     """Anchor one finding's `replacement` to its unit, or refuse.
@@ -97,12 +114,17 @@ def _edit_entry(units: list[str], raw_quote: str, replacement: str,
     if unit.count(raw_quote) > 1:
         return None, ("quote occurs more than once within its unit — "
                       "an edit cannot anchor to an ambiguous quote")
+    if _quote_is_word_fragment(unit, raw_quote):
+        return None, ("quote is only a fragment of a larger word in its "
+                      "unit — refusing an edit that would rewrite inside "
+                      "another word")
     if n in taken_units:
         return None, ("its unit already carries a staged edit from "
                       "this batch")
     if any(m in replacement for m in RESERVED_MARKERS):
         return None, "replacement carries reserved markers (<< >> {{ }})"
-    new = unit.replace(raw_quote, replacement)
+    start = unit.find(raw_quote)
+    new = unit[:start] + replacement + unit[start + len(raw_quote):]
     if not new.strip():
         return None, "replacement would leave the unit empty"
     if new == unit:
