@@ -5224,7 +5224,176 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_checkout_gate() -> None:
+    """Local writes while a file is checked out to Docs must refuse.
+
+    The Doc is the working copy in that window; a silent allow lets the
+    next pull discard local edits. The gate is per-relpath and only fires
+    on a dict entry whose `checked_out` is truthy."""
+    import json as _json
+
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-checkout-gate-")
+    try:
+        rel = "01-epictetus.md"
+        other = "02-other.md"
+
+        def stamp(gdocs: dict) -> None:
+            meta = loads(db.one(
+                "SELECT metadata FROM manuscripts WHERE id = ?",
+                (manuscript["id"],))["metadata"], {})
+            meta["gdocs"] = gdocs
+            db.update("manuscripts", manuscript["id"],
+                      {"metadata": _json.dumps(meta)})
+
+        stamp({})
+        api._checkout_gate(db, manuscript, rel)
+        check("missing gdocs mapping allows the write", True)
+
+        stamp({rel: "not-a-mapping"})
+        api._checkout_gate(db, manuscript, rel)
+        check("a non-dict entry is ignored (not treated as checked out)", True)
+
+        stamp({rel: {"doc_id": "stub", "checked_out": False}})
+        api._checkout_gate(db, manuscript, rel)
+        check("checked_out=False allows the write", True)
+
+        stamp({other: {"doc_id": "stub", "checked_out": True}})
+        api._checkout_gate(db, manuscript, rel)
+        check("another file's checkout does not block this relpath", True)
+
+        stamp({rel: {"doc_id": "stub", "checked_out": True}})
+        try:
+            api._checkout_gate(db, manuscript, rel)
+            refused, message = False, ""
+        except ValueError as err:
+            refused, message = True, str(err)
+        check("checked_out=True refuses the local write", refused, message)
+        check("the refusal names the file and points at doc pull",
+              rel in message
+              and "checked out to Google Docs" in message
+              and "doc pull" in message,
+              message)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_primary_intent_id() -> None:
+    """The writeup's primary intent is the ratified block, else the column.
+
+    `_writeup_episode` routes every beat's transitions and verdicts through
+    this id. Softening the block-over-column rule would land evidence on
+    the wrong episode once a multi-intent set is frozen."""
+    check("column intent_id is the fallback when no intents block exists",
+          api._primary_intent_id({"metadata": "{}", "intent_id": "col-1"})
+          == "col-1")
+    check("a ratified block primary beats the column",
+          api._primary_intent_id({
+              "metadata": '{"intents":{"primary":"block-1"}}',
+              "intent_id": "col-1",
+          }) == "block-1")
+    check("null primary in the block falls through to the column",
+          api._primary_intent_id({
+              "metadata": '{"intents":{"primary":null}}',
+              "intent_id": "col-2",
+          }) == "col-2")
+    check("empty-string primary also falls through (or-chain)",
+          api._primary_intent_id({
+              "metadata": '{"intents":{"primary":""}}',
+              "intent_id": "col-3",
+          }) == "col-3")
+    check("empty intents object with no column primary yields None",
+          api._primary_intent_id({
+              "metadata": '{"intents":{}}',
+              "intent_id": None,
+          }) is None)
+    check("missing intents key still reads the column",
+          api._primary_intent_id({
+              "metadata": '{"clients":[]}',
+              "intent_id": "col-4",
+          }) == "col-4")
+
+
+def check_current_beat() -> None:
+    """The cursor must land on a ratified plan beat or refuse loudly.
+
+    Empty plan and past-end cursor are the two ways a draft/propose path
+    would invent work; each refusal names the recovery verb."""
+    import json as _json
+
+    try:
+        api._current_beat({"plan": "[]", "cursor": 0})
+        empty_refused, empty_msg = False, ""
+    except LookupError as err:
+        empty_refused, empty_msg = True, str(err)
+    check("an empty plan refuses", empty_refused, empty_msg)
+    check("the empty-plan refusal points at write plan",
+          "write plan" in empty_msg, empty_msg)
+
+    plan = _json.dumps([
+        {"role": "opener", "concepts": ["A"], "budget": 40},
+        {"role": "close", "concepts": ["B"], "budget": 60},
+    ])
+    try:
+        api._current_beat({"plan": plan, "cursor": 2})
+        done_refused, done_msg = False, ""
+    except LookupError as err:
+        done_refused, done_msg = True, str(err)
+    check("a past-end cursor refuses", done_refused, done_msg)
+    check("the past-end refusal names write complete and --replace",
+          "write complete" in done_msg and "--replace" in done_msg,
+          done_msg)
+
+    first = api._current_beat({"plan": plan, "cursor": 0})
+    check("cursor 0 returns the first beat",
+          first["role"] == "opener" and first["concepts"] == ["A"],
+          str(first))
+    second = api._current_beat({"plan": plan, "cursor": 1})
+    check("cursor 1 returns the mid-plan beat, not the first",
+          second["role"] == "close" and second["concepts"] == ["B"],
+          str(second))
+
+
+def check_run_tallies() -> None:
+    """Filter-run status counts treat written/cleaned as accepted work.
+
+    Miscounting withdrawn as open, or written as still-proposed, lies about
+    whether a filter run is finished and what triage still owes."""
+    empty = api._run_tallies([])
+    check("no threads tally to zeros",
+          empty == {"proposed": 0, "accepted": 0, "rejected": 0, "open": 0},
+          str(empty))
+
+    threads = [
+        {"state": "proposed"},
+        {"state": "accepted"},
+        {"state": "written"},
+        {"state": "cleaned"},
+        {"state": "rejected"},
+        {"state": "declined"},
+        {"state": "withdrawn"},
+    ]
+    tallies = api._run_tallies(threads)
+    check("proposed is the raw thread count (including withdrawn)",
+          tallies["proposed"] == 7, str(tallies))
+    check("accepted includes written and cleaned",
+          tallies["accepted"] == 3, str(tallies))
+    check("rejected includes declined",
+          tallies["rejected"] == 2, str(tallies))
+    check("open counts only state=proposed (not withdrawn)",
+          tallies["open"] == 1, str(tallies))
+
+    single = api._run_tallies([{"state": "proposed"}])
+    check("a lone proposed thread is open=1",
+          single == {"proposed": 1, "accepted": 0, "rejected": 0, "open": 1},
+          str(single))
+
+
 def main_test() -> None:
+    check_checkout_gate()
+    check_primary_intent_id()
+    check_current_beat()
+    check_run_tallies()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
