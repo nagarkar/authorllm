@@ -236,6 +236,15 @@ staged, and unreviewed rows; selecting a row is independent of staging it.
 Staging a recommendation creates a normal persistent draft. Only **Apply
 selected** mutates the graph.
 
+Workbench tabs are numbered in order: concepts, edges, proposals, critique,
+then **help** (`05`). On the critique tab, **Revise & accept** has no action-bar
+button — double-click the Item cell, type your wording, and the row stages as
+`revise`. **Accept** on a row that already carries that revision keeps your
+wording (it does not downgrade back to the critic's text); any other action
+overwrites the revision. **Columns** show/hide and drag-resize widths; both
+persist per triage type in the browser's `localStorage` (viewer nicety — not
+manuscript state).
+
 ## Deterministic bulk triage
 
 `authorlm concept triage --deterministic -m <manuscript>` scans both pending
