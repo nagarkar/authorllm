@@ -5224,7 +5224,325 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_writeups_holding() -> None:
+    """Active writeups that froze an intent must surface on complete/abandon.
+
+    Without this warning the author closes a goal while a live rewrite still
+    carries it as a ratified member, then discovers the stale_member one
+    `write status` at a time (complete_intent Q4)."""
+    import io
+    import json as _json
+
+    root, _ws, db, manuscript, wide = _writeup_fixture(
+        "authorlm-writeups-holding-")
+    try:
+        api.ensure_session(db, manuscript)
+        scoped = api.declare_intent(
+            db, manuscript, "Rewrite the Epictetus essay",
+            scope="01-epictetus.md")["intent"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            started = api.write_start(db, manuscript, {}, "01-epictetus.md")
+            api.write_plan(db, manuscript,
+                           [{"role": "opener", "concepts": [], "budget": 60}])
+        writeup_id = started["writeup"]["id"]
+        held = api._writeups_holding(db, manuscript, scoped["id"])
+        check("a frozen active writeup holding the intent is reported",
+              held == [{"writeup": writeup_id, "file": "01-epictetus.md"}],
+              str(held))
+        held_wide = api._writeups_holding(db, manuscript, wide["id"])
+        check("the manuscript-wide member is reported on the same writeup",
+              held_wide == [{"writeup": writeup_id,
+                             "file": "01-epictetus.md"}],
+              str(held_wide))
+        stranger = api.declare_intent(
+            db, manuscript, "A goal never ratified here",
+            scope="01-epictetus.md")["intent"]
+        check("an intent absent from the frozen members is not held",
+              api._writeups_holding(db, manuscript, stranger["id"]) == [])
+
+        # Soften the freeze: same members, proposed again — must not warn.
+        row = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                          (writeup_id,)))
+        meta = loads(row["metadata"], {})
+        meta["intents"]["state"] = "proposed"
+        db.update("writeups", writeup_id,
+                  {"metadata": _json.dumps(meta)})
+        check("an unfrozen intents block does not count as holding",
+              api._writeups_holding(db, manuscript, scoped["id"]) == [])
+
+        # Restore freeze, then retire the writeup — only ACTIVE rows warn.
+        meta["intents"]["state"] = "frozen"
+        db.update("writeups", writeup_id,
+                  {"metadata": _json.dumps(meta), "status": "completed"})
+        check("a completed writeup is not reported as holding",
+              api._writeups_holding(db, manuscript, scoped["id"]) == [])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_other_active_filters() -> None:
+    """Creating a filter run warns (never refuses) when another is active.
+
+    Two filters on one essay is legitimate; a silent collide is not. The
+    warning names the other filter so the author can settle first — the
+    second settle still refuses loudly on compose drift (§15.19 rule 3)."""
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-other-filters-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+        other = "02-other.md"
+
+        def add_run(name: str, file: str, status: str = "active") -> str:
+            row = ko_fields("fr")
+            row.update(manuscript_id=mid, filter=name, file=file,
+                       unit_count=1, cursor=0, state=None, registry=None,
+                       result_version_id=None, status=status)
+            row["class"] = "sequential"
+            db.insert("filter_runs", row)
+            return row["id"]
+
+        check("no other active run yields no warning",
+              api._other_active_filters(db, mid, rel, "clarity") is None)
+
+        add_run("clarity", rel)
+        check("the filter being created is excluded from the warning",
+              api._other_active_filters(db, mid, rel, "clarity") is None)
+
+        add_run("voice", other)
+        check("an active run on another file does not warn",
+              api._other_active_filters(db, mid, rel, "clarity") is None)
+
+        add_run("voice", rel, status="settled")
+        add_run("pacing", rel, status="abandoned")
+        check("settled and abandoned runs are not other-active",
+              api._other_active_filters(db, mid, rel, "clarity") is None)
+
+        add_run("voice", rel)
+        add_run("pacing", rel)
+        note = api._other_active_filters(db, mid, rel, "clarity")
+        check("other active filters on this file produce a collision warning",
+              note is not None
+              and "voice" in note and "pacing" in note
+              and rel in note
+              and "drift check" in note,
+              str(note))
+        check("the warning never names the filter being created",
+              note is not None and "clarity" not in note.split(" already ")[0],
+              str(note))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_file_run_mode() -> None:
+    """File-scoped unmark/rollback transport follows the newest mode stamp.
+
+    Choosing an older run's transport (or inventing one when none exists)
+    rebuilds a Doc tab when the work was local, or peels local marks when
+    the work lived in Docs — both are silent wrong recovery."""
+    import json as _json
+
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-file-run-mode-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+
+        def add_run(created_at: str, mode: str | None,
+                    status: str = "settled") -> None:
+            row = ko_fields("fr")
+            meta = loads(row["metadata"], {}) or {}
+            if mode is not None:
+                meta["mode"] = mode
+            row.update(manuscript_id=mid, filter="clarity", file=rel,
+                       unit_count=1, cursor=1, state=None, registry=None,
+                       result_version_id=None, status=status,
+                       created_at=created_at,
+                       metadata=_json.dumps(meta))
+            row["class"] = "sequential"
+            db.insert("filter_runs", row)
+
+        check("no runs on the file yield no transport",
+              api._file_run_mode(db, mid, rel) is None)
+
+        add_run("2026-01-01T00:00:00+00:00", "local")
+        check("a lone stamped run's mode is the file transport",
+              api._file_run_mode(db, mid, rel) == "local")
+
+        add_run("2026-01-02T00:00:00+00:00", None)
+        check("a newer run without a mode falls through to an older stamp",
+              api._file_run_mode(db, mid, rel) == "local")
+
+        add_run("2026-01-03T00:00:00+00:00", "doc")
+        check("the newest stamped mode wins over older local",
+              api._file_run_mode(db, mid, rel) == "doc")
+
+        add_run("2026-01-04T00:00:00+00:00", "local", status="abandoned")
+        check("status does not matter — newest mode stamp still wins",
+              api._file_run_mode(db, mid, rel) == "local")
+
+        check("a different file is unaffected by these runs",
+              api._file_run_mode(db, mid, "02-other.md") is None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_scope_drift() -> None:
+    """After freeze, newly-in-scope intents report; stale members note status.
+
+    Membership after ratification changes only by authorial verb. Softening
+    auto-join would rewrite block A mid-writeup; dropping the stale note
+    hides that a frozen goal already closed under the author's feet."""
+    import io
+
+    root, _ws, db, manuscript, wide = _writeup_fixture(
+        "authorlm-scope-drift-")
+    try:
+        api.ensure_session(db, manuscript)
+        scoped = api.declare_intent(
+            db, manuscript, "Rewrite the Epictetus essay",
+            scope="01-epictetus.md")["intent"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            started = api.write_start(db, manuscript, {}, "01-epictetus.md")
+            api.write_plan(db, manuscript,
+                           [{"role": "opener", "concepts": [], "budget": 60}])
+        writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                              (started["writeup"]["id"],)))
+        block = loads(writeup["metadata"], {})["intents"]
+        check("fixture write_plan froze the intents block",
+              block.get("state") == "frozen", str(block.get("state")))
+
+        empty_new, empty_stale = api._scope_drift(
+            db, manuscript, writeup, {})
+        check("an empty block reports no drift",
+              empty_new == [] and empty_stale == [],
+              f"{empty_new!r} {empty_stale!r}")
+
+        newly, stale = api._scope_drift(db, manuscript, writeup, block)
+        check("a just-frozen set with no later intents has empty drift",
+              newly == [] and stale == [],
+              f"newly={newly!r} stale={stale!r}")
+
+        late = api.declare_intent(
+            db, manuscript, "A goal declared after ratification",
+            scope="01-epictetus.md")["intent"]
+        newly, stale = api._scope_drift(db, manuscript, writeup, block)
+        check("an intent declared after freeze appears in newly_in_scope",
+              len(newly) == 1 and newly[0]["id"] == late["id"]
+              and newly[0]["tier"] == "file"
+              and stale == [],
+              str(newly))
+
+        # Ignoring the late intent suppresses the report — join still refuses.
+        ignored_block = dict(block)
+        ignored_block["ignored"] = [late["id"]]
+        newly_ign, stale_ign = api._scope_drift(
+            db, manuscript, writeup, ignored_block)
+        check("ignored ids are excluded from newly_in_scope",
+              newly_ign == [] and stale_ign == [],
+              str(newly_ign))
+
+        api.complete_intent(db, manuscript, scoped["id"], "done for now")
+        api.abandon_intent(db, manuscript, wide["id"], "changed mind")
+        newly2, stale2 = api._scope_drift(db, manuscript, writeup, block)
+        stale_by_id = {m["id"]: m["status"] for m in stale2}
+        check("completed and abandoned members surface as stale",
+              stale_by_id.get(scoped["id"]) == "completed"
+              and stale_by_id.get(wide["id"]) == "abandoned",
+              str(stale2))
+        check("newly_in_scope still lists the late active intent",
+              any(m["id"] == late["id"] for m in newly2),
+              str(newly2))
+
+        # Gone member (row deleted) is still a note — status 'gone'.
+        orphan_block = {
+            "state": "frozen",
+            "members": [{"id": "di-missing", "tier": "file",
+                         "statement": "vanished", "scope": "01-epictetus.md"}],
+            "ignored": [],
+        }
+        _new3, stale3 = api._scope_drift(
+            db, manuscript, writeup, orphan_block)
+        check("a member whose intent row is gone is reported stale/gone",
+              stale3 == [{"id": "di-missing", "tier": "file",
+                          "statement": "vanished",
+                          "scope": "01-epictetus.md",
+                          "status": "gone"}],
+              str(stale3))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_contradict_folding_belief() -> None:
+    """Adopting a screen-folded proposal must contradict the cutting belief.
+
+    Dismiss agrees with the cut and must NOT support it — a belief that
+    scored its own firings would ratchet its own confidence. Missing law
+    ids stay folded-only, never invent evidence."""
+    import json as _json
+
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-fold-contradict-")
+    try:
+        belief = ko_fields("pol")
+        belief.update(
+            manuscript_id=manuscript["id"],
+            statement="Do not invent a new proper name mid-essay.",
+            status="validated", confidence=0.8, supporting=2,
+            contradicting=0, outstanding_questions="[]",
+            source="review-explanation", source_id=db.source("author"))
+        db.insert("editorial_beliefs", belief)
+
+        dismiss = api._contradict_folding_belief(
+            db,
+            {"metadata": _json.dumps({"law": belief["id"], "by": "screen"})},
+            "dismiss")
+        check("dismiss is folded-only — never counted as support",
+              dismiss == {"folded": True}, str(dismiss))
+        still = dict(db.one(
+            "SELECT contradicting, supporting, confidence FROM "
+            "editorial_beliefs WHERE id = ?", (belief["id"],)))
+        check("dismiss leaves the belief's evidence counters untouched",
+              still["contradicting"] == 0 and still["supporting"] == 2,
+              str(still))
+
+        no_law = api._contradict_folding_belief(
+            db, {"metadata": _json.dumps({"by": "screen"})}, "accept")
+        check("accept without a law id is folded-only",
+              no_law == {"folded": True}, str(no_law))
+
+        missing = api._contradict_folding_belief(
+            db,
+            {"metadata": _json.dumps({"law": "pol-does-not-exist"})},
+            "accept")
+        check("accept against a vanished belief is folded-only",
+              missing == {"folded": True}, str(missing))
+
+        adopted = api._contradict_folding_belief(
+            db,
+            {"metadata": _json.dumps({"law": belief["id"], "by": "screen"})},
+            "accept")
+        check("accept contradicts the cutting belief and reports it",
+              adopted.get("folded") is True
+              and adopted.get("contradicted", {}).get("belief") == belief["id"]
+              and adopted["contradicted"]["confidence"] is not None,
+              str(adopted))
+        after = dict(db.one(
+            "SELECT contradicting, supporting FROM editorial_beliefs "
+            "WHERE id = ?", (belief["id"],)))
+        check("accept increments contradicting exactly once",
+              after["contradicting"] == 1 and after["supporting"] == 2,
+              str(after))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_writeups_holding()
+    check_other_active_filters()
+    check_file_run_mode()
+    check_scope_drift()
+    check_contradict_folding_belief()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
