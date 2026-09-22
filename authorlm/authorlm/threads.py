@@ -41,11 +41,44 @@ DECLINE_KEYWORDS = {"no", "dont", "don't", "revert", "reject"}
 #                                 passes propose new paragraphs this way)
 # Both resolve the same way: the author may edit the {{new}} half; the
 # local file keeps the OLD text (nothing, for an insertion) until resolve.
+#
+# The {{new}} half is closed by *balanced* `{{` / `}}` nesting, not by the
+# first `}}`. Modified acceptance (margin-threads design) lets the author
+# rewrite the green half in place; set notation like `{{a, b}}` is ordinary
+# prose there. A non-greedy / find('}}') close truncated that prose and
+# left residual markers in the manuscript on resolve/approve.
+# Plant-time `assert_no_pending_markers` still refuses delimiter-bearing
+# proposals so the machine never writes a nested form; the scanner is what
+# honours a post-edit the author typed into the Doc.
 PENDING = re.compile(
     r"(?:~~)?<<(?P<old>.*?)>>(?:~~)?\{\{(?P<new>.*?)\}\}",
     re.DOTALL)
 INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
 _ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")
+
+
+def close_braced(text: str, content_start: int) -> int | None:
+    """Index just past the `}}` that balances an opening `{{` whose
+    content begins at `content_start`. None when the span is unclosed.
+
+    Depth counts paired `{{` / `}}` only (single braces are prose). Shared
+    by the tab scanner and `gdocs._replace_pending`'s exact-span locate."""
+    depth = 1
+    i = content_start
+    n = len(text)
+    while i < n - 1:
+        pair = text[i:i + 2]
+        if pair == "{{":
+            depth += 1
+            i += 2
+        elif pair == "}}":
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return i
+        else:
+            i += 1
+    return None
 
 
 def classify_reply(content: str) -> str:
@@ -71,9 +104,12 @@ _RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
 
 def assert_no_pending_markers(old: str, new: str) -> None:
     """Reject proposal text that would break the <<old>>{{new}} grammar.
-    Non-greedy parsers and find('}}') close at the first delimiter, so a
-    new half containing `}}` (e.g. nested braces) truncates the span and
-    corrupts both pull-strip and approve."""
+
+    Plant-time only: the scanner balances nested `{{` / `}}` in a green
+    half the author typed after the fact, but a machine-written proposal
+    still must not carry reserved delimiters — `<<` / `>>` break the old
+    half, and planting nested braces invites every older find('}}') path
+    (and every human reading the tab) to mis-count the span."""
     for label, part in (("old", old), ("new", new)):
         for marker in _RESERVED_MARKERS:
             if marker in part:
@@ -99,21 +135,39 @@ def render_insertion(new: str) -> str:
     return f"{{{{{new}}}}}"
 
 
-_INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
-                             re.DOTALL)
-
-
 def _collapse(text: str, keep: str) -> str:
-    """Resolve every pending form to one half. Replaces first (their
-    {{new}} halves are consumed by the PENDING match, so the INSERTION
-    lookbehind never sees them), then insertions. Dropping an insertion
-    also drops its paragraph separator, so the OLD text is byte-clean;
-    keeping one leaves the paragraph in place."""
-    text = PENDING.sub(lambda m: m.group(keep), text)
-    if keep == "old":
-        text = _INSERTION_PARA.sub("", text)
-    return INSERTION.sub(lambda m: m.group("new") if keep == "new" else "",
-                         text)
+    """Resolve every pending form to one half. Rebuild from `pending_forms`
+    (balanced new halves) so a kept OLD half that itself contains `{{…}}`
+    is not re-scanned as an insertion, and a post-edited green half that
+    nests set notation is not truncated at the inner `}}`. Dropping an
+    insertion that sat as its own paragraph also drops its preceding
+    blank line, so the OLD text is byte-clean; keeping one leaves the
+    paragraph in place."""
+    result = text
+    for form in sorted(pending_forms(text), key=lambda f: f["start"],
+                       reverse=True):
+        start, end = form["start"], form["end"]
+        if keep == "new":
+            repl = form["new"]
+        elif form["kind"] == "insert":
+            start, end, repl = _insertion_strip_span(result, start, end)
+        else:
+            repl = form["old"]
+        result = result[:start] + repl + result[end:]
+    return result
+
+
+def _insertion_strip_span(text: str, start: int, end: int
+                          ) -> tuple[int, int, str]:
+    """When an insertion is its own paragraph, widen the delete to eat
+    the blank line before it (same shape the old `_INSERTION_PARA` regex
+    matched: blank line before, then `\\s*\\n` or end after). Inline
+    insertions just collapse to empty in place."""
+    before, after = text[:start], text[end:]
+    m = re.search(r"\n\s*\n\Z", before)
+    if m and (after == "" or re.match(r"\s*\n", after) is not None):
+        return m.start(), end, ""
+    return start, end, ""
 
 
 def strip_pending(text: str) -> tuple[str, list[str]]:
@@ -160,13 +214,17 @@ def strip_replacements(text: str) -> tuple[str, list[str]]:
     `}}` is NOT warned about: it is not this grammar's business, and a
     warning on every templating example would be noise that trained the
     author to ignore the warnings that matter."""
-    stripped = PENDING.sub(lambda m: m.group("old"), text)
+    result = text
+    for form in sorted(
+            (f for f in pending_forms(text) if f["kind"] == "replace"),
+            key=lambda f: f["start"], reverse=True):
+        result = (result[:form["start"]] + form["old"] + result[form["end"]:])
     warnings = []
-    if _REPLACE_MARKER.search(stripped):
+    if _REPLACE_MARKER.search(result):
         warnings.append(
             "stray or unbalanced pending-change markers (<<, >>) — left "
             "untouched; settle them in the file or ask in chat")
-    return stripped, warnings
+    return result, warnings
 
 
 def has_replacement(text: str) -> bool:
@@ -176,7 +234,7 @@ def has_replacement(text: str) -> bool:
     reason `strip_replacements` is: a file containing `{{title}}` is not
     mid-settle, and treating it as such refused its Doc push forever with
     a message about a resolve that does not exist."""
-    return PENDING.search(text) is not None
+    return any(f["kind"] == "replace" for f in pending_forms(text))
 
 
 def approved_text(text: str) -> str:
@@ -188,18 +246,53 @@ def approved_text(text: str) -> str:
 def pending_forms(text: str) -> list[dict]:
     """Every pending form in a tab, in document order: {kind, old, new,
     start, end}. The resolve verb reads the author's post-edits from the
-    {{new}} halves here."""
-    found = []
-    for m in PENDING.finditer(text):
-        found.append({"kind": "replace", "old": m.group("old"),
-                      "new": m.group("new"), "start": m.start(),
-                      "end": m.end()})
-    consumed = [(f["start"], f["end"]) for f in found]
-    for m in INSERTION.finditer(text):
-        if any(s <= m.start() < e for s, e in consumed):
+    {{new}} halves here. New halves close at balanced brace depth so a
+    post-edited `{{a, b}}` inside the green run is not a false end."""
+    found: list[dict] = []
+    i, n = 0, len(text)
+    while i < n:
+        at = text.find("<<", i)
+        if at < 0:
+            break
+        form_start = at - 2 if at >= 2 and text[at - 2:at] == "~~" else at
+        gt = text.find(">>", at + 2)
+        if gt < 0:
+            break
+        old = text[at + 2:gt]
+        pos = gt + 2
+        if text.startswith("~~", pos):
+            pos += 2
+        if not text.startswith("{{", pos):
+            i = at + 2
             continue
-        found.append({"kind": "insert", "old": "", "new": m.group("new"),
-                      "start": m.start(), "end": m.end()})
+        end = close_braced(text, pos + 2)
+        if end is None:
+            i = at + 2
+            continue
+        found.append({"kind": "replace", "old": old,
+                      "new": text[pos + 2:end - 2],
+                      "start": form_start, "end": end})
+        i = end
+    consumed = [(f["start"], f["end"]) for f in found]
+    i = 0
+    while i < n - 1:
+        if text[i:i + 2] != "{{":
+            i += 1
+            continue
+        if i > 0 and text[i - 1] in ">}":
+            i += 2
+            continue
+        if any(s <= i < e for s, e in consumed):
+            i += 2
+            continue
+        end = close_braced(text, i + 2)
+        if end is None:
+            i += 2
+            continue
+        found.append({"kind": "insert", "old": "",
+                      "new": text[i + 2:end - 2],
+                      "start": i, "end": end})
+        i = end
     return sorted(found, key=lambda f: f["start"])
 
 

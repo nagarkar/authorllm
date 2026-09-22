@@ -2822,7 +2822,7 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
     Doc tab, clear the track-changes styling, and mirror the outcome
     into the local file. Exactness is law: returns False (stale) when
     the span is not found verbatim."""
-    from .threads import render_pending
+    from .threads import close_braced
 
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
@@ -2841,10 +2841,13 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
     at = full.find(prefix)
     if at < 0 or not full[at + len(prefix):].startswith("{{"):
         return False
-    close = full.find("}}", at + len(prefix) + 2)
-    if close < 0:
+    # Balanced close: the author may have nested `{{a, b}}` into the
+    # green half (modified acceptance). find('}}') truncated there and
+    # left residual markers in the essay on approve.
+    close_at = close_braced(full, at + len(prefix) + 2)
+    if close_at is None:
         return False
-    actual_new = full[at + len(prefix) + 2: close]
+    actual_new = full[at + len(prefix) + 2: close_at - 2]
     if replacement == thread["proposed_new"] and actual_new != replacement:
         import json as _json
 
@@ -2856,7 +2859,7 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
                   {"proposed_new": actual_new,
                    "metadata": _json.dumps(meta)})
         replacement = actual_new
-    pending = full[at: close + 2]
+    pending = full[at: close_at]
     span = _locate_in_tab(docs_service, master_id, tab_id, pending)
     if span is None:
         return False
