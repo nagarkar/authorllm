@@ -5224,7 +5224,318 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_with_roles_and_new_intent_block() -> None:
+    """Roles and the birth shape of an intents block before freeze.
+
+    Softening role stamps or the tied/primary birth contract lets drafting
+    frame the wrong standing goal, or hides a tie the author must break."""
+    root = Path(tempfile.mkdtemp(prefix="authorlm-intent-block-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "part.md").write_text("# Part\n", encoding="utf-8")
+        (ms / "01-a.md").write_text("# A\n", encoding="utf-8")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "part.md"\n'
+            '[[chapter]]\nfile = "01-a.md"\nparent = "part.md"\n',
+            encoding="utf-8",
+        )
+        manuscript = {"path": str(ms), "id": "m-intent-block"}
+
+        members = [
+            {"id": "wide", "scope": None, "tier": "manuscript",
+             "statement": "book-wide", "role": "secondary"},
+            {"id": "file", "scope": "01-a.md", "tier": "file",
+             "statement": "this essay", "role": "secondary"},
+        ]
+        roles = api._with_roles(members, "file")
+        check("_with_roles marks only the named id primary",
+              [m["id"] for m in roles if m["role"] == "primary"] == ["file"]
+              and all(m["role"] == "secondary" for m in roles
+                      if m["id"] != "file"),
+              str(roles))
+        check("_with_roles with primary=None leaves every member secondary",
+              all(m["role"] == "secondary"
+                  for m in api._with_roles(members, None)))
+
+        block = api._new_intent_block(manuscript, "01-a.md", members,
+                                      manual=False)
+        check("a clear primary freezes role, derived, and empty tied",
+              block["state"] == "proposed"
+              and block["manual"] is False
+              and block["primary"] == "file"
+              and block["tied"] == []
+              and block["derived"] == ["wide", "file"]
+              and block["adds"] == [] and block["removes"] == []
+              and block["deferred"] == {} and block["ignored"] == []
+              and block["frozen_at"] is None
+              and {m["id"]: m["role"] for m in block["members"]}
+              == {"wide": "secondary", "file": "primary"},
+              str(block))
+
+        tied_members = [
+            {"id": "z-file", "scope": "01-a.md", "tier": "file",
+             "statement": "z", "role": "secondary"},
+            {"id": "a-file", "scope": "01-a.md", "tier": "file",
+             "statement": "a", "role": "secondary"},
+        ]
+        tied = api._new_intent_block(manuscript, "01-a.md", tied_members,
+                                     manual=True)
+        check("a same-tier tie leaves primary unset and lists candidates",
+              tied["primary"] is None
+              and tied["tied"] == ["a-file", "z-file"]
+              and tied["manual"] is True
+              and all(m["role"] == "secondary" for m in tied["members"]),
+              str(tied))
+
+        empty = api._new_intent_block(manuscript, "01-a.md", [], manual=False)
+        check("an empty member list yields a blank proposed block",
+              empty["primary"] is None and empty["tied"] == []
+              and empty["members"] == [] and empty["derived"] == [],
+              str(empty))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_note_preview() -> None:
+    """Compact concept notes truncate at `_NOTE_PREVIEW`, never mid-ellipsis.
+
+    Softening the cut invents notes the author never wrote in list payloads,
+    or ships megabyte notes through every follow-up tool."""
+    n = api._NOTE_PREVIEW
+    check("None and empty notes compact to None",
+          api._preview(None) is None and api._preview("") is None)
+    exact = "x" * n
+    check("a note at the cap is returned unchanged",
+          api._preview(exact) == exact)
+    check("a note under the cap is returned unchanged",
+          api._preview("short") == "short")
+    long = "y" * (n + 5)
+    shown = api._preview(long)
+    check("an oversize note is cut to cap-1 chars plus an ellipsis",
+          shown is not None
+          and len(shown) == n
+          and shown == long[: n - 1] + "…"
+          and shown.endswith("…"),
+          f"len={None if shown is None else len(shown)} {shown!r}")
+
+
+def check_filter_run_row() -> None:
+    """Active filter-run lookup refuses silence and refuses to guess.
+
+    Naming the wrong run (or inventing one) settles another filter's edits;
+    picking among two active runs without a name is the same lie."""
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-filter-run-row-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+
+        def add_run(name: str, file: str = rel, status: str = "active",
+                    created_at: str | None = None) -> str:
+            row = ko_fields("fr")
+            row.update(manuscript_id=mid, filter=name, file=file,
+                       unit_count=1, cursor=0, state=None, registry=None,
+                       result_version_id=None, status=status)
+            row["class"] = "sequential"
+            if created_at is not None:
+                row["created_at"] = created_at
+            db.insert("filter_runs", row)
+            return row["id"]
+
+        raised = None
+        try:
+            api._filter_run_row(db, manuscript, rel)
+        except LookupError as err:
+            raised = str(err)
+        check("no active run on the file is a LookupError, not None",
+              raised is not None and "no active filter run" in raised
+              and rel in raised, raised)
+
+        settled_id = add_run("clarity", status="settled")
+        raised = None
+        try:
+            api._filter_run_row(db, manuscript, rel)
+        except LookupError as err:
+            raised = str(err)
+        check("a settled run alone does not satisfy the lookup",
+              raised is not None and "no active filter run" in raised
+              and settled_id, raised)
+
+        active_id = add_run("clarity",
+                            created_at="2026-01-02T00:00:00+00:00")
+        got = api._filter_run_row(db, manuscript, rel)
+        check("a single active run resolves without a filter name",
+              got["id"] == active_id and got["filter"] == "clarity",
+              str(got))
+
+        add_run("voice", created_at="2026-01-03T00:00:00+00:00")
+        raised = None
+        try:
+            api._filter_run_row(db, manuscript, rel)
+        except LookupError as err:
+            raised = str(err)
+        check("two active runs without a name refuse rather than guess",
+              raised is not None
+              and "2 active filter runs" in raised
+              and "clarity" in raised and "voice" in raised
+              and "name the one you mean" in raised, raised)
+
+        named = api._filter_run_row(db, manuscript, rel, "voice")
+        check("naming the filter resolves among several active runs",
+              named["filter"] == "voice", str(named))
+
+        raised = None
+        try:
+            api._filter_run_row(db, manuscript, rel, "pacing")
+        except LookupError as err:
+            raised = str(err)
+        check("a named miss tells the author how to start that filter",
+              raised is not None
+              and "no active run of 'pacing'" in raised
+              and f"filter run pacing {rel}" in raised, raised)
+
+        raised = None
+        try:
+            api._filter_run_row(db, manuscript, "02-missing.md")
+        except LookupError as err:
+            raised = str(err)
+        check("a different file is unaffected by this essay's runs",
+              raised is not None and "02-missing.md" in raised, raised)
+        # settled_id above proves settled rows are inserted then ignored
+        assert settled_id
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_freeze_run_mode() -> None:
+    """Transport stamp writes `mode` once into metadata without wiping siblings.
+
+    Losing sibling keys (or inventing a default mode) strands a run on the
+    wrong road, or drops the clients list the next verb just stamped."""
+    import json as _json
+
+    from authorlm import clients
+
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-freeze-mode-")
+    try:
+        row = ko_fields("fr")
+        meta = loads(row["metadata"], {}) or {}
+        meta["keep_me"] = "sibling"
+        row.update(manuscript_id=manuscript["id"], filter="clarity",
+                   file="01-epictetus.md", unit_count=1, cursor=0,
+                   state=None, registry=None, result_version_id=None,
+                   status="active", metadata=_json.dumps(meta))
+        row["class"] = "sequential"
+        db.insert("filter_runs", row)
+        run = dict(db.one("SELECT * FROM filter_runs WHERE id = ?",
+                          (row["id"],)))
+
+        check("a fresh run has no transport yet",
+              api._run_mode(run) is None)
+
+        frozen = api._freeze_run_mode(db, run, "doc")
+        check("freeze stamps the chosen mode onto the returned row",
+              api._run_mode(frozen) == "doc"
+              and loads(frozen["metadata"], {}).get("mode") == "doc",
+              str(frozen.get("metadata")))
+        persisted = loads(db.one("SELECT metadata FROM filter_runs WHERE id = ?",
+                                 (row["id"],))["metadata"], {})
+        check("sibling metadata keys survive the freeze",
+              persisted.get("keep_me") == "sibling"
+              and persisted.get("mode") == "doc",
+              str(persisted))
+
+        # The helper itself is a stamp, not a gate — callers refuse a second
+        # road. Pin that honesty so a future "once" check here does not
+        # silently start refusing at the wrong layer.
+        again = api._freeze_run_mode(db, frozen, "local")
+        check("a second freeze overwrites mode (once-only lives at callers)",
+              api._run_mode(again) == "local"
+              and loads(again["metadata"], {}).get("keep_me") == "sibling",
+              str(again.get("metadata")))
+    finally:
+        clients.configure(verb="")
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_touched_filter_run() -> None:
+    """Filter-run touch returns the POST-touch row so metadata RMW keeps clients.
+
+    Assembly and settle are ordinarily two chats. Returning the pre-touch
+    row lets the next verb's dump silently drop the clients list — the
+    same clobber hazard `_writeup` already pins for drafting."""
+    import json as _json
+
+    from authorlm import clients
+
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-touched-filter-")
+    try:
+        row = ko_fields("fr")
+        row.update(manuscript_id=manuscript["id"], filter="clarity",
+                   file="01-epictetus.md", unit_count=1, cursor=0,
+                   state=None, registry=None, result_version_id=None,
+                   status="active")
+        row["class"] = "sequential"
+        db.insert("filter_runs", row)
+        born = dict(db.one("SELECT * FROM filter_runs WHERE id = ?",
+                           (row["id"],)))
+
+        def touch_as(packed: str, verb: str) -> dict:
+            with _as_client(packed):
+                clients.configure(verb=verb)
+                return api._touched_filter_run(db, born)
+
+        first = touch_as("claude-code:fr-a:Chat A", "filter run")
+        clients_a = loads(first["metadata"], {}).get("clients") or []
+        check("the first chat is stamped onto the returned filter-run row",
+              [e["session"] for e in clients_a] == ["fr-a"]
+              and clients_a[0]["verbs"] == ["filter run"],
+              str(clients_a))
+
+        # Re-read the fresh row id so the second touch starts from disk.
+        mid = dict(db.one("SELECT * FROM filter_runs WHERE id = ?",
+                          (row["id"],)))
+
+        def touch_fresh(packed: str, verb: str) -> dict:
+            with _as_client(packed):
+                clients.configure(verb=verb)
+                return api._touched_filter_run(db, mid)
+
+        second = touch_fresh("claude-code:fr-b:Chat B", "filter resolve")
+        # The hazard: a caller loads the POST-touch metadata, mutates it,
+        # and dumps it back. If `_touched_filter_run` had returned the
+        # pre-touch row, this dump would drop Chat B.
+        meta = loads(second["metadata"], {})
+        meta["cursor_note"] = "written by the verb after touch returned"
+        db.update("filter_runs", row["id"],
+                  {"metadata": _json.dumps(meta)})
+        after = loads(db.one("SELECT metadata FROM filter_runs WHERE id = ?",
+                             (row["id"],))["metadata"], {})
+        check("a verb's own read-modify-write keeps both chats on the run",
+              [e["session"] for e in after.get("clients", [])]
+              == ["fr-a", "fr-b"],
+              str(after.get("clients")))
+        check("and the verb's own key landed alongside the clients list",
+              after.get("cursor_note")
+              == "written by the verb after touch returned")
+        check("each chat keeps its own verb trail",
+              after["clients"][0]["verbs"] == ["filter run"]
+              and after["clients"][1]["verbs"] == ["filter resolve"],
+              str(after["clients"]))
+    finally:
+        clients.configure(verb="")
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_with_roles_and_new_intent_block()
+    check_note_preview()
+    check_filter_run_row()
+    check_freeze_run_mode()
+    check_touched_filter_run()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
