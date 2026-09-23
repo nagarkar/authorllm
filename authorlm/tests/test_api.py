@@ -5224,7 +5224,276 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_version_text_and_latest() -> None:
+    """Pinned version text and latest-id lookup for filter settle / restore.
+
+    Wrong file text or a stale version_no silently rolls back the wrong
+    draft, or treats a missing pin as empty prose and wipes the essay."""
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-version-text-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+
+        check("a null version id yields no text",
+              api._version_text(db, None, rel) is None)
+        check("a missing version row yields no text",
+              api._version_text(db, "mv-missing", rel) is None)
+        check("an empty manuscript has no latest version",
+              api._latest_version_id(db, mid) is None)
+
+        older = ko_fields("mv")
+        older.update(manuscript_id=mid, version_no=1, checksum="c1",
+                     files=json.dumps({rel: "first pin\n",
+                                       "other.md": "sibling\n"}),
+                     source="snapshot")
+        db.insert("manuscript_versions", older)
+        newer = ko_fields("mv")
+        newer.update(manuscript_id=mid, version_no=3, checksum="c3",
+                     files=json.dumps({rel: "third pin\n"}),
+                     source="snapshot")
+        db.insert("manuscript_versions", newer)
+        middle = ko_fields("mv")
+        middle.update(manuscript_id=mid, version_no=2, checksum="c2",
+                      files=json.dumps({"other.md": "only sibling\n"}),
+                      source="snapshot")
+        db.insert("manuscript_versions", middle)
+
+        check("version text is the named file's body from that snapshot",
+              api._version_text(db, older["id"], rel) == "first pin\n")
+        check("a snapshot without that file yields None, not ''",
+              api._version_text(db, middle["id"], rel) is None)
+        check("latest is highest version_no, not insert order",
+              api._latest_version_id(db, mid) == newer["id"],
+              api._latest_version_id(db, mid))
+        check("another manuscript's versions are ignored",
+              api._latest_version_id(db, "ms-other") is None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_settled_runs() -> None:
+    """Settled filter history is chronological and status-strict.
+
+    Mixing in active/abandoned runs, or reversing order, misfeeds the
+    prior-edition text that the next run's compose/drift check depends on."""
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-settled-runs-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+
+        def add_run(name: str, status: str, created_at: str,
+                    file: str = rel) -> str:
+            row = ko_fields("fr")
+            row.update(manuscript_id=mid, filter=name, file=file,
+                       unit_count=1, cursor=0, state=None, registry=None,
+                       result_version_id=None, status=status,
+                       created_at=created_at)
+            row["class"] = "sequential"
+            db.insert("filter_runs", row)
+            return row["id"]
+
+        first = add_run("clarity", "settled", "2026-01-01T00:00:00+00:00")
+        add_run("clarity", "active", "2026-01-02T00:00:00+00:00")
+        second = add_run("clarity", "settled", "2026-01-03T00:00:00+00:00")
+        add_run("clarity", "abandoned", "2026-01-04T00:00:00+00:00")
+        add_run("voice", "settled", "2026-01-05T00:00:00+00:00")
+        add_run("clarity", "settled", "2026-01-06T00:00:00+00:00",
+                file="02-other.md")
+
+        got = api._settled_runs(db, mid, "clarity", rel)
+        check("only settled runs of that filter+file are returned",
+              [r["id"] for r in got] == [first, second],
+              str([r["id"] for r in got]))
+        check("settled runs are oldest-first by created_at",
+              [r["created_at"] for r in got]
+              == ["2026-01-01T00:00:00+00:00", "2026-01-03T00:00:00+00:00"],
+              str([r["created_at"] for r in got]))
+        check("a file with no settled history yields an empty list",
+              api._settled_runs(db, mid, "clarity", "03-none.md") == [])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_store_intent_block() -> None:
+    """Intent-block RMW reloads metadata so a stale writeup dict cannot
+    clobber the clients list `_touched` just stamped.
+
+    Softening this to dump `writeup['metadata']` drops the mul-chat trail
+    the next verb's dump would otherwise keep — the same hazard
+    `_touched_filter_run` pins for filter runs."""
+    root, _ws, db, manuscript, intent = _writeup_fixture(
+        "authorlm-store-intent-")
+    try:
+        clients_list = [
+            {"engine": "claude-code", "session": "wu-a",
+             "precision": "exact", "verbs": ["start"]},
+            {"engine": "claude-code", "session": "wu-b",
+             "precision": "exact", "verbs": ["plan"]},
+        ]
+        row = ko_fields("wu")
+        meta = {"clients": clients_list, "keep_me": "sibling"}
+        row.update(manuscript_id=manuscript["id"], intent_id=intent["id"],
+                   file="01-epictetus.md", status="active",
+                   metadata=json.dumps(meta))
+        db.insert("writeups", row)
+
+        # Stale in-memory row: no clients, no sibling — the shape a verb
+        # would hold if it loaded before `_touched` and never re-read.
+        stale = {"id": row["id"], "metadata": json.dumps({"intents": {}})}
+        block = {"state": "frozen", "primary": "x", "members": [],
+                 "tied": [], "derived": [], "adds": [], "removes": [],
+                 "deferred": {}, "ignored": [], "frozen_at": "t0",
+                 "manual": False}
+        api._store_intent_block(db, stale, block)
+
+        after = loads(db.one("SELECT metadata FROM writeups WHERE id = ?",
+                             (row["id"],))["metadata"], {})
+        check("the intents block lands from the stale caller's argument",
+              after.get("intents") == block, str(after.get("intents")))
+        check("clients survive a store that held a stale metadata blob",
+              after.get("clients") == clients_list, str(after.get("clients")))
+        check("sibling metadata keys survive the intents write",
+              after.get("keep_me") == "sibling", str(after))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_compact_projections() -> None:
+    """Briefing/MCP compactors keep shape, optional fields, and note caps.
+
+    Dropping aliases or inventing notes in the compact surface misleads
+    every follow-up tool that reads the briefing instead of the row."""
+    n = api._NOTE_PREVIEW
+    long_notes = "n" * (n + 10)
+    concept = api._compact_concept({
+        "name": "Gravity", "kind": "concept", "status": "unconfirmed",
+        "introduced_in": "01-epictetus.md", "notes": long_notes,
+        "aliases": '["pull", "weight"]',
+    })
+    check("concept compact keeps identity fields and introduced_in",
+          concept["name"] == "Gravity" and concept["kind"] == "concept"
+          and concept["status"] == "unconfirmed"
+          and concept["introduced_in"] == "01-epictetus.md",
+          str(concept))
+    check("concept notes are preview-capped, not raw",
+          concept["notes"] == long_notes[: n - 1] + "…"
+          and len(concept["notes"]) == n,
+          repr(concept.get("notes")))
+    check("concept aliases parse from JSON storage",
+          concept["aliases"] == ["pull", "weight"], str(concept))
+    bare = api._compact_concept({
+        "name": "Bare", "kind": "concept", "status": "confirmed",
+        "notes": "", "aliases": "[]",
+    })
+    check("absent optional concept fields are omitted, not null",
+          "introduced_in" not in bare and "notes" not in bare
+          and "aliases" not in bare, str(bare))
+
+    edge = api._compact_edge({
+        "id": "ce-1", "from_name": "A", "relation": "requires",
+        "to_name": "B", "status": "inferred",
+    })
+    check("edge compact renders the arrow form once",
+          edge == {"id": "ce-1", "edge": "A —requires→ B",
+                   "status": "inferred"},
+          str(edge))
+
+    gap = api._compact_gap({
+        "edge_id": "ce-1", "text": "missing bridge", "status": "open",
+    })
+    check("gap compact keeps edge_id/text/status only",
+          gap == {"edge_id": "ce-1", "text": "missing bridge",
+                  "status": "open"},
+          str(gap))
+
+    belief = api._compact_belief({
+        "id": "eb-1", "statement": "Prefer short sentences",
+        "status": "active", "confidence": 0.8,
+        "supporting": 3, "contradicting": 1,
+    })
+    check("belief compact formats the support tally",
+          belief == {"id": "eb-1", "statement": "Prefer short sentences",
+                     "status": "active", "confidence": 0.8,
+                     "support": "3+/1-"},
+          str(belief))
+
+    check("compact_collect passes through non-version reports unchanged",
+          api.compact_collect({"unchanged": True}) == {"unchanged": True}
+          and api.compact_collect({"staged": ["a"]}) == {"staged": ["a"]})
+    full = api.compact_collect({
+        "version_no": 4, "checksum": "x", "transitions": [],
+        "attached_to_episode": None, "realized": [], "repointed": [],
+        "vanished": [], "hypotheses_dropped": [], "new_paragraphs": 2,
+        "extract_hint": "run extract",
+        "gaps_before": [{"edge_id": "a"}, {"edge_id": "b"}],
+        "gaps_after": [{"edge_id": "b"}],
+        "gaps_resolved": [{"edge_id": "a", "text": "done", "status": "closed"}],
+        "gaps_new": [],
+        "illustrations": {"added": 1},
+        "suggestions_stale": True,
+        "noise_field": "must not leak",
+    })
+    check("compact_collect counts gaps and drops raw before/after lists",
+          full["gaps"] == {"before": 2, "after": 1}
+          and "gaps_before" not in full and "gaps_after" not in full
+          and full["gaps_resolved"] == [{"edge_id": "a", "text": "done",
+                                         "status": "closed"}]
+          and full["gaps_new"] == []
+          and full["illustrations"] == {"added": 1}
+          and full["suggestions_stale"] is True
+          and "noise_field" not in full
+          and full["new_paragraphs"] == 2,
+          str(full))
+
+
+def check_active_filter_run() -> None:
+    """Named active-run lookup is newest-wins and ignores settled rows.
+
+    Picking an older active twin (or a settled prior) settles the wrong
+    edit set when a file was re-run after abandon."""
+    root, _ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-active-filter-")
+    try:
+        mid = manuscript["id"]
+        rel = "01-epictetus.md"
+
+        def add_run(name: str, status: str, created_at: str) -> str:
+            row = ko_fields("fr")
+            row.update(manuscript_id=mid, filter=name, file=rel,
+                       unit_count=1, cursor=0, state=None, registry=None,
+                       result_version_id=None, status=status,
+                       created_at=created_at)
+            row["class"] = "sequential"
+            db.insert("filter_runs", row)
+            return row["id"]
+
+        check("no matching active run is None, not an error",
+              api._active_filter_run(db, mid, "clarity", rel) is None)
+
+        add_run("clarity", "settled", "2026-01-01T00:00:00+00:00")
+        older = add_run("clarity", "active", "2026-01-02T00:00:00+00:00")
+        newer = add_run("clarity", "active", "2026-01-03T00:00:00+00:00")
+        add_run("voice", "active", "2026-01-04T00:00:00+00:00")
+
+        got = api._active_filter_run(db, mid, "clarity", rel)
+        check("named lookup returns the newest active run of that filter",
+              got is not None and got["id"] == newer
+              and got["id"] != older,
+              str(got))
+        check("a settled-only history still yields None for that name",
+              api._active_filter_run(db, mid, "pacing", rel) is None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_version_text_and_latest()
+    check_settled_runs()
+    check_store_intent_block()
+    check_compact_projections()
+    check_active_filter_run()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
