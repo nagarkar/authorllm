@@ -5224,7 +5224,327 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _filter_thread_fixture(prefix: str):
+    """Minimal manuscript + db for filter-thread helper checks."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text("# Solo\n\nAlpha.\n\nBeta.\n")
+    (ms / "other.md").write_text("# Other\n\nGamma.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        db = api.open_db(str(ws))
+        manuscript = api.register_manuscript(db, "book", str(ms))
+    return root, db, manuscript
+
+
+def _insert_filter_run(db, mid: str, *, name: str, file: str, status: str,
+                       created_at: str, run_id: str | None = None) -> str:
+    fields = ko_fields("fr")
+    if run_id is not None:
+        fields["id"] = run_id
+    fields["class"] = "sequential"
+    fields.update(manuscript_id=mid, filter=name, file=file,
+                  unit_count=2, cursor=2, status=status,
+                  created_at=created_at)
+    return db.insert("filter_runs", fields)
+
+
+def _insert_doc_thread(db, mid: str, *, origin_id: str, file: str,
+                       state: str, created_at: str, tid: str | None = None,
+                       origin_type: str = "filter") -> str:
+    fields = ko_fields("dt")
+    if tid is not None:
+        fields["id"] = tid
+    fields.update(
+        manuscript_id=mid, origin_type=origin_type, origin_id=origin_id,
+        file=file, anchor_quote=None, proposed_old="old",
+        proposed_new="new", note="why", state=state, our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref=file,
+        created_at=created_at,
+        metadata=json.dumps({"anchor_paragraph": 1}))
+    return db.insert("doc_threads", fields)
+
+
+def check_open_run_threads() -> None:
+    """Triage's live edit list must not resurrect a settled run's refusals.
+
+    `_open_run_threads` is what `filter edits` / `filter triage` number.
+    Listing a prior run's rejected rows beside an active run lets
+    `filter triage --accept 1` silently re-accept something the author
+    already refused (§ docstring on the helper)."""
+    root, db, manuscript = _filter_thread_fixture("authorlm-open-run-")
+    try:
+        mid = manuscript["id"]
+        settled = _insert_filter_run(
+            db, mid, name="dup", file="solo.md", status="settled",
+            created_at="2026-01-01T00:00:00+00:00", run_id="fr-settled")
+        active = _insert_filter_run(
+            db, mid, name="tone", file="solo.md", status="active",
+            created_at="2026-01-02T00:00:00+00:00", run_id="fr-active")
+        abandoned = _insert_filter_run(
+            db, mid, name="old", file="solo.md", status="abandoned",
+            created_at="2026-01-01T12:00:00+00:00", run_id="fr-abandoned")
+        other_file = _insert_filter_run(
+            db, mid, name="tone", file="other.md", status="active",
+            created_at="2026-01-02T00:00:00+00:00", run_id="fr-otherfile")
+
+        _insert_doc_thread(
+            db, mid, origin_id=f"{settled}:solo.md:1", file="solo.md",
+            state="rejected", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-settled-rej")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{active}:solo.md:1", file="solo.md",
+            state="proposed", created_at="2026-01-02T00:01:00+00:00",
+            tid="dt-active-prop")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{active}:solo.md:2", file="solo.md",
+            state="rejected", created_at="2026-01-02T00:02:00+00:00",
+            tid="dt-active-rej")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{abandoned}:solo.md:1", file="solo.md",
+            state="proposed", created_at="2026-01-01T12:01:00+00:00",
+            tid="dt-orphan-prop")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{other_file}:other.md:1", file="other.md",
+            state="proposed", created_at="2026-01-02T00:01:00+00:00",
+            tid="dt-other-prop")
+        _insert_doc_thread(
+            db, mid, origin_id="critique-pass:solo.md:1", file="solo.md",
+            state="proposed", created_at="2026-01-02T00:03:00+00:00",
+            tid="dt-critique", origin_type="critique")
+
+        live = api._open_run_threads(db, mid, "solo.md")
+        live_ids = [t["id"] for t in live]
+        check("with an active run, only THAT run's door threads appear",
+              set(live_ids) == {"dt-active-prop", "dt-active-rej"},
+              str(live_ids))
+        check("a settled run's rejected row is invisible to live triage",
+              "dt-settled-rej" not in live_ids)
+        check("an abandoned run's orphan is invisible while another run "
+              "is active — resurrecting it would re-number into this run",
+              "dt-orphan-prop" not in live_ids)
+        check("critique proposals are never mixed into the filter door",
+              "dt-critique" not in live_ids)
+        check("another file's active run does not leak into this file",
+              "dt-other-prop" not in live_ids)
+
+        db.update("filter_runs", active, {"status": "settled"})
+        orphans = api._open_run_threads(db, mid, "solo.md")
+        orphan_ids = [t["id"] for t in orphans]
+        check("with no active run, proposed orphans stay visible",
+              "dt-orphan-prop" in orphan_ids, str(orphan_ids))
+        check("with no active run, settled rejected history stays out of "
+              "the open list (only proposed/accepted/written)",
+              "dt-settled-rej" not in orphan_ids
+              and "dt-active-rej" not in orphan_ids, str(orphan_ids))
+        check("settled-run proposed rows that remain proposed still show "
+              "when no active run owns the file",
+              "dt-active-prop" in orphan_ids, str(orphan_ids))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_run_threads() -> None:
+    """Per-run thread list is origin_id-prefixed and ordered stably.
+
+    Tallies (#88) and settle compose from this list; a loose LIKE or
+    wrong order attaches another filter's forms or flips twin position."""
+    root, db, manuscript = _filter_thread_fixture("authorlm-run-threads-")
+    try:
+        mid = manuscript["id"]
+        run_a = _insert_filter_run(
+            db, mid, name="dup", file="solo.md", status="active",
+            created_at="2026-01-01T00:00:00+00:00", run_id="fr-a")
+        run_b = _insert_filter_run(
+            db, mid, name="tone", file="solo.md", status="active",
+            created_at="2026-01-01T00:00:01+00:00", run_id="fr-b")
+        # Same created_at, distinct ids — ORDER BY created_at, id must
+        # still be deterministic for twin position.
+        _insert_doc_thread(
+            db, mid, origin_id=f"{run_a}:solo.md:2", file="solo.md",
+            state="accepted", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-a-2")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{run_a}:solo.md:1", file="solo.md",
+            state="proposed", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-a-1")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{run_b}:solo.md:1", file="solo.md",
+            state="proposed", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-b-1")
+        _insert_doc_thread(
+            db, mid, origin_id=f"{run_a}:other.md:1", file="other.md",
+            state="proposed", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-a-other")
+        # Prefix collision: run id is a prefix of another id string.
+        _insert_doc_thread(
+            db, mid, origin_id=f"{run_a}X:solo.md:9", file="solo.md",
+            state="proposed", created_at="2026-01-01T00:01:00+00:00",
+            tid="dt-prefix-trap")
+
+        run = dict(db.one("SELECT * FROM filter_runs WHERE id = ?",
+                          (run_a,)))
+        rows = api._run_threads(db, mid, run)
+        ids = [t["id"] for t in rows]
+        check("_run_threads returns only this run's file-scoped threads",
+              ids == ["dt-a-1", "dt-a-2"], str(ids))
+        check("sibling filter on the same file is excluded",
+              "dt-b-1" not in ids)
+        check("same run id on another file is excluded",
+              "dt-a-other" not in ids)
+        check("origin_id requires the trailing colon — a longer id that "
+              "shares the run-id prefix must not match",
+              "dt-prefix-trap" not in ids)
+        check("stable order is created_at then id (twin position)",
+              ids == sorted(ids), str(ids))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_owning_filter() -> None:
+    """Refusals name the filter the author knows, not an opaque run id."""
+    root, db, manuscript = _filter_thread_fixture("authorlm-owning-")
+    try:
+        mid = manuscript["id"]
+        run_id = _insert_filter_run(
+            db, mid, name="duplicate-words", file="solo.md",
+            status="active", created_at="2026-01-01T00:00:00+00:00",
+            run_id="fr-own")
+        thread = {"origin_id": f"{run_id}:solo.md:3"}
+        check("owning filter is read from the origin_id run prefix",
+              api._owning_filter(db, mid, thread) == "duplicate-words")
+        check("empty origin_id yields None rather than guessing",
+              api._owning_filter(db, mid, {"origin_id": ""}) is None)
+        check("missing origin_id yields None",
+              api._owning_filter(db, mid, {}) is None)
+        check("unknown run id yields None",
+              api._owning_filter(
+                  db, mid, {"origin_id": "fr-missing:solo.md:1"}) is None)
+        check("a run on another manuscript is not claimed",
+              api._owning_filter(
+                  db, "ms-other", {"origin_id": f"{run_id}:solo.md:1"}
+              ) is None)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_briefing_head() -> None:
+    """MCP compact briefing keeps exact counts and a bounded item head.
+
+    Softening the cap reintroduces the R6.3 anti-pattern (144KB
+    'compact' dump). Softening the count lies about backlog size."""
+    under = [{"i": n} for n in range(api.BRIEFING_HEAD - 1)]
+    at = [{"i": n} for n in range(api.BRIEFING_HEAD)]
+    over = [{"i": n} for n in range(api.BRIEFING_HEAD + 5)]
+
+    h_under = api._head(under, "hint")
+    check("_head under the cap carries count+items and no more pointer",
+          h_under == {"count": len(under), "items": under}
+          and "more" not in h_under, str(h_under))
+    h_at = api._head(at, "hint")
+    check("_head exactly at BRIEFING_HEAD still has no more pointer",
+          h_at == {"count": api.BRIEFING_HEAD, "items": at}
+          and "more" not in h_at, str(h_at))
+    h_over = api._head(over, "see triage")
+    check("_head over the cap keeps the exact count",
+          h_over["count"] == len(over), str(h_over))
+    check("_head over the cap returns only the first BRIEFING_HEAD items",
+          h_over["items"] == over[:api.BRIEFING_HEAD], str(h_over["items"]))
+    check("_head more pointer names the overflow and the hint",
+          h_over["more"] == "5 more — see triage", str(h_over.get("more")))
+
+    fake_node = {"name": "N", "kind": "concept", "status": "declared",
+                 "introduced_in": None, "notes": "x", "aliases": "[]"}
+    proposals = [{"id": f"p{i}", "kind": "add" if i % 2 == 0 else "retire",
+                  "summary": f"s{i}"} for i in range(20)]
+    edges = [{"id": f"e{i}", "from_name": f"A{i}", "to_name": f"B{i}",
+              "relation": "related", "status": "inferred",
+              "introduced_in": None} for i in range(20)]
+    fake = {
+        "since": "t0", "belief_changes": [], "new_beliefs": [],
+        "realized_concepts": [], "contradictions": [],
+        "outstanding_questions": [], "active_intents": [],
+        "active_writeups": [], "focus_areas": [], "toc_unlisted": [],
+        "learning_velocity": {},
+        "proposals": proposals,
+        "unconfirmed_concepts": [dict(fake_node, name=f"N{i}")
+                                 for i in range(20)],
+        "inferred_edges": edges,
+    }
+    compact = api.compact_briefing(fake)
+    props = compact["proposals"]
+    check("compact proposals keep exact count and by_kind tallies",
+          props["count"] == 20
+          and props["by_kind"] == {"add": 10, "retire": 10}
+          and len(props["items"]) == api.BRIEFING_HEAD, str(props))
+    check("compact proposals more pointer routes to list_proposals",
+          "5 more" in props.get("more", "")
+          and "list_proposals" in props.get("more", ""), str(props.get("more")))
+    edges_out = compact["inferred_edges"]
+    check("compact inferred_edges truncates the same way",
+          edges_out["count"] == 20
+          and len(edges_out["items"]) == api.BRIEFING_HEAD
+          and "more" in edges_out, str(edges_out))
+
+
+def check_beat_proposal_and_tallies() -> None:
+    """Beat draft lookup and state histogram for write status / propose."""
+    root, db, manuscript = _filter_thread_fixture("authorlm-beat-tallies-")
+    try:
+        mid = manuscript["id"]
+        intent = api.declare_intent(db, manuscript, "Introduce gravity")
+        fields = ko_fields("wu")
+        fields.update(manuscript_id=mid, intent_id=intent["intent"]["id"],
+                      file="solo.md", status="active", cursor=0,
+                      plan=json.dumps([{"role": "opener", "notes": "n"}]))
+        wu_id = db.insert("writeups", fields)
+        writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
+                              (wu_id,)))
+
+        check("no guidance rows → empty tallies",
+              api._beat_tallies(db, writeup) == {})
+        check("missing beat proposal → None",
+              api._beat_proposal(db, writeup, 1) is None)
+
+        def _gh(state: str, batch_index: int, created_at: str,
+                gid: str) -> None:
+            row = ko_fields("gh")
+            row["id"] = gid
+            row.update(
+                manuscript_id=mid, session_id="sess",
+                intent_id=intent["intent"]["id"], batch_id=wu_id,
+                batch_index=batch_index, kind="focus",
+                suggestion=f"{state}-{batch_index}",
+                explanation="why", state=state, created_at=created_at)
+            db.insert("guidance_history", row)
+
+        _gh("proposed", 1, "2026-01-01T00:00:00+00:00", "gh-old")
+        _gh("proposed", 1, "2026-01-01T00:00:01+00:00", "gh-new")
+        _gh("accepted", 1, "2026-01-01T00:00:02+00:00", "gh-acc")
+        _gh("rejected", 2, "2026-01-01T00:00:03+00:00", "gh-rej")
+
+        newest = api._beat_proposal(db, writeup, 1)
+        check("_beat_proposal returns the newest proposed row for that "
+              "beat index — accepted/rejected siblings do not win",
+              newest is not None and newest["id"] == "gh-new",
+              str(newest))
+        check("_beat_proposal ignores other beat indexes",
+              api._beat_proposal(db, writeup, 2) is None)
+        tallies = api._beat_tallies(db, writeup)
+        check("_beat_tallies counts every state on the writeup",
+              tallies == {"proposed": 2, "accepted": 1, "rejected": 1},
+              str(tallies))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_open_run_threads()
+    check_run_threads()
+    check_owning_filter()
+    check_briefing_head()
+    check_beat_proposal_and_tallies()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
