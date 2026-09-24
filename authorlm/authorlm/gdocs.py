@@ -2881,14 +2881,18 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
 
     # Mirror into the local file: canonical text was the OLD half all
     # along, so approval replaces old→final there; a revert needs no
-    # local change (local never held the proposal).
+    # local change (local never held the proposal). Never splice into a
+    # local `<<…>>{{…}}` pause form — that rewrites its OLD half and
+    # resolve then drops the author's green rewording as a foreign form.
     path = bridge.root / thread["file"]
     if path.exists() and replacement != thread["proposed_old"]:
+        from .threads import mirror_outside_forms
+
         text = path.read_text(encoding="utf-8")
-        if thread["proposed_old"] in text:
-            path.write_text(
-                text.replace(thread["proposed_old"], replacement, 1),
-                encoding="utf-8")
+        mirrored = mirror_outside_forms(
+            text, thread["proposed_old"], replacement)
+        if mirrored is not None:
+            path.write_text(mirrored, encoding="utf-8")
     return True
 
 

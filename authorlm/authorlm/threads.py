@@ -203,6 +203,32 @@ def pending_forms(text: str) -> list[dict]:
     return sorted(found, key=lambda f: f["start"])
 
 
+def mirror_outside_forms(text: str, old: str, replacement: str) -> str | None:
+    """Replace the first `old` that sits outside any `<<…>>{{…}}` form.
+
+    Margin approval mirrors old→final into the local file. An unanchored
+    `str.replace` also hits the OLD half of a local filter/critique pause
+    form, rewriting `<<old…>>{{green}}` into a foreign form whose resolve
+    then collapses to the corrupted half and drops the author's green
+    rewording. Returns the new text, or None when every match is inside a
+    replace form (Doc already holds the margin outcome; leave local
+    pause bytes alone)."""
+    if not old or old not in text:
+        return None
+    spans = [(f["start"], f["end"]) for f in pending_forms(text)
+             if f["kind"] == "replace"]
+    at = 0
+    while True:
+        idx = text.find(old, at)
+        if idx < 0:
+            return None
+        end = idx + len(old)
+        if any(idx < e and end > s for s, e in spans):
+            at = idx + 1
+            continue
+        return text[:idx] + replacement + text[end:]
+
+
 # ------------------------------------------------------------- records
 
 def create_thread(db: Database, manuscript_id: str, comment_id: str,
