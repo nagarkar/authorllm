@@ -464,12 +464,25 @@ def check_manuscript(manuscript: dict) -> list[str]:
     return problems
 
 
+# Filename tags `export_published` appends for PDF profiles. A chapter
+# stem equal to one of these (the e2e fixture's book.md) would otherwise
+# make `--chapters book.md` share `_exports/<title> - book.*` with
+# `--profile book` and silently overwrite the print interior.
+_PROFILE_FILENAME_TAGS = frozenset({"book"})
+
+
 def selection_slug(order: list[str]) -> str:
     """Filename tag for a chapter selection — the selected files' stems,
-    joined, so a part-build never overwrites the whole-book artifacts."""
+    joined, so a part-build never overwrites the whole-book artifacts.
+    Reserved profile tags (see _PROFILE_FILENAME_TAGS) get a `ch-`
+    prefix so they cannot collide with `--profile book`'s ` - book`
+    suffix."""
     stems = [Path(name).stem for name in order]
     slug = "+".join(stems[:3]) + ("+more" if len(stems) > 3 else "")
-    return slug[:60]
+    slug = slug[:60]
+    if slug in _PROFILE_FILENAME_TAGS:
+        slug = f"ch-{slug}"
+    return slug
 
 
 # ------------------------------------------------ the book profile (print interior)
@@ -618,7 +631,9 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     if only:
         title = f"{title} - {selection_slug(order)}"
     if book:
-        title = f"{title} - book"  # never overwrites the review copy
+        # Never overwrite the review copy or a `--chapters book.md`
+        # part-build (selection_slug reserves the bare "book" tag).
+        title = f"{title} - book"
     root = Path(manuscript["path"])
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)

@@ -7882,11 +7882,41 @@ def main_test() -> None:
               and any("no paperback ISBN" in w or "page count" in w
                       for w in book_result["warnings"]),
               str(book_command) + str(book_result["warnings"]))
+        # A chapter literally named book.md used to share that path:
+        # selection_slug(["book.md"]) == "book", so a review part-build
+        # and `--profile book` both wrote `_exports/<title> - book.*`
+        # and the later run silently overwrote the earlier artifact.
+        from authorlm.export import selection_slug as _selection_slug
+        check("selection_slug reserves the book-profile filename tag",
+              _selection_slug(["book.md"]) == "ch-book"
+              and _selection_slug(["book.md"]) != "book"
+              and _selection_slug(["00-intro.md"]) == "00-intro",
+              _selection_slug(["book.md"]))
+        (ms / "book.md").write_text("# Root\n\nContainer prose.\n")
+        prior_toc = (ms / "toc.toml").read_text()
+        (ms / "toc.toml").write_text(
+            prior_toc.rstrip() + '\n\n[[chapter]]\nfile = "book.md"\n')
+        manuscript = api.get_manuscript(db)
+        sel_book = export_published(
+            db, manuscript, fmt="md", variant="images", only=["book.md"])
+        check("chapter selection of book.md does not share the "
+              "book-profile export path",
+              Path(sel_book["markdown"]).name
+              != Path(book_result["markdown"]).name
+              and "ch-book" in Path(sel_book["markdown"]).stem
+              and Path(book_result["markdown"]).stem.endswith(" - book")
+              and Path(book_result["markdown"]).exists()
+              and "Container prose." in Path(sel_book["markdown"]).read_text(),
+              f"sel={sel_book['markdown']} book={book_result['markdown']}")
+        (ms / "book.md").unlink()
+        (ms / "toc.toml").write_text(prior_toc)
+        manuscript = api.get_manuscript(db)
         check("the publishable markdown carries each file's matter",
               "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
               in book_markdown
               and ".authorlm-essay .authorlm-matter-main}" in book_markdown,
               book_markdown[:600])
+
         book_args = _build_parser().parse_args(
             ["export", "pdf", "--profile", "book"])
         check("CLI exposes the book profile", book_args.profile == "book")
