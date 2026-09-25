@@ -5224,7 +5224,289 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _placement_fixture(prefix: str):
+    """Two essays + TOC so placement fragment resolve and chapter tiers work."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "part.md").write_text("# Part\n\nOpener.\n")
+    (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+    (ms / "beta.md").write_text("# Beta\n\nBody of beta.\n")
+    (ms / "toc.toml").write_text(
+        '[[chapter]]\nfile = "part.md"\n\n'
+        '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+        '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    return root, db, manuscript
+
+
+def check_resolve_placement() -> None:
+    """`--after` for summaries.before_after: sentinel vs fragment resolve.
+
+    Softening the sentinel into a path lookup invents a file named
+    `start`; softening empty/None into a path invents an empty query."""
+    from authorlm import summaries as sums
+
+    root, db, manuscript = _placement_fixture("authorlm-placement-")
+    try:
+        check("None after → None (no placement)",
+              api._resolve_placement(manuscript, None) is None)
+        check("empty after → None",
+              api._resolve_placement(manuscript, "") is None)
+        check("PLACEMENT_START passes through unchanged",
+              api._resolve_placement(manuscript, sums.PLACEMENT_START)
+              == sums.PLACEMENT_START)
+        check("fragment resolves to the real manuscript-relative path",
+              api._resolve_placement(manuscript, "alpha") == "alpha.md")
+        try:
+            api._resolve_placement(manuscript, "no-such-essay")
+            miss = False
+        except LookupError:
+            miss = True
+        check("unknown fragment refuses rather than inventing a path", miss)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_style_candidates() -> None:
+    """Missing-`--style` refusal tail: guide list + anchor's attached guide.
+
+    AB-3 covers the write_start surface; this pins the helper edges the
+    surface message is built from — empty guides, START skip, no attach."""
+    from authorlm import summaries as sums
+
+    root, db, manuscript = _placement_fixture("authorlm-style-cand-")
+    try:
+        mid = manuscript["id"]
+        empty = api._style_candidates(db, mid, "alpha.md")
+        check("no guides yet → define-one first message",
+              "No style guides exist yet" in empty
+              and "style guide <name>" in empty, empty)
+
+        api.define_style_guide(db, manuscript, "Sermon voice")
+        api.define_style_guide(db, manuscript, "Connections essays")
+        api.attach_style(db, manuscript, "alpha.md", "Connections essays")
+
+        listed = api._style_candidates(db, mid, None)
+        check("guides on record are named in order",
+              "Guides on record:" in listed
+              and "'Connections essays'" in listed
+              and "'Sermon voice'" in listed
+              and "likely the one you want" not in listed, listed)
+
+        anchored = api._style_candidates(db, mid, "alpha.md")
+        check("placement with an attachment names that guide as likely",
+              "alpha.md uses 'Connections essays'" in anchored
+              and "likely the one you want" in anchored, anchored)
+
+        start = api._style_candidates(db, mid, sums.PLACEMENT_START)
+        check("PLACEMENT_START skips the attachment hint (no file anchor)",
+              "likely the one you want" not in start
+              and "Guides on record:" in start, start)
+
+        unattached = api._style_candidates(db, mid, "beta.md")
+        check("placement without an attachment still lists guides only",
+              "Guides on record:" in unattached
+              and "likely the one you want" not in unattached
+              and "beta.md" not in unattached, unattached)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_member_record_and_order() -> None:
+    """Frozen member rows: tier at ratification + specificity sort key.
+
+    A live join would let a re-scope change block A mid-writeup (F4). The
+    record freezes statement/scope/tier; order drives `_pick_primary`."""
+    root, db, manuscript = _placement_fixture("authorlm-member-")
+    try:
+        file_intent = {"id": "di-file", "scope": "alpha.md",
+                       "statement": "Rewrite alpha"}
+        chap_intent = {"id": "di-chap", "scope": "part.md",
+                       "statement": "Serve the part"}
+        wide_intent = {"id": "di-wide", "scope": None,
+                       "statement": "Book-wide goal"}
+        outside_intent = {"id": "di-out", "scope": "beta.md",
+                          "statement": "Other essay"}
+
+        file_m = api._member_record(manuscript, "alpha.md", file_intent)
+        check("file-scoped intent freezes tier=file and default secondary",
+              file_m == {"id": "di-file", "tier": "file", "scope": "alpha.md",
+                         "statement": "Rewrite alpha", "role": "secondary"},
+              str(file_m))
+
+        chap_m = api._member_record(manuscript, "alpha.md", chap_intent,
+                                    role="primary")
+        check("toc-parent scope freezes tier=chapter and honors role=",
+              chap_m["tier"] == "chapter" and chap_m["role"] == "primary"
+              and chap_m["scope"] == "part.md", str(chap_m))
+
+        wide_m = api._member_record(manuscript, "alpha.md", wide_intent)
+        check("null scope freezes tier=manuscript",
+              wide_m["tier"] == "manuscript" and wide_m["scope"] is None,
+              str(wide_m))
+
+        out_m = api._member_record(manuscript, "alpha.md", outside_intent)
+        check("out-of-chain scope freezes tier=outside (noted, not refused)",
+              out_m["tier"] == "outside" and out_m["scope"] == "beta.md",
+              str(out_m))
+
+        # Smaller specificity wins; equal specificity falls to id.
+        file_ord = api._member_order(manuscript, "alpha.md", file_m)
+        chap_ord = api._member_order(manuscript, "alpha.md", chap_m)
+        wide_ord = api._member_order(manuscript, "alpha.md", wide_m)
+        check("file scope is more specific than chapter than manuscript",
+              file_ord[0] < chap_ord[0] < wide_ord[0],
+              f"{file_ord=} {chap_ord=} {wide_ord=}")
+        check("order tuple carries the member id as the tie-break",
+              file_ord[1] == "di-file" and chap_ord[1] == "di-chap",
+              f"{file_ord=} {chap_ord=}")
+        twin_a = api._member_order(
+            manuscript, "alpha.md",
+            {"id": "di-a", "scope": "alpha.md"})
+        twin_b = api._member_order(
+            manuscript, "alpha.md",
+            {"id": "di-b", "scope": "alpha.md"})
+        check("same-tier members share specificity and sort by id",
+              twin_a[0] == twin_b[0] and twin_a < twin_b,
+              f"{twin_a=} {twin_b=}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_dictionary_text() -> None:
+    """Pronunciation sidecar bytes for filter capture — absent is empty.
+
+    An empty table materializing because a filter RAN would create a Doc
+    tab the author did not ask for (§15.22); absent must stay empty."""
+    root, db, manuscript = _placement_fixture("authorlm-dict-text-")
+    try:
+        from authorlm import pronunciations as pron
+
+        ms = Path(manuscript["path"])
+        check("absent pronunciations.md → empty string",
+              api._dictionary_text(manuscript) == "")
+        (ms / pron.FILENAME).write_text(
+            "| Term | Say |\n| --- | --- |\n| Stoa | STOH-uh |\n")
+        text = api._dictionary_text(manuscript)
+        check("present pronunciations.md returns its bytes",
+              "Stoa" in text and "STOH-uh" in text, text)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_filter_capture() -> None:
+    """One capture for filter run/record/prelude/push/settle gates (§14.7).
+
+    Gate and gated text must be the same bytes. Sidecar / placeholder /
+    in-flight / basename resolve are the silent-corruption edges."""
+    root, db, manuscript = _placement_fixture("authorlm-filter-cap-")
+    try:
+        from authorlm import pronunciations as pron
+
+        ms = Path(manuscript["path"])
+        (ms / pron.FILENAME).write_text(
+            "| Term | Say |\n| --- | --- |\n| Logos | LOH-gos |\n")
+
+        rel, text, capture, dictionary = api._filter_capture(
+            db, manuscript, "alpha.md", "run")
+        check("happy path returns the resolved relpath",
+              rel == "alpha.md", rel)
+        check("happy path returns the essay text from the capture",
+              "Body of alpha" in text, text)
+        check("capture is the three-tuple texts/unlisted/inflight",
+              isinstance(capture, tuple) and len(capture) == 3
+              and "alpha.md" in capture[0], str(type(capture)))
+        check("dictionary is read in the same capture invocation",
+              "Logos" in dictionary and "LOH-gos" in dictionary, dictionary)
+
+        by_name = api._filter_capture(db, manuscript, "beta.md", "prelude")
+        check("basename match resolves when the author omits directories",
+              by_name[0] == "beta.md", by_name[0])
+
+        try:
+            api._filter_capture(db, manuscript, pron.FILENAME, "run")
+            side = None
+        except ValueError as err:
+            side = str(err)
+        check("pronunciations.md is refused as the dictionary, not an essay",
+              side is not None and "pronunciation dictionary" in side, side)
+
+        try:
+            api._filter_capture(db, manuscript, "missing.md", "run")
+            miss = None
+        except LookupError as err:
+            miss = str(err)
+        check("unknown file raises LookupError naming reading order",
+              miss is not None and "reading order" in miss, miss)
+
+        (ms / "alpha.md").write_text(api.PLACEHOLDER)
+        try:
+            api._filter_capture(db, manuscript, "alpha.md", "run")
+            ph = None
+        except ValueError as err:
+            ph = str(err)
+        check("placeholder-only file refuses a filter pass",
+              ph is not None and "placeholder" in ph
+              and "not prose" in ph, ph)
+        (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+
+        # Active writeup → in-flight: capture overlays pinned text, but
+        # the filter still refuses because the disk essay is mid-rewrite.
+        intent = api.declare_intent(db, manuscript, "Rework alpha")["intent"]
+        fields = ko_fields("wu")
+        fields.update(manuscript_id=manuscript["id"], intent_id=intent["id"],
+                      file="alpha.md", status="active", cursor=0,
+                      plan="[]")
+        db.insert("writeups", fields)
+        try:
+            api._filter_capture(db, manuscript, "alpha.md", "settle")
+            flight = None
+        except ValueError as err:
+            flight = str(err)
+        check("in-flight active writeup refuses filter over the marker",
+              flight is not None and "being rewritten" in flight
+              and "write complete" in flight, flight)
+
+        # DOC-mode settle: checkout=False must not hit the gate.
+        meta = loads(db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                            (manuscript["id"],))["metadata"], {})
+        meta["gdocs"] = {"alpha.md": {"checked_out": True, "tab_id": "t1"}}
+        db.update("manuscripts", manuscript["id"],
+                  {"metadata": json.dumps(meta)})
+        manuscript = api.get_manuscript(db)
+        # Clear the writeup so only the checkout gate is under test.
+        db.conn.execute(
+            "UPDATE writeups SET status = 'abandoned' WHERE file = ?",
+            ("alpha.md",))
+        db.conn.commit()
+        try:
+            api._filter_capture(db, manuscript, "alpha.md", "settle",
+                                checkout=True)
+            gated = None
+        except ValueError as err:
+            gated = str(err)
+        check("checkout=True still refuses a Doc-checked-out file",
+              gated is not None and "checked out" in gated, gated)
+        rel2, _, _, _ = api._filter_capture(
+            db, manuscript, "alpha.md", "settle", checkout=False)
+        check("checkout=False is the DOC-mode settle bypass",
+              rel2 == "alpha.md", rel2)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_resolve_placement()
+    check_style_candidates()
+    check_member_record_and_order()
+    check_dictionary_text()
+    check_filter_capture()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
