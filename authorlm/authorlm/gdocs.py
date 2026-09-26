@@ -972,26 +972,54 @@ def split_tabbed_export(text: str, known_files,
     H1s, pass through untouched.
 
     `order` is the tab titles in true document order (the Docs API's tab
-    tree, e.g. from `walk_tabs`). When given, a name in `order` only
-    starts a new section at its correct position in that sequence — so a
-    prose heading that happens to repeat some *other* tab's title, out of
-    turn, is never mistaken for a boundary (it-x7-2). A known name absent
+    tree, e.g. from `walk_tabs`). When given, each tab's boundary is the
+    LAST heading matching its title that still sits before the next tab's
+    boundary (EOF for the last tab). That keeps a prose H1 which repeats
+    another tab's title — out of turn (it-x7-2) *or* as the immediate
+    next-tab neighbor — inside the earlier section instead of opening
+    the next one early. A first-match walk cannot do this: Docs bolds
+    every heading on export, so the content collision and the real tab
+    title are byte-identical (`# **manifest**`). A known name absent
     from `order` (no positional info for it, e.g. docs_service wasn't
     available) still matches anywhere, as before."""
     pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
+    lines = text.splitlines()
+    positioned = list(order) if order else []
+
+    # Precompute ordered boundary line indexes (last-before-next). Without
+    # `order`, fall through to the legacy any-known-name scan below.
+    ordered_bounds: set[int] = set()
+    if positioned:
+        headings: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            match = pattern.match(line)
+            if match:
+                headings.append((i, match.group(1).strip()))
+        limit = len(lines)
+        for name in reversed(positioned):
+            chosen = None
+            for line_i, hname in headings:
+                if line_i >= limit:
+                    break
+                if hname == name:
+                    chosen = line_i
+            if chosen is not None:
+                ordered_bounds.add(chosen)
+                limit = chosen
+
     sections: dict[str, list[str]] = {}
     current: str | None = None
-    positioned = list(order) if order else []
-    idx = 0
-    for line in text.splitlines():
+    for i, line in enumerate(lines):
         match = pattern.match(line)
         name = match.group(1).strip() if match else None
         boundary = False
         if name is not None:
-            if idx < len(positioned) and name == positioned[idx]:
-                boundary = True
-                idx += 1
-            elif name in known_files and name not in positioned:
+            if positioned:
+                if i in ordered_bounds:
+                    boundary = True
+                elif name in known_files and name not in positioned:
+                    boundary = True
+            elif name in known_files:
                 boundary = True
         if boundary:
             current = name
@@ -999,8 +1027,8 @@ def split_tabbed_export(text: str, known_files,
             continue
         if current is not None:
             sections[current].append(line)
-    return {name: "\n".join(lines).strip() + "\n"
-            for name, lines in sections.items()}
+    return {name: "\n".join(body).strip() + "\n"
+            for name, body in sections.items()}
 
 
 # ---------------------------------------------------------------- mapping
