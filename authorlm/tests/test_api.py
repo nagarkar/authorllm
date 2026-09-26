@@ -5224,7 +5224,365 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _episode_fixture(prefix: str):
+    """One essay + live session — enough for episode / writeup routing."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    api.ensure_session(db, manuscript)
+    return root, db, manuscript
+
+
+def check_writeup_episode() -> None:
+    """Beat collect/review attach to the PRIMARY intent's episode (§1.7).
+
+    Softening to session-current would file both parallel writeups under
+    whichever intent was declared last."""
+    from authorlm import sessions as ses
+
+    root, db, manuscript = _episode_fixture("authorlm-wu-episode-")
+    try:
+        mid = manuscript["id"]
+        session = ses.active_session(db, mid)
+        intent_a = api.declare_intent(db, manuscript, "Rewrite alpha")["intent"]
+        intent_b = api.declare_intent(db, manuscript, "Later goal")["intent"]
+
+        # No primary and no column → ambient current_episode (intent-less
+        # or most-recent open in THIS session). With B declared last, that
+        # is B's episode — which is exactly why a writeup MUST NOT use it
+        # once a primary is ratified.
+        bare = {"intent_id": None, "metadata": "{}"}
+        ambient = api._writeup_episode(db, manuscript, bare, session)
+        check("no primary → session current_episode (latest open)",
+              ambient["intent_id"] == intent_b["id"],
+              ambient)
+
+        col_only = {"intent_id": intent_a["id"], "metadata": "{}"}
+        from_col = api._writeup_episode(db, manuscript, col_only, session)
+        check("column intent_id alone routes to that intent's episode",
+              from_col["intent_id"] == intent_a["id"]
+              and from_col["id"] != ambient["id"],
+              from_col)
+
+        block = {"intents": {"primary": intent_a["id"],
+                             "members": [{"id": intent_a["id"]}]}}
+        # Column still names B — block.primary must win (ratified set).
+        ratified = {"intent_id": intent_b["id"],
+                    "metadata": json.dumps(block)}
+        from_block = api._writeup_episode(db, manuscript, ratified, session)
+        check("ratified metadata.intents.primary beats writeups.intent_id",
+              from_block["intent_id"] == intent_a["id"],
+              from_block)
+
+        empty_primary = {
+            "intent_id": intent_a["id"],
+            "metadata": json.dumps({"intents": {"primary": ""}}),
+        }
+        via_or = api._writeup_episode(db, manuscript, empty_primary, session)
+        check("empty primary falls through via `or` to the column",
+              via_or["intent_id"] == intent_a["id"], via_or)
+
+        # Cross-session: plant an open episode for A under an ended
+        # session id. current_episode (session-scoped) would miss it and
+        # invent a fresh one under today's session.
+        old = ko_fields("s")
+        old.update(manuscript_id=mid, started_at="2026-01-01T00:00:00+00:00",
+                   ended_at="2026-01-01T01:00:00+00:00", status="ended")
+        db.insert("sessions", old)
+        planted = ko_fields("ep")
+        planted.update(manuscript_id=mid, session_id=old["id"],
+                       intent_id=intent_a["id"], transition_ids="[]",
+                       outcome=None, status="open")
+        # Close the declare-time episode so the plant is the only open one.
+        for ep in db.all(
+                "SELECT id FROM editorial_episodes WHERE intent_id = ? "
+                "AND status = 'open' AND session_id = ?",
+                (intent_a["id"], session["id"])):
+            db.update("editorial_episodes", ep["id"], {"status": "closed"})
+        db.insert("editorial_episodes", planted)
+        cross = ses.episode_for_intent(db, mid, session, intent_a["id"])
+        check("episode_for_intent finds an open episode in ANY session",
+              cross["id"] == planted["id"]
+              and cross["session_id"] == old["id"],
+              cross)
+        wu_cross = api._writeup_episode(
+            db, manuscript,
+            {"intent_id": intent_a["id"], "metadata": "{}"}, session)
+        check("writeup_episode reuses that foreign-session episode",
+              wu_cross["id"] == planted["id"], wu_cross)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_inflight_sources() -> None:
+    """Active writeups contribute pinned pre-rewrite text (or None).
+
+    Conditioning on the on-disk placeholder would poison neighbour
+    summaries; inventing "" for a --new file would lie about existence."""
+    from authorlm import summaries as sums
+
+    root, db, manuscript = _episode_fixture("authorlm-inflight-")
+    try:
+        mid = manuscript["id"]
+        check("no active writeups → empty overlay",
+              sums.inflight_sources(db, manuscript) == {})
+
+        pinned = "# Alpha\n\nPinned pre-rewrite body.\n"
+        ver = ko_fields("mv")
+        ver.update(manuscript_id=mid, version_no=1, checksum="c1",
+                   files=json.dumps({"alpha.md": pinned}),
+                   source="test", session_id=None)
+        db.insert("manuscript_versions", ver)
+        intent = api.declare_intent(db, manuscript, "Rewrite alpha")["intent"]
+        wu = ko_fields("wu")
+        wu.update(manuscript_id=mid, intent_id=intent["id"], file="alpha.md",
+                  status="active", source_version_id=ver["id"],
+                  plan="[]", cursor=0)
+        db.insert("writeups", wu)
+
+        flight = sums.inflight_sources(db, manuscript)
+        check("active rewrite → pinned text from source_version_id",
+              flight == {"alpha.md": pinned}, flight)
+
+        # --new: version exists but has no entry for this file.
+        new_ver = ko_fields("mv")
+        new_ver.update(manuscript_id=mid, version_no=2, checksum="c2",
+                       files=json.dumps({"alpha.md": pinned}),
+                       source="test", session_id=None)
+        db.insert("manuscript_versions", new_ver)
+        (Path(manuscript["path"]) / "epsilon.md").write_text("")
+        wu_new = ko_fields("wu")
+        wu_new.update(manuscript_id=mid, intent_id=intent["id"],
+                      file="epsilon.md", status="active",
+                      source_version_id=new_ver["id"], plan="[]", cursor=0)
+        db.insert("writeups", wu_new)
+        flight2 = sums.inflight_sources(db, manuscript)
+        check("--new file with no pinned entry → None (not empty string)",
+              flight2.get("epsilon.md") is None
+              and flight2.get("alpha.md") == pinned,
+              flight2)
+
+        db.update("writeups", wu["id"], {"status": "completed"})
+        flight3 = sums.inflight_sources(db, manuscript)
+        check("completed writeup drops out of the overlay",
+              "alpha.md" not in flight3 and "epsilon.md" in flight3,
+              flight3)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_pushed_from() -> None:
+    """filter unmark restores the pre-push triage state, never invents one.
+
+    Defaulting an untriaged proposal to `accepted` fabricates a verdict
+    the author never gave (AW recovery contract)."""
+    check("missing metadata → accepted (local road's only push state)",
+          api._pushed_from({}) == "accepted")
+    check("null metadata → accepted",
+          api._pushed_from({"metadata": None}) == "accepted")
+    check("empty metadata object → accepted",
+          api._pushed_from({"metadata": "{}"}) == "accepted")
+    check("explicit pushed_from=proposed is preserved",
+          api._pushed_from({"metadata": json.dumps(
+              {"pushed_from": "proposed"})}) == "proposed")
+    check("explicit pushed_from=accepted is preserved",
+          api._pushed_from({"metadata": json.dumps(
+              {"pushed_from": "accepted"})}) == "accepted")
+
+
+def check_freeze_intents() -> None:
+    """write plan ratifies the intent set — tied/inactive must refuse.
+
+    Softening either refusal lets block A drift mid-writeup or hangs the
+    episode off an unnamed primary."""
+    root, db, manuscript = _episode_fixture("authorlm-freeze-")
+    try:
+        intent_a = api.declare_intent(db, manuscript, "Goal A")["intent"]
+        intent_b = api.declare_intent(db, manuscript, "Goal B")["intent"]
+
+        empty_wu = {"metadata": "{}"}
+        check("no intents block → freeze is a no-op empty dict",
+              api._freeze_intents(db, manuscript, empty_wu, []) == {})
+
+        tied = {
+            "state": "proposed",
+            "primary": None,
+            "tied": [intent_a["id"], intent_b["id"]],
+            "members": [
+                {"id": intent_a["id"], "statement": "Goal A",
+                 "tier": "manuscript", "role": "secondary"},
+                {"id": intent_b["id"], "statement": "Goal B",
+                 "tier": "manuscript", "role": "secondary"},
+            ],
+        }
+        tied_wu = {"metadata": json.dumps({"intents": tied})}
+        try:
+            api._freeze_intents(db, manuscript, tied_wu, [])
+            tied_ok = False
+            tied_msg = ""
+        except ValueError as err:
+            tied_ok = True
+            tied_msg = str(err)
+        check("tied primaries refuse with --primary recovery hint",
+              tied_ok and "tied for primary" in tied_msg
+              and "write intents --primary" in tied_msg,
+              tied_msg)
+
+        # Inactive member: abandon B, keep A as primary.
+        api.abandon_intent(db, manuscript, intent_b["id"][:12], "drop")
+        inactive = {
+            "state": "proposed",
+            "primary": intent_a["id"],
+            "members": [
+                {"id": intent_a["id"], "statement": "Goal A",
+                 "tier": "manuscript", "role": "secondary"},
+                {"id": intent_b["id"], "statement": "Goal B",
+                 "tier": "manuscript", "role": "secondary"},
+            ],
+        }
+        inactive_wu = {"metadata": json.dumps({"intents": inactive})}
+        try:
+            api._freeze_intents(db, manuscript, inactive_wu, [])
+            inactive_ok = False
+            inactive_msg = ""
+        except ValueError as err:
+            inactive_ok = True
+            inactive_msg = str(err)
+        check("inactive member refuses rather than silently freezing",
+              inactive_ok and "not active" in inactive_msg
+              and "write intents --remove" in inactive_msg,
+              inactive_msg)
+
+        good = {
+            "state": "proposed",
+            "primary": intent_a["id"],
+            "members": [
+                {"id": intent_a["id"], "statement": "Goal A",
+                 "tier": "file", "role": "secondary"},
+            ],
+        }
+        good_wu = {"metadata": json.dumps({"intents": good})}
+        frozen = api._freeze_intents(db, manuscript, good_wu, [])
+        check("happy path stamps state=frozen and frozen_at",
+              frozen.get("state") == "frozen"
+              and isinstance(frozen.get("frozen_at"), str)
+              and frozen.get("frozen_at"),
+              frozen)
+        check("happy path stamps primary role on the named member",
+              frozen["members"][0]["role"] == "primary"
+              and frozen["primary"] == intent_a["id"],
+              frozen)
+
+        # Already frozen: returns the block; beat tags still resolve.
+        frozen_wu = {"metadata": json.dumps({"intents": frozen})}
+        beats = [{"n": 1, "intents": [intent_a["id"][:8]]}]
+        again = api._freeze_intents(db, manuscript, frozen_wu, beats)
+        check("already-frozen block is returned (idempotent stamp)",
+              again["state"] == "frozen"
+              and again["frozen_at"] == frozen["frozen_at"],
+              again)
+        check("beat intent tags still resolve on a replan of a frozen set",
+              beats[0]["intents"] == [intent_a["id"]],
+              beats)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_scope_ruled() -> None:
+    """Book-wide is NULL scope — history is the only trace of the ruling.
+
+    Without this, deliberate --book-wide goals refill the triage sheet
+    as 'no place' forever (AO scope-ruling contract)."""
+    check("file/chapter scope is ruled by presence",
+          api._scope_ruled({"scope": "alpha.md", "metadata": "{}"}))
+    check("null scope with no history is NOT ruled (triage still asks)",
+          not api._scope_ruled({"scope": None, "metadata": "{}"}))
+    check("null scope with missing metadata is NOT ruled",
+          not api._scope_ruled({"scope": None}))
+    check("null→null history entry counts as a book-wide ruling",
+          api._scope_ruled({
+              "scope": None,
+              "metadata": json.dumps({
+                  "scope_history": [
+                      {"from": None, "to": None, "at": "t", "by": "cli"},
+                  ],
+              }),
+          }))
+    check("empty scope_history list is NOT a ruling",
+          not api._scope_ruled({
+              "scope": None,
+              "metadata": json.dumps({"scope_history": []}),
+          }))
+
+
+def check_record_served_by() -> None:
+    """complete appends one served_by row per member; re-complete dedupes.
+
+    Doubling on re-complete would inflate chapter-wide completion
+    analysis; skipping gone members must not crash the close."""
+    root, db, manuscript = _episode_fixture("authorlm-served-by-")
+    try:
+        intent = api.declare_intent(db, manuscript, "Serve me")["intent"]
+        wu = {"id": "wu-test-1", "file": "alpha.md"}
+        dispositions = [{
+            "id": intent["id"], "role": "primary",
+            "disposition": "served", "beats": 3,
+        }]
+        api._record_served_by(db, wu, dispositions)
+        meta = loads(db.one(
+            "SELECT metadata FROM declared_intents WHERE id = ?",
+            (intent["id"],))["metadata"], {})
+        served = meta.get("served_by") or []
+        check("first complete appends one served_by entry",
+              len(served) == 1
+              and served[0]["writeup"] == "wu-test-1"
+              and served[0]["file"] == "alpha.md"
+              and served[0]["role"] == "primary"
+              and served[0]["disposition"] == "served"
+              and served[0]["beats"] == 3,
+              served)
+
+        # Re-complete with updated beats — must replace, not double.
+        dispositions[0]["beats"] = 5
+        api._record_served_by(db, wu, dispositions)
+        meta2 = loads(db.one(
+            "SELECT metadata FROM declared_intents WHERE id = ?",
+            (intent["id"],))["metadata"], {})
+        served2 = meta2.get("served_by") or []
+        check("re-complete dedupes by writeup id (one row, fresh beats)",
+              len(served2) == 1 and served2[0]["beats"] == 5
+              and served2[0]["writeup"] == "wu-test-1",
+              served2)
+
+        # Gone member id is skipped — close must not raise.
+        api._record_served_by(
+            db, wu,
+            [{"id": "di-gone-missing", "role": "secondary",
+              "disposition": "unserved", "beats": 0}])
+        meta3 = loads(db.one(
+            "SELECT metadata FROM declared_intents WHERE id = ?",
+            (intent["id"],))["metadata"], {})
+        check("gone member id is skipped without disturbing existing rows",
+              (meta3.get("served_by") or []) == served2,
+              meta3)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_writeup_episode()
+    check_inflight_sources()
+    check_pushed_from()
+    check_freeze_intents()
+    check_scope_ruled()
+    check_record_served_by()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
