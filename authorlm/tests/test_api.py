@@ -5224,7 +5224,335 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _lookup_fixture(prefix: str):
+    """One-essay workspace for prefix / validate / drafting helper checks."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+    (ms / "beta.md").write_text("# Beta\n\nBody of beta.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    return root, ms, db, manuscript
+
+
+def check_prefix_lookups() -> None:
+    """Prefix finders must refuse ambiguity — never act on SQLite's first row.
+
+    Softening any of these lets complete/abandon/retire/confirm silently
+    hit the wrong intent, edge, style law, or belief when two ids share a
+    substring (the exact failure mode that forced the style-law guard)."""
+    from authorlm import beliefs as bel
+    from authorlm import styles as st
+
+    root, ms, db, manuscript = _lookup_fixture("authorlm-prefix-lookup-")
+    try:
+        mid = manuscript["id"]
+
+        # --- intents ----------------------------------------------------
+        a = api.declare_intent(db, manuscript, "Goal Alpha")["intent"]
+        b = api.declare_intent(db, manuscript, "Goal Beta")["intent"]
+        # Force a shared substring so the LIKE ambiguity is deterministic.
+        db.update("declared_intents", a["id"],
+                  {"id": "di-shared-aaaa1111aaaa1111aaaa1111aaaa1111"})
+        db.update("declared_intents", b["id"],
+                  {"id": "di-shared-bbbb2222bbbb2222bbbb2222bbbb2222"})
+        a["id"] = "di-shared-aaaa1111aaaa1111aaaa1111aaaa1111"
+        b["id"] = "di-shared-bbbb2222bbbb2222bbbb2222bbbb2222"
+
+        hit = api._find_intent(db, manuscript, "aaaa1111")
+        check("intent unique prefix returns that row",
+              hit["id"] == a["id"], hit)
+        try:
+            api._find_intent(db, manuscript, "di-shared")
+            amb_ok, amb_msg = False, ""
+        except LookupError as err:
+            amb_ok, amb_msg = True, str(err)
+        check("intent shared prefix refuses as ambiguous",
+              amb_ok and "ambiguous" in amb_msg and "2 intents" in amb_msg,
+              amb_msg)
+        try:
+            api._find_intent(db, manuscript, "zzzz-missing")
+            miss_ok, miss_msg = False, ""
+        except LookupError as err:
+            miss_ok, miss_msg = True, str(err)
+        check("intent miss names the prefix",
+              miss_ok and "no intent matching" in miss_msg
+              and "zzzz-missing" in miss_msg,
+              miss_msg)
+
+        # --- concept edges ----------------------------------------------
+        n1 = api.add_concept(db, manuscript, "Choice", kind="concept")
+        n2 = api.add_concept(db, manuscript, "Field", kind="concept")
+        e1 = ko_fields("ce")
+        e1.update(id="ce-shared-xxxx1111xxxx1111xxxx1111xxxx1111",
+                  manuscript_id=mid, from_node=n1["id"], relation="elaborates",
+                  to_node=n2["id"], status="inferred", support=0, evidence="[]")
+        e2 = ko_fields("ce")
+        e2.update(id="ce-shared-yyyy2222yyyy2222yyyy2222yyyy2222",
+                  manuscript_id=mid, from_node=n2["id"], relation="depends_on",
+                  to_node=n1["id"], status="inferred", support=0, evidence="[]")
+        db.insert("concept_edges", e1)
+        db.insert("concept_edges", e2)
+
+        edge_hit = api._find_edge(db, manuscript, "xxxx1111")
+        check("edge unique prefix returns that row",
+              edge_hit["id"] == e1["id"], edge_hit)
+        try:
+            api._find_edge(db, manuscript, "ce-shared")
+            e_amb_ok, e_amb_msg = False, ""
+        except LookupError as err:
+            e_amb_ok, e_amb_msg = True, str(err)
+        check("edge shared prefix refuses as ambiguous",
+              e_amb_ok and "ambiguous" in e_amb_msg and "2 edges" in e_amb_msg,
+              e_amb_msg)
+        try:
+            api._find_edge(db, manuscript, "no-such-edge")
+            e_miss_ok, e_miss_msg = False, ""
+        except LookupError as err:
+            e_miss_ok, e_miss_msg = True, str(err)
+        check("edge miss names the prefix",
+              e_miss_ok and "no edge matching" in e_miss_msg, e_miss_msg)
+
+        # --- style laws -------------------------------------------------
+        law1 = st.add_element(db, mid, "tone", "Stay spare.", file="alpha.md")
+        law2 = st.add_element(db, mid, "lexicon", "Prefer plain words.",
+                              file="beta.md")
+        db.update("style_laws", law1["id"],
+                  {"id": "se-shared-pppp1111pppp1111pppp1111pppp1111"})
+        db.update("style_laws", law2["id"],
+                  {"id": "se-shared-qqqq2222qqqq2222qqqq2222qqqq2222"})
+        law1["id"] = "se-shared-pppp1111pppp1111pppp1111pppp1111"
+        law2["id"] = "se-shared-qqqq2222qqqq2222qqqq2222qqqq2222"
+
+        law_hit = api._find_style_law(
+            db, manuscript, "pppp1111", "status = 'active'", "active")
+        check("style-law unique prefix returns that row",
+              law_hit["id"] == law1["id"], law_hit)
+        try:
+            api._find_style_law(
+                db, manuscript, "se-shared", "status = 'active'", "active")
+            s_amb_ok, s_amb_msg = False, ""
+        except LookupError as err:
+            s_amb_ok, s_amb_msg = True, str(err)
+        check("style-law shared prefix refuses as ambiguous",
+              s_amb_ok and "ambiguous" in s_amb_msg
+              and "2 style laws" in s_amb_msg,
+              s_amb_msg)
+        st.retire_element(db, law2)
+        # After retiring law2, the shared prefix is unique among actives.
+        alone = api._find_style_law(
+            db, manuscript, "se-shared", "status = 'active'", "active")
+        check("style-law status_clause excludes retired from the match set",
+              alone["id"] == law1["id"], alone)
+        try:
+            api._find_style_law(
+                db, manuscript, "no-law", "status = 'active'", "active")
+            s_miss_ok, s_miss_msg = False, ""
+        except LookupError as err:
+            s_miss_ok, s_miss_msg = True, str(err)
+        check("style-law miss uses the caller's label",
+              s_miss_ok and "no active style element matching" in s_miss_msg,
+              s_miss_msg)
+
+        # --- editorial beliefs ------------------------------------------
+        b1 = bel.seed_candidate_belief(
+            db, mid, "Prefer short sentences.", "triage-note_update")
+        b2 = bel.seed_candidate_belief(
+            db, mid, "Name the concept before defining it.",
+            "triage-note_update")
+        assert b1 and b2
+        db.update("editorial_beliefs", b1["id"],
+                  {"id": "eb-shared-rrrr1111rrrr1111rrrr1111rrrr1111"})
+        db.update("editorial_beliefs", b2["id"],
+                  {"id": "eb-shared-ssss2222ssss2222ssss2222ssss2222"})
+        b1["id"] = "eb-shared-rrrr1111rrrr1111rrrr1111rrrr1111"
+        b2["id"] = "eb-shared-ssss2222ssss2222ssss2222ssss2222"
+
+        bel_hit = api._belief_by_prefix(db, manuscript, "rrrr1111")
+        check("belief unique prefix returns that row",
+              bel_hit["id"] == b1["id"], bel_hit)
+        try:
+            api._belief_by_prefix(db, manuscript, "eb-shared")
+            bel_amb_ok, bel_amb_msg = False, ""
+        except LookupError as err:
+            bel_amb_ok, bel_amb_msg = True, str(err)
+        check("belief shared prefix refuses as ambiguous",
+              bel_amb_ok and "ambiguous" in bel_amb_msg
+              and "2 matches" in bel_amb_msg,
+              bel_amb_msg)
+        # Retire b2 — shared prefix must become unique (retired out of set).
+        bel.retire_belief(db, mid, dict(b2), "test retire")
+        alone_bel = api._belief_by_prefix(db, manuscript, "eb-shared")
+        check("belief lookup ignores retired rows for ambiguity",
+              alone_bel["id"] == b1["id"], alone_bel)
+        try:
+            api._belief_by_prefix(db, manuscript, "no-belief")
+            bel_miss_ok, bel_miss_msg = False, ""
+        except LookupError as err:
+            bel_miss_ok, bel_miss_msg = True, str(err)
+        check("belief miss names the prefix",
+              bel_miss_ok and "no live belief matching" in bel_miss_msg,
+              bel_miss_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_validate_file() -> None:
+    """Live style attachments must name a file that exists on disk.
+
+    There is no files table — integrity is only at entry. Softening the
+    close-match hint (or skipping the check) plants attachments on typos
+    that never govern a real essay."""
+    root, ms, db, manuscript = _lookup_fixture("authorlm-validate-file-")
+    try:
+        api._validate_file(db, manuscript, "alpha.md")
+        check("known file is accepted without raising", True)
+
+        try:
+            api._validate_file(db, manuscript, "alfa.md")
+            close_ok, close_msg = False, ""
+        except LookupError as err:
+            close_ok, close_msg = True, str(err)
+        check("near-miss typo offers a did-you-mean hint",
+              close_ok and "unknown file 'alfa.md'" in close_msg
+              and "did you mean 'alpha.md'" in close_msg,
+              close_msg)
+
+        try:
+            api._validate_file(db, manuscript, "zzzz-totally-other.md")
+            list_ok, list_msg = False, ""
+        except LookupError as err:
+            list_ok, list_msg = True, str(err)
+        check("far miss lists known files when no close match",
+              list_ok and "unknown file 'zzzz-totally-other.md'" in list_msg
+              and "known:" in list_msg
+              and "alpha.md" in list_msg and "beta.md" in list_msg,
+              list_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_status_drafting_context() -> None:
+    """write status degrades when the file left disk; write_start does not.
+
+    Softening this to re-raise would blank the whole resume view (plan,
+    cursor, tallies) for a writeup whose essay was renamed or removed —
+    the exact case status exists to recover from."""
+    from authorlm import summaries as sums
+
+    root, ms, db, manuscript = _lookup_fixture("authorlm-status-draft-")
+    try:
+        mid = manuscript["id"]
+        intent = api.declare_intent(db, manuscript, "Rewrite alpha")["intent"]
+        live = ko_fields("wu")
+        live.update(manuscript_id=mid, intent_id=intent["id"], file="alpha.md",
+                    status="active", source_version_id=None, plan="[]",
+                    cursor=0, metadata="{}")
+        db.insert("writeups", live)
+        ctx = api._status_drafting_context(db, manuscript, live)
+        check("live file still renders a real drafting context",
+              ctx.startswith("DRAFTING CONTEXT — alpha.md")
+              and sums.WARN_PREFIX + "DRAFTING CONTEXT unavailable" not in ctx,
+              ctx[:200])
+
+        gone = ko_fields("wu")
+        gone.update(manuscript_id=mid, intent_id=intent["id"],
+                    file="vanished.md", status="active",
+                    source_version_id=None, plan="[]", cursor=0,
+                    metadata="{}")
+        db.insert("writeups", gone)
+        degraded = api._status_drafting_context(db, manuscript, gone)
+        check("missing file degrades to a WARN line instead of raising",
+              degraded.startswith(
+                  sums.WARN_PREFIX + "DRAFTING CONTEXT unavailable")
+              and "vanished.md" in degraded
+              and "write abandon" in degraded,
+              degraded)
+
+        # Bad placement on an otherwise-live writeup: same degrade path.
+        bad_place = {
+            "file": "alpha.md",
+            "metadata": json.dumps({"placement": "no-such-anchor.md"}),
+        }
+        placed = api._status_drafting_context(db, manuscript, bad_place)
+        check("bad placement also degrades rather than dying",
+              placed.startswith(
+                  sums.WARN_PREFIX + "DRAFTING CONTEXT unavailable")
+              and "no-such-anchor.md" in placed,
+              placed)
+
+        # write_start's path (_drafting_context) must still raise — status
+        # is the only resume entry that softens.
+        try:
+            api._drafting_context(db, manuscript, gone)
+            raise_ok, raise_msg = False, ""
+        except LookupError as err:
+            raise_ok, raise_msg = True, str(err)
+        check("raw drafting_context still raises for the same missing file",
+              raise_ok and "vanished.md" in raise_msg, raise_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_proposal_row() -> None:
+    """Compact proposal listings must preview detail lines, not dump notes.
+
+    An untruncated 'compact' list of note_updates was still hundreds of KB —
+    soft enough to look safe while re-blowing the MCP token budget."""
+    long_current = "C" * (api._NOTE_PREVIEW + 40)
+    long_proposed = "P" * (api._NOTE_PREVIEW + 40)
+    row = {
+        "id": "kp-testrow000000000000000000000001",
+        "kind": "note_update",
+        "state": "open",
+        "payload": json.dumps({
+            "name": "Gravity",
+            "current_note": long_current,
+            "proposed_note": long_proposed,
+            "current_kind": "concept",
+            "proposed_kind": "concept",
+        }),
+    }
+    compact = api._proposal_row(row, verbose=False)
+    check("compact row keeps only id/kind/summary/details",
+          set(compact) == {"id", "kind", "summary", "details"}, compact)
+    check("compact details are preview-capped with an ellipsis",
+          len(compact["details"]) >= 2
+          and all(len(d) <= api._NOTE_PREVIEW for d in compact["details"])
+          and compact["details"][0].endswith("…")
+          and compact["details"][1].endswith("…")
+          and long_current not in compact["details"][0],
+          compact["details"])
+    verbose = api._proposal_row(row, verbose=True)
+    check("verbose row keeps the full payload fields plus summary/details",
+          verbose["id"] == row["id"] and verbose["kind"] == row["kind"]
+          and long_current in verbose["details"][0]
+          and long_proposed in verbose["details"][1]
+          and "summary" in verbose,
+          verbose["details"])
+    # None / empty detail lines: _preview must not invent ellipsis noise.
+    short = {
+        "id": "kp-short00000000000000000000000001",
+        "kind": "vanished",
+        "state": "open",
+        "payload": json.dumps({"name": "Gone", "was_in": "alpha.md"}),
+    }
+    short_compact = api._proposal_row(short, verbose=False)
+    check("short detail lines pass through untruncated",
+          all(not d.endswith("…") for d in short_compact["details"]),
+          short_compact["details"])
+
+
 def main_test() -> None:
+    check_prefix_lookups()
+    check_validate_file()
+    check_status_drafting_context()
+    check_proposal_row()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
