@@ -1,12 +1,14 @@
 """Single-file manuscript export — a transient, regenerate-on-demand artifact.
 
 `doc create-manuscript` combines every content file (reading order per
-toc.toml) into `_exports/<Manuscript Name>.md` and mirrors it to one Google
-Doc named after the manuscript. Both artifacts are disposable: neither is
-ever observed (the underscore directory is invisible to collection; the
-Doc is push-only, never reconciled or pulled), and every export overwrites
-them in place — the same local file, the same Doc id. Delete either
-freely; the next export recreates it.
+toc.toml) into `_exports/<Manuscript Name> - doc.md` and mirrors it to one
+Google Doc named after the manuscript. The ` - doc` stem keeps the
+Doc-bridge artifact off the bare title used by `export md` / `export docx`
+(those builds resolve different OUTPUTS). Both artifacts are disposable:
+neither is ever observed (the underscore directory is invisible to
+collection; the Doc is push-only, never reconciled or pulled), and every
+export overwrites them in place — the same local file, the same Doc id.
+Delete either freely; the next export recreates it.
 """
 
 from __future__ import annotations
@@ -224,7 +226,11 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
     doc_title = title or manuscript["name"]
     export_dir = Path(manuscript["path"]) / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
-    path = export_dir / export_filename(doc_title)
+    # Tag with the `doc` output name so this artifact never shares a path
+    # with export_published's bare `<title>.*` (fmt=md) or `<title> - docx.*`
+    # — those builds resolve different OUTPUTS and would silently overwrite
+    # Doc-only / publisher-only passages.
+    path = export_dir / export_filename(f"{doc_title} - doc")
 
     meta = _mapping(db, manuscript)
     entry = meta.setdefault("gdocs", {}).setdefault(EXPORT_KEY, {})
@@ -464,12 +470,24 @@ def check_manuscript(manuscript: dict) -> list[str]:
     return problems
 
 
+# Filename tags that export builds append for an OUTPUTS name (` - doc`,
+# ` - docx`, …). A chapter stem equal to one of these would otherwise make
+# `--chapters doc.md` share `_exports/<title> - doc.*` with create-manuscript.
+_OUTPUT_FILENAME_TAGS = frozenset(OUTPUTS)
+
+
 def selection_slug(order: list[str]) -> str:
     """Filename tag for a chapter selection — the selected files' stems,
-    joined, so a part-build never overwrites the whole-book artifacts."""
+    joined, so a part-build never overwrites the whole-book artifacts.
+    Reserved output tags (see _OUTPUT_FILENAME_TAGS) get a `ch-` prefix so
+    they cannot collide with create-manuscript's ` - doc` or a
+    format-tagged publish stem."""
     stems = [Path(name).stem for name in order]
     slug = "+".join(stems[:3]) + ("+more" if len(stems) > 3 else "")
-    return slug[:60]
+    slug = slug[:60]
+    if slug in _OUTPUT_FILENAME_TAGS:
+        slug = f"ch-{slug}"
+    return slug
 
 
 # ------------------------------------------------ the book profile (print interior)
@@ -619,6 +637,13 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         title = f"{title} - {selection_slug(order)}"
     if book:
         title = f"{title} - book"  # never overwrites the review copy
+    # fmt=md keeps the bare (selection/book-tagged) title — that file IS
+    # the product. Every other format tags the stem with its fmt so the
+    # intermediate markdown cannot clobber the md export or the
+    # create-manuscript ` - doc` artifact, and so builds that resolve
+    # different OUTPUTS (docx vs epub vs pdf) do not overwrite each other.
+    elif fmt != "md":
+        title = f"{title} - {fmt}"
     root = Path(manuscript["path"])
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)

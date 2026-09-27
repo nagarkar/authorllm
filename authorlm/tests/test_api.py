@@ -7510,8 +7510,8 @@ def main_test() -> None:
               and text.index("firmer road") < text.index("Welcome"), text)
 
         local_only = export_manuscript(db, manuscript, service=None)
-        export_path = ms / "_exports" / "book.md"
-        check("export writes _exports/<name>.md even without Drive",
+        export_path = ms / "_exports" / "book - doc.md"
+        check("export writes _exports/<name> - doc.md even without Drive",
               local_only["doc_id"] is None
               and "firmer road" in export_path.read_text()
               and "Welcome." in export_path.read_text())
@@ -7568,7 +7568,7 @@ def main_test() -> None:
                   exported["created"] and exported["doc_id"] is not None
                   and stub.state["folders"] == ["doc-1"])
             check("the export Doc is uploaded as a DOCX built beside the md",
-                  (ms / "_exports" / "book.docx").exists()
+                  (ms / "_exports" / "book - doc.docx").exists()
                   and stub.state["uploads"][exported["doc_id"]]
                   .startswith("PK"))
             exported2 = export_manuscript(db, manuscript, service=stub)
@@ -7590,7 +7590,7 @@ def main_test() -> None:
 
         titled = export_manuscript(db, manuscript, service=None, title="My Book")
         check("retitled export replaces the stale local file",
-              (ms / "_exports" / "My Book.md").exists()
+              (ms / "_exports" / "My Book - doc.md").exists()
               and not export_path.exists()
               and titled["doc_title"] == "My Book")
 
@@ -7674,6 +7674,64 @@ def main_test() -> None:
         check("regions resolve for the export Doc as output 'doc'",
               "\\nabla" in combined_markdown(manuscript)[0]
               and "Spoken:" not in combined_markdown(manuscript)[0])
+        # create-manuscript (fmt=doc) and export md/docx used to share
+        # `_exports/<title>.*`, so a later build silently overwrote an
+        # earlier one — Doc-only or publisher-only [Only:] passages vanished
+        # from the surviving file.
+        from authorlm.export import selection_slug as _selection_slug
+        check("selection_slug reserves OUTPUTS filename tags",
+              _selection_slug(["doc.md"]) == "ch-doc"
+              and _selection_slug(["docx.md"]) == "ch-docx"
+              and _selection_slug(["00-intro.md"]) == "00-intro",
+              _selection_slug(["doc.md"]))
+        prior_title = load_settings(manuscript)["title"]
+        set_setting(manuscript, "title", "")  # same basename as manuscript name
+        prior_toc_regions = (ms / "toc.toml").read_text()
+        (ms / "05-outputs.md").write_text(
+            "# Outputs\n\nshared prose\n\n"
+            "[Only: doc]\nDOC_ONLY\n[/Only]\n\n"
+            "[Only: docx]\nDOCX_ONLY\n[/Only]\n\n"
+            "[Only: md]\nMD_ONLY\n[/Only]\n")
+        (ms / "toc.toml").write_text(
+            prior_toc_regions.rstrip()
+            + '\n\n[[chapter]]\nfile = "05-outputs.md"\n')
+        manuscript = api.get_manuscript(db)
+        doc_bridge = export_manuscript(db, manuscript, service=None)
+        doc_md = Path(doc_bridge["path"])
+        pub_md = export_published(db, manuscript, fmt="md", variant="images")
+        md_path = Path(pub_md["markdown"])
+        check("create-manuscript and export md write distinct paths",
+              doc_md.name == "book - doc.md"
+              and md_path.name == "book.md"
+              and doc_md.resolve() != md_path.resolve()
+              and "DOC_ONLY" in doc_md.read_text()
+              and "DOCX_ONLY" not in doc_md.read_text()
+              and "MD_ONLY" not in doc_md.read_text()
+              and "MD_ONLY" in md_path.read_text()
+              and "DOC_ONLY" not in md_path.read_text(),
+              f"doc={doc_md} md={md_path}")
+        if shutil.which("pandoc"):
+            pub_docx = export_published(
+                db, manuscript, fmt="docx", variant="images")
+            docx_md = Path(pub_docx["markdown"])
+            docx_out = Path(pub_docx["docx"])
+            check("export docx does not overwrite create-manuscript or "
+                  "export md artifacts",
+                  docx_md.name == "book - docx.md"
+                  and docx_out.name == "book - docx.docx"
+                  and docx_md.resolve() != doc_md.resolve()
+                  and docx_md.resolve() != md_path.resolve()
+                  and "DOCX_ONLY" in docx_md.read_text()
+                  and "DOC_ONLY" not in docx_md.read_text()
+                  and "MD_ONLY" not in docx_md.read_text()
+                  and "DOC_ONLY" in doc_md.read_text()
+                  and "MD_ONLY" in md_path.read_text()
+                  and docx_out.exists(),
+                  f"docx_md={docx_md} doc={doc_md} md={md_path}")
+        (ms / "05-outputs.md").unlink()
+        (ms / "toc.toml").write_text(prior_toc_regions)
+        set_setting(manuscript, "title", prior_title)
+        manuscript = api.get_manuscript(db)
         from authorlm.export import check_manuscript
         clean_problems = check_manuscript(manuscript)
         (ms / "04-bad.md").write_text(
