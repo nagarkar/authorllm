@@ -305,7 +305,12 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
     introduced_in is re-pointed to the first reading-order location that
     does (definition precedence follows the text). `vanished` are realized
     concepts that no longer appear anywhere; the caller surfaces those for
-    an author decision — never silently demoted."""
+    an author decision — never silently demoted.
+
+    Presence checks use `node_names` (primary + aliases), matching
+    `scan_realizations`. A primary-only scan would mark a concept vanished
+    — and collect would silently retire an unconfirmed extracted one —
+    while an alias is still on the page that just realized it."""
     from .structure import ordered_items
 
     files: dict[str, str] = loads(version["files"], {})
@@ -315,16 +320,20 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status = 'realized'",
         (manuscript_id,),
     ):
-        pattern = _word_pattern(node["name"])
+        patterns = [_word_pattern(n) for n in node_names(node)]
+
+        def _present(text: str) -> bool:
+            return any(p.search(text) for p in patterns)
+
         current_first = next(
-            (name for name, text in items if pattern.search(text)), None
+            (name for name, text in items if _present(text)), None
         )
         if current_first is None:
             vanished.append(dict(node))
             continue
         old = node["introduced_in"]
         old_text = files.get(old, "") if old else ""
-        if current_first != old and not pattern.search(old_text):
+        if current_first != old and not _present(old_text):
             db.update("concept_nodes", node["id"], {"introduced_in": current_first})
             repointed.append({"name": node["name"], "old": old, "new": current_first})
     return repointed, vanished
