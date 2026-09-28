@@ -5224,7 +5224,305 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _coverage_fixture(prefix: str):
+    """Two-essay workspace for hermetic coverage helpers below."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+    (ms / "beta.md").write_text("# Beta\n\nBody of beta.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    return root, ms, db, manuscript
+
+
+def check_collect_no_episode() -> None:
+    """Hygiene collects must not attach to whatever intent is open.
+
+    `episode=NO_EPISODE` is not ambient `None`: ambient files under the
+    session's current episode; NO_EPISODE leaves `transition_ids` alone
+    so filter/critique resolve never credit an unrelated goal (§15.19)."""
+    root, ms, db, manuscript = _coverage_fixture("authorlm-no-episode-")
+    try:
+        api.collect(db, manuscript, {})
+        api.ensure_session(db, manuscript)
+        intent = api.declare_intent(db, manuscript, "Finish the chapter")["intent"]
+        episode = db.one(
+            "SELECT * FROM editorial_episodes WHERE intent_id = ? "
+            "AND status = 'open'", (intent["id"],))
+        check("declaring an intent opens an episode to attach work to",
+              episode is not None, str(episode))
+        before_ids = loads(episode["transition_ids"], [])
+
+        (ms / "alpha.md").write_text("# Alpha\n\nHygiene edit one.\n")
+        report = api.collect(db, manuscript, {}, episode=api.NO_EPISODE)
+        check("NO_EPISODE report is unattached even with an open episode",
+              report.get("attached_to_episode") is False
+              and report.get("transitions"), str(report)[:300])
+        after_hygiene = db.one(
+            "SELECT transition_ids FROM editorial_episodes WHERE id = ?",
+            (episode["id"],))
+        check("NO_EPISODE left the open episode's transition_ids untouched",
+              loads(after_hygiene["transition_ids"], []) == before_ids,
+              str(after_hygiene))
+
+        (ms / "alpha.md").write_text("# Alpha\n\nGoal-serving edit two.\n")
+        ambient = api.collect(db, manuscript, {})
+        check("ambient None attaches to the open episode",
+              ambient.get("attached_to_episode") is True, str(ambient)[:300])
+        after_ambient = db.one(
+            "SELECT transition_ids FROM editorial_episodes WHERE id = ?",
+            (episode["id"],))
+        attached_ids = loads(after_ambient["transition_ids"], [])
+        check("ambient None grew the episode's transition_ids",
+              len(attached_ids) > len(before_ids),
+              str({"before": before_ids, "after": attached_ids}))
+
+        # Contrast: an explicit episode argument (beat-loop path) also
+        # attaches — reload so we do not RMW-clobber the ambient ids.
+        fresh = dict(db.one(
+            "SELECT * FROM editorial_episodes WHERE id = ?", (episode["id"],)))
+        before_explicit = loads(fresh["transition_ids"], [])
+        (ms / "beta.md").write_text("# Beta\n\nExplicit episode edit.\n")
+        explicit = api.collect(db, manuscript, {}, episode=fresh)
+        check("explicit episode argument attaches",
+              explicit.get("attached_to_episode") is True, str(explicit)[:200])
+        after_explicit = db.one(
+            "SELECT transition_ids FROM editorial_episodes WHERE id = ?",
+            (episode["id"],))
+        check("explicit episode grew transition_ids further",
+              len(loads(after_explicit["transition_ids"], []))
+              > len(before_explicit),
+              str(after_explicit))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_scoped_concepts_text_capture() -> None:
+    """`scoped_concepts(text=)` must use the caller's capture, not re-read disk.
+
+    Filter CONCEPT NOTES passes the verb's one capture so a parallel
+    session cannot change the match set mid-run and forfeit the cached
+    prefix. Softening to always re-read disk reopens that one-capture
+    violation. Unknown file names still raise."""
+    root, ms, db, manuscript = _coverage_fixture("authorlm-scoped-capture-")
+    try:
+        api.add_concept(db, manuscript, "Iron Gate",
+                        notes="entry that resists")
+        api.alias_concept(db, manuscript, "Iron Gate", ["Portcullis"])
+        api.add_concept(db, manuscript, "Hidden Latch",
+                        notes="only on disk later")
+
+        # Disk has neither concept name; capture text mentions Portcullis.
+        (ms / "alpha.md").write_text("# Alpha\n\nNo concept names here.\n")
+        via_disk = api.scoped_concepts(db, manuscript, file="alpha.md")
+        check("file scope against disk finds no mention matches",
+              via_disk["node_count"] == 0, str(via_disk))
+
+        captured = "# Alpha\n\nThe Portcullis sealed the lane.\n"
+        via_text = api.scoped_concepts(
+            db, manuscript, file="alpha.md", text=captured)
+        check("text= capture matches aliases even when disk differs",
+              via_text["node_count"] == 1
+              and any(n.get("name") == "Iron Gate" for n in via_text["nodes"]),
+              str(via_text))
+
+        # Disk-only name must not leak in when text= overrides.
+        (ms / "alpha.md").write_text(
+            "# Alpha\n\nHidden Latch appears only on disk.\n")
+        overridden = api.scoped_concepts(
+            db, manuscript, file="alpha.md",
+            text="# Alpha\n\nStill just Portcullis.\n")
+        names = {n.get("name") for n in overridden["nodes"]}
+        check("text= ignores disk mentions that the capture omitted",
+              names == {"Iron Gate"}, str(names))
+
+        try:
+            api.scoped_concepts(db, manuscript, file="no-such.md",
+                                text="anything")
+            miss_ok, miss_msg = False, ""
+        except LookupError as err:
+            miss_ok, miss_msg = True, str(err)
+        check("unknown file still raises even with text= supplied",
+              miss_ok and "no manuscript file matching" in miss_msg,
+              miss_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_compact_show_and_intent_preview() -> None:
+    """MCP show keeps full notes; intent_preview stays deterministic.
+
+    `_compact_concept` preview-caps notes for listings; `compact_show_
+    concept` must NOT — the ratified definition is the point of show.
+    Softening that cap (or dumping raw edge rows) blows the token budget
+    or hides the definition. Intent preview is zero-token feedback before
+    declare: empty graph, exact match, and fuzzy suggestions must not
+    invent edges for realized concepts."""
+    # --- compact_show_concept is pure projection ---------------------
+    long_notes = "N" * (api._NOTE_PREVIEW + 40)
+    shown = api.compact_show_concept({
+        "node": {
+            "id": "cn-1", "name": "Field", "kind": "concept",
+            "status": "realized", "introduced_in": "alpha.md",
+            "notes": long_notes, "aliases": '["Domain"]',
+            "created_at": "should-drop", "metadata": "{}",
+        },
+        "edges": [{
+            "id": "ce-1", "from_name": "Field", "relation": "elaborates",
+            "to_name": "Choice", "status": "confirmed",
+            "support": 9, "evidence": "[]",
+        }],
+    })
+    check("compact_show_concept keeps the full ratified notes",
+          shown["node"]["notes"] == long_notes
+          and "…" not in shown["node"]["notes"],
+          str(shown["node"].get("notes", ""))[:80])
+    check("compact_show_concept keeps aliases and drops boilerplate keys",
+          shown["node"].get("aliases") == ["Domain"]
+          and "created_at" not in shown["node"]
+          and "metadata" not in shown["node"],
+          str(shown["node"]))
+    check("compact_show_concept compacts edges to arrow form",
+          shown["edges"] == [{
+              "id": "ce-1",
+              "edge": "Field —elaborates→ Choice",
+              "status": "confirmed",
+          }],
+          str(shown["edges"]))
+    no_alias = api.compact_show_concept({
+        "node": {"id": "cn-2", "name": "Bare", "kind": "concept",
+                 "status": "hypothesized", "notes": "short"},
+        "edges": [],
+    })
+    check("compact_show_concept omits empty aliases",
+          "aliases" not in no_alias["node"], str(no_alias))
+
+    listing = api.compact_concepts({
+        "nodes": [{"name": "Field", "kind": "concept", "status": "realized",
+                   "notes": long_notes}],
+        "edges": [{"id": "ce-1", "from_name": "Field", "relation": "elaborates",
+                   "to_name": "Choice", "status": "confirmed"}],
+    })
+    check("compact_concepts preview-caps listing notes and reports counts",
+          listing["node_count"] == 1 and listing["edge_count"] == 1
+          and listing["nodes"][0]["notes"].endswith("…")
+          and len(listing["nodes"][0]["notes"]) == api._NOTE_PREVIEW,
+          str(listing["nodes"][0].get("notes", ""))[:80])
+
+    # --- intent_preview ----------------------------------------------
+    root, ms, db, manuscript = _coverage_fixture("authorlm-intent-preview-")
+    try:
+        empty = api.intent_preview(db, manuscript, "Discuss gravity")
+        check("intent_preview on an empty graph reports graph_empty",
+              empty == {"matched": [], "suggestions": [],
+                        "graph_empty": True},
+              str(empty))
+
+        realized = api.add_concept(db, manuscript, "Gravity",
+                                   kind="concept",
+                                   notes="the pull")
+        db.update("concept_nodes", realized["id"],
+                  {"status": "realized", "introduced_in": "alpha.md"})
+        hypo = api.add_concept(db, manuscript, "Trajectory",
+                               kind="concept",
+                               notes="a path through the field")
+        api.link_concepts(db, manuscript, "Trajectory", "depends_on",
+                          "Gravity")
+
+        hit = api.intent_preview(db, manuscript,
+                                 "Discuss Gravity and Trajectory together")
+        matched = {m["name"]: m for m in hit["matched"]}
+        check("intent_preview matches realized concepts without neighbor tallies",
+              hit["graph_empty"] is False
+              and "Gravity" in matched
+              and "relationships" not in matched["Gravity"]
+              and "precedent" not in matched["Gravity"],
+              str(hit))
+        check("intent_preview attaches relationship count for unrealized matches",
+              "Trajectory" in matched
+              and matched["Trajectory"]["relationships"] >= 1,
+              str(matched.get("Trajectory")))
+
+        typo = api.intent_preview(db, manuscript, "Discuss gravety maybe")
+        check("intent_preview offers fuzzy suggestions when nothing matches",
+              not typo["matched"]
+              and "Gravity" in typo["suggestions"],
+              str(typo))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_demote_belief_gate() -> None:
+    """Author demote is validated→candidate only; candidates refuse.
+
+    Softening the status gate (or writing `retired`) bans a statement that
+    should still be re-validatable, or silently no-ops a Sponsor override.
+    The curation reason must land verbatim for audit."""
+    from authorlm import beliefs as bel
+
+    root, ms, db, manuscript = _coverage_fixture("authorlm-demote-belief-")
+    try:
+        mid = manuscript["id"]
+        row = ko_fields("pol")
+        row.update(
+            manuscript_id=mid,
+            statement="Prefer short sentences in asides.",
+            status="validated",
+            confidence=bel._confidence(4, 0),
+            supporting=4,
+            contradicting=0,
+            outstanding_questions="[]",
+            source="triage-note_update",
+        )
+        db.insert("editorial_beliefs", row)
+
+        out = api.demote_belief(db, manuscript, row["id"][:12],
+                                "Sponsor override — too absolute")
+        check("demote_belief returns candidate status for a validated belief",
+              out["status"] == "candidate" and out["id"] == row["id"],
+              str(out))
+        after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                       (row["id"],))
+        meta = loads(after["metadata"], {})
+        check("demote_belief records the reason under curation metadata",
+              after["status"] == "candidate"
+              and meta.get("curation", {}).get("action") == "demoted"
+              and meta.get("curation", {}).get("reason")
+              == "Sponsor override — too absolute",
+              str({"status": after["status"], "meta": meta}))
+
+        try:
+            api.demote_belief(db, manuscript, row["id"][:12], "again")
+            refuse_ok, refuse_msg = False, ""
+        except ValueError as err:
+            refuse_ok, refuse_msg = True, str(err)
+        check("demote_belief refuses a non-validated belief",
+              refuse_ok and "not validated" in refuse_msg
+              and "candidate" in refuse_msg,
+              refuse_msg)
+
+        # Floor must not bounce a demoted belief straight back to validated
+        # on the next reinforce (X7-13 seam documented on demote_belief).
+        bel._record_support(db, mid, row["id"], "triage-note_update",
+                            "fresh support after demote", None)
+        touched = bel.reinforce_belief(db, row["id"], "accepted")
+        check("reinforce after demote does not resurrect via validated floor",
+              touched.get("status") == "candidate",
+              str(touched))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_collect_no_episode()
+    check_scoped_concepts_text_capture()
+    check_compact_show_and_intent_preview()
+    check_demote_belief_gate()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
