@@ -6,14 +6,14 @@ RFC (v2.1) on the Common Core Decision Learning Engine architecture.
 
 AuthorLM does not write for you. It observes your revisions, tracks your
 ideas in a Concept Graph, proposes suggestions that explain themselves, and
-learns editorial policies from how you review those suggestions. When it has
+learns editorial beliefs from how you review those suggestions. When it has
 no evidence, it abstains.
 
 ## Requirements
 
 - **Python 3.11+**. The core is pure standard library (SQLite, difflib)
   and works fully without an LLM or network.
-- **LLM features** (concept extraction, policy distillation, bridge
+- **LLM features** (concept extraction, belief distillation, bridge
   drafting): `pip install litellm` plus an API key for your chosen model
   (see Configuration).
 - **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
@@ -159,7 +159,7 @@ to any command, before or after the subcommand:
 `--workspace`.
 
 Next time you run `session start`, the briefing reports what AuthorLM
-learned: policies strengthened or weakened, newly realized concepts,
+learned: beliefs strengthened or weakened, newly realized concepts,
 inferred relationships awaiting your confirmation, contradictions, and
 outstanding questions.
 
@@ -187,7 +187,7 @@ outstanding questions.
 | `concept retire <name>… / --all-kind K` | Retire one or more concepts; `--all-kind` sweeps unconfirmed extracted ones |
 | `concept confirm <edge> <relation>` | Promote an inferred relationship to declared |
 | `concept unconfirm <name-or-edge>` | Undo a confirmation — back to hypothesis, re-enters triage |
-| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired policies gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
+| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired beliefs gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
 | `concept reject-edge <edge>` | Reject an inferred relationship (kept for history) |
 | `concept retire <name>` | Remove a concept (and its edges) from view and reasoning; kept for history, revived by `concept add` |
 | `concept list --all` | Include retired/rejected items in the listing |
@@ -205,8 +205,9 @@ outstanding questions.
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
 | `lens add/list/run/register/review/resolve` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence; finishing a pass uses `resolve` (same verb as critique/filter) |
 | `guide` | Generate explained suggestions, or abstain |
-| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
-| `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
+| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate beliefs |
+| `belief list/show/answer/retire/demote/merge/convert` | Curate learned editorial beliefs (machine-inferred only — never authored directly). `convert --aspect …` is the door into ratified `style` law (see Editorial beliefs) |
+| `style guides/guide/attach/add/show/retire/move` | Author-declared style law (`style_laws`): guides form a tree; composition per file is deterministic. Aspects include `register`, `lexicon`, `formatting`, `illustration`, `concept-*`, … |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
 
 ## Triage App analyzer profiles
@@ -278,7 +279,7 @@ pipe table always rebuilds wholesale — Docs cell paragraphs and the
 markdown table block never align for diff, so anchors on that tab are
 orphaned (known price; resolve open threads before pushing). Every
 terminal verdict lands as evidence; explained verdicts
-(`doc decide … --reason`) can seed scoped candidate policies through a
+(`doc decide … --reason`) can seed scoped candidate beliefs through a
 decline-by-default distiller. Design: docs/margin-threads-design.md.
 
 ## Critique pass (operator walkthrough)
@@ -372,6 +373,28 @@ footnote labels per file: shortest unique stem prefix
 `[^1]` becomes `[^p-1]`. Labels never render — only the collision goes
 away. Source files are untouched; only the combined artifact is rewritten.
 
+**On-disk names** (all under `_exports/`; later builds overwrite silently):
+
+| Build | Filename stem |
+| :--- | :--- |
+| Full publish (`export md/docx/epub/pdf`) | `export set` title, else manuscript name |
+| Part-build (`--chapters a,b`) | `<title> - <stem[+stem…]>` (up to three stems, then `+more`) |
+| Book profile (`--profile book`) | `<title> - book` (appended after any chapter slug) |
+| `doc create-manuscript` | manuscript name (`--title` overrides); regions resolve for output `doc` |
+
+Constraints operators hit:
+
+- `doc create-manuscript` and a full `export md`/`docx`/… share one stem when
+  the export title equals the manuscript name (the default). They answer to
+  different `[Only:]`/`[Omit:]` outputs (`doc` vs `md`/`docx`/…), so
+  re-running one after the other can drop or add region-tagged passages.
+  Set a distinct `export set title "…"` (or `--title` on create-manuscript)
+  when both artifacts must coexist.
+- A lone `--chapters book.md` selection slug is `book`, which is the same
+  suffix the book profile appends — the two builds can overwrite each other.
+  Prefer a different chapter stem, or export the book profile under a title
+  that will not collide with that part-build.
+
 PDF profiles:
 
 | Profile | How | Marks | Geometry |
@@ -399,16 +422,37 @@ traceable. Critique intake: convert the PDF, then `critique import`.
 
 ## How learning works
 
-- **Accepting / modifying** a suggestion strengthens the policies it relied
+- **Accepting / modifying** a suggestion strengthens the beliefs it relied
   on; **rejecting** weakens them. Confidence is Laplace-smoothed support.
-- An **explained** rejection or modification seeds a *candidate policy* from
-  your explanation — you contribute evidence, never edit policy directly.
-- Candidate policies resurface as reminders (once per session); repeated
-  cross-session support (≥3, confidence ≥0.7) **validates** them; sustained
+- An **explained** rejection or modification seeds a *candidate belief* from
+  your explanation — you contribute evidence, never author beliefs directly
+  (ontology: docs/domain-vocabulary.md).
+- Candidate beliefs resurface as reminders (once per session); repeated
+  cross-session support (default ≥3 observations, confidence ≥0.7;
+  several deliberate sources promote at ≥2) **validates** them; sustained
   contradiction retires them. Promotion is deliberately conservative.
-- Concepts you declare become **realized** when they appear in the text;
-  repeated co-occurrence of concepts creates **inferred** edges that await
-  your confirmation in the briefing.
+- A validated belief may **screen** proposals for queues that read its
+  source; it is still a machine guess until you `belief convert` it into
+  a style law. Concepts you declare become **realized** when they appear
+  in the text; repeated co-occurrence creates **inferred** edges that
+  await confirmation in the briefing.
+
+## Editorial beliefs (curation)
+
+```bash
+authorlm belief list
+authorlm belief show <id-prefix>
+authorlm belief answer <id> "…" [--index N]   # closes QN; becomes declared evidence
+authorlm belief retire <id> --reason "…"     # banned from re-seeding
+authorlm belief demote <id> --reason "…"     # back to candidate; may re-validate
+authorlm belief merge <duplicate> <canonical>
+authorlm belief convert <id> --aspect formatting --guide "Essays"
+```
+
+`convert` is the only door from belief → law: it writes a `style_laws` row
+and retires the belief. Do not invent style elements that only exist as
+unratified beliefs. MCP mirrors the same verbs (`list_beliefs`,
+`retire_belief`, `convert_belief_to_law`, …).
 
 ## Configuration (optional LLM)
 
@@ -530,13 +574,13 @@ What the LLM unlocks:
   actually wrote — the declared intent and the observed transitions — and
   infers the editorial decisions they show ("opened with a lived example
   before the formal definition"). Generalizable patterns become candidate
-  policies (source `episode-analysis`) that strengthen across independent
+  beliefs (source `episode-analysis`) that strengthen across independent
   episodes, so the system learns your editorial judgment from your
   *writing*, not just from your reactions to its suggestions. Inferred
   decisions are stored on the episode; everything is a hypothesis and
   visible in the briefing — nothing validates without accumulation.
-- **Policy distillation** — your review explanations are distilled into
-  short normative policy statements (the verbatim explanation is preserved
+- **Belief distillation** — your review explanations are distilled into
+  short normative belief statements (the verbatim explanation is preserved
   as evidence); the LLM may also decline to generalize a one-off remark.
 - **Bridge drafting** — the top bridge suggestion includes a drafted
   paragraph to consider.
@@ -733,8 +777,8 @@ the tables reads like the history of the book (RFC §18.7). See
 
 ## Known MVP limitations
 
-- Without an LLM, seeded candidate policies use your explanation verbatim
-  as the policy statement (with an LLM they are distilled).
+- Without an LLM, seeded candidate beliefs use your explanation verbatim
+  as the belief statement (with an LLM they are distilled).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
 - Extraction reads at most the first ~24k characters of the manuscript.
