@@ -2599,8 +2599,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         raise LookupError(f"no ingested comment '{comment_id}' — pull first")
     if get_thread(db, mid, comment_id):
         raise ValueError("this comment already has a thread")
-    # Refuse delimiter-bearing prose before any Doc edit: {{…}} closes at
-    # the first `}}`, so nested braces would truncate and corrupt.
+    # Delimiter refusal is in `_mark_replace_requests` (form construction):
+    # {{…}} closes at the first `}}`, so nested braces would truncate.
     relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
     if not relpath:
         raise LookupError("the comment's file could not be attributed — "
@@ -2696,6 +2696,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
     and the DIFF made visible: the words of old that go are red, the
     words of new that arrive are blue. Highlights ride after the base
     styles so they win on their subranges; color only (see RED_GONE)."""
+    threads_mod.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
     requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
@@ -2733,6 +2734,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     """Requests inserting a green {{new}} paragraph at doc index `at`
     (a paragraph boundary): the critique pass's insertion form."""
+    threads_mod.assert_no_pending_markers("", new)
     text = "\n" + "{{" + new + "}}"
     return [
         {"insertText": {"location": {"tabId": tab_id, "index": at},
