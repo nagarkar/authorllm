@@ -3255,6 +3255,50 @@ def main_test() -> None:
         check("strip_pending on the marked text gives back the pristine essay",
               th.strip_pending(marked)[0].strip() == ESSAY.strip())
 
+        # Local road: observation strips embed lines, but on disk the
+        # embed glues under the illustration tag as one paragraph. Compose
+        # must peel that suffix or every illustration-unit accept crashes
+        # (and blocks a mixed accepted batch).
+        from authorlm.revisions import strip_embed_lines
+        disk_illus = (
+            "# Ch\n\nHello world.\n\n"
+            "[Illustration: a lone tracker ⇢ a-lone-tracker.md]\n"
+            "![](_illustrations/a-lone-tracker-aaa11111-0000-01.png)\n\n"
+            "Goodbye.\n")
+        obs_units = passes.paragraphs_of(strip_embed_lines(disk_illus))
+        illus_threads = [
+            {"state": "accepted", "id": "p",
+             "proposed_old": obs_units[1],
+             "proposed_new": "Hello universe.",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 2})},
+            {"state": "accepted", "id": "i",
+             "proposed_old": obs_units[2],
+             "proposed_new":
+             "[Illustration: revised tracker ⇢ a-lone-tracker.md]",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 3})},
+        ]
+        try:
+            illus_marked = passes.compose_marked_text(disk_illus,
+                                                      illus_threads)
+            illus_compose_ok = True
+        except ValueError as err:
+            illus_marked, illus_compose_ok = "", "drifted" not in str(err)
+        illus_final, _ = passes.final_text_from_marked(
+            illus_marked,
+            written=[{**t, "state": "written"} for t in illus_threads],
+            kinds=("replace",)) if illus_compose_ok else ("", [])
+        check("local compose peels a glued illustration embed so an "
+              "accepted illustration-unit edit (and a mixed batch) marks",
+              illus_compose_ok
+              and "aaa11111-0000-01.png" in illus_marked
+              and "<<[Illustration: a lone tracker" in illus_marked
+              and "revised tracker" in illus_final
+              and "aaa11111-0000-01.png" in illus_final
+              and "Hello universe." in illus_final,
+              illus_marked[:200] if illus_marked else "compose raised")
+
         print("critique write order (same-anchor insert before replace):")
         # A replace of paragraph n wraps it as <<old>>{{new}}. Writing the
         # replace first makes the subsequent insert locate `old` inside that
