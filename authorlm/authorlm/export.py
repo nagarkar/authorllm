@@ -665,7 +665,14 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         raise RuntimeError(
             "pandoc is required for docx/epub/pdf export — "
             "brew install pandoc")
-    out_path = md_path.with_suffix(f".{fmt}")
+    # Review and print-ready PDFs must not share a path: exporting one
+    # mode after the other would silently overwrite the other artifact
+    # (watermarked file sent to print, or clean file shared as "review").
+    if fmt == "pdf":
+        out_path = md_path.with_name(
+            md_path.stem + (".review.pdf" if review_copy else ".print.pdf"))
+    else:
+        out_path = md_path.with_suffix(f".{fmt}")
     pandoc_cwd = root
     if fmt in ("pdf", "epub"):
         command = [
