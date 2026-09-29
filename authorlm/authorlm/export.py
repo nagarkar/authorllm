@@ -11,6 +11,7 @@ freely; the next export recreates it.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date
 from pathlib import Path
@@ -495,11 +496,22 @@ def check_manuscript(manuscript: dict) -> list[str]:
 
 
 def selection_slug(order: list[str]) -> str:
-    """Filename tag for a chapter selection — the selected files' stems,
-    joined, so a part-build never overwrites the whole-book artifacts."""
+    """Filename tag for a chapter selection — stems joined so a part-build
+    never overwrites the whole-book artifacts or another part-build.
+
+    Short selections stay fully readable. When the join would exceed the
+    filename budget, keep a readable head and append a content digest so
+    distinct selections (same first three stems, or long stems truncated
+    to the same prefix) cannot collide."""
     stems = [Path(name).stem for name in order]
-    slug = "+".join(stems[:3]) + ("+more" if len(stems) > 3 else "")
-    return slug[:60]
+    full = "+".join(stems)
+    if len(full) <= 60:
+        return full
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:8]
+    suffix = f"+more-{digest}" if len(stems) > 3 else f"-{digest}"
+    budget = 60 - len(suffix)
+    head = ("+".join(stems[:3]) if len(stems) > 3 else full)[:budget]
+    return head.rstrip("+") + suffix
 
 
 # ------------------------------------------------ the book profile (print interior)

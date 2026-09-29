@@ -7602,7 +7602,8 @@ def main_test() -> None:
 
         # --- publishing exports: variants, settings, local pandoc ---
         from authorlm.export import (export_published, load_settings,
-                                     publish_markdown, set_setting)
+                                     publish_markdown, selection_slug,
+                                     set_setting)
 
         winding_tag = ("[Illustration: a winding path ⇢ a-winding-path.md"
                        " | caption: The path]")
@@ -8034,6 +8035,77 @@ def main_test() -> None:
             refused = True
         check("an unknown chapter name is refused, not silently empty",
               refused)
+        slug_a = selection_slug(
+            ["01.md", "02.md", "03.md", "04.md"])
+        slug_b = selection_slug(
+            ["01.md", "02.md", "03.md", "05.md"])
+        check("part-build slugs stay distinct when the first three "
+              "stems match",
+              slug_a != slug_b
+              and slug_a == "01+02+03+04" and slug_b == "01+02+03+05",
+              f"{slug_a!r} vs {slug_b!r}")
+        check("short part-build selections stay fully readable",
+              selection_slug(["ascending.md", "discernment.md"])
+              == "ascending+discernment")
+        # Force the 60-char budget so the digest path is exercised —
+        # same first three stems, different tails, must not collide.
+        crowded_a = selection_slug([
+            "part-alpha.md", "part-beta.md", "part-gamma.md",
+            "chapter-with-a-quite-long-stem-one.md",
+            "chapter-with-a-quite-long-stem-two.md"])
+        crowded_b = selection_slug([
+            "part-alpha.md", "part-beta.md", "part-gamma.md",
+            "chapter-with-a-quite-long-stem-one.md",
+            "chapter-with-a-quite-long-stem-zzz.md"])
+        check("truncated part-build slugs keep a digest so crowded "
+              "selections cannot collide",
+              crowded_a != crowded_b
+              and crowded_a.startswith("part-alpha+part-beta+part-gamma+more-")
+              and crowded_b.startswith("part-alpha+part-beta+part-gamma+more-")
+              and len(crowded_a) <= 60 and len(crowded_b) <= 60,
+              f"{crowded_a!r} vs {crowded_b!r}")
+        long_a = selection_slug([
+            "very-long-chapter-stem-aaaaaaaaaaaa.md",
+            "very-long-chapter-stem-bbbbbbbbbbbb.md"])
+        long_b = selection_slug([
+            "very-long-chapter-stem-aaaaaaaaaaaa.md",
+            "very-long-chapter-stem-cccccccccccc.md"])
+        check("long stem truncations stay distinct under the 60-char "
+              "budget",
+              long_a != long_b and len(long_a) <= 60 and len(long_b) <= 60,
+              f"{long_a!r} vs {long_b!r}")
+        # Expand TOC so overlapping multi-chapter selections are available.
+        (ms / "03-next.md").write_text("# Next\n\nFurther on.\n")
+        (ms / "04-alt.md").write_text("# Alt\n\nA different end.\n")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "02-aside.md"\n'
+            'parent = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "03-next.md"\n\n'
+            '[[chapter]]\nfile = "04-alt.md"\n')
+        manuscript = api.get_manuscript(db)
+        first = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next", "04-alt"])
+        second = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next"])
+        # Re-export the four-file selection; its path must still exist
+        # beside the three-file artifact (not clobber it).
+        first_again = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next", "04-alt"])
+        check("overlapping part-builds write distinct _exports paths",
+              first["markdown"] != second["markdown"]
+              and Path(first["markdown"]).exists()
+              and Path(second["markdown"]).exists()
+              and first_again["markdown"] == first["markdown"]
+              and "Further on." in Path(first["markdown"]).read_text()
+              and "A different end." in Path(first["markdown"]).read_text()
+              and "A different end." not in Path(
+                  second["markdown"]).read_text(),
+              f"{first['markdown']!r} vs {second['markdown']!r}")
         if _shutil.which("pandoc"):
             whole = export_published(db, manuscript, fmt="md",
                                      variant="images")
