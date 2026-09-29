@@ -1130,7 +1130,7 @@ class TriageServerWireContractTest(unittest.TestCase):
         # authorlm.db — a different path than manuscript_fixture's flat
         # root/authorlm.db used elsewhere in this file, so this fixture is
         # built directly against that convention instead.
-        self.db = api.open_db(str(self.root))
+        self.db = api.open_db(str(self.root), create=True)
         self.addCleanup(self.db.conn.close)
         manuscript_path = self.root / "book"
         manuscript_path.mkdir()

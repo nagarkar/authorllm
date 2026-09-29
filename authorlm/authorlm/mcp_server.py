@@ -20,10 +20,8 @@ from mcp.server.fastmcp import FastMCP
 from . import api
 from . import clients
 from . import critique
-from . import triage_transport
+from . import paths
 from .db import loads as _loads
-
-TRIAGE_APP_URI = "ui://authorlm/triage-app.html"
 
 mcp = FastMCP(
     "authorlm",
@@ -61,7 +59,10 @@ mcp = FastMCP(
 # the `mcp-stdio` adapter can supply it through the normal resolution
 # path instead of `ensure_session` taking it as an argument.
 CONNECTION_ID = clients.CONNECTION_ID
-_WORKSPACE = os.environ.get("AUTHORLM_WORKSPACE")
+# The checkout's .env may carry the workspace pointer; read it before the
+# variable is consulted, so the server and the CLI open the same database.
+paths.load_env()
+_WORKSPACE = os.environ.get(paths.WORKSPACE_ENV)
 
 
 def _db():

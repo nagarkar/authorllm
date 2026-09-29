@@ -3799,7 +3799,9 @@ def scenario_errors(root: Path) -> None:
     ms = ws / "manuscript"
     write(ms / "01.md", "# One\n\nText.\n")
     out = run(ws, "status", expect_exit=True)
-    check("status without init errors cleanly", "no manuscript" in out, out)
+    check("status without init errors cleanly: a fresh -w has no database, "
+          "and only init may start one there",
+          "no database" in out and "init" in out, out)
     run(ws, "init", "--name", "book", "--path", str(ms))
     out = run(ws, "guide", expect_exit=True)
     check("guide without session errors cleanly", "no active session" in out, out)
@@ -4014,18 +4016,42 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
     check("completion resolves directories for --path",
           comp.stdout.strip() == "manuscript", comp.stdout + comp.stderr)
 
-    # --- global home database: without -w, data lives in $HOME/.authorlm ---
-    fake_home = root / "fake-home"
+    # --- global home database: without -w or a pointer, the workspace is
+    # $HOME — but a fresh home has no database, and off a terminal nothing
+    # may invent one. The refusal names the path, and `setup` is the door.
+    fake_home = (root / "fake-home").resolve()  # paths are reported resolved
     fake_home.mkdir()
+    fake_env = root / "fake-checkout" / ".env"
+    fake_env.parent.mkdir()
+    home_env = {**os.environ, "HOME": str(fake_home), "AUTHORLM_ENV": str(fake_env)}
+    home_env.pop("AUTHORLM_WORKSPACE", None)
     home_result = subprocess.run(
         [sys.executable, "main.py", "status"],
-        env={**os.environ, "HOME": str(fake_home)},
-        capture_output=True, text=True, timeout=60,
+        env=home_env, capture_output=True, text=True, timeout=60,
         cwd=Path(__file__).resolve().parent.parent,
     )
-    check("default workspace is the home directory",
-          "no manuscript registered" in home_result.stderr + home_result.stdout
-          and (fake_home / ".authorlm" / "authorlm.db").exists(),
+    check("default workspace is the home directory, and a fresh one refuses",
+          str(fake_home / ".authorlm" / "authorlm.db") in home_result.stderr
+          and "setup" in home_result.stderr
+          and not (fake_home / ".authorlm" / "authorlm.db").exists(),
+          home_result.stdout + home_result.stderr)
+    setup_result = subprocess.run(
+        [sys.executable, "main.py", "setup", "--workspace", str(fake_home), "--yes"],
+        env=home_env, capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("setup creates the database and records the pointer in the checkout's .env",
+          setup_result.returncode == 0
+          and (fake_home / ".authorlm" / "authorlm.db").exists()
+          and f"AUTHORLM_WORKSPACE={fake_home}" in fake_env.read_text(),
+          setup_result.stdout + setup_result.stderr)
+    home_result = subprocess.run(
+        [sys.executable, "main.py", "status"],
+        env=home_env, capture_output=True, text=True, timeout=60,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    check("after setup the pointer resolves and status reaches the empty database",
+          "no manuscript registered" in home_result.stderr + home_result.stdout,
           home_result.stdout + home_result.stderr)
 
     # --- multiple manuscripts: tailored error; the shell asks instead ---

@@ -1037,8 +1037,12 @@ def collect(db: Database, manuscript: dict, config: dict,
     if analyze is None:
         analyze = auto
     if analyze:
+        from .extraction import extraction_enabled
+
         llm = LLMClient(config)
-        if llm.enabled:
+        if not extraction_enabled(config):
+            report["extraction"] = "off"
+        elif llm.enabled:
             try:
                 summary = run_extraction(db, manuscript, llm) or {}
             except Exception as err:
@@ -3188,7 +3192,11 @@ def write_complete(db: Database, manuscript: dict, config: dict,
                                               session))
     extraction = None
     llm = LLMClient(config)
-    if llm.enabled:
+    from .extraction import extraction_enabled
+
+    if not extraction_enabled(config):
+        extraction = {"off": True}
+    elif llm.enabled:
         try:
             extraction = run_extraction(db, manuscript, llm)
         except Exception as err:

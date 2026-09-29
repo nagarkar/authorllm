@@ -54,12 +54,11 @@ npm run build` from `web/triage-app/`. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
-AuthorLM keeps **one global database in `~/.authorlm/`** (the database and
-`config.toml`), so `authorlm` works from any directory and manuscripts can
-live anywhere — register them with relative or absolute paths (they're
-stored absolute). `-w/--workspace <dir>` overrides the data location, which
-is mainly how the hermetic tests isolate themselves. `python3 main.py …`
-still works identically.
+AuthorLM keeps **one database per workspace** — by default `~/.authorlm/`
+— so `authorlm` works from any directory and manuscripts can live anywhere
+(register them with relative or absolute paths; they're stored absolute).
+See [Where your data lives](#where-your-data-lives) to put it elsewhere.
+`python3 main.py …` works identically to `authorlm …`.
 
 For bash tab completion (commands, actions, flags, `--kind` values, and
 manuscript names after `-m`), add to `~/.bash_profile`:
@@ -71,6 +70,37 @@ eval "$(authorlm completion)"
 The script is generated from the argument parser at eval time, so it stays
 in sync with the CLI automatically. `authorlm help` (or `help` inside the
 shell) lists all commands.
+
+## Where your data lives
+
+AuthorLM stores its database, backups, logs, and Google token in a
+*workspace*: a directory with a `.authorlm/` folder inside. By default
+that is your home directory, so the database is `~/.authorlm/authorlm.db`.
+
+To put it somewhere else (another folder, an external SSD), run `setup`
+once from the checkout:
+
+```bash
+authorlm setup                                          # asks where
+authorlm setup --workspace ~/writing --yes              # no questions
+authorlm setup --workspace "/Volumes/Crucial X6/authorlm" --yes
+```
+
+This records `AUTHORLM_WORKSPACE=<dir>` in the checkout's gitignored
+`.env` and creates the database there. Both the CLI and the MCP server
+read that line, so they always open the same database.
+
+**Moving a workspace:** copy the `.authorlm/` folder to its new parent,
+run `setup --workspace <new parent>`, then `pkill -f authorlm-mcp`.
+
+**If the database is missing**, for example because the drive is
+unplugged, every command stops and tells you so. Nothing ever creates an
+empty database silently; only `setup` (or `init` with an explicit `-w`)
+starts a new one.
+
+For a one-off command against another workspace, `-w DIR` overrides the
+`.env` setting. Precedence is `-w`, then `AUTHORLM_WORKSPACE` (shell
+environment or `.env`), then home.
 
 ## Quick start — the shell workflow (recommended)
 
@@ -159,6 +189,7 @@ outstanding questions.
 | `shell` | Interactive authoring session: briefing, prefix-free commands, auto-collect watcher (`--no-watch`, `--debounce N`) |
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
+| `setup [--workspace DIR] [--yes]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
 | `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
@@ -565,7 +596,8 @@ replace it.
 
 ## Data
 
-Everything lives in `.authorlm/authorlm.db` (SQLite). Historical objects —
+Everything lives in `<workspace>/.authorlm/authorlm.db` (SQLite; see
+[Where your data lives](#where-your-data-lives)). Historical objects —
 versions, transitions, intents, reviews, evidence — are immutable; reading
 the tables reads like the history of the book (RFC §18.7). See
 [docs/MVP.md](docs/MVP.md) for scope and design decisions.

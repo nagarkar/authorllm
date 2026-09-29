@@ -12,6 +12,13 @@ Three kinds of file, three homes, deliberately not mixed:
   never committed. Config files name environment variables; they never
   carry a key themselves.
 
+`.env` also holds the one thing that cannot live in the workspace: the
+pointer to it. `AUTHORLM_WORKSPACE=<dir>` there names the directory whose
+`.authorlm/` holds this checkout's database, so a checkout is a tenant and
+the database can sit on another volume. The pointer stays in the checkout
+because a file inside the workspace cannot tell you where the workspace
+is. `set_env_value` writes it; `authorlm setup` is the verb that asks.
+
 Environment overrides (`AUTHORLM_CONFIG`, `AUTHORLM_CRAFT`, `AUTHORLM_ENV`)
 exist so a test or a second checkout can point elsewhere without moving
 anything.
@@ -25,6 +32,7 @@ from pathlib import Path
 CONFIG_FILENAME = "config.toml"
 CRAFT_FILENAME = "illustration-craft.md"
 ENV_FILENAME = ".env"
+WORKSPACE_ENV = "AUTHORLM_WORKSPACE"
 
 
 def project_dir() -> Path:
@@ -79,3 +87,34 @@ def load_env() -> list[str]:
             os.environ[name] = value
             loaded.append(name)
     return loaded
+
+
+def set_env_value(name: str, value: str) -> Path:
+    """Write `name=value` into `.env`, replacing an existing line for the
+    same name or appending one. Every other line is kept byte-for-byte:
+    the file holds the author's API keys, and a rewrite that reflowed
+    them would be a worse bug than the one this function fixes. Creates
+    the file (mode 0600) when there is none. Also sets the process
+    environment so the caller sees its own write."""
+    path = env_path()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    new_line = f"{name}={value}"
+    replaced = False
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key = line.partition("=")[0].strip()
+        if key == name and not line.startswith("#"):
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if not existed:
+        path.chmod(0o600)
+    os.environ[name] = value
+    return path

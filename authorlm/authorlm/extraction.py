@@ -523,6 +523,27 @@ def _set_extraction_watermark(db: Database, manuscript: dict,
     manuscript["metadata"] = encoded
 
 
+class ExtractionDisabled(RuntimeError):
+    """Raised when LLM concept extraction is asked for while
+    `[extraction] enabled = false`. A RuntimeError so the MCP guard
+    renders it as a sentence."""
+
+
+DISABLED_MESSAGE = (
+    "concept extraction is switched off ([extraction] enabled = false in "
+    "config.toml): the graph changes only by hand — 'authorlm concept add "
+    "<name> --notes …'. Set enabled = true to run the extractor again.")
+
+
+def extraction_enabled(config: dict | None) -> bool:
+    """The [extraction] enabled switch (default on). Author ruling
+    2026-09-25: extraction is off until the concept-graph feature is
+    redone; the deterministic graph upkeep (realizations, introduced_in,
+    protected terms) is untouched by this switch and keeps running."""
+    section = (config or {}).get("extraction") or {}
+    return bool(section.get("enabled", True))
+
+
 def extract_concepts(
     db: Database, manuscript: dict, llm: LLMClient,
     files: list[str] | None = None, full: bool = False,
@@ -537,6 +558,8 @@ def extract_concepts(
     {"up_to_date": True} when there is nothing new — or None if the LLM is
     unavailable or returned nothing usable.
     """
+    if not extraction_enabled(getattr(llm, "config", None)):
+        raise ExtractionDisabled(DISABLED_MESSAGE)
     mid = manuscript["id"]
     if aliases_only and not files:
         # An aliases pass is a deliberate audit of the whole text — naming

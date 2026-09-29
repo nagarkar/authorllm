@@ -651,7 +651,11 @@ class LLMClient:
 
     def stats_line(self) -> str | None:
         """One brief line of LLM usage for this step, or None if the LLM
-        was never consulted."""
+        was never consulted. Matches the per-verb usage-reporting
+        convention gamelm/supplylm also follow — one trailing clause on
+        the verb's own output, not a separate report command — but
+        prices from `usage.estimate` (litellm's live cost map) rather
+        than a hand-maintained table, so it never drifts stale."""
         if not (self.live_calls or self.replays):
             return None
         core = (f"LLM: {self.live_calls} live call(s) "
@@ -665,6 +669,16 @@ class LLMClient:
                      f"{self.cache_write_tokens:,} written")
         core += ")"
         parts = [core]
+        from . import usage as _usage
+
+        cost = _usage.estimate(self.model, self.input_tokens,
+                               self.output_tokens, self.cache_read_tokens,
+                               self.cache_write_tokens)
+        # None (no price data for this model) is a different claim from
+        # $0 and must never be shown as one (usage.py's own rule) — so a
+        # cost clause is added only when a real estimate exists.
+        if cost is not None:
+            parts.append(f"~${cost:.4f}")
         if self.replays:
             parts.append(f"{self.replays} replayed from cache")
         if self.draft_calls:

@@ -796,6 +796,48 @@ def check_extraction_failure_traced() -> None:
         def boom(*a, **kw):
             raise RuntimeError("stub extraction failure")
 
+        # --- [extraction] enabled = false: the switch (author ruling
+        # 2026-09-25). Off means no LLM extraction anywhere, said plainly,
+        # while the deterministic graph upkeep keeps running.
+        from authorlm.extraction import (ExtractionDisabled,
+                                         extract_concepts as _extract_fn,
+                                         extraction_enabled)
+
+        check("extraction is on by default and off by the switch",
+              extraction_enabled({}) and extraction_enabled({"extraction": {}})
+              and not extraction_enabled({"extraction": {"enabled": False}}))
+        off_cfg = {**config, "extraction": {"enabled": False}}
+        never = {"n": 0}
+
+        def must_not_run(*a, **kw):
+            never["n"] += 1
+            raise RuntimeError("extraction ran while switched off")
+
+        prev_run_extraction = _api.run_extraction
+        _api.run_extraction = must_not_run
+        try:
+            (ms / "01-draft.md").write_text("# Draft\n\nSwitched-off text.\n")
+            off_report = _api.collect(db, manuscript, off_cfg, analyze=True)
+        finally:
+            _api.run_extraction = prev_run_extraction
+        check("an analysed collect skips extraction when the switch is off, "
+              "and says so",
+              never["n"] == 0 and off_report.get("extraction") == "off",
+              str(off_report.get("extraction")))
+
+        class _OffLLM:
+            config = off_cfg
+            enabled = True
+
+        try:
+            _extract_fn(db, manuscript, _OffLLM())
+            declined = None
+        except ExtractionDisabled as err:
+            declined = str(err)
+        check("extract_concepts declines by name when switched off",
+              declined is not None and "[extraction] enabled = false" in declined
+              and "concept add" in declined, str(declined))
+
         # --- collect(..., analyze=True): api.py's first swallow site ---
         prev_run_extraction = _api.run_extraction
         _api.run_extraction = boom
