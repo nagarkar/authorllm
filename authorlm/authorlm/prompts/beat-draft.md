@@ -27,6 +27,12 @@ A beat may be grounded ONLY in:
    say, and no more.
 5. CONCEPT NOTES — the author's ratified definitions.
 6. ACCEPTED TEXT SO FAR — this essay's own prose, already accepted by the author.
+7. THE ORIGINAL ESSAY — present only for a rewrite: the author's own wording,
+   illustration tag lines (`[Illustration: … ⇢ …]` and the `![](…)` embed line
+   beneath it) and footnotes. Reuse its sentences verbatim wherever the beat
+   spec says to keep the author's text; copy a tag line or a footnote byte for
+   byte. It supplies WORDS, not points: the digest still governs which points
+   are in play, and a point the digest does not carry is not in play.
 
 INTENTS states what this rewrite is *for* — the author's declared goals that cover
 this essay. It governs selection and emphasis: which of the permitted materials above

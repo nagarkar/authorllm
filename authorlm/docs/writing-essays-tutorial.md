@@ -278,40 +278,62 @@ it, answer it rather than working around it.
 <details>
 <summary><b>Under the hood — the exact commands</b></summary>
 
-Three commands per beat: assemble, register, rule.
+Five commands per beat: assemble, draft, critique, register, rule. Since
+2026-09-06 the assistant never drafts in its own conversation: the payload
+goes to a file, a drafter subagent with an empty context answers it, a critic
+subagent with an empty context rules on the draft, and only then is it
+registered (design §15.24).
 
 ```bash
-authorlm write draft --dry-run -m SMSTTD
+authorlm write draft --dry-run --out $S/beat-1.payload -m SMSTTD
 # → Beat [n=1 | opener | concepts: Attention | budget ~140]: …
-#   Payload for no [writing] model configured — draft this payload in the
-#   conversation, then register it with 'write propose --why …' — no call made.
-#   Prompt: authorlm/prompts/beat-draft.md
-#   ───── block S — 7,057 chars — sha256 687c06f3… (the prompt, then the style law)
-#   ───── block A — 9,213 chars — sha256 1f4ad0be… (frame, beliefs, plan, concepts)
-#   ───── block B — 4,880 chars — sha256 c02e77a1… (the essay so far)
-#   ───── block C — 1,204 chars — sha256 9b31de07… (this beat, lessons, verdict)
+#   block S — 7,057 chars — sha256 687c06f3…   (the prompt, then the style law)
+#   block A — 9,213 chars — sha256 1f4ad0be…   (frame, beliefs, plan, concepts)
+#   block B — 4,880 chars — sha256 c02e77a1…   (the essay so far)
+#   block C — 1,204 chars — sha256 9b31de07…   (this beat, lessons, verdict)
+#   Payload written to … Assembly recorded for beat n=1.
 ```
-This is where the payload discipline comes from, and it is the step you should
-never skip. `--dry-run` assembles the whole thing — the style law, your
-validated rules, the drafting context, the brief, the digest, the plan, the notes
-for every concept the plan names, the essay so far, this beat's spec, the lessons
-and your last verdict — prints it with a checksum per block, and **makes no
-model call**. The assistant drafts the beat against those blocks and nothing
-else, under the prompt the last line names. The checksums are also how a caching
-problem is found, if you ever turn the billed mode on: compare them across two
-beats, and the block that moved is the culprit.
+This is where the payload discipline comes from, and it is no longer a step
+anyone can skip: `--dry-run` RECORDS that the payload for this beat was
+assembled under the current state, and `write propose` refuses without that
+record. It assembles the whole thing — the style law, your validated rules,
+the drafting context, the brief, the digest, the plan, the notes for every
+concept the plan names, the essay so far, this beat's spec, the lessons and
+your last verdict — and **makes no model call**. A drafter subagent reads the
+file and nothing else, under the prompt `authorlm/prompts/beat-draft.md`.
+
+```bash
+authorlm write critique --out $S/beat-1.critic -m SMSTTD < $S/beat-1.draft
+# → Critic payload written to … for beat n=1.
+#   LINT (deterministic): (clean)      — or the ERROR lines that mean "redraft"
+```
+`write critique` is deterministic too. It runs the prose lint (a sentence
+opening with "What", a term inside its own definition, stacked em-dashes,
+eight words verbatim from anywhere in the book are ERRORs; "not X but Y", a
+re-definition of a concept another essay introduced, a 40-word sentence, a
+reading grade above 13 are warnings) and assembles the critic's payload: your
+laws and lessons as a numbered checklist, the essay so far, your protected
+vocabulary, the concept notes, the eight passages elsewhere in the book the
+draft most resembles, the lint, and the draft. A critic subagent reads it
+under `authorlm/prompts/beat-critic.md` and replies PASS, or FAIL with
+findings that quote the draft. On FAIL the drafter goes again, at most twice,
+before you see anything.
 
 ```bash
 authorlm write propose --why "realizes Attention; opener per the plan; grounded \
     in the brief and kindness.md's hard floor — no source cited beyond Weil's \
-    name" -m SMSTTD < /tmp/beat1.md
+    name" --critique $S/beat-1.report -m SMSTTD < $S/beat-1.draft
 
 authorlm write accept -m SMSTTD                        # as-is
 authorlm write accept -m SMSTTD < /tmp/reworded.md     # your wording wins
 authorlm write reject --reason "…" -m SMSTTD           # reason required
 ```
-`write propose` registers the draft. It is the same verb used for a beat you
-dictated and for wording you asked for mid-beat — one route, one kind of
+`write propose` registers the draft behind three gates: the payload was
+assembled since your last verdict, the lint has no ERROR, and the critic saw
+this exact draft and passed it. Each refusal names the missing step. Text you
+dictated needs neither payload nor critic — `--no-critic "author dictated"`
+registers it, and the reason lands on the row; a lint ERROR on your own words
+is shown to you and `--lint-override "<why>"` registers it. Every override is
 evidence. `--why` is required, and it is what your verdict is recorded against.
 A redraft supersedes the pending proposal — you never accumulate two live drafts
 for one beat.
@@ -1553,7 +1575,9 @@ authorlm write plan [--replace]                        [JSON array on stdin]
 authorlm write status
 authorlm write digest [--replace | --dispositions | --show]  [JSON on stdin]
 authorlm write draft [--dry-run]                                   [no stdin]
-authorlm write propose --why "<grounding>"                    [draft on stdin]
+authorlm write draft --dry-run --out <file>            payload to a file; records the assembly
+authorlm write critique --out <file>                   [draft on stdin] lint + critic payload
+authorlm write propose --why "<grounding>" --critique <report>   [draft on stdin]
 authorlm write accept [--reason "<why>"]            [reworded text on stdin]
 authorlm write reject --reason "<verbatim why>"
 authorlm write learn                                          [lesson on stdin]

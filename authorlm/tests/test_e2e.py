@@ -1495,7 +1495,7 @@ def scenario_write_loop(root: Path) -> None:
               "already active" in out, out)
 
         # --- plan --------------------------------------------------------
-        out = run_stdin(ws, DRAFT_1, "write", "propose", "--why", "opener",
+        out = run_stdin(ws, DRAFT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "opener",
                         expect_exit=True)
         check("propose before a plan is blocked",
               "no ratified beat plan" in out, out)
@@ -1512,9 +1512,9 @@ def scenario_write_loop(root: Path) -> None:
               "pass --replace" in out, out)
 
         # --- beat 1: accept as proposed -----------------------------------
-        out = run_stdin(ws, DRAFT_1, "write", "propose", expect_exit=True)
+        out = run_stdin(ws, DRAFT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", expect_exit=True)
         check("propose without --why blocked", "--why is required" in out, out)
-        out = run_stdin(ws, DRAFT_1, "write", "propose",
+        out = run_stdin(ws, DRAFT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                         "--why", "realizes Choice; opener per the plan")
         check("draft registered for beat 1",
               "n=1" in out and "Draft registered" in out, out)
@@ -1541,7 +1541,7 @@ def scenario_write_loop(root: Path) -> None:
               "learning: author tightens openers" in out, out)
 
         # --- beat 2: reject with reason, redraft, accept reworded ---------
-        run_stdin(ws, DRAFT_2, "write", "propose",
+        run_stdin(ws, DRAFT_2, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "realizes Distinction")
         out = run_stdin(ws, "", "write", "reject", expect_exit=True)
         check("reject without a reason blocked at the tool level",
@@ -1553,7 +1553,7 @@ def scenario_write_loop(root: Path) -> None:
         check("explained rejection seeds a candidate belief",
               "Seeded candidate belief" in out
               and "Introduce intuition before formalism." in out, out)
-        run_stdin(ws, DRAFT_2B, "write", "propose",
+        run_stdin(ws, DRAFT_2B, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "redraft: grounded in a lived moment")
         out = run_stdin(ws, DRAFT_2B_REWORDED, "write", "accept")
         check("reworded accept records a modified decision",
@@ -1574,7 +1574,7 @@ def scenario_write_loop(root: Path) -> None:
               "n=4" in out, out)
 
         # --- beat 4: accept and complete -----------------------------------
-        run_stdin(ws, DRAFT_4, "write", "propose", "--why", "realizes Field")
+        run_stdin(ws, DRAFT_4, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "realizes Field")
         out = run_stdin(ws, "", "write", "accept")
         check("plan reports complete after the last beat",
               "Plan complete" in out, out)
@@ -2149,7 +2149,7 @@ def scenario_write_draft(root: Path) -> None:
               [r["state"] for r in rows].count("proposed") == 1
               and [r["state"] for r in rows].count("superseded") == 1,
               json.dumps([r["state"] for r in rows]))
-        run_stdin(ws, "A beat the author wrote by hand.", "write", "propose",
+        run_stdin(ws, "A beat the author wrote by hand.", "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "hand-drafted; the two entry points interchange")
         rows = [r for r in beat_rows() if r["batch_index"] == 5]
         check("'write propose' after 'write draft' supersedes the same way "
@@ -2550,7 +2550,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
 
         # ---- A11-A15: abandon deletes what the writeup created.
         run_stdin(ws, NEW_PLAN, "write", "plan")
-        run_stdin(ws, NEW_BEAT_1, "write", "propose",
+        run_stdin(ws, NEW_BEAT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "realizes Choice; carries the brief's first clause")
         run_stdin(ws, "", "write", "accept")
         check("A11 — the accepted beat landed in the created file",
@@ -2640,9 +2640,9 @@ def scenario_write_new_and_digest(root: Path) -> None:
                   "--intent", intent_id, "--after", "01-choice.md",
                   "--style", "House")
         run_stdin(ws, NEW_PLAN, "write", "plan")
-        run_stdin(ws, NEW_BEAT_1, "write", "propose", "--why", "opener")
+        run_stdin(ws, NEW_BEAT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "opener")
         run_stdin(ws, "", "write", "accept")
-        run_stdin(ws, NEW_BEAT_2, "write", "propose", "--why", "close")
+        run_stdin(ws, NEW_BEAT_2, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "close")
         run_stdin(ws, "", "write", "accept")
         out = run_stdin(ws, "", "write", "complete")
         check("A6 — the UC-A loop completes",
@@ -2690,7 +2690,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
         run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
                   "write", "plan")
         run_stdin(ws, "An opening beat, before everything else.",
-                  "write", "propose", "--why", "opens the book")
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "opens the book")
         run_stdin(ws, "", "write", "accept")
         out = run_stdin(ws, "", "write", "complete")
         check("F8 — the start sentinel reads as a position, not as a file "
@@ -2828,7 +2828,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
               f"{before_requests} -> {StubLLMHandler.REQUESTS}")
 
         # ---- the loop, ending in the authored removal section.
-        run_stdin(ws, REWRITE_BEAT_1, "write", "propose",
+        run_stdin(ws, REWRITE_BEAT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "carries p1; realizes Choice")
         run(ws, "guide")
         out = run_stdin(ws, "", "write", "status")
@@ -2836,10 +2836,10 @@ def scenario_write_new_and_digest(root: Path) -> None:
               "pending beat, digest or no digest",
               "Pending proposal" in out, out)
         run_stdin(ws, "", "write", "accept")
-        run_stdin(ws, REWRITE_BEAT_2, "write", "propose",
+        run_stdin(ws, REWRITE_BEAT_2, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "carries p2; realizes Field")
         run_stdin(ws, "", "write", "accept")
-        run_stdin(ws, REMOVAL_SECTION, "write", "propose",
+        run_stdin(ws, REMOVAL_SECTION, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--why", "the removal section; quotes the recorded reasons "
                            "for p1 and p3; introduces no new claim")
         run_stdin(ws, "", "write", "accept")
@@ -2890,7 +2890,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
         run_stdin(ws, json.dumps([{"role": "opener", "budget": 40}]),
                   "write", "plan")
         run_stdin(ws, "A single beat for the second rewrite.",
-                  "write", "propose", "--why", "carries q1")
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--why", "carries q1")
         run_stdin(ws, "", "write", "accept")
         out = run_stdin(ws, "", "write", "complete")
         check("B30 — a fully accounted rewrite reports 0 UNACCOUNTED and "
@@ -3239,7 +3239,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         # ---- E4: the placeholder lifecycle, asserted as a PROPERTY at
         # every stage rather than on one path.
         run_stdin(ws, W3_PLAN, "write", "plan", "--writeup", b_id)
-        run_stdin(ws, W3_BEAT_1, "write", "propose", "--writeup", b_id,
+        run_stdin(ws, W3_BEAT_1, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", b_id,
                   "--why", "opens on the claim, realizing Choice")
         run_stdin(ws, "", "write", "accept", "--writeup", b_id)
         text = (ms / "01-choice.md").read_text()
@@ -3247,7 +3247,7 @@ def scenario_parallel_writeups(root: Path) -> None:
               "file is the beat alone, with no marker prepended to it",
               text == W3_BEAT_1 + "\n" and _api.MARKER not in text,
               repr(text))
-        run_stdin(ws, W3_BEAT_2, "write", "propose", "--writeup", b_id,
+        run_stdin(ws, W3_BEAT_2, "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", b_id,
                   "--why", "closes on the same ground")
         run_stdin(ws, "", "write", "accept", "--writeup", b_id)
         text = (ms / "01-choice.md").read_text()
@@ -4672,11 +4672,11 @@ def scenario_writeup_scope(root: Path) -> None:
         run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "beta.md")
 
         run_stdin(ws, "Alpha beat one: the claim, stated plainly.",
-                  "write", "propose", "--writeup", "alpha.md",
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", "alpha.md",
                   "--why", "opens on the claim")
         run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
         run_stdin(ws, "Beta beat one: the same ground, differently held.",
-                  "write", "propose", "--writeup", "beta.md",
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", "beta.md",
                   "--why", "opens on the claim")
         run_stdin(ws, "", "write", "accept", "--writeup", "beta.md")
 
@@ -4715,7 +4715,7 @@ def scenario_writeup_scope(root: Path) -> None:
         before_verdicts = len(_episodes_referenced(
             db, {ep_alpha["id"], ep_beta["id"]}))
         run_stdin(ws, "Alpha beat two: a flat sentence the author turns down.",
-                  "write", "propose", "--writeup", "alpha.md",
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", "alpha.md",
                   "--why", "closes on the same ground")
         run_stdin(ws, "", "write", "reject", "--writeup", "alpha.md",
                   "--reason", "too flat, and it restates the opener")
@@ -4734,7 +4734,7 @@ def scenario_writeup_scope(root: Path) -> None:
               _episode_of(db, intent_beta)["transition_ids"])
         run_stdin(ws, "Alpha beat two: the closing turn, in the author's "
                       "own rhythm.",
-                  "write", "propose", "--writeup", "alpha.md",
+                  "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", "alpha.md",
                   "--why", "closes on the same ground")
         run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
         ep_alpha = _episode_of(db, intent_alpha)
@@ -4840,7 +4840,7 @@ def scenario_intent_no_fanout(root: Path) -> None:
         run_stdin(ws, plan, "write", "plan", "--writeup", "alpha.md")
         for n in (1, 2):
             run_stdin(ws, f"Alpha beat {n}, a sentence of the author's prose.",
-                      "write", "propose", "--writeup", "alpha.md",
+                      "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture", "--writeup", "alpha.md",
                       "--why", "the beat")
             run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
 
@@ -5069,7 +5069,7 @@ def scenario_intent_scope(root: Path) -> None:
         run(ws, "write", "intents", "--primary", i_file,
             "--writeup", "alpha.md")
 
-        run_stdin(ws, "Alpha's first beat, plainly said.", "write", "propose",
+        run_stdin(ws, "Alpha's first beat, plainly said.", "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--writeup", "alpha.md", "--why", "opens on the claim")
         run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
         out = run(ws, "write", "intents", "--primary", i_part,
@@ -5141,7 +5141,8 @@ def scenario_intent_scope(root: Path) -> None:
             "--writeup", "alpha.md")
 
         run_stdin(ws, "Alpha's closing beat, plainly said.", "write",
-                  "propose", "--writeup", "alpha.md", "--why", "closes")
+                  "propose", "--no-critic", "fixture", "--writeup",
+                  "alpha.md", "--why", "closes")
         run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
 
         # ---- WS-12 / WS-13: dispositions, the warning, the cross-reference.
@@ -5205,7 +5206,7 @@ def scenario_intent_scope(root: Path) -> None:
               and {i[:8] for i in _member_ids(_block_of(db, wu_gamma))}
               == {i_wide}, row["intent_id"])
         run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "gamma.md")
-        run_stdin(ws, "Gamma's only beat.", "write", "propose",
+        run_stdin(ws, "Gamma's only beat.", "write", "propose", "--no-critic", "fixture", "--lint-override", "fixture",
                   "--writeup", "gamma.md", "--why", "opens")
         run_stdin(ws, "", "write", "accept", "--writeup", "gamma.md")
         out = run(ws, "write", "complete", "--writeup", "gamma.md")
