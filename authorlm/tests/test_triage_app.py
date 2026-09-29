@@ -163,6 +163,86 @@ class TriageAppTest(unittest.TestCase):
         db.insert("concept_edges", row)
         return row
 
+    def test_critique_tab_lists_stages_and_applies_verdicts(self):
+        from authorlm import critique as crit
+
+        db, manuscript, *_ = self.fixture()
+        guide = ko_fields("sg")
+        guide.update(manuscript_id=manuscript["id"], name="house", parent=None)
+        db.insert("style_guides", guide)
+        crit.import_manifest(db, manuscript["id"], {
+            "source": {"name": "App Review"},
+            "items": [
+                {"kind": "intent", "unit": "Recapitulation", "ordinal": 1,
+                 "text": "Cut the section by half.",
+                 "scope": "recapitulation.md"},
+                {"kind": "intent", "unit": "Global", "ordinal": 1,
+                 "text": "Build a glossary.", "scope": None},
+                {"kind": "style_element", "unit": "Rules", "ordinal": 1,
+                 "text": "Separate claim levels.", "aspect": "rhetoric",
+                 "guide": "house"},
+            ]})
+
+        rows = triage.list_rows(db, manuscript, "critique")
+        self.assertEqual(len(rows), 3)
+        by_statement = {row["statement"]: row for row in rows}
+        self.assertEqual(
+            by_statement["Build a glossary."]["scope_label"], "manuscript-wide")
+        self.assertEqual(
+            by_statement["Separate claim levels."]["kind"], "style element")
+        # manuscript-wide sitting sorts first — the global sitting comes
+        # before any essay's just-in-time pile
+        self.assertEqual(rows[0]["scope_label"], "manuscript-wide")
+        self.assertTrue(all(row["pending"] for row in rows))
+
+        # snapshot works with no analyzer profile (proposals precedent)
+        snap = triage.snapshot(db, manuscript, "critique")
+        self.assertIsNone(snap["profile"])
+        self.assertEqual(len(snap["rows"]), 3)
+
+        intent = by_statement["Cut the section by half."]
+        element = by_statement["Separate claim levels."]
+        glossary = by_statement["Build a glossary."]
+        triage.stage_decisions(db, manuscript, "critique", [
+            {"object_id": intent["id"], "action": "reject",
+             "reason": "The length is deliberate."},
+            {"object_id": element["id"], "action": "accept"},
+            {"object_id": glossary["id"], "action": "revise",
+             "parameters": {"text": "Build a glossary of capitalized terms."}},
+        ])
+        result = triage.apply_selected(
+            db, manuscript, "critique",
+            [intent["id"], element["id"], glossary["id"]])
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(
+            db.one("SELECT status, outcome FROM declared_intents WHERE id = ?",
+                   (intent["id"],))["status"], "rejected")
+        self.assertEqual(
+            db.one("SELECT status FROM style_laws WHERE id = ?",
+                   (element["id"],))["status"], "active")
+        revised = db.one("SELECT * FROM declared_intents WHERE id = ?",
+                         (glossary["id"],))
+        self.assertEqual(revised["status"], "active")
+        self.assertEqual(revised["statement"],
+                         "Build a glossary of capitalized terms.")
+        self.assertEqual(revised["source_id"], db.source("author"))
+        self.assertEqual(triage.list_rows(db, manuscript, "critique"), [])
+
+    def test_critique_reject_without_reason_refuses(self):
+        from authorlm import critique as crit
+
+        db, manuscript, *_ = self.fixture()
+        crit.import_manifest(db, manuscript["id"], {
+            "source": {"name": "App Review"},
+            "items": [{"kind": "intent", "unit": "U", "ordinal": 1,
+                       "text": "Do the thing.", "scope": None}]})
+        row = triage.list_rows(db, manuscript, "critique")[0]
+        with self.assertRaises(ValueError):
+            triage.apply_action(db, manuscript, "critique", row, "reject")
+        self.assertEqual(
+            db.one("SELECT status FROM declared_intents WHERE id = ?",
+                   (row["id"],))["status"], "proposed")
+
     def test_schema_and_profiles_are_shared(self):
         db, manuscript, *_ = self.fixture()
         profile = triage.resolve_profile(manuscript, "concepts")

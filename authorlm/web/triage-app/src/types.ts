@@ -1,4 +1,4 @@
-export type TriageType = "concepts" | "edges" | "proposals";
+export type TriageType = "concepts" | "edges" | "proposals" | "critique";
 
 export interface GroupBy {
   id: string;
@@ -10,12 +10,20 @@ export interface ColumnSchema {
   label: string;
   kind: string;
   width?: number;
+  // Names the staging action an inline edit of this column becomes
+  // (e.g. "revise"): the author edits the text in place and the row is
+  // staged as a dirty revision, tracked like any other draft decision.
+  editable?: string;
 }
 
 export interface ActionSchema {
   id: string;
   label: string;
   help: string;
+  // No action-bar button: the action is staged some other way (e.g. the
+  // critique "revise" lands via the Item column's edit-in-place). Still
+  // listed in the Help tab, which explains that path.
+  hidden?: boolean;
   reason?: {
     label: string;
     placeholder?: string;
@@ -93,6 +101,7 @@ export interface TriageRow {
   pending: boolean;
   lifecycle: string;
   name?: string;
+  statement?: string;
   from_name?: string;
   relation?: string;
   to_name?: string;
@@ -115,7 +124,7 @@ export interface Snapshot {
   manuscript: {id: string; name: string};
   manuscript_version: {id: string; version_no: number; checksum: string; local_dirty: boolean} | null;
   schema: TriageSchema;
-  profile: AnalyzerProfile;
+  profile: AnalyzerProfile | null;
   profiles: AnalyzerProfile[];
   rows: TriageRow[];
   incomplete_runs: Array<{

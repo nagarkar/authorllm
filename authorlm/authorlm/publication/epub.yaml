@@ -2,5 +2,9 @@
 # define essay boundaries, so heading grammar remains purely hierarchical.
 to: epub3
 split-level: 0
+# TeX math becomes MathML (Apple Books, Thorium, Kindle Enhanced
+# Typesetting). Without this pandoc's "plain" fallback emits raw TeX for
+# any fraction or environment (docs/math-and-physics-guidelines.md).
+html-math-method: mathml
 css:
   - epub.css

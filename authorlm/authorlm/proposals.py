@@ -79,6 +79,10 @@ def create(
         db, manuscript_id, payload.get("alias", ""), payload.get("canonical", "")
     ) is not None:
         return None
+    if kind == "pronunciation" and _pronunciation_settled(
+        db, manuscript_id, target
+    ):
+        return None
     row = ko_fields("pr")
     row.update(
         manuscript_id=manuscript_id, kind=kind, target=target,
@@ -87,6 +91,34 @@ def create(
     )
     db.insert("knowledge_proposals", row)
     return row
+
+
+def _pronunciation_settled(db: Database, manuscript_id: str,
+                           term_key: str) -> bool:
+    """ONE proposal per term, EVER. Any prior row in ANY state — open,
+    adopted, dismissed, demoted — means the author has already been
+    asked (§15.22 §3.5).
+
+    `_content_hash` above catches only verbatim repeats, so a second
+    prelude offering a DIFFERENT respelling of a dismissed term would
+    sail straight past it — the exact failure
+    `_suppressed_as_near_duplicate` was written for, whose own docstring
+    records 18 open note_update rows on one concept. The instrument here
+    is stronger and free, because the identity of the question is the
+    TERM and not the spelling: deterministic, no similarity arithmetic,
+    no model.
+
+    The cost, stated rather than hidden: an author who dismisses because
+    THIS RESPELLING was wrong — rather than because the term is easy —
+    is never asked again. That is the right trade. The remedy is to write
+    the row in pronunciations.md directly, which is a better path than
+    another round of guessing, and the dismissal reason is on the
+    evidence stream either way. There is no "re-open" verb and there
+    should not be one; the file is the escape hatch."""
+    return db.one(
+        "SELECT id FROM knowledge_proposals WHERE manuscript_id = ? "
+        "AND kind = 'pronunciation' AND target = ? LIMIT 1",
+        (manuscript_id, term_key)) is not None
 
 
 def _suppressed_as_near_duplicate(db: Database, manuscript_id: str, kind: str,
@@ -245,6 +277,18 @@ def describe(row: dict) -> tuple[str, list[str]]:
             f"—generalizes→ '{payload['alias']}' instead · dismiss = keep "
             "them distinct",
         ]
+    elif kind == "pronunciation":
+        summary = (f"pronounce '{payload['name']}' — {payload.get('say', '')}")
+        details = []
+        if payload.get("note"):
+            details.append(f"note: {payload['note']}")
+        if payload.get("file"):
+            details.append(f"met in: {payload['file']}"
+                           + (f" (filter '{payload['filter']}')"
+                              if payload.get("filter") else ""))
+        details.append(
+            "adopt = write the row into pronunciations.md · "
+            "dismiss = it does not need one")
     elif kind == "incongruence":
         summary = (f"text contradicts settled knowledge about "
                    f"'{payload.get('concept', '?')}' "
@@ -263,7 +307,7 @@ def describe(row: dict) -> tuple[str, list[str]]:
 
 
 def adopt(db: Database, manuscript_id: str, row: dict) -> str:
-    """Apply the proposal to the settled object. Returns a message."""
+    """Apply the proposal to the resolved object. Returns a message."""
     payload = loads(row["payload"], {})
     kind = row["kind"]
     if kind == "note_update":
@@ -397,6 +441,37 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
                        f"— {merged['repointed']} edge(s) re-pointed, "
                        f"{merged['dropped']} retired; the notes absorbed the "
                        "aliasing sentence.")
+    elif kind == "pronunciation":
+        # THE ONLY WRITER of pronunciations.md in the whole system
+        # (§15.22 §3.7). Not the model, not `filter prelude`, not
+        # `filter record`, not `filter resolve`, not `filter rollback`,
+        # not `filter unmark`, and not the Doc pull except as the
+        # author's own edit arriving through the ordinary tab write.
+        # The immutability the Sponsor asked for is a CONSEQUENCE of
+        # there being exactly one writer and it being the author's own
+        # verdict — not a rule enforced anywhere.
+        #
+        # `adopt` takes a manuscript ID rather than the row, so it has no
+        # `path`. Smallest fix, inside this branch and nowhere else: the
+        # signature is used by cli, mcp and the triage app, and is not
+        # worth changing for one branch.
+        from pathlib import Path
+
+        from . import pronunciations as pron
+
+        root = Path(db.one("SELECT path FROM manuscripts WHERE id = ?",
+                           (manuscript_id,))["path"])
+        path = root / pron.FILENAME
+        text = path.read_text(encoding="utf-8") if path.exists() else pron.SEED
+        new = pron.add_row(text, {"term": payload["name"],
+                                  "say": payload["say"],
+                                  "note": payload.get("note") or ""})
+        if new != text:
+            # `add_row` is idempotent, so a double-accept writes nothing
+            # twice and the file's mtime does not move for nothing.
+            path.write_text(new, encoding="utf-8")
+        message = (f"'{payload['name']}' is said {payload['say']} — "
+                   f"written into {pron.FILENAME}.")
     elif kind == "incongruence":
         # No object mutation: the author is the execution engine. Adoption
         # records the acknowledged conflict as evidence; the fix (text or

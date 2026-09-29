@@ -38,6 +38,7 @@ def editor_llm(config: dict) -> LLMClient:
     temperature`/the constant — resolve_temperature (llm.py) is the one
     place that fallback chain is written."""
     llm = LLMClient(config)
+    llm.purpose = "critique.editor"         # the usage ledger's key (AP)
     override = (config.get("critique", {}) or {}).get("editor_model")
     if override:
         llm.model = override
@@ -134,6 +135,42 @@ def toc_ancestors(manuscript: dict, file: str) -> list[str]:
 def scope_chain(manuscript: dict, file: str) -> list[str | None]:
     """file, its toc ancestors, then None (manuscript-wide)."""
     return [file, *toc_ancestors(manuscript, file), None]
+
+
+# The one ordering of the scope tiers, from most specific to least.
+# `scope_tier` produces these words, so the rank that sorts them lives
+# beside it rather than being spelled once in `api` (primary selection)
+# and again in `writing` (block A's INTENTS section) — two copies of the
+# same fact, one of which is inside the byte-stability guarantee. Both
+# import it from here; `passes` imports neither of them.
+# "outside" is not a derived tier: it is what an intent the author named
+# explicitly gets when its scope does not cover this file.
+INTENT_TIER_RANK = {"file": 0, "chapter": 1, "manuscript": 2, "outside": 3}
+UNKNOWN_TIER_RANK = 9
+
+
+def scope_tier(manuscript: dict, file: str,
+               scope: str | None) -> str | None:
+    """Where a scope sits relative to this file: `file`, `chapter` (any
+    toc ancestor, however many levels up), or `manuscript` (no scope at
+    all). None when the scope names a file this one is not under — an
+    intent the author reached for explicitly, which is legitimate and is
+    noted rather than refused (design-intent-scope §1.3)."""
+    if scope is None:
+        return "manuscript"
+    chain = scope_chain(manuscript, file)
+    if scope not in chain:
+        return None
+    return "file" if chain.index(scope) == 0 else "chapter"
+
+
+def scope_specificity(manuscript: dict, file: str,
+                      scope: str | None) -> int:
+    """How specific a scope is to this file — smaller is more specific.
+    The chain is already ordered nearest-first, so the nearest chapter
+    ancestor beating a further one is free."""
+    chain = scope_chain(manuscript, file)
+    return chain.index(scope) if scope in chain else len(chain)
 
 
 def intents_in_scope(db: Database, manuscript: dict, file: str,
@@ -539,19 +576,37 @@ def stage(db: Database, manuscript: dict, pass_row: dict, file: str,
 
 
 def staged_threads(db: Database, manuscript_id: str, file: str,
-                   states=("proposed", "accepted", "rejected")) -> list[dict]:
+                   states=("proposed", "accepted", "rejected"),
+                   origin_type: str = "critique") -> list[dict]:
+    """Staged edits for one file, by PRODUCER (filter-pass design §2.2).
+
+    `origin_type` defaults to today's literal, so every existing caller
+    is byte-for-byte unchanged. It is the one origin-aware line in the
+    settle flow: `compose_marked_text`, `final_text_from_marked` and
+    `verdict` read only thread fields and never the producer."""
     rows = db.all(
         "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
-        "origin_type = 'critique' AND file = ? AND state IN (%s) "
+        "origin_type = ? AND file = ? AND state IN (%s) "
         "ORDER BY created_at, id" % ",".join("?" * len(states)),
-        (manuscript_id, file, *states))
+        (manuscript_id, origin_type, file, *states))
     return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------- verdicts
 
 def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
-                   signal: str, explanation: str | None = None) -> None:
+                   signal: str, explanation: str | None = None,
+                   evidence_type: str = "critique_edit") -> None:
+    """One edit verdict as evidence. `episode_id=None` is the door's
+    standing precedent and not an oversight: an edit verdict is evidence
+    with no episode, because an episode records work in service of a
+    declared GOAL and a hygiene verdict serves none (filter-pass §1.8).
+
+    `evidence_type` names the producer — `critique_edit` or
+    `filter_edit` — and defaults to today's literal, so no existing
+    caller changes. Explained rejections still reach belief learning
+    either way: that path runs off the evidence stream and the author's
+    words, never off an episode."""
     from .gdocs import clamp
 
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '(insertion)')}»"
@@ -563,7 +618,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
         target += f" — {explanation}"
     ev = ko_fields("ev")
     ev.update(manuscript_id=manuscript_id, episode_id=None,
-              evidence_type="critique_edit", signal=signal,
+              evidence_type=evidence_type, signal=signal,
               target=target[:400], supports_belief=None, weight="high")
     if explanation:
         ev["metadata"] = json.dumps({"explanation": explanation})
@@ -571,27 +626,34 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
 
 
 def verdict(db: Database, manuscript_id: str, thread: dict, decision: str,
-            text: str | None = None) -> dict:
+            text: str | None = None,
+            evidence_type: str = "critique_edit") -> dict:
     """accept | reject (text = author's reason) | revise (text = author's
     wording) | undo (back to proposed). Verdicts are recorded only —
-    nothing touches file or Doc until diff-write. Undo is free."""
+    nothing touches file or Doc until diff-write. Undo is free.
+
+    `evidence_type` is passed straight down to `_edit_evidence`; it
+    defaults to today's literal, so the critique pass is unchanged."""
     if decision == "undo":
         meta = loads(thread.get("metadata"), {}) or {}
         original = meta.get("original_new", thread["proposed_new"])
         db.update("doc_threads", thread["id"],
                   {"state": "proposed", "proposed_new": original})
-        _edit_evidence(db, manuscript_id, thread, "undone")
+        _edit_evidence(db, manuscript_id, thread, "undone",
+                       evidence_type=evidence_type)
         return {"state": "proposed"}
     if thread["state"] not in ("proposed", "accepted", "rejected"):
         raise ValueError(f"thread is {thread['state']} — verdicts apply "
                          "only before diff-write")
     if decision == "accept":
         db.update("doc_threads", thread["id"], {"state": "accepted"})
-        _edit_evidence(db, manuscript_id, thread, "accepted")
+        _edit_evidence(db, manuscript_id, thread, "accepted",
+                       evidence_type=evidence_type)
         return {"state": "accepted"}
     if decision == "reject":
         db.update("doc_threads", thread["id"], {"state": "rejected"})
-        _edit_evidence(db, manuscript_id, thread, "rejected", text)
+        _edit_evidence(db, manuscript_id, thread, "rejected", text,
+                       evidence_type=evidence_type)
         return {"state": "rejected"}
     if decision == "revise":
         if not text:
@@ -600,7 +662,8 @@ def verdict(db: Database, manuscript_id: str, thread: dict, decision: str,
                   {"state": "accepted", "proposed_new": text})
         fresh = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
                             (thread["id"],)))
-        _edit_evidence(db, manuscript_id, fresh, "revised")
+        _edit_evidence(db, manuscript_id, fresh, "revised",
+                       evidence_type=evidence_type)
         return {"state": "accepted"}
     raise ValueError(f"unknown decision '{decision}'")
 
@@ -615,7 +678,15 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     """The essay text with every ACCEPTED thread rendered as its pending
     form — what the Doc tab shows during the pause. Pure function; the
     push and the tests share it. Replaces are located verbatim (law);
-    insertions go after their anchor paragraph (0 = before the first)."""
+    insertions go after their anchor paragraph (0 = before the first).
+
+    Illustration embed lines are peeled before the drift check: proposals
+    are staged against observation text (embeds stripped), while the
+    local file still carries `![](_illustrations/…)` glued under the tag.
+    Comparing against the live paragraph verbatim refused every
+    illustration-unit edit on the local road and blocked mixed batches."""
+    from .revisions import peel_embed_suffix
+
     paragraphs = paragraphs_of(text)
     by_para: dict[int, list[dict]] = {}
     for t in threads:
@@ -628,11 +699,16 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
         # a replace of paragraph n
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "replace":
-                if t["proposed_old"] != para:
+                core, embed_suffix = peel_embed_suffix(para)
+                if t["proposed_old"] != core:
                     raise ValueError(
                         f"paragraph {n} no longer matches its proposal — the "
                         "text drifted since the pass; re-run 'critique run'")
-                para = th.render_pending(t["proposed_old"], t["proposed_new"])
+                # Keep the live embed outside the form so resolve leaves
+                # the author's pick in place (capture_embeds cannot read
+                # a tag wrapped in <<>>{{}}).
+                para = (th.render_pending(t["proposed_old"], t["proposed_new"])
+                        + embed_suffix)
         out.append(para)
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert":
@@ -643,13 +719,21 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
 
 
 def final_text_from_marked(marked: str,
-                           written: list[dict] | None = None
+                           written: list[dict] | None = None,
+                           kinds: tuple[str, ...] = ("replace", "insert")
                            ) -> tuple[str, list[dict]]:
-    """Resolve: critique-written forms keep their CURRENT {{new}} half
-    (author post-edits win); any other pending form on the tab (e.g. an
-    open margin-thread proposal) collapses to OLD so resolve never
-    silently approves foreign grammar. Returns (final_text, critique_forms)."""
-    forms = th.pending_forms(marked)
+    """Resolve: written forms keep their CURRENT {{new}} half (author
+    post-edits win); any other pending form on the tab (e.g. an open
+    margin-thread proposal) collapses to OLD so resolve never silently
+    approves foreign grammar. Returns (final_text, matched_forms).
+
+    `kinds` restricts which forms are CONSIDERED, and defaults to both,
+    so the critique pass is unchanged. The local settle transport passes
+    `("replace",)`: a filter never stages an insertion, and an unmatched
+    insertion form collapses to its old half — which for an insertion is
+    the empty string — so leaving bare `{{…}}` in scope would delete a
+    `{{title}}` the author wrote (filter-pass design §2.3)."""
+    forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
     if not written:
         # No written threads: keep old for every form (nothing to approve).
         return th.strip_pending(marked)[0], []
@@ -678,12 +762,56 @@ def final_text_from_marked(marked: str,
     return text, critique_forms
 
 
+def _closest_paragraph(text: str, probe: str,
+                       exclude: set[str] = frozenset()) -> str | None:
+    """The paragraph of `text` most similar to `probe`, whitespace-
+    normalized, or None when nothing comes close enough to trust
+    (ratio < 0.5). The hand-resolution inference below uses it to
+    locate the author's final wording for a form whose markers they
+    removed themselves. `exclude` holds paragraphs that cannot be the
+    answer — the batch's other proposals' old and new halves, which a
+    similar-looking probe would otherwise claim as its own."""
+    import difflib
+
+    probe_n = " ".join(probe.split())
+    best, best_ratio = None, 0.0
+    # Units are paragraphs, and a paragraph is one line in this
+    # pipeline's markdown — the Doc export separates them with single
+    # newlines, the local file with blank lines. Splitting on newlines
+    # serves both shapes.
+    for para in re.split(r"\n+", text):
+        p = " ".join(para.split())
+        if not p or p in exclude:
+            continue
+        ratio = difflib.SequenceMatcher(None, probe_n, p).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = p, ratio
+    return best if best_ratio >= 0.5 else None
+
+
 def record_resolution(db: Database, manuscript_id: str, file: str,
-                      forms: list[dict]) -> list[dict]:
+                      forms: list[dict],
+                      origin_type: str = "critique",
+                      evidence_type: str = "critique_edit",
+                      final_text: str | None = None) -> list[dict]:
     """Match the resolved forms back to their threads by proposal text;
     record proposal→final diffs as evidence; close the threads. Returns
-    the modified-acceptance diffs (the learnings duty's feedstock)."""
-    threads = staged_threads(db, manuscript_id, file, states=("written",))
+    the modified-acceptance diffs (the learnings duty's feedstock).
+
+    Origin-agnostic apart from the `staged_threads` call it makes: both
+    parameters default to today's values (filter-pass design §2.2).
+
+    `final_text` is the resolved text the forms resolved into. When given,
+    a thread whose form is GONE from the marked text is not written off
+    as a decline: the verdict is inferred from the text itself, because
+    an author who resolved the form by hand — deleted the markers, kept
+    the new prose — has accepted it (it-4c5a8038c304; author's ruling
+    2026-08-31: old text still standing as-is → decline; old text gone →
+    acceptance, the resolved text being the final wording). Without
+    `final_text` the old behavior stands: an unmatched form is a
+    decline."""
+    threads = staged_threads(db, manuscript_id, file, states=("written",),
+                             origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
     # Replaces match by their verbatim OLD half (law). Insertions have no
@@ -711,14 +839,103 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
             db.update("doc_threads", match["id"],
                       {"metadata": json.dumps(meta)})
             fresh["metadata"] = json.dumps(meta)
-            _edit_evidence(db, manuscript_id, fresh, "revised")
+            _edit_evidence(db, manuscript_id, fresh, "revised",
+                           evidence_type=evidence_type)
             diffs.append({"file": file, "proposal": proposed,
                           "final": form["new"]})
         else:
             db.update("doc_threads", match["id"], {"state": "cleaned"})
-            _edit_evidence(db, manuscript_id, match, "resolved")
+            _edit_evidence(db, manuscript_id, match, "resolved",
+                           evidence_type=evidence_type)
+    norm_final = (" ".join(final_text.split())
+                  if final_text is not None else None)
+    claimed = {" ".join((t2[field] or "").split())
+               for t2 in threads for field in ("proposed_old", "proposed_new")
+               if (t2[field] or "").strip()}
     for t in unmatched:
-        # The author deleted the form outright during the pause: a decline.
-        db.update("doc_threads", t["id"], {"state": "declined"})
-        _edit_evidence(db, manuscript_id, t, "declined")
+        # The form is gone from the marked text. Without the resolved
+        # text to consult, that reads as the author deleting the form
+        # during the pause: a decline. WITH it, infer the verdict from
+        # the prose (it-4c5a8038c304): an intact old paragraph is a
+        # decline; an old paragraph that is gone was accepted — by an
+        # author who resolved the form by hand instead of editing
+        # inside the braces. Insertions are excluded: their old half is
+        # the empty string, which is "present" in any text.
+        old = " ".join((t["proposed_old"] or "").split())
+        if norm_final is None or not old or old in norm_final:
+            db.update("doc_threads", t["id"], {"state": "declined"})
+            _edit_evidence(db, manuscript_id, t, "declined",
+                           evidence_type=evidence_type)
+            continue
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        if new and new in norm_final:
+            db.update("doc_threads", t["id"], {"state": "cleaned"})
+            _edit_evidence(db, manuscript_id, t, "resolved",
+                           evidence_type=evidence_type)
+            continue
+        # Old gone, new not verbatim: a modified acceptance. The final
+        # wording is the resolved text's closest paragraph; when nothing
+        # comes close (the author folded the passage into other prose),
+        # the acceptance is still recorded — their text won — with the
+        # final marked unlocatable rather than guessed.
+        final_para = _closest_paragraph(final_text, proposed or old,
+                                        exclude=claimed)
+        meta = loads(t.get("metadata"), {}) or {}
+        meta.setdefault("original_new", proposed)
+        if final_para is None or final_para == new:
+            meta["final_unlocated"] = final_para is None
+            db.update("doc_threads", t["id"],
+                      {"state": "cleaned", "metadata": json.dumps(meta)})
+            _edit_evidence(db, manuscript_id,
+                           dict(t, metadata=json.dumps(meta)), "resolved",
+                           evidence_type=evidence_type)
+            continue
+        db.update("doc_threads", t["id"],
+                  {"state": "cleaned", "proposed_new": final_para,
+                   "metadata": json.dumps(meta)})
+        fresh = dict(t, proposed_new=final_para, metadata=json.dumps(meta))
+        _edit_evidence(db, manuscript_id, fresh, "revised",
+                       evidence_type=evidence_type)
+        diffs.append({"file": file, "proposal": proposed,
+                      "final": final_para})
     return diffs
+
+
+LEARNINGS_THRESHOLD = 2
+
+
+def settle_learnings(db: Database, manuscript: dict, diffs: list[dict],
+                     config: dict) -> dict | None:
+    """The second half of the margin-learnings duty: at ≥2 modified
+    acceptances in ONE settle, surface a pattern candidate through the
+    scoped distiller. Returns the candidate, or None — the caller owns
+    its own output, which is why this lives here and not in either CLI
+    path.
+
+    Hoisted out of `cli._critique_learnings` because it was CLI-private
+    and only `critique resolve` could reach it. `record_resolution` was
+    origin-parameterized in the filter-pass stream, so the filter's
+    proposal→final diffs have ALWAYS been recorded — but the half that
+    turns them into a rule the author can ratify had never fired for a
+    filter, in either transport. The Sponsor's "that path also has the
+    learning loop built in" was true of the critique pass and false of
+    the filter pass; doc mode did not create that gap and must not be
+    the only road that closes it (design-filter-doc-settle §1.2).
+
+    Fails soft: the distiller is best-effort and a resolve is never
+    blocked by it. It runs on the GENERAL model tier, deliberately —
+    the same client the critique pass uses, one code path rather than a
+    second model-tier decision smuggled in under a learning-loop fix."""
+    if len(diffs) < LEARNINGS_THRESHOLD:
+        return None
+    from . import placement
+    from .llm import LLMClient
+
+    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
+                                f"«{d['final'][:120]}»") for d in diffs]
+    try:
+        return placement.distill_batch(db, manuscript, explanations,
+                                       LLMClient(config))
+    except Exception:  # noqa: BLE001 — a resolve is never blocked by this
+        return None

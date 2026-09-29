@@ -46,7 +46,7 @@ than a conversation you would have to reconstruct.
 There is also a mode where a pinned model drafts each beat instead, for a
 strictly reproducible draft. It **bills the Anthropic API per beat**, it is
 opt-in, and it is switched off in the configuration — deliberately, at your
-instruction (2026-08-30). Section 10 says what turning it back on would cost and
+instruction (2026-08-30). Section 11 says what turning it back on would cost and
 where the switch is.
 
 Other moments in the workflow also call out to a model, each to do a specific
@@ -54,7 +54,7 @@ job: finishing an essay, refreshing the summaries, closing a goal — and, the o
 that happens most often, **turning the reason you gave into a rule you might
 want.**
 Every rejection you explain, and every reworded acceptance you explain, is read
-by a model that tries to state the principle behind it. Section 10 lists them
+by a model that tries to state the principle behind it. Section 11 lists them
 all, says which model does which job, and says where each is configured.
 
 **One workspace note.** This workspace holds more than one manuscript, so every
@@ -170,7 +170,7 @@ What comes back has three parts:
 
 - a line confirming the file was created and the guide attached, and — read this
   one — a note that abandoning this piece of work will **delete** the new file
-  again (nothing typed into it is lost; see §9).
+  again (nothing typed into it is lost; see §10).
 - **your brief**, verbatim.
 - the **frame**: everything settled *before* this essay in the book, compressed
   to a few sentences each (those concepts are available to you and must not be
@@ -182,7 +182,7 @@ only warnings in that output:
 
 - a summary marked **stale, missing or deprecated** — that entry is not
   trustworthy. It cannot happen when you start; it can appear later, when you
-  come back (§8).
+  come back (§9).
 - **coverage incomplete** — that essay's summary never mentioned some of its own
   paragraphs. Informational, not a block: treat that neighbour as possibly short
   a move.
@@ -321,7 +321,7 @@ payload to the pinned `[writing]` model, which writes the WHY, the SELF-CHECK
 and the prose itself and registers them through `write propose`'s path. It bills
 the Anthropic API per beat. As shipped there is no `[writing]` section, so it
 refuses and prints the TOML to paste; the restore recipe is also in
-`authorlm/config.toml`'s own comments, and §10 says what it would cost. Only
+`authorlm/config.toml`'s own comments, and §11 says what it would cost. Only
 that mode can answer `BLOCKED` in the machine's own voice — but the same rule
 binds the conversational draft, which asks you the question instead of inventing
 the fact.
@@ -777,8 +777,27 @@ Weil essay." Several can be open at once, and they are closed one at a time when
 the goal is met — closing one is what triggers the reconstruction of what you
 decided while pursuing it.
 
-**A writeup is one essay being written or rewritten, beat by beat.** It belongs
-to exactly one intent. It holds the pinned original, the plan you approved, the
+**An intent also has a place.** When you declare one, say where it applies: just
+this essay, the whole part, or the whole book. That is not bookkeeping — it is
+what decides which of your goals a rewrite serves. Say nothing and the goal is
+book-wide, which means it rides along with *every* rewrite you ever start, so it
+is worth saying.
+
+**A rewrite serves every goal whose place covers its essay.** If you have a goal
+for the Epictetus essay, a goal for the whole of Part II, and a standing rule
+about the whole book, then rewriting Epictetus serves all three, and the drafter
+is told about all three. You do not have to name any of them; the system works
+them out and shows you the list before anything else happens. If something on it
+does not belong, say so and it comes off.
+
+**One of them is the primary.** The most specific one wins — this essay beats
+this part beats the whole book — and the primary is the goal your verdicts and
+your changes are recorded against. Only one, deliberately: an afternoon's work
+should not be counted twice. If two goals are equally specific the system will
+not guess; it prints both and asks you which.
+
+**A writeup is one essay being written or rewritten, beat by beat.** It serves
+the goals above, and the primary among them is the one it is bound to. It holds the pinned original, the plan you approved, the
 running verdicts, the lessons, and the accounting. It survives everything:
 closing your laptop, days away, a crashed terminal. You come back and it is
 exactly where you left it, with the frame recomputed fresh.
@@ -796,10 +815,14 @@ change and retroactively closed once it exceeds `idle_hours`. The dedup above is
 `(session_id or evidence id, target)` — so same session AND same target
 collapses, and nothing else does; a beat's `target` is its own draft text, so two
 beats never collide. An intent is a
-`declared_intents` row (`declare` / `complete` / `abandon`); `intent complete`
-runs episode analysis. A writeup is a `writeups` row bound to one intent by
-`intent_id`, holding `source_version_id` (the pinned original), `plan`,
-`cursor`, `learnings` and its metadata. With more than one open, every `write`
+`declared_intents` row (`declare` / `complete` / `abandon`), carrying a `scope`:
+a filename, a toc part opener, or NULL for book-wide. `intent declare --scope
+<file> | --chapter <opener> | --book-wide` sets it; `intent scope <id> …` moves
+it later. `intent complete` runs episode analysis. A writeup is a `writeups` row
+whose `intent_id` holds the PRIMARY, with the whole member set — each record
+freezing the intent's id, tier, scope and statement at ratification — in
+`metadata.intents`; it also holds `source_version_id` (the pinned original),
+`plan`, `cursor`, `learnings` and its other metadata. With more than one open, every `write`
 verb wants `--writeup <id-prefix>` rather than guessing.
 </details>
 
@@ -881,7 +904,89 @@ says so, and the single-file rebuild refuses. Design: §14 of
 
 ---
 
-## 8. Coming back after a break
+## 8. Your goals, and which ones a rewrite serves
+
+You do not name a goal when you start a rewrite. You are shown the ones that
+already apply.
+
+**Say where a goal lives when you declare it.** Just this essay, the whole part,
+or the whole book — in whatever words. Say nothing and it is book-wide, which
+means it will ride along with every rewrite you ever start; the assistant will
+ask you once rather than guess.
+
+> **You:** I want to cut the Rank inheritance in the Becker essay down to one
+> paragraph.
+>
+> **Assistant:** Just that essay, or everywhere Rank comes up?
+>
+> **You:** Just that essay.
+>
+> **Assistant:** Recorded, scoped to becker.md.
+
+**When you start the rewrite, you are shown the list.** Not asked to build it —
+shown it, grouped by how specific each goal is, with the primary marked:
+
+> **You:** Let's rewrite becker.md.
+>
+> **Assistant:** Started, and the old text is pinned. Three of your goals cover
+> this essay — the Becker rewrite itself, the Part II tightening, and the
+> standing rule about thinkers' names carrying arguments. The Becker one is the
+> primary, so the work gets recorded against it. Anything there that shouldn't
+> be?
+>
+> **You:** The Part II one, leave it. The other two are right.
+>
+> **Assistant:** Dropped. Two goals on this rewrite.
+
+**Approving the plan is what resolves it.** The same "yes" that ratifies the beat
+plan ratifies the list of goals — you see both together, and there is no second
+confirmation to give. After that the list is fixed: a goal you declare halfway
+through the rewrite is *reported* to you, never quietly added, and you say
+whether it joins.
+
+**If two goals are equally specific, you pick.** Two goals both about becker.md
+and nothing separates them — the system will not choose, because the choice
+decides where every verdict and every change gets filed and it cannot be undone
+later. It prints both and waits.
+
+**At the end you get a line per goal.** Served, deferred (with the reason you
+gave), or not served at all. The last one is a warning and never a refusal: the
+essay is finished when you say it is.
+
+> **Assistant:** Becker essay completed, six beats. The Becker rewrite and the
+> Part II tightening are both served. The thinkers'-names rule you deferred —
+> "this essay barely names anyone" — is recorded that way. Closing the goals
+> themselves is separate, whenever you want to.
+
+<details>
+<summary><b>Under the hood</b></summary>
+
+```bash
+authorlm intent declare "Cut the Rank inheritance down" --scope becker.md -m SMSTTD
+authorlm intent declare "Tighten Part II" --chapter part-ii.md -m SMSTTD
+authorlm intent scope di-4b7e1 --scope becker.md -m SMSTTD   # move one later
+authorlm intent scope --triage -m SMSTTD                     # the one-time sitting
+
+authorlm write start becker.md -m SMSTTD          # no --intent: the set is derived
+authorlm write intents --remove di-9a02f -m SMSTTD          # before the plan
+authorlm write intents --primary di-4b7e1 -m SMSTTD
+authorlm write intents --add di-c4410 -m SMSTTD             # after: an explicit join
+authorlm write intents --defer di-31cc8 --reason "…" -m SMSTTD
+authorlm write intents --ignore di-c4410 -m SMSTTD
+```
+
+Derivation is `passes.intents_in_scope(file, 'active')` over the toc parent
+chain, persisted as PROPOSED in `writeups.metadata.intents` and frozen at
+`write plan`. The most specific tier is primary and per-beat transitions attach
+to its episode ONLY — no fan-out, and no schema change:
+`writeups.intent_id` still holds the primary. A beat spec may carry
+`"intents": ["di-…"]` to say it serves only those; an untagged beat serves every
+member. Design: §15.17 of `docs/autoregressive-writing-design.md`.
+</details>
+
+---
+
+## 9. Coming back after a break
 
 **You are told, without having to ask.** An open writeup means the essay is
 mid-surgery on disk, so it is manuscript state, not knowledge, and it is printed
@@ -936,7 +1041,7 @@ briefing lists them all.
 
 ---
 
-## 9. Bailing out
+## 10. Bailing out
 
 Abandoning ends the piece of work. What it does depends on which kind you are in,
 and the difference is severe enough to state plainly.
@@ -981,7 +1086,7 @@ authorlm history show v421 -m SMSTTD     # the version the abandon message named
 
 ---
 
-## 10. What it costs, and which model does what
+## 11. What it costs, and which model does what
 
 Four moments call out to a model, each for a job worth naming. **Drafting the
 beats is not one of them** — the beats are written in this conversation, and
@@ -1008,11 +1113,24 @@ spends once — the redraft that follows it is written here and adds nothing.
 Two others sit next to the loop rather than inside it: the critique pass, which
 proposes line edits over one essay at a time, and illustration rendering.
 
+And you do not have to take this list on trust: every model call now records its
+own tokens, and the fold below has the command that will tell you what it
+actually cost.
+
 <details>
 <summary><b>Under the hood — which model, and where it is set</b></summary>
 
 Everything is in `authorlm/config.toml`, versioned with the code. Keys live in
 `.env` beside it.
+
+**And `authorlm usage` will tell you what it actually cost.** Every model call
+records its own tokens into `~/.authorlm/logs/usage.jsonl`, so `authorlm usage
+--days 7` prints the estimate per purpose and model, names what it could not
+price rather than quietly dropping it, says what the replay cache saved you, and
+— separately, and with no dollar figure attached, because a subscription does
+not bill per token — what this conversation itself consumed. The table above is
+a claim about the code and ages the moment the code moves; a reader who can
+measure does not have to trust one.
 
 | Job | Model | Set in |
 |---|---|---|
@@ -1071,12 +1189,322 @@ it: assembling and printing the payload costs nothing, so it works whether or no
 the billed mode is on, and it is what the conversational drafting reads.
 
 Without any model configured at all, the summary rebuild fails loudly rather
-than quietly degrading — see §11's fourth entry.
+than quietly degrading — see §13's fourth entry.
+
+**The filter pass (§12) costs one summarizer call per settle, on the cheap
+tier — and a SECOND call, on the general model, only when you reworded at least
+two of the proposals.** That second one is the pattern hunt: two rewrites doing
+the same thing is a rule you may be enacting, and it is put up for your ruling
+rather than acted on. It fails soft, and one modified acceptance never triggers
+it. Nothing else in the pass costs anything. `[filtering]` is absent for the same
+reason `[writing]` is, and its flag runs the OTHER way round: `filter run` calls
+nothing unless you pass `--native`. §12's fold has the table.
 </details>
 
 ---
 
-## 11. Rough edges, stated plainly
+## 12. Passing one concern over a finished essay
+
+Everything above builds an essay. This is the other thing: taking one that is
+already written and running a single, narrow question over every paragraph of
+it. Duplicate words. Whether it survives being read aloud. Whether the essay's
+figures are used against each other.
+
+The unit is a paragraph, and the question is the same for every one of them.
+That is the whole idea. It is not a general "improve this essay" pass — those
+produce a hundred changes you have to argue with. It is one concern, stated by
+you, applied evenly.
+
+### What a filter is, next to a lens
+
+A **lens** reads the essay whole and tells you what it noticed. A **filter**
+reads it a paragraph at a time and hands you a rewrite of each paragraph that
+breaks its rule. A lens gives you findings to think about; a filter gives you
+edits to say yes or no to.
+
+A filter's jurisdiction is **one essay**. A metaphor used one way in the Becker
+essay and the opposite way in the kindness essay is a real problem and a filter
+cannot see it — it only ever has one essay in front of it. That question is a
+lens, and the filter's own text says so, so you are never misled about what was
+actually checked.
+
+### The three that are written and waiting for you
+
+They are in `docs/filter-pass-design.md`, in full, at the end. Nothing is
+installed until you say so — ask me to read you one and I will, in plain words,
+and install it if you like it.
+
+- **duplicate-words** — a word or phrase used again too soon. It knows the
+  difference between a tic and a **refrain**: when it cannot tell, it leaves the
+  repetition alone and says it thought about it. It will not touch a term of art,
+  will not substitute a synonym for one, and judges the paragraph rather than the
+  essay when it comes to motif words like fire and wall. It carries a ledger
+  forward, so what it does at ¶31 is consistent with what it did at ¶6.
+- **metaphor-consistency** — first it reads the whole essay and writes down what
+  each figure is doing *here*: fire is the agent and never something a person
+  holds; the wall is the limit of a life lived without the Test. Then it judges
+  each paragraph against that. It flags a figure used against its own sense, a
+  mixed figure, and a metaphor asked to carry an argument it cannot. Recurrence
+  is not a finding — only conflict is.
+- **audio-friendly** — where the prose works on the page and fails in the ear. A
+  subject too far from its verb, a parenthesis carrying real content, a Field and
+  a field both live in one sentence. It will not flatten the register: the prose
+  is meant to sound like scripture read aloud, and it breaks a sentence only when
+  a listener would actually lose the thread, never because it is long. It also
+  stocks your pronunciation dictionary — see below.
+
+### Your words are protected, and I am shown the list
+
+Every one of these gets the whole of your vocabulary handed to it before it
+starts: every concept, every figure, every named construct, every proper name,
+and every alternate name of each of them, straight out of your own graph.
+Nothing on that list gets a synonym, a rewording, or a change of
+capitalization — and the list is the *whole* vocabulary rather than a handful I
+happened to remember, so it grows the day you add a concept and never drifts.
+
+Capitalization works the way it already does everywhere else: a single-word name
+you declared with a capital is your term only where the text capitalizes it, so
+**Field** is the concept and *field* is ordinary English. A name you declared in
+lower case — `anattā`, `ressentiment` — is your term in any casing, which is why
+the list is not filtered down to the capitalized ones.
+
+If a proposal does drop one of your terms, you are told so by name at the moment
+it is recorded. It is still staged: the machine hands you the law, it does not
+get to be the editor. But it is usually the proposal worth looking at first.
+
+### The pronunciation dictionary
+
+Some of the book's words are hard to say aloud — `Bṛhadāraṇyaka`, `Nāgārjuna`,
+`Śūnyatā`, `Böhme`. If the essay is ever narrated, someone has to decide how,
+and that someone is you.
+
+`pronunciations.md` sits in the manuscript root beside `toc.toml`. It is a plain
+markdown table, and it looks exactly like this:
+
+| Term | Say it | Note |
+| --- | --- | --- |
+| anattā | uh-NUT-taa | Pali; the second a is long |
+| Nāgārjuna | naa-GAAR-ju-na | |
+
+It is **not part of the book**. It never appears in the reading order, never
+gets scanned for concepts, never gets summarized, never gets filtered, and never
+ships in an export. But it does get a tab in the master Doc, right at the end,
+so you can edit it there exactly like an essay — and it is versioned and
+diffable like everything else, so a bad edit is recoverable.
+
+It fills up like this:
+
+> **You:** run the audio filter over becker
+>
+> **Me:** Before the paragraphs — four terms in this essay have no pronunciation
+> yet, and three of them are Sanskrit. Here is what I would tell a narrator:
+>
+> - **Bṛhadāraṇyaka** — bri-ha-DAA-ran-ya-ka. Sanskrit; the stress is on the
+>   third syllable, not the first.
+> - **Śūnyatā** — shoon-yuh-TAA.
+> - **Nāgārjuna** — naa-GAAR-ju-na.
+> - **Böhme** — BUR-muh. German; the ö is not "oh".
+>
+> Say yes to the ones you want and I will write them into the table.
+
+Two things worth knowing about that exchange.
+
+**The row is yours, and only yours.** Nothing in the system writes that file
+except your own yes. Not the filter, not the resolve, not the rollback, not a
+Doc pull. A row you have written is settled and no pass will ever rewrite it.
+
+**A term I ask about is a term I will never ask about again.** Say no to one and
+it is gone from the queue for good — including if I would have offered a
+different spelling next time. If you change your mind, open the file and write
+the row yourself; that is the escape hatch, and it is a better one than another
+round of guessing.
+
+And the loop closes: once a term is in the table, the audio filter stops
+flagging it as hard to say. The dictionary is the fix, so there is nothing left
+to flag.
+
+### What the conversation looks like
+
+> **You:** run the duplicate-words filter over becker
+>
+> **Me:** Before I start — this ran on becker once before, in June. Four of its
+> six proposals you took; you turned two down, and both of your reasons are in
+> front of me: *"the repetition there is the point — it is a refrain"* at the
+> fourth paragraph, and *"'measure' and 'test' are different terms, not a
+> duplicate"* near the end. I will not raise either again.
+>
+> Thirty-four paragraphs. Working through them in order.
+>
+> *(a minute later)*
+>
+> Seven proposals out of thirty-four:
+>
+> 1. **¶6** — "moreover" for the third time in four paragraphs. I cut it and let
+>    the sentence start with "And", which your syntax law prefers anyway.
+> 2. **¶11** — "the wall" four times in one paragraph. Two of them are the motif
+>    and two are ordinary reference; I left the motif and varied the other two.
+> 3. **¶14** — "essentially" twice in one sentence.
+> 4. **¶18** — "the Chid" is glossed here and was already glossed at ¶3. Your
+>    lexicon law says a term is introduced once per essay, so the second gloss
+>    goes and the reference stays.
+> 5. **¶22** — "ledger" three times in two sentences.
+> 6. **¶27** — "fire" five times in the paragraph. This is the one I am least
+>    sure about: it may be the drumbeat you want.
+> 7. **¶31** — "and so" opening three consecutive paragraphs.
+>
+> Number six is the one worth your ruling. Accept all, or tell me which to drop
+> and why — I will take the why in your words.
+>
+> **You:** 6 is deliberate, that's the passage building to the ending. the rest are fine.
+>
+> **Me:** Six taken, one turned down with your reason recorded. Want to read the
+> marked-up essay in Obsidian before I apply them, or shall I apply them now?
+>
+> **You:** just apply them
+>
+> **Me:** Applied. Six paragraphs changed, becker collected as version 247,
+> summary rebuilt. Your reason for ¶27 is on the record, and the next run of this
+> filter on becker will see it before it starts.
+
+You never see a payload, a unit index you did not ask for, or an id. If you want
+to read the changes in place first, say so: the essay is marked up in the file
+itself — struck-through old text, the proposed new text beside it — you reword
+whatever you like in Obsidian, and then I finalize. **Your wording wins.** While
+the file is marked it will not push to Google Docs, and everything else in the
+system still reads the essay as it was: no summary, no export, no concept scan
+ever sees the markup.
+
+### Or read them in the Google doc instead
+
+Reading a couple of dozen struck-and-green changes is genuinely easier in Docs
+than in a text file, so that road exists too. One sentence opens it.
+
+**You do not have to rule on anything first.** The tab is where you rule. Say the
+word straight after the proposals are read to you — or straight after they are
+recorded, without hearing them at all — and all of them go to the Doc, the ones
+you have opinions about and the ones you have not looked at yet. What you do in
+the tab IS the verdict. If you have already turned some down, those stay behind.
+
+> **You:** put them in the google doc so I can read them there
+>
+> **Me:** Six changes are in becker's tab now — old text struck through, the new
+> text beside it in green. Leave a change alone to take it, empty the green half
+> to turn it down, or reword the green half to make it yours — your wording
+> wins. Anything you don't touch, I'll take as a yes.
+>
+> Two of the six replace the same sentence, word for word — it appears twice in
+> the essay. They'll settle in the order they appear, so rewording either is
+> fine. If you want to kill one of them, empty the green half rather than
+> deleting the whole marked passage; that way I record the right one as refused.
+>
+> Your file on disk still holds the essay exactly as it was, and it won't push
+> to Docs until this is finished.
+>
+> *(a day later)*
+>
+> **You:** done, I changed two of them
+>
+> **Me:** Finalized. Six changes made final, two of them in your wording rather
+> than mine — both recorded. becker collected as version 247, summary rebuilt.
+> Your two rewrites both moved a Latinate substitute back to an Anglo-Saxon one;
+> that may be a rule, and I have put it up for your ruling.
+
+Three things worth knowing once, not every run:
+
+1. **The essay on your disk is the old text while the changes are in the Doc.**
+   Not a bug and not a lag: the change is not yours until you say it is, and
+   until then the file is the thing you can always fall back to.
+2. **A run takes one road and keeps it.** Once the changes are in the Doc they
+   are not also on disk, and switching means finishing this batch and running
+   the filter again. There is no flag for it, deliberately: a set of changes
+   half in one place and half in the other is a state nobody can reason about.
+3. **The Doc road's state is not fully described by your files.** The local road
+   is — that is why it stays the default. If something goes wrong mid-recovery
+   and the tab is left showing marks that nothing on disk knows about, `doc push
+   becker.md` rebuilds the tab from the file, which has held the real essay the
+   whole time.
+
+### Your "no" is the most valuable thing in the pass
+
+When you turn a proposal down, your reason is recorded in your own words, and
+the next run of that filter on that essay is shown it before it starts. That is
+most of what stops a filter raising the same thing every time you run it. It is
+worth a sentence rather than a shrug — *"that's a refrain"* buys you more than
+*"no"* does.
+
+Nothing a filter does is filed against any of your goals. A duplicate-word sweep
+is not work toward the Becker rewrite, and recording it as though it were would
+make that goal's completion report say something untrue. Your reasons still feed
+the belief learning; the sweep just is not credited to a goal it did not serve.
+
+### If it starts proposing everything
+
+Thirty-one changes on thirty-four paragraphs is almost never an essay that bad —
+it is the filter's text asking for too much. You will get a warning saying so,
+and nothing is blocked. The fix is to read the filter (`filter show
+duplicate-words`) and tighten it. Running it again unchanged will not help.
+
+Two filters do not commute: audio-friendly then duplicate-words gives a
+different essay from the reverse. No order is enforced and none is recommended.
+That is your practice, not a feature.
+
+<details>
+<summary><b>Under the hood — the verbs, and the flag that runs backwards</b></summary>
+
+```
+authorlm filter add <name>                    the artifact on stdin
+authorlm filter list | show <name>
+authorlm filter prelude <name> <essay.md>     global filters only
+authorlm filter run <name> <essay.md>         NO model call
+authorlm filter record <essay.md>             the reply JSON on stdin
+authorlm filter edits <essay.md>
+authorlm filter triage <essay.md> --accept 1 2 --reject 3 --reason "…"
+authorlm filter push <essay.md>               the staged edits → the Doc tab
+authorlm filter resolve <essay.md> [--pause]   local road, or reads the tab back
+authorlm filter status [<essay.md>]           incl. the run's transport
+authorlm filter unmark [--force] | rollback | abandon <essay.md>
+```
+
+**`filter run` makes no model call.** It prints the payload and I draft the
+reply here, in the conversation. That is the whole flow, not a preview of it.
+The billed path is `--native`, and it refuses without a `[filtering]` section
+that the shipped config deliberately does not have.
+
+This is the opposite of `write draft`, which calls unless you pass `--dry-run`:
+
+| | with no flag | the other mode |
+|---|---|---|
+| `write draft` | **calls the model** (and refuses without `[writing]`) | `--dry-run` prints the payload, free |
+| `filter run` | **prints the payload**, free | `--native` calls the model (and refuses without `[filtering]`) |
+
+Not an oversight. `write draft` was built billed and the ruling to work in the
+conversation arrived afterwards, so its flag now names the flow you actually
+use — backwards, and not worth churning every habit to fix. `filter run` was
+chat-first from its first line, so the free path needed no flag at all. `filter
+run --dry-run` is accepted and does nothing, for the muscle memory.
+
+**What it costs.** One summarizer call per settle, on the cheap tier — a
+fraction of a cent — because the essay's text changed and a stale summary is a
+lie the next gate refuses. That is the only model call the whole flow makes, and
+it is announced with its usage line. It also marks the essays after this one
+`upstream_stale`, which the resolve says out loud.
+
+**Re-running.** A filter refuses to run on text it has already settled on,
+byte for byte, and names the prior run. `--again` looks anyway. It is
+approximately idempotent, not perfectly: nothing converges, and a filter whose
+proposals never stop has a prompt fault.
+
+**If something goes wrong mid-pause.** `filter status` finds an essay whose
+bytes carry markup with nothing staged behind it — what a crash between marking
+and recording leaves — and `filter unmark <essay>` puts the text back exactly as
+it was, keeping your verdicts. `filter rollback <essay>` restores the version
+pinned when the run started; your verdicts stay, because they are evidence and
+putting text back does not un-decide them.
+</details>
+
+---
+
+## 13. Rough edges, stated plainly
 
 Things that are true today and that you will meet:
 
@@ -1107,7 +1535,7 @@ Things that are true today and that you will meet:
    fixed — fixing it would mean drafting against beats you have not ruled on yet.
 
 Entries that used to live on this list and are now fixed, described above
-instead: an open writeup announces itself in the briefing (§8), replanning
+instead: an open writeup announces itself in the briefing (§9), replanning
 refuses rather than orphaning a pending draft (§3.8), and a mid-rewrite essay
 leaves a visible explanation in place of a blank file (§3.2).
 

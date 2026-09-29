@@ -80,7 +80,7 @@ def _guard(fn) -> dict[str, Any]:
     import sys
     import time
 
-    from . import dbperf, tracelog
+    from . import dbperf, tracelog, usage
 
     # The calling @mcp.tool() function's name is the verb being traced.
     verb = sys._getframe(1).f_code.co_name
@@ -100,6 +100,7 @@ def _guard(fn) -> dict[str, Any]:
                         duration_ms=int((time.monotonic() - t0) * 1000),
                         ok=False, error=f"{type(err).__name__}: {err}")
         dbperf.flush(verb)
+        usage.flush(verb)
         raise
     tracelog.record(verb, surface="mcp", workspace=_WORKSPACE,
                     duration_ms=int((time.monotonic() - t0) * 1000),
@@ -107,6 +108,11 @@ def _guard(fn) -> dict[str, Any]:
     # This server is long-lived, so the perf log's unit of aggregation is
     # the DISPATCH, not the process: one line per tool call, named by it.
     dbperf.flush(verb)
+    usage.flush(verb)
+    # An MCP-heavy chat dispatches hundreds of tool calls, which is
+    # exactly why the sweep is interval-gated rather than run here
+    # unconditionally: at most one chat line per session per five minutes.
+    usage.sweep_opportunistic(_WORKSPACE)
     return result
 
 
@@ -132,16 +138,22 @@ def set_manuscript_metadata(author: str | None = None,
                             copyright_owner: str | None = None,
                             paperback_isbn: str | None = None,
                             hardcover_isbn: str | None = None,
+                            trim_size: str | None = None,
+                            bleed: bool | None = None,
                             manuscript: str | None = None) -> dict:
-    """Set canonical publication identity: author, copyright owner, and/or
-    format-specific print ISBN-13 values. ISBNs are validated and normalized."""
+    """Set canonical publication identity: author, copyright owner,
+    format-specific print ISBN-13 values, and the print geometry — trim
+    size as WIDTHxHEIGHT inches (e.g. '6x9') and whether the interior
+    bleeds. ISBNs are validated and normalized; the trim size is checked
+    against the print range."""
     def run():
         db = _db()
         selected = _manuscript(db, manuscript)
         return api.update_manuscript_metadata(
             db, selected, author=author, copyright_owner=copyright_owner,
             paperback_isbn=paperback_isbn,
-            hardcover_isbn=hardcover_isbn)
+            hardcover_isbn=hardcover_isbn,
+            trim_size=trim_size, bleed=bleed)
     return _guard(run)
 
 
@@ -210,28 +222,83 @@ def triage_app_request(method: str, params: dict[str, Any]) -> dict:
 
 
 @mcp.tool()
-def declare_intent(statement: str, manuscript: str | None = None) -> dict:
+def declare_intent(statement: str, scope: str | None = None,
+                   book_wide: bool = False,
+                   manuscript: str | None = None) -> dict:
     """Declare the author's current writing objective (e.g. 'Introduce
     gravity'). Opens a session lazily if none is active. Returns a
     deterministic preview: concepts the intent matches (with their state,
-    relationships, and precedents) or did-you-mean suggestions."""
+    relationships, and precedents) or did-you-mean suggestions.
+
+    `scope` is WHERE the goal applies: an essay's filename, or a toc part
+    opener (which covers every essay beneath it). Leave it out only for a
+    goal that really is book-wide — an unscoped intent attaches to EVERY
+    future writeup. When the author has not said, ask one line ("just
+    this essay, the whole part, or the whole book?"); never default
+    silently.
+
+    When they answer "the whole book", pass `book_wide=True` rather than
+    simply omitting `scope`. Both leave the scope empty, but the flag
+    records the answer as a RULING — without it the goal reappears on the
+    author's scope-triage sheet as one they have never placed, and the
+    sitting they just finished refills. Omit it only when they genuinely
+    did not say."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         session, created = api.ensure_session(db, ms)
-        result = api.declare_intent(db, ms, statement)
+        result = api.declare_intent(db, ms, statement, scope=scope,
+                                    book_wide=book_wide)
         result["session_opened"] = created
+        result["scope_means"] = (
+            f"every rewrite of {result['intent']['scope']} (and of anything "
+            f"beneath it) serves this goal"
+            if result["intent"]["scope"] else
+            "book-wide: EVERY writeup, on every essay, will carry this goal")
         return result
     return _guard(run)
 
 
 @mcp.tool()
-def list_intents(manuscript: str | None = None) -> dict:
-    """All declared intents with status (active intents are the author's
-    open todos; completed/abandoned are history)."""
+def scope_intent(intent_id: str, scope: str | None = None,
+                 chapter: str | None = None, manuscript_wide: bool = False,
+                 manuscript: str | None = None) -> dict:
+    """(Re)place an existing intent: exactly one of `scope` (this essay),
+    `chapter` (a toc opener, covering every essay beneath it), or
+    `manuscript_wide`. Metadata-forward — episodes keep their
+    transitions and any writeup that already ratified the intent keeps
+    the tier as it stood. This is the verb the one-time scope triage runs,
+    one ruling at a time."""
     def run():
         db = _db()
-        return api.list_intents(db, _manuscript(db, manuscript))
+        return api.scope_intent(db, _manuscript(db, manuscript), intent_id,
+                                scope=scope, chapter=chapter,
+                                manuscript_wide=manuscript_wide)
+    return _guard(run)
+
+
+@mcp.tool()
+def list_intents(manuscript: str | None = None,
+                 evidence: bool = False) -> dict:
+    """All declared intents with status (active intents are the author's
+    open todos; completed/abandoned are history).
+
+    With `evidence=True` this is the scope triage's read: for every
+    active intent with no scope, the files its episodes ACTUALLY touched,
+    the writeups bound to it, and a deterministic suggested tier with the
+    reason in words. Zero model calls. Present them one at a time, oldest
+    first, in the author's terms — never as a menu."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        if evidence:
+            return {"intents": api.list_intents(db, ms),
+                    "unscoped_evidence": api.scope_evidence(db, ms),
+                    # The sitting's closing numbers. `ruled_book_wide` is
+                    # the one to report back: those are the goals every
+                    # future writeup carries by the author's decision.
+                    "scope_tally": api.scope_tally(db, ms)}
+        return api.list_intents(db, ms)
     return _guard(run)
 
 
@@ -321,6 +388,47 @@ def list_critique_items(scope: str | None = None,
 
 
 @mcp.tool()
+def list_critique_decisions(scope: str | None = None,
+                            verdict: str | None = None,
+                            query: str | None = None,
+                            limit: int = 50,
+                            manuscript: str | None = None) -> dict:
+    """Critique items the author has ALREADY answered, with the verdict
+    and the reason recorded at the time — "what did I decide about this,
+    and why?" without opening the database. The counterpart of
+    list_critique_items (which shows only what is still pending).
+    scope: an essay file, or 'manuscript' for manuscript-wide items;
+    verdict: 'accept' | 'reject' | 'revise'; query: matches the
+    statement, the reason, or the critic's original wording. `tally`
+    counts the FULL filtered set even when `items` is capped by `limit`
+    — a manuscript can carry hundreds of settled rejections, so narrow
+    with scope/verdict/query rather than raising the limit. A 'revise'
+    entry carries revised_from: the critic's wording before the author's
+    replaced it."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        rows = critique.decided(db, ms["id"], scope=scope, verdict=verdict,
+                                query=query, manuscript=ms)
+        items = []
+        for d in rows[:max(0, limit)]:
+            item, meta = d["item"], _loads(d["item"]["metadata"], {})
+            meta = meta.get("critique", {})
+            items.append({
+                "id": item["id"], "kind": d["kind"],
+                "unit": meta.get("unit"), "ordinal": meta.get("ordinal"),
+                "scope": item.get("scope") or item.get("file") or
+                ("guide" if item.get("guide_id") else "manuscript"),
+                "verdict": d["verdict"], "statement": item["statement"],
+                "reason": d["reason"], "revised_from": d["revised_from"],
+            })
+        return {"count": len(rows), "tally": critique.tally(rows),
+                "scope": scope, "verdict": verdict,
+                "truncated": len(items) < len(rows), "items": items}
+    return _guard(run)
+
+
+@mcp.tool()
 def triage_critique(operations: list[dict], scope: str | None = None,
                     manuscript: str | None = None) -> dict:
     """Record the author's verdicts on proposed critique items, in batch.
@@ -381,6 +489,118 @@ def triage_critique(operations: list[dict], scope: str | None = None,
             results.append(entry)
         return {"results": results,
                 "still_proposed": len(critique.queue(db, mid, scope))}
+    return _guard(run)
+
+
+@mcp.tool()
+def add_filter(name: str, prompt: str, manuscript: str | None = None) -> dict:
+    """Ratify a new FILTER artifact (docs/filter-pass-design.md). `prompt`
+    is the WHOLE artifact — TOML front matter (`class` = "sequential" |
+    "global", required; optional one-line `state` note) then a `---`
+    line then the prompt body — exactly what `filter add <name>` reads
+    from stdin in the shell. `name` is a short kebab-case slug.
+
+    A filter is ratified law, the style-law sibling: record one only
+    AFTER the author has read and approved this exact text. Do not
+    paraphrase or author a filter's prompt yourself and install it
+    silently — a filter they have not read is a filter they cannot rule
+    on. Bad name, empty prompt, missing/unknown class, or malformed TOML
+    front matter is refused through the normal {ok:false, error}
+    envelope, each error naming what is wrong and the legal values.
+
+    Creating a filter is curation, so it lives here; RUNNING one
+    (`filter run`/`prelude`/`record`/`resolve`/`triage-flags`/`status`/
+    `unmark`/`rollback`/`abandon`) stays CLI-only, the write loop's
+    one-call-surface ruling — use list_filter_edits/triage_filter_edits
+    for the conversational half of that loop instead."""
+    def run():
+        db = _db()
+        return api.filter_add(_manuscript(db, manuscript), name, prompt)
+    return _guard(run)
+
+
+@mcp.tool()
+def list_filters(manuscript: str | None = None) -> dict:
+    """Every filter artifact defined on the manuscript: name, class
+    (sequential | global), and its one-line summary — never the prompt
+    body (show_filter reads one in full). A malformed artifact is listed
+    with its error where the summary would be, not hidden, so a typo the
+    author made stays visible instead of silently vanishing."""
+    def run():
+        from . import filters as flt
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return {"filters": flt.list_filters(ms)}
+    return _guard(run)
+
+
+@mcp.tool()
+def show_filter(name: str, manuscript: str | None = None) -> dict:
+    """The full ratified text of one filter's prompt, plus its class and
+    state note — for the author asking to read one back, or for you to
+    check what an installed filter actually says before recommending it
+    or drafting a reply to its run. Reading is not running: `filter run`
+    stays a CLI-only verb."""
+    def run():
+        from . import filters as flt
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return flt.show_filter(ms, name)
+    return _guard(run)
+
+
+@mcp.tool()
+def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
+    """The FILTER pass's staged edit proposals for one essay (after
+    'filter record' in the shell): numbered, each with the unit
+    (paragraph) it replaces, the verbatim old text, the proposed new
+    text, the one-line why, the registry/ledger entry it names (`ref`),
+    and its state (proposed | accepted | rejected).
+
+    Read them back to the author AS PROSE, by paragraph, never as JSON
+    or as a list of ids — and volunteer the one or two you are least
+    sure about, by number. Record verdicts with triage_filter_edits, and
+    take a rejection's reason in the author's OWN WORDS: it is the
+    highest-value evidence the run produces, and the next run of this
+    filter on this file reads it before it starts.
+
+    Only the ACTIVE run's proposals are listed. A settled run's
+    rejections are history and live in the next run's payload, not in a
+    triage list. Running the filter, settling and rolling back are
+    CLI-only, the same ruling the write loop gets: one call surface, so
+    improving a verb improves every session.
+
+    `mode` is the run's TRANSPORT and `forms_out` how many of its forms
+    are already placed. `mode='doc'` means the author is reading and
+    rewording those changes in the Google Doc right now: say so, do not
+    offer to apply them, and name the CLI verb that ends the pause —
+    `authorlm filter resolve <essay>`, which reads the tab back."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return api.filter_edits(db, ms, essay)
+    return _guard(run)
+
+
+@mcp.tool()
+def triage_filter_edits(essay: str, operations: list[dict],
+                        manuscript: str | None = None) -> dict:
+    """Record the author's verdicts on staged FILTER proposals, in
+    batch. Each operation: {"item": "<list number or id prefix>",
+    "verdict": "accept" | "reject" | "revise" | "undo", "reason": "..."
+    (reject: the author's VERBATIM words, required), "text": "..."
+    (revise: the author's own wording — the diff is evidence)}.
+
+    Verdicts are recorded only; nothing touches the file until 'filter
+    settle' in the shell. Undo is free until then. Numbers resolve
+    against one snapshot of list_filter_edits order. One failed op never
+    blocks the rest."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return api.filter_triage(db, ms, essay, operations)
     return _guard(run)
 
 

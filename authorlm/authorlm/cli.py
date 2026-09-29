@@ -220,7 +220,8 @@ def cmd_manuscript(args):
                 db, manuscript, author=args.author,
                 copyright_owner=args.copyright_owner,
                 paperback_isbn=args.paperback_isbn,
-                hardcover_isbn=args.hardcover_isbn)
+                hardcover_isbn=args.hardcover_isbn,
+                trim_size=args.trim_size, bleed=args.bleed)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -234,6 +235,10 @@ def cmd_manuscript(args):
           f"{identity['paperback_isbn'] or '(not set)'}")
     print("  hardcover_isbn: "
           f"{identity['hardcover_isbn'] or '(not set)'}")
+    print(f"  trim_size: {identity['trim_size'] or '(not set)'}"
+          + ("" if identity["trim_size"] else
+             "  — needed by 'export pdf --profile book'"))
+    print(f"  bleed: {'yes' if identity['bleed'] else 'no'}")
 
 
 def _manuscript_tables(db: Database) -> list[str]:
@@ -666,6 +671,160 @@ def _intent_preview(db: Database, manuscript: dict, statement: str) -> None:
     print(ui.dim("  → 'guide' for full suggestions with drafts."))
 
 
+def _toc_openers(manuscript: dict) -> set:
+    """Files that have essays beneath them in toc.toml — the ones a scope
+    can name to mean a whole part. Best-effort: a missing or unparseable
+    toc degrades to 'no openers', never raises."""
+    from .revisions import read_manuscript_files
+    from .structure import _toc_chapters, TOC_FILENAME
+
+    try:
+        files = read_manuscript_files(Path(manuscript["path"]))
+    except OSError:
+        return set()
+    return {c["parent"] for c in _toc_chapters(files.get(TOC_FILENAME) or "")
+            if c.get("parent")}
+
+
+def _scope_sentence(scope: str | None) -> str:
+    """What the scope MEANS, in words, at the moment the author sets it —
+    an absent scope has a consequence now and they should see it once."""
+    if scope:
+        return (f"Scope {scope} — every rewrite of that essay (and of any "
+                f"essay beneath it) serves this goal.")
+    return ("Scope: the whole book — EVERY writeup, on every essay, will "
+            "carry this goal. Place it instead with "
+            "'intent scope <id> --scope <file>'.")
+
+
+def _print_intent_set(result: dict, label: str) -> None:
+    """The writeup's member set, grouped by tier, primary marked. One
+    shape, printed by start, plan, intents and status."""
+    view = result.get("intents_view") or []
+    if not view:
+        return
+    block = result.get("intents") or {}
+    state = (block.get("state") or "proposed").upper()
+    tail = (" (frozen when you ratify the plan)" if state == "PROPOSED"
+            else "")
+    print(f"{label} — {len(view)}, {state}{tail}:")
+    for member in view:
+        scope = f"   ({member['scope']})" if member.get("scope") else ""
+        mark = "  ← primary" if member.get("role") == "primary" else ""
+        print(f"  {member['tier']:<11} [{member['id'][:8]}] "
+              f"{member['statement']}{scope}{mark}")
+    if block.get("tied"):
+        print(ui.yellow(
+            "  Two or more file-scoped intents are equally specific. The "
+            "primary owns this writeup's episode: every beat verdict and "
+            "every transition is recorded against it, and the others are "
+            "cross-referenced at completion. Name it:"))
+        print(ui.yellow(f"    write intents --primary "
+                        f"{block['tied'][0][:11]}"))
+    for member_id, entry in (block.get("deferred") or {}).items():
+        print(ui.dim(f"  deferred [{member_id[:8]}] — \"{entry['reason']}\""))
+
+
+def _print_newly_in_scope(result: dict) -> None:
+    """The drift line, worded for the state the set is actually in.
+
+    "newly in scope since RATIFICATION" is only true once there has been
+    a ratification. Before the plan there has not been one, and the same
+    words would tell the author their set was frozen when `--remove` is
+    still open to them and nothing has been settled — the sentence would
+    be describing the wrong half of the lifecycle."""
+    frozen = (result.get("intents") or {}).get("state") == "frozen"
+    heading = ("  newly in scope since ratification:" if frozen
+               else "  in scope, but not on this writeup:")
+    tail = (" (re-bills the cached prefix once)" if frozen else "")
+    for member in result.get("newly_in_scope") or []:
+        print(ui.yellow(heading))
+        print(f"    [{member['id'][:8]}] {member['statement']}")
+        print(ui.dim(
+            f"    It has NOT joined. Join it: write intents --add "
+            f"{member['id'][:11]}{tail} · "
+            f"dismiss it: write intents --ignore {member['id'][:11]}"))
+    for member in result.get("stale_members") or []:
+        print(ui.dim(f"  note: member [{member['id'][:8]}] is now "
+                     f"{member['status']} — the writeup still served it."))
+
+
+def _print_intent_dispositions(dispositions: list) -> None:
+    if not dispositions:
+        return
+    print("Intents:")
+    unserved = False
+    for entry in dispositions:
+        role = "  (primary)" if entry.get("role") == "primary" else ""
+        word = entry["disposition"]
+        line = (f"  {word.upper() if word != 'served' else word:<9} "
+                f"[{entry['id'][:8]}] {entry['statement']}{role}")
+        if word == "served":
+            print(line)
+        else:
+            print(ui.yellow(line))
+        if word == "deferred":
+            print(f"            — \"{entry.get('reason')}\"")
+        if word == "unserved":
+            unserved = True
+            print(ui.yellow(
+                f"            No accepted beat serves it and no deferral "
+                f"was recorded. Either it was served (close it: intent "
+                f"complete {entry['id'][:11]}) or it was not (write intents "
+                f"--defer {entry['id'][:11]} --reason \"<why>\")."))
+    if unserved:
+        print(ui.yellow("            Completing anyway — the completion is "
+                        "yours to make."))
+    print(ui.dim("Recorded on each intent: served by this writeup."))
+
+
+def _print_scope_triage(db, manuscript, prefix) -> None:
+    """The one-time sitting's read (design-intent-scope §4). Evidence
+    only — no ruling is made here, and no model is called."""
+    rows = api.scope_evidence(db, manuscript, prefix or None)
+    tally = api.scope_tally(db, manuscript)
+    # The middle number is the whole point of the sitting: it is the one
+    # the author cannot get any other way, and it only exists because a
+    # book-wide RULING is distinguishable from a never-placed default.
+    summary = (f"{tally['no_place']} with no place · "
+               f"{tally['ruled_book_wide']} ruled book-wide · "
+               f"{tally['scoped']} essay/chapter-scoped")
+    if not rows:
+        print(f"Nothing left to place — {summary}.")
+        print(ui.dim("The middle number is the one that matters: those are "
+                     "the goals every future writeup will carry, because "
+                     "you decided they should."))
+        return
+    print(ui.bold(f"{len(rows)} active intent(s) with no place. Every one of "
+                  f"them attaches to EVERY writeup until it has one."))
+    print(ui.dim(f"  {summary}"))
+    for row in rows:
+        print()
+        print(ui.bold(f"[{row['id'][:8]}] {row['statement']}"))
+        print(ui.dim(f"  declared {row['created_at'][:10]}"
+                     + (f" · {row['source']}" if row["source"] else "")))
+        if row["files"]:
+            print("  changes landed in: " + ", ".join(
+                f"{f['file']} ({f['transitions']})" for f in row["files"][:6]))
+        else:
+            print(ui.dim("  no recorded changes hang off it"))
+        for writeup in row["writeups"]:
+            print(ui.dim(f"  writeup [{writeup['id'][:8]}] on "
+                         f"{writeup['file']} ({writeup['status']})"))
+        suggested = row["suggested"]
+        where = (f"--scope {suggested['scope']}" if suggested["tier"] == "file"
+                 else f"--chapter {suggested['scope']}"
+                 if suggested["tier"] == "chapter" else "--book-wide")
+        print(f"  suggested: {suggested['tier']} — {suggested['why']}")
+        print(ui.dim(f"    intent scope {row['id'][:11]} {where}"))
+    print()
+    print(ui.dim(f"{summary}."))
+    print(ui.dim("Rule each one from the evidence, not from memory. An "
+                 "intent you cannot place is left alone and comes back next "
+                 "sitting; one you rule book-wide is settled and will not "
+                 "be offered again."))
+
+
 def cmd_intent(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -705,17 +864,59 @@ def cmd_intent(args):
         return
 
     if args.action == "declare":
-        row = ses.declare_intent(db, manuscript["id"], args.statement)
+        scope = None
+        if args.scope or args.chapter or args.manuscript_wide:
+            try:
+                scope = api._scope_target(manuscript, args.scope,
+                                          args.chapter, args.manuscript_wide)
+            except (ValueError, LookupError) as err:
+                sys.exit(f"error: {err}")
+        # `args.manuscript_wide` is the author saying "the whole book",
+        # which is not the same act as saying nothing at all. Only the
+        # explicit flag records a ruling.
+        result = api.declare_intent(db, manuscript, args.statement,
+                                    scope=scope,
+                                    book_wide=bool(args.manuscript_wide))
+        row = result["intent"]
         print(f"Declared intent [{row['id'][:8]}]: {args.statement}")
+        print(ui.dim("  " + _scope_sentence(row["scope"])))
         _intent_preview(db, manuscript, args.statement)
         if not ses.active_session(db, manuscript["id"]):
             print("note: no active session — the intent is recorded but no episode was opened.")
+    elif args.action == "scope":
+        if args.triage:
+            _print_scope_triage(db, manuscript, args.statement)
+            return
+        if not args.statement:
+            sys.exit("usage: intent scope <id-prefix> --scope FILE | "
+                     "--chapter OPENER | --book-wide  (or --triage)")
+        try:
+            result = api.scope_intent(db, manuscript, args.statement,
+                                      scope=args.scope, chapter=args.chapter,
+                                      manuscript_wide=args.manuscript_wide)
+        except (ValueError, LookupError) as err:
+            sys.exit(f"error: {err}")
+        row = result["intent"]
+        print(f"Scoped [{row['id'][:8]}]: {row['statement']}")
+        print(ui.dim("  " + _scope_sentence(result["scope"])))
+        for held in result["frozen_in"]:
+            print(ui.dim(
+                f"  writeup [{held['writeup'][:11]}] on {held['file']} "
+                f"ratified this intent as [{held['tier']}] and is "
+                f"UNAFFECTED — a re-scope routes future work, it never "
+                f"rewrites what was already ratified."))
     elif args.action == "complete":
         intent = _find_by_prefix(db, "declared_intents", args.id, manuscript["id"])
         if intent["status"] != "active":
             sys.exit(f"error: intent is already {intent['status']}.")
+        held = api._writeups_holding(db, manuscript, intent["id"])
         ses.complete_intent(db, intent, args.outcome)
         print(f"Intent completed: {intent['statement']}")
+        for entry in held:
+            print(ui.yellow(
+                f"  note: writeup [{entry['writeup'][:11]}] on "
+                f"{entry['file']} ratified this intent and is still open — "
+                f"'write status' will now report it as a stale member."))
         if args.outcome:
             print(f"Outcome: {args.outcome}")
         _analyze_closed_episodes(db, manuscript, args)
@@ -733,9 +934,24 @@ def cmd_intent(args):
         )
         if not rows:
             print("No declared intents.")
+        openers = _toc_openers(manuscript)
         for row in rows:
             outcome = f" → {row['outcome']}" if row["outcome"] else ""
-            print(f"[{row['id'][:8]}] ({row['status']}) {row['statement']}{outcome}")
+            # The tier, not just the column: a scope naming a part opener
+            # covers every essay beneath it, and that is the whole
+            # difference between "this essay" and "this part".
+            if not row["scope"]:
+                # "book-wide" alone reads the same for a goal the author
+                # deliberately made book-wide and one nobody has placed
+                # yet, and they are opposite states.
+                where = ("book-wide (ruled)" if api._scope_ruled(dict(row))
+                         else "book-wide (default)")
+            elif row["scope"] in openers:
+                where = f"chapter {row['scope']}"
+            else:
+                where = f"file {row['scope']}"
+            print(f"[{row['id'][:8]}] ({row['status']} · {where}) "
+                  f"{row['statement']}{outcome}")
 
 
 def cmd_critique(args):
@@ -750,6 +966,11 @@ def cmd_critique(args):
         print(f"Imported {result['intents']} intent(s) and "
               f"{result['style_laws']} style element(s) as proposed "
               f"({result['skipped']} already present, skipped).")
+        for dup in result.get("duplicates", []):
+            print(ui.dim(
+                f"duplicate: {dup['unit']} #{dup['ordinal']} restates "
+                f"{dup['existing_id']} ({dup['status']}, from "
+                f"'{dup['source']}') — skipped, verdict stands"))
         for err in result["errors"]:
             print(ui.yellow(f"warning: {err}"))
         if result["intents"] or result["style_laws"]:
@@ -784,6 +1005,8 @@ def cmd_critique(args):
     elif args.action == "rollback":
         _critique_rollback(db, manuscript, args)
     elif args.action == "list":
+        if args.decided:
+            return _critique_decided(db, manuscript, args)
         queue = _critique_queue(db, mid, args.scope)
         if not queue:
             print("No proposed critique items"
@@ -809,7 +1032,7 @@ def _critique_settled(db: Database, mid: str, token: str) -> tuple[str, dict]:
                         ("element", "style_laws")):
         rows = db.all(
             f"SELECT * FROM {table} WHERE manuscript_id = ? AND id LIKE ? "
-            "AND source_id IS NOT NULL", (mid, f"%{token}%"))
+            f"AND {crit.FROM_CRITIC}", (mid, f"%{token}%"))
         if len(rows) == 1:
             return kind, dict(rows[0])
         if len(rows) > 1:
@@ -828,14 +1051,13 @@ def _critique_show(db: Database, mid: str, args) -> None:
         for table, kind in (("declared_intents", "intent"),
                             ("style_laws", "element")):
             for r in db.all(f"SELECT * FROM {table} WHERE manuscript_id = ? "
-                            "AND source_id IS NOT NULL", (mid,)):
+                            f"AND {crit.FROM_CRITIC}", (mid,)):
                 if q in r["statement"].lower():
                     rows.append((kind, dict(r)))
         if not rows:
             print(f"No critique items match '{args.query}'.")
         for kind, item in rows:
-            reason = item.get("outcome") if kind == "intent" else \
-                loads(item["metadata"], {}).get("rejection_reason")
+            _, reason, _ = crit.verdict_of(kind, item)
             status = {"proposed": ui.dim, "active": ui.green,
                       "rejected": ui.yellow}.get(item["status"], str)(
                           item["status"])
@@ -850,17 +1072,47 @@ def _critique_show(db: Database, mid: str, args) -> None:
     color = {"proposed": ui.dim, "active": ui.green, "completed": ui.green,
              "rejected": ui.yellow}.get(item["status"], str)
     print("  status: " + color(item["status"]))
-    reason = item.get("outcome") if kind == "intent" else \
-        loads(item["metadata"], {}).get("rejection_reason")
+    _, reason, original = crit.verdict_of(kind, item)
     if reason:
         print("  reason: " + reason)
-    lineage = loads(item["metadata"], {}).get("lineage")
-    if lineage:
-        print(ui.dim(f"  lineage: {json.dumps(lineage)}"))
+    if original:
+        print(ui.dim(ui.wrap("critic wrote: " + original, indent="  ")))
+
+
+def _critique_decided(db: Database, manuscript: dict, args) -> None:
+    """`critique list --decided` — every settled item with its verdict and
+    the author's reason. The point is that nobody has to open sqlite to
+    remember what was already answered, or why."""
+    rows = crit.decided(db, manuscript["id"], scope=args.scope,
+                        verdict=args.verdict, query=args.query,
+                        manuscript=manuscript)
+    if not rows:
+        print("No decided critique items"
+              + (f" scoped to {args.scope}" if args.scope else "")
+              + (f" with verdict '{args.verdict}'" if args.verdict else "")
+              + (f" matching '{args.query}'" if args.query else "") + ".")
+        return
+    counts = crit.tally(rows)
+    print(ui.bold(f"{len(rows)} decided") + ui.dim(
+        " (" + ", ".join(f"{n} {v}" for v, n in sorted(counts.items())) + ")"))
+    for d in rows:
+        item, verdict = d["item"], d["verdict"]
+        color = {"accept": ui.green, "revise": ui.cyan,
+                 "reject": ui.yellow}.get(verdict, ui.dim)
+        print()
+        print(f"{_critique_label(d['kind'], item)} {color(verdict)}")
+        print(ui.wrap(item["statement"], indent="  "))
+        if d["reason"]:
+            print(ui.dim(ui.wrap("reason: " + d["reason"], indent="  ")))
+        if d["revised_from"]:
+            print(ui.dim(ui.wrap("critic wrote: " + d["revised_from"],
+                                 indent="  ")))
+    print(ui.dim("\nAmend a reason: critique reason <id> --text \"…\"  |  "
+                 "send one back to proposed: critique reopen <id>"))
 
 
 def _critique_reason(db: Database, mid: str, args) -> None:
-    """Amend a settled item's recorded reason (stray keystrokes and
+    """Amend a resolved item's recorded reason (stray keystrokes and
     wholesale markers happen; the evidence stream must be correctable)."""
     if not (args.target and args.text):
         sys.exit('usage: critique reason <id-prefix> --text "the real why"')
@@ -885,7 +1137,7 @@ def _critique_reason(db: Database, mid: str, args) -> None:
 
 
 def _critique_reopen(db: Database, mid: str, args) -> None:
-    """Send a settled item back to proposed."""
+    """Send a resolved item back to proposed."""
     if not args.target:
         sys.exit("usage: critique reopen <id-prefix>")
     kind, item = _critique_settled(db, mid, args.target)
@@ -1149,7 +1401,11 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
         passes.compose_marked_text(text, threads)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    result = gdocs.critique_diff_write(db, manuscript, file, threads,
+    # `accepted`, not `threads`: the writer no longer filters by state,
+    # because its two producers now disagree about which states go to
+    # the tab. The critique pass's contract is unchanged — accepted
+    # edits only — and it is stated HERE now, where it belongs.
+    result = gdocs.write_pending_forms(db, manuscript, file, accepted,
                                        service, docs_service)
     for t in result["written"]:
         db.update("doc_threads", t["id"], {"state": "written"})
@@ -1191,7 +1447,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (it-x7-1). Three-wayed against local so an edit made elsewhere in
     # the tab still lands, and a genuine two-sided edit is surfaced
     # instead of a side being picked silently.
-    fetched = gdocs.critique_tab_markdown(db, manuscript, file,
+    fetched = gdocs.tab_marked_markdown(db, manuscript, file,
                                           service, docs_service)
     if fetched["state"] == "missing":
         sys.exit(f"error: '{file}' has no matching section in the "
@@ -1210,12 +1466,15 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (BUG-2 / A1).
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
-    # Apply locally: the author's post-edits win.
+    # Apply locally: the author's post-edits win. The Doc never carries
+    # illustration embed lines (push strips them), so write-back must
+    # re-insert them — the same `_write_resolved_text` path filter/lens
+    # resolve use. Writing the tab text as-is silently unlinked every
+    # rendered plate while leaving the [Illustration:] tag (SMSTTD,
+    # 2026-09-02; critique was missed when that writer was shared).
     path = Path(manuscript["path"]) / file
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
-    diffs = passes.record_resolution(db, mid, file, forms)
+    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    diffs = passes.record_resolution(db, mid, file, forms, final_text=final)
     # No push: the author settles these forms in the Doc themselves, in
     # most cases. The Doc keeps them until their next ordinary 'doc push'.
     print(ui.green(f"resolved {file}: {len(forms)} form(s) made final")
@@ -1225,8 +1484,21 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         print(ui.dim(f"  «{gdocs.clamp(d['proposal'])}» → "
                      f"«{gdocs.clamp(d['final'])}»"))
     # Collect, then rebuild this essay's summary at the gate.
+    #
+    # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
+    # critique-resolve row). `episode=None` means "the session's most
+    # recently created open episode, whatever goal it belongs to", so
+    # this collect used to file the resolve's transitions against
+    # whichever intent happened to be open — making a completion report
+    # say a substantive goal was served by an edit sweep. Settling
+    # staged edits is hygiene, not goal-work: the version history, the
+    # `critique_edit` evidence rows and the pass row are the complete
+    # record. The pre-resolve collect above stays AMBIENT, deliberately:
+    # it snapshots the author's own uncollected local edits, which
+    # predate this verb, exactly as `write_start`'s first collect does.
     with contextlib.redirect_stdout(io.StringIO()):
-        api.collect(db, manuscript, config, source="critique-resolve")
+        api.collect(db, manuscript, config, source="critique-resolve",
+                    episode=api.NO_EPISODE)
     llm = sums.summarizer_llm(config)
     if llm.enabled:
         try:
@@ -1242,29 +1514,17 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
         idx = order.index(file)
         if idx >= p["cursor"]:
             db.update("critique_passes", p["id"], {"cursor": idx + 1})
-    if diffs:
-        _critique_learnings(db, manuscript, diffs, config)
+    _print_pattern_candidate(
+        passes.settle_learnings(db, manuscript, diffs, config))
     nxt = order[idx + 1] if file in order and idx + 1 < len(order) else None
     print(ui.dim(f"Next essay: {nxt} — 'critique run {nxt}' when you say so."
                  if nxt else "That was the last essay in reading order."))
 
 
-def _critique_learnings(db: Database, manuscript: dict, diffs: list[dict],
-                        config: dict) -> None:
-    """Modified acceptances feed the margin-learnings duty: at ≥2 in one
-    resolve, surface a pattern candidate through the scoped distiller."""
-    if len(diffs) < 2:
-        return
-    from . import placement
-    from .llm import LLMClient
-
-    explanations = [(d["file"], f"proposal «{d['proposal'][:120]}» became "
-                                f"«{d['final'][:120]}»") for d in diffs]
-    llm = LLMClient(config)
-    try:
-        candidate = placement.distill_batch(db, manuscript, explanations, llm)
-    except Exception:  # noqa: BLE001
-        candidate = None
+def _print_pattern_candidate(candidate: dict | None) -> None:
+    """The one line a resolve's pattern candidate earns. The distiller
+    itself is `passes.settle_learnings`, shared by both passes and both
+    filter transports; each CLI path owns its own output."""
     if candidate:
         print(ui.yellow("Pattern candidate from your post-edits: "
                         + ui.shorten(candidate.get("statement", ""), 70)))
@@ -1302,6 +1562,22 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
         db.update("doc_threads", t["id"], {"state": "withdrawn"})
+    # The restore itself, recorded — and filed under NO episode (AQ;
+    # §15.17's disposition table). Two things were wrong here. The
+    # rollback was never collected at all, so the version history had the
+    # pre-rollback snapshot and then a gap where the restore should be;
+    # and had it been collected ambiently it would have filed the
+    # UNWINDING of an edit pass against whatever goal happened to be
+    # open, which is the same lie `critique resolve` was telling one
+    # function away. `filter rollback` does exactly this, and the two
+    # verbs now agree.
+    #
+    # The pre-rollback collect above stays AMBIENT, deliberately: it
+    # snapshots the author's own uncollected edit, which is their work
+    # and predates this verb.
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config, source="critique-rollback",
+                    episode=api.NO_EPISODE)
     try:
         service = gdocs.get_service(config, args.workspace, interactive=True)
         docs_service = gdocs.get_docs_service(config, args.workspace,
@@ -2621,6 +2897,13 @@ def cmd_illus(args):
                 "'illus render <fragment>' for a fresh take, or "
                 "'illus render <fragment> --from N' to evolve the image "
                 "you approved."))
+        moved = [r for r in rows if r["state"] == "stale-desc"]
+        if moved:
+            print(ui.dim(
+                f"{len(moved)} slot(s) hold art made for a description you "
+                "have since rewritten. The art is KEPT — the key holds it "
+                "— so this is a note, not a loss: 'illus render <fragment> "
+                "--from N' redraws it against the new words."))
         return
 
     if args.action == "rerender":
@@ -2637,8 +2920,7 @@ def cmd_illus(args):
         result = illus.render_slot(db, manuscript, slot, config,
                                    count=args.count)
         newest = result["written"][-1]
-        illus.set_embed(root / slot["file"], slot["desc_hash"], newest,
-                        illus.load_prompts(root))
+        illus.set_embed(root / slot["file"], slot["key"], newest)
         removed = illus.prune(manuscript)
         print(f"Rendered + pinned {newest}"
               + (f"; pruned {len(removed)} orphan(s)" if removed else ""))
@@ -2668,7 +2950,8 @@ def cmd_illus(args):
         else:
             targets = [
                 {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
-                 "caption": None,
+                 "caption": None, "ref": s.get("ref"),
+                 "key": s.get("key"),
                  "desc_hash": illus.desc_hash(s["prompt"])}
                 for s in illus.slot_report(root)["unrendered"]]
             if not targets:
@@ -2712,6 +2995,35 @@ def cmd_illus(args):
             print(ui.yellow(line) if failed else line)
         return
 
+    if args.action == "import":
+        if not args.candidate:
+            raise SystemExit("usage: authorlm illus import '<fragment>' "
+                             "<image.png>")
+        slot = resolve_slot()
+        if args.caption:
+            slot = {**slot, "caption": args.caption}
+        try:
+            result = illus.import_image(db, manuscript, slot, args.candidate)
+        except (ValueError, OSError) as err:
+            raise SystemExit(f"error: {err}")
+        print(f"Imported {result['source']} → "
+              f"_illustrations/{result['name']}")
+        if result["ref"] != slot.get("ref"):
+            print(ui.dim(f"  slot externalized first → "
+                         f"_illustrations/prompts/{result['ref']} — the "
+                         f"first image mints a slot's key, and the key is "
+                         f"what keeps this image attached when you "
+                         f"reword the description."))
+        if not result["had_embed"]:
+            print(f"  embedded → {result['name']}")
+        else:
+            print(ui.dim(f"  embed kept at {result['embedded']} — "
+                         f"'illus pick {result['n']}' to stand this one "
+                         f"up instead."))
+        print(ui.dim(f"  'illus render <fragment> --from {result['n']}' "
+                     f"evolves it under the current illustration law."))
+        return
+
     if args.action == "externalize":
         slot = resolve_slot()
         try:
@@ -2730,15 +3042,19 @@ def cmd_illus(args):
         if args.candidate is None:
             raise SystemExit("pick needs a candidate number, e.g. "
                              f"illus pick '{args.name}' 2")
-        cands = illus.slot_candidates(root, slot["desc_hash"])
+        try:
+            wanted = int(args.candidate)
+        except ValueError:
+            raise SystemExit(f"pick takes a candidate NUMBER, not "
+                             f"{args.candidate!r}")
+        cands = illus.slot_candidates(root, slot["key"])
         target = next((c for c in cands
-                       if int(c["n"]) == args.candidate), None)
+                       if int(c["n"]) == wanted), None)
         if target is None:
-            have = ", ".join(c["n"] for c in cands) or "none"
-            raise SystemExit(f"no candidate {args.candidate:02d} "
-                             f"(rendered: {have})")
-        illus.set_embed(root / slot["file"], slot["desc_hash"],
-                        target["name"], illus.load_prompts(root))
+            have = ", ".join(c["src"] + c["n"] for c in cands) or "none"
+            raise SystemExit(f"no candidate {wanted:02d} "
+                             f"(held: {have})")
+        illus.set_embed(root / slot["file"], slot["key"], target["name"])
         # Render-side learning loop: which candidate won (and over what
         # field) is evidence for future illustration law.
         from .db import ko_fields as _ko
@@ -2898,6 +3214,553 @@ def cmd_sweep(args):
             "triage them individually: concept triage)."))
 
 
+def _print_filter_payload(result: dict) -> None:
+    """The payload, block by block, with hashes — `write draft
+    --dry-run`'s shape, so a silent cache invalidator on the native path
+    is findable and the author can audit what is actually sent."""
+    payload = result["payload"]
+    print(ui.dim(f"Prompt: {result['prompt_location']}"))
+    for name, text in payload.blocks:
+        print()
+        print(ui.bold(f"───── block {name} — {len(text):,} chars — "
+                      f"sha256 {payload.hashes[name]}"))
+        print(text)
+    print()
+    print(ui.dim("Identical stored state gives byte-identical blocks S and "
+                 "A. A hash that moved between two windows IS the cache "
+                 "invalidator."))
+
+
+def _print_filter_warnings(warnings) -> None:
+    for line in warnings or []:
+        print(ui.yellow(f"!! {line}"))
+
+
+def cmd_filter(args):
+    """`authorlm filter` — the filter pass (docs/filter-pass-design.md).
+
+    A LENS reads one essay whole and reports findings; a FILTER reads one
+    essay unit by unit and proposes an edit to each unit. Its output goes
+    through the edit door, not the guidance queue."""
+    from . import filters as flt
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+
+    # Two positional shapes, one parser. `add`, `show`, `prelude` and
+    # `run` are NAME-first; everything after the payload is staged is
+    # FILE-first, because by then the author is talking about the essay
+    # and not about the filter. The optional name stays legal on the
+    # file-first verbs for the one case that needs it — two filters with
+    # active runs on the same essay — so `filter resolve becker.md` and
+    # `filter resolve duplicate-words becker.md` both read naturally.
+    if args.action not in ("add", "show", "prelude", "run") and \
+            args.file is None and args.name is not None:
+        args.name, args.file = None, args.name
+
+    try:
+        if args.action == "add":
+            text = _stdin_text()
+            if not args.name:
+                raise SystemExit("usage: authorlm filter add <name>  "
+                                 "(the artifact, front matter and prompt, "
+                                 "on stdin)")
+            out = api.filter_add(manuscript, args.name, text or "")
+            print(f"Filter '{args.name}' ratified → {out['path']}")
+            print(ui.dim(f"class = {out['class']} — {out['class_help']}"))
+            if out["state"]:
+                print(ui.dim(f"state: {out['state']}"))
+            if out.get("prelude"):
+                print(ui.dim(f"prelude = {out['prelude']} — run it with "
+                             f"'filter prelude {args.name} <essay.md>'; it "
+                             f"proposes dictionary rows and judges no "
+                             f"unit."))
+            if out.get("summaries"):
+                print(ui.dim("summaries = true — the payload carries "
+                             "the neighbouring essays' summaries in "
+                             "block A, stale ones marked and never "
+                             "blocking. It is worth real tokens; do "
+                             "not window a run that declares it."))
+            return
+
+        if args.action == "list":
+            rows = flt.list_filters(manuscript)
+            if not rows:
+                print("No filters defined. Create one: authorlm filter add "
+                      "<name>  (the artifact on stdin)")
+                return
+            for row in rows:
+                if row["error"]:
+                    print(ui.yellow(f"  {row['name']}: MALFORMED — "
+                                    f"{row['error'].splitlines()[0]}"))
+                    continue
+                print(f"  {row['name']} [{row['class']}]: {row['summary']}")
+            return
+
+        if args.action == "show":
+            if not args.name:
+                raise SystemExit("usage: authorlm filter show <name>")
+            shown = flt.show_filter(manuscript, args.name)
+            print(ui.bold(f"Filter '{args.name}' — {shown['path']}"))
+            print(ui.dim(f"class = {shown['class']} — {shown['class_help']}"))
+            if shown["state"]:
+                print(ui.dim(f"state: {shown['state']}"))
+            if shown.get("prelude"):
+                print(ui.dim(f"prelude = {shown['prelude']}"))
+            if shown.get("summaries"):
+                print(ui.dim("summaries = true — neighbouring essay summaries in block A"))
+            print()
+            print(shown["prompt"])
+            return
+
+        if args.action == "status":
+            report = api.filter_status(db, manuscript, args.file)
+            if not report["runs"]:
+                print("No filter runs recorded.")
+            for r in report["runs"]:
+                head = (f"{r['filter']} on {r['file']} [{r['class']}] — "
+                        f"{r['status']}, {r['date']}")
+                print(ui.bold(head))
+                print(f"  units {r['cursor']}/{r['unit_count']} processed; "
+                      f"{r['proposed']} proposed, {r['accepted']} accepted, "
+                      f"{r['rejected']} rejected, {r['open']} awaiting a "
+                      f"verdict")
+                print(ui.dim(
+                    f"  transport: {r['mode'] or 'not chosen yet'}"
+                    + (f"; {r['forms_out']} form(s) out"
+                       if r["forms_out"] else "")
+                    + (f" — {r['tab_url']}" if r.get("tab_url") else "")))
+                if r["class_now"]:
+                    print(ui.yellow(
+                        f"  !! the artifact's class is now "
+                        f"'{r['class_now']}'; this run is '{r['class']}' "
+                        f"and will finish as one"))
+            for rel in report["orphaned_marks"]:
+                print(ui.yellow(
+                    f"!! {rel} carries pending forms on disk with no "
+                    f"matching staged edit — a crash between composing and "
+                    f"writing the threads leaves exactly this. Recover with "
+                    f"'filter unmark {rel}'."))
+            if report.get("orphan_scan_note"):
+                print(ui.dim(report["orphan_scan_note"]))
+            return
+
+        if args.action == "edits":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter edits <essay.md>")
+            report = api.filter_edits(db, manuscript, args.file)
+            if not report["count"]:
+                print(f"No staged filter edits on {report['file']}.")
+                return
+            for item in report["items"]:
+                ref = f" ({item['ref']})" if item["ref"] else ""
+                print(f"{ui.cyan(str(item['n']) + '.')} ¶{item['unit']} "
+                      f"[{item['state']}]{ref} {item['why']}")
+                print(ui.dim(f"    − {gdocs_clamp(item['old'])}"))
+                print(f"    + {gdocs_clamp(item['new'])}")
+            print(ui.dim("\nBulk verdicts by number: filter triage <essay> "
+                         "--accept 1 2 5 | --reject 3 --reason \"…\" | "
+                         "--revise 6 --text \"…\""))
+            return
+
+        if args.action == "triage":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter triage <essay.md> "
+                                 "--accept … | --reject … --reason \"…\"")
+            ops = []
+            for token in args.accept or []:
+                ops.append({"item": token, "verdict": "accept"})
+            for token in args.reject or []:
+                ops.append({"item": token, "verdict": "reject",
+                            "reason": args.reason})
+            for token in args.revise or []:
+                ops.append({"item": token, "verdict": "revise",
+                            "text": args.text})
+            for token in args.undo or []:
+                ops.append({"item": token, "verdict": "undo"})
+            if not ops:
+                raise SystemExit("nothing to record — pass --accept / "
+                                 "--reject / --revise / --undo with the "
+                                 "numbers from 'filter edits'")
+            report = api.filter_triage(db, manuscript, args.file, ops)
+            for r in report["results"]:
+                if r.get("ok"):
+                    print(f"  [{r['item']}] {r['verdict']} → {r['state']}")
+                else:
+                    print(ui.yellow(f"  [{r['item']}] {r['error']}"))
+            print(ui.dim(f"{report['still_proposed']} still awaiting a "
+                         f"verdict."))
+            return
+
+        if args.action == "prelude":
+            if not (args.name and args.file):
+                raise SystemExit("usage: authorlm filter prelude <name> "
+                                 "<essay.md>  (the registry JSON on stdin, "
+                                 "or --native)")
+            result = api.filter_prelude(
+                db, manuscript, config, args.name, args.file,
+                replace=args.replace, native=args.native,
+                reply=_stdin_text())
+            _print_filter_warnings(result.get("warnings"))
+            if result.get("kind") == "pronunciations":
+                if "proposed" not in result:
+                    print(ui.dim(
+                        f"Pronunciation prelude payload for "
+                        f"{result['file']} ({result['unit_count']} units) "
+                        f"— no call made. Draft the reply against it and "
+                        f"pipe {{\"pronunciations\": [...]}} back into "
+                        f"this same command. No unit is judged and the "
+                        f"essay is not touched."))
+                    _print_filter_payload(result)
+                    return
+                proposed, suppressed = (result["proposed"],
+                                        result["suppressed"])
+                print(ui.green(
+                    f"{len(proposed)} pronunciation(s) proposed"
+                    + (f", {len(suppressed)} suppressed" if suppressed
+                       else "") + "."))
+                for term in proposed:
+                    print(f"  · {term}")
+                for term in suppressed:
+                    print(ui.dim(f"  (already settled, not re-asked: "
+                                 f"{term})"))
+                if proposed:
+                    print(ui.dim("Rule on them with 'proposal review' — "
+                                 "accepting one writes the row into "
+                                 "pronunciations.md."))
+                if result.get("usage_line"):
+                    print(ui.dim(result["usage_line"]))
+                return
+            if result["registry"] is None:
+                print(ui.dim(f"Prelude payload for {result['file']} "
+                             f"({result['unit_count']} units) — no call "
+                             f"made. Draft the registry against it and pipe "
+                             f"{{\"registry\": \"…\"}} back into this same "
+                             f"command."))
+                _print_filter_payload(result)
+                return
+            print(ui.green(
+                f"Registry {'replaced' if result['replaced'] else 'frozen'} "
+                f"for this run ({len(result['registry']):,} chars)."))
+            if result["replaced"]:
+                print(ui.yellow("!! the run's cached prefix is invalidated "
+                                "— on the native path the next unit call "
+                                "re-bills blocks S and A."))
+            if result.get("usage_line"):
+                print(ui.dim(result["usage_line"]))
+            return
+
+        if args.action == "run":
+            if not (args.name and args.file):
+                raise SystemExit("usage: authorlm filter run <name> "
+                                 "<essay.md>")
+            result = api.filter_run(
+                db, manuscript, config, args.name, args.file,
+                window=args.window, from_unit=getattr(args, "from_unit", None),
+                again=args.again, native=args.native)
+            _print_filter_warnings(result["warnings"])
+            start, end = result["window"]
+            print(ui.bold(
+                f"{result['filter']} [{result['class']}] on "
+                f"{result['file']} — units {start}–{end} of "
+                f"{result['unit_count']}"))
+            if not result["native"]:
+                print(ui.dim(
+                    "No model call was made. This is the DEFAULT and it is "
+                    "the opposite of 'write draft', which calls unless you "
+                    "pass --dry-run: here the call is what needs the flag "
+                    "(--native), and it needs [filtering] in config.toml "
+                    "as well. Draft the reply against the payload below, "
+                    "then pipe it into 'filter record'."))
+                _print_filter_payload(result)
+                return
+            print(ui.dim(f"Native run on {result['model']}."))
+            print(ui.dim(result["usage_line"] or ""))
+            print(json.dumps({"units": result["reply"]["edits"],
+                              "keeps": result["reply"]["keeps"]}, indent=2))
+            print(ui.dim("Pipe the model's reply into 'filter record' to "
+                         "stage it — nothing is staged by the call itself."))
+            return
+
+        if args.action == "record":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter record <essay.md>  "
+                                 "(the reply JSON on stdin)")
+            reply = _stdin_text()
+            if not reply:
+                raise SystemExit("the reply JSON travels on stdin — nothing "
+                                 "arrived. Nothing was staged and the "
+                                 "cursor did not move.")
+            result = api.filter_record(db, manuscript, config, args.file,
+                                       reply, name=args.name)
+            start, end = result["window"]
+            print(ui.green(
+                f"Recorded units {start}–{end}: {len(result['staged'])} "
+                f"proposal(s), {len(result['keeps'])} kept."))
+            _print_filter_warnings(result["warnings"])
+            if result["remaining"] > 0:
+                print(ui.dim(f"{result['remaining']} unit(s) left — "
+                             f"'filter run {result['run']['filter']} "
+                             f"{result['file']}' assembles the next window."))
+            elif result["staged"]:
+                print(ui.dim(f"Read them back to the author, then "
+                             f"'filter triage {result['file']} --accept …'."))
+            return
+
+        if args.action == "apply":
+            # RECORD then PUSH, under one name, because from the author's
+            # seat those are one act: the proposals reach the tab they rule
+            # them in. The DRAFTING step cannot be folded in here — in chat
+            # mode `filter run` makes no model call at all, the assistant
+            # answers the payload in the conversation, and no CLI process
+            # can stand in for that. So this wraps the two verbs that ARE
+            # mechanical and leaves the one that is judgment where it is.
+            if not args.file:
+                raise SystemExit(
+                    "usage: authorlm filter apply [<name>] <essay.md>  "
+                    "(the reply JSON on stdin)\n"
+                    "It records the reply and pushes the proposals into the "
+                    "essay's Doc tab in one step. Draft the reply against "
+                    "'filter run <name> <essay>' first.")
+            reply = _stdin_text()
+            if not reply:
+                raise SystemExit(
+                    "the reply JSON travels on stdin — nothing arrived. "
+                    "Nothing was staged, nothing was pushed, and the cursor "
+                    "did not move.")
+            result = api.filter_record(db, manuscript, config, args.file,
+                                       reply, name=args.name)
+            start, end = result["window"]
+            print(ui.green(
+                f"Recorded units {start}–{end}: {len(result['staged'])} "
+                f"proposal(s), {len(result['keeps'])} kept."))
+            _print_filter_warnings(result["warnings"])
+            if result["remaining"] > 0:
+                # Pushing a partial run would put half an essay's forms in
+                # the tab and commit the run to the Doc road before the rest
+                # of it has been judged. The road is chosen once, so it is
+                # chosen when the run is complete.
+                print(ui.dim(
+                    f"{result['remaining']} unit(s) left — nothing pushed "
+                    f"yet. 'filter run {result['run']['filter']} "
+                    f"{result['file']}' assembles the next window; the "
+                    f"apply that completes the run is the one that pushes."))
+                return
+            if not result["staged"]:
+                print(ui.dim("No proposals, so there is nothing to push and "
+                             "this run has taken no road."))
+                return
+            args.action = "push"          # fall through to the push branch
+
+        if args.action == "push":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter push <essay.md>")
+            def _push_bridge():
+                from . import gdocs as _gd
+
+                try:
+                    return (_gd.get_service(config, args.workspace,
+                                            interactive=True),
+                            _gd.get_docs_service(config, args.workspace,
+                                                 interactive=True))
+                except ValueError as err:
+                    # The local road needs no credentials and is the
+                    # DEFAULT and the recommendation — an author without
+                    # a Doc bridge must never be left thinking the pass
+                    # is unavailable.
+                    raise ValueError(
+                        f"{err}\nThe Doc road needs the [gdocs] bridge. "
+                        f"The local road does not: 'filter resolve "
+                        f"{args.file} --pause' writes the same "
+                        f"<<old>>{{{{new}}}} forms into the file in your "
+                        f"vault, and 'filter resolve {args.file}' "
+                        f"finalizes them.") from err
+
+            result = api.filter_push(db, manuscript, config, args.file,
+                                     services=_push_bridge, name=args.name)
+            _print_filter_warnings(result["warnings"])
+            for t, why in result["failed"]:
+                print(ui.yellow(f"  could not write [{t['id'][:8]}]: {why}"
+                                " — left accepted"))
+            if not result["written"]:
+                print(ui.yellow(
+                    "Nothing landed in the Doc, so this run has NOT taken "
+                    "the Doc road — the local settle is still open to it."))
+                return
+            print(ui.green(f"{result['written']} change(s) written into "
+                           f"{result['file']}'s tab")
+                  + ui.dim(f" — {result['url']}"))
+            print(ui.dim(
+                "Old text struck through, the new text beside it in green. "
+                "The tab is where you rule on these: leave a change alone "
+                "to take it, empty its green half to turn it down, or "
+                "reword the green half to make it yours — your wording "
+                f"wins. Then 'filter resolve {result['file']}' reads the "
+                "tab back and records every one of those verdicts."))
+            if result["local_unchanged"]:
+                print(ui.dim(
+                    f"The file on your disk still holds {result['file']} "
+                    "exactly as it was, and it will not push to Docs "
+                    "until this is finished."))
+            else:
+                # The push levels the tab from the local file, and that
+                # goes through `normalize_markdown` — so on a file that
+                # was not already canonical the bytes DID move. Saying
+                # "exactly as it was" there is false, and an author who
+                # later finds a diff they were told did not exist has
+                # been given a reason to distrust the whole road.
+                print(ui.dim(
+                    f"The file on your disk still holds the OLD "
+                    f"{result['file']} — none of these changes is in it "
+                    f"— but the push did rewrite it once, into canonical "
+                    f"markdown (list markers, spacing, trailing "
+                    f"whitespace; not a word of the prose). That is the "
+                    f"same normalization every 'doc push' does. It will "
+                    f"not push to Docs again until this is finished."))
+            return
+
+        if args.action == "resolve":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter resolve <essay.md> "
+                                 "[--pause]")
+            def _doc_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            # A CALLABLE, not two arguments: the local road must work
+            # with no credentials, so nothing here can pop a consent
+            # window unless the run actually took the Doc road.
+            result = api.filter_resolve(db, manuscript, config, args.file,
+                                       pause=args.pause, name=args.name,
+                                       services=_doc_bridge)
+            _print_filter_warnings(result["warnings"])
+            if result["paused"]:
+                print(ui.green(
+                    f"Marked {result['file']} with {result['forms']} "
+                    f"change(s) — open it and edit any of the {{{{new}}}} "
+                    f"halves you want to reword, then 'filter resolve "
+                    f"{result['file']}' with no flag to finalize."))
+                print(ui.dim("The file will not push to Docs while it is "
+                             "marked, and every observer still reads the "
+                             "original text."))
+                return
+            made = result.get("accepted", result["forms"])
+            if result.get("mode") == "doc":
+                print(ui.green(
+                    f"Finalized: {made} change(s) made final in "
+                    f"{result['file']}"
+                    + (f", {len(result['diffs'])} of them in your wording "
+                       f"rather than mine" if result["diffs"] else "")
+                    + "."))
+            else:
+                print(ui.green(f"Applied: {made} change(s) made "
+                               f"final in {result['file']}."))
+            for d in result["diffs"]:
+                print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
+                             f"«{gdocs_clamp(d['final'])}»"))
+            for row in result["falsified_prefix"]:
+                units = ", ".join(str(u) for u in row["downstream"])
+                print(ui.yellow(
+                    f"!! n={row['n']} rejected. Units {units} were drafted "
+                    f"after it and may have assumed it.\n"
+                    f"   Re-run the tail if their edits depended on it:  "
+                    f"filter run {result['run']['filter']} "
+                    f"{result['file']} --from {row['n']}"))
+            summary = result["summary"]
+            if summary["rebuilt"]:
+                print(ui.dim("summary rebuilt; downstream marked "
+                             "upstream_stale"))
+                if summary["usage"]:
+                    print(ui.dim(summary["usage"]))
+            elif summary["error"]:
+                print(ui.yellow(f"summary rebuild failed "
+                                f"({summary['error']}) — run 'summarize "
+                                f"rebuild {result['file']}'"))
+            _print_pattern_candidate(result.get("pattern_candidate"))
+            if result.get("tab_still_marked"):
+                print(ui.dim(
+                    f"The Doc tab still shows the struck-and-green marks: "
+                    f"a resolve that also re-pushed could fail halfway on "
+                    f"the network after the evidence was recorded, so it "
+                    f"does not. Your next 'doc push {result['file']}' "
+                    f"clears them."))
+            print(ui.dim("Nothing here was filed against any of your goals: "
+                         "a filter pass is hygiene, not work toward a "
+                         "declared aim, and recording it as if it were "
+                         "would make that goal's completion report say "
+                         "something untrue."))
+            return
+
+        if args.action == "unmark":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter unmark <essay.md>")
+            def _unmark_bridge():
+                from . import gdocs as _gd
+
+                return (_gd.get_service(config, args.workspace,
+                                        interactive=True),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=True))
+
+            result = api.filter_unmark(db, manuscript, args.file,
+                                       force=args.force,
+                                       services=_unmark_bridge)
+            for warn in result["marker_warnings"]:
+                print(ui.yellow(f"  {warn}"))
+            if result["mode"] == "doc":
+                print(ui.green(
+                    f"{result['file']}'s tab rebuilt clean; "
+                    f"{result['reopened']} form(s) returned to 'accepted' "
+                    f"— 'filter resolve' applies them, 'filter triage "
+                    f"--undo' reopens them."))
+                print(ui.dim(
+                    "The tab was rebuilt from the file on disk, so it now "
+                    "shows the essay as it stands there — anything typed "
+                    "into that tab since the push is gone. The file itself "
+                    "was never touched: it has held the old text "
+                    "throughout."))
+                return
+            print(ui.green(
+                f"{result['file']} restored to its original text; "
+                f"{result['reopened']} form(s) returned to 'accepted' — "
+                f"'filter resolve' applies them, 'filter triage --undo' "
+                f"reopens them."))
+            return
+
+        if args.action == "rollback":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter rollback <essay.md>")
+            result = api.filter_rollback(db, manuscript, config, args.file,
+                                         name=args.name)
+            print(ui.green(f"{result['file']} restored to the run's pinned "
+                           f"version ({result['restored_chars']:,} chars)."))
+            print(ui.dim("The verdicts stay: they are evidence, and "
+                         "evidence is not undone by putting text back."))
+            return
+
+        if args.action == "abandon":
+            if not args.file:
+                raise SystemExit("usage: authorlm filter abandon <essay.md>")
+            result = api.filter_abandon(db, manuscript, args.file,
+                                        name=args.name)
+            print(ui.green(f"Run dropped; {result['withdrawn']} open "
+                           f"proposal(s) withdrawn."))
+            return
+    except (LookupError, ValueError, RuntimeError) as err:
+        sys.exit(f"error: {err}")
+
+
+def gdocs_clamp(text: str, limit: int = 90) -> str:
+    from .gdocs import clamp
+
+    return clamp(text or "", limit)
+
+
 def cmd_lens(args):
     import json as _json
 
@@ -2954,6 +3817,81 @@ def cmd_lens(args):
         if result.get("seeded_belief"):
             print(ui.dim("Your explanation seeded a candidate belief: "
                          f"\"{result['seeded_belief']['statement']}\""))
+        # §7.2's ruling: finding verdicts and staged edits are
+        # INDEPENDENT — accepting the finding does not settle its edit,
+        # and the author is told so rather than left to infer it.
+        gmeta = _json.loads(result["guidance"].get("metadata") or "{}")
+        tid = gmeta.get("edit_thread")
+        if tid:
+            thread = db.one("SELECT * FROM doc_threads WHERE id = ?",
+                            (tid,))
+            if thread and thread["state"] in ("proposed", "accepted",
+                                              "written"):
+                where = ("in the Doc tab" if thread["state"] == "written"
+                         else "staged")
+                print(ui.dim(
+                    f"This finding's edit is still open ({where}) — the "
+                    f"verdict on the finding does not settle it. "
+                    f"'lens push {gmeta.get('file', '<file>')}' / "
+                    f"'lens resolve {gmeta.get('file', '<file>')}' run "
+                    f"the edit's own road."))
+        return
+
+    if args.action in ("push", "resolve"):
+        target = args.name or args.file
+        if not target:
+            raise SystemExit(f"usage: authorlm lens {args.action} "
+                             f"<essay.md>")
+        config = _load_config(args)
+
+        def _doc_bridge():
+            from . import gdocs as _gd
+
+            return (_gd.get_service(config, args.workspace,
+                                    interactive=True),
+                    _gd.get_docs_service(config, args.workspace,
+                                         interactive=True))
+
+        try:
+            if args.action == "push":
+                result = api.lens_push(db, manuscript, config, target,
+                                       services=_doc_bridge)
+                _print_filter_warnings(result["warnings"])
+                print(ui.green(
+                    f"Pushed {result['written']} lens form(s) into "
+                    f"{result['file']}'s tab → {result['url']}"))
+                for t, why in result["failed"]:
+                    print(ui.yellow(f"  failed to land: «"
+                                    f"{gdocs_clamp(t['proposed_old'])}» "
+                                    f"— {why}"))
+                print(ui.dim("Resolve them in the Doc, then "
+                             f"'lens resolve {result['file']}'."))
+            else:
+                result = api.lens_resolve(db, manuscript, config, target,
+                                         services=_doc_bridge)
+                _print_filter_warnings(result["warnings"])
+                print(ui.green(
+                    f"Finalized: {result['accepted']} lens change(s) made "
+                    f"final in {result['file']}"
+                    + (f", {len(result['diffs'])} of them in your wording "
+                       f"rather than mine" if result["diffs"] else "")
+                    + (f"; {result['declined']} declined"
+                       if result["declined"] else "") + "."))
+                for d in result["diffs"]:
+                    print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
+                                 f"«{gdocs_clamp(d['final'])}»"))
+                if result["summary"]["rebuilt"]:
+                    print("summary rebuilt; downstream marked "
+                          "upstream_stale")
+                if result.get("pattern_candidate"):
+                    print(ui.dim("Pattern candidate from your post-edits: "
+                                 f"{result['pattern_candidate'][:80]}…"))
+                if result["tab_still_marked"]:
+                    print(ui.dim(
+                        "The Doc tab keeps its struck-and-green marks "
+                        f"until your next 'doc push {result['file']}'."))
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         return
 
     if not args.name or not args.file:
@@ -2964,8 +3902,11 @@ def cmd_lens(args):
         if not llm.enabled:
             raise SystemExit("lens run needs the LLM enabled — for an "
                              "external (Claude) pass, use lens register")
-        result = lenses.run_lens(db, manuscript, session, args.name,
-                                 args.file, llm)
+        try:
+            result = lenses.run_lens(db, manuscript, session, args.name,
+                                     args.file, llm)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         line = llm.stats_line()
     else:  # register — the door for externally produced findings
         raw = _stdin_text()
@@ -2979,16 +3920,33 @@ def cmd_lens(args):
             raise SystemExit('lens register expects JSON on stdin: '
                              '{"findings": [{"quote": "...", '
                              '"note": "..."}]}')
-        result = lenses.register_findings(db, manuscript, session,
-                                          args.name, args.file, findings)
+        try:
+            result = lenses.register_findings(db, manuscript, session,
+                                              args.name, args.file,
+                                              findings)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         line = None
     print(f"Lens '{result['lens']}' on {result['file']}: "
           f"{len(result['findings'])} finding(s)"
           + (f", {result['dropped_ungrounded']} ungrounded dropped"
              if result["dropped_ungrounded"] else "") + ".")
     for i, row in enumerate(result["findings"], start=1):
-        print(f"  [{i}] {row['suggestion']}")
+        meta = _json.loads(row.get("metadata") or "{}")
+        tag = " [edit staged]" if meta.get("edit_thread") else ""
+        print(f"  [{i}] {row['suggestion']}{tag}")
         print(ui.dim(f"      {row['explanation']}"))
+    for refusal in result.get("edits_refused", []):
+        print(ui.yellow(f"  edit refused on «{refusal['quote']}» — "
+                        f"{refusal['reason']} (the finding itself is "
+                        f"kept)"))
+    if result.get("edits_staged"):
+        print(ui.dim(f"{len(result['edits_staged'])} edit(s) staged — "
+                     f"'lens push {result['file']}' writes them into the "
+                     f"Doc tab as <<old>>{{{{new}}}} forms; "
+                     f"'lens resolve {result['file']}' reads the tab "
+                     f"back. Ruling on a finding and settling its edit "
+                     f"stay independent."))
     if result["findings"]:
         print(ui.dim("Verdicts: authorlm lens review <n> "
                      "--accept|--reject [--explain \"why\"]"))
@@ -3018,24 +3976,57 @@ def cmd_export(args):
         print(f"{args.key} = {settings[args.key]}")
         return
 
+    if args.action == "check":
+        problems = ex.check_manuscript(manuscript)
+        if not problems:
+            print("Every region tag resolves and every math span "
+                  "converts — the book is exportable.")
+            return
+        for problem in problems:
+            print(ui.yellow(problem))
+        raise SystemExit(1)
+
     try:
         chapters = [c for part in (args.chapters or [])
                     for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
                                      variant=args.variant,
                                      only=chapters or None,
-                                     print_ready=args.print_ready)
+                                     print_ready=args.print_ready,
+                                     profile=args.profile)
     except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
     if args.action == "pdf":
         print(ui.dim(f"  mode: {result['mode']}"))
+        if result.get("pages"):
+            print(ui.dim(f"  pages: {result['pages']}  "
+                         f"geometry: {result.get('geometry', '')}"))
     if chapters:
         print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
         print(f"Wrote {result[args.action]}.")
     for warning in result["warnings"]:
         print(ui.yellow(f"warning: {warning}"))
+
+
+# Verbs that send an LLM prompt announce it in --help and point at the
+# registry, so the words shaping the model are always one command away.
+#
+# Module level so the suite can iterate the REAL set. It lived inside the
+# parser builder, and the test that asserts the note is present listed
+# five of these by hand — so a new LLM verb was unchecked by
+# construction.
+LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
+             "analyze", "lens", "sweep", "illus", "summarize", "doc",
+             "belief", "critique", "triage-app",
+             # `filter run --native` is the filter pass's one call, and
+             # it is off by default — the verb still announces the prompt
+             # it would send, because the CHAT path drafts under exactly
+             # those rules.
+             "filter",
+             # `write draft` is the write path's one LLM call.
+             "write"}
 
 
 def _stdin_text() -> str | None:
@@ -3263,17 +4254,13 @@ def cmd_write(args):
     try:
         if args.action == "start":
             if not args.params:
-                sys.exit("usage: write start <file> --intent <id>")
-            if not args.intent:
-                sys.exit("write start requires --intent <id> — declare one "
-                         "first (the writeup is bound to it)")
+                sys.exit("usage: write start <file> [--intent <id>]")
             result = api.write_start(db, manuscript, config,
                                      args.params[0], args.intent,
                                      after=args.after, brief=_stdin_text(),
                                      new=args.new, style=args.style)
             w = result["writeup"]
-            print(f"Writeup [{w['id'][:11]}] on {w['file']} "
-                  f"(intent {result['intent']['id'][:11]}).")
+            print(f"Writeup [{w['id'][:11]}] on {w['file']}.")
             if result["created"]:
                 print(f"Created {w['file']} (empty); style guide "
                       f"'{result['style']}' attached.")
@@ -3283,6 +4270,41 @@ def cmd_write(args):
             else:
                 print(f"Pinned v{result['source_version_no']} as raw material "
                       f"({result['source_chars']} chars); file truncated.")
+            print()
+            _print_intent_set(
+                result,
+                "Intents named" if result["intents"].get("manual")
+                else "Intents in scope")
+            if result["intents"].get("manual"):
+                if result["outside_scope"]:
+                    print(ui.dim(
+                        "  note: an intent above is scoped outside this "
+                        "essay — you reached for it explicitly, which is "
+                        "yours to do."))
+                print(ui.dim("  Derivation was skipped: --intent names the "
+                             "set. The first flag is the primary."))
+            else:
+                print(ui.dim("  Adjust before the plan: write intents "
+                             "--add <id> | --remove <id> | --primary <id>"))
+            if result["many_manuscript_wide"]:
+                print(ui.yellow(
+                    f"  ⚠ {result['manuscript_wide']} book-wide intents are "
+                    f"in scope and will attach to EVERY writeup. They are "
+                    f"unscoped, not book-wide by decision. Run the scope "
+                    f"triage — ask the assistant, or: "
+                    f"authorlm intent scope --triage"))
+            if result["chapter_undecidable"]:
+                print(ui.dim(
+                    "  note: this file has no toc entry yet, so no "
+                    "chapter-scoped intent can be derived for it. Its entry "
+                    "lands at 'write complete'; until then name any by hand "
+                    "with --intent."))
+            for row in result["proposed_in_scope"]:
+                print(ui.dim(
+                    f"  note: proposed (untriaged) intent [{row['id'][:8]}] "
+                    f"also covers this essay — 'critique triage' settles it. "
+                    f"It has NOT joined."))
+            print()
             _print_brief(result["brief"])
             _print_drafting_context(result["drafting_context"])
             if not result["created"] and result["source_chars"]:
@@ -3301,8 +4323,23 @@ def cmd_write(args):
                                     replace=args.replace)
             kept = f"kept {result['kept']} written, " if result["kept"] else ""
             print(f"Plan ratified: {kept}{result['added']} beat(s) ahead.")
+            _print_intent_set(result, "Intents")
             for beat in result["plan"][result["cursor"]:]:
                 _print_beat_spec(beat, label="  •")
+        elif args.action == "intents":
+            result = api.write_intents(
+                db, manuscript, add=args.add or (),
+                remove=args.remove_intent or (), primary=args.primary,
+                defer=args.defer, ignore=args.ignore or (),
+                reason=args.reason, prefix=prefix)
+            for change in result["changed"]:
+                print(f"Intent set: {change}.")
+            _print_intent_set(result, "Intents")
+            if result.get("rebills_prefix"):
+                print(ui.yellow(
+                    "  Block A changed, so the next beat re-bills the cached "
+                    "prefix once. A join is cheapest at a replan, which "
+                    "invalidates block A anyway."))
         elif args.action == "status":
             result = api.write_status(db, manuscript, prefix=prefix)
             w = result["writeup"]
@@ -3311,6 +4348,8 @@ def cmd_write(args):
                   f"beat {min(w['cursor'] + 1, len(plan))}/{len(plan)}."
                   if plan else
                   f"Writeup [{w['id'][:11]}] on {w['file']} ({w['status']}) — no plan yet.")
+            _print_intent_set(result, "Intents")
+            _print_newly_in_scope(result)
             if result["current_beat"]:
                 _print_beat_spec(result["current_beat"], label="Current")
             if result["pending_proposal"]:
@@ -3441,6 +4480,7 @@ def cmd_write(args):
             print(f"Writeup [{result['writeup_id'][:11]}] completed — "
                   f"{result['beats_done']} beat(s){unwritten}.")
             _print_marker_warning(result, result["summary_hint"])
+            _print_intent_dispositions(result["intent_dispositions"])
             if result["tallies"]:
                 print("Verdicts: " + ", ".join(
                     f"{k} {v}" for k, v in sorted(result["tallies"].items())))
@@ -4038,11 +5078,29 @@ def cmd_doc(args):
             sys.exit(f"error: {err}")
         try:
             if args.action == "push":
+                # The reader-load manifest is DERIVED, so it is recomputed
+                # here rather than stored: every push writes the current
+                # book, and a push is the only thing that writes it. It
+                # rides along on a single-file push too — one essay changing
+                # can move the whole curve, and a manifest tab that is only
+                # correct after a full push is a tab nobody can trust.
+                from . import manifest as mf
+
+                try:
+                    _mpath, _mrows = mf.refresh(db, manuscript)
+                    print(ui.dim(
+                        f"Manifest recomputed: {len(_mrows)} units, "
+                        f"{sum(len(r['debt']) for r in _mrows)} unmet "
+                        f"assumptions → {mf.FILENAME}"))
+                except Exception as err:   # never fatal to a push
+                    print(ui.dim(f"Manifest not recomputed: {err}"))
                 # One tab per file in a single master Doc; no file argument
                 # pushes the whole manuscript.
                 targets = ([args.name] if args.name
                            else gdocs._reading_order_files(
                                gdocs.manuscript_bridge(manuscript)))
+                if args.name and mf.FILENAME not in targets:
+                    targets.append(mf.FILENAME)
                 normalized_any = False
                 result = None
                 for target in targets:
@@ -4194,11 +5252,28 @@ def cmd_doc(args):
                     print(f"{relpath}: local file is ahead (its tab is "
                           f"unchanged since the last push) — kept local. "
                           f"'doc push {relpath}' refreshes the tab.")
+                for relpath in result.get("marked", []):
+                    print(ui.yellow(
+                        f"MID-SETTLE: {relpath} carries staged "
+                        f"<<old>>{{{{new}}}} forms on disk — untouched. "
+                        f"Pulling would discard the resolve. Finalize it "
+                        f"('filter resolve {relpath}') or put the original "
+                        f"text back ('filter unmark {relpath}')."))
+                for relpath in result.get("sidecar_unparsable", []):
+                    print(ui.yellow(
+                        f"REFUSED: the tab for {relpath} came back with no "
+                        f"table rows at all, and the local file has some — "
+                        f"a Docs export that mangled the table would "
+                        f"destroy the dictionary. Untouched, and --force "
+                        f"does not reach past this. Fix the table in the "
+                        f"Doc (it must stay a table) and pull again."))
                 if result["changed"]:
                     print("Collecting:")
                     cmd_collect(args)
                 elif (not result["conflicts"] and not result["missing"]
-                      and not result.get("local_ahead")):
+                      and not result.get("local_ahead")
+                      and not result.get("marked")
+                      and not result.get("sidecar_unparsable")):
                     scope = (f"Tab for {args.name}" if args.name
                              else "All tabs")
                     print(f"{scope} identical to local files — clean round "
@@ -5217,6 +6292,31 @@ def cmd_dbperf(args):
         print(line)
 
 
+def cmd_usage(args):
+    """Read the always-on usage ledger. Read-only, no network, no LLM, no
+    writes — and it does not open the database, so it is safe against a
+    live workspace mid-flight.
+
+    `--sweep` is the ONE exception and is explicit: the plain reader never
+    sweeps, because a report that silently changes what it is reporting on
+    is not a report, and an implicit sweep would put a transcript parse on
+    a read-only verb."""
+    from . import usage
+
+    workspace = getattr(args, "workspace", None)
+    if args.sweep:
+        swept = usage.sweep_all(workspace, force=True)
+        print(f"swept {len(swept)} live chat session(s)")
+        print()
+    directory = usage.log_dir(workspace)
+    if getattr(args, "json", False):
+        print(json.dumps(usage.read_entries(directory), indent=1))
+        return
+    for line in usage.report(directory, days=args.days, top=args.top,
+                             by=args.by, workspace=workspace):
+        print(line)
+
+
 def cmd_provenance(args):
     """Which chat did this. Read-only, no network, no LLM, no writes —
     safe to run against a live workspace mid-flight."""
@@ -5331,6 +6431,26 @@ def cmd_client_hook(args):
     try:
         workspace = getattr(args, "workspace", None)
         if args.end:
+            # One forced sweep BEFORE the unlink. This is the only place a
+            # chat's TAIL — everything after its last AuthorLM verb — is
+            # ever counted, and the tail of a long session is often its
+            # largest part. `allow_recompute=False`: the discontinuity path
+            # is a full file read and the hook's documented shared
+            # SessionEnd budget is 1.5 s, so this sweep declines that work
+            # and takes the `restart` loss. Nothing is lost permanently —
+            # the checkpoint is left untouched, so the next opportunistic
+            # sweep of this session (a resume) still sees the
+            # discontinuity and does the recompute off the hook's clock.
+            from . import clients as _clients, usage as _usage
+
+            _usage.sweep_session(
+                _clients.Client(engine=claude_code.ENGINE,
+                                session_id=payload.get("session_id"),
+                                transcript_hint=payload.get("transcript_path"),
+                                precision="exact", adapter="claude-code"),
+                workspace=workspace, force=True, allow_recompute=False,
+                final=True)
+            _usage.flush("client-hook session-end")
             claude_code.clear_marker(payload.get("session_id"),
                                      workspace=workspace)
         else:
@@ -5410,14 +6530,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     original_add_parser = sub.add_parser
 
-    # Verbs that send an LLM prompt announce it in --help and point at the
-    # registry, so the words shaping the model are always one command away.
     from .prompt_registry import HELP_NOTE
-    LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
-                 "analyze", "lens", "sweep", "illus", "summarize", "doc",
-                 "belief", "critique", "triage-app",
-                 # `write draft` is the write path's one LLM call.
-                 "write"}
 
     def add_parser(name, *a, **kw):
         kw.setdefault("parents", [common])
@@ -5455,6 +6568,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the paperback edition")
     p.add_argument("--hardcover-isbn", default=None,
                    help="ISBN-13 assigned to the hardcover edition")
+    p.add_argument("--trim-size", default=None, metavar="WxH",
+                   help="print trim size in inches, e.g. 6x9 (the book "
+                        "profile refuses to build without one)")
+    p.add_argument("--bleed", default=None, choices=["yes", "no"],
+                   help="whether the print interior bleeds to the page "
+                        "edge (adds 0.125in to the page on three sides)")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")
@@ -5481,20 +6600,38 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the URL without opening a browser")
     p.set_defaults(func=cmd_triage_app)
 
-    p = sub.add_parser("intent", help="declare/complete/abandon/list writing intents")
-    p.add_argument("action", choices=["declare", "show", "complete",
+    p = sub.add_parser("intent", help="declare/scope/complete/abandon/list "
+                                      "writing intents")
+    p.add_argument("action", choices=["declare", "show", "scope", "complete",
                                       "abandon", "retire", "list"])
     p.add_argument("statement", nargs="?",
                    help="intent statement (declare) or id prefix "
-                        "(show/complete/abandon)")
+                        "(show/scope/complete/abandon)")
     p.add_argument("--outcome", help="outcome note (complete) or reason (abandon)")
+    p.add_argument("--scope", metavar="FILE",
+                   help="declare/scope: the goal applies to this essay only")
+    p.add_argument("--chapter", metavar="OPENER",
+                   help="declare/scope: the goal applies to every essay "
+                        "beneath this toc opener")
+    # NOT `--manuscript`: `-m/--manuscript` is already on every subparser
+    # (the `common` parent, above), and a second registration is an
+    # argparse conflict at parser-build time. `--book-wide` says the same
+    # thing and cannot be mistaken for the manuscript SELECTOR.
+    p.add_argument("--book-wide", dest="manuscript_wide",
+                   action="store_true",
+                   help="declare/scope: the goal applies to the whole book "
+                        "(what an absent scope already means)")
+    p.add_argument("--triage", action="store_true",
+                   help="scope: the one-time sitting — every unscoped active "
+                        "intent with the files its episodes actually touched")
     p.set_defaults(func=cmd_intent)
 
     p = sub.add_parser(
         "critique",
         help="external critique: import a report as proposed items, triage "
              "them, then the essay-by-essay edit pass — run → triage "
-             "--edits → write → (read in Docs) → resolve "
+             "--edits → write → (read in Docs) → resolve; "
+             "'list --decided' reads the past verdicts back "
              "(docs/critique-pass-design.md)")
     p.add_argument("action",
                    choices=["import", "status", "list", "triage",
@@ -5511,7 +6648,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="run: proceed past the preflight gate WITHOUT the "
                         "unconfirmed items (never with them)")
-    p.add_argument("--query", help="show: search critique items by text")
+    p.add_argument("--query",
+                   help="show / list --decided: search critique items by "
+                        "text (statement, reason, or the critic's original)")
+    p.add_argument("--decided", action="store_true",
+                   help="list: the resolved items instead of the pending "
+                        "queue — every past verdict with its reason "
+                        "(narrow with --scope/--verdict/--query)")
+    p.add_argument("--verdict",
+                   choices=["accept", "reject", "revise", "retired"],
+                   help="list --decided: only items answered this way "
+                        "('retired' = accepted once, retired since)")
     p.add_argument("--scope",
                    help="list/triage: only intents scoped to this file; "
                         "'manuscript' = only manuscript-wide items (the "
@@ -5589,11 +6736,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="beat-by-beat co-writing loop: draft → author verdict → append "
              "(docs/autoregressive-writing-design.md)")
     p.add_argument("action",
-                   choices=["start", "plan", "status", "draft", "propose",
-                            "accept", "reject", "learn", "complete",
-                            "abandon", "digest"])
+                   choices=["start", "plan", "intents", "status", "draft",
+                            "propose", "accept", "reject", "learn",
+                            "complete", "abandon", "digest"])
     p.add_argument("params", nargs="*", help="start: <file>")
-    p.add_argument("--intent", help="start: intent id prefix (required)")
+    p.add_argument("--intent", action="append", metavar="ID",
+                   help="start: reach for these intents BY NAME, skipping "
+                        "derivation (repeatable; the first is the primary). "
+                        "Without it the set is derived from the scopes "
+                        "covering the essay")
+    p.add_argument("--add", action="append", metavar="ID",
+                   help="intents: join this intent to the writeup")
+    p.add_argument("--remove", dest="remove_intent", action="append",
+                   metavar="ID",
+                   help="intents: drop it (only while the set is proposed)")
+    p.add_argument("--primary", metavar="ID",
+                   help="intents: the member whose episode carries this "
+                        "writeup's transitions and verdicts")
+    p.add_argument("--defer", metavar="ID",
+                   help="intents: a ratified member this writeup will not "
+                        "serve (--reason required)")
+    p.add_argument("--ignore", action="append", metavar="ID",
+                   help="intents: dismiss a newly-in-scope intent so the "
+                        "flag stops recurring")
     p.add_argument("--new", action="store_true",
                    help="start: create <file>; it does not exist yet "
                         "(requires --after and --style; the one-paragraph "
@@ -5617,7 +6782,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--why", help="propose: which concepts the draft realizes, "
                                  "which precedent it follows (required)")
     p.add_argument("--reason", help="reject: the author's why, verbatim "
-                                    "(required); accept: optional")
+                                    "(required); intents --defer: required; "
+                                    "accept: optional")
     p.add_argument("--replace", action="store_true",
                    help="plan: replace the remaining (unwritten) beats; "
                         "digest: replace the stored digest")
@@ -5678,13 +6844,14 @@ def build_parser() -> argparse.ArgumentParser:
         "lens",
         help="author-defined lenses (_lenses/*.md prompts): add, list, "
              "run <name> <file>, register (external findings on stdin), "
-             "review <n>")
+             "review <n>, push <file> (staged lens edits → Doc forms), "
+             "resolve <file> (read the tab back)")
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
-                            "review"])
+                            "review", "push", "resolve"])
     p.add_argument("name", nargs="?",
-                   help="lens name (add/run/register) or finding index "
-                        "(review)")
+                   help="lens name (add/run/register), finding index "
+                        "(review), or manuscript file (push/resolve)")
     p.add_argument("file", nargs="?", help="manuscript file (run/register)")
     p.add_argument("--accept", action="store_true")
     p.add_argument("--reject", action="store_true")
@@ -5695,12 +6862,91 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_lens)
 
     p = sub.add_parser(
+        "filter",
+        help="author-defined filters (_filters/*.md, TOML front matter): "
+             "add, list, show, run <name> <file> (NO model call by "
+             "default), record, edits, triage, push, settle, status, "
+             "unmark, rollback, abandon",
+        description=(
+            "The filter pass. A LENS reads one essay whole and reports "
+            "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
+            "an edit to each unit, conditioned on what came before.\n\n"
+            "NOTE THE FLAG POLARITY, which is the OPPOSITE of 'write "
+            "draft'. `filter run` makes NO model call: it prints the "
+            "payload for the conversation to draft against. The billed "
+            "path is `--native`, and it needs a [filtering] section that "
+            "the shipped config deliberately does not have. `--dry-run` "
+            "is accepted as a no-op alias for muscle memory.\n\n"
+            "TWO ROADS TO THE AUTHOR'S EYES, and the run picks one by "
+            "which verb it meets first. `filter resolve <essay>` is the "
+            "LOCAL road and the default: the changes are applied (or, "
+            "with --pause, written into the file as <<old>>{{new}} forms "
+            "to read in Obsidian). `filter push <essay>` is the DOC road: "
+            "the same forms go into the essay's tab of the master Doc, "
+            "struck-through and green, the file on disk keeps the OLD "
+            "text, and `filter resolve <essay>` later reads the tab back. "
+            "Local is recommended — its whole state is described by the "
+            "bytes on disk, and the Doc road's is not (a crash mid-recovery "
+            "can leave forms in a tab that nothing on disk records; "
+            "'doc push <essay>' rebuilds the tab from the pristine file). "
+            "Once a run takes a road it keeps it; switching is "
+            "resolve-then-rerun, never a flag. `filter apply [<name>] "
+            "<essay>` is `record` and `push` under one name — the reply "
+            "JSON on stdin, the proposals in the tab, one step. It does "
+            "NOT draft: in chat mode `filter run` makes no model call, the "
+            "assistant answers the payload in the conversation, and no CLI "
+            "process can stand in for that. A partial run records and does "
+            "not push, because the road is chosen once and a half-pushed "
+            "essay has chosen it early."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("action",
+                   choices=["add", "list", "show", "prelude", "run",
+                            "record", "apply", "edits", "triage", "push",
+                            "resolve", "status", "unmark", "rollback",
+                            "abandon"])
+    p.add_argument("name", nargs="?",
+                   help="filter name (add/show/prelude/run); optional "
+                        "elsewhere, to disambiguate two runs on one file")
+    p.add_argument("file", nargs="?", help="the essay (one file per run)")
+    p.add_argument("--window", type=int, default=None,
+                   help="units per reply (default: all remaining)")
+    p.add_argument("--from", type=int, default=None, dest="from_unit",
+                   metavar="N", help="re-open the window at unit N")
+    p.add_argument("--again", action="store_true",
+                   help="run even though this filter already ran on this "
+                        "exact text")
+    p.add_argument("--native", action="store_true",
+                   help="make the billed model call ([filtering] required; "
+                        "absent by design)")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="no-op alias: 'filter run' already makes no call")
+    p.add_argument("--replace", action="store_true",
+                   help="prelude: rewrite the frozen registry (invalidates "
+                        "this run's cached prefix)")
+    p.add_argument("--pause", action="store_true",
+                   help="settle: write the <<old>>{{new}} forms into the "
+                        "file to read in Obsidian instead of applying")
+    p.add_argument("--force", action="store_true",
+                   help="unmark: required on the DOC road, where taking "
+                        "the forms out of the tab destroys any rewording "
+                        "the author did there and nothing else holds it")
+    p.add_argument("--accept", nargs="*", metavar="N")
+    p.add_argument("--reject", nargs="*", metavar="N")
+    p.add_argument("--revise", nargs="*", metavar="N")
+    p.add_argument("--undo", nargs="*", metavar="N")
+    p.add_argument("--reason", help="the author's verbatim words for a "
+                                    "rejection — the next run reads it")
+    p.add_argument("--text", help="the author's own wording for a revision")
+    p.set_defaults(func=cmd_filter)
+
+    p = sub.add_parser(
         "export",
         help="publishing exports: md/docx/epub/pdf built locally (pandoc) "
              "with picked illustrations embedded; settings in "
              "_exports/settings.toml")
     p.add_argument("action",
-                   choices=["show", "set", "md", "docx", "epub", "pdf"])
+                   choices=["show", "set", "check", "md", "docx", "epub",
+                            "pdf"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
@@ -5711,6 +6957,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")
+    p.add_argument("--profile", choices=["book"], default=None,
+                   help="PDF only: 'book' builds a print interior at the "
+                        "manuscript's trim size (book class, mirrored "
+                        "margins with a KDP gutter, running heads, "
+                        "captions under the plates) — no review marks")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(
@@ -5742,6 +6993,8 @@ def build_parser() -> argparse.ArgumentParser:
                "_illustrations/prompts/<slug>.md (tag keeps excerpt ⇢ ref)\n"
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
                "--reason \"…\"   bulk verdicts\n"
+               "  illus import '<fragment>' path.png   bring an image "
+               "made outside AuthorLM into that slot as a candidate\n"
                "  illus versions                  list snapshots of "
                "_illustrations/prompts/ (recovery points before a pull)\n"
                "  illus restore                   restore prompts/ from "
@@ -5750,14 +7003,17 @@ def build_parser() -> argparse.ArgumentParser:
                "snapshot instead of the latest")
     p.add_argument("action",
                    choices=["list", "show", "render", "rerender", "pick",
-                            "prune", "prompt", "scan", "triage",
+                            "import", "prune", "prompt", "scan", "triage",
                             "externalize", "versions", "restore"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
                         "scan: one file (default: all main matter)")
-    p.add_argument("candidate", nargs="?", type=int,
-                   help="candidate number (pick)")
+    p.add_argument("candidate", nargs="?",
+                   help="candidate number (pick), or the image file to "
+                        "bring in (import)")
+    p.add_argument("--caption",
+                   help="import: set the slot's reader-facing caption")
     p.add_argument("-n", "--count", type=int, default=1,
                    help="render: how many candidates to generate")
     p.add_argument("--from", dest="from_n", type=int, metavar="N",
@@ -5977,6 +7233,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how many query shapes per table (default 10)")
     p.set_defaults(func=cmd_dbperf)
 
+    p = sub.add_parser("usage",
+                       help="the usage ledger: estimated API spend, chat "
+                            "consumption, the per-day trend")
+    p.add_argument("--days", type=int, default=7,
+                   help="window to report over (default 7)")
+    p.add_argument("--top", type=int, default=10,
+                   help="how many rows per table (default 10)")
+    p.add_argument("--by", default="purpose|model",
+                   choices=["purpose|model", "client", "purpose", "model",
+                            "day", "verb"],
+                   help="how to partition the API spend table")
+    p.add_argument("--sweep", action="store_true",
+                   help="close the books first: force a chat sweep of "
+                        "every live session before reporting")
+    p.add_argument("--json", action="store_true",
+                   help="emit the raw ledger entries instead of the "
+                        "rendering")
+    p.set_defaults(func=cmd_usage)
+
     p = sub.add_parser("provenance",
                        help="which chat session touched an object")
     p.add_argument("id", nargs="?",
@@ -6058,6 +7333,12 @@ def _dispatch(argv: list[str] | None = None) -> None:
         sys.exit(f"usage: intent {args.action} <statement-or-id>")
     if args.command == "intent" and args.action in ("complete", "abandon"):
         args.id = args.statement
+    if (args.command == "intent" and args.action == "scope"
+            and not args.triage
+            and not (args.scope or args.chapter or args.manuscript_wide)):
+        sys.exit("usage: intent scope <id-prefix> --scope FILE | "
+                 "--chapter OPENER | --book-wide  (or --triage to see the "
+                 "evidence for every unplaced intent)")
     if args.command == "belief" and args.action == "answer" and not (args.id and args.answer):
         sys.exit("usage: belief answer <id-prefix> \"answer text\"")
     if args.command == "belief" and args.action == "retire" and not (args.id and args.reason):
@@ -6071,7 +7352,7 @@ def _dispatch(argv: list[str] | None = None) -> None:
                  "[--guide NAME | --file FILE]")
     import time as _time
 
-    from . import dbperf, tracelog
+    from . import dbperf, tracelog, usage
 
     def _trace(ok: bool, error: str | None = None) -> None:
         tracelog.record(
@@ -6087,8 +7368,17 @@ def _dispatch(argv: list[str] | None = None) -> None:
         # through `_trace`. `dbperf`'s own atexit hook is the backstop.
         # Named by command+action, never raw argv: an intent statement is
         # a positional argument and does not belong in a telemetry log.
-        dbperf.flush(" ".join(
-            str(p) for p in (args.command, getattr(args, "action", None)) if p))
+        label = " ".join(
+            str(p) for p in (args.command, getattr(args, "action", None)) if p)
+        dbperf.flush(label)
+        # The usage ledger's aggregate line, on the same terms and named
+        # by the same label.
+        usage.flush(label)
+        # And the chat sweep: opportunistic, rate-limited to one sweep per
+        # session per [usage] sweep_interval_seconds, and scoped to the
+        # chat that is right now driving AuthorLM. No daemon, no thread,
+        # no cron — between sweeps the cost is one `stat`.
+        usage.sweep_opportunistic(getattr(args, "workspace", None))
 
     # Resolve the client ONCE for this invocation, before the verb runs —
     # the per-invocation stamp, never a per-"current client" ambient read.

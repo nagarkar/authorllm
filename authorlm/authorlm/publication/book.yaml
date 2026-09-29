@@ -1,0 +1,17 @@
+# Print interior — the book profile. Page geometry is NOT here: the trim
+# size and bleed are manuscript properties, and the exporter passes the
+# computed geometry (with the KDP gutter for the page count) as a
+# variable. Everything that is the same for every trim lives below and
+# in book-header.tex.
+pdf-engine: xelatex
+top-level-division: section
+variables:
+  documentclass: book
+  classoption:
+    - twoside
+    - openright
+  fontsize: 11pt
+  linestretch: 1.15
+include-in-header:
+  - pdf-header.tex
+  - book-header.tex

@@ -44,6 +44,7 @@ checks land here as named checks rather than as one-off scripts.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -55,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from authorlm import paths  # noqa: E402
 from authorlm import summaries as sums  # noqa: E402
 from authorlm.api import MARKER, PLACEHOLDER  # noqa: E402
-from authorlm.db import Database  # noqa: E402
+from authorlm.db import Database, loads  # noqa: E402
 from authorlm.llm import VENDOR_KEY_ENV  # noqa: E402
 
 # ------------------------------------------------------------ constants
@@ -66,11 +67,44 @@ BENCH = "testbench"
 BENCH_STYLE = "Bench Plain"
 BENCH_INTENT = "Test bench: exercise the write path against fixed text."
 
+# The bench's whole concept graph, seeded by hand at --setup (§15.22).
+#
+# The bench is registered `--no-extract` because an EXTRACTED graph over
+# it would add triage proposals and model calls to a step that must stay
+# free. A hand-seeded graph adds neither: `concept add` makes no model
+# call, and a declared concept that never appears in the text raises no
+# proposal. What it buys is that `--check pronunciations` has a real
+# derivation to run against instead of an empty one.
+#
+# Four nodes, chosen so every branch of the kind/status rule is exercised
+# and so that TWO of the three graph assertions stop being vacuous:
+# without a retired node and a label-kind node on the bench, "contains no
+# retired name" and "contains no label kind" pass over empty sets and
+# would pass over a completely broken derivation too.
+BENCH_CONCEPTS = (
+    # (name, kind, retire?)
+    ("Figure", "concept", False),          # protected: the plainest case
+    ("Prägnanz", "concept", False),        # protected, and non-ASCII, so
+                                           # F1 has a GRAPH-DERIVED hard
+                                           # term and not only literals
+    ("Objection to ground as nothing",     # NOT protected: a label kind,
+     "objection", False),                  # whose name is a sentence
+    ("Salience", "concept", True),         # NOT protected: retired is
+)                                          # vocabulary deliberately dropped
+
+BENCH_PROTECTED = ("Figure", "Prägnanz")
+BENCH_UNPROTECTED = ("Objection to ground as nothing", "Salience")
+
 # The essay a check rewrites. Deliberately the MIDDLE one, so the
 # before/after drafting context has a neighbour on each side and the
 # summary-freshness gate is exercised rather than skirted.
 TARGET = "02-ground.md"
 
+# `01-figure.md` is a PART OPENER: the other two hang off it. That parent
+# chain is what gives the bench a `chapter` tier at all — without it
+# `scope_chain` is [file, None] and no chapter-scoped intent can ever be
+# derived, so `--check intent-scope` would miss the middle tier entirely.
+# Zero new files, zero new summaries, reading order unchanged.
 TOC = """# Reading order for the test bench (see tools/testbench.py).
 
 [[chapter]]
@@ -78,9 +112,11 @@ file = "01-figure.md"
 
 [[chapter]]
 file = "02-ground.md"
+parent = "01-figure.md"
 
 [[chapter]]
 file = "03-frame.md"
+parent = "01-figure.md"
 """
 
 ESSAYS = {
@@ -115,6 +151,12 @@ of the composition; the rest is arrangement.
 }
 
 FILES = [*ESSAYS, "toc.toml"]
+# Every committed bench file, keyed the way `setup`'s drift check needs
+# it. `ESSAYS` alone was not enough: `setup()` writes only MISSING files,
+# so an existing bench kept its old toc.toml silently and a check that
+# depends on the parent chain would fail with a confusing chapter-tier
+# miss (design-intent-scope RISK R-e).
+FILE_TEXT = {**ESSAYS, "toc.toml": TOC}
 
 PROJECT = paths.project_dir()
 
@@ -171,12 +213,17 @@ def _guard(db: Database, manuscript_dir: Path) -> dict:
 # ------------------------------------------------------- driving the CLI
 
 def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
-        allow_fail: bool = False) -> str:
+        allow_fail: bool = False, stdin_text: str | None = None) -> str:
     """One real `authorlm` invocation, in its own process.
 
     A subprocess and not an in-process `cli.main()` call for two reasons:
     it is the surface the author actually types, and it is the only way
-    to hand a command an environment with no provider keys in it at all."""
+    to hand a command an environment with no provider keys in it at all.
+
+    `stdin_text` is for the verbs whose payload travels on stdin (the
+    beat plan). Without it stdin is DEVNULL, which is what every other
+    call wants: a command that silently read the operator's terminal
+    would hang the check."""
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(PROJECT), env.get("PYTHONPATH", "")) if p)
@@ -189,7 +236,9 @@ def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
     argv = ("--workspace", str(workspace), *argv)
     proc = subprocess.run(
         [sys.executable, str(PROJECT / "main.py"), *argv],
-        cwd=str(PROJECT), env=env, stdin=subprocess.DEVNULL,
+        cwd=str(PROJECT), env=env,
+        **({"input": stdin_text} if stdin_text is not None
+           else {"stdin": subprocess.DEVNULL}),
         capture_output=True, text=True)
     out = proc.stdout + proc.stderr
     if proc.returncode and not allow_fail:
@@ -202,6 +251,18 @@ def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
 
 def _summary_states(db: Database, manuscript: dict) -> dict[str, str]:
     return {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+
+
+def _unseeded_concepts(db: Database, row: dict | None) -> list[tuple]:
+    """The BENCH_CONCEPTS rows not yet in the graph, in declaration
+    order. Idempotent by NAME so a re-run seeds nothing and --setup can
+    report the bench healthy."""
+    if row is None:
+        return list(BENCH_CONCEPTS)
+    have = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ?",
+        (row["id"],))}
+    return [c for c in BENCH_CONCEPTS if c[0] not in have]
 
 
 def _needs_summaries(states: dict[str, str]) -> list[str]:
@@ -224,9 +285,10 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     db = _open(workspace)
     row = _bench_row(db)
     missing_files = [f for f in FILES if not (manuscript_dir / f).exists()]
-    drifted = [f for f in ESSAYS
+    drifted = [f for f in FILE_TEXT
                if (manuscript_dir / f).exists()
-               and (manuscript_dir / f).read_text(encoding="utf-8") != ESSAYS[f]]
+               and (manuscript_dir / f).read_text(encoding="utf-8")
+               != FILE_TEXT[f]]
 
     todo: list[str] = []
     if missing_files:
@@ -253,6 +315,12 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     if stale:
         todo.append(f"build summaries for {', '.join(stale)} "
                     f"(the ONLY step that calls a model)")
+    unseeded = _unseeded_concepts(db, row)
+    if unseeded:
+        todo.append(f"seed {len(unseeded)} bench concept(s) so the "
+                    f"derivation has a graph to run against: "
+                    f"{', '.join(n for n, _k, _r in unseeded)} "
+                    f"(no model call)")
 
     if drifted:
         print(f"note: {', '.join(drifted)} differ(s) from the text in "
@@ -274,8 +342,8 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
     if missing_files:
         manuscript_dir.mkdir(parents=True, exist_ok=True)
         for name in missing_files:
-            body = TOC if name == "toc.toml" else ESSAYS[name]
-            (manuscript_dir / name).write_text(body, encoding="utf-8")
+            (manuscript_dir / name).write_text(FILE_TEXT[name],
+                                               encoding="utf-8")
         print(f"wrote {', '.join(missing_files)}")
         done += 1
 
@@ -300,6 +368,16 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
         _guard(db, manuscript_dir)
         print(cli(workspace, "-m", BENCH, "style", "attach",
                   name, BENCH_STYLE).strip())
+        done += 1
+
+    for name, kind, retire in unseeded:
+        _guard(db, manuscript_dir)
+        print(cli(workspace, "-m", BENCH, "concept", "add", name,
+                  "--kind", kind).strip())
+        if retire:
+            _guard(db, manuscript_dir)
+            print(cli(workspace, "-m", BENCH, "concept", "retire",
+                      name).strip())
         done += 1
 
     states = _summary_states(db, row)
@@ -337,7 +415,18 @@ FENCE_RE = re.compile(r"\A(?P<fence>```+|~~~+)")
 # A markdown line that is NOT plain paragraph prose. Up to three leading
 # spaces still counts as the same block (four makes it a code block,
 # handled separately).
-BLOCK_RE = re.compile(r"\A {0,3}(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||<)")
+# A line that markdown renders as something OTHER than paragraph prose:
+# heading, blockquote, list item, table row, or an HTML block.
+#
+# The HTML case requires a plausible tag start (`<` then a letter, `!`,
+# `/` or `?`), not a bare `<`. CommonMark's HTML-block rules need a tag
+# name too, so a line opening `<<old>>{{new}}` — the pending-change form
+# the filter pass writes into a local file — is an ordinary paragraph
+# and renders as visible text with the angle brackets escaped. Matching a
+# bare `<` classified that form as invisible machinery, which is the
+# exact opposite of what it is and of what `--check filter` must assert.
+BLOCK_RE = re.compile(
+    r"\A {0,3}(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||<[a-zA-Z!/?])")
 
 
 def front_matter(text: str) -> str:
@@ -533,7 +622,747 @@ def check_placeholder(workspace: Path, manuscript_dir: Path, *,
     return report.failed
 
 
-CHECKS = {"placeholder": check_placeholder}
+SCOPE_INTENTS = {
+    "file": "Bench scope check: rewrite 02-ground.md itself.",
+    "chapter": "Bench scope check: tighten every essay under the figure.",
+    "manuscript": "Bench scope check: a standing rule for the whole bench.",
+    "late": "Bench scope check: a goal declared after ratification.",
+}
+SCOPE_PLAN = ('[{"role":"opener","concepts":[],"budget":60},'
+              ' {"role":"close","concepts":[],"budget":60}]')
+
+
+def _intent_ids(db: Database, manuscript: dict) -> dict:
+    """The bench's scope-check intents, by their statement."""
+    found = {}
+    for key, statement in SCOPE_INTENTS.items():
+        row = db.one(
+            "SELECT * FROM declared_intents WHERE manuscript_id = ? "
+            "AND statement = ? AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (manuscript["id"], statement))
+        if row:
+            found[key] = dict(row)
+    return found
+
+
+def _stored_intents(db: Database, manuscript: dict) -> dict:
+    row = db.one("SELECT metadata FROM writeups WHERE manuscript_id = ? "
+                 "AND file = ? AND status = 'active'",
+                 (manuscript["id"], TARGET))
+    return (loads(row["metadata"] if row else None, {})
+            .get("intents") or {})
+
+
+def check_intent_scope(workspace: Path, manuscript_dir: Path) -> int:
+    """a rewrite derives every intent whose scope covers the essay.
+
+    Drives the real CLI over the real database: three intents at the
+    three tiers, `write start` with NO --intent, the freeze at `write
+    plan`, and the newly-in-scope flag. Zero model calls — the whole
+    derive → freeze → flag cycle is deterministic, and the only
+    model-calling step on the bench is summary building in --setup, which
+    this check does not touch."""
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    toc = (manuscript_dir / "toc.toml").read_text(encoding="utf-8")
+    if f'parent = "{sorted(ESSAYS)[0]}"' not in toc:
+        raise BenchRefusal(
+            f"{manuscript_dir / 'toc.toml'} has no parent chain, so no "
+            f"chapter-scoped intent can be derived. The script is the "
+            f"source of truth: delete that file and re-run --setup.")
+    active = db.one(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active'", (manuscript["id"], TARGET))
+    if active:
+        raise BenchRefusal(
+            f"writeup [{active['id'][:11]}] is already active on {TARGET}. "
+            f"This check would fight it for the file. Settle it first — "
+            f"'authorlm -m {BENCH} write abandon --writeup {TARGET}' if it "
+            f"is a leftover.")
+
+    original = target.read_bytes()
+    report = _Report()
+    started = False
+    try:
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["file"], "--scope", TARGET, scrub_keys=True)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["chapter"], "--chapter", sorted(ESSAYS)[0],
+            scrub_keys=True)
+        cli(workspace, "-m", BENCH, "intent", "declare",
+            SCOPE_INTENTS["manuscript"], "--book-wide", scrub_keys=True)
+        ids = _intent_ids(db, manuscript)
+        report("all three intents were declared, one per tier",
+               set(ids) == {"file", "chapter", "manuscript"},
+               f"found {sorted(ids)}")
+
+        _guard(db, manuscript_dir)
+        start_out = cli(workspace, "-m", BENCH, "write", "start", TARGET,
+                        scrub_keys=True)
+        started = True
+        report("write start with NO --intent derives the set rather than "
+               "refusing for a missing flag",
+               "Intents in scope" in start_out, start_out)
+        for tier in ("file", "chapter", "manuscript"):
+            report(f"the {tier}-scoped intent is derived, and labelled "
+                   f"{tier}",
+                   any(line.strip().startswith(tier)
+                       and ids.get(tier, {}).get("id", "?")[:8] in line
+                       for line in start_out.splitlines()),
+                   start_out)
+        report("the file-scoped intent is the primary — most specific tier "
+               "wins, and the writeup's episode hangs off it",
+               any("← primary" in line
+                   and ids["file"]["id"][:8] in line
+                   for line in start_out.splitlines()),
+               start_out)
+
+        _guard(db, manuscript_dir)
+        plan_out = cli(workspace, "-m", BENCH, "write", "plan",
+                       "--writeup", TARGET, scrub_keys=True,
+                       stdin_text=SCOPE_PLAN)
+        # NOT an exact count: this is the author's live bench and any
+        # other book-wide intent they have open is legitimately derived
+        # too. What must be true is that the set is frozen and that all
+        # three tiers of THIS check are in it.
+        report("write plan RATIFIES the set and prints it above the beats",
+               "FROZEN" in plan_out
+               and all(ids[t]["id"][:8] in plan_out
+                       for t in ("file", "chapter", "manuscript")),
+               plan_out)
+        block = _stored_intents(db, manuscript)
+        frozen_ids = {m["id"] for m in block.get("members") or []}
+        report("and the stored state really is 'frozen', with a stamp",
+               block.get("state") == "frozen" and block.get("frozen_at"),
+               str(block))
+
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "intent", "declare", SCOPE_INTENTS["late"],
+            "--scope", TARGET, scrub_keys=True)
+        late = _intent_ids(db, manuscript).get("late") or {}
+        status_out = cli(workspace, "-m", BENCH, "write", "status",
+                         "--writeup", TARGET, scrub_keys=True)
+        report("an intent declared AFTER ratification is reported as newly "
+               "in scope",
+               "newly in scope since ratification" in status_out
+               and late.get("id", "?")[:8] in status_out, status_out)
+        members = {m["id"] for m in
+                   _stored_intents(db, manuscript).get("members") or []}
+        report("...and it did NOT join: the ratified member list is exactly "
+               "what was frozen, and the new intent is not in it",
+               members == frozen_ids and late.get("id") not in members,
+               str(sorted(m[:8] for m in members)))
+        report("no live model call anywhere in the check",
+               "live call" not in (start_out + plan_out + status_out),
+               start_out + plan_out + status_out)
+    finally:
+        if started:
+            _guard(db, manuscript_dir)
+            abandon_out = cli(workspace, "-m", BENCH, "write", "abandon",
+                              "--writeup", TARGET, scrub_keys=True,
+                              allow_fail=True)
+            print(abandon_out.strip())
+            report("write abandon restored the essay byte for byte",
+                   target.read_bytes() == original,
+                   f"{len(original)} bytes before, "
+                   f"{len(target.read_bytes())} after")
+        # The bench must be idempotent for the next run: every intent
+        # this check declared is abandoned, whatever else happened.
+        for intent in _intent_ids(db, manuscript).values():
+            _guard(db, manuscript_dir)
+            cli(workspace, "-m", BENCH, "intent", "abandon",
+                intent["id"][:11], "--outcome", "bench check finished",
+                scrub_keys=True, allow_fail=True)
+        left = _intent_ids(db, manuscript)
+        report("the check left no bench intents behind", not left,
+               str(sorted(left)))
+    return report.failed
+
+
+
+# ------------------------------------------------------ --check filter
+
+# A trivial SEQUENTIAL filter, constant text owned by this script — never
+# the author's own `_filters/`, which this check must not touch.
+TB_FILTER = "tb-dupes"
+TB_FILTER_TEXT = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n'
+    "---\n\n"
+    "# Test-bench duplicate words\n\n"
+    "A filter owned by tools/testbench.py. Flag a word used again too "
+    "soon and propose the wording that removes the repetition without "
+    "removing anything else. Change nothing else in the unit.\n")
+
+
+def _echo_of(paragraph: str) -> str:
+    return " ".join(paragraph.split()[:5])
+
+
+def _units_of(text: str) -> list[str]:
+    from authorlm.passes import paragraphs_of
+
+    return paragraphs_of(text)
+
+
+def _tb_reply(units: list[str], replaces: dict[int, str],
+              echo_override: dict[int, str] | None = None) -> str:
+    entries = []
+    for n, unit in enumerate(units, 1):
+        echo = (echo_override or {}).get(n, _echo_of(unit))
+        if n in replaces:
+            entries.append({"n": n, "echo": echo, "action": "replace",
+                            "new": replaces[n],
+                            "why": "the bench's constant reason"})
+        else:
+            entries.append({"n": n, "echo": echo, "action": "keep"})
+    return json.dumps({"units": entries,
+                       "state": "bench ledger: one line, constant"})
+
+
+def _filter_rows(db: Database, manuscript: dict) -> list[dict]:
+    return [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'filter' AND file = ? ORDER BY origin_id",
+        (manuscript["id"], TARGET))]
+
+
+def _active_run(db: Database, manuscript: dict) -> dict | None:
+    row = db.one(
+        "SELECT * FROM filter_runs WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+        (manuscript["id"], TARGET))
+    return dict(row) if row else None
+
+
+def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
+                       db: Database, manuscript: dict, report) -> None:
+    """The doc transport's share of `--check filter`: an honest, PARTIAL
+    answer (design-filter-doc-settle §6).
+
+    A zero-LLM round trip through a real Google Doc is NOT feasible here,
+    and pretending otherwise would be the vacuous-assertion failure
+    §15.22 already recorded once: it needs interactive OAuth and it
+    mutates a shared document this bench does not own. The bench's
+    non-negotiable rails — provider keys scrubbed from every subprocess,
+    nothing resolved by argument — forbid it outright.
+
+    What IS feasible is every refusal that reads the run's own state,
+    because `filter push` and `filter resolve` both build the Doc bridge
+    LAST, after those refusals. Not one assertion below can reach the
+    network even if the operator's [gdocs] bridge is fully authorized,
+    and that is a property of the ordering rather than of luck.
+
+    Five assertions, each paired with the SAME verb at the OTHER mode so
+    the check is proved to DISCRIMINATE rather than to pass whatever it
+    is handed."""
+    import json as _json
+
+    from authorlm import gdocs as _gdocs
+
+    target = manuscript_dir / TARGET
+    as_found = target.read_bytes()
+    _guard(db, manuscript_dir)
+    cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER, TARGET,
+        "--again", stdin_text="", scrub_keys=True)
+    units = _units_of(target.read_text(encoding="utf-8"))
+    cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+        stdin_text=_tb_reply(units, {
+            2: units[1] + " (the bench doc-mode probe)"}),
+        scrub_keys=True)
+    cli(workspace, "-m", BENCH, "filter", "triage", TARGET, "--accept", "1",
+        stdin_text="", scrub_keys=True)
+    run = _active_run(db, manuscript)
+
+    def _set_mode(mode: str | None) -> None:
+        meta = loads(run.get("metadata"), {}) or {}
+        if mode is None:
+            meta.pop("mode", None)
+        else:
+            meta["mode"] = mode
+        db.update("filter_runs", run["id"], {"metadata": _json.dumps(meta)})
+
+    def _mode_now() -> str | None:
+        row = db.one("SELECT metadata FROM filter_runs WHERE id = ?",
+                     (run["id"],))
+        return (loads(row["metadata"] if row else None, {}) or {}).get("mode")
+
+    try:
+        report("a triaged run has no transport yet — absent is the birth "
+               "value, and a default would lie about a run that has not "
+               "decided where its edits will be read",
+               _mode_now() is None, str(_mode_now()))
+        # (1) The local road is TAKEN by taking it, and does NOT meet the
+        #     doc refusal. This is the discrimination for (4).
+        _guard(db, manuscript_dir)
+        paused = cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
+                     "--pause", stdin_text="", scrub_keys=True)
+        report("'filter resolve --pause' takes the LOCAL road, records the "
+               "transport, and meets no doc-mode refusal — the "
+               "discrimination without which the refusal below proves "
+               "nothing",
+               _mode_now() == "local"
+               and "put its forms in the Doc" not in paused
+               and "Marked" in paused, paused)
+        # (2) A local-mode run refuses `filter push`, by name, on the
+        #     run's own state — no bridge is built to say so.
+        push_local = cli(workspace, "-m", BENCH, "filter", "push", TARGET,
+                         stdin_text="", scrub_keys=True, allow_fail=True)
+        report("a run already on the LOCAL road refuses 'filter push' by "
+               "name, and refuses on state alone: no Doc bridge is built, "
+               "so no token, no consent window and no network are in play",
+               "already took the local road" in push_local
+               and "docs.google.com" not in push_local, push_local)
+        # (3) The same verb at mode='doc' says something DIFFERENT — and
+        #     still never reaches the bridge.
+        _set_mode("doc")
+        push_doc_mode = cli(workspace, "-m", BENCH, "filter", "push",
+                            TARGET, stdin_text="", scrub_keys=True,
+                            allow_fail=True)
+        report("...and the SAME verb on a doc-mode run whose forms are "
+               "already out says the OTHER thing — the refusal reads the "
+               "mode instead of firing at everything",
+               "already out" in push_doc_mode
+               and "already took the local road" not in push_doc_mode
+               and "docs.google.com" not in push_doc_mode, push_doc_mode)
+        # (4) mode='doc' refuses `filter resolve --pause`, by name.
+        pause_doc = cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
+                        "--pause", stdin_text="", scrub_keys=True,
+                        allow_fail=True)
+        report("a doc-mode run refuses 'filter resolve --pause' by name — "
+               "one run's forms half in the Doc and half on disk is the "
+               "state the mode freeze exists to forbid",
+               "put its forms in the Doc" in pause_doc, pause_doc)
+        # (5) `filter status` prints the transport.
+        status = cli(workspace, "-m", BENCH, "filter", "status", TARGET,
+                     stdin_text="", scrub_keys=True)
+        report("'filter status' prints the run's transport and its "
+               "forms-out count, so a run whose forms are sitting in a "
+               "Doc is never invisible from the shell",
+               "transport: doc" in status and "form(s) out" in status,
+               status[-600:])
+        # (6) The DB push guard, in-process, with NO services at all: it
+        #     raises before either is touched, which is exactly why the
+        #     assertion is safe to make here.
+        try:
+            _gdocs.push_doc(db, manuscript, TARGET, service=None,
+                            docs_service=None)
+            refusal = ""
+        except LookupError as err:
+            refusal = str(err)
+        report("with the run's forms out, the DB push guard refuses 'doc "
+               "push' and names 'filter resolve' — the guard that is the "
+               "ONLY one able to see anything when the transport is the "
+               "Doc and the local file is clean",
+               "filter pending forms" in refusal
+               and f"filter resolve {TARGET}" in refusal, refusal)
+    finally:
+        # Clear the transport BEFORE the unmark: the doc branch of
+        # `filter unmark` would want --force and a Doc bridge, and this
+        # run's forms are on disk, not in any tab.
+        _set_mode(None)
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "unmark", TARGET,
+            stdin_text="", scrub_keys=True, allow_fail=True)
+        cli(workspace, "-m", BENCH, "filter", "abandon", TARGET,
+            stdin_text="", scrub_keys=True, allow_fail=True)
+        # Put the bytes back and COLLECT, so the version history agrees
+        # with the disk. A restore without a collect leaves the newest
+        # version describing text that is no longer there, and the next
+        # run's pin check reads that disagreement as author drift.
+        if target.read_bytes() != as_found:
+            target.write_bytes(as_found)
+        report("the doc-mode section left the bench essay exactly as it "
+               "found it", target.read_bytes() == as_found,
+               f"{len(as_found)} bytes before, "
+               f"{len(target.read_bytes())} after")
+
+
+def check_filter(workspace: Path, manuscript_dir: Path, *,
+                 _corrupt=None) -> int:
+    """a filter pass runs, stages, marks and settles with ZERO model calls.
+
+    Drives the real CLI against the real database in the shape `--check
+    placeholder` established: a try/finally that rolls back and restores,
+    byte-for-byte assertions, provider keys scrubbed from every
+    subprocess, and the bench name re-asserted before each mutating step.
+
+    `_corrupt` is a test seam and nothing else: a callable applied to the
+    marked file's text, used by the hermetic suite to prove this check
+    DISCRIMINATES — forms hidden inside an HTML comment must make the
+    visibility assertions FAIL. Production has no caller for it."""
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    active = db.one(
+        "SELECT * FROM writeups WHERE manuscript_id = ? AND file = ? "
+        "AND status = 'active'", (manuscript["id"], TARGET))
+    if active:
+        raise BenchRefusal(
+            f"writeup [{active['id'][:11]}] is already active on {TARGET} "
+            f"— a filter refuses to run on a file a writeup holds, and "
+            f"this check would just be asserting that. Settle it first: "
+            f"'authorlm -m {BENCH} write abandon --writeup {TARGET}'.")
+    if _active_run(db, manuscript):
+        raise BenchRefusal(
+            f"a filter run is already active on {TARGET}. This check "
+            f"would fight it for the file. Settle it ('authorlm -m "
+            f"{BENCH} filter resolve {TARGET}') or drop it ('… filter "
+            f"abandon {TARGET}') first.")
+
+    original = target.read_bytes()
+    report = _Report()
+    started = False
+    try:
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "add", TB_FILTER,
+            stdin_text=TB_FILTER_TEXT, scrub_keys=True)
+
+        # --- 1. the payload: zero calls, four blocks, stable prefix ----
+        _guard(db, manuscript_dir)
+        out1 = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                   TARGET, stdin_text="", scrub_keys=True)
+        started = True
+        out2 = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                   TARGET, stdin_text="", scrub_keys=True)
+        report("filter run made NO live model call — it passes with the "
+               "provider keys scrubbed out of the environment",
+               "live call" not in (out1 + out2), out1[-400:])
+        report("it printed all four blocks with their hashes",
+               all(f"───── block {b} — " in out1 for b in "SABC"),
+               out1[:400])
+        report("a second invocation's blocks S and A hash EXACTLY the "
+               "same — identical stored state, byte-identical prefix",
+               _hash_of(out1, "S") == _hash_of(out2, "S")
+               and _hash_of(out1, "A") == _hash_of(out2, "A"),
+               f"S {_hash_of(out1, 'S')} / {_hash_of(out2, 'S')}; "
+               f"A {_hash_of(out1, 'A')} / {_hash_of(out2, 'A')}")
+
+        units = _units_of(target.read_text(encoding="utf-8"))
+        rewritten = ("The ground is what the figure came out of. It has "
+                     "no shape of its own, which is why it is so easy to "
+                     "mistake for nothing at all.")
+
+        # --- 2. a wrong echo: refused, and NOTHING in the database -----
+        _guard(db, manuscript_dir)
+        bad = _tb_reply(units, {2: rewritten},
+                        echo_override={2: "Not the echo at all"})
+        out = cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+                  stdin_text=bad, scrub_keys=True, allow_fail=True)
+        report("a deliberately wrong echo refuses the whole reply",
+               "echo mismatch" in out, out)
+        run_row = _active_run(db, manuscript)
+        report("...and the refusal is asserted ON THE DATABASE: no "
+               "doc_threads row exists and the run cursor is still 0",
+               not _filter_rows(db, manuscript)
+               and run_row is not None and run_row["cursor"] == 0,
+               f"{len(_filter_rows(db, manuscript))} rows, cursor "
+               f"{run_row['cursor'] if run_row else '?'}")
+
+        # --- 3. a valid reply: old comes from DISK, not from the reply -
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "record", TARGET,
+            stdin_text=_tb_reply(units, {2: rewritten}), scrub_keys=True)
+        rows = _filter_rows(db, manuscript)
+        disk_units = _units_of(target.read_text(encoding="utf-8"))
+        report("proposed_old equals the paragraph READ FROM DISK, byte "
+               "for byte — the harness supplies it, never the reply",
+               len(rows) == 1 and rows[0]["proposed_old"] == disk_units[1],
+               repr(rows[0]["proposed_old"][:80]) if rows else "no rows")
+
+        # --- 4. verdicts: evidence with no episode, reason verbatim ----
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "triage", TARGET,
+            "--accept", "1", scrub_keys=True)
+        ev = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' ORDER BY created_at DESC "
+            "LIMIT 1", (manuscript["id"],))]
+        report("the verdict is a filter_edit evidence row with "
+               "episode_id IS NULL — hygiene is never filed against a goal",
+               ev and ev[0]["episode_id"] is None, ev[:1])
+
+        # --- 5. the pause: the form is VISIBLE markdown on disk --------
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "resolve", TARGET, "--pause",
+            stdin_text="", scrub_keys=True)
+        if _corrupt is not None:
+            target.write_text(_corrupt(target.read_text(encoding="utf-8")),
+                              encoding="utf-8")
+        marked = target.read_text(encoding="utf-8")
+        form = f"<<{disk_units[1]}>>{{{{{rewritten}}}}}"
+        report("the file on disk holds the <<old>>{{new}} form",
+               form in marked, marked[:300])
+        report("the form is NOT inside an HTML comment (the one place a "
+               "reader would never show it)",
+               "<<" not in html_comments(marked), html_comments(marked))
+        report("the form is NOT inside YAML front matter",
+               "<<" not in front_matter(marked), front_matter(marked))
+        report("the form is NOT inside a code fence or an indented code "
+               "block", "<<" not in code_blocks(marked),
+               code_blocks(marked))
+        report("the form survives the strip and renders as a plain "
+               "paragraph — this is what makes it visible in Obsidian",
+               any("<<" in ln for ln in paragraph_lines(marked)),
+               visible_body(marked)[:300])
+
+        # --- 6. the canonicalization, LIVE ----------------------------
+        from authorlm.revisions import read_manuscript_files
+
+        observed = read_manuscript_files(manuscript_dir).get(TARGET, "")
+        report("while marked, every read path still reports the essay's "
+               "ORIGINAL text byte for byte — the canonicalization "
+               "property, asserted live and not only in the suite",
+               observed == original.decode("utf-8"), repr(observed[:160]))
+        status_out = cli(workspace, "-m", BENCH, "summarize", "status",
+                         stdin_text="", scrub_keys=True, allow_fail=True)
+        report("...and 'summarize status' does not report the marked "
+               "essay as changed under it",
+               "<<" not in status_out, status_out[:400])
+
+        # --- 7. finalize: the exact expected bytes --------------------
+        _guard(db, manuscript_dir)
+        cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
+            stdin_text="", scrub_keys=True)
+        final = target.read_text(encoding="utf-8")
+        expected = original.decode("utf-8").replace(disk_units[1],
+                                                    rewritten)
+        report("the finalized text is exactly the original with that one "
+               "unit replaced — byte for byte",
+               final == expected, repr(final[:200]))
+
+        # --- 8. M1: the identical-text refusal fires and names the run -
+        _guard(db, manuscript_dir)
+        out = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
+                  TARGET, stdin_text="", scrub_keys=True, allow_fail=True)
+        report("re-running on the resolved text refuses and names the "
+               "prior run and its tallies",
+               "already ran on this exact text" in out and "--again" in out,
+               out)
+
+        # --- 9. the DOC transport, credential-free ---------------------
+        # Skipped under `_corrupt`, which exists solely to prove the
+        # VISIBILITY assertions above fail on a hidden form. It leaves
+        # the essay wrapped in an HTML comment, and a second run staged
+        # against that is asserting nothing about the transport.
+        if _corrupt is None:
+            _doc_mode_refusals(workspace, manuscript_dir, db, manuscript,
+                               report)
+    finally:
+        if started:
+            _guard(db, manuscript_dir)
+            out = cli(workspace, "-m", BENCH, "filter", "rollback", TARGET,
+                      stdin_text="", scrub_keys=True, allow_fail=True)
+            print(out.strip())
+            if target.read_bytes() != original:
+                target.write_bytes(original)
+            # COLLECT after the restore. `filter run` pins
+            # `_latest_version_id` and does not collect, so a bench left
+            # with history describing text that is no longer on disk
+            # makes the NEXT run's pin check refuse for drift the author
+            # never caused. The restore above always needs this; before
+            # the doc-mode section it happened to be a no-op because the
+            # rollback target's pin was already the original.
+            cli(workspace, "-m", BENCH, "collect", stdin_text="",
+                scrub_keys=True, allow_fail=True)
+            report("filter rollback restored the essay byte for byte",
+                   target.read_bytes() == original,
+                   f"{len(original)} bytes before, "
+                   f"{len(target.read_bytes())} after")
+            for run_row in db.all(
+                    "SELECT * FROM filter_runs WHERE manuscript_id = ? "
+                    "AND file = ? AND status = 'active'",
+                    (manuscript["id"], TARGET)):
+                cli(workspace, "-m", BENCH, "filter", "abandon", TARGET,
+                    stdin_text="", scrub_keys=True, allow_fail=True)
+                break
+        artifact = manuscript_dir / "_filters" / f"{TB_FILTER}.md"
+        if artifact.exists():
+            artifact.unlink()
+    return report.failed
+
+
+# The sixteen live SMSTTD names whose only oddity is a non-ASCII LETTER,
+# and the two whose only non-ASCII character is a curly apostrophe. F1 is
+# a deterministic test, so the bench asserts it against real names rather
+# than invented ones (§15.22 §3.3).
+HARD_SAMPLE = (
+    "Bṛhadāraṇyaka", "Chāndogya", "Cit-Śakti", "Jñāna", "Līlā",
+    "Nāgārjuna", "Nāsadīya Sūkta", "Prakāśa", "Saddharmapuṇḍarīka Sūtra",
+    "Vimarśa", "Böhme", "anattā", "jīvanmukta", "Śūnya-Pūrṇa", "Śūnyatā",
+    "οὐκ ὄν θεός",
+)
+EASY_SAMPLE = ("Noether’s Theorem", "Jung’s Septem Sermones ad Mortuos")
+
+
+def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
+                         _corrupt=None) -> int:
+    """PROTECTED TERMS derives, holds still, and the dictionary parses.
+
+    Read-only: it assembles two payloads and parses a file. Nothing is
+    written, nothing is settled, and there is no try/finally because
+    there is nothing to roll back.
+
+    It runs against the BENCH graph, which `--setup` seeds by hand
+    (BENCH_CONCEPTS), and it asserts the seeded names BY NAME. The first
+    cut asserted only "the protected set is non-empty" against a bench
+    registered `--no-extract`, whose graph is empty by design — so it
+    could never pass on its own, and passed in the hermetic suite only
+    because a `pronunciations.md` written moments earlier supplied a term
+    through list 3. Its two siblings passed VACUOUSLY, over empty sets,
+    and would have passed over a completely broken derivation.
+
+    Reading the author's real graph instead was considered and refused:
+    this script's load-bearing rail is that nothing in it resolves a
+    manuscript by argument, and a live read would have to resolve one
+    nobody named — "the manuscript that is not the testbench" — making
+    the verdict depend on which manuscripts happen to be registered. The
+    live-graph question is answered by the product rather than by this
+    script, and the measurement is recorded: `protected_terms` over the
+    live SMSTTD graph returns 313 nodes / 348 names, which is the
+    design's own figure.
+
+    `_corrupt` is a test seam and nothing else: a callable applied to the
+    dictionary text before it is parsed, used by the hermetic suite to
+    prove this check DISCRIMINATES. The corruptions it applies are the
+    real failure modes rather than invented ones — a table a Docs export
+    mangled into bullet lines (which must FAIL rather than read as an
+    empty dictionary), and two rows for one term (which the parser must
+    report and never delete). Production has no caller for it."""
+    from authorlm import api as _api
+    from authorlm import filtering as _fg
+    from authorlm import pronunciations as _pron
+
+    manuscript_dir = _guard_dir(manuscript_dir)
+    workspace = Path(workspace).expanduser().resolve()
+    db = _open(workspace)
+    if db is None:
+        raise BenchRefusal(f"no workspace database under {workspace} — "
+                           f"run --setup first.")
+    manuscript = _guard(db, manuscript_dir)
+    target = manuscript_dir / TARGET
+    if not target.exists():
+        raise BenchRefusal(f"{target} is missing — run --setup.")
+    text = target.read_text(encoding="utf-8")
+    report = _Report()
+
+    dict_path = manuscript_dir / _pron.FILENAME
+    raw = (dict_path.read_text(encoding="utf-8")
+           if dict_path.exists() else "")
+    if _corrupt is not None:
+        raw = _corrupt(raw)
+
+    if _unseeded_concepts(db, manuscript):
+        raise BenchRefusal(
+            "the bench graph is not seeded — run --setup. Without it the "
+            "derivation runs over an empty graph and every assertion "
+            "below would pass by saying nothing.")
+    terms = _fg.protected_terms(db, manuscript, TARGET, text, raw)
+    missing = [n for n in BENCH_PROTECTED if n not in terms["all"]]
+    report("the protected set carries the bench's vocabulary kinds BY "
+           "NAME — a filter with an empty list is a filter that was told "
+           "nothing, and 'non-empty' alone would pass on the wrong list",
+           not missing,
+           "missing: " + ", ".join(missing)
+           + f" (set has {len(terms['all'])})")
+    retired = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "status = 'retired'", (manuscript["id"],))}
+    live = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "status != 'retired'", (manuscript["id"],))}
+    report("the bench really HAS a retired name for that to be about — "
+           "an assertion over an empty set passes on a broken derivation",
+           bool(retired - live), sorted(retired))
+    leaked = sorted((retired - live) & set(terms["all"]))
+    report("...and NO retired name is in the set — a retired name is "
+           "vocabulary the author deliberately abandoned",
+           not leaked, ", ".join(leaked[:10]))
+    labelled = {r["name"] for r in db.all(
+        "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND "
+        "kind IN ('objection', 'example', 'question', 'syllogism')",
+        (manuscript["id"],))}
+    report("the bench really HAS a label-kind node too, for the same "
+           "reason", bool(labelled), sorted(labelled))
+    sentences = sorted(labelled & set(terms["all"]))
+    report("...and NO label kind is in the set — those names are "
+           "sentences, and a list that protects the ordinary English "
+           "inside them protects nothing",
+           not sentences, ", ".join(sentences[:10]))
+
+    first = _fg._protected_block(terms)
+    second = _fg._protected_block(
+        _fg.protected_terms(db, manuscript, TARGET, text, raw))
+    report("the block is BYTE-STABLE across two assemblies on identical "
+           "stored state — no counts, no ids, no timestamps",
+           first == second,
+           f"{len(first)} vs {len(second)} characters")
+
+    graph_hard = sorted(t for t in terms["all"] if _fg.is_hard_to_say(t))
+    report("F1 runs over a name the DERIVATION produced, not only over "
+           "the literals below — the bench seeds one non-ASCII concept "
+           "so the floor is exercised end to end",
+           graph_hard == ["Prägnanz"], graph_hard)
+    admitted = [t for t in HARD_SAMPLE if _fg.is_hard_to_say(t)]
+    refused = [t for t in EASY_SAMPLE if _fg.is_hard_to_say(t)]
+    report(f"F1 admits all {len(HARD_SAMPLE)} non-ASCII-LETTER names",
+           len(admitted) == len(HARD_SAMPLE),
+           "missed: " + ", ".join(t for t in HARD_SAMPLE
+                                  if t not in admitted))
+    report("F1 refuses the two whose only non-ASCII character is a curly "
+           "apostrophe — letters carry phonetic information and "
+           "punctuation does not",
+           not refused, ", ".join(refused))
+
+    if not raw.strip():
+        report(f"no {_pron.FILENAME} yet — an absent dictionary parses as "
+               f"empty with no error, which is the first-run case", True)
+    else:
+        rows, warnings = _pron.parse(raw)
+        report(f"{_pron.FILENAME} parses with no warnings "
+               f"({len(rows)} row(s))",
+               bool(rows) and not warnings,
+               f"{len(rows)} rows; " + "; ".join(warnings[:5]))
+        report("...and every term it carries is in the protected set — "
+               "a term the author ruled on aloud is by construction a "
+               "term of art",
+               all(t in terms["all"] for t in _pron.terms(raw)),
+               ", ".join(t for t in _pron.terms(raw)
+                         if t not in terms["all"]))
+    return report.failed
+
+
+def _hash_of(out: str, name: str) -> str:
+    marker = f"───── block {name} — "
+    if marker not in out:
+        return f"(no block {name})"
+    return out.split(marker, 1)[1].split("sha256 ", 1)[1].split(
+        "\n", 1)[0].strip()
+
+
+CHECKS = {"placeholder": check_placeholder,
+          "intent-scope": check_intent_scope,
+          "filter": check_filter,
+          "pronunciations": check_pronunciations}
 
 
 # ------------------------------------------------------------------ main

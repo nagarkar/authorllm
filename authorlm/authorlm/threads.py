@@ -99,35 +99,107 @@ def render_insertion(new: str) -> str:
     return f"{{{{{new}}}}}"
 
 
+# Critique insertions are paragraph forms (compose joins with blank
+# lines; head inserts sit at the start of the marked text). Inline
+# `{{…}}` is author prose once a manuscript has been pushed into a tab.
 _INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
                              re.DOTALL)
+# Start-of-text insertions include the following blank-line separator
+# so dropping them leaves no leading `\n\n` residue (compose may stack
+# several head inserts before the first live paragraph).
+_INSERTION_START = re.compile(
+    r"\A\s*\{\{(?P<new>.*?)\}\}(?:(?:\s*\n)+|\Z)", re.DOTALL)
+
+_REPLACE_MARKER = re.compile(r"<<|>>")
 
 
 def _collapse(text: str, keep: str) -> str:
     """Resolve every pending form to one half. Replaces first (their
-    {{new}} halves are consumed by the PENDING match, so the INSERTION
-    lookbehind never sees them), then insertions. Dropping an insertion
-    also drops its paragraph separator, so the OLD text is byte-clean;
-    keeping one leaves the paragraph in place."""
+    {{new}} halves are consumed by the PENDING match), then
+    paragraph-scoped insertions only.
+
+    Bare inline `{{…}}` is left alone. Author prose (`{{title}}`, set
+    notation, TeX grouping) reaches Doc tabs through `doc push`, and the
+    older bare-INSERTION collapse deleted it on every pull/reconcile —
+    silently, because local still matched `pushed_hash` while the
+    stripped tab looked like a Doc-only edit."""
     text = PENDING.sub(lambda m: m.group(keep), text)
     if keep == "old":
-        text = _INSERTION_PARA.sub("", text)
-    return INSERTION.sub(lambda m: m.group("new") if keep == "new" else "",
-                         text)
+        while True:
+            nxt = _INSERTION_START.sub("", text, count=1)
+            if nxt == text:
+                break
+            text = nxt
+        return _INSERTION_PARA.sub("", text)
+    while True:
+        m = _INSERTION_START.match(text)
+        if not m:
+            break
+        # Keep a blank-line separator when more content follows so the
+        # unwrapped insertion stays its own paragraph.
+        rest = text[m.end():]
+        text = m.group("new") + ("\n\n" + rest if rest else "")
+    return _INSERTION_PARA.sub(lambda m: "\n\n" + m.group("new"), text)
 
 
 def strip_pending(text: str) -> tuple[str, list[str]]:
-    """Canonical text for local files: pending spans collapse to their
-    OLD half (insertions vanish). Returns (canonical, warnings).
-    Unbalanced or stray markers are never guessed at — the span is left
-    intact and warned about, to be settled in conversation."""
+    """Canonical text from a Doc tab: replace forms collapse to their
+    OLD half; critique paragraph insertions vanish; author `{{…}}`
+    prose is left intact. Returns (canonical, warnings).
+
+    Stray `<<` / `>>` surviving the collapse are warned about rather
+    than guessed at. Surviving `{{` / `}}` are not warned about — they
+    are ordinary manuscript content once the tab holds a pushed essay."""
     stripped = _collapse(text, "old")
     warnings = []
-    if _ANY_MARKER.search(stripped):
+    if _REPLACE_MARKER.search(stripped):
         warnings.append(
-            "stray or unbalanced pending-change markers (<<, >>, {{, }}) "
+            "stray or unbalanced pending-change markers (<<, >>) "
             "— left untouched; fix in the Doc or ask in chat")
     return stripped, warnings
+
+
+def strip_replacements(text: str) -> tuple[str, list[str]]:
+    """`strip_pending` narrowed to the REPLACE form alone.
+
+    The canonicalizer for LOCAL files (filter-pass design §2.3), and it is
+    deliberately not `strip_pending`.
+
+    Local observation must never run the Doc insertion strip: a filter
+    never stages an insertion, and `{{title}}` / `{{a, b}}` / Handlebars
+    samples in an essay ABOUT templating are the author's own prose.
+    Running a broad insertion collapse over local files deleted every
+    one of them from what the system observes — silently, with no
+    warning, because once they were gone there was nothing left to warn
+    about.
+
+    Doc pull/reconcile uses `strip_pending`, which still drops
+    paragraph-scoped critique insertions but now leaves inline author
+    braces alone for the same reason (they arrive in the tab via push).
+
+    So: only `<<old>>{{new}}` collapses here, and only to its old half.
+    Stray `<<` or `>>` surviving the collapse is an unbalanced replace
+    form and is warned about rather than guessed at. A surviving `{{` or
+    `}}` is NOT warned about: it is not this grammar's business, and a
+    warning on every templating example would be noise that trained the
+    author to ignore the warnings that matter."""
+    stripped = PENDING.sub(lambda m: m.group("old"), text)
+    warnings = []
+    if _REPLACE_MARKER.search(stripped):
+        warnings.append(
+            "stray or unbalanced pending-change markers (<<, >>) — left "
+            "untouched; settle them in the file or ask in chat")
+    return stripped, warnings
+
+
+def has_replacement(text: str) -> bool:
+    """True when the text carries a `<<old>>{{new}}` form.
+
+    The predicate `staging.is_marked` is built on, and narrow for the same
+    reason `strip_replacements` is: a file containing `{{title}}` is not
+    mid-settle, and treating it as such refused its Doc push forever with
+    a message about a resolve that does not exist."""
+    return PENDING.search(text) is not None
 
 
 def approved_text(text: str) -> str:

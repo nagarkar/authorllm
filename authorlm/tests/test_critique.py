@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from authorlm import concepts, critique, sessions, styles  # noqa: E402
+from authorlm.critique import tally as crit_tally  # noqa: E402
 from authorlm.db import (Database, ko_fields, loads, PROVENANCE_TABLES)  # noqa: E402
 
 PASSED = 0
@@ -440,6 +441,47 @@ def test_import_and_triage(root: Path) -> None:
                  "AND evidence_type = 'critique_triage' AND signal = 'modified' "
                  "AND target LIKE '%→%'", (mid,))["n"] == 1)
 
+    settled = critique.decided(db, mid)
+    verdicts = {d["item"]["statement"]: d["verdict"] for d in settled}
+    check("decided() reads every verdict back — accept, reject, revise, "
+          "intents and elements alike",
+          crit_tally(settled) == {"accept": 2, "reject": 2, "revise": 1})
+    check("a rejected intent carries the author's reason back out",
+          [d["reason"] for d in settled if d["verdict"] == "reject"
+           and d["kind"] == "intent"]
+          == ["The exposition is deliberate; readers need it."])
+    check("a rejected element's reason comes from its metadata",
+          [d["reason"] for d in settled if d["verdict"] == "reject"
+           and d["kind"] == "element"] == ["Too broad as law."])
+    revision = [d for d in settled if d["verdict"] == "revise"][0]
+    check("a modified acceptance stays in the list under the author's "
+          "wording, with the critic's original as revised_from",
+          revision["revised_from"] == "Explain the Anagramma materially."
+          and verdicts["Explain the Anagramma in the Recapitulation only."]
+          == "revise")
+    check("nothing still proposed leaks into the decided list",
+          all(d["item"]["status"] != "proposed" for d in settled))
+    check("--verdict narrows to one answer",
+          {d["verdict"] for d in critique.decided(db, mid, verdict="reject")}
+          == {"reject"})
+    check("--query matches the reason, not only the statement",
+          [d["item"]["statement"]
+           for d in critique.decided(db, mid, query="deliberate")]
+          == ["Cut repeated exposition by 20 to 25 percent."])
+    check("--scope narrows to one essay's chain (elements are global law "
+          "and stay)",
+          {d["kind"] for d in
+           critique.decided(db, mid, scope="preface.md")} == {"intent", "element"})
+
+    author_own = ko_fields("di")
+    author_own.update(manuscript_id=mid, statement="My own retired plan.",
+                      status="rejected", outcome="changed my mind",
+                      scope=None, source_id=author)
+    db.insert("declared_intents", author_own)
+    check("the author's own settled intents are not critique verdicts",
+          "My own retired plan."
+          not in {d["item"]["statement"] for d in critique.decided(db, mid)})
+
     tallies = critique.status(db, mid)[0]
     check("status tallies reflect the verdicts",
           tallies["intents"] == {"proposed": 0, "accepted": 1, "rejected": 1}
@@ -584,6 +626,74 @@ def test_numbered_bulk_triage(root: Path) -> None:
     check("out-of-range number errors instead of guessing", ok)
 
 
+def test_cross_source_dedupe(root: Path) -> None:
+    print("cross-source dedupe on import:")
+    db = Database(root / "dedupe.db")
+    mid = "ms-dedupe"
+    guide = ko_fields("sg")
+    guide.update(manuscript_id=mid, name="house", parent=None)
+    db.insert("style_guides", guide)
+
+    first = critique.import_manifest(db, mid, {
+        "source": {"name": "First Review"},
+        "items": [
+            {"kind": "intent", "unit": "Recapitulation", "ordinal": 1,
+             "text": "Cut the section by *at least half*.",
+             "scope": "recapitulation.md"},
+            {"kind": "intent", "unit": "Recapitulation", "ordinal": 2,
+             "text": "Explain the Anagramma materially.",
+             "scope": "recapitulation.md"},
+            {"kind": "style_element", "unit": "Rules", "ordinal": 1,
+             "text": "Separate claim levels typographically.",
+             "aspect": "rhetoric", "guide": "house"},
+        ]})
+    ruled = critique.pending(db, mid, scope="recapitulation.md")["intents"][0]
+    critique.reject_intent(db, mid, ruled, "The length is deliberate.")
+
+    second = critique.import_manifest(db, mid, {
+        "source": {"name": "Second Review"},
+        "items": [
+            # restates the REJECTED item, with markdown/case drift only:
+            {"kind": "intent", "unit": "Recap revisited", "ordinal": 1,
+             "text": "Cut the section by at least HALF.",
+             "scope": "recapitulation.md"},
+            # restates the still-proposed item verbatim:
+            {"kind": "intent", "unit": "Recap revisited", "ordinal": 2,
+             "text": "Explain the Anagramma materially.",
+             "scope": "recapitulation.md"},
+            # restates the proposed style element:
+            {"kind": "style_element", "unit": "Rules again", "ordinal": 1,
+             "text": "Separate claim levels **typographically**.",
+             "aspect": "rhetoric", "guide": "house"},
+            # genuinely new:
+            {"kind": "intent", "unit": "Recap revisited", "ordinal": 3,
+             "text": "End by opening the question of awareness.",
+             "scope": "recapitulation.md"},
+        ]})
+    check("a later report cannot re-litigate or double earlier items",
+          second["intents"] == 1 and second["style_laws"] == 0
+          and second["skipped"] == 3 and len(second["duplicates"]) == 3)
+    check("duplicates name the existing item, its status, and its source",
+          {(d["status"], d["source"]) for d in second["duplicates"]}
+          == {("rejected", "First Review"), ("proposed", "First Review")}
+          and all(d["existing_id"] for d in second["duplicates"]))
+    check("the rejected item's verdict stands (no second proposed copy)",
+          db.one("SELECT COUNT(*) AS n FROM declared_intents WHERE "
+                 "manuscript_id = ? AND statement LIKE '%at least%'",
+                 (mid,))["n"] == 1)
+    third = critique.import_manifest(db, mid, {
+        "source": {"name": "Third Review"},
+        "items": [
+            {"kind": "intent", "unit": "U", "ordinal": 1,
+             "text": "A brand new instruction.", "scope": None},
+            {"kind": "intent", "unit": "U2", "ordinal": 1,
+             "text": "A *brand new* instruction!", "scope": None},
+        ]})
+    check("duplicates within one manifest collapse to a single item",
+          third["intents"] == 1 and third["skipped"] == 1
+          and first["intents"] == 2)
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-critique-"))
     try:
@@ -591,6 +701,7 @@ def main_test() -> None:
         test_fresh_db_provenance(root)
         test_parse_units()
         test_import_and_triage(root)
+        test_cross_source_dedupe(root)
         test_shell_history(root)
         test_terminal_wrap()
         test_numbered_bulk_triage(root)

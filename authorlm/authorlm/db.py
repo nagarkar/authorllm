@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS manuscripts (
     author TEXT NOT NULL DEFAULT '',
     copyright_owner TEXT NOT NULL DEFAULT '',
     paperback_isbn TEXT NOT NULL DEFAULT '',
-    hardcover_isbn TEXT NOT NULL DEFAULT ''
+    hardcover_isbn TEXT NOT NULL DEFAULT '',
+    trim_width REAL NOT NULL DEFAULT 0,
+    trim_height REAL NOT NULL DEFAULT 0,
+    bleed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS manuscript_versions (
@@ -210,7 +213,7 @@ CREATE TABLE IF NOT EXISTS knowledge_proposals (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
     kind TEXT NOT NULL,           -- note_update | revival | edge_reproposal | belief_revival
-    target TEXT NOT NULL,         -- id of the settled object the proposal is against
+    target TEXT NOT NULL,         -- id of the resolved object the proposal is against
     payload TEXT NOT NULL,        -- JSON: current vs proposed
     content_hash TEXT NOT NULL,   -- dedupe: a dismissed proposal never returns verbatim
     source TEXT NOT NULL DEFAULT 'extraction',
@@ -247,9 +250,14 @@ CREATE TABLE IF NOT EXISTS doc_comments (
 CREATE TABLE IF NOT EXISTS doc_threads (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
-    origin_type TEXT NOT NULL,    -- author_comment | critique  (design §6.1)
-    origin_id TEXT NOT NULL,      -- Drive comment id | critique proposal ref
-                                  -- (pass id + ordinal); the thread's join key
+    origin_type TEXT NOT NULL,    -- author_comment | critique | filter  (and
+                                  -- `lens` when a lens finding starts carrying
+                                  -- a proposal — filter-pass design §2.4's
+                                  -- deferred contract). The PRODUCER at the
+                                  -- finding→edit door (§2.1).
+    origin_id TEXT NOT NULL,      -- Drive comment id | owner:file:ordinal
+                                  -- (pass or filter run id + ordinal); the
+                                  -- thread's join key
     file TEXT NOT NULL,           -- relpath of the tab the thread lives in
     anchor_quote TEXT,            -- the span the author's comment anchors
     proposed_old TEXT,            -- exact text to be replaced (verbatim law);
@@ -352,6 +360,29 @@ CREATE TABLE IF NOT EXISTS critique_passes (
                                   -- manuscript_versions.id (pre-pass pin, set
                                   -- at diff-write; rollback target)
     status TEXT NOT NULL DEFAULT 'active'   -- active | completed | abandoned
+);
+
+-- One application of one FILTER to one file (filter-pass design §1.7).
+-- A filter run is not bound to a writeup, an intent, a critique pass or a
+-- session, so it has no host row to hang metadata off: it gets its own
+-- table rather than corrupting critique_passes' state machine. No index
+-- (§15.17's discipline); dbperf is the trigger if the tables ever grow.
+CREATE TABLE IF NOT EXISTS filter_runs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id       TEXT NOT NULL,
+    filter              TEXT NOT NULL,   -- the artifact's name (_filters/<name>.md)
+    class               TEXT NOT NULL,   -- sequential | global, FROZEN at run start
+    file                TEXT NOT NULL,   -- relpath; exactly one file per run
+    source_version_id   TEXT,            -- manuscript_versions.id pinned at start:
+                                         -- the text the units were read from, and
+                                         -- the rollback target
+    unit_count          INTEGER NOT NULL DEFAULT 0,   -- units at pin time
+    cursor              INTEGER NOT NULL DEFAULT 0,   -- units recorded so far
+    state               TEXT,            -- opaque carried text (sequential)
+    registry            TEXT,            -- opaque frozen text (global prelude)
+    result_version_id   TEXT,            -- manuscript_versions.id produced at resolve
+    status              TEXT NOT NULL DEFAULT 'active'
+                                         -- active | settled | abandoned
 );
 
 CREATE TABLE IF NOT EXISTS triage_runs (
@@ -522,6 +553,19 @@ class Database:
         if "hardcover_isbn" not in manuscript_columns:
             self.conn.execute(
                 "ALTER TABLE manuscripts ADD COLUMN hardcover_isbn TEXT NOT NULL DEFAULT ''"
+            )
+        # Print geometry (the book profile): trim size in inches, and
+        # whether the interior bleeds. Manuscript properties, like the
+        # ISBNs — a trim size belongs to the edition, not to an export run.
+        if "trim_width" not in manuscript_columns:
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN trim_width REAL NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN trim_height REAL NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN bleed INTEGER NOT NULL DEFAULT 0"
             )
         if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(

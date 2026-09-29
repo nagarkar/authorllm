@@ -293,7 +293,7 @@ def main_test() -> None:
         print("drafting context (§12.4 item 1 — the L1 glue) with LOUD "
               "coverage reporting (item 4 — informational, never blocking):")
         ctx = sums.drafting_context(db, manuscript, "alpha.md")
-        check("BEFORE holds the settled prefix in reading order and AFTER "
+        check("BEFORE holds the resolved prefix in reading order and AFTER "
               "the upcoming essays, each entry labeled with its file",
               ctx.index("BEFORE") < ctx.index("[title.md]")
               < ctx.index("[part1.md]") < ctx.index("AFTER")
@@ -1021,14 +1021,22 @@ def main_test() -> None:
             cli_main(["--workspace", str(ws), "prompts", "show", "summarizer"])
         check("'prompts show' prints the prompt text",
               "MOVES:" in buf.getvalue())
-        for verb in ("summarize", "extract", "guide", "illus", "critique"):
+        # The REAL list, not a hardcoded five of it. A new LLM verb added
+        # to cli.LLM_VERBS was silently unchecked here, and the closing
+        # `check(..., True)` asserted nothing at all — it counted a pass
+        # whatever the loop above had found.
+        from authorlm.cli import LLM_VERBS
+
+        missing = []
+        for verb in sorted(LLM_VERBS):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
                 cli_main([verb, "--help"])
-            assert "authorlm prompts" in buf.getvalue(), \
-                f"{verb} --help lacks the LLM-prompt note"
-        check("every LLM-using verb's --help points at the prompt registry",
-              True)
+            if "authorlm prompts" not in buf.getvalue():
+                missing.append(verb)
+        check("every LLM-using verb's --help points at the prompt "
+              "registry — every verb in cli.LLM_VERBS, not a sample",
+              not missing, f"missing the note: {missing}")
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

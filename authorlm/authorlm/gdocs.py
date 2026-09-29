@@ -30,6 +30,7 @@ from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
                     split_prompt_embeds, strip_dangling)
 from .revisions import iter_manuscript_paths, strip_embed_lines
+from .staging import is_marked as staging_is_marked
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 GDOC_MIME = "application/vnd.google-apps.document"
@@ -38,10 +39,161 @@ MARKDOWN_MIME = "text/markdown"
 
 # ------------------------------------------------------------- normalizer
 
-_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|])")
+_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
+# CommonMark thematic break: ≥3 of *, -, or _ with optional spaces
+# between, ≤3 leading spaces. Must run BEFORE _BULLET — a spaced
+# `* * *` break would otherwise become `- * *` (the bullet rule eats
+# the first `* `) and push_doc would write that corruption to disk.
+_THEMATIC_BREAK = re.compile(
+    r"^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$",
+    re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
+_TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
+_FOOTNOTE_SYNTAX = re.compile(r"\[\^")
+
+
+# ------------------------------------------------------------- code fences
+#
+# Fenced code blocks (``` / ~~~) are opaque to the normalizer for the
+# same reason math is: their bytes are intentional examples, not prose
+# the Doc bridge is free to canonicalize. Without lifting them, the
+# prose rules rewrite the fence body in place — `*` bullets become `-`,
+# `\*` loses its backslash, `| :--- |` alignment colons vanish — and
+# `push_doc` writes that corruption back to the local manuscript
+# whenever normalize differs from disk. Lifted before math so a fence
+# that *shows* TeX is preserved byte-for-byte too.
+_FENCE_OPEN = re.compile(r"^([`~]{3,})")
+_FENCE_SENTINEL = "\x00F%d\x00"
+_FENCE_SENTINEL_RE = re.compile(r"\x00F(\d+)\x00")
+
+
+def _lift_fences(text: str) -> tuple[str, list[str]]:
+    """Replace each fenced code block with a sentinel; return (text, spans).
+    Unclosed fences consume through EOF (CommonMark)."""
+    lines = text.split("\n")
+    out: list[str] = []
+    spans: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        marker = m.group(1)
+        ch, n = marker[0], len(marker)
+        block = [lines[i]]
+        i += 1
+        while i < len(lines):
+            block.append(lines[i])
+            close = _FENCE_OPEN.match(lines[i])
+            # Closing fence: same char, at least as long, no info string.
+            if (close and close.group(1)[0] == ch
+                    and len(close.group(1)) >= n
+                    and lines[i].strip() == close.group(1)):
+                i += 1
+                break
+            i += 1
+        spans.append("\n".join(block))
+        out.append(_FENCE_SENTINEL % (len(spans) - 1))
+    return "\n".join(out), spans
+
+
+def _restore_fences(text: str, spans: list[str]) -> str:
+    return _FENCE_SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
+
+
+# ------------------------------------------------------------- math spans
+#
+# TeX math — $…$ inline, $$…$$ display (docs/math-and-physics-guidelines.md)
+# — is opaque to the normalizer: every backslash inside it is content,
+# so the Docs-export escape strip that is right for prose would gut a
+# `\\` row break or a `\{` brace. Spans are lifted out before the prose
+# rules run and put back after; only display layout is canonicalized
+# (one physical line — the Doc reflows a block to that anyway).
+_DISPLAY_MATH = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_INLINE_MATH = re.compile(
+    r"(?<![\\$])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?![\d$])")
+_MATH_SENTINEL = "\x00M%d\x00"
+_SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
+
+
+def map_math(text: str, fn) -> str:
+    """fn over the inside of every math span, delimiters excluded."""
+    text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
+    return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
+
+
+def _lift_math(text: str) -> tuple[str, list[str]]:
+    spans: list[str] = []
+
+    def display(m: re.Match) -> str:
+        spans.append("$$ " + " ".join(m.group(1).split()) + " $$")
+        return _MATH_SENTINEL % (len(spans) - 1)
+
+    def inline(m: re.Match) -> str:
+        spans.append(m.group(0))
+        return _MATH_SENTINEL % (len(spans) - 1)
+
+    text = _DISPLAY_MATH.sub(display, text)
+    # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
+    # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
+    # normalized bytes back to disk, so the damage is permanent. Keep
+    # the remnant opaque (byte-identical aside from the file's trailing
+    # newline, which normalize re-adds) until a closer exists.
+    if "$$" in text:
+        at = text.index("$$")
+        head, tail = text[:at], text[at:]
+        head = _INLINE_MATH.sub(inline, head)
+        spans.append(tail.rstrip("\n"))
+        return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
+    return _INLINE_MATH.sub(inline, text), spans
+
+
+def _restore_math(text: str, spans: list[str]) -> str:
+    return _SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
+
+
+_MATH_ACTIVE = set("*_<>~|#[]`")
+
+
+def escape_math(markdown: str) -> str:
+    r"""Math spans for Google's markdown importer, which consumes one
+    backslash escape from every punctuation character it meets: a `\\`
+    row break, `\{`, `\|`, `\,` all lose their backslash, and bare `_`,
+    `*`, `<` can read as emphasis or HTML. Doubling every backslash and
+    escaping the markdown-active characters hands back exactly what was
+    sent (measured 2026-09-02). Apply ONLY to bytes handed to the
+    importer, exactly like escape_footnotes; the tab shows the TeX."""
+    def esc(body: str) -> str:
+        return "".join("\\\\" if c == "\\" else
+                       "\\" + c if c in _MATH_ACTIVE else c for c in body)
+    return map_math(markdown, esc)
+
+
+def unescape_export_math(markdown: str) -> str:
+    r"""Docs-export backslash escapes inside math spans — `\\frac` →
+    `\frac`, `\_` → `_`, `\=` → `=` (a real TeX accent, which would
+    corrupt every equation with an equals sign). Pull-side only:
+    normalize_markdown leaves math alone because on a local file every
+    backslash is TeX."""
+    return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
+
+
+def escape_footnotes(markdown: str) -> str:
+    """Pandoc footnote syntax — [^X1] references and [^X1]: definitions —
+    must reach the Doc as LITERAL text, matching the manuscript convention
+    the author reads in the tabs. Google's markdown importer consumes the
+    syntax, and the tab transplant then drops whatever it made of it
+    (it-e63eabd58b11: every footnote silently lost on push). A
+    backslash-escaped bracket imports as a literal bracket, and
+    normalize_markdown's _ESCAPE strips the backslash on export, so the
+    push→pull round trip stays byte-clean against the unescaped hash.
+    Apply ONLY to bytes handed to a markdown import, never to the text
+    that is hashed or written locally."""
+    return _FOOTNOTE_SYNTAX.sub(r"\\[^", markdown)
 
 
 def normalize_markdown(text: str) -> str:
@@ -50,9 +202,21 @@ def normalize_markdown(text: str) -> str:
     Idempotent: normalize(normalize(x)) == normalize(x)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ")           # NBSP → space
+    # Fences before math: a code example of TeX must stay verbatim, and
+    # the prose rules below must never rewrite inside a fence (push_doc
+    # persists normalize to disk whenever the bytes move).
+    text, fences = _lift_fences(text)
+    text, math = _lift_math(text)                # TeX is opaque from here
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
+    text = _THEMATIC_BREAK.sub("---", text)      # before bullets (see above)
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
+    # A Docs-exported table carries an aligned delimiter row (| :---- |);
+    # the canonical form is | --- | per column, so a table that round-trips
+    # through a tab is byte-identical to the one that was pushed.
+    text = _TABLE_DELIM.sub(
+        lambda m: "|" + "|".join(" --- " for _ in m.group(0).strip().split("|")[1:-1]) + "|",
+        text)
     # Doc-pasted images export as dangling ![][imageN] refs — churn, not
     # content. Stripping here (not just in pull) keeps push, pull, and
     # session-start reconciliation agreeing on the canonical text.
@@ -66,7 +230,8 @@ def normalize_markdown(text: str) -> str:
     text = re.sub(r"\n*^(---|\*\*\*|___)$\n*", r"\n\n---\n\n", text,
                   flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
-    text = text.strip("\n")
+    text = _restore_math(text.strip("\n"), math)
+    text = _restore_fences(text, fences)
     return text + "\n" if text else ""
 
 
@@ -140,10 +305,91 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
 
     requests: list[dict] = []
     cursor = 1  # tab bodies start at index 1
+
+    def reset_style(start: int, end: int) -> dict:
+        return {"updateTextStyle": {
+            "range": {"tabId": tab_id,
+                      "startIndex": start, "endIndex": end},
+            "textStyle": {"bold": False, "italic": False,
+                          "underline": False},
+            "fields": "bold,italic,underline"}}
+
+    def run_style_requests(start: int, runs: list, limit: int) -> list[dict]:
+        out: list[dict] = []
+        offset = start
+        for run_text, text_style in runs:
+            end = min(offset + len(run_text), limit)
+            fields = {k: True for k in ("bold", "italic", "underline")
+                      if text_style.get(k)}
+            link = text_style.get("link", {}).get("url")
+            payload: dict = dict(fields)
+            if link:
+                payload["link"] = {"url": link}
+            if payload and run_text.strip() and end > offset:
+                out.append({"updateTextStyle": {
+                    "range": {"tabId": tab_id, "startIndex": offset,
+                              "endIndex": end},
+                    "textStyle": payload,
+                    "fields": ",".join(sorted(payload))}})
+            offset += len(run_text)
+        return out
+
     for element in doc.get("body", {}).get("content", []):
+        table = element.get("table")
+        if table:
+            # A markdown pipe table imports as a Docs table. It is rebuilt
+            # with insertTable and the cells filled afterwards (it-08b8b0a0c737:
+            # the pronunciation dictionary never reached its tab). Index
+            # arithmetic, measured on a Drive-imported table: insertTable
+            # puts a newline at `index` and the table at index + 1; the
+            # table costs 2 (start and end), each row 1, each cell 1 plus its paragraph
+            # (a lone newline while empty). Cell texts are inserted from
+            # the LAST cell backwards so every precomputed index stays
+            # valid; the cursor then advances by the empty layout plus
+            # every character inserted.
+            rows = table.get("tableRows", [])
+            ncols = max((len(r.get("tableCells", [])) for r in rows),
+                        default=0)
+            nrows = len(rows)
+            if not nrows or not ncols:
+                continue
+            requests.append({"insertTable": {
+                "rows": nrows, "columns": ncols,
+                "location": {"tabId": tab_id, "index": cursor}}})
+            table_start = cursor + 1
+            cells: list[tuple[int, str, list]] = []
+            for r, row in enumerate(rows):
+                row_start = table_start + 1 + r * (1 + 2 * ncols)
+                for c, cell in enumerate(row.get("tableCells", [])):
+                    para_index = row_start + 1 + c * 2 + 1
+                    runs = [(e["textRun"].get("content", ""),
+                             e["textRun"].get("textStyle", {}))
+                            for block in cell.get("content", [])
+                            if "paragraph" in block
+                            for e in block["paragraph"].get("elements", [])
+                            if "textRun" in e]
+                    text = "".join(t for t, _ in runs)
+                    if text.endswith("\n"):
+                        text = text[:-1]  # the cell's own paragraph ends it
+                    cells.append((para_index, text, runs))
+            inserted = 0
+            for para_index, text, runs in reversed(cells):
+                if not text:
+                    continue
+                requests.append({"insertText": {
+                    "location": {"tabId": tab_id, "index": para_index},
+                    "text": text}})
+                end = para_index + len(text)
+                requests.append(reset_style(para_index, end))
+                requests += run_style_requests(para_index, runs, end)
+                inserted += len(text)
+            # newline before the table (1) + table start and end markers (2)
+            # + rows and cells + every character inserted into the cells.
+            cursor += 3 + nrows * (1 + 2 * ncols) + inserted
+            continue
         paragraph = element.get("paragraph")
         if not paragraph:
-            continue  # section breaks, tables: not manuscript territory
+            continue  # section breaks: not manuscript territory
         style = paragraph.get("paragraphStyle", {}).get(
             "namedStyleType", "NORMAL_TEXT")
         runs = [(e["textRun"].get("content", ""),
@@ -159,14 +405,6 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
         # re-italicized an entire essay on every subsequent push. Every
         # insertion is therefore followed by an explicit style reset; the
         # temp doc's true run styles are applied after.
-        def reset_style(start: int, end: int) -> dict:
-            return {"updateTextStyle": {
-                "range": {"tabId": tab_id,
-                          "startIndex": start, "endIndex": end},
-                "textStyle": {"bold": False, "italic": False,
-                              "underline": False},
-                "fields": "bold,italic,underline"}}
-
         if any("horizontalRule" in e for e in paragraph.get("elements", [])):
             requests.append({"insertText": {
                 "location": {"tabId": tab_id, "index": cursor},
@@ -196,21 +434,7 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
                       "startIndex": start, "endIndex": cursor},
             "paragraphStyle": {"namedStyleType": style},
             "fields": "namedStyleType"}})
-        offset = start
-        for run_text, text_style in runs:
-            fields = {k: True for k in ("bold", "italic", "underline")
-                      if text_style.get(k)}
-            link = text_style.get("link", {}).get("url")
-            payload: dict = dict(fields)
-            if link:
-                payload["link"] = {"url": link}
-            if payload and run_text.strip():
-                requests.append({"updateTextStyle": {
-                    "range": {"tabId": tab_id, "startIndex": offset,
-                              "endIndex": offset + len(run_text)},
-                    "textStyle": payload,
-                    "fields": ",".join(sorted(payload))}})
-            offset += len(run_text)
+        requests += run_style_requests(start, runs, cursor)
         if paragraph.get("bullet"):
             preset = ("NUMBERED_DECIMAL_ALPHA_ROMAN"
                       if numbered(paragraph["bullet"].get("listId"))
@@ -457,13 +681,20 @@ def workspace_bridge(manuscript: dict) -> DocBridge:
 def _reading_order_files(bridge: DocBridge) -> list[str]:
     """Tab order for a bridge's files: TOC order for the manuscript root
     (reading_order falls back to alphabetical when no toc.toml exists —
-    which is exactly right for the workspace directory)."""
+    which is exactly right for the workspace directory).
+
+    THE ONE INVERSION (§15.22, §2.5 row 19). Every other site excludes a
+    sidecar; this one includes it, appended LAST, after the essays and
+    before the manifest. The dictionary is edited in the Doc like an
+    essay — that is the Sponsor's ruling — so it must have a tab, and a
+    tab it does not have is a dictionary the author cannot reach from
+    the place they actually work."""
     from .revisions import read_manuscript_files
-    from .structure import reading_order
+    from .structure import is_sidecar, reading_order
 
     files = read_manuscript_files(bridge.root)
     order, _ = reading_order(files)
-    return order
+    return order + [n for n in sorted(files) if is_sidecar(n)]
 
 
 def _doc_tabs(docs_service, master_id: str) -> list[tuple[str, str]]:
@@ -955,11 +1186,40 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
             documentId=master_id, body={"requests": requests}).execute()
 
 
+# The remedy each producer's pending forms are settled by. A refusal
+# that names the wrong verb is worse than a refusal that names none.
+_SETTLE_REMEDY = {"critique": "critique resolve {file}",
+                  "filter": "filter resolve {file}"}
+
+
+def forms_pending(db: Database, manuscript_id: str,
+                  relpath: str) -> str | None:
+    """The `origin_type` of any pending form on this file, or None.
+
+    Generalized from `critique_forms_pending` over `origin_type`
+    (filter-pass design §2.3 / §6 step 4b). It filtered on
+    `origin_type = 'critique'` only, so a file carrying a FILTER's
+    written forms sailed past it and pushed its markers straight into
+    the Doc — where the next pull would overwrite the local file and
+    silently discard the resolve. Returning the origin rather than a bool
+    is what lets the refusal name the right remedy."""
+    row = db.one(
+        "SELECT origin_type FROM doc_threads WHERE manuscript_id = ? "
+        "AND file = ? AND state = 'written' "
+        "ORDER BY created_at, id LIMIT 1",
+        (manuscript_id, relpath),
+    )
+    return row["origin_type"] if row else None
+
+
 def critique_forms_pending(db: Database, manuscript_id: str,
                            relpath: str) -> bool:
     """True when the essay still has critique pending forms in the Doc
     (threads in state 'written'). open_threads deliberately excludes
-    these — critique resolve owns them — so push must check separately."""
+    these — critique resolve owns them — so push must check separately.
+
+    Kept as the critique-specific predicate for callers that mean
+    exactly that; the PUSH guard now uses `forms_pending`."""
     return db.one(
         "SELECT id FROM doc_threads WHERE manuscript_id = ? "
         "AND origin_type = 'critique' AND file = ? AND state = 'written' "
@@ -971,8 +1231,18 @@ def critique_forms_pending(db: Database, manuscript_id: str,
 def _refuse_mid_rewrite(relpath: str, text: str) -> None:
     """A push makes the Doc the working copy (api._checkout_gate) — for a
     file that has no text yet, the next pull would then be the authority
-    over an essay that lives only in the database."""
+    over an essay that lives only in the database.
+
+    Two cases, both byte checks on the RAW file. `push_doc` and
+    `diff_push` read the file with `path.read_text`, never through
+    `read_manuscript_files`, so the canonicalization that hides pending
+    forms from every observer does NOT hide them from here: without the
+    second case a marked file would push its markers into the Doc.
+    Byte-level rather than a database query, deliberately — it is the
+    guard that survives a database that has lost the run row, and the
+    state is fully described by the bytes (filter-pass design §2.3)."""
     from .api import is_placeholder
+    from .staging import is_marked
 
     if is_placeholder(text):
         raise LookupError(
@@ -981,6 +1251,15 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"the Doc the working copy for text that does not exist yet. "
             f"Finish the writeup ('write complete') or put the old essay "
             f"back ('write abandon') first.")
+    if is_marked(text):
+        raise LookupError(
+            f"'{relpath}' is mid-settle: the file on disk carries "
+            f"<<old>>{{{{new}}}} pending-change forms, which are staged "
+            f"proposals and not the essay. Pushing them would put the "
+            f"markers in the Doc, and the next pull would overwrite the "
+            f"local file and silently discard the resolve. Finalize it "
+            f"('filter resolve {relpath}') or put the original text back "
+            f"('filter unmark {relpath}') first.")
 
 
 def push_doc(db: Database, manuscript: dict, query: str,
@@ -993,18 +1272,39 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
-    _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
-    # Critique pause: Doc holds <<old>>{{new}} / {{insert}} forms the
-    # author may have post-edited; local still has OLD. open_threads
-    # only sees author_comment rows, so without this gate a rebuild
-    # (or a surgical push that only guards '<<') would wipe the forms
-    # — including via session-start reconcile auto-push.
-    if critique_forms_pending(db, manuscript["id"], relpath):
+    # The pause: <<old>>{{new}} / {{insert}} forms the author may have
+    # post-edited live either in the Doc (critique) or on disk (filter).
+    # open_threads only sees author_comment rows, so without this gate a
+    # rebuild (or a surgical push that only guards '<<') would wipe the
+    # forms — including via session-start reconcile auto-push.
+    #
+    # ABOVE _refuse_mid_rewrite, deliberately: when the database still
+    # knows who staged the forms, the refusal can name that producer's
+    # own settle verb. The byte-level check below is the SECOND guard,
+    # and it is the one that survives a database that has lost the run
+    # row — so the two are ordered most-informative first, and both are
+    # separately reachable (filter-pass design §2.3 / F31).
+    origin = forms_pending(db, manuscript["id"], relpath)
+    if origin:
+        remedy = _SETTLE_REMEDY.get(origin, "settle the staged edits")
         raise LookupError(
-            f"'{relpath}' has critique pending forms in the Doc — "
-            f"run 'critique resolve {relpath}' before pushing "
+            f"'{relpath}' has {origin} pending forms — "
+            f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
-    if (threads_mod.open_threads(db, manuscript["id"], relpath)
+    _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
+    # A tab carrying a table cannot be pushed by paragraph diff: the Docs
+    # API reports every cell as a paragraph while the markdown export
+    # carries the table as one block, so the two sides never align and
+    # diff_push refuses (seen on manifest.md the day tables started
+    # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
+    # comment anchors that a rebuild orphans are the known price.
+    # Fence bodies can contain markdown table examples; those are not
+    # Docs tables and must not force a rebuild (which orphans open
+    # margin-thread anchors). Detect delimiters in prose only.
+    has_table = bool(_TABLE_DELIM.search(
+        _lift_fences(path.read_text(encoding="utf-8"))[0]))
+    if not has_table and (
+            threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
         # AND every open comment anchor (it-77ef98f5289e), so tabs
@@ -1036,7 +1336,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry = meta[bridge.meta_key][relpath]
     tab_id = entry["tab_id"]
 
-    _rewrite_tab(service, docs_service, master_id, tab_id, normalized,
+    _rewrite_tab(service, docs_service, master_id, tab_id,
+                 escape_math(escape_footnotes(normalized)),
                  f"authorlm-temp-{Path(relpath).stem}")
     apply_tab_spacing(docs_service, master_id, tab_id,
                       doc_spacing(manuscript))
@@ -1052,6 +1353,27 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _sidecar_would_be_emptied(relpath: str, incoming: str,
+                              current: str) -> bool:
+    """True when writing `incoming` over a sidecar would drop every row
+    it has. Deterministic, and it consults the sidecar's OWN parser
+    rather than counting lines: what matters is whether the rows survive
+    the round trip, not whether the bytes look like a table."""
+    from . import pronunciations as pron
+
+    # Scoped to the DICTIONARY by name, not to sidecars in general: this
+    # guard consults the pronunciation parser, and a second sidecar whose
+    # rows that parser cannot read would be judged empty on every push.
+    # `manifest.md` needs no guard of its own — it is derived, so the push
+    # that would "empty" it is the push that regenerates it.
+    if relpath != pron.FILENAME:
+        return False
+
+    if not (current or "").strip():
+        return False
+    return bool(pron.parse(current)[0]) and not pron.parse(incoming)[0]
 
 
 def classify_tabs(tabs: list[tuple[str, str]], links: dict,
@@ -1144,9 +1466,17 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     (never-pushed local files) are preserved after their previous
     predecessor; per-file attributes (matter) ride through unchanged.
     Returns the new (name, depth) tree."""
-    from .structure import (TOC_FILENAME, parents_to_tree,
+    from .structure import (TOC_FILENAME, is_sidecar, parents_to_tree,
                             serialize_toc_tree, toc_attrs)
 
+    # SIDECAR GUARD 3 of 3 (§15.22 §2.5 row 25), and the one that does the
+    # most damage if it is missing: writing `pronunciations.md` into
+    # toc.toml makes it a CHAPTER, at which point every exclusion in
+    # §2.5 unravels at once — it enters the reading order, the concept
+    # scan mines it, and it ships inside the book. Guarded here as well
+    # as at both call sites, because this function writes the file and a
+    # guard on the caller is a guard on the caller.
+    doc_pairs = [(n, p) for n, p in doc_pairs if not is_sidecar(n)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -1171,7 +1501,8 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
     moved since the last sync (local_moved / insync); a doc-side change
     means 'pull first'."""
-    from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents
+    from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
+                            tree_to_parents)
 
     meta = _mapping(db, manuscript)
     links = meta.get("gdocs", {})
@@ -1189,12 +1520,18 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     linked = {f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")}
+    # SIDECAR GUARD 1 of 3 (§15.22 §2.5 row 23). `linked` contains the
+    # dictionary — it has a tab — and `parse_toc_tree` never can, because
+    # a sidecar is not in the reading order. Comparing a doc list that
+    # holds it against a desired list that cannot would be a PERMANENT
+    # `unsynced`, and tab-order sync would stop working the day the
+    # dictionary first appeared.
     doc_pairs = [(n, p if p in linked else None)
-                 for n, p in doc_pairs if n in linked]
+                 for n, p in doc_pairs if n in linked and not is_sidecar(n)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked]
+               if n in linked and not is_sidecar(n)]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     state = classify_structure(doc_pairs, desired, base)
@@ -1272,10 +1609,12 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
     return "conflict"
 
 
-def critique_tab_markdown(db: Database, manuscript: dict, file: str,
+def tab_marked_markdown(db: Database, manuscript: dict, file: str,
                           service, docs_service,
                           bridge: DocBridge | None = None) -> dict:
-    """Fetch `file`'s pending-review text straight from the master Doc, the
+    """Fetch `file`'s pending-review text straight from the master Doc —
+    the authoritative marked text for BOTH doc-transport settles
+    (`critique resolve` and a doc-mode `filter resolve`), the
     same way pull_doc does: whole-Doc markdown export + order-aware
     split_tabbed_export (never the textRun walk that critique_tab_text
     used, which discards headings/bold/lists/link targets — it-x7-1).
@@ -1313,7 +1652,8 @@ def critique_tab_markdown(db: Database, manuscript: dict, file: str,
 
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -1431,7 +1771,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -1482,6 +1823,36 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
         path = bridge.root / relpath
         current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        # A marked local file is MID-SETTLE: its bytes carry staged
+        # <<old>>{{new}} proposals the author may have post-edited, and
+        # overwriting them with the tab would discard the resolve without
+        # saying so. The checkout gate makes this mostly unreachable (a
+        # marked file is not checked out, so nothing pulls it) — but
+        # "mostly unreachable" is not a guard, and --force must not be
+        # able to reach past it either. Skipped and reported by name,
+        # the shape `conflicts` and `local_ahead` already use; the
+        # remedy is `filter resolve` or `filter unmark`
+        # (filter-pass design §2.3).
+        if staging_is_marked(current_raw):
+            report.setdefault("marked", []).append(relpath)
+            entry = links[relpath]
+            entry["checked_out"] = False
+            continue
+        # The sidecar guard (§15.22 §2.6) — the highest-value line in
+        # this feature. One bad Docs export (a table converted to
+        # bullets, a table dropped) would otherwise destroy the whole
+        # pronunciation dictionary on the next pull, silently, with the
+        # only recovery in a version history nobody thinks to look at.
+        # A pull that parses to FEWER rows is NOT guarded: that is an
+        # author deleting a row in the Doc, which is legitimate and must
+        # work. Zero rows against a local file that has rows is not an
+        # edit, it is a loss — and `--force` must not reach past it, for
+        # the same reason the marked-file guard above refuses it:
+        # "mostly unreachable" is not a guard, and neither is a guard
+        # with a flag that turns it off.
+        if _sidecar_would_be_emptied(relpath, text, current_raw):
+            report.setdefault("sidecar_unparsable", []).append(relpath)
+            continue
         # The bridge's canonical text is embed-free: illustration embed
         # lines are local derived machinery, so every comparison strips
         # them and a pull re-inserts them (the prior pick wins).
@@ -1575,13 +1946,21 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # content: only-Doc-moved rewrites toc.toml; only-local-moved defers to
     # the next push; both → conflict, touch nothing.
     if doc_pairs and query is None and bridge.toc_sync:
-        from .structure import TOC_FILENAME, parse_toc_tree, tree_to_parents
+        from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
+                                tree_to_parents)
 
         linked = {f for f, e in links.items()
                   if not f.startswith("_") and isinstance(e, dict)
                   and e.get("tab_id")}
+        # SIDECAR GUARD 2 of 3 (§15.22 §2.5 row 24). Same mismatched
+        # comparison as sync_tab_structure's, on the pull side: the
+        # dictionary has a tab and can never be in toc.toml, so leaving
+        # it in `doc_struct` would report a permanent conflict — and,
+        # worse, a `doc_moved` verdict would hand it to
+        # rewrite_toc_from_doc.
         doc_struct = [(n, p if p in linked else None)
-                      for n, p in doc_pairs if n in linked]
+                      for n, p in doc_pairs
+                      if n in linked and not is_sidecar(n)]
         toc_path = bridge.root / TOC_FILENAME
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
@@ -1715,7 +2094,8 @@ def reconcile(db: Database, manuscript: dict, service,
     except Exception as err:  # network, API — never block the session
         report["errors"].append({"file": "(master doc)", "error": str(err)})
         return report
-    whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
     mapped = [f for f, e in links.items()
               if not f.startswith("_") and isinstance(e, dict)
               and e.get("tab_id")]
@@ -2093,8 +2473,29 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _paragraphs_in_body(content: list) -> list[dict]:
+    """Structural paragraph elements from a Docs body, descending into
+    table cells. Top-level `item.get("paragraph")` alone misses every
+    cell; after tables started reaching tabs (transplant_requests),
+    `_tab_runs` / `_locate_in_tab` then mapped post-table prose onto
+    indices inside the table and planted forms in the wrong place."""
+    out: list[dict] = []
+    for item in content or []:
+        if "paragraph" in item:
+            out.append(item)
+            continue
+        table = item.get("table")
+        if not table:
+            continue
+        for row in table.get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                out.extend(_paragraphs_in_body(cell.get("content", [])))
+    return out
+
+
 def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]]:
-    """(doc_start_index, content) for every text run in a tab, in order."""
+    """(doc_start_index, content) for every text run in a tab, in order —
+    including runs inside table cells."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     runs: list[tuple[int, str]] = []
@@ -2102,8 +2503,9 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
                     for el in item.get("paragraph", {}).get("elements", []):
                         run = el.get("textRun")
                         if run and run.get("content"):
@@ -2115,26 +2517,64 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
 
 
 def _locate_in_tab(docs_service, master_id: str, tab_id: str,
-                   needle: str) -> tuple[int, int] | None:
-    """(start, end) doc indices (UTF-16 units) of the FIRST verbatim
-    occurrence of `needle` in the tab, or None. Exactness is law: no
+                   needle: str, occurrence: int = 0) -> tuple[int, int] | None:
+    """(start, end) doc indices (UTF-16 units) of the
+    (`occurrence`+1)-th verbatim occurrence of `needle` in the tab, or
+    None when the tab holds fewer than that many. Exactness is law: no
     normalization, no fuzz (design: an approval authorizes one exact
-    transformation)."""
+    transformation).
+
+    `occurrence` defaults to 0 — the FIRST match, which is exactly what
+    a hand-quoted span means and what `propose_change` still passes.
+
+    A producer writing SEVERAL forms into one tab must compute it.
+    Two staged edits whose old halves are byte-identical (two identical
+    paragraphs in one essay — a refrain, a liturgical repetition) both
+    searched for the same needle and both resolved to the same span; the
+    descending write order then landed the second write INSIDE the
+    wrapper the first had planted, and `threads.PENDING`, being
+    non-greedy, matched `<<<<old>>{{new}}` at resolve and left the rest
+    of the wrapper in the author's manuscript as literal text. Text
+    corruption, not a cosmetic fault (design-filter-doc-settle §9.3)."""
     runs = _tab_runs(docs_service, master_id, tab_id)
     full = "".join(content for _, content in runs)
-    offset = full.find(needle)
-    if offset < 0:
-        return None
+    offset = -1
+    for _ in range(occurrence + 1):
+        offset = full.find(needle, offset + 1)
+        if offset < 0:
+            return None
 
-    def doc_index(py_offset: int) -> int:
+    def doc_index_at(py_offset: int) -> int:
+        """Doc index of the character at `py_offset` in `full`.
+
+        Runs are not always contiguous in Doc index space: a table's
+        structural markers sit between the last cell run and the next
+        paragraph. Mapping a boundary with `<=` pinned the start of
+        post-table prose to the end of the preceding cell (and, before
+        `_tab_runs` walked cells, into the table itself)."""
         seen = 0
         for start, content in runs:
-            if py_offset <= seen + len(content):
+            if py_offset < seen + len(content):
                 return start + _utf16_len(content[: py_offset - seen])
             seen += len(content)
         raise ValueError("offset beyond tab text")
 
-    return doc_index(offset), doc_index(offset + len(needle))
+    def doc_index_end(py_offset: int) -> int:
+        """Exclusive end index for a span ending at `py_offset` in `full`."""
+        if py_offset <= 0:
+            return runs[0][0] if runs else 1
+        if py_offset > len(full):
+            raise ValueError("offset beyond tab text")
+        if py_offset == len(full):
+            start, content = runs[-1]
+            return start + _utf16_len(content)
+        # One past the last character of the span: that character's Doc
+        # index plus its UTF-16 width, so a gap after a cell is not
+        # swallowed into the range.
+        ch = full[py_offset - 1]
+        return doc_index_at(py_offset - 1) + _utf16_len(ch)
+
+    return doc_index_at(offset), doc_index_end(offset + len(needle))
 
 
 def propose_change(db: Database, manuscript: dict, comment_id: str,
@@ -2203,23 +2643,62 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
 
 
 GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
+# The changed-word highlights (author request 2026-08-31: a one-word edit
+# inside a paragraph-sized form was invisible). COLOR ONLY, never bold or
+# italics: the doc settle reads the whole-Doc MARKDOWN export, which
+# preserves bold as **…** — a bolded highlight would leak literal
+# asterisks into the resolved prose. foregroundColor is proven invisible
+# to that export (the green half already round-trips clean).
+RED_GONE = {"color": {"rgbColor": {"red": 0.8, "green": 0.1, "blue": 0.1}}}
+BLUE_NEW = {"color": {"rgbColor": {"red": 0.07, "green": 0.33, "blue": 0.8}}}
+
+
+def _word_diff_spans(old: str, new: str) -> tuple[list[tuple[int, int]],
+                                                  list[tuple[int, int]]]:
+    """Word-level diff of old vs new: two lists of (start16, end16)
+    utf-16 offset spans — the words of `old` that do not survive, and
+    the words of `new` that were not there. Deterministic (difflib on
+    whitespace tokens). When BOTH sides are mostly changed (a rewrite),
+    the highlight is noise rather than signal and both lists come back
+    empty — but a one-sided change stays highlighted: a cut that
+    removes most of the old half is exactly where the red must pop."""
+    import difflib
+    import re as _re
+
+    old_toks = list(_re.finditer(r"\S+", old))
+    new_toks = list(_re.finditer(r"\S+", new))
+    if not old_toks or not new_toks:
+        return [], []
+    sm = difflib.SequenceMatcher(None, [t.group() for t in old_toks],
+                                 [t.group() for t in new_toks])
+    old_spans, new_spans = [], []
+    old_changed = new_changed = 0
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        if i2 > i1:
+            old_changed += i2 - i1
+            old_spans.append((_utf16_len(old[:old_toks[i1].start()]),
+                              _utf16_len(old[:old_toks[i2 - 1].end()])))
+        if j2 > j1:
+            new_changed += j2 - j1
+            new_spans.append((_utf16_len(new[:new_toks[j1].start()]),
+                              _utf16_len(new[:new_toks[j2 - 1].end()])))
+    if (old_changed * 2 > len(old_toks)) and (new_changed * 2 > len(new_toks)):
+        return [], []
+    return old_spans, new_spans
 
 
 def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
                            new: str) -> list[dict]:
     """Requests turning the span [start,end) (holding `old`) into the
-    styled pending form <<old>>{{new}}: old struck through, new green.
-
-    This is Doc-side form construction (merge #15): the delimiter guard
-    lives here so propose_change / critique_diff_write refuse before any
-    batchUpdate. Building the markers inline without going through
-    render_pending used to write a corrupt span first, then raise only
-    when a later read-back called render_pending — leaving <<>>{{}}
-    debris in the live tab and a proposed thread that approve/strip
-    would truncate at the first `}}`."""
+    styled pending form <<old>>{{new}}: old struck through, new green —
+    and the DIFF made visible: the words of old that go are red, the
+    words of new that arrive are blue. Highlights ride after the base
+    styles so they win on their subranges; color only (see RED_GONE)."""
     threads_mod.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
-    return [
+    requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
                         "text": ">>" + "{{" + new + "}}"}},
         {"insertText": {"location": {"tabId": tab_id, "index": start},
@@ -2234,6 +2713,22 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
             "textStyle": {"foregroundColor": GREEN},
             "fields": "foregroundColor"}},
     ]
+    old_spans, new_spans = _word_diff_spans(old, new)
+    old_base = start + 2                      # first char of old text
+    new_base = start + 4 + old16 + 2          # first char of new text
+    for s16, e16 in old_spans:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": old_base + s16,
+                      "endIndex": old_base + e16},
+            "textStyle": {"foregroundColor": RED_GONE},
+            "fields": "foregroundColor"}})
+    for s16, e16 in new_spans:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": new_base + s16,
+                      "endIndex": new_base + e16},
+            "textStyle": {"foregroundColor": BLUE_NEW},
+            "fields": "foregroundColor"}})
+    return requests
 
 
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
@@ -2252,8 +2747,8 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     ]
 
 
-def critique_write_order(threads: list[dict]) -> list[dict]:
-    """Surgical-write order for accepted critique threads: higher
+def pending_write_order(threads: list[dict]) -> list[dict]:
+    """Surgical-write order for a producer's accepted threads: higher
     anchors first (so earlier indices stay valid); at the same
     anchor, inserts BEFORE replaces.
 
@@ -2261,7 +2756,10 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     n then locates the pristine paragraph text via substring search —
     which matches inside the wrapped form and plants {{insert}} between
     `old` and `>>`, corrupting the pending grammar. Inserts must land
-    first while the anchor text is still verbatim."""
+    first while the anchor text is still verbatim.
+
+    The descending order is also half of the twins invariant: see
+    `_occurrence`, which is correct only because of it."""
     def anchor_of(t):
         return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
 
@@ -2271,15 +2769,62 @@ def critique_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
-def critique_diff_write(db: Database, manuscript: dict, file: str,
+def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
+    """The occurrence index of unit `n`'s own text, counted in the SAME
+    universe `_locate_in_tab` searches.
+
+    That universe is SUBSTRING matches in the tab's joined text — not
+    paragraphs equal to the needle. The distinction is the whole of this
+    function's correctness. Counting paragraph EQUALITY agrees with the
+    locator only while no paragraph strictly CONTAINS another
+    paragraph's whole text; a refrain that also opens a longer paragraph
+    breaks that, and this manuscript is full of refrains. Where the two
+    counts diverge, the writer plants each form in the WRONG paragraph
+    and the read-back proof cannot see it — the form IS present, just
+    not where it belongs — so the resolve resolves every thread `cleaned`
+    and the manuscript is silently corrupted. A silent wrong write is
+    strictly worse than the loud nesting failure this parameter exists
+    to fix, so the counting universe is matched exactly.
+
+    So: rebuild the text the tab holds, find where unit `n` starts in
+    it, and count the matches that BEGIN before that — which is exactly
+    how many the locator will step over on its way there.
+
+    Computed from the LOCAL paragraph list, which is byte-identical to
+    the tab because the levelling `push_doc` has just put it there, and
+    correct only in company with the DESCENDING write order: when unit n
+    is written, every paragraph before it is still pristine, so a match
+    before it is still where it was. Paragraphs AFTER n may already be
+    wrapped — their old text still occurs inside the wrapper — but they
+    sit past n and cannot shift a lower occurrence index. Descending
+    order and occurrence-from-original are jointly correct or not at all
+    (design-filter-doc-settle §9.3)."""
+    if n <= 0 or not needle:
+        return 0
+    full = "".join(p + "\n" for p in paragraphs)
+    start = sum(len(p) + 1 for p in paragraphs[: n - 1])
+    count, at = 0, full.find(needle)
+    while 0 <= at < start:
+        count += 1
+        at = full.find(needle, at + 1)
+    return count
+
+
+def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None) -> dict:
-    """Critique pass diff-write (design §6.3 step 3): render every
-    ACCEPTED thread of `file` into its Doc tab as a pending form. The
-    tab is first brought level with the local file (a plain push, since
-    the local file is pristine), then each span is marked surgically,
-    last-to-first so earlier indices stay valid. Local keeps OLD.
-    Returns {written, failed:[(thread, reason)]}."""
+    """Render every thread it is GIVEN into `file`'s Doc tab as a
+    pending form (critique design §6.3 step 3). The tab is first brought
+    level with the local file (a plain push, since the local file is
+    pristine), then each span is marked surgically, last-to-first so
+    earlier indices stay valid, and located by OCCURRENCE INDEX so two
+    identical old halves land in their own paragraphs (§9.3). Local
+    keeps OLD. Returns {written, failed:[(thread, reason)]}.
+
+    Two producers now: `critique write` and `filter push`. Neither is
+    named in the signature — the threads arrive as an argument and the
+    caller owns their state transitions — which is why this took a
+    rename and not an `origin_type` parameter."""
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -2293,15 +2838,21 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
     text = (bridge.root / file).read_text(encoding="utf-8")
     paragraphs = _paragraphs(text)
-    accepted = critique_write_order(
-        [t for t in threads if t["state"] == "accepted"])
+    # EVERY thread handed in is written. The caller chooses the set and
+    # owns the state transitions — which is what the two producers now
+    # need to differ about: `critique write` sends its accepted threads,
+    # and `filter push` sends the untriaged proposals too, because on
+    # the Doc road the tab IS the review surface. A state filter in here
+    # would silently drop half of one producer's push.
+    ordered = pending_write_order(threads)
     written, failed = [], []
-    for t in accepted:
+    for t in ordered:
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
-                span = _locate_in_tab(docs_service, master_id, tab_id,
-                                      t["proposed_old"])
+                span = _locate_in_tab(
+                    docs_service, master_id, tab_id, t["proposed_old"],
+                    _occurrence(paragraphs, n, t["proposed_old"]))
                 if span is None:
                     raise LookupError("old text not found verbatim in the tab")
                 requests = _mark_replace_requests(
@@ -2313,8 +2864,9 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
                 else:
                     if n > len(paragraphs):
                         raise LookupError(f"anchor paragraph {n} out of range")
-                    span = _locate_in_tab(docs_service, master_id, tab_id,
-                                          paragraphs[n - 1])
+                    span = _locate_in_tab(
+                        docs_service, master_id, tab_id, paragraphs[n - 1],
+                        _occurrence(paragraphs, n, paragraphs[n - 1]))
                     if span is None:
                         raise LookupError("anchor paragraph not found "
                                           "verbatim in the tab")
@@ -2339,10 +2891,10 @@ def critique_diff_write(db: Database, manuscript: dict, file: str,
 
 def _tab_paragraph_texts(docs_service, master_id: str,
                          tab_id: str) -> list[str]:
-    """Non-empty paragraph strings from a tab, Docs trailing newlines
-    stripped. Blank separator paragraphs (transplant skips them on push)
-    are omitted — callers that need markdown structure must rejoin with
-    `\\n\\n`."""
+    """Non-empty paragraph strings from a tab (table cells included),
+    Docs trailing newlines stripped. Blank separator paragraphs
+    (transplant skips them on push) are omitted — callers that need
+    markdown structure must rejoin with `\\n\\n`."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     out: list[str] = []
@@ -2350,11 +2902,10 @@ def _tab_paragraph_texts(docs_service, master_id: str,
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
-                    paragraph = item.get("paragraph")
-                    if not paragraph:
-                        continue
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
+                    paragraph = item.get("paragraph") or {}
                     text = "".join(
                         el.get("textRun", {}).get("content", "")
                         for el in paragraph.get("elements", [])
@@ -2758,7 +3309,8 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     def tab_markdown() -> str:
         data = service.files().export(
             fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-        whole = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+        whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
         return normalize_markdown(
             split_tabbed_export(whole, boundaries, order=tab_order)
             .get(relpath, ""))
@@ -2815,6 +3367,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     "endIndex": end}}})
             if tag in ("replace", "insert") and j2 > j1:
                 chunk = "\n\n".join(local_paras[j1:j2]) + "\n"
+                chunk = escape_math(escape_footnotes(chunk))
                 media = MediaInMemoryUpload(chunk.encode("utf-8"),
                                             mimetype=MARKDOWN_MIME)
                 temp = service.files().create(

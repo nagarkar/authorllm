@@ -52,7 +52,11 @@ def _reconcile(db: Database, manuscript: dict, workspace: str | None) -> dict[st
 def _recommendations(db: Database, manuscript: dict,
                      triage_type: str) -> dict[str, Any]:
     if triage_type not in {"concepts", "edges"}:
-        raise ValueError(f"unknown triage type '{triage_type}'")
+        # Proposals and critique items have no deterministic rules: each is
+        # already an opinion awaiting the author's verdict. An empty plan,
+        # not an error — the button is honest instead of broken.
+        return {"decisions": [], "protected": [],
+                "counts": {"concepts": 0, "edges": 0, "protected": 0}}
     files = read_manuscript_files(Path(manuscript["path"]))
     return triage_rules.plan(
         db, manuscript, files,

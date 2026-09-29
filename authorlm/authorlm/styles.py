@@ -15,10 +15,18 @@ from .db import Database, ko_fields
 ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
     "citation", "rhetoric", "figure", "tone", "illustration",
-    "illustration-placement",
+    "illustration-placement", "pronunciation",
     "concept-note", "concept-identity", "concept-lifecycle",
     "concept-relation",
 }
+# 'pronunciation' is law about HOW A TERM IS SAID ALOUD ("never respell
+# a Sanskrit term for an English ear"). Like the four 'concept-*'
+# aspects it names the QUESTION being decided, and it is consumed by the
+# proposal screen for `pronunciation` proposals (loop.REGISTRY). It
+# exists so that spec's aspect is a real one: until the author ratifies
+# law under it, `active_law` finds nothing and the screen is inert by
+# construction.
+#
 # 'figure' is figurative language — metaphor and analogy law for PROSE.
 # 'illustration' is image law, consumed only by the illustration
 # renderer (illus.illustration_law). 'illustration-placement' is

@@ -24,7 +24,8 @@ def _sub_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
 # (command, action) → the id/name list a bare positional should complete
 # with (served by the hidden `authorlm _ids <kind>` helper).
 DYNAMIC_POSITIONALS: dict[str, dict[str, str]] = {
-    "intent": {"complete": "intents", "abandon": "intents", "retire": "intents"},
+    "intent": {"complete": "intents", "abandon": "intents",
+               "retire": "intents", "scope": "intents"},
     "belief": {"answer": "beliefs"},
     "concept": {"retire": "concepts", "edit": "concepts", "show": "concepts",
                 "confirm": "confirmables", "unconfirm": "edges",

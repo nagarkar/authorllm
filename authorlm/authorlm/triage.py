@@ -43,16 +43,38 @@ def _optional_reason(placeholder: str) -> dict[str, Any]:
     }
 
 
+def _required_reason(placeholder: str) -> dict[str, Any]:
+    return {
+        "label": "Reason (required)",
+        "placeholder": placeholder,
+        "required": True,
+    }
+
+
 PROPOSAL_TRIAGE_HELP = (
     "Proposals are conflicts with knowledge you have already settled: a "
     "reframed definition, a retired concept recurring, a rejected "
     "relationship argued again. Unlike concept and edge triage — which "
     "curate machine HYPOTHESES that were never settled — accepting here "
-    "overwrites a decision you already made, so the settled version wins by "
+    "overwrites a decision you already made, so the resolved version wins by "
     "default. Rows are grouped by concept because proposals against one "
     "concept are competing rewrites of a single note: pick at most one. "
     "Dismissal reasons are the highest-value evidence in the system — they "
     "are what the distiller turns into beliefs."
+)
+
+CRITIQUE_TRIAGE_HELP = (
+    "Critique items are an external critic's proposals — revision tasks and "
+    "candidate standing rules imported from an editorial report. Nothing "
+    "here is law: the critic's authority makes an item exist, only the "
+    "author's verdict makes it real. Accept turns an item into an active "
+    "intent or style law; Reject refuses it and REQUIRES the author's "
+    "reason, verbatim — an explained rejection is the highest-value "
+    "evidence the system can receive; Revise accepts it in the author's "
+    "own wording, flipping provenance to the author with the critic's "
+    "original kept as lineage. Rows are grouped by sitting: rule on the "
+    "manuscript-wide items first (they set the law every essay pass "
+    "consults), then each essay's items just-in-time, in reading order."
 )
 
 TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -112,6 +134,50 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
              "reason": _optional_reason("Why are these endpoints the same concept?")},
         ],
     },
+    "critique": {
+        "id": "critique",
+        "label": "Critique",
+        "singular": "critique item",
+        "help": CRITIQUE_TRIAGE_HELP,
+        # No analyzer by design: a critique item is already a critic's
+        # opinion; the author's verdict is the only judgment that counts.
+        "default_profile": None,
+        # Grouped by sitting: the global items first, then each essay's
+        # just-in-time pile, matching the design's triage sequencing.
+        "group_by": {"id": "scope_label", "label": "Sitting"},
+        "columns": [
+            {"id": "id", "label": "Id", "kind": "text", "width": 130},
+            {"id": "kind", "label": "Kind", "kind": "enum", "width": 110},
+            {"id": "scope_label", "label": "Sitting", "kind": "enum", "width": 150},
+            {"id": "unit", "label": "Unit", "kind": "text", "width": 180},
+            # editable: an inline edit of this column stages the named
+            # action with the new text as its parameter — the app's
+            # edit-in-place path to Revise & accept.
+            {"id": "statement", "label": "Item", "kind": "long_text",
+             "width": 430, "editable": "revise"},
+            {"id": "source_name", "label": "Critic", "kind": "enum", "width": 200},
+            {"id": "raised", "label": "Raised", "kind": "text", "width": 105},
+            {"id": "version", "label": "Row v", "kind": "number", "width": 70},
+        ],
+        "actions": [
+            {"id": "accept", "label": "Accept",
+             "help": "The item becomes an active intent (or active style law). "
+                     "The author's verdict, not the critic's authority, makes it real."},
+            {"id": "reject", "label": "Reject",
+             "help": "The critic's item is refused. The reason is the author's, "
+                     "verbatim — it is the evidence the system learns from.",
+             "reason": _required_reason("Why is the critic wrong here?")},
+            # hidden: no action-bar button — the Item column's edit-in-place
+            # (editable: "revise") is the only path that stages this action.
+            {"id": "revise", "label": "Revise & accept", "hidden": True,
+             "help": "Double-click the Item cell and type your own wording — "
+                     "the edit stages this action. Provenance flips to the "
+                     "author; the critic's original survives as lineage and "
+                     "the original→final diff is recorded as evidence.",
+             "parameter": {"id": "text", "label": "The author's wording",
+                           "multiline": True}},
+        ],
+    },
     "proposals": {
         "id": "proposals",
         "label": "Proposals",
@@ -124,6 +190,7 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
         # concept it is 280, most of them one keystroke.
         "group_by": {"id": "target_name", "label": "Concept"},
         "columns": [
+            {"id": "id", "label": "Id", "kind": "text", "width": 130},
             {"id": "target_name", "label": "Concept", "kind": "text", "width": 190},
             {"id": "kind", "label": "Kind", "kind": "enum", "width": 130},
             {"id": "summary", "label": "Proposes", "kind": "text", "width": 300},
@@ -135,11 +202,11 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
         ],
         "actions": [
             {"id": "accept", "label": "Accept",
-             "help": "Apply the proposal to the settled object."},
+             "help": "Apply the proposal to the resolved object."},
             {"id": "dismiss", "label": "Dismiss",
-             "help": "Keep the settled version. The reason is the evidence the "
+             "help": "Keep the resolved version. The reason is the evidence the "
                      "system learns from — give it verbatim.",
-             "reason": _optional_reason("Why is the settled version right?")},
+             "reason": _optional_reason("Why is the resolved version right?")},
             {"id": "edge", "label": "Kind, not identity",
              "help": "Alias proposals only: record 'canonical generalizes "
                      "alias' instead of merging the two concepts."},
@@ -291,6 +358,51 @@ def _proposal_rows(db: Database, manuscript_id: str) -> list[dict[str, Any]]:
     return result
 
 
+def _critique_rows(db: Database, manuscript_id: str) -> list[dict[str, Any]]:
+    """Pending critique items — proposed critic-sourced intents and style
+    elements — flattened for the grid. Two tables, one pile: the author
+    triages an editorial report, not our storage layout."""
+    result = []
+    for raw in db.all(
+        "SELECT i.*, s.name AS source_name FROM declared_intents i "
+        "JOIN sources s ON s.id = i.source_id "
+        "WHERE i.manuscript_id = ? AND i.status = 'proposed' "
+        "AND s.kind = 'critic' ORDER BY i.created_at",
+        (manuscript_id,)
+    ):
+        row = dict(raw)
+        meta = loads(row["metadata"], {}).get("critique", {})
+        row["kind"] = "intent"
+        row["scope_label"] = row.get("scope") or "manuscript-wide"
+        row["unit"] = meta.get("unit") or ""
+        row["ordinal"] = meta.get("ordinal")
+        row["raised"] = (row["created_at"] or "")[:10]
+        row["pending"] = True
+        row["lifecycle"] = "pending"
+        result.append(row)
+    for raw in db.all(
+        "SELECT l.*, s.name AS source_name FROM style_laws l "
+        "JOIN sources s ON s.id = l.source_id "
+        "WHERE l.manuscript_id = ? AND l.status = 'proposed' "
+        "AND s.kind = 'critic' ORDER BY l.created_at",
+        (manuscript_id,)
+    ):
+        row = dict(raw)
+        meta = loads(row["metadata"], {}).get("critique", {})
+        row["kind"] = "style element"
+        row["scope_label"] = row.get("file") or "manuscript-wide"
+        row["unit"] = meta.get("unit") or ""
+        row["ordinal"] = meta.get("ordinal")
+        row["raised"] = (row["created_at"] or "")[:10]
+        row["pending"] = True
+        row["lifecycle"] = "pending"
+        result.append(row)
+    result.sort(key=lambda r: (r["scope_label"] != "manuscript-wide",
+                               r["scope_label"], r["unit"],
+                               r["ordinal"] if r["ordinal"] is not None else 0))
+    return result
+
+
 def list_rows(db: Database, manuscript: dict, triage_type: str) -> list[dict[str, Any]]:
     if triage_type == "concepts":
         return _concept_rows(db, manuscript["id"])
@@ -298,6 +410,8 @@ def list_rows(db: Database, manuscript: dict, triage_type: str) -> list[dict[str
         return _edge_rows(db, manuscript["id"])
     if triage_type == "proposals":
         return _proposal_rows(db, manuscript["id"])
+    if triage_type == "critique":
+        return _critique_rows(db, manuscript["id"])
     raise ValueError(f"unknown triage type '{triage_type}'")
 
 
@@ -403,6 +517,23 @@ def _table(triage_type: str) -> str:
         or _raise_unknown(triage_type)
 
 
+def _fetch_row(db: Database, manuscript_id: str, triage_type: str,
+               object_id: str) -> dict[str, Any] | None:
+    """Fetch one triageable object by id. Critique items span two tables
+    (declared_intents and style_laws) — every other type is one table."""
+    if triage_type == "critique":
+        for table in ("declared_intents", "style_laws"):
+            row = db.one(f"SELECT * FROM {table} WHERE manuscript_id = ? "
+                         "AND id = ?", (manuscript_id, object_id))
+            if row:
+                return dict(row)
+        return None
+    row = db.one(f"SELECT * FROM {_table(triage_type)} "
+                 "WHERE manuscript_id = ? AND id = ?",
+                 (manuscript_id, object_id))
+    return dict(row) if row else None
+
+
 def _raise_unknown(triage_type: str):
     raise ValueError(f"unknown triage type '{triage_type}'")
 
@@ -420,6 +551,9 @@ def _validate_action(db: Database, manuscript: dict, triage_type: str,
             raise ValueError(f"invalid relation '{parameters.get('relation', '')}'")
     if action == "reword_notes" and not str(parameters.get("notes", "")).strip():
         raise ValueError("Reword notes needs non-empty notes")
+    if triage_type == "critique" and action == "revise" \
+            and not str(parameters.get("text", "")).strip():
+        raise ValueError("Revise needs the author's wording")
     if action == "alias":
         canonical_id = parameters.get("canonical_id")
         if not canonical_id:
@@ -437,16 +571,13 @@ def _validate_action(db: Database, manuscript: dict, triage_type: str,
 
 def stage_decisions(db: Database, manuscript: dict, triage_type: str,
                     decisions: list[dict[str, Any]]) -> dict[str, Any]:
-    table = _table(triage_type)
     staged = []
     with db.transaction():
         for decision in decisions:
             object_id = decision["object_id"]
-            row = db.one(f"SELECT * FROM {table} WHERE manuscript_id = ? AND id = ?",
-                         (manuscript["id"], object_id))
+            row = _fetch_row(db, manuscript["id"], triage_type, object_id)
             if not row:
                 raise LookupError(f"no {TRIAGE_SCHEMAS[triage_type]['singular']} '{object_id}'")
-            row = dict(row)
             action = decision["action"]
             parameters = decision.get("parameters") or {}
             _validate_action(db, manuscript, triage_type, row, action, parameters)
@@ -508,6 +639,29 @@ def apply_action(db: Database, manuscript: dict, triage_type: str, row: dict,
     parameters = parameters or {}
     _validate_action(db, manuscript, triage_type, row, action, parameters)
     mid = manuscript["id"]
+    if triage_type == "critique":
+        # Routed through critique.py, never reimplemented here: the verbs
+        # own the evidence recording, provenance flips, and lineage.
+        from . import critique as crit
+
+        is_element = "aspect" in row
+        if action == "accept":
+            (crit.accept_element if is_element else crit.accept_intent)(
+                db, mid, row)
+        elif action == "reject":
+            if not reason:
+                raise ValueError(
+                    "a rejection needs the author's reason, verbatim — it is "
+                    "the evidence the system learns from")
+            (crit.reject_element if is_element else crit.reject_intent)(
+                db, mid, row, reason)
+        elif action == "revise":
+            (crit.revise_element if is_element else crit.revise_intent)(
+                db, mid, row, parameters["text"].strip())
+        else:
+            raise ValueError(f"'{action}' is not a critique triage action")
+        return {"id": row["id"], "action": action}
+
     if triage_type == "proposals":
         # Routed through proposals.py, never reimplemented here: adopt() has
         # eight kind-specific effects (merging concepts, restoring edges,
@@ -708,7 +862,6 @@ def apply_selected(db: Database, manuscript: dict, triage_type: str,
                    object_ids: list[str]) -> dict[str, Any]:
     if not object_ids:
         raise ValueError("select at least one row to apply")
-    table = _table(triage_type)
     applied = []
     with db.transaction():
         marks = ",".join("?" for _ in object_ids)
@@ -722,8 +875,7 @@ def apply_selected(db: Database, manuscript: dict, triage_type: str,
         conflicts = []
         current: dict[str, dict] = {}
         for object_id in object_ids:
-            row = db.one(f"SELECT * FROM {table} WHERE manuscript_id = ? AND id = ?",
-                         (manuscript["id"], object_id))
+            row = _fetch_row(db, manuscript["id"], triage_type, object_id)
             draft = by_id[object_id]
             if not row or row["version"] != draft["object_version"]:
                 conflicts.append({"object_id": object_id,

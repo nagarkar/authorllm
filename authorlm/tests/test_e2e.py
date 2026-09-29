@@ -462,7 +462,7 @@ def scenario_editorial_loop(root: Path) -> None:
     check("intent abandon works (retire alias)", "Intent abandoned" in out, out)
     out = run(ws, "intent", "list")
     check("abandoned intent shown with status",
-          "(abandoned) A dead-end objective" in out, out)
+          "(abandoned · book-wide (default)) A dead-end objective" in out, out)
     out = run(ws, "intent", "abandon", dead_id, expect_exit=True)
     check("double abandon blocked", "already abandoned" in out, out)
 
@@ -680,7 +680,7 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                     # this test — the positive case the flipped ALIAS GUIDE
                     # exists to admit.
                     {"alias": "Elective Ground", "canonical": "Choice",
-                     "sentence": "We call it Elective Ground, the settled "
+                     "sentence": "We call it Elective Ground, the resolved "
                                  "name for Choice."},
                     # Q/alias-retired-guard: the bestowed name is a RETIRED
                     # concept — a side door around the retired-name ban.
@@ -1056,7 +1056,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         write(ms / "03-names.md",
               "# Names\n\nWhat ye call Distinction is the choice of "
               "qualities parted. What ye call Persistence is the becoming "
-              "of shapes. We call it Elective Ground, the settled name for "
+              "of shapes. We call it Elective Ground, the resolved name for "
               "Choice. We once called Choice by the name "
               "RetiredAliasCandidate.\n")
         out = run(ws, "extract", "--aliases")
@@ -4353,6 +4353,99 @@ def scenario_transplant() -> None:
     check("horizontal rules survive transplant as --- paragraphs",
           hr_text == "Above.\n---\nBelow.\n", hr_text)
 
+    # Tables (it-08b8b0a0c737): a Docs table element must be rebuilt with
+    # insertTable and its cells filled last-to-first at the empty-table
+    # indices; text after the table must land after the whole table.
+    def _cell(text, **style):
+        return {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": text, "textStyle": style}}]}}]}
+    tbl_doc = {"body": {"content": [
+        {"paragraph": {"elements": [{"textRun": {"content": "Before.\n"}}]}},
+        {"table": {"rows": 2, "columns": 2, "tableRows": [
+            {"tableCells": [_cell("A\n", bold=True), _cell("B\n")]},
+            {"tableCells": [_cell("c\n"), _cell("dd\n")]}]}},
+        {"paragraph": {"elements": [{"textRun": {"content": "After.\n"}}]}},
+    ]}}
+    tbl_reqs = transplant_requests(tbl_doc, "t.x")
+    tables = [r["insertTable"] for r in tbl_reqs if "insertTable" in r]
+    check("a table element becomes one insertTable at the cursor",
+          tables == [{"rows": 2, "columns": 2,
+                      "location": {"tabId": "t.x", "index": 9}}], str(tables))
+    tbl_inserts = [(r["insertText"]["location"]["index"], r["insertText"]["text"])
+                   for r in tbl_reqs if "insertText" in r]
+    # empty 2x2 table: newline(1) + table start/end(2) + 2 rows x (1 + 2 cells x 2) = 13
+    check("cells fill last-to-first at empty-table indices, prose follows the table",
+          tbl_inserts == [(1, "Before.\n"), (20, "dd"), (18, "c"), (15, "B"),
+                          (13, "A"), (27, "After.\n")], str(tbl_inserts))
+    bolds = [r["updateTextStyle"]["range"] for r in tbl_reqs
+             if "updateTextStyle" in r
+             and r["updateTextStyle"]["textStyle"].get("bold") is True]
+    check("cell run styles are applied inside the cell",
+          bolds == [{"tabId": "t.x", "startIndex": 13, "endIndex": 14}], str(bolds))
+
+    # `_tab_runs` must descend into table cells, and `_locate_in_tab`
+    # must map across the structural index gap tables leave between
+    # cells and the next paragraph. Skipping either planted
+    # <<old>>{{new}} forms on the wrong span once tables reached tabs
+    # (it-08b8b0a0c737).
+    from authorlm.gdocs import _locate_in_tab, _tab_runs
+
+    class _Req:
+        def __init__(self, result):
+            self._result = result
+
+        def execute(self):
+            return self._result
+
+    cell_para = {
+        "startIndex": 12, "endIndex": 21,
+        "paragraph": {"elements": [
+            {"startIndex": 12, "endIndex": 21,
+             "textRun": {"content": "in-table\n"}},
+        ]},
+    }
+    table_body = [
+        {"startIndex": 1, "endIndex": 8,
+         "paragraph": {"elements": [
+             {"startIndex": 1, "endIndex": 8,
+              "textRun": {"content": "Before\n"}},
+         ]}},
+        {"startIndex": 8, "endIndex": 30,
+         "table": {"tableRows": [
+             {"tableCells": [{"content": [cell_para]}]}]}},
+        {"startIndex": 30, "endIndex": 37,
+         "paragraph": {"elements": [
+             {"startIndex": 30, "endIndex": 37,
+              "textRun": {"content": "After.\n"}},
+         ]}},
+    ]
+
+    class _TableTabDocs:
+        def documents(self):
+            class _Docs:
+                def get(self, documentId=None, includeTabsContent=None):
+                    return _Req({"tabs": [{
+                        "tabProperties": {"tabId": "t.x",
+                                          "title": "essay.md"},
+                        "documentTab": {"body": {"content": table_body}},
+                        "childTabs": [],
+                    }]})
+            return _Docs()
+
+    docs = _TableTabDocs()
+    runs = _tab_runs(docs, "doc", "t.x")
+    check("_tab_runs includes table-cell text runs",
+          runs == [(1, "Before\n"), (12, "in-table\n"), (30, "After.\n")],
+          str(runs))
+    span = _locate_in_tab(docs, "doc", "t.x", "After.")
+    check("_locate_in_tab maps post-table prose to the real Doc index "
+          "(not the end of the preceding cell / inside the table)",
+          span == (30, 36), str(span))
+    cell_span = _locate_in_tab(docs, "doc", "t.x", "in-table\n")
+    check("_locate_in_tab exclusive end after a cell does not swallow "
+          "the table's structural gap",
+          cell_span == (12, 21), str(cell_span))
+
     # Tab reordering: iterated single moves must converge to TOC order
     # under remove-then-insert semantics, and no-op once matched.
     from authorlm.gdocs import next_tab_move
@@ -4423,6 +4516,752 @@ def scenario_ephemeral_history() -> None:
     check("triage-scoped input leaves no readline history",
           readline.get_current_history_length() == base,
           f"history length {readline.get_current_history_length()} != {base}")
+
+
+# --- Scenario WS fixtures (scope-derived intent attachment) ---------------
+#
+# A real toc PARENT CHAIN, which no other e2e workspace has: book.md is a
+# grandparent opener, part.md its child opener, alpha.md and beta.md the
+# essays beneath. That is what makes `chapter` a tier with two levels in
+# it rather than a synonym for "the one parent".
+
+TOC_WS = ('[[chapter]]\nfile = "book.md"\n\n'
+          '[[chapter]]\nfile = "part.md"\nparent = "book.md"\n\n'
+          '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+          '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n\n'
+          '[[chapter]]\nfile = "gamma.md"\nparent = "part.md"\n\n'
+          '[[chapter]]\nfile = "orphan.md"\n')
+
+WS_BOOK = "# The Book\n\nThe book opener, which sits above every part.\n"
+WS_PART = "# The Part\n\nThe part opener, which sits above its essays.\n"
+WS_ALPHA = ("# Alpha\n\nThe old alpha opening, soon to be raw material.\n\n"
+            "The old alpha second paragraph, about fields.\n")
+WS_BETA = ("# Beta\n\nThe old beta opening, soon to be raw material.\n\n"
+           "The old beta second paragraph, about trajectories.\n")
+WS_GAMMA = ("# Gamma\n\nThe old gamma opening, soon to be raw material.\n\n"
+            "The old gamma second paragraph, about ties.\n")
+WS_ORPHAN = "# Orphan\n\nAn essay no part claims and no intent covers.\n"
+
+WS_FILES = {"book.md": WS_BOOK, "part.md": WS_PART, "alpha.md": WS_ALPHA,
+            "beta.md": WS_BETA, "gamma.md": WS_GAMMA, "orphan.md": WS_ORPHAN}
+
+WS_PLAN = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                       "budget": 60, "notes": "open on the claim"}])
+WS_PLAN_2 = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                         "budget": 60, "notes": "open on the claim"},
+                        {"role": "close", "concepts": ["Choice"],
+                         "budget": 60, "notes": "close on the same ground"}])
+
+
+def _ws_workspace(root: Path, server, name: str = "ws") -> tuple:
+    """The Scenario WS fixture: the parent chain above, a style guide on
+    every essay, and fresh summaries. Returns (ws, ms, db, manuscript)."""
+    from authorlm.db import Database as _DB
+
+    ws = root / name
+    ms = ws / "manuscript"
+    for filename, body in WS_FILES.items():
+        write(ms / filename, body)
+    write(ms / "toc.toml", TOC_WS)
+    write(ws / ".authorlm" / "config.toml",
+          "[llm]\nenabled = true\nprovider = \"openai\"\n"
+          f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
+          "model = \"stub\"\n")
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    run(ws, "style", "guide", "House")
+    for filename in WS_FILES:
+        run(ws, "style", "attach", filename, "House")
+    run(ws, "summarize", "rebuild", "--all")
+    db = _DB(ws / ".authorlm" / "authorlm.db")
+    manuscript = dict(db.one("SELECT * FROM manuscripts WHERE name = 'book'"))
+    return ws, ms, db, manuscript
+
+
+def _full_id(db, table: str, prefix: str) -> str:
+    """The CLI prints id PREFIXES; the database is keyed on full ids."""
+    row = db.one(f"SELECT id FROM {table} WHERE id LIKE ?", (f"{prefix}%",))
+    assert row is not None, f"no {table} row for '{prefix}'"
+    return row["id"]
+
+
+def _episode_of(db, intent_id: str) -> dict:
+    row = db.one("SELECT * FROM editorial_episodes WHERE intent_id LIKE ? "
+                 "ORDER BY created_at DESC LIMIT 1", (f"{intent_id}%",))
+    return dict(row) if row else {}
+
+
+def _episode_locations(db, episode: dict) -> list[str]:
+    ids = json.loads(episode.get("transition_ids") or "[]")
+    out = []
+    for tid in ids:
+        row = db.one("SELECT location FROM editorial_transitions WHERE id = ?",
+                     (tid,))
+        if row:
+            out.append(row["location"].split("#", 1)[0])
+    return out
+
+
+def _review_episodes(db, writeup_id: str) -> set:
+    """The episodes this writeup's beat verdicts were recorded against.
+    `beliefs.record_review` carries the episode on the evidence row it
+    writes, and that row names the suggestion text — which is how a
+    verdict is tied back to the beat it settled."""
+    texts = {r["suggestion"][:120] for r in db.all(
+        "SELECT suggestion FROM guidance_history WHERE batch_id LIKE ?",
+        (f"{writeup_id}%",))}
+    return {row["episode_id"] for row in db.all(
+        "SELECT episode_id, target FROM evidence "
+        "WHERE evidence_type = 'author_review'")
+        if row["target"] in texts}
+
+
+def scenario_writeup_scope(root: Path) -> None:
+    """Scenario WS — scope-derived intent attachment (design
+    findings/design-intent-scope.md)."""
+    print("Scenario WS — writeup scope: derived intents and episode attribution")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server)
+        run(ws, "session", "start")
+
+        # ---- WS-11: episode single-attribution, the parallel case.
+        # Two writeups open at once (design §14) under two DIFFERENT
+        # intents. Before this design `collect` attached every transition
+        # to `sessions.current_episode` — the session's most recently
+        # CREATED open episode, whatever intent it belonged to — so both
+        # writeups' beats landed on whichever intent was declared last.
+        out = run(ws, "intent", "declare", "Rewrite alpha")
+        intent_alpha = out.split("[")[1].split("]")[0]
+        out = run(ws, "intent", "declare", "Rewrite beta")
+        intent_beta = out.split("[")[1].split("]")[0]
+
+        out = run_stdin(ws, "", "write", "start", "alpha.md",
+                        "--intent", intent_alpha)
+        wu_alpha = out.split("[")[1].split("]")[0]
+        out = run_stdin(ws, "", "write", "start", "beta.md",
+                        "--intent", intent_beta)
+        wu_beta = out.split("[")[1].split("]")[0]
+        run_stdin(ws, WS_PLAN_2, "write", "plan", "--writeup", "alpha.md")
+        run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "beta.md")
+
+        run_stdin(ws, "Alpha beat one: the claim, stated plainly.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "opens on the claim")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+        run_stdin(ws, "Beta beat one: the same ground, differently held.",
+                  "write", "propose", "--writeup", "beta.md",
+                  "--why", "opens on the claim")
+        run_stdin(ws, "", "write", "accept", "--writeup", "beta.md")
+
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
+        check("WS-11 — the alpha writeup's accepted beat attaches to "
+              "ALPHA's own episode, not to whichever intent was declared "
+              "last (design §0.3: the live mis-attribution)",
+              "alpha.md" in _episode_locations(db, ep_alpha),
+              f"alpha episode {ep_alpha.get('id')} holds "
+              f"{_episode_locations(db, ep_alpha)}")
+        check("WS-11 — and the beta writeup's beat attaches to BETA's "
+              "episode",
+              "beta.md" in _episode_locations(db, ep_beta),
+              f"beta episode {ep_beta.get('id')} holds "
+              f"{_episode_locations(db, ep_beta)}")
+        check("WS-11 — no fan-out: alpha's episode holds NOTHING from "
+              "beta.md",
+              "beta.md" not in _episode_locations(db, ep_alpha),
+              str(_episode_locations(db, ep_alpha)))
+        check("WS-11 — the beat VERDICT is recorded against the same "
+              "episode as the transitions (write_accept passes one row to "
+              "both collect and record_review)",
+              _review_episodes(db, wu_alpha) == {ep_alpha.get("id")},
+              f"{_review_episodes(db, wu_alpha)} != {ep_alpha.get('id')}")
+        check("WS-11 — and beta's verdict likewise",
+              _review_episodes(db, wu_beta) == {ep_beta.get("id")},
+              f"{_review_episodes(db, wu_beta)} != {ep_beta.get('id')}")
+        # ---- WS-11r: `write reject` is its own site, and is covered as
+        # one. It takes a different path from `write_accept` — no collect,
+        # one `record_review` — so a routing fix applied to accept alone
+        # would leave every rejection filed against whichever intent was
+        # declared last, and rejections are the highest-value evidence the
+        # loop receives.
+        before_beta = _episode_of(db, intent_beta)["transition_ids"]
+        before_verdicts = len(_episodes_referenced(
+            db, {ep_alpha["id"], ep_beta["id"]}))
+        run_stdin(ws, "Alpha beat two: a flat sentence the author turns down.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "closes on the same ground")
+        run_stdin(ws, "", "write", "reject", "--writeup", "alpha.md",
+                  "--reason", "too flat, and it restates the opener")
+        check("WS-11r — a REJECTED beat on alpha is recorded against "
+              "ALPHA's episode, while beta's is the session's newest",
+              _review_episodes(db, wu_alpha) == {ep_alpha.get("id")},
+              f"{_review_episodes(db, wu_alpha)} != {ep_alpha.get('id')}")
+        check("WS-11r — the rejection really was recorded (the assertion "
+              "above is not passing on an absence)",
+              len(_episodes_referenced(db, {ep_alpha["id"], ep_beta["id"]}))
+              > before_verdicts,
+              f"{before_verdicts} verdict rows before")
+        check("WS-11r — and beta's episode is untouched by alpha's "
+              "rejection",
+              _episode_of(db, intent_beta)["transition_ids"] == before_beta,
+              _episode_of(db, intent_beta)["transition_ids"])
+        run_stdin(ws, "Alpha beat two: the closing turn, in the author's "
+                      "own rhythm.",
+                  "write", "propose", "--writeup", "alpha.md",
+                  "--why", "closes on the same ground")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
+        del wu_beta
+
+        # ---- WS-11b: the writeup's LAST collect belongs to the primary
+        # too. Between the final accepted beat and `write complete` the
+        # file can genuinely move — a doc pull, or the author's own hand
+        # edit — and `write complete`'s own collect is what records it.
+        # "Usually unchanged" is not never, and when it IS changed those
+        # transitions went the same wrong way the per-beat ones did.
+        before_alpha = set(json.loads(ep_alpha["transition_ids"]))
+        before_beta = set(json.loads(ep_beta["transition_ids"]))
+        (ms / "alpha.md").write_text(
+            (ms / "alpha.md").read_text()
+            + "\nA paragraph the author typed by hand, after the last beat "
+              "and before completing.\n")
+        run(ws, "write", "complete", "--writeup", "alpha.md")
+        ep_alpha = _episode_of(db, intent_alpha)
+        ep_beta = _episode_of(db, intent_beta)
+        gained_alpha = set(json.loads(ep_alpha["transition_ids"])) - before_alpha
+        gained_beta = set(json.loads(ep_beta["transition_ids"])) - before_beta
+        check("WS-11b — a hand edit between the last beat and completion is "
+              "collected onto the PRIMARY's episode, not onto whichever "
+              "intent was declared last",
+              gained_alpha and all(
+                  f == "alpha.md" for f in _episode_locations(
+                      db, {"transition_ids": json.dumps(list(gained_alpha))})),
+              str(_episode_locations(
+                  db, {"transition_ids": json.dumps(list(gained_alpha))})))
+        check("WS-11b — and beta's episode gains nothing from alpha's "
+              "completion: the final collect fans out no further than the "
+              "per-beat ones do",
+              not gained_beta,
+              str(_episode_locations(
+                  db, {"transition_ids": json.dumps(list(gained_beta))})))
+    finally:
+        server.shutdown()
+
+
+def _episodes_referenced(db, episode_ids: set) -> list:
+    """Every evidence row pointing at one of these episodes. The reviews
+    themselves carry no episode column — `beliefs.record_review` puts it
+    on the evidence row it writes — so this is where a verdict filed
+    against the wrong intent becomes visible."""
+    return [dict(r) for r in db.all(
+        "SELECT id, episode_id, evidence_type, target FROM evidence "
+        "WHERE episode_id IS NOT NULL")
+        if r["episode_id"] in episode_ids]
+
+
+def _newest_open_episode(db, manuscript_id: str) -> dict:
+    """What `sessions.current_episode` would return: the session's most
+    recently created open episode, whatever intent it belongs to."""
+    row = db.one(
+        "SELECT e.* FROM editorial_episodes e JOIN sessions s "
+        "ON s.id = e.session_id WHERE e.manuscript_id = ? "
+        "AND e.status = 'open' AND s.status = 'active' "
+        "ORDER BY e.created_at DESC LIMIT 1", (manuscript_id,))
+    return dict(row) if row else {}
+
+
+def scenario_intent_no_fanout(root: Path) -> None:
+    """Scenario WS4 — design-intent-scope §5.1 item 11, as specified: a
+    DERIVED writeup with a primary and true secondaries, where fan-out is
+    the failure case and is asserted as an explicit ABSENCE."""
+    print("Scenario WS4 — no fan-out: the secondaries' episodes stay empty")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server, name="ws4")
+        run(ws, "session", "start")
+        # The book-wide one is declared LAST, so ITS episode is the
+        # session's most recently created open one — which is precisely
+        # what `current_episode` would hand every collect on this writeup.
+        i_file = _declare(ws, "Rewrite alpha itself", "--scope", "alpha.md")
+        i_part = _declare(ws, "Tighten every essay in the part",
+                          "--chapter", "part.md")
+        i_wide = _declare(ws, "A standing rule for the whole book")
+
+        out = run_stdin(ws, "", "write", "start", "alpha.md")
+        wu = out.split("[")[1].split("]")[0]
+        ep_file = _episode_of(db, i_file)
+        ep_part = _episode_of(db, i_part)
+        ep_wide = _episode_of(db, i_wide)
+        check("WS4 — the file-scoped intent is the primary; the other two "
+              "are true secondaries",
+              _block_of(db, wu)["primary"].startswith(i_file)
+              and {i[:8] for i in _member_ids(_block_of(db, wu))}
+              == {i_file, i_part, i_wide}, str(_block_of(db, wu)))
+        check("WS4 — the writeup's OWN TRUNCATION is filed against the "
+              "primary's episode. It is the writeup's first recorded act, "
+              "and before this it went wherever current_episode pointed — "
+              "which here is the book-wide secondary declared last",
+              "alpha.md" in _episode_locations(db, ep_file),
+              f"primary episode holds {_episode_locations(db, ep_file)}; "
+              f"the book-wide secondary holds "
+              f"{_episode_locations(db, ep_wide)}")
+
+        plan = json.dumps([{"role": "opener", "concepts": [], "budget": 60},
+                           {"role": "close", "concepts": [], "budget": 60}])
+        run_stdin(ws, plan, "write", "plan", "--writeup", "alpha.md")
+        for n in (1, 2):
+            run_stdin(ws, f"Alpha beat {n}, a sentence of the author's prose.",
+                      "write", "propose", "--writeup", "alpha.md",
+                      "--why", "the beat")
+            run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+
+        ep_file = _episode_of(db, i_file)
+        ep_part = _episode_of(db, i_part)
+        ep_wide = _episode_of(db, i_wide)
+        check("WS4 — the primary's episode holds every transition of the "
+              "writeup",
+              len(json.loads(ep_file["transition_ids"])) >= 3,
+              str(_episode_locations(db, ep_file)))
+        for label, episode in (("chapter", ep_part), ("book-wide", ep_wide)):
+            check(f"WS4 — the {label} SECONDARY's episode transition_ids is "
+                  f"EXACTLY [] — one authorial act is never mined twice, "
+                  f"and the absence is what says so",
+                  json.loads(episode["transition_ids"]) == [],
+                  f"{episode['id']} holds "
+                  f"{_episode_locations(db, episode)}")
+        secondaries = {ep_part["id"], ep_wide["id"]}
+        check("WS4 — and no review reaches a secondary either: not one "
+              "evidence row references either secondary episode",
+              _episodes_referenced(db, secondaries) == [],
+              str(_episodes_referenced(db, secondaries)))
+        check("WS4 — every verdict of this writeup is filed against the "
+              "primary's episode and nowhere else",
+              _review_episodes(db, wu) == {ep_file["id"]},
+              f"{_review_episodes(db, wu)} != {ep_file['id']}")
+        run(ws, "write", "complete", "--writeup", "alpha.md")
+
+        # ---- The tie: the machine must NOT guess an episode either.
+        run(ws, "summarize", "rebuild")
+        tie_one = _declare(ws, "Rewrite gamma around the refrain",
+                           "--scope", "gamma.md")
+        tie_two = _declare(ws, "Cut gamma's inheritance to a paragraph",
+                           "--scope", "gamma.md")
+        # Declared LAST and NOT a member of gamma's set, so it owns the
+        # session episode: that is what "ambient" looks like from outside.
+        bystander = _declare(ws, "Work on beta later", "--scope", "beta.md")
+        ambient = _newest_open_episode(db, manuscript["id"])
+        check("WS4 — the bystander's episode is the session's newest, so it "
+              "is what current_episode would hand the truncation",
+              ambient["intent_id"].startswith(bystander), str(ambient))
+
+        run_stdin(ws, "", "write", "start", "gamma.md")
+        ep_one = _episode_of(db, tie_one)
+        ep_two = _episode_of(db, tie_two)
+        check("WS4 — with the primary UNSETTLED the truncation stays "
+              "AMBIENT: real work is never attributed to a placeholder "
+              "candidate the author has not chosen",
+              "gamma.md" in _episode_locations(
+                  db, _episode_of(db, bystander)),
+              str(_episode_locations(db, _episode_of(db, bystander))))
+        for label, episode in (("first", ep_one), ("second", ep_two)):
+            check(f"WS4 — and the {label} tied candidate's episode holds "
+                  f"nothing: refusing to guess means refusing to file",
+                  json.loads(episode["transition_ids"]) == [],
+                  f"{episode['id']} holds "
+                  f"{_episode_locations(db, episode)}")
+        # ---- The drift line is worded for the state the set is in. This
+        # writeup is still PROPOSED — nothing has been ratified — so
+        # "newly in scope since ratification" would name a moment that has
+        # not happened, and would imply a freeze the author can still edit
+        # their way out of.
+        late = _declare(ws, "A third goal for gamma", "--scope", "gamma.md")
+        out = run(ws, "write", "status", "--writeup", "gamma.md")
+        check("WS4 — while PROPOSED the drift line says 'in scope, but not "
+              "on this writeup' and never claims a ratification",
+              "in scope, but not on this writeup" in out
+              and late in out
+              and "since ratification" not in out, out)
+        check("WS4 — and it does not offer the cache-rebill warning, which "
+              "is only true of a join after the freeze",
+              "re-bills the cached prefix" not in out, out)
+        run(ws, "write", "abandon", "--writeup", "gamma.md")
+    finally:
+        server.shutdown()
+
+
+def _block_of(db, writeup_prefix: str) -> dict:
+    row = db.one("SELECT metadata FROM writeups WHERE id LIKE ?",
+                 (f"{writeup_prefix}%",))
+    return json.loads(row["metadata"] or "{}").get("intents") or {}
+
+
+def _member_ids(block: dict) -> set:
+    return {m["id"] for m in block.get("members") or []}
+
+
+def _tier_of(block: dict, intent_id: str) -> str | None:
+    for member in block.get("members") or []:
+        if member["id"].startswith(intent_id):
+            return member["tier"]
+    return None
+
+
+def _declare(ws, statement: str, *flags) -> str:
+    out = run(ws, "intent", "declare", statement, *flags)
+    return out.split("[")[1].split("]")[0]
+
+
+def scenario_intent_scope(root: Path) -> None:
+    """Scenario WS2 — derive → ratify → freeze, and the completion
+    dispositions (design-intent-scope §5.1)."""
+    print("Scenario WS2 — scope-derived intent sets: derive, ratify, freeze")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server, name="ws2")
+        run(ws, "session", "start")
+
+        # ---- WS-3: an essay no active intent covers is a writeup with no
+        # goal. It refuses, names BOTH exits, and — RISK K1 — leaves the
+        # disk exactly as it was.
+        before = (ms / "orphan.md").read_bytes()
+        out = run_stdin(ws, "", "write", "start", "orphan.md",
+                        expect_exit=True)
+        check("WS-3 — an empty derived set REFUSES rather than starting a "
+              "writeup with no goal",
+              "no active intent covers orphan.md" in out, out)
+        check("WS-3 — and the refusal names both exits: declare one scoped "
+              "to this file, or place an existing one",
+              "intent declare" in out and "--scope orphan.md" in out
+              and "intent scope" in out, out)
+        check("WS-3 — never auto-declared",
+              "declared intent" not in out.lower(), out)
+        check("WS-3 — the refused start left the file byte-identical and "
+              "wrote no writeup row (the gate order of RISK K1 holds)",
+              (ms / "orphan.md").read_bytes() == before
+              and db.one("SELECT id FROM writeups WHERE file = 'orphan.md'")
+              is None, out)
+
+        i_file = _declare(ws, "Rewrite alpha around the door refrain",
+                          "--scope", "alpha.md")
+        i_part = _declare(ws, "Tighten every essay in the part",
+                          "--chapter", "part.md")
+        i_book = _declare(ws, "Cut the throat-clearing everywhere in the book",
+                          "--chapter", "book.md")
+        i_wide = _declare(ws, "Never let a thinker's name carry an argument")
+        i_beta = _declare(ws, "Beta-only work", "--scope", "beta.md")
+
+        out = run(ws, "intent", "list")
+        check("WS — intent list prints the TIER, not just the column",
+              f"({'active'} · file alpha.md)" in out
+              and "· chapter part.md)" in out
+              and "· book-wide (default))" in out, out)
+
+        # ---- WS-1 / WS-2: derivation by tier, including a GRANDPARENT
+        # opener, which is what makes `chapter` a tier with depth.
+        out = run_stdin(ws, "", "write", "start", "alpha.md")
+        wu = out.split("[")[1].split("]")[0]
+        block = _block_of(db, wu)
+        derived = {i[:8] for i in _member_ids(block)}
+        check("WS-1 — with no --intent the set is DERIVED: every active "
+              "intent whose scope covers this essay, and only those",
+              derived == {i_file, i_part, i_book, i_wide},
+              f"{sorted(derived)} (beta-scoped {i_beta} must be absent)")
+        check("WS-1 — the tiers are named: file, chapter, manuscript",
+              (_tier_of(block, i_file), _tier_of(block, i_part),
+               _tier_of(block, i_wide)) == ("file", "chapter", "manuscript"),
+              json.dumps(block["members"], indent=1))
+        check("WS-2 — an intent scoped to a GRANDPARENT opener is derived "
+              "too, and its tier is chapter, not manuscript",
+              _tier_of(block, i_book) == "chapter", str(block["members"]))
+        check("WS-1 — the most specific tier is primary",
+              block["primary"].startswith(i_file), block["primary"])
+        check("WS-1 — and the start output says so, grouped by tier",
+              "Intents in scope" in out and "← primary" in out
+              and "manuscript " in out, out)
+        check("WS-6 — the set is PROPOSED at start; nothing is ratified yet",
+              block["state"] == "proposed" and block["frozen_at"] is None,
+              str(block))
+
+        # ---- WS-9: the proposed window is the editable one.
+        run(ws, "write", "intents", "--primary", i_part, "--writeup", "alpha.md")
+        check("WS-9 — --primary re-points freely while the set is proposed",
+              _block_of(db, wu)["primary"].startswith(i_part), "")
+        run(ws, "write", "intents", "--primary", i_file, "--writeup", "alpha.md")
+        out = run(ws, "write", "intents", "--remove", i_book,
+                  "--writeup", "alpha.md")
+        check("WS-9 — --remove succeeds while proposed",
+              i_book not in {i[:8] for i in _member_ids(_block_of(db, wu))},
+              out)
+
+        # ---- WS-6: the plan is the ratification gate; the set freezes on it.
+        plan = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                            "budget": 60, "intents": [i_file]}])
+        out = run_stdin(ws, plan, "write", "plan", "--writeup", "alpha.md")
+        block = _block_of(db, wu)
+        frozen_at = block["frozen_at"]
+        check("WS-6 — 'Plan ratified' is visibly a ratification of plan AND "
+              "intents: the frozen set prints above the beats",
+              "Intents — 3, FROZEN" in out, out)
+        check("WS-6 — the stored state is frozen and stamped",
+              block["state"] == "frozen" and frozen_at, str(block))
+        check("WS-8 — a beat tag is stored RESOLVED to the full member id "
+              "(the digest's `serves` precedent)",
+              json.loads(db.one("SELECT plan FROM writeups WHERE id LIKE ?",
+                                (f"{wu}%",))["plan"])[0]["intents"][0]
+              .startswith(i_file), "")
+
+        replan = json.dumps([
+            {"role": "opener", "concepts": ["Choice"], "budget": 60,
+             "intents": [i_file]},
+            {"role": "close", "concepts": ["Choice"], "budget": 60,
+             "intents": [i_file]}])
+        run_stdin(ws, replan, "write", "plan", "--replace",
+                  "--writeup", "alpha.md")
+        after = _block_of(db, wu)
+        check("WS-6 — a --replace replan replans BEATS only: membership and "
+              "frozen_at are untouched",
+              after["frozen_at"] == frozen_at
+              and _member_ids(after) == _member_ids(block), str(after))
+
+        # ---- WS-9: the frozen window is narrower, and each refusal names
+        # the one command that clears it.
+        out = run(ws, "write", "intents", "--remove", i_part,
+                  "--writeup", "alpha.md", expect_exit=True)
+        check("WS-9 — --remove is REFUSED after the freeze, because a "
+              "ratified set that quietly loses a member makes the "
+              "completion report a fiction — and it names --defer",
+              "ratified" in out and "--defer" in out, out)
+        run(ws, "write", "intents", "--primary", i_part,
+            "--writeup", "alpha.md")
+        check("WS-9 — --primary is still legal after the freeze while "
+              "cursor == 0: nothing has been attributed yet",
+              _block_of(db, wu)["primary"].startswith(i_part), "")
+        run(ws, "write", "intents", "--primary", i_file,
+            "--writeup", "alpha.md")
+
+        run_stdin(ws, "Alpha's first beat, plainly said.", "write", "propose",
+                  "--writeup", "alpha.md", "--why", "opens on the claim")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+        out = run(ws, "write", "intents", "--primary", i_part,
+                  "--writeup", "alpha.md", expect_exit=True)
+        check("WS-9 — and it is REFUSED once a beat is accepted: "
+              "re-pointing would split one writeup's transitions across two "
+              "episodes, which is the fan-out the design forbids",
+              "already accepted" in out and "write abandon" in out, out)
+
+        # ---- WS-10: newly in scope is flagged, NEVER joined.
+        i_join = _declare(ws, "Make the debt explicit in alpha",
+                          "--scope", "alpha.md")
+        out = run(ws, "write", "status", "--writeup", "alpha.md")
+        check("WS-10 — an intent declared mid-writeup is reported as newly "
+              "in scope, with both exits named",
+              "newly in scope since ratification" in out
+              and "--add" in out and "--ignore" in out, out)
+        check("WS-10 — and it has NOT joined: the member list is unchanged",
+              i_join not in {i[:8] for i in _member_ids(_block_of(db, wu))},
+              str(_block_of(db, wu)))
+        out = run(ws, "write", "intents", "--add", i_join,
+                  "--writeup", "alpha.md")
+        joined = _block_of(db, wu)
+        check("WS-9 — --add stays legal after the freeze as an explicit "
+              "JOIN, recorded with the beat it happened at",
+              any(a["id"].startswith(i_join) and a.get("beat") == 1
+                  for a in joined["adds"]), str(joined["adds"]))
+        check("WS-9 — and the CLI says plainly that block A changed, so the "
+              "next beat re-bills the cached prefix once",
+              "re-bills the cached prefix" in out, out)
+
+        i_ignore = _declare(ws, "A goal for alpha the author will not take up",
+                            "--scope", "alpha.md")
+        run(ws, "write", "intents", "--ignore", i_ignore,
+            "--writeup", "alpha.md")
+        out = run(ws, "write", "status", "--writeup", "alpha.md")
+        check("WS-10 — --ignore stops the flag recurring without joining "
+              "or refusing anything",
+              i_ignore not in out
+              and i_ignore not in {i[:8] for i in
+                                   _member_ids(_block_of(db, wu))}, out)
+
+        # A RE-SCOPED existing intent behaves identically to a new one.
+        run(ws, "intent", "scope", i_beta, "--scope", "alpha.md")
+        out = run(ws, "write", "status", "--writeup", "alpha.md")
+        check("WS-10 — an intent RE-SCOPED onto this essay lands in the "
+              "same flag, and still does not join",
+              i_beta in out and "newly in scope" in out
+              and i_beta not in {i[:8] for i in
+                                 _member_ids(_block_of(db, wu))}, out)
+        run(ws, "write", "intents", "--ignore", i_beta, "--writeup", "alpha.md")
+
+        # ---- WS-14: --defer's two refusals.
+        primary_id = _block_of(db, wu)["primary"]
+        out = run(ws, "write", "intents", "--defer", primary_id[:8],
+                  "--reason", "not this time", "--writeup", "alpha.md",
+                  expect_exit=True)
+        check("WS-14 — --defer REFUSES the primary: it owns the attribution "
+              "for every beat already accepted",
+              "is the primary" in out, out)
+        out = run(ws, "write", "intents", "--defer", i_part,
+                  "--writeup", "alpha.md", expect_exit=True)
+        check("WS-14 — --defer requires a reason, on the same ground as "
+              "'write reject --reason': an unexplained deferral teaches "
+              "nothing",
+              "--reason is required" in out, out)
+        run(ws, "write", "intents", "--defer", i_part, "--reason",
+            "this essay barely names anyone; nothing to do here",
+            "--writeup", "alpha.md")
+
+        run_stdin(ws, "Alpha's closing beat, plainly said.", "write",
+                  "propose", "--writeup", "alpha.md", "--why", "closes")
+        run_stdin(ws, "", "write", "accept", "--writeup", "alpha.md")
+
+        # ---- WS-12 / WS-13: dispositions, the warning, the cross-reference.
+        out = run(ws, "write", "complete", "--writeup", "alpha.md")
+        check("WS-12 — a member every accepted beat is tagged for is SERVED",
+              f"served    [{i_file}" in out, out)
+        check("WS-12 — a deferred member reports its reason VERBATIM",
+              "DEFERRED" in out
+              and "this essay barely names anyone" in out, out)
+        check("WS-12 — a member no accepted beat serves is UNSERVED, named, "
+              "and given both exits",
+              "UNSERVED" in out and f"[{i_wide}" in out
+              and "--defer" in out and "intent complete" in out, out)
+        check("WS-12 — and the completion SUCCEEDS anyway (§15.13: warn, "
+              "never block)",
+              "completed — 2 beat(s)" in out, out)
+        for intent_id, expected in ((i_file, "served"), (i_part, "deferred"),
+                                    (i_wide, "unserved"), (i_join, "unserved")):
+            row = db.one("SELECT metadata FROM declared_intents WHERE id LIKE ?",
+                         (f"{intent_id}%",))
+            served = json.loads(row["metadata"] or "{}").get("served_by") or []
+            check(f"WS-13 — {intent_id} carries one served_by entry on its "
+                  f"OWN row, with the disposition ({expected}) and the role",
+                  len(served) == 1 and served[0]["file"] == "alpha.md"
+                  and served[0]["disposition"] == expected
+                  and served[0]["role"] in ("primary", "secondary"),
+                  json.dumps(served))
+
+        # ---- WS-4 / WS-5: explicit --intent overrides derivation entirely.
+        run(ws, "summarize", "rebuild")   # alpha's rewrite made it stale
+        out = run_stdin(ws, "", "write", "start", "beta.md",
+                        "--intent", i_wide, "--intent", i_beta)
+        wu_beta = out.split("[")[1].split("]")[0]
+        block = _block_of(db, wu_beta)
+        check("WS-4 — --intent flags override derivation ENTIRELY: the "
+              "members are exactly the named ones",
+              {i[:8] for i in _member_ids(block)} == {i_wide, i_beta},
+              str(block["members"]))
+        check("WS-4 — and the block records that it was manual",
+              block["manual"] is True, str(block))
+        check("WS-4 — the author's FIRST flag is the primary, even when the "
+              "second is more specific",
+              block["primary"].startswith(i_wide), block["primary"])
+        check("WS-4 — an intent whose scope does not cover this file is "
+              "KEPT and noted, never refused — reaching outside the tier is "
+              "a legitimate authorial act",
+              _tier_of(block, i_beta) == "outside"
+              and "scoped outside this essay" in out, out)
+        run(ws, "write", "abandon", "--writeup", "beta.md")
+        run(ws, "summarize", "rebuild")
+
+        out = run_stdin(ws, "", "write", "start", "gamma.md",
+                        "--intent", i_wide)
+        wu_gamma = out.split("[")[1].split("]")[0]
+        row = db.one("SELECT intent_id FROM writeups WHERE id LIKE ?",
+                     (f"{wu_gamma}%",))
+        check("WS-5 — the single-flag command that existed before this "
+              "design still binds writeups.intent_id to that intent and "
+              "carries it as the one member",
+              row["intent_id"].startswith(i_wide)
+              and {i[:8] for i in _member_ids(_block_of(db, wu_gamma))}
+              == {i_wide}, row["intent_id"])
+        run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "gamma.md")
+        run_stdin(ws, "Gamma's only beat.", "write", "propose",
+                  "--writeup", "gamma.md", "--why", "opens")
+        run_stdin(ws, "", "write", "accept", "--writeup", "gamma.md")
+        out = run(ws, "write", "complete", "--writeup", "gamma.md")
+        check("WS-12 — an UNTAGGED beat serves every member",
+              f"served    [{i_wide}" in out, out)
+        served = json.loads(db.one(
+            "SELECT metadata FROM declared_intents WHERE id LIKE ?",
+            (f"{i_wide}%",))["metadata"])["served_by"]
+        check("WS-13 — a second writeup APPENDS a second served_by entry, "
+              "deduped by writeup id",
+              len(served) == 2
+              and {s["file"] for s in served} == {"alpha.md", "gamma.md"},
+              json.dumps(served))
+    finally:
+        server.shutdown()
+
+
+def scenario_intent_tie(root: Path) -> None:
+    """Scenario WS3 — the tie, and the plan's two other new refusals."""
+    print("Scenario WS3 — the primary tie and the plan-time refusals")
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws, ms, db, manuscript = _ws_workspace(root, server, name="ws3")
+        run(ws, "session", "start")
+        i_one = _declare(ws, "Rewrite gamma around the refrain",
+                         "--scope", "gamma.md")
+        i_two = _declare(ws, "Cut the inheritance down to one paragraph",
+                         "--scope", "gamma.md")
+        i_dead = _declare(ws, "A goal that will be closed mid-writeup",
+                          "--chapter", "part.md")
+
+        # ---- WS-7: the tie is ANNOUNCED at start (refusing the start
+        # would be a gate-parade regression — the author would lose the
+        # truncation they came for) and REFUSED at the plan.
+        out = run_stdin(ws, "", "write", "start", "gamma.md")
+        wu = out.split("[")[1].split("]")[0]
+        check("WS-7 — write start proceeds and names the tied candidates "
+              "rather than sending the author away to look them up",
+              "equally specific" in out and i_one in out and i_two in out
+              and "write intents --primary" in out, out)
+        check("WS-7 — the stored primary is null while the tie is unsettled",
+              _block_of(db, wu)["primary"] is None, str(_block_of(db, wu)))
+        out = run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "gamma.md",
+                        expect_exit=True)
+        check("WS-7 — write plan REFUSES while the primary is unsettled, "
+              "repeating both candidates and the one command that clears it",
+              "tied for primary" in out and i_one in out and i_two in out
+              and "write intents --primary" in out, out)
+        run(ws, "write", "intents", "--primary", i_two, "--writeup", "gamma.md")
+
+        # ---- WS-8: a dead member, then a beat tag naming a non-member.
+        run(ws, "intent", "abandon", i_dead, "--outcome", "changed plans")
+        out = run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "gamma.md",
+                        expect_exit=True)
+        check("WS-8 — write plan REFUSES a member that died between start "
+              "and plan: a silently changed set is not a ratified set",
+              "abandoned, not active" in out
+              and f"write intents --remove {i_dead}" in out, out)
+        run(ws, "write", "intents", "--remove", i_dead, "--writeup", "gamma.md")
+
+        stranger = _declare(ws, "An intent scoped to another essay entirely",
+                            "--scope", "beta.md")
+        bad = json.dumps([{"role": "opener", "concepts": ["Choice"],
+                           "budget": 60, "intents": [stranger]}])
+        out = run_stdin(ws, bad, "write", "plan", "--writeup", "gamma.md",
+                        expect_exit=True)
+        check("WS-8 — and it REFUSES a beat tag naming a non-member, "
+              "listing the members (the digest's dangling-reference rule)",
+              stranger in out and "not a member" in out
+              and "write intents --add" in out, out)
+
+        out = run_stdin(ws, WS_PLAN, "write", "plan", "--writeup", "gamma.md")
+        check("WS-7 — with the tie settled and the dead member dropped, the "
+              "plan ratifies and prints the frozen set",
+              "Plan ratified" in out and "FROZEN" in out
+              and "← primary" in out, out)
+        check("WS-7 — and writeups.intent_id now holds the chosen primary",
+              db.one("SELECT intent_id FROM writeups WHERE id LIKE ?",
+                     (f"{wu}%",))["intent_id"].startswith(i_two), "")
+    finally:
+        server.shutdown()
 
 
 def _load_testbench():
@@ -4505,9 +5344,12 @@ def scenario_testbench(root: Path) -> None:
         check("--setup writes the three bench essays and a toc from the "
               "constants in the script (manuscripts/ is gitignored, so the "
               "script is the source of truth)",
-              all((msdir / f).read_text() == (tb.TOC if f == "toc.toml"
-                                              else tb.ESSAYS[f])
+              all((msdir / f).read_text() == tb.FILE_TEXT[f]
                   for f in tb.FILES), sorted(p.name for p in msdir.iterdir()))
+        check("the bench toc carries a real PARENT CHAIN, which is what "
+              "gives it a chapter tier at all",
+              'parent = "01-figure.md"' in (msdir / "toc.toml").read_text(),
+              (msdir / "toc.toml").read_text())
         check("--setup builds the summaries and prints the cost line — the "
               "one place the bench spends money",
               "built 3" in out and "LLM: 3 live call(s)" in out, out)
@@ -4551,6 +5393,36 @@ def scenario_testbench(root: Path) -> None:
               "with no keys at all",
               StubLLMHandler.REQUESTS == before,
               f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- the intent-scope check ----------------------------------------
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "intent-scope")
+        check("the intent-scope check passes on a healthy bench",
+              "all assertions passed" in out and "FAIL" not in out, out)
+        check("it drives the real derivation: start with NO --intent, all "
+              "three tiers labelled, the file-scoped one primary",
+              "derives the set rather than refusing" in out
+              and "labelled file" in out and "labelled chapter" in out
+              and "labelled manuscript" in out
+              and "the file-scoped intent is the primary" in out, out)
+        check("it proves the freeze at write plan, in the output AND in the "
+              "stored state",
+              "RATIFIES the set" in out and "really is 'frozen'" in out, out)
+        check("it proves an intent declared after ratification is flagged "
+              "and does NOT join",
+              "newly in scope" in out and "did NOT join" in out, out)
+        check("the check restores the essay and leaves no intents behind, "
+              "so the bench is idempotent for the next run",
+              (msdir / tb.TARGET).read_bytes() == original
+              and "left no bench intents behind" in out
+              and "FAIL" not in out, out)
+        check("ZERO live model calls: the whole derive → freeze → flag "
+              "cycle is deterministic",
+              StubLLMHandler.REQUESTS == before,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+        check("--list-checks names it",
+              "intent-scope" in bench("--list-checks"), "")
+
 
         # --- the check must DISCRIMINATE ------------------------------------
         # A visibility test that passes on a HIDDEN marker is worse than no
@@ -4614,8 +5486,2129 @@ def scenario_testbench(root: Path) -> None:
         check("and the bench is checkable again once it is settled",
               "all assertions passed"
               in bench("--check", "placeholder"), "")
+
+        # --- the filter check ----------------------------------------------
+        # LAST, deliberately: it settles the essay and rebuilds its
+        # summary, which leaves that summary stale against the text the
+        # rollback puts back. Every check above needs a fresh summary to
+        # get past the drafting gate, so this one runs after them.
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "filter")
+        check("the filter check passes on a healthy bench",
+              "all assertions passed" in out and "FAIL" not in out, out)
+        check("it proves the payload is deterministic and made no call",
+              "made NO live model call" in out
+              and "byte-identical prefix" in out, out)
+        check("it asserts the ECHO refusal ON THE DATABASE — no thread "
+              "row, cursor still 0 — rather than on the message alone",
+              "asserted ON THE DATABASE" in out, out)
+        check("it asserts proposed_old came from DISK, not from the reply",
+              "READ FROM DISK" in out, out)
+        check("it asserts the verdict evidence carries no episode",
+              "episode_id IS NULL" in out, out)
+        check("it asserts the marked form is VISIBLE markdown — the same "
+              "four hiding places --check placeholder tests, and for the "
+              "same reason: the author reads this in Obsidian",
+              "NOT inside an HTML comment" in out
+              and "NOT inside YAML front matter" in out
+              and "NOT inside a code fence" in out
+              and "renders as a plain paragraph" in out, out)
+        check("it asserts the canonicalization LIVE: while marked, every "
+              "read path still reports the original text",
+              "ORIGINAL text byte for byte" in out, out)
+        check("it asserts the finalized bytes and the identical-text "
+              "refusal",
+              "exactly the original with that one unit replaced" in out
+              and "refuses and names the prior run" in out, out)
+        check("it asserts the DOC transport's refusals too — the honest, "
+              "partial answer §6 rules for it: every one reads the run's "
+              "own state, so none can reach the network even on a fully "
+              "authorized bridge",
+              "refuses 'filter push' by name" in out
+              and "refuses 'filter resolve --pause' by name" in out
+              and "prints the run's transport" in out
+              and "names 'filter resolve'" in out, out)
+        check("...and each of those is PAIRED with the same verb at the "
+              "other mode, so the section is proved to discriminate "
+              "rather than to pass whatever it is handed",
+              "the discrimination without which the refusal below proves "
+              "nothing" in out and "says the OTHER thing" in out, out)
+        check("the check leaves the bench exactly as it found it",
+              (msdir / tb.TARGET).read_bytes() == original,
+              (msdir / tb.TARGET).read_text())
+        check("and it removes the filter artifact it created — the "
+              "author's own _filters/ is never touched",
+              not (msdir / "_filters" / "tb-dupes.md").exists())
+        check("the ONLY model call in the whole filter check is the "
+              "settle's summary rebuild — the filter path itself makes "
+              "none, which is the design's claim stated exactly rather "
+              "than loosely. On the author's own bench the keys are "
+              "scrubbed, so that one call fails and the resolve warns "
+              "soft: zero live spend there, one stub call here",
+              StubLLMHandler.REQUESTS - before == 1,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+        check("--list-checks names it",
+              "filter " in bench("--list-checks"), "")
+
+        # The filter check must DISCRIMINATE too: a visibility assertion
+        # that passes on a HIDDEN form would sign off on exactly the
+        # failure it exists to catch (§14.8).
+        _pin_config(ws)
+        before = StubLLMHandler.REQUESTS
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed = tb.check_filter(
+                ws, msdir, _corrupt=lambda x: "<!--\n" + x + "\n-->\n")
+        negative = buffer.getvalue()
+        check("the filter check FAILS when the marked forms are hidden "
+              "inside an HTML comment",
+              failed >= 1, negative)
+        check("and it fails on the VISIBILITY assertions by name",
+              "FAIL: the form is NOT inside an HTML comment" in negative
+              and "FAIL: the form survives the strip" in negative, negative)
+        check("the try/finally holds: a failed filter check still rolls "
+              "back and restores the essay byte for byte",
+              (msdir / tb.TARGET).read_bytes() == original
+              and "restored the essay byte for byte" in negative, negative)
+        check("the discriminating run spends no more than that one "
+              "rebuild either",
+              StubLLMHandler.REQUESTS - before <= 1,
+              f"{StubLLMHandler.REQUESTS - before} calls")
+
+        # --- the pronunciations check (§15.22) ---------------------------
+        _pin_config(ws)
+        # WITH NO DICTIONARY AT ALL, first, and that ordering is the
+        # point. The first cut of this check asserted only "the protected
+        # set is non-empty" against a bench registered `--no-extract`,
+        # whose graph is empty by design — so it could never pass on its
+        # own. It passed here only because the test wrote a
+        # pronunciations.md moments earlier and list 3 (the dictionary's
+        # own terms) made the set non-empty. The check was green for a
+        # reason that had nothing to do with the derivation.
+        check("the bench has no dictionary yet — the case the check used "
+              "to be unable to pass",
+              not (msdir / "pronunciations.md").exists())
+        before = StubLLMHandler.REQUESTS
+        out = bench("--check", "pronunciations")
+        check("the pronunciations check passes on a healthy bench with NO "
+              "dictionary, because --setup seeds the graph the derivation "
+              "runs over, and it asserts the seeded names BY NAME rather "
+              "than merely counting them",
+              "FAIL" not in out
+              and "carries the bench's vocabulary kinds BY NAME" in out
+              and "F1 admits all 16 non-ASCII-LETTER names" in out
+              and "F1 refuses the two whose only non-ASCII character is a "
+                  "curly apostrophe" in out, out)
+        check("...and the two assertions that used to pass VACUOUSLY over "
+              "empty sets now assert the bench really has a retired name "
+              "and a label-kind node for them to be about",
+              "the bench really HAS a retired name" in out
+              and "the bench really HAS a label-kind node" in out, out)
+        check("...and F1 runs over a name the DERIVATION produced, not "
+              "only over the recorded literals",
+              "F1 runs over a name the DERIVATION produced" in out, out)
+        (msdir / "pronunciations.md").write_text(
+            "# Pronunciations\n\nHow they are said.\n\n"
+            "| Term | Say it | Note |\n| --- | --- | --- |\n"
+            "| Nothing | NUH-thing | the book's own word |\n",
+            encoding="utf-8")
+        out = bench("--check", "pronunciations")
+        check("and it passes with a dictionary too, whose terms join the "
+              "protected set through list 3",
+              "FAIL" not in out, out)
+        check("...and it is READ-ONLY: not one model call, and no verb "
+              "that writes",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+        check("--list-checks names it",
+              "pronunciations " in bench("--list-checks"), "")
+        # The check must DISCRIMINATE, and the corruption is the real
+        # failure mode rather than an invented one: a Docs export that
+        # turned the table into bullet lines. (The design named an HTML
+        # comment; a line-oriented pipe-table parser does not care about
+        # one, and asserting that it does would assert a behaviour that
+        # does not exist. The mangled table is what the pull guard exists
+        # for, so it is the corruption worth catching here too.)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed = tb.check_pronunciations(
+                ws, msdir, _corrupt=lambda x: x.replace(
+                    "| Nothing | NUH-thing | the book's own word |",
+                    "- Nothing NUH-thing the book's own word"))
+        negative = buffer.getvalue()
+        check("the pronunciations check FAILS BY NAME on a dictionary "
+              "whose table has been mangled into bullet lines — it never "
+              "reads a lost table as an empty one",
+              failed >= 1
+              and "FAIL: pronunciations.md parses with no warnings"
+              in negative, negative)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            failed_dup = tb.check_pronunciations(
+                ws, msdir, _corrupt=lambda x: x
+                + "| nothing | NAW-thing | a second, lower case |\n")
+        dup_out = buffer.getvalue()
+        check("...and on a dictionary carrying two rows for one term, "
+              "which the parser reports and never deletes",
+              failed_dup >= 1
+              and "appears more than once" in dup_out, dup_out)
+        (msdir / "pronunciations.md").unlink()
+
     finally:
         server.shutdown()
+
+
+
+# ==================================================================
+# Scenario F — the filter pass (docs/filter-pass-design.md §7.1)
+#
+# Zero model calls except the ONE summary rebuild each settle makes, and
+# every one of those is asserted against the stub's own counter rather
+# than assumed.
+# ==================================================================
+
+FILTER_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Moreover the wall stands. Moreover it stands again, and the wall is "
+    "what the Dead cannot pass.",
+    "The ground is what the figure was taken out of. It has no shape of "
+    "its own, which is why it is so easy to mistake for nothing at all.",
+    "Moreover the ledger counts. The ledger counts, and the ledger counts "
+    "again, and nothing in it is an accusation.",
+    "Fire is what the Qualities do to a life. It is always the agent and "
+    "never a thing a person holds.",
+    "A frame does not add anything to what it surrounds. It subtracts "
+    "everything else, and the subtraction is felt as emphasis.",
+    "Every ground was once a figure and will be again. The two are two "
+    "offices, not two kinds of thing.",
+    "And so the wall is not stone. And so it is not anything a hand could "
+    "test by pushing.",
+    "The count itself is neutral. Neither friend nor accuser, only the "
+    "count, kept where a life can read it.",
+    "Choosing the edge is the whole of the composition. The rest is "
+    "arrangement, and arrangement is not composition.",
+    "A listener cannot look back. They hold about one sentence in mind at "
+    "a time, and everything else follows from that.",
+    "The Test is not a test. The capitalization does all the work on the "
+    "page and none of it aloud.",
+    "There is no such thing as a background. There is only what is not, "
+    "at this moment, being attended to.",
+    "The wall stands where it stood. Nothing has moved it and nothing "
+    "will, which is the whole of the difficulty.",
+]) + "\n"
+
+SEQ_FILTER = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n---\n\n'
+    "# Duplicate words and phrases\n\n"
+    "Flag a word or phrase used again too soon, and propose the wording "
+    "that removes the repetition without removing anything else.\n")
+
+GLOBAL_FILTER = (
+    '---\nclass = "global"\n'
+    'state = "not used — the registry is this filter\'s coordination object"\n'
+    "---\n\n"
+    "# Metaphor consistency\n\n"
+    "The book's figures are a system, not decoration. Return a registry "
+    "naming every motif family and what it is doing HERE.\n")
+
+
+def _filter_units(text: str) -> list[str]:
+    from authorlm.passes import paragraphs_of
+
+    return paragraphs_of(text)
+
+
+def _filter_reply(units, window, replaces=None, state="ledger: (empty)",
+                  echo_override=None, drop=None, extra=None):
+    """A contract-valid reply for `window`, with named perturbations.
+
+    Every anchoring test differs from the valid reply in exactly one
+    respect, which is what makes each refusal attributable."""
+    from authorlm.passes import echo_of
+
+    replaces = replaces or {}
+    entries = []
+    for n in range(window[0], window[1] + 1):
+        if drop is not None and n == drop:
+            continue
+        echo = echo_of(units[n - 1])
+        if echo_override and n in echo_override:
+            echo = echo_override[n]
+        if n in replaces:
+            entries.append({"n": n, "echo": echo, "action": "replace",
+                            "new": replaces[n], "why": "the stub's reason",
+                            "ref": "moreover"})
+        else:
+            entries.append({"n": n, "echo": echo, "action": "keep"})
+    if extra:
+        entries.extend(extra)
+    body = {"units": entries}
+    if state is not None:
+        body["state"] = state
+    return json.dumps(body)
+
+
+def api_filter_edit_count(db, mid: str, file: str) -> int:
+    return db.one(
+        "SELECT COUNT(*) AS n FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = 'filter' AND file = ? AND state = 'proposed'",
+        (mid, file))["n"]
+
+
+def scenario_filter(root: Path) -> None:
+    print("Scenario FP — the filter pass, unit by unit (design §7.1's Scenario F)")
+    import authorlm.gdocs as _gd
+    from authorlm import api as _fapi
+    from authorlm.db import Database as _DB, loads as _loads
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "flt"
+        ms = ws / "manuscript"
+        write(ms / "01-open.md", CH1)
+        write(ms / "02-wall.md", FILTER_ESSAY)
+        write(ms / "03-close.md", CH3)
+        _draft_config(ws, server.server_port)
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        # A declared goal with an OPEN episode, from the start: the
+        # settle's attribution assertions are worthless unless there is
+        # something for the resolve to be mis-attributed TO (§14.8).
+        run(ws, "intent", "declare", "Foreground the wall as a refrain")
+        db = _DB(ws / ".authorlm" / "authorlm.db")
+        manuscript = _fapi.get_manuscript(db)
+        mid = manuscript["id"]
+        run(ws, "collect")
+        units = _filter_units(FILTER_ESSAY)
+        check("the bench essay really has the units the window tests need",
+              len(units) == 14, len(units))
+
+        # ---------------- F1-F6: the artifact and its class -----------
+        out = run_stdin(ws, SEQ_FILTER, "filter", "add", "duplicate-words")
+        check("F1 filter add writes the artifact and reports its class",
+              "_filters/duplicate-words.md" in out
+              and "class = sequential" in out, out)
+        artifact = (ms / "_filters" / "duplicate-words.md").read_text()
+        check("F1 the artifact round-trips verbatim",
+              artifact == SEQ_FILTER.strip() + "\n", repr(artifact[:80]))
+
+        out = run_stdin(ws, '---\nstate = "x"\n---\n\n# No class\n\nBody.\n',
+                        "filter", "add", "no-class", expect_exit=True)
+        check("F2 front matter with no class is refused, naming BOTH legal "
+              "values — a filter is never silently defaulted into a class",
+              "'sequential'" in out and "'global'" in out, out)
+        check("F2 and the refused artifact was never written",
+              not (ms / "_filters" / "no-class.md").exists())
+
+        out = run_stdin(ws, '---\nclass = "wholefile"\n---\n\n# X\n\nBody.\n',
+                        "filter", "add", "bad-class", expect_exit=True)
+        check("F3 an unknown class is refused, naming both legal values "
+              "and saying a third class is code, not configuration",
+              "wholefile" in out and "'sequential'" in out
+              and "'global'" in out and "is code" in out, out)
+
+        out = run_stdin(ws, '---\nclass = "sequential"\nklass = "x"\n---\n\n'
+                        "# X\n\nBody.\n", "filter", "add", "typo",
+                        expect_exit=True)
+        check("F4 an unknown front-matter key is refused BY NAME, at the "
+              "moment it is written rather than at the first run",
+              "klass" in out, out)
+
+        out = run_stdin(ws, SEQ_FILTER, "filter", "add", "Not A Slug",
+                        expect_exit=True)
+        check("F5 a name failing the kebab-case rule is refused",
+              "kebab-case" in out, out)
+
+        run_stdin(ws, GLOBAL_FILTER, "filter", "add", "metaphor")
+        out = run(ws, "filter", "list")
+        check("F6 filter list prints each artifact's first PROSE line as "
+              "its summary, with its class — and the front matter never "
+              "appears in it",
+              "duplicate-words [sequential]: Duplicate words and phrases"
+              in out and "metaphor [global]: Metaphor consistency" in out
+              and "class =" not in out, out)
+
+        # ---------------- F7-F12: payload and determinism -------------
+        before = StubLLMHandler.REQUESTS
+        out1 = run(ws, "filter", "run", "duplicate-words", "02-wall.md")
+        check("F7 filter run makes ZERO model calls — the default, and "
+              "the opposite of write draft's",
+              StubLLMHandler.REQUESTS == before,
+              f"{before} -> {StubLLMHandler.REQUESTS}")
+        check("F7 and it prints all four blocks with their hashes",
+              all(f"───── block {b} — " in out1 for b in "SABC"), out1)
+        check("F7 the output says the polarity inversion out loud",
+              "opposite of 'write draft'" in out1, out1)
+        out2 = run(ws, "filter", "run", "duplicate-words", "02-wall.md")
+        dry = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--dry-run")
+        check("--dry-run is a SILENT NO-OP alias, kept for muscle memory "
+              "from `write draft`: identical output, and still no call",
+              _block_hash(dry, "S") == _block_hash(out2, "S")
+              and _block_hash(dry, "C") == _block_hash(out2, "C")
+              and StubLLMHandler.REQUESTS == before,
+              f"{_block_hash(dry, 'C')} vs {_block_hash(out2, 'C')}")
+        check("F8 two consecutive runs with no state change produce "
+              "BYTE-IDENTICAL blocks S and A (the write path's "
+              "silent-invalidator check, reused)",
+              _block_hash(out1, "S") == _block_hash(out2, "S")
+              and _block_hash(out1, "A") == _block_hash(out2, "A"),
+              f"S {_block_hash(out1, 'S')} vs {_block_hash(out2, 'S')}; "
+              f"A {_block_hash(out1, 'A')} vs {_block_hash(out2, 'A')}")
+        check("F10 an absent section renders (none) rather than "
+              "disappearing — the block's shape never changes",
+              "FILTER STATE (carry it forward and return its updated "
+              "value)\n(none)" in _block(out1, "C"), _block(out1, "C"))
+        check("F12 a SEQUENTIAL run's block A carries no MOTIF REGISTRY "
+              "and no whole-essay pin — class resolution is observable in "
+              "the bytes, not just in the code",
+              "MOTIF REGISTRY" not in _block(out1, "A")
+              and "THE ESSAY —" not in _block(out1, "A"),
+              _block(out1, "A"))
+
+        out = run(ws, "filter", "run", "metaphor", "02-wall.md",
+                  expect_exit=True)
+        check("F11 a global filter refuses before its prelude and names "
+              "the verb that supplies one",
+              "filter prelude metaphor 02-wall.md" in out, out)
+        # run_stdin with an empty payload: `filter prelude` reads the
+        # registry off stdin when one is piped in, the same idiom
+        # `lens add` and `write plan` use, so a harness that leaves stdin
+        # an open pipe would otherwise block here.
+        pre = run_stdin(ws, "", "filter", "prelude", "metaphor",
+                        "02-wall.md")
+        check("F11 the prelude payload is printed with no call made",
+              "no call made" in pre and "THE PRELUDE" in pre, pre)
+        run_stdin(ws, json.dumps({"registry": "wall — the limit of a life "
+                                              "lived without the Test."}),
+                  "filter", "prelude", "metaphor", "02-wall.md")
+        g1 = run(ws, "filter", "run", "metaphor", "02-wall.md")
+        g2 = run(ws, "filter", "run", "metaphor", "02-wall.md")
+        check("F11 after the prelude every unit payload carries the SAME "
+              "registry bytes — it is frozen for the life of the run",
+              _block_hash(g1, "A") == _block_hash(g2, "A")
+              and "wall — the limit of a life" in _block(g1, "A"),
+              _block_hash(g1, "A"))
+        check("F12 a GLOBAL run's payload carries no FILTERED PREFIX "
+              "content, and says why in as many words",
+              "not applicable" in _block(g1, "B")
+              and "MOTIF REGISTRY" in _block(g1, "A"), _block(g1, "B"))
+        run(ws, "filter", "abandon", "metaphor", "02-wall.md")
+
+        # ------------- F13-F21: anchoring refusal, nothing staged -----
+        def staged_now() -> int:
+            return len(db.all(
+                "SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
+                "origin_type = 'filter' AND file = '02-wall.md'", (mid,)))
+
+        def cursor_now() -> int:
+            return db.one(
+                "SELECT cursor FROM filter_runs WHERE manuscript_id = ? "
+                "AND filter = 'duplicate-words' AND status = 'active'",
+                (mid,))["cursor"]
+
+        window = (1, 14)
+        for label, reply, needle in [
+            ("F13 an echo mismatch on ONE unit refuses the WHOLE reply",
+             _filter_reply(units, window,
+                           echo_override={7: "Not the real echo at all"}),
+             "echo mismatch"),
+            # A NEAR MISS, not a wild one: the real echo with a single
+            # word changed. This is the case a well-meaning fuzzy
+            # matcher would wave through, and the whole anchoring law is
+            # that there is no fuzzy match and no closest paragraph. A
+            # casefold-prefix or edit-distance matcher passes every
+            # other test in this loop and fails only this one.
+            ("the anchoring law admits NO fuzzy match: the real echo "
+             "with one word changed is still refused, and the expected "
+             "and received echoes are both printed",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:4] + ["stone"])}),
+             "echo mismatch"),
+            ("...and a case-only difference is refused too",
+             _filter_reply(units, window, echo_override={
+                 7: " ".join(units[6].split()[:5]).upper()}),
+             "echo mismatch"),
+            ("F14 a missing unit entry refuses the whole reply, naming "
+             "the missing n",
+             _filter_reply(units, window, drop=9), "missing n=9"),
+            ("F15 an n outside the window refuses",
+             _filter_reply(units, window,
+                           extra=[{"n": 99, "echo": "x", "action": "keep"}]),
+             "not in this window: n=99"),
+            ("F16 a replacement containing '<<' refuses, naming the marker",
+             _filter_reply(units, window,
+                           replaces={4: "The ledger <<counts>> once."}),
+             "'<<'"),
+            ("F16 likewise '{{'",
+             _filter_reply(units, window,
+                           replaces={4: "The ledger {{counts}} once."}),
+             "'{{'"),
+            ("F17 an empty replacement refuses — 'delete this paragraph' "
+             "is not a filter's judgment to make",
+             _filter_reply(units, window, replaces={4: "   "}),
+             "not a filter's judgment"),
+            ("F19 action 'insert' is refused, saying a filter never ADDS "
+             "a unit",
+             json.dumps({"units": [
+                 {"n": n, "echo": " ".join(units[n - 1].split()[:5]),
+                  "action": "insert" if n == 4 else "keep"}
+                 for n in range(1, 15)], "state": "x"}),
+             "never ADDS a unit"),
+            ("a sequential reply with no state refuses — the next window "
+             "is conditioned on it",
+             _filter_reply(units, window, state=None),
+             "must return its updated `state`"),
+            ("the 4,000-character state cap refuses rather than "
+             "truncating: a silently truncated ledger lies",
+             _filter_reply(units, window, state="x" * 4001),
+             "over the 4,000 cap"),
+        ]:
+            out = run_stdin(ws, reply, "filter", "record", "02-wall.md",
+                            expect_exit=True)
+            check(label, needle in out, out)
+            check(f"...{label.split()[0]}: nothing was staged and the "
+                  f"cursor did not move",
+                  staged_now() == 0 and cursor_now() == 0,
+                  f"{staged_now()} staged, cursor {cursor_now()}")
+
+        # F18 / F21: the two entries that are NOT refusals.
+        out = run_stdin(
+            ws, _filter_reply(units, window, replaces={
+                6: units[5],                      # F18: new == old
+                2: "The wall stands. It stands again, and the wall is what "
+                   "the Dead cannot pass.",
+                4: "The ledger counts.\n\nNothing in it is an accusation.",
+            }),
+            "filter", "record", "02-wall.md")
+        check("F18 a replace whose text equals the unit is silently a "
+              "KEEP and stages nothing", staged_now() == 2,
+              f"{staged_now()} staged")
+        check("F21 a replacement containing a blank line IS accepted",
+              "2 proposal(s)" in out, out)
+
+        # ---------------- F22-F27: the door ---------------------------
+        rows = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' ORDER BY origin_id", (mid,))]
+        run_row = dict(db.one(
+            "SELECT * FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'duplicate-words' AND status = 'active'", (mid,)))
+        check("F22 a staged filter edit's proposed_old is BYTE-EQUAL to "
+              "the source unit — read from the file, never from the reply",
+              [r["proposed_old"] for r in rows] == [units[1], units[3]],
+              [r["proposed_old"][:40] for r in rows])
+        check("F22 and its origin_id is the shared {owner}:{file}:{ordinal}"
+              " shape",
+              [r["origin_id"] for r in rows]
+              == [f"{run_row['id']}:02-wall.md:1",
+                  f"{run_row['id']}:02-wall.md:2"],
+              [r["origin_id"] for r in rows])
+        from authorlm import passes as _passes
+        check("F23 passes.staged_threads with the DEFAULT origin_type "
+              "does not return filter rows — the critique pass cannot see "
+              "them and its own tests are untouched",
+              _passes.staged_threads(db, mid, "02-wall.md") == [])
+
+        out = run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+            4: "The ledger counts.\n\nNothing in it is an accusation.",
+        }), "filter", "record", "02-wall.md")
+        after = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' ORDER BY origin_id", (mid,))]
+        check("F27 a re-run over the same units REPLACES the same "
+              "origin_id rows in place rather than colliding on the "
+              "UNIQUE constraint",
+              len(after) == 2
+              and [r["id"] for r in after] == [r["id"] for r in rows],
+              [r["origin_id"] for r in after])
+
+        # A re-record with FEWER proposals must SUPERSEDE, not accumulate.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+        }), "filter", "record", "02-wall.md")
+        open_after = [dict(r) for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'proposed' "
+            "ORDER BY origin_id", (mid,))]
+        check("re-recording a window with FEWER proposals SUPERSEDES the "
+              "ones it dropped: the reply is the authoritative answer for "
+              "its window, so an ordinal it did not reach is a proposal "
+              "that no longer exists. Left standing, the stale row would "
+              "appear in the next `filter edits` list under a number the "
+              "author reads as current, and could be accepted into a "
+              "settle it was never part of",
+              len(open_after) == 1
+              and open_after[0]["proposed_old"] == units[1],
+              [(r["origin_id"], r["state"], r["proposed_old"][:30])
+               for r in open_after])
+        withdrawn = db.all(
+            "SELECT origin_id FROM doc_threads WHERE manuscript_id = ? "
+            "AND origin_type = 'filter' AND state = 'withdrawn'", (mid,))
+        check("...and the dropped one is WITHDRAWN rather than deleted — "
+              "the row is history, and origin_id is UNIQUE",
+              len(withdrawn) == 1, [r["origin_id"] for r in withdrawn])
+        # Put the two-proposal state back for the triage that follows.
+        run_stdin(ws, _filter_reply(units, window, replaces={
+            2: "The wall stands. It stands again, and the wall is what the "
+               "Dead cannot pass.",
+            4: "The ledger counts.\n\nNothing in it is an accusation.",
+        }), "filter", "record", "02-wall.md")
+
+        beliefs_before = db.one(
+            "SELECT COUNT(*) AS n FROM editorial_beliefs WHERE "
+            "manuscript_id = ?", (mid,))["n"]
+        # Reject the EARLIER proposal (unit 2) and accept the later one
+        # (unit 4), so that §1.3's derived falsified-prefix warning has
+        # downstream work to name. A rejection with nothing after it
+        # would make that assertion pass vacuously.
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "2",
+            "--reject", "1", "--reason",
+            "the repetition there is the point — it is a refrain")
+        ev = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' ORDER BY created_at", (mid,))]
+        check("F24 triage verdicts write evidence rows with "
+              "evidence_type='filter_edit'", len(ev) == 2, len(ev))
+        check("F24 ...and EVERY one carries episode_id IS NULL: hygiene "
+              "work is never filed against a declared goal",
+              all(r["episode_id"] is None for r in ev),
+              [r["episode_id"] for r in ev])
+        rejected = next(r for r in ev if r["signal"] == "rejected")
+        check("F25 the explained rejection reaches the belief machinery — "
+              "asserted positively, not assumed. That path runs off the "
+              "evidence stream and the author's WORDS, not off an episode",
+              _loads(rejected["metadata"], {}).get("explanation")
+              == "the repetition there is the point — it is a refrain"
+              and db.one("SELECT COUNT(*) AS n FROM editorial_beliefs "
+                         "WHERE manuscript_id = ?", (mid,))["n"]
+              >= beliefs_before,
+              rejected["metadata"])
+        check("the author's reason is ALSO kept on the thread verbatim — "
+              "that is what block A's PRIOR RUNS section renders",
+              any("refrain" in (_loads(r["metadata"], {}) or {}).get(
+                  "author_reason", "") for r in db.all(
+                      "SELECT metadata FROM doc_threads WHERE "
+                      "manuscript_id = ? AND origin_type = 'filter'",
+                      (mid,))))
+
+        # ---------------- F26 + the resolve ----------------------------
+        episodes_before = {r["id"]: r["transition_ids"] for r in db.all(
+            "SELECT id, transition_ids FROM editorial_episodes WHERE "
+            "manuscript_id = ?", (mid,))}
+        check("there IS an open episode for the resolve to be "
+              "mis-attributed to (§14.8: make the guarded thing happen)",
+              any(r["status"] == "open" for r in db.all(
+                  "SELECT status FROM editorial_episodes WHERE "
+                  "manuscript_id = ?", (mid,))))
+        calls_before = StubLLMHandler.REQUESTS
+        out = run(ws, "filter", "resolve", "02-wall.md")
+        settled_text = (ms / "02-wall.md").read_text()
+        check("the resolve applied the one accepted edit — and F21's "
+              "blank-line replacement resolved to TWO paragraphs, which "
+              "is the whole reason a split is allowed",
+              "The ledger counts.\n\nNothing in it is an accusation."
+              in settled_text
+              and "Moreover the wall stands" in settled_text,
+              settled_text[:300])
+        check("the resolve's ONE model call is the summary rebuild, and it "
+              "is the only call the whole chat-mode path makes",
+              StubLLMHandler.REQUESTS == calls_before + 1,
+              f"{calls_before} -> {StubLLMHandler.REQUESTS}")
+        episodes_after = {r["id"]: r["transition_ids"] for r in db.all(
+            "SELECT id, transition_ids FROM editorial_episodes WHERE "
+            "manuscript_id = ?", (mid,))}
+        grew = {k: (episodes_before[k], episodes_after[k])
+                for k in episodes_before
+                if episodes_after.get(k) != episodes_before[k]}
+        check("F26 the resolve's collect attaches its transitions to NO "
+              "episode: every open episode's transition_ids is unchanged "
+              "across the resolve",
+              not grew, grew)
+        check("F26 ...and no NEW episode was opened to hold them either",
+              not any(_loads(episodes_after[k], []) for k in
+                      set(episodes_after) - set(episodes_before)),
+              sorted(set(episodes_after) - set(episodes_before)))
+        check("the resolve says the attribution out loud, once",
+              out.count("filed against any of your goals") == 1, out)
+        check("F42 rejecting unit 2 prints the downstream list and the "
+              "--from remedy — derived, never stored, and deliberately "
+              "not automatic: re-running the tail would discard the "
+              "author's verdicts on those units",
+              "n=2 rejected" in out and "Units 4" in out
+              and "may have assumed it" in out
+              and "--from 2" in out, out)
+        check("F42 ...and it re-ran nothing: the run is settled, not "
+              "reopened",
+              db.one("SELECT status FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'duplicate-words' AND "
+                     "file = '02-wall.md' ORDER BY created_at DESC LIMIT 1",
+                     (mid,))["status"] == "settled")
+
+        # ---------------- F37-F40: approximate idempotency ------------
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  expect_exit=True)
+        check("F37 M1: a resolved run on this exact text refuses and names "
+              "the prior run and its tallies",
+              "already ran on this exact text" in out
+              and "1 accepted / 1 rejected" in out and "--again" in out, out)
+        again = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                    "--again")
+        check("F38 --again proceeds, and block A carries the prior run's "
+              "rejection reason VERBATIM — M2, in the CACHED layer",
+              "the repetition there is the point — it is a refrain"
+              in _block(again, "A"), _block(again, "A"))
+        check("F39 the prior run's STATE is NOT carried into the new "
+              "run's payload — a prior ledger described a prior text, and "
+              "re-loading it would make run two condition on a fiction",
+              "FILTER STATE (carry it forward and return its updated "
+              "value)\n(none)" in _block(again, "C"), _block(again, "C"))
+        check("F40 the PRIOR RUNS block excludes the CURRENT run",
+              _block(again, "A").count("proposed,") == 1,
+              _block(again, "A"))
+
+        # Departure #3, pinned directly. A settled run's rejected
+        # proposal must not appear in the NEW run's triage list: it lives
+        # in PRIOR RUNS above, where its reason is law, and listing it
+        # here would let `--accept 1` resurrect the very thing the author
+        # refused — into a resolve it was never part of.
+        settled_rejection = dict(db.one(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'rejected' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,)))
+        check("the resolved run's rejected proposal is still ON RECORD — "
+              "it is evidence, and nothing withdrew it",
+              settled_rejection["state"] == "rejected",
+              settled_rejection["origin_id"])
+        now_units = _filter_units((ms / "02-wall.md").read_text())
+        run_stdin(ws, _filter_reply(now_units, (1, len(now_units)),
+                                    replaces={6: "A brand-new proposal on "
+                                                 "an entirely different "
+                                                 "unit."}),
+                  "filter", "record", "02-wall.md")
+        listed = run(ws, "filter", "edits", "02-wall.md")
+        check("...and it is NOT in the new run's numbered triage list",
+              "A brand-new proposal" in listed
+              and settled_rejection["proposed_new"][:40] not in listed
+              and listed.count("¶") == 1, listed)
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        fresh_state = db.one(
+            "SELECT state FROM doc_threads WHERE id = ?",
+            (settled_rejection["id"],))["state"]
+        check("...so `--accept 1` targets the NEW run's proposal and "
+              "leaves the resolved rejection exactly as the author left "
+              "it (departure #3)",
+              fresh_state == "rejected"
+              and db.one("SELECT state FROM doc_threads WHERE "
+                         "manuscript_id = ? AND origin_type = 'filter' AND "
+                         "proposed_new LIKE 'A brand-new proposal%'",
+                         (mid,))["state"] == "accepted",
+              fresh_state)
+
+        # ---------------- F41/F43: warn, never block ------------------
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+        fresh = _filter_units((ms / "02-wall.md").read_text())
+        w1 = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                 "--again", "--window", "5")
+        out = run_stdin(ws, _filter_reply(fresh, (1, 5), replaces={
+            2: "The wall stands once, and the Dead cannot pass it."}),
+            "filter", "record", "02-wall.md")
+        check("a windowed run reports what is left",
+              f"{len(fresh) - 5} unit(s) left" in out, out)
+        w2 = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                 "--window", "5")
+        check("F9 recording a window changes blocks B and C and leaves S "
+              "and A BYTE IDENTICAL — the two cached layers survive the "
+              "window boundary, which is the whole point of the ordering",
+              _block_hash(w1, "S") == _block_hash(w2, "S")
+              and _block_hash(w1, "A") == _block_hash(w2, "A")
+              and _block_hash(w1, "B") != _block_hash(w2, "B")
+              and _block_hash(w1, "C") != _block_hash(w2, "C"),
+              f"S {_block_hash(w1, 'S')}/{_block_hash(w2, 'S')} "
+              f"A {_block_hash(w1, 'A')}/{_block_hash(w2, 'A')} "
+              f"B {_block_hash(w1, 'B')}/{_block_hash(w2, 'B')}")
+        check("F9 ...and block B carries the run's OWN version of the "
+              "units before the window, not the original — conditioning "
+              "on the run's proposed prefix is what makes the pass "
+              "autoregressive rather than N independent judgments",
+              "The wall stands once, and the Dead cannot pass it."
+              in _block(w2, "B")
+              and "Moreover the wall stands" not in _block(w2, "B"),
+              _block(w2, "B"))
+        check("F9 ...and the carried STATE is rendered into block C for "
+              "the next window",
+              "ledger: (empty)" in _block(w2, "C"), _block(w2, "C"))
+        # Back to the one-window shape the F41 assertion below is about:
+        # this run must settle having covered only units 1-5.
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+            "--from", "1", "--window", "5")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        out = run(ws, "filter", "resolve", "02-wall.md")
+        check(f"F41 a run that covered 5 of {len(fresh)} units settles, "
+              f"WARNS naming the uncovered range, and does not refuse — "
+              f"completion is the author's call, exactly as an unwritten "
+              f"beat and an unaccounted digest point are (§15.13)",
+              f"units 6–{len(fresh)} of {len(fresh)} were never processed"
+              in out and "ordinary open state" in out, out)
+
+        # ---------------- F28-F36: the local transport ----------------
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now = _filter_units((ms / "02-wall.md").read_text())
+        original = (ms / "02-wall.md").read_bytes()
+        run_stdin(ws, _filter_reply(now, (1, len(now)), replaces={
+            4: "The ledger counts, and nothing in it is an accusation.",
+            8: "And so the wall is not stone, nor anything a hand could "
+               "test by pushing.",
+        }), "filter", "record", "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1", "2")
+        out = run(ws, "filter", "resolve", "02-wall.md", "--pause")
+        marked = (ms / "02-wall.md").read_text()
+        check("F28 --pause writes MARKED text: the file's bytes carry "
+              "the <<old>>{{new}} form for every accepted edit, with the "
+              "OLD half byte-equal to the unit it replaces",
+              all(f"<<{now[n - 1]}>>{{{{" in marked for n in (4, 8))
+              and marked.count("<<") == 2, marked[:400])
+        check("F28 the form is a PLAIN paragraph in the file — visible in "
+              "Obsidian, which is the whole argument for a local "
+              "transport rather than a hidden marker",
+              any(ln.startswith("<<") for ln in marked.split("\n")),
+              marked[:400])
+        from authorlm.revisions import read_manuscript_files as _rmf
+        check("F29 while marked, read_manuscript_files returns the "
+              "ORIGINAL text byte for byte — the canonicalization "
+              "property, and the check that discriminates step 4",
+              _rmf(ms)["02-wall.md"] == original.decode(),
+              repr(_rmf(ms)["02-wall.md"][:120]))
+        versions_before = db.one(
+            "SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+            "manuscript_id = ?", (mid,))["n"]
+        run(ws, "collect")
+        check("F30 while marked, collect records NO new version and no "
+              "transition — a marker can never enter version history",
+              db.one("SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
+                     "manuscript_id = ?", (mid,))["n"] == versions_before
+              and not db.all("SELECT id FROM editorial_transitions WHERE "
+                             "manuscript_id = ? AND detail LIKE '%<<%'",
+                             (mid,)))
+        check("F31b the pre-existing embed-line stripping is not "
+              "displaced by the new pending-form stripping",
+              "![](" not in _rmf(ms)["02-wall.md"])
+        # F31 (a) and (b): both push guards, separately, no network.
+        meta = _gd._mapping(db, manuscript)
+        links = meta.setdefault("gdocs", {})
+        links["_master_id"] = "doc-fake"
+        links["02-wall.md"] = {"tab_id": "tab-1", "checked_out": False}
+        _gd._save_mapping(db, manuscript, meta)
+        raised_a = None
+        try:
+            _gd.push_doc(db, manuscript, "02-wall.md", service=None,
+                         docs_service=None)
+        except LookupError as err:
+            raised_a = str(err)
+        check("F31(a) with the run row present, forms_pending refuses the "
+              "push and names 'filter resolve'",
+              raised_a is not None and "filter pending forms" in raised_a
+              and "filter resolve 02-wall.md" in raised_a, raised_a)
+        written_ids = [r["id"] for r in db.all(
+            "SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = 'filter' AND state = 'written'", (mid,))]
+        for tid in written_ids:
+            db.conn.execute("UPDATE doc_threads SET state = 'stale' "
+                            "WHERE id = ?", (tid,))
+        db.conn.commit()
+        raised_b = None
+        try:
+            _gd.push_doc(db, manuscript, "02-wall.md", service=None,
+                         docs_service=None)
+        except LookupError as err:
+            raised_b = str(err)
+        check("F31(b) with the run's threads gone from under it, the "
+              "BYTE-level is_marked check still refuses and names "
+              "'filter unmark' — asserting only (a) would leave this "
+              "guard free to delete with the suite green",
+              raised_b is not None and "mid-settle" in raised_b
+              and "filter unmark 02-wall.md" in raised_b, raised_b)
+        for tid in written_ids:
+            db.conn.execute("UPDATE doc_threads SET state = 'written' "
+                            "WHERE id = ?", (tid,))
+        db.conn.commit()
+        # F32/F33: the author post-edits one {{new}} half during the
+        # pause. F34: they delete the OTHER form outright, which is how a
+        # rejection made in the file itself reads.
+        edited = marked.replace(
+            "{{The ledger counts, and nothing in it is an accusation.}}",
+            "{{The ledger counts. Nothing in it accuses.}}")
+        form8 = f"<<{now[7]}>>{{{{And so the wall is not stone, nor " \
+                f"anything a hand could test by pushing.}}}}"
+        check("the second form is in the file to be deleted (§14.8)",
+              form8 in edited, edited[:600])
+        (ms / "02-wall.md").write_text(edited.replace(form8, now[7]))
+        out = run(ws, "filter", "resolve", "02-wall.md")
+        final = (ms / "02-wall.md").read_text()
+        check("F32 the finalized text carries the author's post-edit, not "
+              "the proposal — their words win",
+              "The ledger counts. Nothing in it accuses." in final
+              and "<<" not in final and "{{" not in final, final[:300])
+        check("F33 the post-edited half records a REVISED evidence row "
+              "carrying the proposal→final pair",
+              "modified" in out.lower() or "→" in out, out)
+        revised = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' AND signal = 'revised'", (mid,))]
+        check("F33 ...and it is a filter_edit row with no episode",
+              revised and all(r["episode_id"] is None for r in revised),
+              len(revised))
+        declined = [dict(r) for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'filter_edit' AND signal = 'declined'",
+            (mid,))]
+        check("F34 a form DELETED outright during the pause records a "
+              "declined verdict — the author rejecting in the file is "
+              "still a verdict, and it is still evidence",
+              len(declined) == 1
+              and declined[0]["episode_id"] is None, len(declined))
+        check("F34 ...and that unit kept its original text",
+              now[7] in final and "nor anything a hand" not in final,
+              final[:600])
+
+        # F35: unmark restores the original bytes.
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now2 = _filter_units((ms / "02-wall.md").read_text())
+        before_unmark = (ms / "02-wall.md").read_bytes()
+        run_stdin(ws, _filter_reply(now2, (1, len(now2)), replaces={
+            2: "The wall stands, and the Dead cannot pass it."}),
+            "filter", "record", "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
+        run(ws, "filter", "resolve", "02-wall.md", "--pause")
+        out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
+        check("filter rollback REFUSES while forms are out, naming both "
+              "exits — a rollback mid-pause destroys post-edits the "
+              "author may already have made, with nothing left to "
+              "recover them from. The DB guard is what answers here, "
+              "above the byte check, because in DOC mode the local file "
+              "is clean and only the rows can know (§2.5); the byte "
+              "guard stays separately reachable and is asserted at the "
+              "seam, with the rows deleted from under it",
+              "still out in the file on disk" in out
+              and "filter resolve 02-wall.md" in out
+              and "filter unmark 02-wall.md" in out, out)
+        check("...and it left the marked bytes untouched",
+              "<<" in (ms / "02-wall.md").read_text())
+        out = run(ws, "filter", "unmark", "02-wall.md")
+        check("F35 filter unmark restores the original text BYTE FOR BYTE "
+              "and returns the forms to ACCEPTED — it undoes the marking, "
+              "never the triage; the author chooses whether the verdicts "
+              "then apply, reopen, or go",
+              (ms / "02-wall.md").read_bytes() == before_unmark
+              and "1 form(s) returned to 'accepted'" in out, out)
+        check("...so the verdicts really did survive the recovery",
+              db.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                     "manuscript_id = ? AND origin_type = 'filter' AND "
+                     "state = 'accepted'", (mid,))["n"] == 1)
+
+        # F36: rollback restores the pin and keeps the verdicts.
+        ev_before = db.one(
+            "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'filter_edit'", (mid,))["n"]
+        run(ws, "filter", "resolve", "02-wall.md")
+        changed = (ms / "02-wall.md").read_bytes()
+        pin = dict(db.one(
+            "SELECT source_version_id FROM filter_runs WHERE "
+            "manuscript_id = ? AND file = '02-wall.md' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,)))
+        pinned_text = _loads(db.one(
+            "SELECT files FROM manuscript_versions WHERE id = ?",
+            (pin["source_version_id"],))["files"], {})["02-wall.md"]
+        out = run(ws, "filter", "rollback", "02-wall.md")
+        check("F36 filter rollback restores the run's PINNED version, "
+              "byte for byte",
+              (ms / "02-wall.md").read_bytes() != changed
+              and (ms / "02-wall.md").read_text() == pinned_text,
+              (ms / "02-wall.md").read_text()[:200])
+        check("F36 ...and the verdicts STAY as evidence: putting text "
+              "back does not un-record what the author decided",
+              db.one("SELECT COUNT(*) AS n FROM evidence WHERE "
+                     "manuscript_id = ? AND evidence_type = 'filter_edit'",
+                     (mid,))["n"] >= ev_before, ev_before)
+
+        # ---------------- F43: the prompt-fault warning ---------------
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        many = _filter_units((ms / "02-wall.md").read_text())
+        out = run_stdin(ws, _filter_reply(many, (1, len(many)), replaces={
+            n: f"A rewritten unit {n} that the filter insisted on."
+            for n in range(2, len(many) + 1)}),
+            "filter", "record", "02-wall.md")
+        check("F43 proposals on nearly every unit print the prompt-fault "
+              "warning — a filter that fires everywhere is almost always "
+              "the PROMPT, not an essay that bad — and name the remedy",
+              "PROMPT fault" in out and "filter show duplicate-words" in out
+              and "Nothing is blocked" in out, out)
+        staged_n = api_filter_edit_count(db, mid, "02-wall.md")
+        run(ws, "filter", "triage", "02-wall.md",
+            "--accept", "1",
+            "--reject", *[str(i) for i in range(2, staged_n + 1)],
+            "--reason", "all of these are the filter overreaching")
+        out = run(ws, "filter", "resolve", "02-wall.md")
+        check("F43 ...and it SETTLES anyway: the warning blocks nothing, "
+              "and the remedy (edit the artifact) is the author's",
+              "Applied: 1 change(s) made final" in out, out)
+
+        # ---------------- F45-F50: refusals from doctrine -------------
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--window", "2")
+        check("a second essay runs independently — one file per run",
+              "01-open.md" in out, out[:200])
+        out = run(ws, "filter", "run", "metaphor", "01-open.md",
+                  expect_exit=True)
+        check("a global filter with no run at all refuses before creating "
+              "one — a run whose registry was never written has not "
+              "stalled, it has not begun",
+              "filter prelude metaphor 01-open.md" in out, out)
+        check("...and it left no half-made run row behind",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'metaphor' AND "
+                     "file = '01-open.md'", (mid,))["n"] == 0)
+        out = run_stdin(ws, json.dumps(
+            {"registry": "choice — the primal act."}),
+            "filter", "prelude", "metaphor", "01-open.md")
+        check("F50 a SECOND filter on the same file WARNS by name, names "
+              "the collision it can cause, and does NOT refuse — "
+              "refusing would be the machine deciding the author's work "
+              "order",
+              "duplicate-words already has an active run" in out
+              and "drift check" in out and "Registry frozen" in out, out)
+        out = run(ws, "filter", "run", "metaphor", "01-open.md")
+        check("F50 ...and both runs are live on the one file",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND file = '01-open.md' AND "
+                     "status = 'active'", (mid,))["n"] == 2)
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--again", expect_exit=True)
+        check("F50 --again while a run of the SAME filter is active is "
+              "refused, naming both exits",
+              "already active" in out and "filter resolve" in out
+              and "filter abandon" in out, out)
+        check("F50 ...and there is still exactly ONE active run of that "
+              "filter on that file",
+              db.one("SELECT COUNT(*) AS n FROM filter_runs WHERE "
+                     "manuscript_id = ? AND filter = 'duplicate-words' AND "
+                     "file = '01-open.md' AND status = 'active'",
+                     (mid,))["n"] == 1)
+        run(ws, "filter", "abandon", "metaphor", "01-open.md")
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # F49: the native path's refusal, and the chat path succeeding on
+        # the SAME config — the §15.10 reorder lesson, built in from the
+        # start rather than discovered.
+        calls_before = StubLLMHandler.REQUESTS
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md",
+                  "--native", expect_exit=True)
+        check("F49 --native with [filtering] absent refuses and names the "
+              "chat flow",
+              "no [filtering] section" in out
+              and "makes no model call at all" in out, out)
+        check("F49 ...and made no call in the process",
+              StubLLMHandler.REQUESTS == calls_before,
+              f"{calls_before} -> {StubLLMHandler.REQUESTS}")
+        out = run(ws, "filter", "run", "duplicate-words", "01-open.md")
+        check("F49 the SAME config runs fine with no flag — the payload "
+              "is never gated on the billed path's configuration",
+              "───── block S — " in out, out[:300])
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # F47/F48: the checkout gate, on run AND on record.
+        meta = _gd._mapping(db, manuscript)
+        meta["gdocs"]["02-wall.md"] = {"tab_id": "tab-1",
+                                       "checked_out": True}
+        _gd._save_mapping(db, manuscript, meta)
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again", expect_exit=True)
+        check("F47 filter run on a checked-out file refuses, naming "
+              "doc pull", "doc pull 02-wall.md" in out, out)
+        meta["gdocs"]["02-wall.md"]["checked_out"] = False
+        _gd._save_mapping(db, manuscript, meta)
+        run(ws, "filter", "run", "duplicate-words", "02-wall.md", "--again")
+        now3 = _filter_units((ms / "02-wall.md").read_text())
+        meta["gdocs"]["02-wall.md"]["checked_out"] = True
+        _gd._save_mapping(db, manuscript, meta)
+        out = run_stdin(ws, _filter_reply(now3, (1, len(now3))),
+                        "filter", "record", "02-wall.md", expect_exit=True)
+        check("F48 filter record on a checked-out file refuses too — the "
+              "push→pull window is closed on BOTH halves of the turn",
+              "doc pull 02-wall.md" in out, out)
+        meta["gdocs"]["02-wall.md"]["checked_out"] = False
+        _gd._save_mapping(db, manuscript, meta)
+
+        # F20: pin drift between assembly and registration.
+        (ms / "02-wall.md").write_text(
+            (ms / "02-wall.md").read_text()
+            + "\nA paragraph added in another chat, after the run pinned "
+              "the essay.\n")
+        run(ws, "collect")
+        out = run_stdin(ws, _filter_reply(now3, (1, len(now3))),
+                        "filter", "record", "02-wall.md", expect_exit=True)
+        check("F20 a reply recorded after the file changed under the run "
+              "is refused, naming --again",
+              "changed since this run pinned it" in out and "--again" in out,
+              out)
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+
+        # F45/F46: an active writeup owns the file.
+        run(ws, "summarize", "rebuild", "--all")
+        run(ws, "style", "guide", "House")
+        run(ws, "style", "attach", "02-wall.md", "House")
+        out = run(ws, "intent", "declare", "Rewrite the wall essay")
+        intent_id = out.split("[")[1].split("]")[0]
+        run_stdin(ws, "The essay is about the wall.", "write", "start",
+                  "02-wall.md", "--intent", intent_id)
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again", expect_exit=True)
+        check("F45/F46 filter run on a file an active writeup holds "
+              "refuses, naming the writeup's BOTH exits — what is on disk "
+              "is a placeholder, not the essay",
+              "being rewritten right now" in out
+              and "write complete" in out and "write abandon" in out, out)
+        run(ws, "write", "abandon", "--writeup", "02-wall.md")
+
+        # F44: a surviving marker warns and does not block.
+        from authorlm.api import MARKER
+        text = (ms / "02-wall.md").read_text()
+        (ms / "02-wall.md").write_text(text.replace(
+            "# The Wall", f"# The Wall\n\n{MARKER}"))
+        out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
+                  "--again")
+        check("F44 a marker surviving inside a hand-edited file WARNS and "
+              "does not block", "still carries the mid-rewrite marker"
+              in out and "───── block S — " in out, out[:600])
+        run(ws, "filter", "abandon", "duplicate-words", "02-wall.md")
+
+        # --- filter status: the class drift and the orphaned mark ------
+        run(ws, "filter", "run", "duplicate-words", "01-open.md")
+        run_stdin(ws, SEQ_FILTER.replace('class = "sequential"',
+                                         'class = "global"'),
+                  "filter", "add", "duplicate-words")
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status reports a run whose ARTIFACT class changed "
+              "under it, and says the run will finish as what it started "
+              "— the class is frozen so a mid-run edit cannot change a "
+              "live run's mechanics",
+              "the artifact's class is now 'global'" in out
+              and "will finish as one" in out, out)
+        run_stdin(ws, SEQ_FILTER, "filter", "add", "duplicate-words")
+        run(ws, "filter", "abandon", "duplicate-words", "01-open.md")
+
+        # A crash between "compose" and "write threads" leaves a marked
+        # file with no written rows. The bytes fully describe that state,
+        # so `filter status` can find it and `filter unmark` can undo it.
+        orphan = (ms / "01-open.md")
+        kept = orphan.read_bytes()
+        first = _filter_units(orphan.read_text())[0]
+        orphan.write_text(orphan.read_text().replace(
+            first, f"<<{first}>>{{{{An orphaned proposal.}}}}"))
+        out = run(ws, "filter", "status", "01-open.md")
+        check("filter status detects an ORPHANED mark — pending forms on "
+              "disk with no matching staged edit — and names the two-line "
+              "recovery",
+              "carries pending forms on disk with no matching staged edit"
+              in out and "filter unmark 01-open.md" in out, out)
+        run(ws, "filter", "unmark", "01-open.md")
+        check("filter unmark recovers it byte for byte, with no run row "
+              "and no thread to consult — the state was fully described "
+              "by the bytes",
+              orphan.read_bytes() == kept, orphan.read_text()[:200])
+    finally:
+        server.shutdown()
+
+
+# ==================================================================
+# Scenario PR — protected terms and the pronunciation dictionary
+# (docs/autoregressive-writing-design.md §15.22)
+#
+# Zero model calls: every reply the pass needs travels on stdin, and the
+# stub's own counter is asserted rather than assumed.
+# ==================================================================
+
+PRON_ESSAY = "\n\n".join([
+    "# Terms of art",
+    "The Chid is what looks out. It is not the Field, and the field it "
+    "stands in is not the Field of Choice either.",
+    "Nāgārjuna wrote that anattā is not a thing a person has. Noether’s "
+    "Theorem is a different kind of statement altogether.",
+    "The Bṛhadāraṇyaka says one thing and the Chid says another. Between "
+    "them is the whole of the difficulty.",
+    "A ledger counts. A ledger counts again, and nothing in it is an "
+    "accusation, which is the point of keeping one. Some transliterate "
+    "the word as chid, without its capital.",
+]) + "\n"
+
+PRON_FILTER = (
+    '---\nclass = "sequential"\n'
+    'prelude = "pronunciations"\n'
+    'state = "the voice note: what has already been heard aloud"\n---\n\n'
+    "# Audio friendly\n\n"
+    "Read each unit aloud in your head and flag what a listener cannot "
+    "follow.\n")
+
+DUP_FILTER = (
+    '---\nclass = "sequential"\n'
+    'state = "a ledger of every word already flagged as repeated"\n---\n\n'
+    "# Duplicate words\n\n"
+    "Flag a word used again too soon.\n")
+
+GLOBAL_PRON_FILTER = (
+    '---\nclass = "global"\n'
+    'state = "not used"\n---\n\n'
+    "# Metaphor consistency\n\nReturn a registry of the motif families.\n")
+
+PRON_SEED_ROWS = (
+    "# Pronunciations\n\n"
+    "How the terms in this book are said aloud.\n\n"
+    "| Term | Say it | Note |\n"
+    "| --- | --- | --- |\n"
+    "| anattā | uh-NUT-taa | Pali |\n"
+    "| Nāgārjuna | naa-GAAR-ju-na |  |\n"
+    "| Ereignis | er-EYE-gnis | German; no concept node carries it |\n")
+
+
+def _pron_section(payload_block: str, header_start: str) -> str:
+    """One named section out of a printed block, up to the next section."""
+    body = payload_block.split(header_start, 1)[1]
+    for nxt in ("\nTHE BOOK'S LEXICON", "\nPRONUNCIATION DICTIONARY",
+                "\nPRIOR RUNS", "\nTHE ESSAY —", "\nHARD TERMS",
+                "\nOUTPUT CONTRACT"):
+        if nxt in body:
+            body = body.split(nxt, 1)[0]
+    return body
+
+
+def scenario_pronunciations(root: Path) -> None:
+    print("Scenario PR — protected terms and the pronunciation dictionary "
+          "(§15.22)")
+    import subprocess
+
+    from authorlm import api as _api
+    from authorlm import filtering as _fg
+    from authorlm import pronunciations as _pron
+    from authorlm.db import Database as _DB, loads as _loads
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ws = root / "pron"
+        ms = ws / "manuscript"
+        write(ms / "01-open.md", CH1)
+        write(ms / "02-terms.md", PRON_ESSAY)
+        write(ms / "toc.toml",
+              '[[chapter]]\nfile = "01-open.md"\n\n'
+              '[[chapter]]\nfile = "02-terms.md"\n')
+        _draft_config(ws, server.server_port)
+        run(ws, "init", "--name", "book", "--path", str(ms))
+        run(ws, "session", "start")
+        db = _DB(ws / ".authorlm" / "authorlm.db")
+        manuscript = _api.get_manuscript(db)
+        mid = manuscript["id"]
+        run(ws, "collect")
+        dict_path = ms / _pron.FILENAME
+
+        # ---------- the fixture graph: every kind, every status --------
+        _api.add_concept(db, manuscript, "Chid", kind="concept",
+                         notes="what looks out")
+        _api.add_concept(db, manuscript, "Field of Choice", kind="concept",
+                         notes="where choosing happens")
+        _api.alias_concept(db, manuscript, "Field of Choice",
+                           ["the Field"])
+        _api.add_concept(db, manuscript, "Field", kind="concept",
+                         notes="the ordinary word, capitalized")
+        _api.add_concept(db, manuscript, "anattā", kind="concept",
+                         notes="no self")
+        _api.add_concept(db, manuscript, "Nāgārjuna",
+                         kind="historical_reference", notes="the man")
+        _api.add_concept(db, manuscript, "Bṛhadāraṇyaka",
+                         kind="historical_reference", notes="the upaniṣad")
+        _api.add_concept(db, manuscript, "Noether’s Theorem",
+                         kind="mathematical_construct", notes="a symmetry")
+        _api.add_concept(db, manuscript, "The Ledger", kind="metaphor",
+                         notes="the count a life can read")
+        for kind, name in (("objection", "Objection to Man as beast"),
+                           ("example", "The Herdsman’s lantern"),
+                           ("question", "Question about Supreme God"),
+                           ("syllogism", "Syllogism of the wall")):
+            _api.add_concept(db, manuscript, name, kind=kind, notes="a move")
+        _api.add_concept(db, manuscript, "Abandoned Wording", kind="concept",
+                         notes="deliberately given up")
+        _api.retire_concept(db, manuscript, "Abandoned Wording")
+        _api.add_concept(db, manuscript, "Chid-consciousness", kind="concept",
+                         notes="a duplicate of Chid")
+        _api.merge_concepts(db, manuscript, "Chid", "Chid-consciousness")
+        run(ws, "collect")
+
+        out = run_stdin(ws, PRON_FILTER, "filter", "add", "audio-friendly")
+        check("the `prelude` front-matter key is accepted on a SEQUENTIAL "
+              "filter and reported, so the author sees what they ratified",
+              "prelude = pronunciations" in out, out)
+        run_stdin(ws, DUP_FILTER, "filter", "add", "duplicate-words")
+        run_stdin(ws, GLOBAL_PRON_FILTER, "filter", "add", "metaphor")
+
+        out = run_stdin(ws, GLOBAL_PRON_FILTER.replace(
+            'state = "not used"',
+            'prelude = "pronunciations"\nstate = "not used"'),
+            "filter", "add", "both", expect_exit=True)
+        check("a GLOBAL filter declaring a prelude is refused — its "
+              "prelude is the registry, and two outputs for one call is "
+              "two preludes",
+              "two outputs for one call is two preludes" in out, out)
+        out = run_stdin(ws, PRON_FILTER.replace(
+            '"pronunciations"', '"phonetics"'),
+            "filter", "add", "typo-prelude", expect_exit=True)
+        check("an unknown prelude value is refused BY NAME, with the one "
+              "legal value spelled out",
+              "'phonetics'" in out and "'pronunciations'" in out, out)
+        # run_stdin, not run: `filter prelude` reads its reply off stdin
+        # before it dispatches, so a harness leaving stdin an open pipe
+        # would block here — the same idiom the F11 checks use.
+        out = run_stdin(ws, "", "filter", "prelude", "duplicate-words",
+                        "02-terms.md", expect_exit=True)
+        check("`filter prelude` on a sequential filter that declares NO "
+              "prelude refuses and names the front-matter key that would "
+              "give it one",
+              "declares no prelude" in out
+              and 'prelude = "pronunciations"' in out, out)
+
+        # ================= T2 — the derivation ======================
+        out1 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_a = _block(out1, "A")
+        in_essay = _pron_section(block_a, "IN THIS ESSAY\n")
+        lexicon = _pron_section(block_a, "allusion)\n")
+        check("T2 the four VOCABULARY kinds are protected — concept, "
+              "metaphor, mathematical_construct, historical_reference",
+              all(f"- {n}" in lexicon for n in
+                  ("Chid", "The Ledger", "Noether’s Theorem", "Nāgārjuna")),
+              lexicon)
+        check("T2 the four LABEL kinds are NOT — their names are "
+              "SENTENCES, and a list that protects the ordinary English "
+              "inside them protects nothing",
+              not any(n in block_a for n in
+                      ("Objection to Man as beast", "Herdsman’s lantern",
+                       "Question about Supreme God", "Syllogism of the wall")),
+              block_a)
+        check("T2 a RETIRED name is not protected — it is vocabulary the "
+              "author deliberately abandoned, and freezing it would freeze "
+              "exactly the wording a recast should be free to move",
+              "Abandoned Wording" not in block_a, block_a)
+        check("T2 a DECLARED concept IS protected: the author ratified the "
+              "name, and realization is a scan that may not have caught up",
+              "- Bṛhadāraṇyaka" in lexicon, lexicon)
+        check("T2 aliases ride on their node's line after ' · ', never on "
+              "lines of their own — the grouping is information the "
+              "homophone rule can use",
+              "- Field of Choice · the Field" in in_essay, in_essay)
+        check("T2 a synonym that survived retirement through "
+              "merge_concepts is protected THROUGH THE CANONICAL",
+              "Chid · Chid-consciousness" in in_essay
+              or "- Chid" in in_essay and "Chid-consciousness" in lexicon,
+              in_essay + "|" + lexicon)
+
+        # ================= T3 — the rule is prose ===================
+        check("T3 a single-word LOWER-CASE name is in the list — a rule "
+              "that only protected capitalized names would drop every "
+              "borrowed term from the protection they most need",
+              "- anattā" in in_essay, in_essay)
+        check("T3 and a single-word CAPITALIZED name is too",
+              "- Field\n" in in_essay, in_essay)
+        check("T3 the capitalization rule appears in the header exactly "
+              "ONCE, as prose",
+              block_a.count("is ordinary English") == 1, block_a)
+        check("T3 and NOWHERE as a per-line annotation — the list is "
+              "rendered unmarked",
+              "(capitalized only)" not in block_a
+              and "[capitalized]" not in block_a, block_a)
+
+        # ================= T1 — byte-stable protection ===============
+        out2 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        check("T1 two assemblies on identical stored state produce a "
+              "BYTE-IDENTICAL block A",
+              _block_hash(out1, "A") == _block_hash(out2, "A"),
+              f"{_block_hash(out1, 'A')} vs {_block_hash(out2, 'A')}")
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = "12345"
+        env["AUTHORLM_CONFIG"] = str(ws / ".authorlm" / "config.toml")
+        env["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+        env["AUTHORLM_CLIENT"] = "none"
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        proc = subprocess.run(
+            [sys.executable,
+             str(Path(__file__).resolve().parent.parent / "main.py"),
+             "--workspace", str(ws),
+             "filter", "run", "duplicate-words", "02-terms.md"],
+            env=env, capture_output=True, text=True)
+        check("T1 ...in a SEPARATE PROCESS with a different "
+              "PYTHONHASHSEED too — the derivation walks sets, and a "
+              "sorted() that was forgotten would show up here and "
+              "nowhere else",
+              proc.returncode == 0
+              and _block_hash(proc.stdout, "A") == _block_hash(out1, "A"),
+              proc.stdout[-800:] + proc.stderr[-400:])
+
+        # ================= T4/T5 — the dictionary in block A =========
+        check("T4 an absent dictionary renders (none) rather than the "
+              "section disappearing — a section that comes and goes is a "
+              "shape change, and shape changes are cache invalidations",
+              "PRONUNCIATION DICTIONARY (settled by the author" in block_a
+              and _pron_section(block_a, "the dictionary IS the fix)\n")
+              .strip() == "(none)",
+              _pron_section(block_a, "the dictionary IS the fix)\n"))
+        dict_path.write_text(PRON_SEED_ROWS, encoding="utf-8")
+        out3 = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_a3 = _block(out3, "A")
+        check("T5 adding a dictionary row changes block A and NOTHING "
+              "else — an honest invalidation, because the suppression set "
+              "genuinely changed",
+              _block_hash(out3, "A") != _block_hash(out1, "A")
+              and _block_hash(out3, "S") == _block_hash(out1, "S")
+              and _block_hash(out3, "B") == _block_hash(out1, "B")
+              and _block_hash(out3, "C") == _block_hash(out1, "C"),
+              f"S {_block_hash(out3, 'S')}/{_block_hash(out1, 'S')} "
+              f"A {_block_hash(out3, 'A')}/{_block_hash(out1, 'A')}")
+        rendered = _pron_section(block_a3, "the dictionary IS the fix)\n")
+        check("T4 rows render sorted by term key, note in parentheses, "
+              "omitted when empty",
+              rendered.strip().splitlines() == [
+                  "- anattā — uh-NUT-taa (Pali)",
+                  "- Ereignis — er-EYE-gnis (German; no concept node "
+                  "carries it)",
+                  "- Nāgārjuna — naa-GAAR-ju-na"], repr(rendered))
+        check("T4 a dictionary term with NO concept node is in the "
+              "protected set — a term the author ruled on aloud is by "
+              "construction a term of art",
+              "- Ereignis" in _pron_section(block_a3, "allusion)\n"),
+              _pron_section(block_a3, "allusion)\n"))
+        run_stdin(ws, json.dumps({"registry": "ledger — the count."}),
+                  "filter", "prelude", "metaphor", "02-terms.md")
+        gout = run(ws, "filter", "run", "metaphor", "02-terms.md")
+        check("T4 a GLOBAL filter's block A carries both sections too — a "
+              "motif family's own name is a protected term, and a "
+              "`replace` that swaps it for a synonym is precisely the harm",
+              "PROTECTED TERMS" in _block(gout, "A")
+              and "- anattā — uh-NUT-taa (Pali)" in _block(gout, "A"),
+              _block(gout, "A")[:400])
+        run(ws, "filter", "abandon", "metaphor", "02-terms.md")
+
+        # ================= T6 — protected_loss =======================
+        protected = ["Field", "Chid", "anattā", "Field of Choice"]
+        check("T6 'Field' → 'the field of choosing' IS a loss: the "
+              "capitalization rule is mention_pattern's, so the "
+              "lower-case survivor does not count as the term",
+              _fg.protected_loss("The Field is where it happens.",
+                                 "The field of choosing is where it "
+                                 "happens.", protected) == ["Field"], "")
+        check("T6 'field' → 'meadow' is NOT a loss — the ordinary word "
+              "was never the term",
+              _fg.protected_loss("a field of grass", "a meadow of grass",
+                                 protected) == [], "")
+        check("T6 dropping ONE of two mentions is NOT a loss — which is "
+              "exactly why this warns rather than refusing",
+              _fg.protected_loss("The Chid and the Chid again.",
+                                 "The Chid, once.", protected) == [], "")
+        before_calls = StubLLMHandler.REQUESTS
+        _fg.protected_loss("anattā here", "nothing here", protected)
+        check("T6 the function is pure and makes no model call",
+              StubLLMHandler.REQUESTS == before_calls, "")
+
+        # ================= E1 — protection reaches the door ==========
+        units = _filter_units(PRON_ESSAY)
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md",
+                  "--window", "5")
+        check("E1 the payload carries the essay's own terms under "
+              "PROTECTED TERMS · IN THIS ESSAY",
+              "- Chid" in _pron_section(_block(out, "A"), "IN THIS ESSAY\n"),
+              _block(out, "A"))
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'duplicate-words' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        losing = _filter_reply(
+            units, tuple(window),
+            replaces={2: "The mind is what looks out. It is not the Field, "
+                         "and the field it stands in is not the Field of "
+                         "Choice either."})
+        rec = run_stdin(ws, losing, "filter", "record", "02-terms.md")
+        check("E1 filter record WARNS by name when a replacement drops a "
+              "protected term the original carried",
+              "'Chid'" in rec and "PROTECTED TERMS" in rec, rec)
+        check("E1 ...and STAGES it anyway — the harness supplies the law, "
+              "it is not the editor",
+              api_filter_edit_count(db, mid, "02-terms.md") == 1
+              and "Staged anyway" in rec, rec)
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+        run(ws, "filter", "unmark", "02-terms.md") \
+            if "<<" in (ms / "02-terms.md").read_text() else None
+        for row in db.all("SELECT id FROM doc_threads WHERE "
+                          "manuscript_id = ? AND origin_type = 'filter'",
+                          (mid,)):
+            db.update("doc_threads", row["id"], {"state": "withdrawn"})
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md",
+                  "--window", "5")
+        keeping = _filter_reply(units, tuple(window))
+        rec2 = run_stdin(ws, keeping, "filter", "record", "02-terms.md")
+        check("E1 a reply that keeps the term produces NO warning",
+              "PROTECTED TERMS" not in rec2, rec2)
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+
+        # ================= T7 — the prelude reply's refusals ==========
+        def pron_rows() -> int:
+            return db.one("SELECT COUNT(*) AS n FROM knowledge_proposals "
+                          "WHERE manuscript_id = ? AND kind = "
+                          "'pronunciation'", (mid,))["n"]
+
+        def refuse(label: str, body, expect: str) -> None:
+            before = pron_rows()
+            out = run_stdin(ws, body if isinstance(body, str)
+                            else json.dumps(body),
+                            "filter", "prelude", "audio-friendly",
+                            "02-terms.md", expect_exit=True)
+            check(f"T7 {label}", expect in out, out)
+            check(f"T7 ...and nothing was created ({label})",
+                  pron_rows() == before, f"{before} -> {pron_rows()}")
+
+        refuse("a reply that is not a JSON object",
+               "[]", "not a JSON object")
+        refuse("a reply with no `pronunciations` list",
+               {"terms": []}, "must return a `pronunciations` list")
+        refuse("a term that is not in the essay verbatim — the anchoring "
+               "law, applied to the prelude",
+               {"pronunciations": [{"term": "Kierkegaard", "say": "KEER"}]},
+               "does not appear in the essay verbatim")
+        refuse("an entry with no pronunciation",
+               {"pronunciations": [{"term": "anattā", "say": ""}]},
+               "has no pronunciation")
+        refuse("a reserved marker in any field",
+               {"pronunciations": [{"term": "Chid", "say": "chit",
+                                    "note": "see <<this>>"}]},
+               "reserved grammar")
+        refuse("a newline in any field — a row is ONE LINE",
+               {"pronunciations": [{"term": "Chid", "say": "chit\nchit"}]},
+               "carries a newline")
+        refuse("a PIPE in any field — the table's own column separator, "
+               "which no escape can carry across the Doc bridge",
+               {"pronunciations": [{"term": "Chid", "say": "chit|kid"}]},
+               "carries a '|'")
+        refuse("two entries that are the same term under key()",
+               {"pronunciations": [{"term": "Chid", "say": "chit"},
+                                   {"term": "chid", "say": "kid"}]},
+               "are the same term")
+        refuse("a term the dictionary already carries — additions only",
+               {"pronunciations": [{"term": "anattā", "say": "AN-at-ta"}]},
+               "already in PRONUNCIATION DICTIONARY")
+        refuse("more than the cap in one reply — refused, never truncated",
+               {"pronunciations": [{"term": "Chid", "say": f"c{n}"}
+                                   for n in range(61)]},
+               "over the 60 cap")
+
+        # ================= E2 — the loop closes ======================
+        before_calls = StubLLMHandler.REQUESTS
+        pre = run_stdin(ws, "", "filter", "prelude", "audio-friendly",
+                        "02-terms.md")
+        check("E2 the prelude payload prints with no call made, and its "
+              "block C is the pronunciation contract rather than the "
+              "registry's",
+              "no call made" in pre
+              and "HARD TERMS FOUND IN THIS ESSAY" in _block(pre, "C")
+              and '{"pronunciations"' in _block(pre, "C")
+              and "registry" not in _block(pre, "C"), _block(pre, "C"))
+        hard = _pron_section(_block(pre, "C"),
+                             "already has it)\n")
+        check("E2 HARD TERMS is F1 and only F1: a non-ASCII LETTER, never "
+              "a curly apostrophe — Bṛhadāraṇyaka is in, Noether’s "
+              "Theorem is out, and a term the dictionary already carries "
+              "is out too",
+              hard.strip().splitlines() == ["- Bṛhadāraṇyaka"],
+              repr(hard))
+        check("E2 the prelude makes ZERO model calls on the chat path",
+              StubLLMHandler.REQUESTS == before_calls, "")
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Bṛhadāraṇyaka", "say": "bri-ha-DAA-ran-ya-ka",
+             "note": "Sanskrit"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md")
+        check("E2 one proposal is filed on the ORDINARY queue",
+              "1 pronunciation(s) proposed" in out
+              and "Bṛhadāraṇyaka" in out, out)
+        listed = run(ws, "proposal", "list")
+        check("E2 it reads on the queue with no new surface — "
+              "kind-agnostic list, describe's own summary",
+              "pronounce 'Bṛhadāraṇyaka' — bri-ha-DAA-ran-ya-ka" in listed,
+              listed)
+        pid = db.one("SELECT id FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "state = 'open'", (mid,))["id"]
+        acc = run(ws, "proposal", "accept", pid)
+        check("E2 accepting writes the row into pronunciations.md — the "
+              "adopt path, deterministically, never the model",
+              "written into pronunciations.md" in acc
+              and {"term": "Bṛhadāraṇyaka", "say": "bri-ha-DAA-ran-ya-ka",
+                   "note": "Sanskrit"}
+              in _pron.parse(dict_path.read_text())[0], acc)
+        check("E2 and it rewrote no line it did not add",
+              dict_path.read_text().startswith(PRON_SEED_ROWS),
+              dict_path.read_text())
+        pre2 = run_stdin(ws, "", "filter", "prelude", "audio-friendly",
+                         "02-terms.md", "--replace")
+        hard2 = _pron_section(_block(pre2, "C"), "already has it)\n")
+        check("E2 THE LOOP CLOSES: re-running the prelude flags nothing — "
+              "the term is settled, and the dictionary is both this "
+              "pass's output channel and its suppression list",
+              hard2.strip() == "(none)", repr(hard2))
+        check("E2 ...and the term is now in block A's PRONUNCIATION "
+              "DICTIONARY, told to the filter as settled",
+              "- Bṛhadāraṇyaka — bri-ha-DAA-ran-ya-ka (Sanskrit)"
+              in _block(pre2, "A"), _block(pre2, "A"))
+        aud = run(ws, "filter", "run", "audio-friendly", "02-terms.md")
+        check("E2 and `filter run audio-friendly` judges its units against "
+              "a payload that carries it",
+              "- Bṛhadāraṇyaka — bri-ha-DAA-ran-ya-ka (Sanskrit)"
+              in _block(aud, "A"), _block(aud, "A"))
+        check("E2 a second prelude ALSO re-proposes nothing rather than "
+              "asking again",
+              "0 pronunciation(s) proposed" in run_stdin(
+                  ws, json.dumps({"pronunciations": []}), "filter",
+                  "prelude", "audio-friendly", "02-terms.md", "--replace"),
+              "")
+
+        # ================= E8 — the prelude's own idempotency ========
+        out = run_stdin(ws, json.dumps({"pronunciations": []}), "filter",
+                        "prelude", "audio-friendly", "02-terms.md",
+                        expect_exit=True)
+        check("E8 a second prelude on the same active run REFUSES without "
+              "--replace, mirroring the registry's refusal",
+              "already ran its pronunciation prelude" in out
+              and "--replace" in out, out)
+
+        # ================= E4 — rejected never re-proposed ===========
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Chid", "say": "chit", "note": "Sanskrit"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md",
+            "--replace")
+        check("E4 a term above the F1 floor can still be proposed — the "
+              "list is a floor, not a ceiling",
+              "1 pronunciation(s) proposed" in out, out)
+        pid = db.one("SELECT id FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "state = 'open'", (mid,))["id"]
+        run(ws, "proposal", "dismiss", pid, "--why",
+            "everyone in this book's audience can say Chid")
+        out = run_stdin(ws, json.dumps({"pronunciations": [
+            {"term": "Chid", "say": "SHEED", "note": "a different guess"}]}),
+            "filter", "prelude", "audio-friendly", "02-terms.md",
+            "--replace")
+        check("E4 a DIFFERENT respelling of a dismissed term is not "
+              "re-proposed — the guard is on the TERM, not the spelling, "
+              "which the content hash alone would have let straight past",
+              "0 pronunciation(s) proposed, 1 suppressed" in out
+              and "already settled, not re-asked: Chid" in out, out)
+        check("E4 ...and no second row was written",
+              db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+                     "manuscript_id = ? AND kind = 'pronunciation' AND "
+                     "target = 'chid'", (mid,))["n"] == 1, "")
+        from authorlm import proposals as _prop
+        check("E4 ...and the guard that does it is DETERMINISTIC and "
+              "kind-specific: a prior row in ANY state settles the term. "
+              "The near-duplicate firewall would also catch this pair, "
+              "but only because its dedupe text is the term alone — it "
+              "is a similarity THRESHOLD, and this is not",
+              _prop._pronunciation_settled(db, mid, _pron.key("Chid"))
+              and _prop._pronunciation_settled(db, mid, _pron.key("chid"))
+              and not _prop._pronunciation_settled(
+                  db, mid, _pron.key("Līlā")), "")
+        ev = db.one(
+            "SELECT metadata FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'proposal_review' AND signal = 'dismissed' "
+            "ORDER BY created_at DESC LIMIT 1", (mid,))
+        check("E4 the dismissal reason is on the evidence stream VERBATIM",
+              _loads(ev["metadata"], {}).get("explanation")
+              == "everyone in this book's audience can say Chid",
+              str(ev["metadata"]))
+
+        # ================= E3 — immutability across every path =======
+        # The Sponsor asked that no pass overwrite a validated row. It is
+        # not implemented as a rule: it is a CONSEQUENCE of there being
+        # exactly one writer (`proposals.adopt`). Asserted by outcome,
+        # against the file's BYTES, after every verb of the whole pass.
+        frozen = dict_path.read_bytes()
+        essay_before = (ms / "02-terms.md").read_bytes()
+
+        def untouched(verb: str) -> None:
+            check(f"E3 {verb} leaves pronunciations.md byte for byte",
+                  dict_path.read_bytes() == frozen,
+                  dict_path.read_text()[-200:])
+
+        run_stdin(ws, json.dumps({"pronunciations": []}), "filter",
+                  "prelude", "audio-friendly", "02-terms.md", "--replace")
+        untouched("filter prelude")
+        out = run(ws, "filter", "run", "audio-friendly", "02-terms.md")
+        untouched("filter run")
+        units = _filter_units((ms / "02-terms.md").read_text())
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'audio-friendly' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        run_stdin(ws, _filter_reply(units, tuple(window), replaces={
+            5: "A ledger counts, and nothing in it is an accusation, "
+               "which is the point of keeping one. Some transliterate "
+               "the word as chid, without its capital."},
+            state="the voice note: read once"),
+            "filter", "record", "02-terms.md")
+        untouched("filter record")
+        run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
+        untouched("filter triage")
+        run(ws, "filter", "resolve", "02-terms.md", "--pause")
+        untouched("filter resolve --pause")
+        marked = (ms / "02-terms.md").read_text()
+        (ms / "02-terms.md").write_text(
+            marked.replace("which is the point of keeping one",
+                           "which is why one is kept"))
+        untouched("a hand post-edit of the marked essay")
+        run(ws, "filter", "resolve", "02-terms.md")
+        untouched("filter resolve")
+        run(ws, "filter", "rollback", "02-terms.md")
+        untouched("filter rollback")
+        (ms / "02-terms.md").write_bytes(essay_before)
+        run(ws, "collect")
+        out = run(ws, "filter", "run", "audio-friendly", "02-terms.md",
+                  "--again")
+        window = _loads(db.one(
+            "SELECT metadata FROM filter_runs WHERE manuscript_id = ? AND "
+            "filter = 'audio-friendly' AND status = 'active'",
+            (mid,))["metadata"], {})["window"]
+        units = _filter_units((ms / "02-terms.md").read_text())
+        run_stdin(ws, _filter_reply(units, tuple(window), replaces={
+            5: "A ledger counts, and nothing in it is an accusation."},
+            state="the voice note: read twice"),
+            "filter", "record", "02-terms.md")
+        run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
+        run(ws, "filter", "resolve", "02-terms.md", "--pause")
+        run(ws, "filter", "unmark", "02-terms.md")
+        untouched("filter unmark")
+        run(ws, "filter", "abandon", "audio-friendly", "02-terms.md")
+        untouched("filter abandon")
+        # The TENTH verb, and the only one that could actually rewrite
+        # the file: `doc push` normalizes its text and WRITES THE
+        # NORMALIZED BYTES BACK to disk (gdocs.push_doc), which makes it
+        # a second writer of anything normalize_markdown is not a no-op
+        # on. Driven at the seam — what is under test is the write-back,
+        # not Drive.
+        from authorlm.gdocs import normalize_markdown as _norm
+        pushed = _norm(dict_path.read_text(encoding="utf-8"))
+        check("E3 `doc push` normalizes and writes back, so its "
+              "normalizer must be a NO-OP on the dictionary — otherwise "
+              "the push is a SECOND WRITER of a file whose whole point "
+              "is that only the author's verdict writes it",
+              pushed.encode("utf-8") == frozen,
+              repr(pushed[-160:]))
+        check("E3 ten verbs, and NOTHING in the system writes that file "
+              "except the author's own verdict at `proposal accept`",
+              dict_path.read_bytes() == frozen)
+        (ms / "02-terms.md").write_bytes(essay_before)
+        run(ws, "collect")
+
+        # ================= E6 — the exclusions, one each =============
+        check("E6 no essay_summaries row for the dictionary — it is not a "
+              "unit of the book",
+              db.one("SELECT COUNT(*) AS n FROM essay_summaries WHERE "
+                     "manuscript_id = ? AND file = ?",
+                     (mid, _pron.FILENAME))["n"] == 0, "")
+        run(ws, "export", "md")
+        combined = next((ms / "_exports").glob("*.md")).read_text()
+        check("E6 absent from the exported book — the dictionary must "
+              "NEVER ship inside it",
+              "uh-NUT-taa" not in combined
+              and "# Pronunciations" not in combined, combined[:400])
+        _api.add_concept(db, manuscript, "Ereignis", kind="concept",
+                         notes="only ever named in the dictionary")
+        run(ws, "collect")
+        node = db.one("SELECT status, introduced_in FROM concept_nodes "
+                      "WHERE manuscript_id = ? AND name = 'Ereignis'",
+                      (mid,))
+        check("E6 a concept whose name appears ONLY in the dictionary does "
+              "not realize — the ratified toc.toml assertion, re-run for "
+              "the sidecar (otherwise the extractor mines a pronunciation "
+              "table for concepts)",
+              node["status"] == "declared" and node["introduced_in"] is None,
+              f"{node['status']} / {node['introduced_in']}")
+        out = run(ws, "filter", "run", "duplicate-words",
+                  _pron.FILENAME, expect_exit=True)
+        check("E6 `filter run` on the dictionary refuses BY NAME rather "
+              "than through the generic reading-order refusal",
+              "is the pronunciation dictionary, not an essay" in out
+              and "proposal review" in out, out)
+        run_stdin(ws, "Find the loose ends.\n", "lens", "add", "loose")
+        out = run(ws, "lens", "run", "loose", _pron.FILENAME,
+                  expect_exit=True)
+        check("E6 `lens run` refuses by name too — the site that accepts "
+              "toc.toml today, sharing one helper so the two cannot drift",
+              "is the pronunciation dictionary, not an essay" in out, out)
+        out = run(ws, "intent", "declare", "Say the Sanskrit right",
+                  "--scope", _pron.FILENAME, expect_exit=True)
+        check("E6 an intent scoped to the dictionary refuses — there is no "
+              "writing to route there",
+              "is the pronunciation dictionary, not an essay" in out, out)
+        brief = run(ws, "briefing")
+        check("E6 the briefing never reports it as missing from toc.toml — "
+              "`reading_order`'s unlisted list only covers CONTENT files",
+              _pron.FILENAME not in brief, brief)
+        version = db.one(
+            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
+            "ORDER BY version_no DESC LIMIT 1", (mid,))
+        check("E6 BUT it IS in manuscript_versions.files — structure is "
+              "not content, and it is still the author's: versioned, "
+              "checksummed, diffable and rollback-able like any file",
+              _pron.FILENAME in _loads(version["files"], {}), "")
+        dict_path.write_text(
+            dict_path.read_text() + "| Līlā | LEE-laa | play |\n",
+            encoding="utf-8")
+        run(ws, "collect")
+        check("E6 ...and a hand edit of it produces an "
+              "editorial_transitions row — an added pronunciation is a "
+              "real editorial act",
+              db.one("SELECT COUNT(*) AS n FROM editorial_transitions "
+                     "WHERE manuscript_id = ? AND location LIKE ?",
+                     (mid, _pron.FILENAME + "%"))["n"] >= 1,
+              [r["location"] for r in db.all(
+                  "SELECT location FROM editorial_transitions WHERE "
+                  "manuscript_id = ?", (mid,))])
+        # ================= E9 — the pointers resolve =================
+        # §6.0's genericity boundary is only real if the thing the
+        # prompts POINT AT is actually in the payload. Two halves: the
+        # aspect tags reach block S, and the three artifacts name no word
+        # of this book.
+        run(ws, "style", "guide", "Book Law")
+        run(ws, "style", "add", "figure",
+            "Draw from the established motif families: walls/chains, "
+            "fire/light.", "--guide", "Book Law")
+        run(ws, "style", "add", "lexicon",
+            "'Test' names the two questions; 'measure' is the universal "
+            "count. Never interchange them.", "--guide", "Book Law")
+        run(ws, "style", "attach", "02-terms.md", "Book Law")
+        out = run(ws, "filter", "run", "duplicate-words", "02-terms.md")
+        block_s = _block(out, "S")
+        check("E9 STYLE LAW prints one element per line with its aspect "
+              "in brackets, so a prompt that says \"the `[figure]` "
+              "elements of STYLE LAW\" names something actually in the "
+              "payload",
+              "- [figure] Draw from the established motif families"
+              in block_s
+              and "- [lexicon] 'Test' names the two questions" in block_s,
+              block_s[-600:])
+        check("E9 ...and the harness prompt makes exactly that pointer, "
+              "so a renderer change that dropped the tag fails a test "
+              "rather than silently turning three prompt pointers into "
+              "references to nothing",
+              "`[figure]`" in block_s and "`[lexicon]`" in block_s,
+              block_s[:2000])
+        run(ws, "filter", "abandon", "duplicate-words", "02-terms.md")
+
+        # The template check. A listed-exceptions test, not a bare "no
+        # book words": an artifact may keep the worked example §6.0
+        # ratifies, and a bare assertion would fail on the first ordinary
+        # English collision.
+        design = (Path(__file__).resolve().parent.parent / "docs"
+                  / "filter-pass-design.md").read_text(encoding="utf-8")
+        appendix = design.split(
+            "## Appendix — the three filters, in full", 1)[1]
+        # The NORMATIVE prose only. The indented blocks are worked
+        # examples of a FORM — a state ledger's shape, a registry's shape
+        # — and §6.4 labels them as such in as many words. An
+        # enumeration in a normative bullet is a lexicon the model treats
+        # as the set; a labelled example is not, and rewriting the
+        # ratified examples was not part of the ruling.
+        normative = "\n".join(line for line in appendix.split("\n")
+                               if not line.startswith("    "))
+        this_book = [
+            "Nothingness", "Qualities", "The Chid", "the Chid",
+            "Field of Choice", "The Dharma", "the Dead", "the Dharma",
+        ]
+        named = [t for t in this_book if t in normative]
+        check("E9 the three artifacts name NO term of this book in "
+              "normative prose — the vocabulary comes from PROTECTED "
+              "TERMS, so a second manuscript adopts them unedited",
+              not named, ", ".join(named))
+        # Not only the two removed lists: the metaphor artifact's
+        # per-unit bullets used to teach this book's families in passing
+        # ("fire is the agent", "a wall that catches light", "since the
+        # wall is stone"), which is the same enumeration wearing an
+        # example's clothes.
+        families = ["Fire, wall, stone, chain, ledger, ladder, tremor",
+                    "Fire, wall, stone, chain, ledger, ladder, tremor, "
+                    "field,", "walls/chains, fire/light",
+                    "the registry says fire is", "carries his fire",
+                    "a wall that\n  catches light", "a ledger that burns",
+                    "a path that strikes", "since the wall is stone",
+                    "fire, wall, stone"]
+        listed = [f for f in families if f in normative]
+        check("E9 ...and no motif-family list either — the `[figure]` "
+              "elements of STYLE LAW are the authority, and a copy in a "
+              "prompt is a copy that can disagree with the law",
+              not listed, ", ".join(listed))
+        check("E9 the worked examples that DO carry this book's words "
+              "are labelled as illustrations of the FORM, never of the "
+              "set — which is the whole difference between an example "
+              "and an enumeration",
+              "worked illustration of the FORM, not the list" in appendix,
+              "")
+        check("E9 the worked example §6.0 keeps IS still there, with the "
+              "law named as the authority it only illustrates — a "
+              "template needs an example, and must not pretend the "
+              "example is the law",
+              '"test" and "measure" are one' in appendix
+              and "`[lexicon]` elements are\n  the authority" in appendix,
+              appendix[:200])
+        check("E9 and the doctrine stays, in the author's words, because "
+              "that is what a per-manuscript artifact is FOR",
+              "**A refrain.**" in appendix
+              and "Cut, don't substitute." in appendix
+              and "precision wins" in appendix
+              and "A listener cannot look back" in appendix, "")
+
+    finally:
+        server.shutdown()
+
+
+def _pron_tab_tree(pairs: list[tuple[str, str]]) -> dict:
+    """A Docs tab tree: [(tab_id, title)] flat under one container."""
+    return {"tabs": [{
+        "tabProperties": {"tabId": "root", "title": "book"},
+        "childTabs": [{"tabProperties": {"tabId": tid, "title": title},
+                       "childTabs": []} for tid, title in pairs]}]}
+
+
+class _PronDocsService:
+    """The Docs API's read half: the tab tree, and nothing else."""
+
+    def __init__(self, tree):
+        self.tree = tree
+
+    def documents(self):
+        outer = self
+
+        class Docs:
+            @staticmethod
+            def get(documentId, includeTabsContent=False):
+                class R:
+                    @staticmethod
+                    def execute():
+                        return outer.tree
+                return R()
+        return Docs()
+
+
+class _PronDriveService:
+    """The Drive API's export half: one whole-master markdown blob."""
+
+    def __init__(self, export: str):
+        self.export = export
+
+    def files(self):
+        outer = self
+
+        class Files:
+            @staticmethod
+            def export(fileId, mimeType):
+                class R:
+                    @staticmethod
+                    def execute():
+                        return outer.export.encode("utf-8")
+                return R()
+        return Files()
+
+
+def scenario_pronunciation_bridge(root: Path) -> None:
+    """E5 and E7 — the Doc bridge (§15.22 §2.5 rows 19, 22-25).
+
+    Driven at the seam against recording doubles rather than through the
+    CLI: what is under test is `sync_tab_structure`, the pull's toc sync,
+    `rewrite_toc_from_doc` and the zero-rows guard, and each of those is
+    a function that takes a tab tree and a markdown export."""
+    print("Scenario PB — the pronunciation dictionary across the Doc bridge")
+    import json as _json
+
+    from authorlm import api as _api
+    from authorlm import gdocs as _gd
+    from authorlm import pronunciations as _pron
+    from authorlm.db import Database as _DB
+    from authorlm.structure import parse_toc_tree
+
+    ws = root / "pbridge"
+    ms = ws / "manuscript"
+    write(ms / "01-open.md", "# One\n\nThe first essay.\n")
+    write(ms / "02-next.md", "# Two\n\nThe second essay.\n")
+    write(ms / "toc.toml",
+          '[[chapter]]\nfile = "01-open.md"\n\n'
+          '[[chapter]]\nfile = "02-next.md"\n')
+    write(ms / _pron.FILENAME, PRON_SEED_ROWS)
+    run(ws, "init", "--name", "book", "--path", str(ms))
+    db = _DB(ws / ".authorlm" / "authorlm.db")
+    manuscript = _api.get_manuscript(db)
+
+    bridge = _gd.manuscript_bridge(manuscript)
+    order = _gd._reading_order_files(bridge)
+    check("E7 the dictionary IS in the tab list — the ONE inversion — and "
+          "it is APPENDED LAST, after every essay",
+          order == ["01-open.md", "02-next.md", _pron.FILENAME], order)
+
+    # The mapping a push would have left behind: one tab per file,
+    # dictionary included.
+    tabs = [("t1", "01-open.md"), ("t2", "02-next.md"),
+            ("t3", _pron.FILENAME)]
+    links = {"_master_id": "master-1", "_container_tab": "root"}
+    for tid, title in tabs:
+        links[title] = {"tab_id": tid, "checked_out": False}
+    _gd._save_mapping(db, manuscript, {"gdocs": links})
+    docs = _PronDocsService(_pron_tab_tree(tabs))
+
+    # ---- E7 / site 23: sync_tab_structure -------------------------
+    state = _gd.sync_tab_structure(db, manuscript, docs)
+    check("E7 site 23: sync_tab_structure reports INSYNC with a mapped "
+          "dictionary tab present. Without the guard `linked` holds a "
+          "file `parse_toc_tree` never can, the two lists can never "
+          "agree, and tab-order sync stops working forever",
+          state == {"insync": True}, state)
+    saved = _gd._mapping(db, manuscript)["gdocs"].get("_tab_structure")
+    check("E7 ...and the recorded base carries the essays only, so the "
+          "next comparison starts from a list the toc can match",
+          [tuple(x) for x in saved] == [("01-open.md", None),
+                                        ("02-next.md", None)], saved)
+
+    # Site 23 has TWO halves and only the doc_pairs half is exercised
+    # above, because toc.toml cannot normally name a sidecar. It CAN if
+    # the author hand-lists it — or if a pre-guard build already wrote it
+    # there, which is exactly the state guard 25 exists to prevent and
+    # therefore exactly the state a repair must survive. With the desired
+    # side unfiltered, `desired` would then hold the dictionary while the
+    # base recorded above does not, and the sync would report movement
+    # that never happened.
+    toc_path_pre = ms / "toc.toml"
+    hand_listed = toc_path_pre.read_bytes()
+    toc_path_pre.write_text(hand_listed.decode()
+                            + f'\n[[chapter]]\nfile = "{_pron.FILENAME}"\n')
+    state = _gd.sync_tab_structure(db, manuscript, docs)
+    check("E7 site 23, the DESIRED half: a toc.toml that names the "
+          "dictionary — hand-listed, or left by a pre-guard build — "
+          "still reports insync. Filtering only the doc side would leave "
+          "the repair path reporting movement that never happened",
+          state == {"insync": True}, state)
+    toc_path_pre.write_bytes(hand_listed)
+
+    # ---- E7 / site 25: rewrite_toc_from_doc -----------------------
+    toc_path = ms / "toc.toml"
+    before = toc_path.read_bytes()
+    _gd.rewrite_toc_from_doc(
+        manuscript, [("01-open.md", None), (_pron.FILENAME, None),
+                     ("02-next.md", None)],
+        parse_toc_tree(before.decode()))
+    entries = [n for n, _ in parse_toc_tree(toc_path.read_text())]
+    check("E7 site 25: rewrite_toc_from_doc NEVER writes the dictionary "
+          "into toc.toml, even handed a doc list that names it. That is "
+          "the one that does the most damage: a dictionary in toc.toml is "
+          "a CHAPTER, and every exclusion unravels at once",
+          _pron.FILENAME not in entries
+          and entries == ["01-open.md", "02-next.md"], entries)
+    toc_path.write_bytes(before)
+
+    # ---- E7 / site 24 + E5: the pull ------------------------------
+    def export_of(files: dict[str, str]) -> str:
+        # The container tab is the first boundary in the Docs export,
+        # exactly as walk_tabs reports it — split_tabbed_export matches
+        # positionally, so an export missing it splits into nothing.
+        return "# **book**\n\n" + "".join(
+            f"# **{name}**\n\n{text}\n" for name, text in files.items())
+
+    live = {"01-open.md": "# One\n\nThe first essay.\n",
+            "02-next.md": "# Two\n\nThe second essay.\n",
+            _pron.FILENAME: PRON_SEED_ROWS}
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of(live)), docs_service=docs, with_comments=False)
+    check("E5 a clean round trip: the Docs export of the dictionary tab "
+          "parses back to exactly the rows that went out",
+          _pron.parse((ms / _pron.FILENAME).read_text())[0]
+          == _pron.parse(PRON_SEED_ROWS)[0]
+          and _pron.FILENAME not in report["conflicts"]
+          and _pron.FILENAME not in report["missing"]
+          and _pron.FILENAME in (report["changed"] + report["unchanged"]),
+          report)
+    check("E7 site 24: a pull whose Doc tab order is unchanged does NOT "
+          "rewrite toc.toml, and does not report a conflict — the same "
+          "mismatched comparison as site 23, on the pull side",
+          not report.get("toc_updated") and not report.get("toc_conflict")
+          and toc_path.read_bytes() == before, report)
+    check("E7 ...and toc.toml still has no pronunciations.md chapter "
+          "after a full pull",
+          _pron.FILENAME not in
+          [n for n, _ in parse_toc_tree(toc_path.read_text())],
+          toc_path.read_text())
+
+    # A Docs export that mangled the table into bullet lines: the row
+    # count goes to ZERO, and this is the pull that would destroy the
+    # dictionary.
+    frozen = (ms / _pron.FILENAME).read_bytes()
+    mangled = ("# Pronunciations\n\nHow the terms in this book are said "
+               "aloud.\n\n- anattā uh-NUT-taa Pali\n- Nāgārjuna "
+               "naa-GAAR-ju-na\n- Ereignis er-EYE-gnis German\n")
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: mangled})),
+        docs_service=docs, with_comments=False)
+    check("E5 the zero-rows guard: a mangled export is SKIPPED and "
+          "reported by name",
+          report.get("sidecar_unparsable") == [_pron.FILENAME], report)
+    check("E5 ...and the local bytes are untouched — asserted by outcome, "
+          "the way push_doc's is_marked guard is",
+          (ms / _pron.FILENAME).read_bytes() == frozen,
+          (ms / _pron.FILENAME).read_text()[:200])
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: mangled})),
+        docs_service=docs, force=True, with_comments=False)
+    check("E5 ...and --force DOES NOT REACH PAST IT. 'Mostly "
+          "unreachable' is not a guard, and neither is a guard with a "
+          "flag that turns it off",
+          report.get("sidecar_unparsable") == [_pron.FILENAME]
+          and (ms / _pron.FILENAME).read_bytes() == frozen, report)
+
+    # FEWER rows is the author deleting a row in the Doc, which is
+    # legitimate and must work.
+    shorter = ("# Pronunciations\n\nHow the terms in this book are said "
+               "aloud.\n\n| Term | Say it | Note |\n| --- | --- | --- |\n"
+               "| anattā | uh-NUT-taa | Pali |\n")
+    report = _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: shorter})),
+        docs_service=docs, with_comments=False)
+    check("E5 a pull that parses to FEWER rows is not guarded — that is "
+          "an author deleting a row in the Doc, and it must work",
+          not report.get("sidecar_unparsable")
+          and [r["term"] for r in
+               _pron.parse((ms / _pron.FILENAME).read_text())[0]]
+          == ["anattā"],
+          (ms / _pron.FILENAME).read_text())
+
+    # And the Docs shape itself: colons, bold, padding, escapes.
+    docsy = ("# Pronunciations\n\nHow the terms in this book are said "
+             "aloud.\n\n| **Term** | **Say it** | **Note** |\n"
+             "| :--- | :---: | --- |\n"
+             "|  anattā  |  uh-NUT-taa  | Pali |\n"
+             "| Śūnyatā | shoon-yuh-TAA | Sanskrit |\n"
+             "|  |  |  |\n")
+    _gd.pull_doc(db, manuscript, service=_PronDriveService(
+        export_of({**live, _pron.FILENAME: docsy})),
+        docs_service=docs, with_comments=False)
+    check("E5 a Docs-SHAPED export round-trips to the rows it means — "
+          "the parser's tolerance list is written against what Docs "
+          "actually emits, and normalize_markdown runs before it",
+          _pron.parse((ms / _pron.FILENAME).read_text())[0]
+          == [{"term": "anattā", "say": "uh-NUT-taa", "note": "Pali"},
+              {"term": "Śūnyatā", "say": "shoon-yuh-TAA",
+               "note": "Sanskrit"}],
+          (ms / _pron.FILENAME).read_text())
 
 
 def main_test() -> None:
@@ -4634,10 +7627,17 @@ def main_test() -> None:
         scenario_write_draft(root)
         scenario_write_new_and_digest(root)
         scenario_parallel_writeups(root)
+        scenario_writeup_scope(root)
+        scenario_intent_no_fanout(root)
+        scenario_intent_scope(root)
+        scenario_intent_tie(root)
         scenario_doc_comments(root)
         scenario_shell_watch_obsidian(root)
         scenario_watcher_guard(root)
         scenario_testbench(root)
+        scenario_filter(root)
+        scenario_pronunciations(root)
+        scenario_pronunciation_bridge(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
