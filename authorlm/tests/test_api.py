@@ -5351,6 +5351,75 @@ def check_critique_resolve_reembeds() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_filter_prelude_opt_in_frame() -> None:
+    """Prelude assembly must accept summaries=/profiles= without NameError.
+
+    `_frame_block` builds a list named `sections`; `assemble_prelude`
+    builds the same shape under the name `frame`. A copy-paste that kept
+    `sections.insert` on the prelude path crashed every global / 
+    pronunciation prelude whose front matter asked for neighbour
+    summaries or author profiles — the unit-window path was fine, so the
+    flags looked ratified while the prelude itself could not run.
+    """
+    from authorlm import filtering as fg
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-prelude-frame-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "01-before.md").write_text("# Before\n\nEarlier.\n")
+        (ms / "02-middle.md").write_text("# Middle\n\nHere.\n")
+        (ms / "03-after.md").write_text("# After\n\nLater.\n")
+        (ms / "_profiles").mkdir()
+        (ms / "_profiles" / "audience.md").write_text(
+            "Readers who already know the literature.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms), "--no-extract"])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        run = {"id": "fr-prelude", "file": "02-middle.md",
+               "filter": "metaphor", "class": "global", "registry": None}
+        units = ["Here."]
+        text = "# Middle\n\nHere.\n"
+        bare = fg.assemble_prelude(db, manuscript, run, "body", units,
+                                   text=text)
+        check("prelude without opt-ins still builds its frame",
+              "THE ESSAY — 02-middle.md" in bare.frame
+              and "NEIGHBOURING ESSAYS" not in bare.frame
+              and "AUTHOR PROFILES" not in bare.frame,
+              bare.frame[:500])
+        with_sum = fg.assemble_prelude(db, manuscript, run, "body", units,
+                                       text=text, summaries=True)
+        check("prelude + summaries=true inserts NEIGHBOURING ESSAYS "
+              "before THE ESSAY (no NameError)",
+              "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
+              "marked, and is still shown)" in with_sum.frame
+              and with_sum.frame.index("NEIGHBOURING ESSAYS")
+              < with_sum.frame.index("THE ESSAY — 02-middle.md"),
+              with_sum.frame)
+        with_prof = fg.assemble_prelude(db, manuscript, run, "body", units,
+                                        text=text, profiles=["audience"])
+        check("prelude + profiles inserts AUTHOR PROFILES (no NameError)",
+              "AUTHOR PROFILES (declared context — never law, and never "
+              "authority for a prose decision the author has not invoked it "
+              "for)" in with_prof.frame
+              and "Readers who already know the literature."
+              in with_prof.frame,
+              with_prof.frame)
+        both = fg.assemble_prelude(db, manuscript, run, "body", units,
+                                   text=text, summaries=True,
+                                   profiles=["audience"])
+        check("prelude accepts summaries and profiles together",
+              "NEIGHBOURING ESSAYS" in both.frame
+              and "AUTHOR PROFILES" in both.frame
+              and "THE ESSAY — 02-middle.md" in both.frame,
+              both.frame[:800])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_critique_resolve_reembeds()
     check_client_resolution()
@@ -5392,6 +5461,7 @@ def main_test() -> None:
     check_alias_guide_flip()
     check_alias_retired_guard()
     check_digest_schema()
+    check_filter_prelude_opt_in_frame()
     root = Path(tempfile.mkdtemp(prefix="authorlm-api-"))
     try:
         ws = root / "ws"

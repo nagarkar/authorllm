@@ -909,12 +909,16 @@ def assemble_prelude(db: Database, manuscript: dict, run: dict,
                  _essay_block(units)),
     ]
     if profiles:
-        sections.insert(3, _section(
+        # Same list the rest of this frame builds — `_frame_block` names
+        # it `sections`, and a copy-paste that kept that name here raised
+        # NameError the moment a prelude filter asked for profiles or
+        # summaries (global registry / pronunciation prelude).
+        frame.insert(3, _section(
             "AUTHOR PROFILES (declared context — never law, and never "
             "authority for a prose decision the author has not invoked it "
             "for)", _profiles_block(manuscript, profiles)))
     if summaries:
-        sections.insert(-1, _section(
+        frame.insert(-1, _section(
             "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
             "marked, and is still shown)",
             _neighbour_summaries(db, manuscript, file)))
