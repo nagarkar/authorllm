@@ -7169,6 +7169,162 @@ def main_test() -> None:
               in (ms / "01-choice.md").read_text()
               and not imp2["had_embed"], str(imp2))
 
+        # --- the cast: cast-id / cast / prior, references, stale-cast, the
+        # pin (docs/verse-and-cast-design.md §5–§7) ---
+        ctag = illus_mod.parse_tag(
+            "[Illustration: a serpent in three strokes | caption: none "
+            "| cast-id: Dragon]")
+        check("tag grammar parses cast-id (lowercased) beside caption",
+              ctag["cast_id"] == "dragon" and ctag["caption"] == "none"
+              and ctag["prompt"] == "a serpent in three strokes", str(ctag))
+        rtag = illus_mod.parse_tag(
+            "[Illustration: a hooded rider ⇢ hooded-rider.md | cast: Seeker, "
+            "dragon | prior: relegere-stage]")
+        check("tag grammar parses cast list, prior, and ref together",
+              rtag["cast"] == ["seeker", "dragon"]
+              and rtag["prior"] == "relegere-stage"
+              and rtag["ref"] == "hooded-rider.md"
+              and rtag["prompt"] == "a hooded rider", str(rtag))
+        check("a tag without options carries empty cast fields",
+              illus_mod.parse_tag("[Illustration: plain]")["cast"] == []
+              and illus_mod.parse_tag("[Illustration: plain]")["prior"] is None)
+        (ms / "illustration_cast.md").write_text(
+            "[Omit: pdf, docx, epub, md, audio]\n\n# Cast\n\n"
+            "[Illustration: a serpent in three strokes | cast-id: dragon]\n\n"
+            "[Illustration: a lone pilgrim with a wide hat | cast-id: seeker]"
+            "\n\n[/Omit]\n")
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n[Illustration: the rider meets the serpent | cast: dragon, "
+              "seeker]\n")
+        api.collect(db, manuscript, {})
+        hero = illus_mod.find_slot(ms, "rider meets")[0]
+        unresolved = illus_mod.resolve_references(ms, hero)
+        check("an unpicked cast plate is a named error, never a silent "
+              "omission",
+              len(unresolved["errors"]) == 2
+              and "dragon" in unresolved["errors"][0]
+              and "no pick" in unresolved["errors"][0]
+              and not unresolved["references"], str(unresolved))
+        try:
+            illus_mod.render_slot(db, manuscript, hero, {}, generator=fake_gen)
+            refused = False
+        except LookupError:
+            refused = True
+        check("render stops on an unresolved cast", refused)
+        dragon = illus_mod.find_slot(ms, "serpent in three")[0]
+        rd = illus_mod.render_slot(db, manuscript, dragon, {}, generator=fake_gen)
+        # Re-find after the render: externalizing the dragon inserted an
+        # embed line above the seeker, and a slot's line number is only
+        # good until the file changes.
+        seeker = illus_mod.find_slot(ms, "lone pilgrim")[0]
+        rs = illus_mod.render_slot(db, manuscript, seeker, {}, generator=fake_gen)
+        index, problems = illus_mod.cast_index(ms)
+        check("cast_index finds both plates picked, with no problems",
+              set(index) == {"dragon", "seeker"}
+              and index["dragon"]["plate"] == rd["written"][0]
+              and not problems, str((sorted(index), problems)))
+        ref_calls = []
+
+        def fake_gen_refs(prompt, input_png, references=None):
+            ref_calls.append((prompt, input_png, references))
+            return tiny_png()
+
+        hero = illus_mod.find_slot(ms, "rider meets")[0]
+        assembled = illus_mod.effective_prompt(db, manuscript, hero)
+        check("effective_prompt carries an identification-only reference "
+              "block in cast order",
+              "Image 1: the Dragon of this book" in assembled["composed"]
+              and "Image 2: the Seeker of this book" in assembled["composed"]
+              and [r["slug"] for r in assembled["references"]]
+              == ["dragon", "seeker"]
+              and assembled["composed"].index("DEPICT")
+              < assembled["composed"].index("REFERENCES")
+              < assembled["composed"].index("STYLE"),
+              assembled["composed"])
+        rh = illus_mod.render_slot(db, manuscript, hero, {},
+                                   generator=fake_gen_refs)
+        check("render attaches the picked plates as references, in order, "
+              "with the same composed prompt",
+              len(ref_calls[-1][2]) == 2
+              and ref_calls[-1][0] == assembled["composed"]
+              and rh["references"] == ["cast dragon", "cast seeker"],
+              str(rh))
+        meta = illus_mod.read_metadata(ms / "_illustrations" / rh["written"][0])
+        check("the render records which plates it was made against",
+              meta.get("authorlm:cast")
+              == f"dragon={rd['written'][0]};seeker={rs['written'][0]}"
+              and meta.get("authorlm:off-model", "") == "", str(meta))
+        hstat = [st for st in illus_mod.slot_status(db, manuscript)
+                 if "rider meets" in st["prompt"]][0]
+        check("a render made against the current picks is not stale-cast",
+              hstat["state"] == "rendered"
+              and hstat["cast"] == ["dragon", "seeker"], str(hstat))
+        dragon = illus_mod.find_slot(ms, "serpent in three")[0]
+        rd2 = illus_mod.render_slot(db, manuscript, dragon, {},
+                                    generator=fake_gen)
+        illus_mod.set_embed(ms / "illustration_cast.md", dragon["key"],
+                            rd2["written"][0])
+        hstat = [st for st in illus_mod.slot_status(db, manuscript)
+                 if "rider meets" in st["prompt"]][0]
+        check("re-picking a cast plate marks every dependent render "
+              "stale-cast", hstat["state"] == "stale-cast", str(hstat))
+        bad = {**hero, "cast": ["dragon", "seeker", "ghost"]}
+        check("an unknown cast id is a named error",
+              any("ghost" in e for e in
+                  illus_mod.resolve_references(ms, bad)["errors"]))
+        crowded = {**hero, "cast": ["dragon", "seeker", "dragon", "a", "b"]}
+        check("more than three cast ids is a named error",
+              any("at most" in e for e in
+                  illus_mod.resolve_references(ms, crowded)["errors"]))
+        rep_cast = illus_mod.slot_report(ms)
+        check("slot_report carries cast fields and no false problems",
+              "cast_problems" in rep_cast and not rep_cast["cast_problems"],
+              str(rep_cast["cast_problems"]))
+
+        # the pin: stamped complete from the global default, then owned
+        pin_root = root / "pin-scratch"
+        pin_root.mkdir()
+        pin_cfg = {"illustrations": {"model": "openai/test-image",
+                                     "image_size": "1024x1536"}}
+        pin = illus_mod.ensure_pin(pin_root, pin_cfg)
+        check("the pin is stamped complete from the global default, in the "
+              "manuscript folder",
+              pin == {"model": "openai/test-image", "image_size": "1024x1536"}
+              and illus_mod.pin_path(pin_root).exists()
+              and illus_mod.load_pin(pin_root) == pin, str(pin))
+        moved_cfg = {"illustrations": {"model": "gemini/other",
+                                       "image_size": "1024x1024"}}
+        held = illus_mod.resolve_pin(pin_root, moved_cfg)
+        check("after stamping, the global setting no longer reaches the "
+              "manuscript (copy, then own)",
+              held["model"] == "openai/test-image"
+              and held["size"] == "1024x1536" and not held["off_model"],
+              str(held))
+        off = illus_mod.resolve_pin(pin_root, moved_cfg,
+                                    model_override="gemini/other")
+        check("a named other model is off-model, never a silent fallback",
+              off["model"] == "gemini/other" and off["off_model"]
+              and off["pinned_model"] == "openai/test-image", str(off))
+        illus_mod.write_pin(pin_root, "openai/test-image", "1024x1024")
+        check("illus pin rewrites the pin explicitly",
+              illus_mod.load_pin(pin_root)["image_size"] == "1024x1024")
+        seeker = illus_mod.find_slot(ms, "lone pilgrim")[0]
+        ro = illus_mod.render_slot(db, manuscript, seeker, {},
+                                   generator=fake_gen, model="gemini/other")
+        ometa = illus_mod.read_metadata(
+            ms / "_illustrations" / ro["written"][0])
+        check("an off-model render says so in its result and metadata",
+              ro["off_model"] and ro["model"] == "gemini/other"
+              and ometa.get("authorlm:off-model") == "true"
+              and ometa.get("authorlm:model") == "gemini/other", str(ometa))
+        (ms / "illustration_cast.md").unlink()
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text().replace(
+                "\n[Illustration: the rider meets the serpent | cast: dragon, "
+                "seeker]\n", ""))
+        api.collect(db, manuscript, {})
+
         # --- capture_embeds/reembed: the pick survives a Doc round trip ---
         embed_root = root / "illus-embed-scratch"
         (embed_root / "_illustrations" / "prompts").mkdir(parents=True)

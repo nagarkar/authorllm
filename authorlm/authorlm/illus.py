@@ -36,7 +36,15 @@ from .revisions import iter_manuscript_paths
 ILLUS_DIR = "_illustrations"
 
 _TAG = re.compile(r"\[Illustration:\s*(?P<body>.+?)\]\s*$", re.IGNORECASE)
-_CAPTION = re.compile(r"\s*\|\s*caption:\s*(?P<caption>.+)\s*$", re.IGNORECASE)
+# The tag's options tail: `| caption: …`, and the cast grammar of
+# verse-and-cast-design.md §5 — `| cast-id: <slug>` defines a cast member
+# or a stage plate, `| cast: a, b, c` names the plates a render attaches
+# (one to three), `| prior: <slug>` names one plate to follow for stage
+# and composition. Order-independent; each value runs to the next option.
+_OPTION = re.compile(
+    r"\s*\|\s*(?P<key>caption|cast-id|cast|prior)\s*:\s*", re.IGNORECASE)
+CAST_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+MAX_CAST = 3
 _CANDIDATE = re.compile(
     r"^(?P<key>.+)-(?P<desc>[0-9a-f]{8})-(?P<style>[0-9a-f]{4})"
     r"-(?P<src>i?)(?P<n>\d{2})\.(?P<ext>png|jpe?g)$")
@@ -75,11 +83,23 @@ def parse_tag(line: str) -> dict | None:
     if not m or not line.strip().startswith("["):
         return None
     body = m.group("body")
-    caption = None
-    cm = _CAPTION.search(body)
-    if cm:
-        caption = cm.group("caption").strip()
-        body = body[: cm.start()]
+    caption = cast_id = prior = None
+    cast: list[str] = []
+    options = list(_OPTION.finditer(body))
+    for i, om in enumerate(options):
+        end = options[i + 1].start() if i + 1 < len(options) else len(body)
+        value = body[om.end():end].strip()
+        key = om.group("key").lower()
+        if key == "caption":
+            caption = value or None
+        elif key == "cast-id":
+            cast_id = value.lower() or None
+        elif key == "cast":
+            cast = [c.strip().lower() for c in value.split(",") if c.strip()]
+        elif key == "prior":
+            prior = value.lower() or None
+    if options:
+        body = body[: options[0].start()]
     ref = None
     rm = _REF.search(body)
     if rm:
@@ -90,7 +110,8 @@ def parse_tag(line: str) -> dict | None:
     if not prompt and not ref:
         return None
     return {"prompt": prompt, "caption": caption, "ref": ref,
-            "malformed_ref": malformed_ref}
+            "malformed_ref": malformed_ref, "cast_id": cast_id,
+            "cast": cast, "prior": prior}
 
 
 # Preview embeds in prompt files: `![](../<candidate>)` lines at the end
@@ -333,10 +354,18 @@ def _excerpt_of(full: str, words: int = 8) -> str:
     return head + ("…" if len(tokens) > words else "")
 
 
-def _tag_line(excerpt: str, ref: str | None, caption: str | None) -> str:
+def _tag_line(excerpt: str, ref: str | None, caption: str | None,
+              cast_id: str | None = None, cast: list[str] | None = None,
+              prior: str | None = None) -> str:
     body = excerpt + (f" ⇢ {ref}" if ref else "")
     if caption:
         body += f" | caption: {caption}"
+    if cast_id:
+        body += f" | cast-id: {cast_id}"
+    if cast:
+        body += " | cast: " + ", ".join(cast)
+    if prior:
+        body += f" | prior: {prior}"
     return f"[Illustration: {body}]"
 
 
@@ -359,7 +388,8 @@ def externalize(root: Path, slot: dict) -> dict:
     path = root / slot["file"]
     lines = path.read_text(encoding="utf-8").split("\n")
     lines[slot["line"] - 1] = _tag_line(
-        _excerpt_of(slot["prompt"]), name, slot.get("caption"))
+        _excerpt_of(slot["prompt"]), name, slot.get("caption"),
+        slot.get("cast_id"), slot.get("cast"), slot.get("prior"))
     path.write_text("\n".join(lines), encoding="utf-8")
     return {"file": slot["file"], "ref": name,
             "desc_hash": slot["desc_hash"]}
@@ -478,7 +508,9 @@ def maintain_excerpts(root: Path) -> list[dict]:
             if tag["prompt"] != expected:
                 report.append({"file": rel, "ref": tag["ref"],
                                "discarded_edit": bool(tag["prompt"])})
-                lines[i] = _tag_line(expected, tag["ref"], tag["caption"])
+                lines[i] = _tag_line(expected, tag["ref"], tag["caption"],
+                                     tag.get("cast_id"), tag.get("cast"),
+                                     tag.get("prior"))
                 changed = True
         if changed:
             path.write_text("\n".join(lines), encoding="utf-8")
@@ -625,9 +657,14 @@ def slot_report(root: Path) -> dict:
     unrendered = [
         {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
          "caption": s.get("caption"), "ref": s.get("ref"), "key": s["key"],
-         "desc_hash": s["desc_hash"]}
+         "desc_hash": s["desc_hash"], "cast_id": s.get("cast_id"),
+         "cast": s.get("cast") or [], "prior": s.get("prior")}
         for s in slots if s["key"] not in held
     ]
+    index, cast_problems = cast_index(root)
+    for s in slots:
+        if s.get("cast") or s.get("prior"):
+            cast_problems += resolve_references(root, s, index)["errors"]
     orphaned = [c["name"] for c in candidate_files(root)
                 if c["key"] not in declared]
     malformed_refs = [
@@ -635,7 +672,7 @@ def slot_report(root: Path) -> dict:
         for s in slots if s.get("malformed_ref")
     ]
     return {"unrendered": unrendered, "orphaned": orphaned,
-            "malformed_refs": malformed_refs}
+            "malformed_refs": malformed_refs, "cast_problems": cast_problems}
 
 
 def strip_dangling(text: str) -> tuple[str, list[str]]:
@@ -795,9 +832,242 @@ def find_slot(root: Path, fragment: str) -> list[dict]:
     return matches
 
 
+# --------------------------------------------------------------- the cast
+# verse-and-cast-design.md §5–§7. A cast member or stage plate is an
+# ordinary slot whose tag carries `cast-id:`; a poem's tag names the
+# plates it wants attached with `cast:` and one plate to follow with
+# `prior:`. The PINNED PICK of each named slot is the file the renderer
+# sends. An unpicked plate is a render-time error, which is what forces
+# the plates to come first.
+
+def display_name(cast_slug: str) -> str:
+    """`tower-of-light` → `Tower of Light`: how a cast id is named in the
+    reference block."""
+    small = {"of", "the", "and", "in", "a", "on"}
+    return " ".join(w if (w in small and i) else w.capitalize()
+                    for i, w in enumerate(cast_slug.split("-")))
+
+
+def cast_index(root) -> tuple[dict[str, dict], list[str]]:
+    """Every `cast-id:` slot in the manuscript, keyed by id, each with
+    `plate` (its pinned candidate name, or None when unpicked), plus the
+    problems the scan found: a malformed id, an id defined twice."""
+    root = Path(root)
+    prompts = load_prompts(root)
+    index: dict[str, dict] = {}
+    problems: list[str] = []
+    for rel, path in iter_manuscript_paths(root).items():
+        text = _read_manuscript_text(path, rel)
+        for slot in scan_text(text, prompts):
+            cid = slot.get("cast_id")
+            if not cid:
+                continue
+            where = f"{rel}:{slot['line']}"
+            if not CAST_SLUG.match(cid):
+                problems.append(f"{where}: cast-id '{cid}' is not a slug "
+                                "(lowercase letters, digits, hyphens)")
+                continue
+            if cid in index:
+                first = index[cid]
+                problems.append(f"{where}: cast-id '{cid}' is already "
+                                f"defined at {first['file']}:{first['line']}")
+                continue
+            plate = embed_target(text, slot["key"]) if slot["key"] else None
+            if plate and not (root / ILLUS_DIR / plate).exists():
+                plate = None
+            index[cid] = {**slot, "file": rel, "plate": plate}
+    return index, problems
+
+
+def resolve_references(root, slot: dict,
+                       index: dict[str, dict] | None = None) -> dict:
+    """The plates a render of `slot` attaches, in order — its `cast:` ids
+    then its `prior:` — as {slug, role, name, path}; and every reason one
+    could not be attached, as a sentence. Errors are returned, never
+    raised: `effective_prompt` reports them and `render_slot` refuses on
+    them."""
+    root = Path(root)
+    if index is None:
+        index, _ = cast_index(root)
+    refs: list[dict] = []
+    errors: list[str] = []
+    where = f"{slot.get('file', '?')}:{slot.get('line', '?')}"
+    cast = list(slot.get("cast") or [])
+    if len(cast) > MAX_CAST:
+        errors.append(f"{where}: cast names {len(cast)} ids; at most "
+                      f"{MAX_CAST}")
+    seen: set[str] = set()
+
+    def attach(cid: str, role: str) -> None:
+        entry = index.get(cid)
+        if entry is None:
+            errors.append(f"{where}: {role} '{cid}' is not defined — no tag "
+                          f"carries 'cast-id: {cid}'")
+            return
+        if not entry.get("plate"):
+            errors.append(f"{where}: {role} plate '{cid}' has no pick — "
+                          f"render and pick it first "
+                          f"({entry['file']}:{entry['line']})")
+            return
+        refs.append({"slug": cid, "role": role, "name": entry["plate"],
+                     "path": root / ILLUS_DIR / entry["plate"]})
+
+    for cid in cast[:MAX_CAST]:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        attach(cid, "cast")
+    if slot.get("prior"):
+        attach(slot["prior"], "prior")
+    return {"references": refs, "errors": errors}
+
+
+def reference_block(refs: list[dict]) -> str:
+    """Identification only, one line per attached image, in attachment
+    order. Meaning ("the mind") is deliberately NOT sent: likeness is the
+    model's business, meaning is ours (design §6). The wording is a first
+    draft the three-poem trial settles."""
+    if not refs:
+        return ""
+    lines = ["REFERENCES (the attached images, in this order — likeness "
+             "only, never subject):"]
+    for i, ref in enumerate(refs, 1):
+        if ref["role"] == "prior":
+            lines.append(f"Image {i}: the previous plate in this series; "
+                         "keep its stage and composition.")
+        else:
+            lines.append(f"Image {i}: the {display_name(ref['slug'])} of "
+                         "this book. Draw the same figure again.")
+    return "\n".join(lines)
+
+
+def read_metadata(path) -> dict[str, str]:
+    """The fields image_with_metadata wrote, read back: PNG iTXt chunks
+    or JPEG COM segments. Empty for an image that carries none."""
+    data = Path(path).read_bytes()
+    out: dict[str, str] = {}
+    if data.startswith(_PNG_SIG):
+        pos = 8
+        while pos + 8 <= len(data):
+            length = int.from_bytes(data[pos:pos + 4], "big")
+            ctype = data[pos + 4:pos + 8]
+            body = data[pos + 8:pos + 8 + length]
+            if ctype == b"iTXt":
+                try:
+                    keyword, rest = body.split(b"\x00", 1)
+                    rest = rest[2:]  # compression flag, method
+                    _lang, rest = rest.split(b"\x00", 1)
+                    _translated, text = rest.split(b"\x00", 1)
+                    out[keyword.decode("latin-1")] = text.decode(
+                        "utf-8", "replace")
+                except ValueError:
+                    pass
+            if ctype == b"IEND":
+                break
+            pos += 12 + length
+    elif data.startswith(_JPEG_SIG):
+        pos = 2
+        while pos + 4 <= len(data) and data[pos] == 0xFF:
+            marker = data[pos + 1]
+            if marker in (0xD8, 0xD9):
+                pos += 2
+                continue
+            seglen = int.from_bytes(data[pos + 2:pos + 4], "big")
+            if marker == 0xFE:
+                body = data[pos + 4:pos + 2 + seglen].decode("utf-8", "replace")
+                if ": " in body:
+                    key, value = body.split(": ", 1)
+                    out[key] = value
+            if marker == 0xDA:
+                break
+            pos += 2 + seglen
+    return out
+
+
+def _cast_record(refs: list[dict], role: str) -> str:
+    return ";".join(f"{r['slug']}={r['name']}" for r in refs
+                    if r["role"] == role)
+
+
+# ---------------------------------------------------------------- the pin
+# verse-and-cast-design.md §7, §15. A style is model-bound, so each
+# manuscript pins the illustration model and size in its own folder:
+# stamped COMPLETE from the global default the first time it is needed
+# (init, or the first render of a manuscript that predates the pin),
+# read on every render after, changed only by `illus pin`. Copy, then
+# own: there is no override chain back to config.toml.
+
+PIN_FILE = "settings.toml"
+
+
+def pin_path(root) -> Path:
+    return Path(root) / ILLUS_DIR / PIN_FILE
+
+
+def load_pin(root) -> dict | None:
+    path = pin_path(root)
+    if not path.exists():
+        return None
+    import tomllib
+
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as err:
+        raise ValueError(f"{path} is not valid TOML: {err}") from err
+    return {"model": str(data.get("model", "")),
+            "image_size": str(data.get("image_size", ""))}
+
+
+def write_pin(root, model: str, image_size: str) -> Path:
+    path = pin_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# _illustrations/settings.toml — this manuscript's illustration "
+        "pin.\n"
+        "# Stamped once from config.toml [illustrations] and owned here "
+        "from then on:\n"
+        "# the global setting no longer reaches this book. Change with\n"
+        "# 'authorlm illus pin --model … --size …'. A render on any other "
+        "model or\n"
+        "# size stops unless named with --model, and is then marked "
+        "off-model.\n"
+        "# (docs/verse-and-cast-design.md §7, §15)\n\n"
+        f'model = "{model}"\n'
+        f'image_size = "{image_size}"\n', encoding="utf-8")
+    return path
+
+
+def ensure_pin(root, config: dict) -> dict:
+    """The pin, stamping it from the global default when absent."""
+    pin = load_pin(root)
+    if pin is not None:
+        return pin
+    from .llm import DEFAULT_IMAGE_MODEL, resolve_image_setting
+
+    model = resolve_image_setting(config, "model", "image_model",
+                                  DEFAULT_IMAGE_MODEL)
+    size = resolve_image_setting(config, "image_size", "image_size", "")
+    write_pin(root, model, size)
+    return {"model": model, "image_size": size}
+
+
+def resolve_pin(root, config: dict, model_override: str | None = None,
+                size_override: str | None = None) -> dict:
+    """What a render runs on: the pin, unless the author named another
+    model or size for this render — which is permitted and marked
+    off-model, never silent."""
+    pin = ensure_pin(root, config)
+    model = model_override or pin["model"]
+    size = size_override if size_override is not None else pin["image_size"]
+    return {"model": model, "size": size,
+            "off_model": model != pin["model"] or size != pin["image_size"],
+            "pinned_model": pin["model"], "pinned_size": pin["image_size"]}
+
+
 def render_slot(db, manuscript: dict, slot: dict, config: dict,
                 from_n: int | None = None, count: int = 1,
-                generator=None) -> dict:
+                generator=None, model: str | None = None,
+                size: str | None = None) -> dict:
     """Render `count` new candidates for a slot. `from_n` passes an
     existing candidate as the input image — continuity across a style
     change, and the seed door for an imported plate. A slot with no
@@ -806,14 +1076,21 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     EXTERNALIZED first: the first image is what mints a slot's key."""
     from datetime import datetime, timezone
 
-    from .llm import DEFAULT_IMAGE_MODEL, generate_image, resolve_image_setting
+    from .llm import generate_image
 
-    generator = generator or (lambda prompt, input_png:
-                              generate_image(config, prompt, input_png))
     root = Path(manuscript["path"])
+    pin = resolve_pin(root, config, model, size)
+    generator = generator or (
+        lambda prompt, input_png, references=None:
+        generate_image(config, prompt, input_png, references=references,
+                       model=pin["model"], size=pin["size"]))
     slot = ensure_key(root, slot)
     deschash = slot["desc_hash"]
     assembled = effective_prompt(db, manuscript, slot)
+    if assembled["reference_errors"]:
+        raise LookupError("cast unresolved — " +
+                          "; ".join(assembled["reference_errors"]))
+    references = [r["path"].read_bytes() for r in assembled["references"]]
     shash = assembled["style_hash"]
     prompt = assembled["composed"]
 
@@ -829,18 +1106,21 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     next_n = max((int(c["n"]) for c in existing), default=0) + 1
     directory = root / ILLUS_DIR
     directory.mkdir(exist_ok=True)
-    model = resolve_image_setting(config, "model", "image_model",
-                                  DEFAULT_IMAGE_MODEL)
     written = []
     for offset in range(count):
-        img = generator(prompt, input_png)
+        img = (generator(prompt, input_png, references=references)
+               if references else generator(prompt, input_png))
         name = (f"{slot['key']}-{deschash}-{shash}"
                 f"-{next_n + offset:02d}.{image_ext(img)}")
         payload = image_with_metadata(img, {
             "authorlm:prompt": slot["prompt"],
             "authorlm:caption": slot.get("caption") or "",
             "authorlm:style": assembled["law"],
-            "authorlm:model": model,
+            "authorlm:model": pin["model"],
+            "authorlm:size": pin["size"],
+            "authorlm:off-model": "true" if pin["off_model"] else "",
+            "authorlm:cast": _cast_record(assembled["references"], "cast"),
+            "authorlm:prior": _cast_record(assembled["references"], "prior"),
             "authorlm:date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             **({"authorlm:from": f"{from_n:02d}"} if from_n else {}),
         })
@@ -851,7 +1131,11 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     if embedded is None:
         set_embed(root / slot["file"], slot["key"], written[-1])
     return {"written": written, "embedded": embedded or written[-1],
-            "style_hash": shash, "had_embed": embedded is not None}
+            "style_hash": shash, "had_embed": embedded is not None,
+            "model": pin["model"], "off_model": pin["off_model"],
+            "pinned_model": pin["pinned_model"],
+            "references": [f"{r['role']} {r['slug']}"
+                           for r in assembled["references"]]}
 
 
 def slot_status(db, manuscript: dict) -> list[dict]:
@@ -865,6 +1149,7 @@ def slot_status(db, manuscript: dict) -> list[dict]:
     root = Path(manuscript["path"])
     out = []
     prompts = load_prompts(root)
+    index, _problems = cast_index(root)
     for rel, path in iter_manuscript_paths(root).items():
         text = path.read_text(encoding="utf-8")
         current = style_hash(illustration_law(db, manuscript["id"], rel))
@@ -872,20 +1157,40 @@ def slot_status(db, manuscript: dict) -> list[dict]:
             cands = slot_candidates(root, slot["key"])
             embedded = embed_target(text, slot["key"]) if slot["key"] else None
             state = "unrendered"
+            off_model = False
             if cands:
                 target = next((c for c in cands if c["name"] == embedded),
                               None) or cands[-1]
                 state = "imported" if target["src"] else "rendered"
                 if target["style"] != current:
                     state = "stale-style"
+                meta = read_metadata(root / ILLUS_DIR / target["name"])
+                off_model = meta.get("authorlm:off-model") == "true"
+                if slot.get("cast") or slot.get("prior"):
+                    # stale-cast: the plate was made against picks that
+                    # have since moved (or against none) — design §5.
+                    wanted = resolve_references(root, slot, index)
+                    now = {(r["role"], r["slug"], r["name"])
+                           for r in wanted["references"]}
+                    then = set()
+                    for role in ("cast", "prior"):
+                        for pair in (meta.get(f"authorlm:{role}") or "").split(";"):
+                            if "=" in pair:
+                                cid, name = pair.split("=", 1)
+                                then.add((role, cid, name))
+                    if now != then and not target["src"]:
+                        state = "stale-cast"
                 if target["desc"] != slot["desc_hash"]:
                     state = "stale-desc"
             out.append({"file": rel, "line": slot["line"],
                         "prompt": slot["prompt"],
                         "caption": slot.get("caption"),
                         "key": slot["key"],
+                        "cast_id": slot.get("cast_id"),
+                        "cast": slot.get("cast") or [],
+                        "prior": slot.get("prior"),
                         "state": state, "candidates": len(cands),
-                        "embedded": embedded,
+                        "embedded": embedded, "off_model": off_model,
                         "style_current": current})
     return out
 
@@ -972,6 +1277,8 @@ def effective_prompt(db, manuscript: dict, slot: dict) -> dict:
     image look like that". render_slot composes through this same
     function, so the two can never diverge."""
     law = illustration_law(db, manuscript["id"], slot["file"])
+    resolved = resolve_references(Path(manuscript["path"]), slot)
+    refs = reference_block(resolved["references"])
     # Subject first, style second, precedence explicit — image models
     # weight early tokens and resolve conflicts toward whatever claims
     # authority, so the depiction must outrank the style's era/content
@@ -979,12 +1286,19 @@ def effective_prompt(db, manuscript: dict, slot: dict) -> dict:
     # the engraving law's period pull). The stylehash still hashes the
     # LAW text; a change to this template ships with a law edit, which
     # bumps the hash and marks prior renders stale-style honestly.
-    composed = ((
-        "DEPICT (content commands — costume, era, objects, and "
-        "composition here override anything the style implies):\n"
-        f"{slot['prompt']}\n\n"
-        "STYLE (technique and rendering only):\n"
-        f"{law}") if law else slot["prompt"])
+    # The reference block sits between DEPICT and STYLE: it identifies
+    # the attached images and nothing more (design §6).
+    if law or refs:
+        parts = ["DEPICT (content commands — costume, era, objects, and "
+                 "composition here override anything the style implies):\n"
+                 f"{slot['prompt']}"]
+        if refs:
+            parts.append(refs)
+        if law:
+            parts.append("STYLE (technique and rendering only):\n" + law)
+        composed = "\n\n".join(parts)
+    else:
+        composed = slot["prompt"]
     return {
         "file": slot["file"],
         "line": slot.get("line"),
@@ -994,4 +1308,6 @@ def effective_prompt(db, manuscript: dict, slot: dict) -> dict:
         "style_hash": style_hash(law),
         "law": law,
         "composed": composed,
+        "references": resolved["references"],
+        "reference_errors": resolved["errors"],
     }

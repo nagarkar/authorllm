@@ -1334,22 +1334,33 @@ def resolve_image_setting(config: dict, illus_key: str, llm_key: str,
 
 
 def generate_image(config: dict, prompt: str,
-                   input_png: bytes | None = None) -> bytes:
-    """One rendered PNG for an illustration slot. The model comes from
-    `[illustrations] model` (a litellm-style string), falling back to
-    the legacy `[llm] image_model`, then the default gemini flash image
-    model. gemini/* models call the Gemini REST API directly — the
-    multimodal generateContent endpoint supports image output and
-    image-conditioned editing (`--from` continuity), which
-    litellm.image_generation cannot express; every other model string
-    routes through litellm.image_generation. Unlike completions there is
-    no silent degradation: rendering is an explicit act, so failures
-    raise RuntimeError with a readable message."""
+                   input_png: bytes | None = None,
+                   references: list[bytes] | None = None,
+                   model: str | None = None,
+                   size: str | None = None) -> bytes:
+    """One rendered image for an illustration slot. `model` and `size`
+    come from the manuscript's pin when the caller has one
+    (illus.resolve_pin); absent that, from `[illustrations]`, then the
+    legacy `[llm] image_model`, then the default gemini flash image
+    model. `input_png` is the image to edit (`--from` continuity);
+    `references` are the cast plates to hold a likeness to
+    (verse-and-cast-design.md §6), attached after it in the order the
+    prompt's reference block names them. gemini/* models take them
+    through generateContent; openai/* image models through the images
+    EDITS endpoint (up to 16 inputs); every other model string routes
+    through litellm.image_generation, which is text-to-image only and so
+    refuses any input image. Unlike completions there is no silent
+    degradation: rendering is an explicit act, so failures raise
+    RuntimeError with a readable message."""
     from . import budget, paths, usage
 
     llm = config.get("llm", {}) or {}
-    model = resolve_image_setting(config, "model", "image_model",
-                                  DEFAULT_IMAGE_MODEL)
+    model = model or resolve_image_setting(config, "model", "image_model",
+                                          DEFAULT_IMAGE_MODEL)
+    if size is None:
+        size = resolve_image_setting(config, "image_size", "image_size", "")
+    images = ([input_png] if input_png is not None else []) + list(
+        references or [])
     # The third enforcement seam, after model resolution and before the
     # key check. Permits on every shipped configuration.
     budget.gate("illustrations", model)
@@ -1363,15 +1374,24 @@ def generate_image(config: dict, prompt: str,
             raise RuntimeError(
                 "no API key for image generation — set GEMINI_API_KEY in "
                 f"{paths.env_path()}")
-        png = _gemini_image(model.split("/", 1)[1], prompt, input_png,
+        png = _gemini_image(model.split("/", 1)[1], prompt, images,
                             key, timeout)
         usage.record_image(purpose="illustrations", model=model, images=1)
         return png
-    if input_png is not None:
+    if images and model.startswith("openai/"):
+        if not key:
+            raise RuntimeError(
+                "no API key for image generation — set OPENAI_API_KEY in "
+                f"{paths.env_path()}")
+        png = _openai_image_edit(model.split("/", 1)[1], prompt, images,
+                                 size, key, timeout)
+        usage.record_image(purpose="illustrations", model=model, images=1)
+        return png
+    if images:
         raise RuntimeError(
-            f"--from (image-conditioned render) needs a gemini/* image "
-            f"model; '{model}' goes through litellm.image_generation, "
-            "which is text-to-image only")
+            f"an input image (--from) or cast references need a gemini/* "
+            f"or openai/* image model; '{model}' goes through "
+            "litellm.image_generation, which is text-to-image only")
     try:
         import litellm
     except ImportError as err:
@@ -1380,10 +1400,9 @@ def generate_image(config: dict, prompt: str,
             "(pip install litellm)") from err
     litellm.suppress_debug_info = True
     # Aspect ratio is ratified style law, not a per-render choice; the
-    # OpenAI image API defaults to a square, so [illustrations] image_size
-    # (falling back to the legacy [llm] image_size) carries the
-    # manuscript's shape (gpt-image-* landscape 3:2 = 1536x1024).
-    size = resolve_image_setting(config, "image_size", "image_size", "")
+    # OpenAI image API defaults to a square, so the pin's image_size
+    # (falling back to [illustrations] / the legacy [llm] image_size)
+    # carries the manuscript's shape.
     try:
         response = litellm.image_generation(
             model=model, prompt=prompt, timeout=timeout,
@@ -1409,15 +1428,56 @@ def generate_image(config: dict, prompt: str,
     return base64.b64decode(b64)
 
 
-def _gemini_image(model: str, prompt: str, input_png: bytes | None,
+def _image_mime(blob: bytes) -> str:
+    return "image/png" if blob.startswith(b"\x89PNG") else "image/jpeg"
+
+
+def _openai_image_edit(model: str, prompt: str, images: list[bytes],
+                       size: str, key: str, timeout: int) -> bytes:
+    """The images EDITS endpoint: one or more input images plus the
+    prompt, one image back. The order of `images` is the order the
+    prompt's reference block numbers them."""
+    import base64
+    import io
+
+    try:
+        from openai import OpenAI
+    except ImportError as err:
+        raise RuntimeError(
+            "the 'openai' package is needed for reference-image renders on "
+            "openai/* image models (pip install openai)") from err
+    files = []
+    for i, blob in enumerate(images, 1):
+        handle = io.BytesIO(blob)
+        handle.name = (f"image-{i}.png" if _image_mime(blob) == "image/png"
+                       else f"image-{i}.jpg")
+        files.append(handle)
+    client = OpenAI(api_key=key, timeout=timeout)
+    try:
+        response = client.images.edit(
+            model=model, image=files if len(files) > 1 else files[0],
+            prompt=prompt, n=1, **({"size": size} if size else {}))
+    except Exception as err:
+        raise RuntimeError(
+            f"image model 'openai/{model}' failed: {str(err).strip()[:300]}"
+        ) from err
+    data = response.data[0] if response.data else None
+    b64 = getattr(data, "b64_json", None) if data is not None else None
+    if not b64:
+        raise RuntimeError(f"image model 'openai/{model}' returned no "
+                           "image data")
+    return base64.b64decode(b64)
+
+
+def _gemini_image(model: str, prompt: str, images: list[bytes],
                   key: str, timeout: int) -> bytes:
     import base64
 
     parts: list[dict] = [{"text": prompt}]
-    if input_png is not None:
+    for blob in images or []:
         parts.append({"inline_data": {
-            "mime_type": "image/png",
-            "data": base64.b64encode(input_png).decode("ascii")}})
+            "mime_type": _image_mime(blob),
+            "data": base64.b64encode(blob).decode("ascii")}})
     body = {"contents": [{"parts": parts}],
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
     request = urllib.request.Request(
