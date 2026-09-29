@@ -5665,12 +5665,12 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
 def _write_resolved_text(path: Path, root: Path, final: str) -> str:
     """Write a resolve's final text back to disk WITH its illustration
     embed lines. The Doc never carries embed lines (push strips them),
-    so the text a filter or lens resolve reads back from a tab is
-    embed-free — and writing it as-is silently unlinked every rendered
-    illustration in the essay (the tag stayed, the picture under it
-    vanished from Obsidian; 15 slots across SMSTTD, 2026-09-02). The
-    ordinary pull re-inserts them; this is the same step, the prior
-    pick winning while its file exists."""
+    so the text a filter, lens, or critique resolve reads back from a
+    tab is embed-free — and writing it as-is silently unlinked every
+    rendered illustration in the essay (the tag stayed, the picture
+    under it vanished from Obsidian; 15 slots across SMSTTD,
+    2026-09-02). The ordinary pull re-inserts them; this is the same
+    step, the prior pick winning while its file exists."""
     from . import gdocs
     from .illus import capture_embeds, reembed
 

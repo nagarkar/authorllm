@@ -706,6 +706,10 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
 
   async function editReasons(edits: readonly EditListItem[]) {
     const decisions = [];
+    // Inline revise reverted to the database text: clear the draft. A bare
+    // `continue` left the prior revise staged, so Apply could still write the
+    // discarded wording while the grid showed the original (c368224 path).
+    const clearIds: string[] = [];
     for (const edit of edits) {
       const column = visibleColumns[edit.location[0]];
       const row = filteredRows[edit.location[1]];
@@ -717,7 +721,13 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       // it — no separate Revise & accept round trip.
       if (column.source === "database" && column.editable) {
         const text = textValue(value.data).trim();
-        if (!text || text === textValue(row[column.key])) continue;
+        if (!text) continue;
+        const original = textValue(row[column.key]);
+        if (text === original) {
+          if (row.draft?.action === column.editable) clearIds.push(row.id);
+          continue;
+        }
+        if (text === stagedRevision(row, column)) continue;
         decisions.push({
           object_id: row.id,
           action: column.editable,
@@ -735,9 +745,16 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         reason: textValue(value.data),
       });
     }
-    if (!decisions.length) return;
+    if (!decisions.length && !clearIds.length) return;
     try {
-      await transport.request("stage", {manuscript, triage_type: triageType, decisions});
+      if (clearIds.length) {
+        await transport.request("unstage", {
+          manuscript, triage_type: triageType, object_ids: clearIds,
+        });
+      }
+      if (decisions.length) {
+        await transport.request("stage", {manuscript, triage_type: triageType, decisions});
+      }
       await refresh(true);
     } catch (reason) {
       setError((reason as Error).message);

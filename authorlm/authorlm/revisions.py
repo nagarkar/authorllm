@@ -59,6 +59,27 @@ def strip_embed_lines(text: str) -> str:
     return "\n".join(lines)
 
 
+def peel_embed_suffix(para: str) -> tuple[str, str]:
+    """Split one paragraph into `(core, embed_suffix)`.
+
+    Observation strips embed lines (`read_manuscript_files`), so filter
+    and lens proposals are staged against the core alone. On disk an
+    embed sits on the line under its `[Illustration: …]` tag with no
+    blank line between, so `_paragraphs` glues them into ONE unit. Local
+    `compose_marked_text` must peel that suffix for the drift check and
+    re-attach it after the pending form — otherwise every accepted edit
+    of an illustration unit raises "text drifted", and a mixed accepted
+    batch cannot settle at all."""
+    lines = (para or "").split("\n")
+    i = len(lines)
+    while i > 0 and EMBED_LINE.match(lines[i - 1]):
+        i -= 1
+    if i == len(lines):
+        return para, ""
+    core = "\n".join(lines[:i])
+    return core, "\n" + "\n".join(lines[i:])
+
+
 def iter_manuscript_paths(root: Path) -> dict[str, Path]:
     """Manuscript files by relative path. Directories whose name starts with
     '.' or '_' are invisible to observation — this keeps editor internals

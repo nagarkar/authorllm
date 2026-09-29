@@ -1040,6 +1040,49 @@ def _the_doc_is_the_review(root: Path) -> None:
           str(settle["diffs"]))
 
 
+def _proposed_drift_refuses_before_wrong_twin(root: Path) -> None:
+    """AW-1 left a hole: `compose_marked_text` still filtered to
+    `state='accepted'`, so `filter push`'s local drift check was a no-op
+    for the untriaged proposals that road now sends. With a twin (or any
+    later verbatim match of `proposed_old`) still on disk, the surgical
+    writer then planted the form on the WRONG paragraph — silent
+    manuscript corruption, not a loud refusal.
+
+    Concrete: stage unit 3 of DOC_ESSAY (first twin), leave it proposed,
+    rewrite unit 3 locally, push. Pre-fix the form landed on unit 5;
+    post-fix the push raises on the drift check and writes nothing."""
+    print("proposed + local drift + twin: refuse, do not plant on the other:")
+
+    twin = "And so the wall stands, and the Dead do not pass."
+    db, manuscript, ms, fake = _doc_run(
+        root, "proposed-drift-twin-ws", {3: "THREE REDONE."}, accept=False)
+    drifted = DOC_ESSAY.replace(twin, "CHANGED FIRST TWIN.", 1)
+    (ms / "solo.md").write_text(drifted)
+    bodies_before = len(fake.bodies)
+    raised = None
+    try:
+        api.filter_push(db, manuscript, {}, "solo.md",
+                        services=lambda: (fake, fake))
+    except ValueError as err:
+        raised = str(err)
+    check("an untriaged proposal whose target drifted refuses on the "
+          "local drift check — same loud failure an accepted thread "
+          "always got",
+          raised is not None and "drifted" in raised, raised)
+    check("...and NOTHING reached the Doc: the form must not land on "
+          "the surviving twin at unit 5",
+          len(fake.bodies) == bodies_before
+          and twin in fake.tab_text("solo.md")
+          and "<<" not in fake.tab_text("solo.md")
+          and "{{THREE REDONE.}}" not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    mid = manuscript["id"]
+    check("...and the proposal is still a proposal — a refused push "
+          "must not invent a verdict or advance state",
+          all(t["state"] == "proposed"
+              for t in api._run_threads(db, mid, _run_row(db, mid))))
+
+
 def _mixed_push_set_membership(root: Path) -> None:
     """Which states go to the Doc, and what the author is told."""
     print("push set membership: proposed and accepted go, rejected stays:")
@@ -2594,23 +2637,24 @@ TEMPLATE_ESSAY = (
 
 
 def _braces_are_the_authors(root: Path) -> None:
-    """AQ/FU-A — the local canonicalizer is the REPLACE form ONLY.
+    """AQ/FU-A — author `{{…}}` is prose on BOTH seams.
 
-    `strip_pending` is the DOC canonicalizer: in a Doc tab nothing put
-    `{{…}}` there but AuthorLM, so a bare one is a critique-pass
-    insertion and deleting it is ratified. Pointed at LOCAL files that
-    rule inverts — `{{title}}`, `{{a, b}}`, a Handlebars sample in an
-    essay ABOUT templating are the author's own prose — and the broad
-    strip deleted every one of them from everything the system observes,
-    silently, because once they were gone there was nothing left to warn
-    about. `is_marked` tripped on them too, refusing the file's Doc push
+    Local observation uses `strip_replacements` (replace forms only).
+    Doc pull/reconcile uses `strip_pending`, which must drop critique
+    paragraph insertions but leave inline author braces alone — they
+    reach the tab via `doc push`, and collapsing them made reconcile
+    auto-pull a gutted essay whenever local still matched `pushed_hash`.
+    `is_marked` must not trip on braces either, or Doc push refuses
     forever with a message about a resolve that does not exist.
 
     A filter never stages an insertion (`insert` is refused by the
-    recorder), so narrowing loses nothing this seam exists for."""
+    recorder), so the local narrowing loses nothing this seam exists for."""
+    import hashlib
+
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
     from authorlm import threads as _th
+    from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
 
@@ -2636,6 +2680,35 @@ def _braces_are_the_authors(root: Path) -> None:
           "matter",
           _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
           _th.strip_replacements(TEMPLATE_ESSAY)[1])
+    doc_stripped, doc_warns = _th.strip_pending(TEMPLATE_ESSAY)
+    check("strip_pending (Doc pull/reconcile) leaves author braces intact "
+          "— the tab holds the pushed essay, not only AuthorLM forms",
+          doc_stripped == TEMPLATE_ESSAY and doc_warns == [],
+          repr((doc_stripped, doc_warns)))
+    with_math = TEMPLATE_ESSAY + "Energy $E={{mc}}^2$.\n"
+    math_stripped, _ = _th.strip_pending(with_math)
+    check("...including TeX grouping braces that math push carries intact",
+          "$E={{mc}}^2$" in math_stripped, repr(math_stripped))
+    mixed = (TEMPLATE_ESSAY.rstrip() + "\n\n{{critique insertion}}\n\n"
+             "Trailing prose.\n")
+    mixed_stripped, _ = _th.strip_pending(mixed)
+    check("...while still dropping a critique paragraph insertion "
+          "byte-clean, braces in the surrounding prose untouched",
+          "{{title}}" in mixed_stripped
+          and "{{a, b}}" in mixed_stripped
+          and "{{critique insertion}}" not in mixed_stripped
+          and "Trailing prose." in mixed_stripped,
+          repr(mixed_stripped))
+    # Reconcile's auto-pull fires when local_hash == pushed_hash and the
+    # stripped tab differs. After a clean push those two sides must agree.
+    pushed = normalize_markdown(TEMPLATE_ESSAY)
+    base = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    tab_canon = _th.strip_pending(pushed)[0]
+    local_hash = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    check("reconcile would NOT auto-pull after a clean brace-bearing push "
+          "— stripped tab equals local, so session-start cannot gut "
+          "{{title}} / {{a, b}}",
+          local_hash == base and tab_canon == pushed, repr(tab_canon))
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
 
@@ -3207,9 +3280,13 @@ def main_test() -> None:
 
         print("marked text (diff-write composition):")
         threads = passes.staged_threads(db, mid, "alpha.md")
-        marked = passes.compose_marked_text(ESSAY, threads)
+        # Caller owns the set: compose every thread it is given. Hand it
+        # the accepted ones only — proposed/rejected stay out, same as
+        # `critique write` / the local settle.
+        accepted_now = [t for t in threads if t["state"] == "accepted"]
+        marked = passes.compose_marked_text(ESSAY, accepted_now)
         check("accepted replace renders <<old>>{{new}}; insertion renders "
-              "{{new}} after its anchor; rejected/proposed untouched",
+              "{{new}} after its anchor; rejected/proposed not in the set",
               "<<First paragraph of alpha, plainly stated.>>{{First paragraph "
               "of alpha, stated with care.}}" in marked
               and "{{A bridging paragraph, new.}}" in marked
@@ -3217,13 +3294,57 @@ def main_test() -> None:
               and "decisively" not in marked)
         drifted = ESSAY.replace("plainly stated", "PLAINLY stated")
         try:
-            passes.compose_marked_text(drifted, threads)
+            passes.compose_marked_text(drifted, accepted_now)
             raised = False
         except ValueError as err:
             raised = "drifted" in str(err)
         check("drifted paragraph fails loudly before any Doc write", raised)
         check("strip_pending on the marked text gives back the pristine essay",
               th.strip_pending(marked)[0].strip() == ESSAY.strip())
+
+        # Local road: observation strips embed lines, but on disk the
+        # embed glues under the illustration tag as one paragraph. Compose
+        # must peel that suffix or every illustration-unit accept crashes
+        # (and blocks a mixed accepted batch).
+        from authorlm.revisions import strip_embed_lines
+        disk_illus = (
+            "# Ch\n\nHello world.\n\n"
+            "[Illustration: a lone tracker ⇢ a-lone-tracker.md]\n"
+            "![](_illustrations/a-lone-tracker-aaa11111-0000-01.png)\n\n"
+            "Goodbye.\n")
+        obs_units = passes.paragraphs_of(strip_embed_lines(disk_illus))
+        illus_threads = [
+            {"state": "accepted", "id": "p",
+             "proposed_old": obs_units[1],
+             "proposed_new": "Hello universe.",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 2})},
+            {"state": "accepted", "id": "i",
+             "proposed_old": obs_units[2],
+             "proposed_new":
+             "[Illustration: revised tracker ⇢ a-lone-tracker.md]",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 3})},
+        ]
+        try:
+            illus_marked = passes.compose_marked_text(disk_illus,
+                                                      illus_threads)
+            illus_compose_ok = True
+        except ValueError as err:
+            illus_marked, illus_compose_ok = "", "drifted" not in str(err)
+        illus_final, _ = passes.final_text_from_marked(
+            illus_marked,
+            written=[{**t, "state": "written"} for t in illus_threads],
+            kinds=("replace",)) if illus_compose_ok else ("", [])
+        check("local compose peels a glued illustration embed so an "
+              "accepted illustration-unit edit (and a mixed batch) marks",
+              illus_compose_ok
+              and "aaa11111-0000-01.png" in illus_marked
+              and "<<[Illustration: a lone tracker" in illus_marked
+              and "revised tracker" in illus_final
+              and "aaa11111-0000-01.png" in illus_final
+              and "Hello universe." in illus_final,
+              illus_marked[:200] if illus_marked else "compose raised")
 
         print("critique write order (same-anchor insert before replace):")
         # A replace of paragraph n wraps it as <<old>>{{new}}. Writing the
@@ -3896,6 +4017,7 @@ def main_test() -> None:
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
         _the_doc_is_the_review(root)
+        _proposed_drift_refuses_before_wrong_twin(root)
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)

@@ -675,15 +675,31 @@ def mark_triaged(db: Database, pass_row: dict, file: str) -> None:
 # ------------------------------------------------- local apply/rollback
 
 def compose_marked_text(text: str, threads: list[dict]) -> str:
-    """The essay text with every ACCEPTED thread rendered as its pending
-    form — what the Doc tab shows during the pause. Pure function; the
-    push and the tests share it. Replaces are located verbatim (law);
-    insertions go after their anchor paragraph (0 = before the first)."""
+    """The essay text with every thread it is GIVEN rendered as its
+    pending form — what the Doc tab shows during the pause. Pure
+    function; the push and the tests share it. Replaces are located
+    verbatim (law); insertions go after their anchor paragraph
+    (0 = before the first).
+
+    EVERY thread handed in is composed. The caller chooses the set —
+    `critique write` and the local settle send accepted threads; 
+    `filter push` sends proposed and accepted, because on the Doc road
+    the tab IS the review. A state filter here would silently skip the
+    drift check for untriaged proposals: with a twin (or any later
+    substring match of `proposed_old`) still on disk, the surgical
+    writer would then plant the form on the wrong paragraph and settle
+    would corrupt the manuscript.
+
+    Illustration embed lines are peeled before the drift check: proposals
+    are staged against observation text (embeds stripped), while the
+    local file still carries `![](_illustrations/…)` glued under the tag.
+    Comparing against the live paragraph verbatim refused every
+    illustration-unit edit on the local road and blocked mixed batches."""
+    from .revisions import peel_embed_suffix
+
     paragraphs = paragraphs_of(text)
     by_para: dict[int, list[dict]] = {}
     for t in threads:
-        if t["state"] != "accepted":
-            continue
         meta = loads(t.get("metadata"), {}) or {}
         by_para.setdefault(meta.get("anchor_paragraph", 0), []).append(t)
     out = []
@@ -691,11 +707,16 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
         # a replace of paragraph n
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "replace":
-                if t["proposed_old"] != para:
+                core, embed_suffix = peel_embed_suffix(para)
+                if t["proposed_old"] != core:
                     raise ValueError(
                         f"paragraph {n} no longer matches its proposal — the "
                         "text drifted since the pass; re-run 'critique run'")
-                para = th.render_pending(t["proposed_old"], t["proposed_new"])
+                # Keep the live embed outside the form so resolve leaves
+                # the author's pick in place (capture_embeds cannot read
+                # a tag wrapped in <<>>{{}}).
+                para = (th.render_pending(t["proposed_old"], t["proposed_new"])
+                        + embed_suffix)
         out.append(para)
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert":

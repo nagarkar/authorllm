@@ -41,10 +41,68 @@ MARKDOWN_MIME = "text/markdown"
 
 _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
+# CommonMark thematic break: ≥3 of *, -, or _ with optional spaces
+# between, ≤3 leading spaces. Must run BEFORE _BULLET — a spaced
+# `* * *` break would otherwise become `- * *` (the bullet rule eats
+# the first `* `) and push_doc would write that corruption to disk.
+_THEMATIC_BREAK = re.compile(
+    r"^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$",
+    re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
+
+
+# ------------------------------------------------------------- code fences
+#
+# Fenced code blocks (``` / ~~~) are opaque to the normalizer for the
+# same reason math is: their bytes are intentional examples, not prose
+# the Doc bridge is free to canonicalize. Without lifting them, the
+# prose rules rewrite the fence body in place — `*` bullets become `-`,
+# `\*` loses its backslash, `| :--- |` alignment colons vanish — and
+# `push_doc` writes that corruption back to the local manuscript
+# whenever normalize differs from disk. Lifted before math so a fence
+# that *shows* TeX is preserved byte-for-byte too.
+_FENCE_OPEN = re.compile(r"^([`~]{3,})")
+_FENCE_SENTINEL = "\x00F%d\x00"
+_FENCE_SENTINEL_RE = re.compile(r"\x00F(\d+)\x00")
+
+
+def _lift_fences(text: str) -> tuple[str, list[str]]:
+    """Replace each fenced code block with a sentinel; return (text, spans).
+    Unclosed fences consume through EOF (CommonMark)."""
+    lines = text.split("\n")
+    out: list[str] = []
+    spans: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        marker = m.group(1)
+        ch, n = marker[0], len(marker)
+        block = [lines[i]]
+        i += 1
+        while i < len(lines):
+            block.append(lines[i])
+            close = _FENCE_OPEN.match(lines[i])
+            # Closing fence: same char, at least as long, no info string.
+            if (close and close.group(1)[0] == ch
+                    and len(close.group(1)) >= n
+                    and lines[i].strip() == close.group(1)):
+                i += 1
+                break
+            i += 1
+        spans.append("\n".join(block))
+        out.append(_FENCE_SENTINEL % (len(spans) - 1))
+    return "\n".join(out), spans
+
+
+def _restore_fences(text: str, spans: list[str]) -> str:
+    return _FENCE_SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
 
 
 # ------------------------------------------------------------- math spans
@@ -80,6 +138,17 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         return _MATH_SENTINEL % (len(spans) - 1)
 
     text = _DISPLAY_MATH.sub(display, text)
+    # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
+    # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
+    # normalized bytes back to disk, so the damage is permanent. Keep
+    # the remnant opaque (byte-identical aside from the file's trailing
+    # newline, which normalize re-adds) until a closer exists.
+    if "$$" in text:
+        at = text.index("$$")
+        head, tail = text[:at], text[at:]
+        head = _INLINE_MATH.sub(inline, head)
+        spans.append(tail.rstrip("\n"))
+        return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
     return _INLINE_MATH.sub(inline, text), spans
 
 
@@ -133,8 +202,13 @@ def normalize_markdown(text: str) -> str:
     Idempotent: normalize(normalize(x)) == normalize(x)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ")           # NBSP → space
+    # Fences before math: a code example of TeX must stay verbatim, and
+    # the prose rules below must never rewrite inside a fence (push_doc
+    # persists normalize to disk whenever the bytes move).
+    text, fences = _lift_fences(text)
     text, math = _lift_math(text)                # TeX is opaque from here
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
+    text = _THEMATIC_BREAK.sub("---", text)      # before bullets (see above)
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
     # A Docs-exported table carries an aligned delimiter row (| :---- |);
@@ -157,6 +231,7 @@ def normalize_markdown(text: str) -> str:
                   flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
     text = _restore_math(text.strip("\n"), math)
+    text = _restore_fences(text, fences)
     return text + "\n" if text else ""
 
 
@@ -1223,7 +1298,11 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # diff_push refuses (seen on manifest.md the day tables started
     # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
     # comment anchors that a rebuild orphans are the known price.
-    has_table = bool(_TABLE_DELIM.search(path.read_text(encoding="utf-8")))
+    # Fence bodies can contain markdown table examples; those are not
+    # Docs tables and must not force a rebuild (which orphans open
+    # margin-thread anchors). Detect delimiters in prose only.
+    has_table = bool(_TABLE_DELIM.search(
+        _lift_fences(path.read_text(encoding="utf-8"))[0]))
     if not has_table and (
             threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
@@ -2394,8 +2473,29 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _paragraphs_in_body(content: list) -> list[dict]:
+    """Structural paragraph elements from a Docs body, descending into
+    table cells. Top-level `item.get("paragraph")` alone misses every
+    cell; after tables started reaching tabs (transplant_requests),
+    `_tab_runs` / `_locate_in_tab` then mapped post-table prose onto
+    indices inside the table and planted forms in the wrong place."""
+    out: list[dict] = []
+    for item in content or []:
+        if "paragraph" in item:
+            out.append(item)
+            continue
+        table = item.get("table")
+        if not table:
+            continue
+        for row in table.get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                out.extend(_paragraphs_in_body(cell.get("content", [])))
+    return out
+
+
 def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]]:
-    """(doc_start_index, content) for every text run in a tab, in order."""
+    """(doc_start_index, content) for every text run in a tab, in order —
+    including runs inside table cells."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     runs: list[tuple[int, str]] = []
@@ -2403,8 +2503,9 @@ def _tab_runs(docs_service, master_id: str, tab_id: str) -> list[tuple[int, str]
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
                     for el in item.get("paragraph", {}).get("elements", []):
                         run = el.get("textRun")
                         if run and run.get("content"):
@@ -2443,15 +2544,37 @@ def _locate_in_tab(docs_service, master_id: str, tab_id: str,
         if offset < 0:
             return None
 
-    def doc_index(py_offset: int) -> int:
+    def doc_index_at(py_offset: int) -> int:
+        """Doc index of the character at `py_offset` in `full`.
+
+        Runs are not always contiguous in Doc index space: a table's
+        structural markers sit between the last cell run and the next
+        paragraph. Mapping a boundary with `<=` pinned the start of
+        post-table prose to the end of the preceding cell (and, before
+        `_tab_runs` walked cells, into the table itself)."""
         seen = 0
         for start, content in runs:
-            if py_offset <= seen + len(content):
+            if py_offset < seen + len(content):
                 return start + _utf16_len(content[: py_offset - seen])
             seen += len(content)
         raise ValueError("offset beyond tab text")
 
-    return doc_index(offset), doc_index(offset + len(needle))
+    def doc_index_end(py_offset: int) -> int:
+        """Exclusive end index for a span ending at `py_offset` in `full`."""
+        if py_offset <= 0:
+            return runs[0][0] if runs else 1
+        if py_offset > len(full):
+            raise ValueError("offset beyond tab text")
+        if py_offset == len(full):
+            start, content = runs[-1]
+            return start + _utf16_len(content)
+        # One past the last character of the span: that character's Doc
+        # index plus its UTF-16 width, so a gap after a cell is not
+        # swallowed into the range.
+        ch = full[py_offset - 1]
+        return doc_index_at(py_offset - 1) + _utf16_len(ch)
+
+    return doc_index_at(offset), doc_index_end(offset + len(needle))
 
 
 def propose_change(db: Database, manuscript: dict, comment_id: str,
@@ -2476,8 +2599,8 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         raise LookupError(f"no ingested comment '{comment_id}' — pull first")
     if get_thread(db, mid, comment_id):
         raise ValueError("this comment already has a thread")
-    # Refuse delimiter-bearing prose before any Doc edit: {{…}} closes at
-    # the first `}}`, so nested braces would truncate and corrupt.
+    # Delimiter refusal is in `_mark_replace_requests` (form construction):
+    # {{…}} closes at the first `}}`, so nested braces would truncate.
     relpath = (comment["file"] or "").removeprefix(bridge.display_prefix)
     if not relpath:
         raise LookupError("the comment's file could not be attributed — "
@@ -2573,6 +2696,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
     and the DIFF made visible: the words of old that go are red, the
     words of new that arrive are blue. Highlights ride after the base
     styles so they win on their subranges; color only (see RED_GONE)."""
+    threads_mod.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
     requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
@@ -2610,6 +2734,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     """Requests inserting a green {{new}} paragraph at doc index `at`
     (a paragraph boundary): the critique pass's insertion form."""
+    threads_mod.assert_no_pending_markers("", new)
     text = "\n" + "{{" + new + "}}"
     return [
         {"insertText": {"location": {"tabId": tab_id, "index": at},
@@ -2766,10 +2891,10 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
 
 def _tab_paragraph_texts(docs_service, master_id: str,
                          tab_id: str) -> list[str]:
-    """Non-empty paragraph strings from a tab, Docs trailing newlines
-    stripped. Blank separator paragraphs (transplant skips them on push)
-    are omitted — callers that need markdown structure must rejoin with
-    `\\n\\n`."""
+    """Non-empty paragraph strings from a tab (table cells included),
+    Docs trailing newlines stripped. Blank separator paragraphs
+    (transplant skips them on push) are omitted — callers that need
+    markdown structure must rejoin with `\\n\\n`."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     out: list[str] = []
@@ -2777,11 +2902,10 @@ def _tab_paragraph_texts(docs_service, master_id: str,
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
-                for item in tab.get("documentTab", {}).get("body", {}).get(
-                        "content", []):
-                    paragraph = item.get("paragraph")
-                    if not paragraph:
-                        continue
+                body = tab.get("documentTab", {}).get("body", {}).get(
+                    "content", [])
+                for item in _paragraphs_in_body(body):
+                    paragraph = item.get("paragraph") or {}
                     text = "".join(
                         el.get("textRun", {}).get("content", "")
                         for el in paragraph.get("elements", [])
