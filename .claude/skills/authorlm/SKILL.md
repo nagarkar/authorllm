@@ -1151,6 +1151,32 @@ occasion for this rule: on 2026-09-06 a merged hierarchy.md was
 introduced-but-undeployed distinctions the checklist repairs had left
 behind.
 
+### Morph — paragraph-defect detection (design: docs/morph-design.md)
+When the author asks to "run a morph" (or names one of its four checks —
+claim-before-evidence, discontinuity, specificity, concept-invalidation —
+on an essay), run `authorlm morph run <essay.md> [--full]`. Unlike a
+lens, morph is always native: there is no payload-print/subagent road,
+because its rubric (`_morph/paragraph-defects.md`, author-editable like a
+lens's Examples) is fixed prose, not something a collaborator drafts
+against per essay. Without `--full` it only checks paragraphs changed
+since the last collected version (say so if it reports "nothing
+changed" and the author expected a check — `--full` forces a whole-file
+pass, needed for a first run or a file with no collected history). It
+always prints a cost line after running (`llm.stats_line()` — live
+calls, tokens, and an estimated `$` from `usage.estimate`, the same
+convention every token-spending verb follows).
+
+**Findings do NOT reach the Doc yet — say so, do not imply otherwise.**
+`morph run` stages an edit locally (same `doc_threads` door lens and
+filter use) but nothing yet calls `write_pending_forms` for a
+morph-origin batch, so a proposed replacement never becomes a visible
+`<<old>>{{new}}` form in the tab until that push step is built
+(docs/morph-design.md §10). `morph review <n> --accept|--reject|--modify
+|--defer [--explain "…"]` records the author's verdict on the finding
+itself in the meantime. A `[Judgment: …]` tag morph plants (no safe
+`replacement` available) IS already resolvable — `lens repair <essay>`
+finds it by finding-id, not by producer kind, so it works unmodified.
+
 **FOOTNOTES ARE PLANTED, NEVER WRITTEN — by every producer (author
 ruling 2026-09-06: "a standard thing this filter does, for all
 interlocutors").** A filter's replacement, a lens finding's `footnote`
