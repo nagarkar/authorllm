@@ -135,24 +135,41 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
     return "\n".join(kept)
 
 
-def strip_display_math(text: str) -> str:
+def strip_display_math(text: str, where: str = "") -> str:
     """Drop display equations ($$ … $$, single-line by convention, or a
-    block opened and closed by lines carrying $$) — the audio default:
+    multi-line block opened and closed by a lone $$) — the audio default:
     an equation read aloud by a synthetic voice is noise. Inline math
-    stays; the style guide keeps it to what a voice can say."""
+    stays; the style guide keeps it to what a voice can say.
+
+    Malformed display math refuses by file and line (same posture as
+    resolve_regions / docs/math-and-physics-guidelines.md §6): an unclosed
+    block, or a line that starts with $$ but is neither a lone opener nor
+    a single-line $$…$$, must never silently eat the rest of the essay.
+    Before this guard, `$$\\nE=mc^2` with no closer (or a prose line like
+    `$$100 was the price.`) dropped every following paragraph from the
+    audio-clean export with no error."""
     out: list[str] = []
     in_block = False
-    for line in text.split("\n"):
+    prefix = f"{where}:" if where else "line "
+    for lineno, line in enumerate(text.split("\n"), 1):
         s = line.strip()
         if in_block:
             if "$$" in s:
                 in_block = False
             continue
-        if s.startswith("$$"):
-            if not (len(s) > 2 and s.endswith("$$")):
-                in_block = True
+        if s == "$$":
+            in_block = True
             continue
+        if s.startswith("$$") and s.endswith("$$") and len(s) > 2:
+            continue  # single-line $$…$$
+        if s.startswith("$$"):
+            raise ValueError(
+                f"{prefix}{lineno}: display math must be a lone $$ "
+                f"or a single-line $$…$$")
         out.append(line)
+    if in_block:
+        raise ValueError(
+            f"{prefix}end of file: display math ($$) never closed")
     return "\n".join(out)
 
 
@@ -389,7 +406,7 @@ def publish_markdown(manuscript: dict, variant: str,
             continue
         text = resolve_regions(normalize_markdown(files[name]), outputs, name)
         if "audio" in outputs:
-            text = strip_display_math(text)
+            text = strip_display_math(text, name)
         text = normalize_markdown(text).rstrip("\n")
         if variant != "slots":
             raw = (root / name).read_text(encoding="utf-8")
@@ -458,6 +475,13 @@ def check_manuscript(manuscript: dict) -> list[str]:
             except ValueError as err:
                 problems.append(str(err))
                 break
+        # Display-math structure is independent of output: an unclosed
+        # $$ would silently truncate the audio-clean export, so the
+        # check refuses it the same way it refuses a stray [/Omit].
+        try:
+            strip_display_math(text, name)
+        except ValueError as err:
+            problems.append(str(err))
         if have_pandoc and "$" in text:
             proc = subprocess.run(
                 ["pandoc", "-f", "markdown+smart+footnotes", "-t", "html",
