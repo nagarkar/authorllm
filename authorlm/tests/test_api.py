@@ -5224,7 +5224,279 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _coverage_fixture(prefix: str):
+    """Two-essay workspace for hermetic coverage helpers below."""
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    ws = root / "ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "alpha.md").write_text("# Alpha\n\nBody of alpha.\n")
+    (ms / "beta.md").write_text("# Beta\n\nBody of beta.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    return root, ms, db, manuscript
+
+
+def check_merge_beliefs_api() -> None:
+    """API merge resolves by prefix, refuses self-merge, folds questions.
+
+    `beliefs.merge_beliefs` is covered in test_loop; this pins the API
+    door: same-id LookupError before any mutation, question fold across
+    the pair, curation reason on the retired duplicate, and
+    belief_curation evidence on the survivor. Softening the same-id
+    guard double-retires one row; dropping the question fold loses the
+    outstanding audit trail."""
+    from authorlm import beliefs as bel
+
+    root, _ms, db, manuscript = _coverage_fixture("authorlm-merge-beliefs-")
+    try:
+        dup = bel.seed_candidate_belief(
+            db, manuscript["id"], "Trim throat-clearing openers.",
+            source="test")
+        canon = bel.seed_candidate_belief(
+            db, manuscript["id"], "Cut redundant opening phrases.",
+            source="test")
+        check("fixture seeded two distinct live beliefs",
+              dup is not None and canon is not None
+              and dup["id"] != canon["id"], str({"dup": dup, "canon": canon}))
+
+        db.update("editorial_beliefs", dup["id"], {
+            "outstanding_questions": json.dumps(["when is an opener clearing?"]),
+            "contradicting": 1,
+        })
+        db.update("editorial_beliefs", canon["id"], {
+            "outstanding_questions": json.dumps(["keep examples intact?"]),
+        })
+
+        try:
+            api.merge_beliefs(db, manuscript, canon["id"][:8], canon["id"][:8])
+            same_ok, same_msg = False, ""
+        except LookupError as err:
+            same_ok, same_msg = True, str(err)
+        check("merging a belief into itself is refused before mutation",
+              same_ok and "same belief" in same_msg, same_msg)
+        still_live = db.one(
+            "SELECT status FROM editorial_beliefs WHERE id = ?",
+            (canon["id"],))["status"]
+        check("self-merge left both rows live (no partial retire)",
+              still_live != "retired"
+              and db.one("SELECT status FROM editorial_beliefs WHERE id = ?",
+                         (dup["id"],))["status"] != "retired",
+              still_live)
+
+        merged = api.merge_beliefs(
+            db, manuscript, dup["id"][:8], canon["id"][:8],
+            reason="near-paraphrase of the same rule")
+        check("merge reports the duplicate statement that was folded in",
+              merged.get("merged") == "Trim throat-clearing openers.",
+              str(merged)[:200])
+        dup_row = dict(db.one(
+            "SELECT * FROM editorial_beliefs WHERE id = ?", (dup["id"],)))
+        canon_row = dict(db.one(
+            "SELECT * FROM editorial_beliefs WHERE id = ?", (canon["id"],)))
+        dup_meta = loads(dup_row["metadata"], {})
+        questions = loads(canon_row["outstanding_questions"], [])
+        check("duplicate is retired with curation pointing at canonical",
+              dup_row["status"] == "retired"
+              and dup_meta.get("curation", {}).get("action") == "merged"
+              and dup_meta["curation"].get("into") == canon["id"]
+              and dup_meta["curation"].get("reason")
+              == "near-paraphrase of the same rule",
+              str(dup_meta))
+        check("canonical absorbs both outstanding questions and "
+              "contradicting tally",
+              "when is an opener clearing?" in questions
+              and "keep examples intact?" in questions
+              and canon_row["contradicting"] == 1,
+              str({"questions": questions, "contradicting":
+                   canon_row["contradicting"]}))
+        curation = db.one(
+            "SELECT * FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'belief_curation' AND signal = 'merged' "
+            "AND supports_belief = ?",
+            (manuscript["id"], canon["id"]))
+        check("merge writes belief_curation evidence on the survivor",
+              curation is not None
+              and "Trim throat-clearing openers." in (curation["target"] or ""),
+              str(dict(curation) if curation else None))
+
+        try:
+            api.merge_beliefs(db, manuscript, dup["id"][:8], canon["id"][:8])
+            retired_ok, retired_msg = False, ""
+        except LookupError as err:
+            retired_ok, retired_msg = True, str(err)
+        check("a retired duplicate is no longer a live merge source",
+              retired_ok and "no live belief matching" in retired_msg,
+              retired_msg)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_proposal_pipeline_short_circuits() -> None:
+    """API screen/reconcile short-circuits and dry-run never mutate.
+
+    Distinct from `loop.screen` / `loop.reconcile_queue` unit tests: these
+    pin the API aggregators that walk every knowledge_proposals queue.
+    Empty or lawless/disabled screens must leave proposals open; dry-run
+    reconcile must report without dismissing; a real apply must satisfy
+    a note that already matches the world."""
+    from authorlm import proposals as prop
+
+    root, _ms, db, manuscript = _coverage_fixture("authorlm-proposal-pipe-")
+    try:
+        empty_screen = api.screen_proposals(db, manuscript, llm=None)
+        check("screen with no open proposals cuts nothing",
+              empty_screen["cut"] == [] and empty_screen["still_open"] == 0,
+              str(empty_screen))
+        empty_reconcile = api.reconcile_proposals(db, manuscript)
+        check("reconcile with no open proposals is a zero report",
+              empty_reconcile["satisfied"] == []
+              and empty_reconcile["orphan"] == []
+              and empty_reconcile["stale"] == []
+              and empty_reconcile["live"] == 0
+              and empty_reconcile["still_open"] == 0
+              and empty_reconcile["applied"] is True,
+              str(empty_reconcile))
+
+        node = api.add_concept(
+            db, manuscript, "Clasp",
+            notes="The clasp of all opposites.")
+        satisfied = prop.create(
+            db, manuscript["id"], "note_update", node["id"],
+            {"name": "Clasp",
+             "current_note": "The clasp of all opposites.",
+             "proposed_note": "The clasp of all opposites.",
+             "current_kind": "concept", "proposed_kind": "concept"})
+        live = prop.create(
+            db, manuscript["id"], "note_update", node["id"],
+            {"name": "Clasp",
+             "current_note": "The clasp of all opposites.",
+             "proposed_note": "A different claim about provenance.",
+             "current_kind": "concept", "proposed_kind": "concept"})
+        check("fixture planted two open note_update proposals",
+              satisfied is not None and live is not None,
+              str({"satisfied": satisfied, "live": live}))
+
+        class _Disabled:
+            enabled = False
+
+            def complete_json(self, *a, **k):
+                raise AssertionError("disabled LLM must never be called")
+
+        screened = api.screen_proposals(db, manuscript, llm=_Disabled())
+        still_open = {r["id"] for r in prop.open_proposals(db, manuscript["id"])}
+        check("screen with disabled LLM cuts nothing and leaves proposals open",
+              screened["cut"] == []
+              and satisfied["id"] in still_open
+              and live["id"] in still_open,
+              str(screened))
+
+        dry = api.reconcile_proposals(db, manuscript, apply=False)
+        check("dry-run reconcile detects the already-satisfied note",
+              any(e["id"] == satisfied["id"] for e in dry["satisfied"])
+              and dry["applied"] is False,
+              str(dry))
+        check("dry-run reconcile leaves both proposals open",
+              satisfied["id"] in {r["id"] for r in
+                                  prop.open_proposals(db, manuscript["id"])}
+              and live["id"] in {r["id"] for r in
+                                 prop.open_proposals(db, manuscript["id"])})
+
+        applied = api.reconcile_proposals(db, manuscript, apply=True)
+        open_after = {r["id"] for r in prop.open_proposals(db, manuscript["id"])}
+        check("apply reconcile removes the satisfied proposal from the queue",
+              satisfied["id"] not in open_after
+              and any(e["id"] == satisfied["id"]
+                      for e in applied["satisfied"]),
+              str(applied))
+        check("apply reconcile keeps a still-live proposal open",
+              live["id"] in open_after
+              and applied["still_open"] >= 1,
+              str({"open": open_after, "report": applied}))
+        meta = loads(db.one(
+            "SELECT metadata FROM knowledge_proposals WHERE id = ?",
+            (satisfied["id"],))["metadata"], {})
+        check("satisfied resolution is attributed to reconcile, not the author",
+              meta.get("by") == "reconcile"
+              and meta.get("verdict") == "satisfied",
+              str(meta))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_drafting_context_capture_and_placement() -> None:
+    """`_drafting_context` freezes capture and honors stored placement.
+
+    write_start hands its own capture so the printed L1 frame matches the
+    gate that just passed — a second disk read under a parallel truncate
+    would lie. Placement lives on the writeup metadata so a resumed
+    writeup recomputes the same split without re-passing `--after`."""
+    import hashlib
+
+    from authorlm import summaries as sums
+
+    def _hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    root, ms, db, manuscript = _coverage_fixture("authorlm-drafting-ctx-")
+    try:
+        alpha_text = (ms / "alpha.md").read_text()
+        beta_text = (ms / "beta.md").read_text()
+        for file, text in (("alpha.md", alpha_text), ("beta.md", beta_text)):
+            row = ko_fields("es")
+            row.update(
+                manuscript_id=manuscript["id"], file=file,
+                summary=f"summary of {file}",
+                source_hash=_hash(text),
+                upstream_hash=_hash(""), upstream_stale=0)
+            db.insert("essay_summaries", row)
+
+        writeup = {
+            "file": "beta.md",
+            "metadata": json.dumps({"placement": "alpha.md"}),
+        }
+        snap = sums.capture(db, manuscript)
+        # Parallel session mutates disk AFTER the capture the gate used.
+        (ms / "alpha.md").write_text(
+            "# Alpha\n\nTruncated by a parallel write start.\n"
+            "And another paragraph the summary never saw.\n")
+        ctx = api._drafting_context(db, manuscript, writeup, capture=snap)
+        check("_drafting_context reports the writeup's stored placement",
+              "placed after alpha.md" in ctx
+              and "DRAFTING CONTEXT — beta.md" in ctx, ctx[:240])
+        check("capture freeze keeps alpha FRESH from the gated snapshot "
+              "(disk drift must not rewrite the frame the gate passed)",
+              "[alpha.md] (fresh)" in ctx
+              and "summary of alpha.md" in ctx, ctx)
+        ctx_fresh = api._drafting_context(db, manuscript, writeup)
+        check("a second disk read without capture sees the drift as stale",
+              "[alpha.md] (stale)" in ctx_fresh
+              and "placed after alpha.md" in ctx_fresh, ctx_fresh[:280])
+
+        start_wu = {
+            "file": "beta.md",
+            "metadata": json.dumps({"placement": sums.PLACEMENT_START}),
+        }
+        start_ctx = api._drafting_context(
+            db, manuscript, start_wu, capture=snap)
+        check("PLACEMENT_START stored on the writeup renders as placed first",
+              "placed first in the manuscript" in start_ctx, start_ctx[:200])
+
+        bare = {"file": "beta.md", "metadata": "{}"}
+        bare_ctx = api._drafting_context(db, manuscript, bare, capture=snap)
+        check("absent placement falls back to committed toc wording",
+              "in its committed toc position" in bare_ctx, bare_ctx[:200])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_merge_beliefs_api()
+    check_proposal_pipeline_short_circuits()
+    check_drafting_context_capture_and_placement()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
