@@ -7644,6 +7644,25 @@ def main_test() -> None:
         epub_text, _, _ = publish_markdown(manuscript, "images", fmt="epub")
         audio_text, _, _ = publish_markdown(manuscript, "stripped", fmt="md")
         md_text, _, _ = publish_markdown(manuscript, "images", fmt="md")
+        # Sticky settings: variant=stripped is the audio-clean markdown
+        # door. A later PDF/EPUB/DOCX/Doc build that inherits it must
+        # still strip plates, but must NOT join the `audio` output —
+        # otherwise display math and [Omit: audio] passages vanish from
+        # print with no error.
+        stripped_pdf, _, _ = publish_markdown(
+            manuscript, "stripped", fmt="pdf")
+        from authorlm.export import publish_outputs
+        check("stripped PDF is not an audio build",
+              publish_outputs("pdf", "stripped") == frozenset({"pdf"})
+              and publish_outputs("md", "stripped")
+              == frozenset({"md", "audio"}))
+        check("stripped PDF keeps [Omit: audio] math and drops [Only: audio]",
+              "\\nabla" in stripped_pdf and "mc^2" in stripped_pdf
+              and "Spoken:" not in stripped_pdf
+              and "inline $E$ stays" in stripped_pdf, stripped_pdf)
+        check("stripped PDF still drops illustration tags",
+              "[Illustration" not in stripped_pdf
+              and "Welcome." in stripped_pdf, stripped_pdf)
         check("[Omit:] drops a region only from the named outputs",
               "\\nabla" in pdf_text and "\\nabla" not in epub_text
               and "\\nabla" not in audio_text, epub_text)

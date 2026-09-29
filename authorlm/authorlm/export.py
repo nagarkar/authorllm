@@ -73,9 +73,14 @@ _REGION_CLOSE = re.compile(r"^\[/(?P<kind>Omit|Only)\]\s*$", re.IGNORECASE)
 
 def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
     """The output names a build answers to: its format, plus `audio`
-    for the stripped variant (the audio-clean markdown)."""
+    when the build IS the audio-clean markdown (`fmt=md` with
+    `variant=stripped`). Illustration stripping is independent — a
+    stripped PDF/DOCX/EPUB/Doc still drops plates — but must not inherit
+    audio region membership or the display-math drop: a leftover
+    `variant=stripped` in export settings would otherwise silently gut
+    equations and `[Omit: audio]` passages from every print build."""
     names = {fmt}
-    if variant == "stripped":
+    if fmt == "md" and variant == "stripped":
         names.add("audio")
     return frozenset(names)
 
@@ -280,7 +285,8 @@ SETTINGS_KEYS = {
              "manuscript name",
     "variant": "illustration handling: images (embed picked candidates) | "
                "slots (keep [Illustration: …] tags as production notes) | "
-               "stripped (remove tags — audio-clean)",
+               "stripped (remove tags; with `export md`, also the "
+               "audio-clean build — regions and display-math drop)",
     "language": "publication language code (epub metadata), default en",
     "reference_docx": "path to a pandoc reference .docx for Word styling "
                       "(fonts, margins); empty = pandoc defaults",
