@@ -3,12 +3,15 @@
 
 Generic ingestion tool for any PDF headed into the writing workflow:
 critique reports, references, research articles, photographed books.
-Hybrid per page: a page with a substantial embedded text layer is
-extracted directly; an image-only page is rendered and read with Apple's
-Vision framework (accurate mode). Both paths land in one cleanup
-pipeline: running header/footer and page-number stripping, de-hyphenation,
-paragraph re-flow, conservative single-level heading detection, and
-<!-- p.N --> page markers so quotes stay traceable to physical pages.
+Hybrid per page: a page with a substantial body-zone text layer is
+extracted directly; an image-only page (including scanned pages whose
+only embedded text is a margin stamp or folio) is rendered and read with
+Apple's Vision framework (accurate mode). When OCR is unavailable the
+text layer is kept rather than aborting the whole convert. Both paths
+land in one cleanup pipeline: running header/footer and page-number
+stripping, de-hyphenation, paragraph re-flow, conservative single-level
+heading detection, and <!-- p.N --> page markers so quotes stay
+traceable to physical pages.
 
 Footnotes flow inline in reading order. Multi-column layouts are not
 untangled. macOS-only (Vision); text-layer-only PDFs work anywhere.
@@ -38,17 +41,26 @@ HEADING_RATIO = 1.35      # line height vs body height to count as a heading
 HEADING_MAX_WORDS = 12
 PARA_GAP_RATIO = 1.9      # vertical gap vs typical line gap = new paragraph
 INDENT_RATIO = 1.2        # indent vs body height = new paragraph
-MIN_TEXT_LAYER_CHARS = 50  # below this, a page is treated as image-only
+# Below this many BODY-zone (non-margin) characters, a page is treated as
+# image-only and OCR'd. Margin stamps/folios do not count — see body_layer_chars.
+MIN_TEXT_LAYER_CHARS = 50
 
 
 def ocr_page(page: "fitz.Page", dpi: int) -> list[dict]:
-    """Render one page and return Vision text observations as line dicts."""
+    """Render one page and return Vision text observations as line dicts.
+
+    Raises RuntimeError when Vision is unavailable or recognition fails —
+    callers decide whether to fall back to the text layer. Never
+    ``sys.exit``: a stamp-only page that needs OCR must not abort a
+    multi-page convert that still has readable text-layer pages left.
+    """
     try:
         import Vision
         from Foundation import NSData
-    except ImportError:
-        sys.exit("missing dependency — run: pip3 install pyobjc-framework-Vision\n"
-                 "(OCR requires macOS; text-layer PDFs convert without it)")
+    except ImportError as err:
+        raise RuntimeError(
+            "OCR requires macOS Vision — pip3 install pyobjc-framework-Vision"
+        ) from err
 
     pix = page.get_pixmap(dpi=dpi)
     png = pix.tobytes("png")
@@ -101,6 +113,38 @@ def text_layer_page(page: "fitz.Page") -> list[dict]:
             })
     lines.sort(key=lambda l: (l["y_top"], l["x0"]))
     return lines
+
+
+def body_layer_chars(lines: list[dict]) -> int:
+    """Characters outside the top/bottom margin zone.
+
+    The text-vs-OCR gate must ignore stamps, download watermarks, and
+    folios living in the margin: a scanned page whose only embedded text
+    is a 55-char journal header used to clear ``MIN_TEXT_LAYER_CHARS``,
+    skip OCR, then lose its entire body after furniture stripping (or
+    ship the stamp alone as the page). Body-zone characters are what
+    "a substantial embedded text layer" means.
+    """
+    total = 0
+    for line in lines:
+        top = line["y_top"]
+        bottom = top + line["height"]
+        if top < MARGIN_ZONE or bottom > 1 - MARGIN_ZONE:
+            continue
+        total += len(line["text"])
+    return total
+
+
+def _try_ocr(page: "fitz.Page", dpi: int, number: int,
+             fallback: list[dict]) -> tuple[list[dict], str]:
+    """OCR one page; on failure keep ``fallback`` rather than aborting."""
+    try:
+        return ocr_page(page, dpi), "ocr"
+    except RuntimeError as err:
+        print(f"  page {number}: OCR unavailable ({err}); "
+              f"{'using text layer' if fallback else 'no text layer'}",
+              file=sys.stderr)
+        return fallback, "text-fallback" if fallback else "ocr-failed"
 
 
 def furniture_keys(pages: list[tuple[int, list[dict]]]) -> set[str]:
@@ -188,11 +232,18 @@ def convert(pdf_path: Path, pages_range: tuple[int, int] | None,
     pages = []
     for number in range(first, last + 1):
         page = doc[number - 1]
-        embedded = "" if force_ocr else page.get_text().strip()
-        if len(embedded) >= MIN_TEXT_LAYER_CHARS:
-            lines, how = text_layer_page(page), "text"
+        if force_ocr:
+            lines, how = _try_ocr(page, dpi, number, fallback=[])
         else:
-            lines, how = ocr_page(page, dpi), "ocr"
+            # Gate on BODY-zone characters, not raw get_text length:
+            # margin stamps alone used to clear MIN_TEXT_LAYER_CHARS and
+            # skip OCR, so scanned journal pages converted to "" (or to
+            # the watermark alone) after furniture stripping.
+            layer = text_layer_page(page)
+            if body_layer_chars(layer) >= MIN_TEXT_LAYER_CHARS:
+                lines, how = layer, "text"
+            else:
+                lines, how = _try_ocr(page, dpi, number, fallback=layer)
         pages.append((number, lines))
         if number % 10 == 0 or number == last:
             print(f"  page {number}/{last} ({how})", file=sys.stderr)
