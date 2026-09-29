@@ -41,10 +41,68 @@ MARKDOWN_MIME = "text/markdown"
 
 _ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
+# CommonMark thematic break: ≥3 of *, -, or _ with optional spaces
+# between, ≤3 leading spaces. Must run BEFORE _BULLET — a spaced
+# `* * *` break would otherwise become `- * *` (the bullet rule eats
+# the first `* `) and push_doc would write that corruption to disk.
+_THEMATIC_BREAK = re.compile(
+    r"^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$",
+    re.MULTILINE)
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
+
+
+# ------------------------------------------------------------- code fences
+#
+# Fenced code blocks (``` / ~~~) are opaque to the normalizer for the
+# same reason math is: their bytes are intentional examples, not prose
+# the Doc bridge is free to canonicalize. Without lifting them, the
+# prose rules rewrite the fence body in place — `*` bullets become `-`,
+# `\*` loses its backslash, `| :--- |` alignment colons vanish — and
+# `push_doc` writes that corruption back to the local manuscript
+# whenever normalize differs from disk. Lifted before math so a fence
+# that *shows* TeX is preserved byte-for-byte too.
+_FENCE_OPEN = re.compile(r"^([`~]{3,})")
+_FENCE_SENTINEL = "\x00F%d\x00"
+_FENCE_SENTINEL_RE = re.compile(r"\x00F(\d+)\x00")
+
+
+def _lift_fences(text: str) -> tuple[str, list[str]]:
+    """Replace each fenced code block with a sentinel; return (text, spans).
+    Unclosed fences consume through EOF (CommonMark)."""
+    lines = text.split("\n")
+    out: list[str] = []
+    spans: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _FENCE_OPEN.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        marker = m.group(1)
+        ch, n = marker[0], len(marker)
+        block = [lines[i]]
+        i += 1
+        while i < len(lines):
+            block.append(lines[i])
+            close = _FENCE_OPEN.match(lines[i])
+            # Closing fence: same char, at least as long, no info string.
+            if (close and close.group(1)[0] == ch
+                    and len(close.group(1)) >= n
+                    and lines[i].strip() == close.group(1)):
+                i += 1
+                break
+            i += 1
+        spans.append("\n".join(block))
+        out.append(_FENCE_SENTINEL % (len(spans) - 1))
+    return "\n".join(out), spans
+
+
+def _restore_fences(text: str, spans: list[str]) -> str:
+    return _FENCE_SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
 
 
 # ------------------------------------------------------------- math spans
@@ -133,8 +191,13 @@ def normalize_markdown(text: str) -> str:
     Idempotent: normalize(normalize(x)) == normalize(x)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ")           # NBSP → space
+    # Fences before math: a code example of TeX must stay verbatim, and
+    # the prose rules below must never rewrite inside a fence (push_doc
+    # persists normalize to disk whenever the bytes move).
+    text, fences = _lift_fences(text)
     text, math = _lift_math(text)                # TeX is opaque from here
     text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
+    text = _THEMATIC_BREAK.sub("---", text)      # before bullets (see above)
     text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
     text = _HEADING.sub(lambda m: m.group(1) + " ", text)
     # A Docs-exported table carries an aligned delimiter row (| :---- |);
@@ -157,6 +220,7 @@ def normalize_markdown(text: str) -> str:
                   flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
     text = _restore_math(text.strip("\n"), math)
+    text = _restore_fences(text, fences)
     return text + "\n" if text else ""
 
 
@@ -1223,7 +1287,11 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # diff_push refuses (seen on manifest.md the day tables started
     # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
     # comment anchors that a rebuild orphans are the known price.
-    has_table = bool(_TABLE_DELIM.search(path.read_text(encoding="utf-8")))
+    # Fence bodies can contain markdown table examples; those are not
+    # Docs tables and must not force a rebuild (which orphans open
+    # margin-thread anchors). Detect delimiters in prose only.
+    has_table = bool(_TABLE_DELIM.search(
+        _lift_fences(path.read_text(encoding="utf-8"))[0]))
     if not has_table and (
             threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
