@@ -138,16 +138,22 @@ def set_manuscript_metadata(author: str | None = None,
                             copyright_owner: str | None = None,
                             paperback_isbn: str | None = None,
                             hardcover_isbn: str | None = None,
+                            trim_size: str | None = None,
+                            bleed: bool | None = None,
                             manuscript: str | None = None) -> dict:
-    """Set canonical publication identity: author, copyright owner, and/or
-    format-specific print ISBN-13 values. ISBNs are validated and normalized."""
+    """Set canonical publication identity: author, copyright owner,
+    format-specific print ISBN-13 values, and the print geometry — trim
+    size as WIDTHxHEIGHT inches (e.g. '6x9') and whether the interior
+    bleeds. ISBNs are validated and normalized; the trim size is checked
+    against the print range."""
     def run():
         db = _db()
         selected = _manuscript(db, manuscript)
         return api.update_manuscript_metadata(
             db, selected, author=author, copyright_owner=copyright_owner,
             paperback_isbn=paperback_isbn,
-            hardcover_isbn=hardcover_isbn)
+            hardcover_isbn=hardcover_isbn,
+            trim_size=trim_size, bleed=bleed)
     return _guard(run)
 
 
@@ -382,6 +388,47 @@ def list_critique_items(scope: str | None = None,
 
 
 @mcp.tool()
+def list_critique_decisions(scope: str | None = None,
+                            verdict: str | None = None,
+                            query: str | None = None,
+                            limit: int = 50,
+                            manuscript: str | None = None) -> dict:
+    """Critique items the author has ALREADY answered, with the verdict
+    and the reason recorded at the time — "what did I decide about this,
+    and why?" without opening the database. The counterpart of
+    list_critique_items (which shows only what is still pending).
+    scope: an essay file, or 'manuscript' for manuscript-wide items;
+    verdict: 'accept' | 'reject' | 'revise'; query: matches the
+    statement, the reason, or the critic's original wording. `tally`
+    counts the FULL filtered set even when `items` is capped by `limit`
+    — a manuscript can carry hundreds of settled rejections, so narrow
+    with scope/verdict/query rather than raising the limit. A 'revise'
+    entry carries revised_from: the critic's wording before the author's
+    replaced it."""
+    def run():
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        rows = critique.decided(db, ms["id"], scope=scope, verdict=verdict,
+                                query=query, manuscript=ms)
+        items = []
+        for d in rows[:max(0, limit)]:
+            item, meta = d["item"], _loads(d["item"]["metadata"], {})
+            meta = meta.get("critique", {})
+            items.append({
+                "id": item["id"], "kind": d["kind"],
+                "unit": meta.get("unit"), "ordinal": meta.get("ordinal"),
+                "scope": item.get("scope") or item.get("file") or
+                ("guide" if item.get("guide_id") else "manuscript"),
+                "verdict": d["verdict"], "statement": item["statement"],
+                "reason": d["reason"], "revised_from": d["revised_from"],
+            })
+        return {"count": len(rows), "tally": critique.tally(rows),
+                "scope": scope, "verdict": verdict,
+                "truncated": len(items) < len(rows), "items": items}
+    return _guard(run)
+
+
+@mcp.tool()
 def triage_critique(operations: list[dict], scope: str | None = None,
                     manuscript: str | None = None) -> dict:
     """Record the author's verdicts on proposed critique items, in batch.
@@ -462,7 +509,7 @@ def add_filter(name: str, prompt: str, manuscript: str | None = None) -> dict:
     envelope, each error naming what is wrong and the legal values.
 
     Creating a filter is curation, so it lives here; RUNNING one
-    (`filter run`/`prelude`/`record`/`settle`/`triage-flags`/`status`/
+    (`filter run`/`prelude`/`record`/`resolve`/`triage-flags`/`status`/
     `unmark`/`rollback`/`abandon`) stays CLI-only, the write loop's
     one-call-surface ruling — use list_filter_edits/triage_filter_edits
     for the conversational half of that loop instead."""
@@ -529,7 +576,7 @@ def list_filter_edits(essay: str, manuscript: str | None = None) -> dict:
     are already placed. `mode='doc'` means the author is reading and
     rewording those changes in the Google Doc right now: say so, do not
     offer to apply them, and name the CLI verb that ends the pause —
-    `authorlm filter settle <essay>`, which reads the tab back."""
+    `authorlm filter resolve <essay>`, which reads the tab back."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)

@@ -220,7 +220,8 @@ def cmd_manuscript(args):
                 db, manuscript, author=args.author,
                 copyright_owner=args.copyright_owner,
                 paperback_isbn=args.paperback_isbn,
-                hardcover_isbn=args.hardcover_isbn)
+                hardcover_isbn=args.hardcover_isbn,
+                trim_size=args.trim_size, bleed=args.bleed)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -234,6 +235,10 @@ def cmd_manuscript(args):
           f"{identity['paperback_isbn'] or '(not set)'}")
     print("  hardcover_isbn: "
           f"{identity['hardcover_isbn'] or '(not set)'}")
+    print(f"  trim_size: {identity['trim_size'] or '(not set)'}"
+          + ("" if identity["trim_size"] else
+             "  — needed by 'export pdf --profile book'"))
+    print(f"  bleed: {'yes' if identity['bleed'] else 'no'}")
 
 
 def _manuscript_tables(db: Database) -> list[str]:
@@ -1000,6 +1005,8 @@ def cmd_critique(args):
     elif args.action == "rollback":
         _critique_rollback(db, manuscript, args)
     elif args.action == "list":
+        if args.decided:
+            return _critique_decided(db, manuscript, args)
         queue = _critique_queue(db, mid, args.scope)
         if not queue:
             print("No proposed critique items"
@@ -1025,7 +1032,7 @@ def _critique_settled(db: Database, mid: str, token: str) -> tuple[str, dict]:
                         ("element", "style_laws")):
         rows = db.all(
             f"SELECT * FROM {table} WHERE manuscript_id = ? AND id LIKE ? "
-            "AND source_id IS NOT NULL", (mid, f"%{token}%"))
+            f"AND {crit.FROM_CRITIC}", (mid, f"%{token}%"))
         if len(rows) == 1:
             return kind, dict(rows[0])
         if len(rows) > 1:
@@ -1044,14 +1051,13 @@ def _critique_show(db: Database, mid: str, args) -> None:
         for table, kind in (("declared_intents", "intent"),
                             ("style_laws", "element")):
             for r in db.all(f"SELECT * FROM {table} WHERE manuscript_id = ? "
-                            "AND source_id IS NOT NULL", (mid,)):
+                            f"AND {crit.FROM_CRITIC}", (mid,)):
                 if q in r["statement"].lower():
                     rows.append((kind, dict(r)))
         if not rows:
             print(f"No critique items match '{args.query}'.")
         for kind, item in rows:
-            reason = item.get("outcome") if kind == "intent" else \
-                loads(item["metadata"], {}).get("rejection_reason")
+            _, reason, _ = crit.verdict_of(kind, item)
             status = {"proposed": ui.dim, "active": ui.green,
                       "rejected": ui.yellow}.get(item["status"], str)(
                           item["status"])
@@ -1066,17 +1072,47 @@ def _critique_show(db: Database, mid: str, args) -> None:
     color = {"proposed": ui.dim, "active": ui.green, "completed": ui.green,
              "rejected": ui.yellow}.get(item["status"], str)
     print("  status: " + color(item["status"]))
-    reason = item.get("outcome") if kind == "intent" else \
-        loads(item["metadata"], {}).get("rejection_reason")
+    _, reason, original = crit.verdict_of(kind, item)
     if reason:
         print("  reason: " + reason)
-    lineage = loads(item["metadata"], {}).get("lineage")
-    if lineage:
-        print(ui.dim(f"  lineage: {json.dumps(lineage)}"))
+    if original:
+        print(ui.dim(ui.wrap("critic wrote: " + original, indent="  ")))
+
+
+def _critique_decided(db: Database, manuscript: dict, args) -> None:
+    """`critique list --decided` — every settled item with its verdict and
+    the author's reason. The point is that nobody has to open sqlite to
+    remember what was already answered, or why."""
+    rows = crit.decided(db, manuscript["id"], scope=args.scope,
+                        verdict=args.verdict, query=args.query,
+                        manuscript=manuscript)
+    if not rows:
+        print("No decided critique items"
+              + (f" scoped to {args.scope}" if args.scope else "")
+              + (f" with verdict '{args.verdict}'" if args.verdict else "")
+              + (f" matching '{args.query}'" if args.query else "") + ".")
+        return
+    counts = crit.tally(rows)
+    print(ui.bold(f"{len(rows)} decided") + ui.dim(
+        " (" + ", ".join(f"{n} {v}" for v, n in sorted(counts.items())) + ")"))
+    for d in rows:
+        item, verdict = d["item"], d["verdict"]
+        color = {"accept": ui.green, "revise": ui.cyan,
+                 "reject": ui.yellow}.get(verdict, ui.dim)
+        print()
+        print(f"{_critique_label(d['kind'], item)} {color(verdict)}")
+        print(ui.wrap(item["statement"], indent="  "))
+        if d["reason"]:
+            print(ui.dim(ui.wrap("reason: " + d["reason"], indent="  ")))
+        if d["revised_from"]:
+            print(ui.dim(ui.wrap("critic wrote: " + d["revised_from"],
+                                 indent="  ")))
+    print(ui.dim("\nAmend a reason: critique reason <id> --text \"…\"  |  "
+                 "send one back to proposed: critique reopen <id>"))
 
 
 def _critique_reason(db: Database, mid: str, args) -> None:
-    """Amend a settled item's recorded reason (stray keystrokes and
+    """Amend a resolved item's recorded reason (stray keystrokes and
     wholesale markers happen; the evidence stream must be correctable)."""
     if not (args.target and args.text):
         sys.exit('usage: critique reason <id-prefix> --text "the real why"')
@@ -1101,7 +1137,7 @@ def _critique_reason(db: Database, mid: str, args) -> None:
 
 
 def _critique_reopen(db: Database, mid: str, args) -> None:
-    """Send a settled item back to proposed."""
+    """Send a resolved item back to proposed."""
     if not args.target:
         sys.exit("usage: critique reopen <id-prefix>")
     kind, item = _critique_settled(db, mid, args.target)
@@ -1429,12 +1465,15 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (BUG-2 / A1).
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
-    # Apply locally: the author's post-edits win.
+    # Apply locally: the author's post-edits win. The Doc never carries
+    # illustration embed lines (push strips them), so write-back must
+    # re-insert them — the same `_write_resolved_text` path filter/lens
+    # resolve use. Writing the tab text as-is silently unlinked every
+    # rendered plate while leaving the [Illustration:] tag (SMSTTD,
+    # 2026-09-02; critique was missed when that writer was shared).
     path = Path(manuscript["path"]) / file
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
-    diffs = passes.record_resolution(db, mid, file, forms)
+    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    diffs = passes.record_resolution(db, mid, file, forms, final_text=final)
     # No push: the author settles these forms in the Doc themselves, in
     # most cases. The Doc keeps them until their next ordinary 'doc push'.
     print(ui.green(f"resolved {file}: {len(forms)} form(s) made final")
@@ -1448,7 +1487,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
     # critique-resolve row). `episode=None` means "the session's most
     # recently created open episode, whatever goal it belongs to", so
-    # this collect used to file the settle's transitions against
+    # this collect used to file the resolve's transitions against
     # whichever intent happened to be open — making a completion report
     # say a substantive goal was served by an edit sweep. Settling
     # staged edits is hygiene, not goal-work: the version history, the
@@ -1482,7 +1521,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
 
 
 def _print_pattern_candidate(candidate: dict | None) -> None:
-    """The one line a settle's pattern candidate earns. The distiller
+    """The one line a resolve's pattern candidate earns. The distiller
     itself is `passes.settle_learnings`, shared by both passes and both
     filter transports; each CLI path owns its own output."""
     if candidate:
@@ -2857,6 +2896,13 @@ def cmd_illus(args):
                 "'illus render <fragment>' for a fresh take, or "
                 "'illus render <fragment> --from N' to evolve the image "
                 "you approved."))
+        moved = [r for r in rows if r["state"] == "stale-desc"]
+        if moved:
+            print(ui.dim(
+                f"{len(moved)} slot(s) hold art made for a description you "
+                "have since rewritten. The art is KEPT — the key holds it "
+                "— so this is a note, not a loss: 'illus render <fragment> "
+                "--from N' redraws it against the new words."))
         return
 
     if args.action == "rerender":
@@ -2873,8 +2919,7 @@ def cmd_illus(args):
         result = illus.render_slot(db, manuscript, slot, config,
                                    count=args.count)
         newest = result["written"][-1]
-        illus.set_embed(root / slot["file"], slot["desc_hash"], newest,
-                        illus.load_prompts(root))
+        illus.set_embed(root / slot["file"], slot["key"], newest)
         removed = illus.prune(manuscript)
         print(f"Rendered + pinned {newest}"
               + (f"; pruned {len(removed)} orphan(s)" if removed else ""))
@@ -2904,7 +2949,8 @@ def cmd_illus(args):
         else:
             targets = [
                 {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
-                 "caption": None,
+                 "caption": None, "ref": s.get("ref"),
+                 "key": s.get("key"),
                  "desc_hash": illus.desc_hash(s["prompt"])}
                 for s in illus.slot_report(root)["unrendered"]]
             if not targets:
@@ -2948,6 +2994,35 @@ def cmd_illus(args):
             print(ui.yellow(line) if failed else line)
         return
 
+    if args.action == "import":
+        if not args.candidate:
+            raise SystemExit("usage: authorlm illus import '<fragment>' "
+                             "<image.png>")
+        slot = resolve_slot()
+        if args.caption:
+            slot = {**slot, "caption": args.caption}
+        try:
+            result = illus.import_image(db, manuscript, slot, args.candidate)
+        except (ValueError, OSError) as err:
+            raise SystemExit(f"error: {err}")
+        print(f"Imported {result['source']} → "
+              f"_illustrations/{result['name']}")
+        if result["ref"] != slot.get("ref"):
+            print(ui.dim(f"  slot externalized first → "
+                         f"_illustrations/prompts/{result['ref']} — the "
+                         f"first image mints a slot's key, and the key is "
+                         f"what keeps this image attached when you "
+                         f"reword the description."))
+        if not result["had_embed"]:
+            print(f"  embedded → {result['name']}")
+        else:
+            print(ui.dim(f"  embed kept at {result['embedded']} — "
+                         f"'illus pick {result['n']}' to stand this one "
+                         f"up instead."))
+        print(ui.dim(f"  'illus render <fragment> --from {result['n']}' "
+                     f"evolves it under the current illustration law."))
+        return
+
     if args.action == "externalize":
         slot = resolve_slot()
         try:
@@ -2966,15 +3041,19 @@ def cmd_illus(args):
         if args.candidate is None:
             raise SystemExit("pick needs a candidate number, e.g. "
                              f"illus pick '{args.name}' 2")
-        cands = illus.slot_candidates(root, slot["desc_hash"])
+        try:
+            wanted = int(args.candidate)
+        except ValueError:
+            raise SystemExit(f"pick takes a candidate NUMBER, not "
+                             f"{args.candidate!r}")
+        cands = illus.slot_candidates(root, slot["key"])
         target = next((c for c in cands
-                       if int(c["n"]) == args.candidate), None)
+                       if int(c["n"]) == wanted), None)
         if target is None:
-            have = ", ".join(c["n"] for c in cands) or "none"
-            raise SystemExit(f"no candidate {args.candidate:02d} "
-                             f"(rendered: {have})")
-        illus.set_embed(root / slot["file"], slot["desc_hash"],
-                        target["name"], illus.load_prompts(root))
+            have = ", ".join(c["src"] + c["n"] for c in cands) or "none"
+            raise SystemExit(f"no candidate {wanted:02d} "
+                             f"(held: {have})")
+        illus.set_embed(root / slot["file"], slot["key"], target["name"])
         # Render-side learning loop: which candidate won (and over what
         # field) is evidence for future illustration law.
         from .db import ko_fields as _ko
@@ -3173,8 +3252,8 @@ def cmd_filter(args):
     # FILE-first, because by then the author is talking about the essay
     # and not about the filter. The optional name stays legal on the
     # file-first verbs for the one case that needs it — two filters with
-    # active runs on the same essay — so `filter settle becker.md` and
-    # `filter settle duplicate-words becker.md` both read naturally.
+    # active runs on the same essay — so `filter resolve becker.md` and
+    # `filter resolve duplicate-words becker.md` both read naturally.
     if args.action not in ("add", "show", "prelude", "run") and \
             args.file is None and args.name is not None:
         args.name, args.file = None, args.name
@@ -3196,6 +3275,12 @@ def cmd_filter(args):
                              f"'filter prelude {args.name} <essay.md>'; it "
                              f"proposes dictionary rows and judges no "
                              f"unit."))
+            if out.get("summaries"):
+                print(ui.dim("summaries = true — the payload carries "
+                             "the neighbouring essays' summaries in "
+                             "block A, stale ones marked and never "
+                             "blocking. It is worth real tokens; do "
+                             "not window a run that declares it."))
             return
 
         if args.action == "list":
@@ -3222,6 +3307,8 @@ def cmd_filter(args):
                 print(ui.dim(f"state: {shown['state']}"))
             if shown.get("prelude"):
                 print(ui.dim(f"prelude = {shown['prelude']}"))
+            if shown.get("summaries"):
+                print(ui.dim("summaries = true — neighbouring essay summaries in block A"))
             print()
             print(shown["prompt"])
             return
@@ -3420,6 +3507,51 @@ def cmd_filter(args):
                              f"'filter triage {result['file']} --accept …'."))
             return
 
+        if args.action == "apply":
+            # RECORD then PUSH, under one name, because from the author's
+            # seat those are one act: the proposals reach the tab they rule
+            # them in. The DRAFTING step cannot be folded in here — in chat
+            # mode `filter run` makes no model call at all, the assistant
+            # answers the payload in the conversation, and no CLI process
+            # can stand in for that. So this wraps the two verbs that ARE
+            # mechanical and leaves the one that is judgment where it is.
+            if not args.file:
+                raise SystemExit(
+                    "usage: authorlm filter apply [<name>] <essay.md>  "
+                    "(the reply JSON on stdin)\n"
+                    "It records the reply and pushes the proposals into the "
+                    "essay's Doc tab in one step. Draft the reply against "
+                    "'filter run <name> <essay>' first.")
+            reply = _stdin_text()
+            if not reply:
+                raise SystemExit(
+                    "the reply JSON travels on stdin — nothing arrived. "
+                    "Nothing was staged, nothing was pushed, and the cursor "
+                    "did not move.")
+            result = api.filter_record(db, manuscript, config, args.file,
+                                       reply, name=args.name)
+            start, end = result["window"]
+            print(ui.green(
+                f"Recorded units {start}–{end}: {len(result['staged'])} "
+                f"proposal(s), {len(result['keeps'])} kept."))
+            _print_filter_warnings(result["warnings"])
+            if result["remaining"] > 0:
+                # Pushing a partial run would put half an essay's forms in
+                # the tab and commit the run to the Doc road before the rest
+                # of it has been judged. The road is chosen once, so it is
+                # chosen when the run is complete.
+                print(ui.dim(
+                    f"{result['remaining']} unit(s) left — nothing pushed "
+                    f"yet. 'filter run {result['run']['filter']} "
+                    f"{result['file']}' assembles the next window; the "
+                    f"apply that completes the run is the one that pushes."))
+                return
+            if not result["staged"]:
+                print(ui.dim("No proposals, so there is nothing to push and "
+                             "this run has taken no road."))
+                return
+            args.action = "push"          # fall through to the push branch
+
         if args.action == "push":
             if not args.file:
                 raise SystemExit("usage: authorlm filter push <essay.md>")
@@ -3438,10 +3570,10 @@ def cmd_filter(args):
                     # is unavailable.
                     raise ValueError(
                         f"{err}\nThe Doc road needs the [gdocs] bridge. "
-                        f"The local road does not: 'filter settle "
+                        f"The local road does not: 'filter resolve "
                         f"{args.file} --pause' writes the same "
                         f"<<old>>{{{{new}}}} forms into the file in your "
-                        f"vault, and 'filter settle {args.file}' "
+                        f"vault, and 'filter resolve {args.file}' "
                         f"finalizes them.") from err
 
             result = api.filter_push(db, manuscript, config, args.file,
@@ -3463,7 +3595,7 @@ def cmd_filter(args):
                 "The tab is where you rule on these: leave a change alone "
                 "to take it, empty its green half to turn it down, or "
                 "reword the green half to make it yours — your wording "
-                f"wins. Then 'filter settle {result['file']}' reads the "
+                f"wins. Then 'filter resolve {result['file']}' reads the "
                 "tab back and records every one of those verdicts."))
             if result["local_unchanged"]:
                 print(ui.dim(
@@ -3487,9 +3619,9 @@ def cmd_filter(args):
                     f"not push to Docs again until this is finished."))
             return
 
-        if args.action == "settle":
+        if args.action == "resolve":
             if not args.file:
-                raise SystemExit("usage: authorlm filter settle <essay.md> "
+                raise SystemExit("usage: authorlm filter resolve <essay.md> "
                                  "[--pause]")
             def _doc_bridge():
                 from . import gdocs as _gd
@@ -3502,7 +3634,7 @@ def cmd_filter(args):
             # A CALLABLE, not two arguments: the local road must work
             # with no credentials, so nothing here can pop a consent
             # window unless the run actually took the Doc road.
-            result = api.filter_settle(db, manuscript, config, args.file,
+            result = api.filter_resolve(db, manuscript, config, args.file,
                                        pause=args.pause, name=args.name,
                                        services=_doc_bridge)
             _print_filter_warnings(result["warnings"])
@@ -3510,21 +3642,22 @@ def cmd_filter(args):
                 print(ui.green(
                     f"Marked {result['file']} with {result['forms']} "
                     f"change(s) — open it and edit any of the {{{{new}}}} "
-                    f"halves you want to reword, then 'filter settle "
+                    f"halves you want to reword, then 'filter resolve "
                     f"{result['file']}' with no flag to finalize."))
                 print(ui.dim("The file will not push to Docs while it is "
                              "marked, and every observer still reads the "
                              "original text."))
                 return
+            made = result.get("accepted", result["forms"])
             if result.get("mode") == "doc":
                 print(ui.green(
-                    f"Finalized: {result['forms']} change(s) made final in "
+                    f"Finalized: {made} change(s) made final in "
                     f"{result['file']}"
                     + (f", {len(result['diffs'])} of them in your wording "
                        f"rather than mine" if result["diffs"] else "")
                     + "."))
             else:
-                print(ui.green(f"Applied: {result['forms']} change(s) made "
+                print(ui.green(f"Applied: {made} change(s) made "
                                f"final in {result['file']}."))
             for d in result["diffs"]:
                 print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
@@ -3551,7 +3684,7 @@ def cmd_filter(args):
             if result.get("tab_still_marked"):
                 print(ui.dim(
                     f"The Doc tab still shows the struck-and-green marks: "
-                    f"a settle that also re-pushed could fail halfway on "
+                    f"a resolve that also re-pushed could fail halfway on "
                     f"the network after the evidence was recorded, so it "
                     f"does not. Your next 'doc push {result['file']}' "
                     f"clears them."))
@@ -3582,7 +3715,7 @@ def cmd_filter(args):
                 print(ui.green(
                     f"{result['file']}'s tab rebuilt clean; "
                     f"{result['reopened']} form(s) returned to 'accepted' "
-                    f"— 'filter settle' applies them, 'filter triage "
+                    f"— 'filter resolve' applies them, 'filter triage "
                     f"--undo' reopens them."))
                 print(ui.dim(
                     "The tab was rebuilt from the file on disk, so it now "
@@ -3594,7 +3727,7 @@ def cmd_filter(args):
             print(ui.green(
                 f"{result['file']} restored to its original text; "
                 f"{result['reopened']} form(s) returned to 'accepted' — "
-                f"'filter settle' applies them, 'filter triage --undo' "
+                f"'filter resolve' applies them, 'filter triage --undo' "
                 f"reopens them."))
             return
 
@@ -3683,6 +3816,81 @@ def cmd_lens(args):
         if result.get("seeded_belief"):
             print(ui.dim("Your explanation seeded a candidate belief: "
                          f"\"{result['seeded_belief']['statement']}\""))
+        # §7.2's ruling: finding verdicts and staged edits are
+        # INDEPENDENT — accepting the finding does not settle its edit,
+        # and the author is told so rather than left to infer it.
+        gmeta = _json.loads(result["guidance"].get("metadata") or "{}")
+        tid = gmeta.get("edit_thread")
+        if tid:
+            thread = db.one("SELECT * FROM doc_threads WHERE id = ?",
+                            (tid,))
+            if thread and thread["state"] in ("proposed", "accepted",
+                                              "written"):
+                where = ("in the Doc tab" if thread["state"] == "written"
+                         else "staged")
+                print(ui.dim(
+                    f"This finding's edit is still open ({where}) — the "
+                    f"verdict on the finding does not settle it. "
+                    f"'lens push {gmeta.get('file', '<file>')}' / "
+                    f"'lens resolve {gmeta.get('file', '<file>')}' run "
+                    f"the edit's own road."))
+        return
+
+    if args.action in ("push", "resolve"):
+        target = args.name or args.file
+        if not target:
+            raise SystemExit(f"usage: authorlm lens {args.action} "
+                             f"<essay.md>")
+        config = _load_config(args)
+
+        def _doc_bridge():
+            from . import gdocs as _gd
+
+            return (_gd.get_service(config, args.workspace,
+                                    interactive=True),
+                    _gd.get_docs_service(config, args.workspace,
+                                         interactive=True))
+
+        try:
+            if args.action == "push":
+                result = api.lens_push(db, manuscript, config, target,
+                                       services=_doc_bridge)
+                _print_filter_warnings(result["warnings"])
+                print(ui.green(
+                    f"Pushed {result['written']} lens form(s) into "
+                    f"{result['file']}'s tab → {result['url']}"))
+                for t, why in result["failed"]:
+                    print(ui.yellow(f"  failed to land: «"
+                                    f"{gdocs_clamp(t['proposed_old'])}» "
+                                    f"— {why}"))
+                print(ui.dim("Resolve them in the Doc, then "
+                             f"'lens resolve {result['file']}'."))
+            else:
+                result = api.lens_resolve(db, manuscript, config, target,
+                                         services=_doc_bridge)
+                _print_filter_warnings(result["warnings"])
+                print(ui.green(
+                    f"Finalized: {result['accepted']} lens change(s) made "
+                    f"final in {result['file']}"
+                    + (f", {len(result['diffs'])} of them in your wording "
+                       f"rather than mine" if result["diffs"] else "")
+                    + (f"; {result['declined']} declined"
+                       if result["declined"] else "") + "."))
+                for d in result["diffs"]:
+                    print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
+                                 f"«{gdocs_clamp(d['final'])}»"))
+                if result["summary"]["rebuilt"]:
+                    print("summary rebuilt; downstream marked "
+                          "upstream_stale")
+                if result.get("pattern_candidate"):
+                    print(ui.dim("Pattern candidate from your post-edits: "
+                                 f"{result['pattern_candidate'][:80]}…"))
+                if result["tab_still_marked"]:
+                    print(ui.dim(
+                        "The Doc tab keeps its struck-and-green marks "
+                        f"until your next 'doc push {result['file']}'."))
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
         return
 
     if not args.name or not args.file:
@@ -3723,8 +3931,21 @@ def cmd_lens(args):
           + (f", {result['dropped_ungrounded']} ungrounded dropped"
              if result["dropped_ungrounded"] else "") + ".")
     for i, row in enumerate(result["findings"], start=1):
-        print(f"  [{i}] {row['suggestion']}")
+        meta = _json.loads(row.get("metadata") or "{}")
+        tag = " [edit staged]" if meta.get("edit_thread") else ""
+        print(f"  [{i}] {row['suggestion']}{tag}")
         print(ui.dim(f"      {row['explanation']}"))
+    for refusal in result.get("edits_refused", []):
+        print(ui.yellow(f"  edit refused on «{refusal['quote']}» — "
+                        f"{refusal['reason']} (the finding itself is "
+                        f"kept)"))
+    if result.get("edits_staged"):
+        print(ui.dim(f"{len(result['edits_staged'])} edit(s) staged — "
+                     f"'lens push {result['file']}' writes them into the "
+                     f"Doc tab as <<old>>{{{{new}}}} forms; "
+                     f"'lens resolve {result['file']}' reads the tab "
+                     f"back. Ruling on a finding and settling its edit "
+                     f"stay independent."))
     if result["findings"]:
         print(ui.dim("Verdicts: authorlm lens review <n> "
                      "--accept|--reject [--explain \"why\"]"))
@@ -3754,18 +3975,32 @@ def cmd_export(args):
         print(f"{args.key} = {settings[args.key]}")
         return
 
+    if args.action == "check":
+        problems = ex.check_manuscript(manuscript)
+        if not problems:
+            print("Every region tag resolves and every math span "
+                  "converts — the book is exportable.")
+            return
+        for problem in problems:
+            print(ui.yellow(problem))
+        raise SystemExit(1)
+
     try:
         chapters = [c for part in (args.chapters or [])
                     for c in part.split(",") if c.strip()]
         result = ex.export_published(db, manuscript, fmt=args.action,
                                      variant=args.variant,
                                      only=chapters or None,
-                                     print_ready=args.print_ready)
+                                     print_ready=args.print_ready,
+                                     profile=args.profile)
     except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
     if args.action == "pdf":
         print(ui.dim(f"  mode: {result['mode']}"))
+        if result.get("pages"):
+            print(ui.dim(f"  pages: {result['pages']}  "
+                         f"geometry: {result.get('geometry', '')}"))
     if chapters:
         print(ui.dim(f"  chapters: {', '.join(result['files'])}"))
     if args.action in result:
@@ -4842,11 +5077,29 @@ def cmd_doc(args):
             sys.exit(f"error: {err}")
         try:
             if args.action == "push":
+                # The reader-load manifest is DERIVED, so it is recomputed
+                # here rather than stored: every push writes the current
+                # book, and a push is the only thing that writes it. It
+                # rides along on a single-file push too — one essay changing
+                # can move the whole curve, and a manifest tab that is only
+                # correct after a full push is a tab nobody can trust.
+                from . import manifest as mf
+
+                try:
+                    _mpath, _mrows = mf.refresh(db, manuscript)
+                    print(ui.dim(
+                        f"Manifest recomputed: {len(_mrows)} units, "
+                        f"{sum(len(r['debt']) for r in _mrows)} unmet "
+                        f"assumptions → {mf.FILENAME}"))
+                except Exception as err:   # never fatal to a push
+                    print(ui.dim(f"Manifest not recomputed: {err}"))
                 # One tab per file in a single master Doc; no file argument
                 # pushes the whole manuscript.
                 targets = ([args.name] if args.name
                            else gdocs._reading_order_files(
                                gdocs.manuscript_bridge(manuscript)))
+                if args.name and mf.FILENAME not in targets:
+                    targets.append(mf.FILENAME)
                 normalized_any = False
                 result = None
                 for target in targets:
@@ -5002,8 +5255,8 @@ def cmd_doc(args):
                     print(ui.yellow(
                         f"MID-SETTLE: {relpath} carries staged "
                         f"<<old>>{{{{new}}}} forms on disk — untouched. "
-                        f"Pulling would discard the settle. Finalize it "
-                        f"('filter settle {relpath}') or put the original "
+                        f"Pulling would discard the resolve. Finalize it "
+                        f"('filter resolve {relpath}') or put the original "
                         f"text back ('filter unmark {relpath}')."))
                 for relpath in result.get("sidecar_unparsable", []):
                     print(ui.yellow(
@@ -6314,6 +6567,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the paperback edition")
     p.add_argument("--hardcover-isbn", default=None,
                    help="ISBN-13 assigned to the hardcover edition")
+    p.add_argument("--trim-size", default=None, metavar="WxH",
+                   help="print trim size in inches, e.g. 6x9 (the book "
+                        "profile refuses to build without one)")
+    p.add_argument("--bleed", default=None, choices=["yes", "no"],
+                   help="whether the print interior bleeds to the page "
+                        "edge (adds 0.125in to the page on three sides)")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")
@@ -6370,7 +6629,8 @@ def build_parser() -> argparse.ArgumentParser:
         "critique",
         help="external critique: import a report as proposed items, triage "
              "them, then the essay-by-essay edit pass — run → triage "
-             "--edits → write → (read in Docs) → resolve "
+             "--edits → write → (read in Docs) → resolve; "
+             "'list --decided' reads the past verdicts back "
              "(docs/critique-pass-design.md)")
     p.add_argument("action",
                    choices=["import", "status", "list", "triage",
@@ -6387,7 +6647,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="run: proceed past the preflight gate WITHOUT the "
                         "unconfirmed items (never with them)")
-    p.add_argument("--query", help="show: search critique items by text")
+    p.add_argument("--query",
+                   help="show / list --decided: search critique items by "
+                        "text (statement, reason, or the critic's original)")
+    p.add_argument("--decided", action="store_true",
+                   help="list: the resolved items instead of the pending "
+                        "queue — every past verdict with its reason "
+                        "(narrow with --scope/--verdict/--query)")
+    p.add_argument("--verdict",
+                   choices=["accept", "reject", "revise", "retired"],
+                   help="list --decided: only items answered this way "
+                        "('retired' = accepted once, retired since)")
     p.add_argument("--scope",
                    help="list/triage: only intents scoped to this file; "
                         "'manuscript' = only manuscript-wide items (the "
@@ -6573,13 +6843,14 @@ def build_parser() -> argparse.ArgumentParser:
         "lens",
         help="author-defined lenses (_lenses/*.md prompts): add, list, "
              "run <name> <file>, register (external findings on stdin), "
-             "review <n>")
+             "review <n>, push <file> (staged lens edits → Doc forms), "
+             "resolve <file> (read the tab back)")
     p.add_argument("action",
                    choices=["add", "list", "show", "run", "register",
-                            "review"])
+                            "review", "push", "resolve"])
     p.add_argument("name", nargs="?",
-                   help="lens name (add/run/register) or finding index "
-                        "(review)")
+                   help="lens name (add/run/register), finding index "
+                        "(review), or manuscript file (push/resolve)")
     p.add_argument("file", nargs="?", help="manuscript file (run/register)")
     p.add_argument("--accept", action="store_true")
     p.add_argument("--reject", action="store_true")
@@ -6606,24 +6877,32 @@ def build_parser() -> argparse.ArgumentParser:
             "the shipped config deliberately does not have. `--dry-run` "
             "is accepted as a no-op alias for muscle memory.\n\n"
             "TWO ROADS TO THE AUTHOR'S EYES, and the run picks one by "
-            "which verb it meets first. `filter settle <essay>` is the "
+            "which verb it meets first. `filter resolve <essay>` is the "
             "LOCAL road and the default: the changes are applied (or, "
             "with --pause, written into the file as <<old>>{{new}} forms "
             "to read in Obsidian). `filter push <essay>` is the DOC road: "
             "the same forms go into the essay's tab of the master Doc, "
             "struck-through and green, the file on disk keeps the OLD "
-            "text, and `filter settle <essay>` later reads the tab back. "
+            "text, and `filter resolve <essay>` later reads the tab back. "
             "Local is recommended — its whole state is described by the "
             "bytes on disk, and the Doc road's is not (a crash mid-recovery "
             "can leave forms in a tab that nothing on disk records; "
             "'doc push <essay>' rebuilds the tab from the pristine file). "
             "Once a run takes a road it keeps it; switching is "
-            "settle-then-rerun, never a flag."),
+            "resolve-then-rerun, never a flag. `filter apply [<name>] "
+            "<essay>` is `record` and `push` under one name — the reply "
+            "JSON on stdin, the proposals in the tab, one step. It does "
+            "NOT draft: in chat mode `filter run` makes no model call, the "
+            "assistant answers the payload in the conversation, and no CLI "
+            "process can stand in for that. A partial run records and does "
+            "not push, because the road is chosen once and a half-pushed "
+            "essay has chosen it early."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action",
                    choices=["add", "list", "show", "prelude", "run",
-                            "record", "edits", "triage", "push", "settle",
-                            "status", "unmark", "rollback", "abandon"])
+                            "record", "apply", "edits", "triage", "push",
+                            "resolve", "status", "unmark", "rollback",
+                            "abandon"])
     p.add_argument("name", nargs="?",
                    help="filter name (add/show/prelude/run); optional "
                         "elsewhere, to disambiguate two runs on one file")
@@ -6665,7 +6944,8 @@ def build_parser() -> argparse.ArgumentParser:
              "with picked illustrations embedded; settings in "
              "_exports/settings.toml")
     p.add_argument("action",
-                   choices=["show", "set", "md", "docx", "epub", "pdf"])
+                   choices=["show", "set", "check", "md", "docx", "epub",
+                            "pdf"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
@@ -6676,6 +6956,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")
+    p.add_argument("--profile", choices=["book"], default=None,
+                   help="PDF only: 'book' builds a print interior at the "
+                        "manuscript's trim size (book class, mirrored "
+                        "margins with a KDP gutter, running heads, "
+                        "captions under the plates) — no review marks")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(
@@ -6707,6 +6992,8 @@ def build_parser() -> argparse.ArgumentParser:
                "_illustrations/prompts/<slug>.md (tag keeps excerpt ⇢ ref)\n"
                "  illus triage --accept 1 2 --revise 3 \"…\" --reject 4 "
                "--reason \"…\"   bulk verdicts\n"
+               "  illus import '<fragment>' path.png   bring an image "
+               "made outside AuthorLM into that slot as a candidate\n"
                "  illus versions                  list snapshots of "
                "_illustrations/prompts/ (recovery points before a pull)\n"
                "  illus restore                   restore prompts/ from "
@@ -6715,14 +7002,17 @@ def build_parser() -> argparse.ArgumentParser:
                "snapshot instead of the latest")
     p.add_argument("action",
                    choices=["list", "show", "render", "rerender", "pick",
-                            "prune", "prompt", "scan", "triage",
+                            "import", "prune", "prompt", "scan", "triage",
                             "externalize", "versions", "restore"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
                         "scan: one file (default: all main matter)")
-    p.add_argument("candidate", nargs="?", type=int,
-                   help="candidate number (pick)")
+    p.add_argument("candidate", nargs="?",
+                   help="candidate number (pick), or the image file to "
+                        "bring in (import)")
+    p.add_argument("--caption",
+                   help="import: set the slot's reader-facing caption")
     p.add_argument("-n", "--count", type=int, default=1,
                    help="render: how many candidates to generate")
     p.add_argument("--from", dest="from_n", type=int, metavar="N",

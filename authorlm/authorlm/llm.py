@@ -126,7 +126,7 @@ def vendor_key(model: str, llm: dict) -> str:
 #                                  server-side on its own still does).
 #
 # ONLY add a row for a contract you have VERIFIED — a live call, or
-# litellm's own model map. The map lookups that settled the rows below:
+# litellm's own model map. The map lookups that resolved the rows below:
 #
 #     litellm.get_model_info("anthropic/claude-haiku-4-5")
 #     litellm.llms.anthropic.common_utils.AnthropicModelInfo \

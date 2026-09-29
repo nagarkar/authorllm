@@ -199,6 +199,28 @@ def import_manifest(db: Database, manuscript_id: str, manifest: dict) -> dict:
 
 # ------------------------------------------------------------------ triage
 
+def _scope_clause(db: Database, manuscript_id: str, scope: str | None,
+                  manuscript: dict | None) -> tuple[str, list]:
+    """The scope chain shared by `pending` and `decided`: a file selects
+    its own items, its toc ancestors', and the manuscript-wide ones —
+    exactly the chain the preflight gate consults. "manuscript" selects
+    the manuscript-wide items alone."""
+    if scope == "manuscript":
+        return " AND scope IS NULL", []
+    if not scope:
+        return "", []
+    chain: list = [scope]
+    if manuscript is None:
+        row = db.one("SELECT * FROM manuscripts WHERE id = ?",
+                     (manuscript_id,))
+        manuscript = dict(row) if row else None
+    if manuscript is not None:
+        from .passes import toc_ancestors
+        chain += toc_ancestors(manuscript, scope)
+    marks = ",".join("?" * len(chain))
+    return f" AND (scope IN ({marks}) OR scope IS NULL)", chain
+
+
 def pending(db: Database, manuscript_id: str,
             scope: str | None = None,
             manuscript: dict | None = None) -> dict:
@@ -212,22 +234,8 @@ def pending(db: Database, manuscript_id: str,
     own items are selected.) `scope` = "manuscript": manuscript-wide
     items only (the global sitting). Style elements are global law and
     appear in every sitting."""
-    args: list = [manuscript_id]
-    scope_sql = ""
-    if scope == "manuscript":
-        scope_sql = " AND scope IS NULL"
-    elif scope:
-        chain: list = [scope]
-        if manuscript is None:
-            row = db.one("SELECT * FROM manuscripts WHERE id = ?",
-                         (manuscript_id,))
-            manuscript = dict(row) if row else None
-        if manuscript is not None:
-            from .passes import toc_ancestors
-            chain += toc_ancestors(manuscript, scope)
-        marks = ",".join("?" * len(chain))
-        scope_sql = f" AND (scope IN ({marks}) OR scope IS NULL)"
-        args.extend(chain)
+    scope_sql, scope_args = _scope_clause(db, manuscript_id, scope, manuscript)
+    args: list = [manuscript_id, *scope_args]
     intents = db.all(
         "SELECT * FROM declared_intents WHERE manuscript_id = ? "
         f"AND status = 'proposed'{scope_sql} ORDER BY created_at, id", tuple(args))
@@ -319,6 +327,86 @@ def reject_element(db: Database, manuscript_id: str, element: dict,
               {"status": "rejected", "metadata": json.dumps(meta)})
     _triage_evidence(db, manuscript_id, "rejected",
                      f"{element['statement']} — {reason}")
+
+
+# ----------------------------------------------------- settled verdicts
+#
+# A verdict is only worth keeping if it can be read back. Everything below
+# answers "what did I already decide about this, and why?" without SQL.
+
+# What makes a row a *critique* item is that a critic proposed it. A
+# modified acceptance flips provenance to the author (`revise_intent`), so
+# for those the critic's fingerprint survives only as lineage — hence the
+# second arm. Without it, every intent and style law the author ever wrote
+# would pour into this list; with it, a revised item is not lost from it.
+FROM_CRITIC = ("(source_id IN (SELECT id FROM sources WHERE kind = 'critic')"
+               " OR metadata LIKE '%original_source_id%')")
+
+
+def verdict_of(kind: str, item: dict) -> tuple[str, str | None, str | None]:
+    """(verdict, reason, revised_from) for one settled critique item.
+
+    A rejection carries the author's words; a modified acceptance carries
+    the critic's original. Those two are the whole point of reading the
+    list back. A later fate (retired, abandoned) reports as itself rather
+    than as the original verdict — the item's standing today is the
+    honest answer to "what did I decide?"."""
+    meta = loads(item["metadata"], {})
+    original = meta.get("critique", {}).get("original_text")
+    if item["status"] == "rejected":
+        reason = (item.get("outcome") if kind == "intent"
+                  else meta.get("rejection_reason"))
+        return "reject", reason, original
+    if item["status"] in ("active", "completed"):
+        return ("revise" if original else "accept"), None, original
+    return item["status"], None, original
+
+
+def decided(db: Database, manuscript_id: str, scope: str | None = None,
+            verdict: str | None = None, query: str | None = None,
+            manuscript: dict | None = None) -> list[dict]:
+    """Settled critique items — past verdicts with their reasons.
+
+    The mirror of `queue`: same scope chain, same intents-then-elements
+    order, but everything the author has already answered. `verdict`
+    filters to accept | reject | revise (or a later status such as
+    retired); `query` matches statement or reason, case-insensitively.
+    Each entry is {kind, item, verdict, reason, revised_from} — the raw
+    row travels along so callers keep their own labelling."""
+    scope_sql, scope_args = _scope_clause(db, manuscript_id, scope, manuscript)
+    intents = db.all(
+        "SELECT * FROM declared_intents WHERE manuscript_id = ? "
+        f"AND status != 'proposed' AND {FROM_CRITIC}{scope_sql} "
+        "ORDER BY created_at, id", (manuscript_id, *scope_args))
+    # Style elements are global law: they belong to every sitting, so no
+    # scope narrows them (the same rule `pending` follows).
+    elements = db.all(
+        "SELECT * FROM style_laws WHERE manuscript_id = ? "
+        f"AND status != 'proposed' AND {FROM_CRITIC} ORDER BY created_at, id",
+        (manuscript_id,))
+    q = (query or "").lower()
+    out = []
+    for kind, rows in (("intent", intents), ("element", elements)):
+        for row in rows:
+            item = dict(row)
+            v, reason, original = verdict_of(kind, item)
+            if verdict and v != verdict:
+                continue
+            if q and q not in item["statement"].lower() \
+                    and q not in (reason or "").lower() \
+                    and q not in (original or "").lower():
+                continue
+            out.append({"kind": kind, "item": item, "verdict": v,
+                        "reason": reason, "revised_from": original})
+    return out
+
+
+def tally(decisions: list[dict]) -> dict:
+    """Verdict counts for a decided list — the headline above the rows."""
+    counts: dict = {}
+    for d in decisions:
+        counts[d["verdict"]] = counts.get(d["verdict"], 0) + 1
+    return counts
 
 
 def status(db: Database, manuscript_id: str) -> list[dict]:

@@ -135,6 +135,11 @@ document pipeline.
      appended to the essay verbatim if the author accepts it. No preamble, no
      commentary, no closing question, no markdown fences. Just the prose.>
 
+Mathematics, if the beat needs any, is TeX in `$...$` (inline, for a symbol or
+a short relation) or `$$...$$` (display, one physical line), in the amsmath
+subset only: no `\(`, `\[`, `equation`, `\label`, macros, or `physics` and
+`siunitx` commands. Never change a backslash inside an existing math span.
+
 **When you cannot write the beat without inventing something:**
 
     BLOCKED

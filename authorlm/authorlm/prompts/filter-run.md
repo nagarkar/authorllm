@@ -58,6 +58,10 @@ file: their reason is law for this essay.
   frozen MOTIF REGISTRY. Units are independent; do not assume any other unit was
   changed.
 
+- Math spans (`$...$`, `$$...$$`) are TeX. Copy them into a replacement byte
+  for byte unless the filter is about the mathematics itself; never add or
+  drop a backslash inside one. New math, if any, takes the same form.
+
 ## Reply
 
 Return JSON only — no prose before it, no prose after it, no markdown fence.

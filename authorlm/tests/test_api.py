@@ -1881,7 +1881,7 @@ def check_alias_guide_flip() -> None:
         mid = manuscript["id"]
         api.add_concept(db, manuscript, "FlipCanonical", kind="concept",
                         notes="the established term")
-        sentence = "We call it FlipBestowed, the settled name for FlipCanonical."
+        sentence = "We call it FlipBestowed, the resolved name for FlipCanonical."
         (ms / "01-flip.md").write_text(f"# Flip\n\n{sentence}\n")
 
         class NamingCeremonyLLM:
@@ -5171,7 +5171,7 @@ def check_provenance_verb() -> None:
               "start, plan, draft" in text, text)
         check("a beat drafted by one chat and settled by another is marked",
               "←" in text and "a beat drafted by one chat" in text, text)
-        check("a beat settled by its own proposer is not marked",
+        check("a beat resolved by its own proposer is not marked",
               text.count("←") == 2, text)      # the flag and the legend
         check("a pre-stamp row prints the backfill footnote, "
               "rather than rendering as unknown",
@@ -5224,7 +5224,135 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_critique_resolve_reembeds() -> None:
+    """critique resolve must re-insert illustration embeds on write-back.
+
+    Filter/lens already go through `_write_resolved_text`. Critique
+    resolve also reads embed-free Doc markdown (`tab_marked_markdown`)
+    and used to write it straight to disk — silently unlinking every
+    rendered plate while leaving the [Illustration:] tag (same class as
+    the SMSTTD 2026-09-02 filter/lens incident)."""
+    import argparse
+    import hashlib as _hashlib
+    import json as _json
+
+    import authorlm.gdocs as gdocs_mod
+    from authorlm import illus as illus_mod
+    from authorlm.cli import _critique_resolve_essay
+    from authorlm.db import ko_fields as _ko
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-critique-reembed-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "book"
+        (ms / "_illustrations" / "prompts").mkdir(parents=True)
+        key = "a-lone-tracker"
+        prompt = "a lone tracker"
+        (ms / "_illustrations" / "prompts" / f"{key}.md").write_text(
+            prompt + "\n")
+        h = illus_mod.desc_hash(prompt)
+        pick = f"{key}-{h}-0000-01.png"
+        newer = f"{key}-{h}-0000-02.png"
+        (ms / "_illustrations" / pick).write_bytes(b"")
+        (ms / "_illustrations" / newer).write_bytes(b"")
+        local = (
+            f"# Solo\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n"
+            f"![](_illustrations/{pick})\n\n"
+            f"Original paragraph text.\n")
+        (ms / "solo.md").write_text(local)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        mid = manuscript["id"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, {})
+        from authorlm import passes as passes_mod
+        passes_mod.ensure_pass(db, mid, db.source("system"))
+        normalized = gdocs_mod.normalize_markdown(local)
+        base_hash = _hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        meta = gdocs_mod._mapping(db, manuscript)
+        links = meta.setdefault("gdocs", {})
+        links["_master_id"] = "doc-fake"
+        links["solo.md"] = {"tab_id": "tab-1", "checked_out": False,
+                            "pushed_hash": base_hash}
+        gdocs_mod._save_mapping(db, manuscript, meta)
+
+        written_row = _ko("dt")
+        written_row.update(
+            manuscript_id=mid, origin_type="critique", origin_id="cp1",
+            file="solo.md", anchor_quote=None,
+            proposed_old="Original paragraph text.",
+            proposed_new="Resolved paragraph text.",
+            note="test", state="written", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md",
+            metadata=_json.dumps({"kind": "replace",
+                                  "anchor_paragraph": 1,
+                                  "intent_id": None,
+                                  "original_new": "Resolved paragraph text."}))
+        db.insert("doc_threads", written_row)
+
+        # Doc export: illustration tag kept, embed stripped, form pending.
+        doc_text = (
+            f"# Solo\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n\n"
+            f"<<Original paragraph text.>>{{{{Resolved paragraph text.}}}}\n")
+
+        class _Fake:
+            def files(self):
+                outer = self
+
+                class _Files:
+                    def export(self, fileId=None, mimeType=None):
+                        class _Req:
+                            def execute(self):
+                                whole = (f"# **solo.md**\n\n{doc_text}")
+                                return whole.encode("utf-8")
+                        return _Req()
+                return _Files()
+
+            def documents(self):
+                class _Documents:
+                    def get(self, documentId=None, includeTabsContent=None):
+                        class _Req:
+                            def execute(self):
+                                return {"tabs": [{
+                                    "tabProperties": {"tabId": "tab-1",
+                                                      "title": "solo.md"},
+                                    "childTabs": []}]}
+                        return _Req()
+                return _Documents()
+
+        fake = _Fake()
+        orig = (gdocs_mod.get_service, gdocs_mod.get_docs_service)
+        gdocs_mod.get_service = lambda *a, **k: fake
+        gdocs_mod.get_docs_service = lambda *a, **k: fake
+        try:
+            args = argparse.Namespace(target="solo.md", workspace=str(ws))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(db, manuscript, args)
+        finally:
+            gdocs_mod.get_service, gdocs_mod.get_docs_service = orig
+
+        on_disk = (ms / "solo.md").read_text()
+        check("critique resolve reembeds the prior illustration pick",
+              illus_mod.embed_target(on_disk, key) == pick
+              and f"![](_illustrations/{pick})" in on_disk
+              and "Resolved paragraph text." in on_disk
+              and "<<" not in on_disk,
+              on_disk)
+        check("critique resolve does not fall back to a newer candidate "
+              "when the prior pick still exists",
+              newer not in on_disk, on_disk)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_critique_resolve_reembeds()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
@@ -6040,6 +6168,51 @@ def main_test() -> None:
               escape_footnotes("[Illustration: a fork | caption: x]")
               == "[Illustration: a fork | caption: x]")
 
+        # Math spans are opaque to the normalizer (every backslash is
+        # TeX); display math lays out on one line; the Doc road
+        # round-trips byte for byte via escape_math on the way in and
+        # unescape_export_math on the way out (measured 2026-09-02:
+        # Google's importer eats one backslash before any punctuation,
+        # its exporter escapes \ _ = + *).
+        from authorlm.gdocs import escape_math, unescape_export_math
+
+        tex = ("Sets $\\{a, b\\}$ and $\\|x\\|$, $x_1^2 \\, a^*$.\n\n"
+               "$$\n\\begin{aligned}\na &= b \\\\\n&= c\n\\end{aligned}\n$$\n")
+        canon = normalize_markdown(tex)
+        check("normalizer leaves TeX untouched and lays display math on "
+              "one line",
+              canon == ("Sets $\\{a, b\\}$ and $\\|x\\|$, $x_1^2 \\, a^*$.\n\n"
+                        "$$ \\begin{aligned} a &= b \\\\ &= c "
+                        "\\end{aligned} $$\n"), repr(canon))
+        check("prose escapes still strip outside math, not inside",
+              normalize_markdown("a \\- b $\\-$ \\=c")
+              == "a - b $\\-$ =c\n",
+              repr(normalize_markdown("a \\- b $\\-$ \\=c")))
+        check("a price is not math",
+              normalize_markdown("costs $5 and $10 \\- cheap")
+              == "costs $5 and $10 - cheap\n")
+        import re as _re_math
+        importer = lambda s: _re_math.sub(r"\\([!-/:-@\[-`{-~])", r"\1", s)
+        exporter = lambda s: _re_math.sub(r"([\\_=+*])", r"\\\1", s)
+        doc_text = importer(escape_math(canon))
+        check("escape_math hands the importer exactly the TeX",
+              doc_text == canon, repr(doc_text))
+        pulled = normalize_markdown(unescape_export_math(exporter(doc_text)))
+        check("math round-trips the Doc road byte for byte",
+              pulled == canon, repr(pulled))
+        # Unclosed $$ used to fail open into the prose escape strip:
+        # push_doc writes normalize_markdown back to disk, so a mid-edit
+        # `\\` row break became `\` and `\{` braces vanished — permanent
+        # TeX corruption, not a cosmetic reflow.
+        orphan = ("Intro\n$$\n\\begin{matrix} a \\\\ b \\end{matrix}\n"
+                  "x \\{ y \\} and a \\| b\n")
+        got_orphan = normalize_markdown(orphan)
+        check("unclosed display math does not gut TeX on normalize",
+              "a \\\\ b" in got_orphan and "\\{ y \\}" in got_orphan
+              and "\\| b" in got_orphan
+              and normalize_markdown(got_orphan) == got_orphan,
+              repr(got_orphan))
+
         # An empty heading paragraph in the Doc (e.g. a blank Subtitle
         # line) must be dropped — never merged into the next heading
         # ('## ##', it-7b127d3164ff).
@@ -6074,22 +6247,65 @@ def main_test() -> None:
             "# C\n\n[Illustration: two turns in opposite order]\n")
         rep = slot_report(scratch)
         check("scan reports an unrendered slot with file and line",
-              rep["unrendered"] == [{"file": "ch.md", "line": 3,
-                                     "prompt": "two turns in opposite order"}]
+              [{k: v for k, v in rep["unrendered"][0].items()
+                if k in ("file", "line", "prompt")}]
+              == [{"file": "ch.md", "line": 3,
+                   "prompt": "two turns in opposite order"}]
               and not rep["orphaned"], str(rep))
+
+        # A slot's IDENTITY is its ref slug, minted at externalize. An
+        # inline slot has no key, so it can hold no art at all: the
+        # first image externalizes it first (it-2e4a5ec3d809).
+        from authorlm.illus import ensure_key, find_slot, slot_candidates
+        inline = find_slot(scratch, "two turns")[0]
+        check("an inline slot has no key and therefore no candidates",
+              inline["key"] is None
+              and slot_candidates(scratch, inline["key"]) == [])
+        keyed = ensure_key(scratch, inline)
+        check("ensure_key externalizes and mints the key from the ref",
+              keyed["key"] == "two-turns-in-opposite"
+              and keyed["ref"] == "two-turns-in-opposite.md"
+              and "⇢ two-turns-in-opposite.md"
+              in (scratch / "ch.md").read_text(), str(keyed))
+        check("ensure_key is idempotent on an already-keyed slot",
+              ensure_key(scratch, keyed) is keyed)
+
         ill_dir = scratch / "_illustrations"
-        ill_dir.mkdir()
         h = desc_hash("two turns in opposite order")
-        candidate = f"two-turns-in-opposite-{h}-0000-01.png"
+        candidate = f"{keyed['key']}-{h}-0000-01.png"
         (ill_dir / candidate).write_bytes(b"")
-        check("a matching candidate marks the slot rendered",
+        check("a candidate under the slot's key marks the slot rendered",
               not slot_report(scratch)["unrendered"])
-        (scratch / "ch.md").write_text(
-            "# C\n\n[Illustration: two turns, reworded]\n")
+
+        # THE REGRESSION. Rewording used to re-key the slot and orphan
+        # every image under it — the author reworks prompts constantly,
+        # and in the Doc, where nothing can warn them. The key lives in
+        # the tag, not in the prompt, so the art now survives a rewrite
+        # into something with no word in common.
+        (ill_dir / "prompts" / "two-turns-in-opposite.md").write_text(
+            "a bronze orrery under a shattered dome, nothing alike\n")
         rep = slot_report(scratch)
-        check("editing the prompt un-renders the slot and orphans the file",
-              rep["unrendered"][0]["prompt"] == "two turns, reworded"
-              and rep["orphaned"] == [candidate], str(rep))
+        check("rewording the description keeps the art attached",
+              not rep["unrendered"] and not rep["orphaned"], str(rep))
+        check("the reworded slot still resolves to its candidate",
+              [c["name"] for c in slot_candidates(
+                  scratch, find_slot(scratch, "orrery")[0]["key"])]
+              == [candidate], str(rep))
+        check("the stale marker records the description it was made for",
+              slot_candidates(scratch, keyed["key"])[0]["desc"] == h
+              and find_slot(scratch, "orrery")[0]["desc_hash"] != h)
+
+        # Deleting the SLOT still orphans its art — that is the honest
+        # signal, and it is now the only thing that produces one.
+        (scratch / "ch.md").write_text("# C\n\nno slot here\n")
+        check("deleting the slot orphans its candidate",
+              slot_report(scratch)["orphaned"] == [candidate],
+              str(slot_report(scratch)))
+        (scratch / "ch.md").write_text(
+            "# C\n\n[Illustration: a bronze orrery… "
+            "⇢ two-turns-in-opposite.md]\n")
+        check("restoring the tag re-attaches the art",
+              not slot_report(scratch)["orphaned"])
 
         # A `⇢` present but not matching the ref grammar (e.g. it doesn't
         # end in a bare 'name.md') must be reported loudly, never
@@ -6164,7 +6380,15 @@ def main_test() -> None:
             return tiny_png()
 
         slot = illus_mod.find_slot(ms, "forking path")[0]
+        # Mint the key explicitly and let collect absorb the externalize,
+        # so what follows tests the EMBED's invisibility and nothing else.
+        slot = illus_mod.ensure_key(ms, slot)
+        api.collect(db, manuscript, {})
         h = slot["desc_hash"]
+        check("externalizing to mint a key leaves the description hash "
+              "alone, so nothing already rendered is disturbed",
+              illus_mod.find_slot(ms, "forking path")[0]["desc_hash"] == h
+              and slot["key"] == "choice-as-a-forking", str(slot))
         r1 = illus_mod.render_slot(db, manuscript, slot, {},
                                    generator=fake_gen)
         first = f"choice-as-a-forking-{h}-0000-01.png"
@@ -6187,7 +6411,8 @@ def main_test() -> None:
               [n[-6:-4] for n in r2["written"]] == ["02", "03"]
               and r2["had_embed"]
               and illus_mod.embed_target(
-                  (ms / "01-choice.md").read_text(), h) == first, str(r2))
+                  (ms / "01-choice.md").read_text(),
+                  slot["key"]) == first, str(r2))
 
         api.add_style_law(db, manuscript, "illustration",
                               "woodcut, high-contrast linework",
@@ -6218,7 +6443,8 @@ def main_test() -> None:
               and assembled["law"] and assembled["law"] in
               assembled["composed"], str(assembled))
 
-        illus_mod.set_embed(ms / "01-choice.md", h, r3["written"][0])
+        illus_mod.set_embed(ms / "01-choice.md", slot["key"],
+                            r3["written"][0])
         removed = illus_mod.prune(manuscript)
         check("prune removes every unpicked candidate, keeps the pick",
               sorted(removed) == sorted([first,
@@ -6227,26 +6453,85 @@ def main_test() -> None:
               and (ms / "_illustrations" / r3["written"][0]).exists(),
               str(removed))
 
+        # --- import: art made elsewhere becomes a first-class candidate.
+        # The point of the door (it-2e4a5ec3d809): a system that can only
+        # consume its own renders cannot reuse an illustrator's work.
+        seed = root / "an-illustrator-plate.png"
+        seed.write_bytes(tiny_png())
+        imp = illus_mod.import_image(db, manuscript, slot, seed)
+        check("import lands under the slot's key, numbered i for imported",
+              imp["name"] == f"choice-as-a-forking-{h}-{shash}-i05.png"
+              and (ms / "_illustrations" / imp["name"]).exists()
+              and imp["had_embed"] is True, str(imp))
+        plate = (ms / "_illustrations" / imp["name"]).read_bytes()
+        check("an imported plate records where it came from",
+              b"authorlm:source" in plate
+              and b"an-illustrator-plate.png" in plate)
+        cands = illus_mod.slot_candidates(ms, slot["key"])
+        check("the import is a candidate like any other, marked imported",
+              [c["src"] for c in cands if c["name"] == imp["name"]] == ["i"]
+              and int(cands[-1]["n"]) == 5, str(cands))
+        illus_mod.set_embed(ms / "01-choice.md", slot["key"], imp["name"])
+        istatus = [s for s in illus_mod.slot_status(db, manuscript)
+                   if s["file"] == "01-choice.md"][0]
+        check("a slot standing on an imported plate reads as imported, "
+              "never as a render it is not",
+              istatus["state"] == "imported", str(istatus))
+        r4 = illus_mod.render_slot(db, manuscript, slot, {}, from_n=5,
+                                   generator=fake_gen)
+        check("an imported plate seeds a render like any other candidate",
+              gen_calls[-1][1] is not None
+              and r4["written"] == [
+                  f"choice-as-a-forking-{h}-{shash}-06.png"], str(r4))
+        (root / "notes.txt").write_text("not an image")
+        try:
+            illus_mod.import_image(db, manuscript, slot, root / "notes.txt")
+            refused = False
+        except ValueError:
+            refused = True
+        check("import refuses a file the manuscript could never embed",
+              refused)
+
+        # An import into an INLINE slot mints the key on the way in, the
+        # same as a render does — otherwise the plate would be named
+        # after a description and orphan on the next reword.
+        (ms / "01-choice.md").write_text(
+            (ms / "01-choice.md").read_text()
+            + "\n[Illustration: a bare hillside at first light]\n")
+        bare_slot = illus_mod.find_slot(ms, "bare hillside")[0]
+        check("the new slot starts inline, with no key", not bare_slot["key"])
+        imp2 = illus_mod.import_image(db, manuscript, bare_slot, seed)
+        check("importing into an inline slot externalizes it first",
+              imp2["ref"] == "a-bare-hillside-at.md"
+              and imp2["name"].startswith("a-bare-hillside-at-")
+              and imp2["name"].endswith("-i01.png")
+              and "⇢ a-bare-hillside-at.md"
+              in (ms / "01-choice.md").read_text()
+              and not imp2["had_embed"], str(imp2))
+
         # --- capture_embeds/reembed: the pick survives a Doc round trip ---
         embed_root = root / "illus-embed-scratch"
-        (embed_root / "_illustrations").mkdir(parents=True)
+        (embed_root / "_illustrations" / "prompts").mkdir(parents=True)
         (embed_root / "ch.md").write_text(
-            "# C\n\n[Illustration: a lone tracker]\n")
+            "# C\n\n[Illustration: a lone tracker ⇢ a-lone-tracker.md]\n")
+        (embed_root / "_illustrations" / "prompts"
+         / "a-lone-tracker.md").write_text("a lone tracker\n")
+        ekey = "a-lone-tracker"
         eh = illus_mod.desc_hash("a lone tracker")
-        cand1 = f"a-lone-tracker-{eh}-0000-01.png"
-        cand2 = f"a-lone-tracker-{eh}-0000-02.png"
+        cand1 = f"{ekey}-{eh}-0000-01.png"
+        cand2 = f"{ekey}-{eh}-0000-02.png"
         (embed_root / "_illustrations" / cand1).write_bytes(b"")
         (embed_root / "_illustrations" / cand2).write_bytes(b"")
         bare = (embed_root / "ch.md").read_text()
 
         never_picked = illus_mod.reembed(bare, embed_root)
         check("a never-picked slot falls back to the newest candidate",
-              illus_mod.embed_target(never_picked, eh) == cand2, never_picked)
+              illus_mod.embed_target(never_picked, ekey) == cand2, never_picked)
 
-        pick = {eh: cand1}
+        pick = {ekey: cand1}
         embedded = illus_mod.reembed(bare, embed_root, prior=pick)
         check("a prior pick wins over the newest candidate",
-              illus_mod.embed_target(embedded, eh) == cand1, embedded)
+              illus_mod.embed_target(embedded, ekey) == cand1, embedded)
         check("capture_embeds recovers the exact picked candidate",
               illus_mod.capture_embeds(embedded) == pick,
               illus_mod.capture_embeds(embedded))
@@ -6257,7 +6542,7 @@ def main_test() -> None:
         (embed_root / "_illustrations" / cand1).unlink()
         fallback = illus_mod.reembed(bare, embed_root, prior=pick)
         check("a pick whose file is gone falls back to the newest candidate",
-              illus_mod.embed_target(fallback, eh) == cand2, fallback)
+              illus_mod.embed_target(fallback, ekey) == cand2, fallback)
 
         # In-memory Drive + Docs fake for the tabbed master-Doc model:
         # one object serves as both `service` and `docs_service`. Master
@@ -6283,7 +6568,7 @@ def main_test() -> None:
                 fid = f"doc-{self.state['counter']}"
                 if media_body is not None:  # markdown import (temp/export)
                     self.state["uploads"][fid] = media_body.getbytes(
-                        0, media_body.size()).decode("utf-8")
+                        0, media_body.size()).decode("utf-8", "replace")
                 elif (body or {}).get("mimeType") == FOLDER_MIME:
                     self.state["folders"].append(fid)
                 else:  # a native Doc, born with the blank default tab
@@ -6295,7 +6580,7 @@ def main_test() -> None:
 
             def update(self, fileId=None, media_body=None):
                 self.state["uploads"][fileId] = media_body.getbytes(
-                    0, media_body.size()).decode("utf-8")
+                    0, media_body.size()).decode("utf-8", "replace")
                 return FakeRequest({})
 
             def delete(self, fileId=None):
@@ -6679,24 +6964,40 @@ def main_test() -> None:
         # Embed round trip: the embed line never reaches the Doc, and a
         # pull restores the pinned pick under its tag.
         picked_name = r3["written"][0]
+        keyed_tag = ("[Illustration: choice as a forking path "
+                     "⇢ choice-as-a-forking.md]")
         (ms / "01-choice.md").write_text(
-            "# Title\n\n[Illustration: choice as a forking path]\n"
+            f"# Title\n\n{keyed_tag}\n"
             f"![](_illustrations/{picked_name})\n\nProse below.\n")
         push_doc(db, manuscript, "01-choice.md",
                  service=stub, docs_service=stub)
         tab_now = next(t["text"] for t in stub.state["docs"]["doc-2"]
                        if t["title"] == "01-choice.md")
         check("push keeps the tag but never the embed line",
-              "[Illustration: choice as a forking path]" in tab_now
-              and "_illustrations" not in tab_now, tab_now)
+              keyed_tag in tab_now
+              and "_illustrations/choice" not in tab_now, tab_now)
         stub.set_tab("01-choice.md", tab_now.replace(
             "Prose below.", "Prose below, edited in the Doc."))
         pull_doc(db, manuscript, "01-choice.md", service=stub)
         round_tripped = (ms / "01-choice.md").read_text()
         check("pull re-inserts the pinned embed under its tag",
-              f"[Illustration: choice as a forking path]\n"
-              f"![](_illustrations/{picked_name})" in round_tripped
+              f"{keyed_tag}\n![](_illustrations/{picked_name})"
+              in round_tripped
               and "edited in the Doc" in round_tripped, round_tripped)
+
+        # THE REGRESSION, at the door it actually came through: the
+        # author rewords a description IN THE DOC. The old capture was
+        # keyed by the description hash, so the reworded tag matched
+        # nothing and the pull dropped the picked image on the floor.
+        stub.set_tab("01-choice.md", tab_now.replace(
+            "choice as a forking path",
+            "a road parting under a low sky, nothing alike"))
+        pull_doc(db, manuscript, "01-choice.md", service=stub)
+        reworded = (ms / "01-choice.md").read_text()
+        check("rewording the description in the Doc keeps the pinned "
+              "image through the pull",
+              f"![](_illustrations/{picked_name})" in reworded
+              and "a road parting under a low sky" in reworded, reworded)
 
         # --- session-start reconciliation: all four outcomes ---
         from authorlm.gdocs import reconcile
@@ -6878,6 +7179,29 @@ def main_test() -> None:
               == ("Para one.\n\ninserted paragraph\n\n"
                   "swapped\n\nPara three.\n"),
               th.approved_text(with_insert))
+        # Author braces reach the tab via push; bare-INSERTION collapse
+        # used to delete them on pull/reconcile (silent auto-pull when
+        # local still matched pushed_hash). Paragraph insertions only.
+        author_braces = (
+            "A template substitutes {{title}} and writes {{a, b}}.\n\n"
+            "Energy $E={{mc}}^2$.\n")
+        brace_stripped, brace_warns = th.strip_pending(author_braces)
+        check("strip_pending leaves author {{…}} / TeX braces intact "
+              "with no marker warning",
+              brace_stripped == author_braces and brace_warns == [],
+              repr((brace_stripped, brace_warns)))
+        head_insert = "{{lead insert}}\n\n" + author_braces
+        head_stripped, _ = th.strip_pending(head_insert)
+        check("strip_pending still drops a start-of-text critique "
+              "insertion while keeping author braces below it",
+              head_stripped == author_braces
+              and "{{title}}" in head_stripped,
+              repr(head_stripped))
+        check("approved_text unwraps paragraph insertions but does not "
+              "eat inline author braces",
+              th.approved_text(head_insert)
+              == "lead insert\n\n" + author_braces,
+              th.approved_text(head_insert))
         forms = th.pending_forms(with_insert)
         check("pending_forms lists replace + insert once each, doc order",
               [(f["kind"], f["old"], f["new"]) for f in forms]
@@ -6901,6 +7225,30 @@ def main_test() -> None:
               and not stub.state["comments"]["c-1"]["resolved"]
               and pulled_c["threads"]["counts"] == {},
               str(pulled_c.get("comments")))
+
+        # Nested braces truncate at the first }} — refuse BEFORE Doc write.
+        # `_mark_replace_requests` is the form-construction gate; without
+        # the assert there, propose_change wrote the corrupt span then
+        # raised only when building the return value via render_pending.
+        tab_before_bad = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                              if t2["title"] == "01-choice.md")
+        try:
+            propose_change(
+                db, manuscript, "c-1", old="Doc went another way.",
+                new="f(x)={{a}}", note="nested braces",
+                service=stub, docs_service=stub)
+            check("propose_change refuses delimiter-bearing new "
+                  "before any Doc write", False)
+        except ValueError as err:
+            tab_after_bad = next(
+                t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                if t2["title"] == "01-choice.md")
+            check("propose_change refuses delimiter-bearing new "
+                  "before any Doc write",
+                  "pending-change grammar" in str(err)
+                  and tab_after_bad == tab_before_bad
+                  and th.get_thread(db, manuscript["id"], "c-1") is None,
+                  f"err={err!s} tab={tab_after_bad!r}")
 
         prop = propose_change(
             db, manuscript, "c-1", old="Doc went another way.",
@@ -7267,6 +7615,10 @@ def main_test() -> None:
             "This text is nowhere in the essay.",
             "Should fail loudly.",
             2, "replace")
+        t_brace = _crit_thread(
+            "Second body paragraph stays.",
+            "Keep the {{nested}} braces out.",
+            3, "replace")
         t_rej = _crit_thread(
             "Second body paragraph stays.",
             "Should never appear.",
@@ -7281,7 +7633,7 @@ def main_test() -> None:
         # that it never reaches the tab still means what it meant.
         result = write_pending_forms(
             db, manuscript, "07-critique-write.md",
-            [t_rep, t_ins, t_bad], stub, stub)
+            [t_rep, t_ins, t_bad, t_brace], stub, stub)
         tab_cw = next(t["text"] for t in stub.state["docs"]["doc-2"]
                       if t["title"] == "07-critique-write.md")
         written_ids = {t["id"] for t in result["written"]}
@@ -7303,6 +7655,13 @@ def main_test() -> None:
               t_rej["id"] not in written_ids
               and t_rej["id"] not in failed_ids
               and "Should never appear" not in tab_cw, tab_cw)
+        check("write_pending_forms refuses delimiter-bearing new "
+              "without writing the corrupt span",
+              t_brace["id"] in failed_ids
+              and t_brace["id"] not in written_ids
+              and "{{nested}}" not in tab_cw
+              and "Keep the" not in tab_cw,
+              f"failed={result['failed']!r} tab={tab_cw!r}")
         check("write_pending_forms leaves local file as OLD (pristine)",
               (ms / "07-critique-write.md").read_text() == local_before)
         check("write_pending_forms reports a Doc tab URL",
@@ -7351,7 +7710,9 @@ def main_test() -> None:
         local_only = export_manuscript(db, manuscript, service=None)
         export_path = ms / "_exports" / "book.md"
         check("export writes _exports/<name>.md even without Drive",
-              local_only["doc_id"] is None and export_path.read_text() == text)
+              local_only["doc_id"] is None
+              and "firmer road" in export_path.read_text()
+              and "Welcome." in export_path.read_text())
 
         # Footnote labels are only file-unique; concatenation must
         # namespace them or pandoc binds colliding labels to one
@@ -7394,26 +7755,36 @@ def main_test() -> None:
             '[[chapter]]\nfile = "01-choice.md"\n\n'
             '[[chapter]]\nfile = "00-intro.md"\n')
 
-        exported = export_manuscript(db, manuscript, service=stub)
-        check("export creates the manuscript Doc in the existing folder",
-              exported["created"] and exported["doc_id"] is not None
-              and stub.state["folders"] == ["doc-1"])
-        exported2 = export_manuscript(db, manuscript, service=stub)
-        check("re-export updates the same Doc (no new one)",
-              not exported2["created"]
-              and exported2["doc_id"] == exported["doc_id"])
+        # The export Doc is born from the pandoc DOCX (Drive converts
+        # Word equations, footnotes and images to native Doc objects,
+        # which the markdown importer cannot carry) — so the Drive half
+        # needs pandoc, like every other publishing output.
+        import shutil as _shutil_exp
+        if _shutil_exp.which("pandoc"):
+            exported = export_manuscript(db, manuscript, service=stub)
+            check("export creates the manuscript Doc in the existing folder",
+                  exported["created"] and exported["doc_id"] is not None
+                  and stub.state["folders"] == ["doc-1"])
+            check("the export Doc is uploaded as a DOCX built beside the md",
+                  (ms / "_exports" / "book.docx").exists()
+                  and stub.state["uploads"][exported["doc_id"]]
+                  .startswith("PK"))
+            exported2 = export_manuscript(db, manuscript, service=stub)
+            check("re-export updates the same Doc (no new one)",
+                  not exported2["created"]
+                  and exported2["doc_id"] == exported["doc_id"])
 
-        # A Doc deleted by hand in Drive is transient — recreated on export.
-        class Gone(Exception):
-            resp = type("R", (), {"status": 404})()
+            # A Doc deleted by hand in Drive is transient — recreated on export.
+            class Gone(Exception):
+                resp = type("R", (), {"status": 404})()
 
-        original_update = stub._files.update
-        stub._files.update = lambda fileId=None, media_body=None: (_ for _ in ()).throw(Gone())
-        exported3 = export_manuscript(db, manuscript, service=stub)
-        stub._files.update = original_update
-        check("a hand-deleted export Doc is recreated",
-              exported3["created"]
-              and exported3["doc_id"] != exported["doc_id"])
+            original_update = stub._files.update
+            stub._files.update = lambda fileId=None, media_body=None: (_ for _ in ()).throw(Gone())
+            exported3 = export_manuscript(db, manuscript, service=stub)
+            stub._files.update = original_update
+            check("a hand-deleted export Doc is recreated",
+                  exported3["created"]
+                  and exported3["doc_id"] != exported["doc_id"])
 
         titled = export_manuscript(db, manuscript, service=None, title="My Book")
         check("retitled export replaces the stale local file",
@@ -7429,12 +7800,18 @@ def main_test() -> None:
 
         # --- publishing exports: variants, settings, local pandoc ---
         from authorlm.export import (export_published, load_settings,
-                                     publish_markdown, set_setting)
+                                     publish_markdown, selection_slug,
+                                     set_setting)
 
+        winding_tag = ("[Illustration: a winding path ⇢ a-winding-path.md"
+                       " | caption: The path]")
         (ms / "00-intro.md").write_text(
             "An opening epigraph.\n\n# Intro\n\nWelcome.\n\n"
-            "[Illustration: a winding path | caption: The path]\n\n"
+            f"{winding_tag}\n\n"
             "[Illustration: an unrendered idea]\n")
+        (ms / "_illustrations" / "prompts").mkdir(exist_ok=True)
+        (ms / "_illustrations" / "prompts"
+         / "a-winding-path.md").write_text("a winding path\n")
         path_hash = illus_mod.desc_hash("a winding path")
         winding = f"a-winding-path-{path_hash}-0000-01.png"
         (ms / "_illustrations" / winding).write_bytes(tiny_png())
@@ -7450,8 +7827,147 @@ def main_test() -> None:
               and "Welcome." in stripped_text)
         slots_text, _, _ = publish_markdown(manuscript, "slots")
         check("slots variant keeps tags verbatim as production notes",
-              "[Illustration: a winding path | caption: The path]"
-              in slots_text)
+              winding_tag in slots_text)
+
+        # --- per-output regions: [Omit:] / [Only:] and the audio default ---
+        (ms / "03-physics.md").write_text(
+            "# Physics\n\nGauss's law in one line.\n\n"
+            "[Omit: audio, epub]\n"
+            "$$ \\nabla \\cdot \\mathbf{E} = \\frac{\\rho}{\\varepsilon_0} $$\n"
+            "[/Omit]\n\n"
+            "[Only: audio]\nSpoken: flux equals enclosed charge over "
+            "the permittivity.\n[/Only]\n\n"
+            "Bare display math:\n\n$$ E = mc^2 $$\n\n"
+            "And inline $E$ stays.\n")
+        pdf_text, _, _ = publish_markdown(manuscript, "images", fmt="pdf")
+        epub_text, _, _ = publish_markdown(manuscript, "images", fmt="epub")
+        audio_text, _, _ = publish_markdown(manuscript, "stripped", fmt="md")
+        md_text, _, _ = publish_markdown(manuscript, "images", fmt="md")
+        # Sticky settings: variant=stripped is the audio-clean markdown
+        # door. A later PDF/EPUB/DOCX/Doc build that inherits it must
+        # still strip plates, but must NOT join the `audio` output —
+        # otherwise display math and [Omit: audio] passages vanish from
+        # print with no error.
+        stripped_pdf, _, _ = publish_markdown(
+            manuscript, "stripped", fmt="pdf")
+        from authorlm.export import publish_outputs
+        check("stripped PDF is not an audio build",
+              publish_outputs("pdf", "stripped") == frozenset({"pdf"})
+              and publish_outputs("md", "stripped")
+              == frozenset({"md", "audio"}))
+        check("stripped PDF keeps [Omit: audio] math and drops [Only: audio]",
+              "\\nabla" in stripped_pdf and "mc^2" in stripped_pdf
+              and "Spoken:" not in stripped_pdf
+              and "inline $E$ stays" in stripped_pdf, stripped_pdf)
+        check("stripped PDF still drops illustration tags",
+              "[Illustration" not in stripped_pdf
+              and "Welcome." in stripped_pdf, stripped_pdf)
+        check("[Omit:] drops a region only from the named outputs",
+              "\\nabla" in pdf_text and "\\nabla" not in epub_text
+              and "\\nabla" not in audio_text, epub_text)
+        check("[Only:] keeps a region for the named outputs alone",
+              "Spoken:" in audio_text and "Spoken:" not in pdf_text
+              and "Spoken:" not in md_text, audio_text)
+        from authorlm.export import (combined_markdown, resolve_regions,
+                                     strip_display_math)
+        # Nested Only-inside-Omit is the documented substitution pattern
+        # (math-and-physics-guidelines §5). Conjunctive all()-of-frames
+        # deleted both halves for audio; Only must re-include its body.
+        nested_sub = (
+            "Lead-in.\n\n"
+            "[Omit: audio]\n"
+            "$$ \\nabla \\cdot \\mathbf{E} = 0 $$\n"
+            "[Only: audio]\n"
+            "Nested spoken: divergence of E is zero.\n"
+            "[/Only]\n"
+            "[/Omit]\n\n"
+            "Tail.\n")
+        nested_audio = resolve_regions(nested_sub, {"audio"})
+        nested_pdf = resolve_regions(nested_sub, {"pdf"})
+        check("Only inside Omit keeps the audio substitute",
+              "Nested spoken:" in nested_audio
+              and "\\nabla" not in nested_audio
+              and "Lead-in." in nested_audio and "Tail." in nested_audio,
+              nested_audio)
+        check("Only inside Omit still drops the substitute from print",
+              "Nested spoken:" not in nested_pdf
+              and "\\nabla" in nested_pdf
+              and "Lead-in." in nested_pdf, nested_pdf)
+        check("tag lines never reach a reader",
+              "[Omit" not in pdf_text and "[/Only" not in audio_text
+              and "[Only" not in md_text, md_text)
+        check("audio drops untagged display math and keeps inline math",
+              "mc^2" not in audio_text and "inline $E$ stays" in audio_text
+              and "mc^2" in epub_text, audio_text)
+        check("a multi-line $$ block is one display equation to audio",
+              strip_display_math("a\n$$\nx\n$$\nb") == "a\nb")
+        # Unclosed / malformed $$ used to fail OPEN: everything after the
+        # opener vanished from the audio-clean export with no error
+        # (guidelines §6: malformed tags refuse by file and line).
+        for bad_math, why in (("a\n$$\nx\n\nb", "never closed"),
+                              ("a\n$$100 was the price.\nb",
+                               "lone $$ or a single-line")):
+            try:
+                strip_display_math(bad_math, "f.md")
+                refused = ""
+            except ValueError as err:
+                refused = str(err)
+            check(f"malformed display math is refused, not truncated ({why})",
+                  why in refused and "f.md:" in refused, refused)
+        # Plant an unclosed $$ in a content file and prove the audio
+        # export refuses rather than shipping a truncated chapter.
+        physics = (ms / "03-physics.md").read_text(encoding="utf-8")
+        (ms / "03-physics.md").write_text(
+            physics + "\n$$\norphan display\n", encoding="utf-8")
+        try:
+            publish_markdown(manuscript, "stripped", fmt="md")
+            trunc_refused = ""
+        except ValueError as err:
+            trunc_refused = str(err)
+        (ms / "03-physics.md").write_text(physics, encoding="utf-8")
+        check("audio export refuses an unclosed display-math block",
+              "03-physics.md:" in trunc_refused
+              and "never closed" in trunc_refused, trunc_refused)
+        for bad, why in (("[Omit: audoi]\nx\n[/Omit]", "unknown output"),
+                         ("[Omit: pdf]\nx", "never closed"),
+                         ("x\n[/Only]", "closes nothing"),
+                         ("[Only: pdf]\nx\n[/Omit]", "closes nothing")):
+            try:
+                resolve_regions(bad, {"pdf"}, "f.md")
+                refused = ""
+            except ValueError as err:
+                refused = str(err)
+            check(f"a malformed region is refused, not guessed ({why})",
+                  why in refused and "f.md:" in refused, refused)
+        check("regions resolve for the export Doc as output 'doc'",
+              "\\nabla" in combined_markdown(manuscript)[0]
+              and "Spoken:" not in combined_markdown(manuscript)[0])
+        from authorlm.export import check_manuscript
+        clean_problems = check_manuscript(manuscript)
+        (ms / "04-bad.md").write_text(
+            "# Bad\n\n[Omit: audoi]\nx\n[/Omit]\n\n"
+            "Physics-package math $\\dv{x}{t}$ here.\n")
+        bad_problems = check_manuscript(manuscript)
+        check("export check passes a well-formed book",
+              not [p for p in clean_problems if not p.startswith("pandoc")],
+              clean_problems)
+        check("export check names a malformed region by file and line",
+              any(p.startswith("04-bad.md:3") and "unknown output" in p
+                  for p in bad_problems), bad_problems)
+        (ms / "05-math.md").write_text(
+            "# Math\n\nBefore.\n$$\nE = mc^2\n\n## After\nDone.\n")
+        math_problems = check_manuscript(manuscript)
+        (ms / "05-math.md").unlink()
+        check("export check names unclosed display math by file",
+              any("05-math.md:" in p and "never closed" in p
+                  for p in math_problems), math_problems)
+        import shutil as _shutil_chk
+        if _shutil_chk.which("pandoc"):
+            check("export check names math outside the portable subset",
+                  any("04-bad.md: math outside" in p and "dv" in p
+                      for p in bad_problems), bad_problems)
+        (ms / "04-bad.md").unlink()
+        (ms / "03-physics.md").unlink()
 
         set_setting(manuscript, "variant", "slots")
         check("export settings persist in _exports/settings.toml",
@@ -7503,6 +8019,11 @@ def main_test() -> None:
               and any(item.startswith("copyright-year=")
                       for item in pdf_metadata),
               str(pdf_command))
+        check("review PDF writes a mode-specific filename",
+              Path(pdf_result["pdf"]).name.endswith(".review.pdf")
+              and pdf_command[pdf_command.index("-o") + 1]
+              == pdf_result["pdf"],
+              pdf_result["pdf"])
         check("PDF export starts the whole essay before its epigraph",
               "::: {.authorlm-file .authorlm-essay}\n"
               "An opening epigraph.\n\n# Intro"
@@ -7538,6 +8059,12 @@ def main_test() -> None:
               and "author=Author Penname" in print_metadata
               and any(item.startswith("subject=Copyright © ")
                       for item in print_metadata), str(print_command))
+        check("print-ready PDF writes a distinct filename from review",
+              Path(print_result["pdf"]).name.endswith(".print.pdf")
+              and print_result["pdf"] != pdf_result["pdf"]
+              and print_command[print_command.index("-o") + 1]
+              == print_result["pdf"],
+              f"{pdf_result['pdf']} vs {print_result['pdf']}")
         from authorlm.cli import build_parser as _build_parser
         print_args = _build_parser().parse_args(
             ["export", "pdf", "--print-ready"])
@@ -7552,6 +8079,106 @@ def main_test() -> None:
             non_pdf_print_ready_refused = True
         check("publication interface restricts print-ready mode to PDF",
               non_pdf_print_ready_refused)
+
+        # --- print geometry: trim size + bleed are manuscript properties;
+        # the book profile is a print interior at that trim.
+        from authorlm.api import parse_trim_size
+        from authorlm.export import book_geometry, kdp_gutter
+
+        check("trim size parses every human spelling to inches",
+              parse_trim_size("6x9") == (6.0, 9.0)
+              and parse_trim_size("6 X 9") == (6.0, 9.0)
+              and parse_trim_size("6in x 9in") == (6.0, 9.0)
+              and parse_trim_size("5.5×8.5") == (5.5, 8.5)
+              and parse_trim_size("") == (0.0, 0.0))
+        try:
+            parse_trim_size("3x4")
+            tiny_trim_refused = False
+        except ValueError:
+            tiny_trim_refused = True
+        try:
+            parse_trim_size("six by nine")
+            word_trim_refused = False
+        except ValueError:
+            word_trim_refused = True
+        check("trim size refuses the unprintable and the unparseable",
+              tiny_trim_refused and word_trim_refused)
+        try:
+            export_published(db, manuscript, fmt="pdf", variant="images",
+                             profile="book")
+            book_without_trim_refused = False
+        except RuntimeError as err:
+            book_without_trim_refused = "trim size" in str(err)
+        check("book profile refuses to build without a trim size",
+              book_without_trim_refused)
+        try:
+            export_published(db, manuscript, fmt="epub", variant="images",
+                             profile="book")
+            book_non_pdf_refused = False
+        except ValueError:
+            book_non_pdf_refused = True
+        check("book profile is PDF-only", book_non_pdf_refused)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "manuscript", "set",
+                      "--trim-size", "6x9", "--bleed", "no"])
+        manuscript = api.get_manuscript(db)
+        identity = api.manuscript_metadata(manuscript)
+        check("trim size and bleed round-trip through the CLI and the "
+              "identity view",
+              manuscript["trim_width"] == 6.0
+              and manuscript["trim_height"] == 9.0
+              and manuscript["bleed"] == 0
+              and identity["trim_size"] == "6x9"
+              and identity["bleed"] is False)
+        check("the KDP gutter follows the page count",
+              kdp_gutter(38) == 0.375 and kdp_gutter(151) == 0.5
+              and kdp_gutter(500) == 0.625 and kdp_gutter(None) == 0.5
+              and kdp_gutter(5000) == 0.875)
+        check("book geometry is the trim plus gutter, growing with bleed",
+              book_geometry(6, 9, False, 38).startswith(
+                  "paperwidth=6in,paperheight=9in,inner=0.75in,"
+                  "outer=0.625in,top=0.75in,bottom=0.75in")
+              and book_geometry(6, 9, True, 200).startswith(
+                  "paperwidth=6.125in,paperheight=9.25in,inner=0.875in,"
+                  "outer=0.75in,top=0.875in,bottom=0.875in"))
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as book_run):
+            book_result = export_published(
+                db, manuscript, fmt="pdf", variant="images",
+                profile="book")
+        book_command = book_run.call_args.args[0]
+        book_defaults = [Path(book_command[i + 1]).name
+                         for i, arg in enumerate(book_command[:-1])
+                         if arg == "--defaults"]
+        book_vars = [book_command[i + 1]
+                     for i, arg in enumerate(book_command[:-1])
+                     if arg == "-V"]
+        book_markdown = Path(book_result["markdown"]).read_text()
+        check("book profile builds through book.yaml at the trim, with "
+              "no review marks and its own filename",
+              book_result["mode"] == "book"
+              and book_defaults == ["common.yaml", "book.yaml"]
+              and any(v.startswith("geometry=paperwidth=6in,paperheight=9in")
+                      for v in book_vars)
+              and any(v.startswith("header-includes=")
+                      and "AuthorLMRunningBook" in v for v in book_vars)
+              and "authorlm-review-copy=true" not in book_command
+              and Path(book_result["markdown"]).stem.endswith(" - book")
+              and any("no paperback ISBN" in w or "page count" in w
+                      for w in book_result["warnings"]),
+              str(book_command) + str(book_result["warnings"]))
+        check("the publishable markdown carries each file's matter",
+              "::: {.authorlm-file .authorlm-title-page .authorlm-matter-front}"
+              in book_markdown
+              and ".authorlm-essay .authorlm-matter-main}" in book_markdown,
+              book_markdown[:600])
+        book_args = _build_parser().parse_args(
+            ["export", "pdf", "--profile", "book"])
+        check("CLI exposes the book profile", book_args.profile == "book")
+        # Reset for the pandoc export test below, which asserts the
+        # review filenames.
+        api.update_manuscript_metadata(db, manuscript, trim_size="")
 
         import shutil as _shutil
         if _shutil.which("pandoc"):
@@ -7629,6 +8256,77 @@ def main_test() -> None:
             refused = True
         check("an unknown chapter name is refused, not silently empty",
               refused)
+        slug_a = selection_slug(
+            ["01.md", "02.md", "03.md", "04.md"])
+        slug_b = selection_slug(
+            ["01.md", "02.md", "03.md", "05.md"])
+        check("part-build slugs stay distinct when the first three "
+              "stems match",
+              slug_a != slug_b
+              and slug_a == "01+02+03+04" and slug_b == "01+02+03+05",
+              f"{slug_a!r} vs {slug_b!r}")
+        check("short part-build selections stay fully readable",
+              selection_slug(["ascending.md", "discernment.md"])
+              == "ascending+discernment")
+        # Force the 60-char budget so the digest path is exercised —
+        # same first three stems, different tails, must not collide.
+        crowded_a = selection_slug([
+            "part-alpha.md", "part-beta.md", "part-gamma.md",
+            "chapter-with-a-quite-long-stem-one.md",
+            "chapter-with-a-quite-long-stem-two.md"])
+        crowded_b = selection_slug([
+            "part-alpha.md", "part-beta.md", "part-gamma.md",
+            "chapter-with-a-quite-long-stem-one.md",
+            "chapter-with-a-quite-long-stem-zzz.md"])
+        check("truncated part-build slugs keep a digest so crowded "
+              "selections cannot collide",
+              crowded_a != crowded_b
+              and crowded_a.startswith("part-alpha+part-beta+part-gamma+more-")
+              and crowded_b.startswith("part-alpha+part-beta+part-gamma+more-")
+              and len(crowded_a) <= 60 and len(crowded_b) <= 60,
+              f"{crowded_a!r} vs {crowded_b!r}")
+        long_a = selection_slug([
+            "very-long-chapter-stem-aaaaaaaaaaaa.md",
+            "very-long-chapter-stem-bbbbbbbbbbbb.md"])
+        long_b = selection_slug([
+            "very-long-chapter-stem-aaaaaaaaaaaa.md",
+            "very-long-chapter-stem-cccccccccccc.md"])
+        check("long stem truncations stay distinct under the 60-char "
+              "budget",
+              long_a != long_b and len(long_a) <= 60 and len(long_b) <= 60,
+              f"{long_a!r} vs {long_b!r}")
+        # Expand TOC so overlapping multi-chapter selections are available.
+        (ms / "03-next.md").write_text("# Next\n\nFurther on.\n")
+        (ms / "04-alt.md").write_text("# Alt\n\nA different end.\n")
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "02-aside.md"\n'
+            'parent = "00-intro.md"\n\n'
+            '[[chapter]]\nfile = "01-choice.md"\n\n'
+            '[[chapter]]\nfile = "03-next.md"\n\n'
+            '[[chapter]]\nfile = "04-alt.md"\n')
+        manuscript = api.get_manuscript(db)
+        first = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next", "04-alt"])
+        second = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next"])
+        # Re-export the four-file selection; its path must still exist
+        # beside the three-file artifact (not clobber it).
+        first_again = export_published(
+            db, manuscript, fmt="md", variant="images",
+            only=["00-intro", "01-choice", "03-next", "04-alt"])
+        check("overlapping part-builds write distinct _exports paths",
+              first["markdown"] != second["markdown"]
+              and Path(first["markdown"]).exists()
+              and Path(second["markdown"]).exists()
+              and first_again["markdown"] == first["markdown"]
+              and "Further on." in Path(first["markdown"]).read_text()
+              and "A different end." in Path(first["markdown"]).read_text()
+              and "A different end." not in Path(
+                  second["markdown"]).read_text(),
+              f"{first['markdown']!r} vs {second['markdown']!r}")
         if _shutil.which("pandoc"):
             whole = export_published(db, manuscript, fmt="md",
                                      variant="images")
@@ -8242,7 +8940,7 @@ def main_test() -> None:
         illus_tab = next(t for t in master if t["title"] == ILLUS_TAB_TITLE)
         slug_tab = next(t for t in master if t["title"] == ref)
         check("full push mirrors the prompt file into the reserved tree",
-              prom["created"] == [ref] and not prom["updated"]
+              ref in prom["created"] and not prom["updated"]
               and slug_tab.get("parent") == illus_tab["id"]
               and illus_tab.get("parent") is None
               and slug_tab["text"].strip()
@@ -8391,14 +9089,14 @@ def main_test() -> None:
         from authorlm.illus import load_prompts
 
         orrery_slot = il.find_slot(ms, "reconsidered twice")[0]
-        cand = f"a-silver-orrery-{orrery_slot['desc_hash']}-0000-01.png"
+        cand = (f"{orrery_slot['key']}-{orrery_slot['desc_hash']}"
+                "-0000-01.png")
         (ms / "_illustrations" / cand).write_bytes(tiny_png())
-        ok_pin = il.set_embed(ms / "06-orrery.md",
-                              orrery_slot["desc_hash"], cand,
-                              il.load_prompts(ms))
-        check("set_embed finds an externalized slot by canonical hash",
-              ok_pin and f"![](_illustrations/{cand})"
-              in (ms / "06-orrery.md").read_text(), "")
+        ok_pin = il.set_embed(ms / "06-orrery.md", orrery_slot["key"], cand)
+        check("set_embed finds an externalized slot by its key",
+              ok_pin and orrery_slot["key"] == ref[:-3]
+              and f"![](_illustrations/{cand})"
+              in (ms / "06-orrery.md").read_text(), str(orrery_slot))
         fixes = il.maintain_excerpts(ms)
         check("maintenance mirrors the essay's pick into the prompt file",
               any(f.get("embed_synced") for f in fixes)
@@ -8579,7 +9277,7 @@ def main_test() -> None:
         stub.state["comments"]["c-nowhere"]["resolved"] = True
         cleared = push_doc(db, manuscript, "06-orrery.md", service=stub,
                            docs_service=stub)
-        check("a settled margin restores the rebuild path",
+        check("a resolved margin restores the rebuild path",
               "mode" not in cleared, str(cleared))
 
         # Critique pending forms are invisible to open_threads (author_comment
@@ -9103,9 +9801,9 @@ def main_test() -> None:
               closed["status"] == "resolved")
         try:
             api.resolve_improvement(db, task["id"], "dismiss", note="n/a")
-            check("a settled task cannot be re-transitioned", False)
+            check("a resolved task cannot be re-transitioned", False)
         except ValueError:
-            check("a settled task cannot be re-transitioned", True)
+            check("a resolved task cannot be re-transitioned", True)
 
         task2 = api.file_improvement(db, title="t2", evidence="e2", given="g2",
                                      observed="o2", expected="x2")
@@ -10488,6 +11186,7 @@ def main_test() -> None:
             "get_illustration_prompt", "scan_illustrations",
             "triage_illustrations",
             "import_critique", "critique_status", "list_critique_items",
+            "list_critique_decisions",
             "triage_critique", "list_critique_edits", "triage_critique_edits",
             # The filter pass's conversational pair (AQ). `filter run` is
             # deliberately NOT here — the same ruling the write loop

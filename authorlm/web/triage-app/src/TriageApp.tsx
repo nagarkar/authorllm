@@ -144,6 +144,42 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
   const [reasonValue, setReasonValue] = useState("");
   const [aliasWizard, setAliasWizard] = useState<AliasWizard>();
   const [applyOpen, setApplyOpen] = useState(false);
+  // Grid layout preferences: per-column width overrides, hidden columns,
+  // and the Columns popover. Persisted per triage type in localStorage so
+  // the author's layout survives reloads; storage failures are harmless.
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set());
+  const [columnsOpen, setColumnsOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      setColWidths(JSON.parse(localStorage.getItem(`triage.widths.${triageType}`) ?? "{}"));
+      setHiddenCols(new Set(JSON.parse(localStorage.getItem(`triage.hidden.${triageType}`) ?? "[]")));
+    } catch {
+      setColWidths({});
+      setHiddenCols(new Set());
+    }
+    setColumnsOpen(false);
+  }, [triageType]);
+
+  function resizeColumn(id: string, width: number) {
+    setColWidths((current) => {
+      const next = {...current, [id]: Math.max(60, Math.round(width))};
+      try { localStorage.setItem(`triage.widths.${triageType}`, JSON.stringify(next)); } catch { /* per-viewer nicety */ }
+      return next;
+    });
+  }
+
+  function toggleColumn(id: string, all: string[]) {
+    setHiddenCols((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      if (next.size >= all.length) return current;  // never hide everything
+      try { localStorage.setItem(`triage.hidden.${triageType}`, JSON.stringify([...next])); } catch { /* per-viewer nicety */ }
+      return next;
+    });
+  }
   const [applying, setApplying] = useState<{completed: number; total: number}>();
   const [syncPrompt, setSyncPrompt] = useState<{ids: string[]; reanalyze: boolean}>();
   const [syncReport, setSyncReport] = useState<Record<string, unknown>>();
@@ -306,9 +342,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       key: column.id,
       title: column.label,
       width: column.width || 140,
-      // The first column is frozen; glide paints group headers once per
-      // region, so sharing the group label would render "DATABASE" twice.
-      group: index === 0 ? "" : "DATABASE",
+      group: "DATABASE",
       source: "database" as const,
       editable: column.editable,
       themeOverride: {bgCell: "#fffaf0", bgHeader: "#e8dfcf", textHeader: "#51483b"},
@@ -344,22 +378,66 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     },
   ];
 
+  // What the grid actually shows: hidden columns removed, author-resized
+  // widths applied, and the first visible column given its own blank
+  // group — it is the frozen region, and glide paints group labels once
+  // per region, so sharing a label would render it twice.
+  const visibleColumns: ColumnDef[] = columns
+    .filter((column) => !hiddenCols.has(String(column.id)))
+    .map((column, index) => ({
+      ...column,
+      width: colWidths[String(column.id)] ?? (column as {width?: number}).width ?? 140,
+      group: index === 0 ? "" : column.group,
+    }));
+
+  // Rows grow to fit their longest wrapped text cell (capped at ten
+  // lines), so long items read in place instead of truncating.
+  function rowHeightFor(row: TriageRow): number {
+    let lines = 1;
+    for (const column of visibleColumns) {
+      let value: unknown;
+      if (column.source === "database") value = stagedRevision(row, column) ?? row[column.key];
+      else if (column.source === "analysis" && column.key !== "evidence") value = row.analysis?.[column.key];
+      else if (column.source === "decision") value = column.key === "reason" ? row.draft?.reason : undefined;
+      const text = textValue(value);
+      if (text.length < 24) continue;
+      const width = Math.max(60, Number((column as {width?: number}).width ?? 140)) - 24;
+      const perLine = Math.max(8, Math.floor(width / 6.6));
+      lines = Math.max(lines, Math.min(10, Math.ceil(text.length / perLine)));
+    }
+    return 14 + lines * 19;
+  }
+
   function actionAcceptsReason(actionId: string): boolean {
     return !!currentSnapshot.schema.actions.find((action) => action.id === actionId)?.reason;
   }
 
+  // The staged wording of an inline revision (e.g. critique "revise").
+  // The grid must display it in place of the database value: the draft is
+  // the author's edit, and re-rendering the old text after they commit
+  // reads as the edit having been lost.
+  function stagedRevision(row: TriageRow, column: ColumnDef): string | undefined {
+    if (column.source !== "database" || !column.editable) return undefined;
+    if (row.draft?.action !== column.editable) return undefined;
+    const parameterId = currentSnapshot.schema.actions
+      .find((action) => action.id === column.editable)?.parameter?.id ?? "text";
+    const staged = row.draft.parameters?.[parameterId];
+    return typeof staged === "string" ? staged : undefined;
+  }
+
   function cellContent([columnIndex, rowIndex]: Item): GridCell {
-    const column = columns[columnIndex];
+    const column = visibleColumns[columnIndex];
     const row = filteredRows[rowIndex];
+    const revision = stagedRevision(row, column);
     const colors = column.source === "database"
-      ? {bgCell: "#fffaf0"}
+      ? {bgCell: revision !== undefined ? "#fff3ea" : "#fffaf0"}
       : column.source === "analysis"
         ? {bgCell: row.analysis?.state === "outdated" ? "#fff0d7" : "#f2f7f3"}
         : column.source === "recommendation"
           ? {bgCell: recommendationFor(row) ? "#fff8df" : "#fffcf2"}
           : {bgCell: row.draft?.state === "conflict" ? "#ffe2dd" : "#fff3ea"};
     let value: unknown;
-    if (column.source === "database") value = row[column.key];
+    if (column.source === "database") value = revision ?? row[column.key];
     else if (column.source === "analysis") value = row.analysis?.[column.key];
     else if (column.source === "recommendation") {
       const recommendation = recommendationFor(row);
@@ -428,6 +506,14 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
   }
 
   function onGridSelectionChange(nextGrid: GridSelection) {
+    // Clicking a cell proposes a selection with a focused cell and an
+    // EMPTY row set. That is a focus change, not a deselection — the
+    // author's checkboxes survive it (they clear only via the markers,
+    // the Clear button, or Escape with nothing focused).
+    if (nextGrid.current !== undefined && nextGrid.rows.length === 0) {
+      setGridFocus({...nextGrid, rows: CompactSelection.empty()});
+      return;
+    }
     const visibleIds = new Set(filteredRows.map((row) => row.id));
     const next = new Set([...selected].filter((id) => !visibleIds.has(id)));
     for (const index of nextGrid.rows) {
@@ -445,13 +531,33 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     closeDialog = true,
   ): Promise<boolean> {
     if (!objectIds.length) return false;
+    // Accept keeps a staged inline revision: the revision IS an accept in
+    // the author's own wording, so plain Accept must not downgrade the row
+    // back to the original text. Any other action (e.g. Reject) is a
+    // change of mind and overwrites the revision as before.
+    const editableActions = new Set(
+      currentSnapshot.schema.columns.map((column) => column.editable).filter(Boolean));
+    const revised = action.id === "accept"
+      ? objectIds.filter((objectId) => {
+          const draft = currentSnapshot.rows.find((row) => row.id === objectId)?.draft;
+          return !!draft && editableActions.has(draft.action);
+        })
+      : [];
+    const staging = objectIds.filter((objectId) => !revised.includes(objectId));
+    const revisedNote = revised.length
+      ? ` ${revised.length} edited row${revised.length === 1 ? " keeps its" : "s keep their"} revision (accepted in your wording).`
+      : "";
+    if (!staging.length) {
+      setNotice(`Nothing to assign.${revisedNote}`);
+      return true;
+    }
     const parameters: Record<string, unknown> = {};
     if (action.parameter) parameters[action.parameter.id] = parameter;
     try {
       await transport.request("stage", {
         manuscript,
         triage_type: triageType,
-        decisions: objectIds.map((objectId) => {
+        decisions: staging.map((objectId) => {
           const existing = currentSnapshot.rows.find((row) => row.id === objectId)?.draft;
           const stagedReason = action.reason
             ? reason === undefined ? existing?.reason : reason.trim() || undefined
@@ -465,7 +571,7 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         setParameterSearch("");
         setReasonValue("");
       }
-      setNotice(`${action.label} assigned to ${objectIds.length} selected row${objectIds.length === 1 ? "" : "s"}.`);
+      setNotice(`${action.label} assigned to ${staging.length} selected row${staging.length === 1 ? "" : "s"}.${revisedNote}`);
       await refresh(true);
       return true;
     } catch (reason) {
@@ -600,8 +706,12 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
 
   async function editReasons(edits: readonly EditListItem[]) {
     const decisions = [];
+    // Inline revise reverted to the database text: clear the draft. A bare
+    // `continue` left the prior revise staged, so Apply could still write the
+    // discarded wording while the grid showed the original (c368224 path).
+    const clearIds: string[] = [];
     for (const edit of edits) {
-      const column = columns[edit.location[0]];
+      const column = visibleColumns[edit.location[0]];
       const row = filteredRows[edit.location[1]];
       if (!column || !row) continue;
       const value = edit.value as EditableGridCell & {data?: unknown};
@@ -611,7 +721,13 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       // it — no separate Revise & accept round trip.
       if (column.source === "database" && column.editable) {
         const text = textValue(value.data).trim();
-        if (!text || text === textValue(row[column.key])) continue;
+        if (!text) continue;
+        const original = textValue(row[column.key]);
+        if (text === original) {
+          if (row.draft?.action === column.editable) clearIds.push(row.id);
+          continue;
+        }
+        if (text === stagedRevision(row, column)) continue;
         decisions.push({
           object_id: row.id,
           action: column.editable,
@@ -629,9 +745,16 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         reason: textValue(value.data),
       });
     }
-    if (!decisions.length) return;
+    if (!decisions.length && !clearIds.length) return;
     try {
-      await transport.request("stage", {manuscript, triage_type: triageType, decisions});
+      if (clearIds.length) {
+        await transport.request("unstage", {
+          manuscript, triage_type: triageType, object_ids: clearIds,
+        });
+      }
+      if (decisions.length) {
+        await transport.request("stage", {manuscript, triage_type: triageType, decisions});
+      }
       await refresh(true);
     } catch (reason) {
       setError((reason as Error).message);
@@ -964,11 +1087,26 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
         <div className="selection-tools">
           <button onClick={() => changeSelection(new Set([...selected, ...filteredRows.map((row) => row.id)]))}>Select all filtered</button>
           <button onClick={() => changeSelection(new Set())} disabled={!selected.size}>Clear</button>
+          <div className="columns-menu">
+            <button onClick={() => setColumnsOpen((open) => !open)}>Columns</button>
+            {columnsOpen && <div className="columns-popover">
+              {columns.map((column) => (
+                <label key={String(column.id)}>
+                  <input
+                    type="checkbox"
+                    checked={!hiddenCols.has(String(column.id))}
+                    onChange={() => toggleColumn(String(column.id), columns.map((c) => String(c.id)))}
+                  />
+                  {String(column.title)}
+                </label>
+              ))}
+            </div>}
+          </div>
           <span><strong>{selected.size}</strong> selected across the full result set</span>
         </div>
         <div className="verb-tools">
           <button className="recommendation-action" onClick={() => void stageRecommendations()} disabled={!selectedRecommendations.length}>Stage recommendations{selectedRecommendations.length ? ` (${selectedRecommendations.length})` : ""}</button>
-          {snapshot.schema.actions.map((action) => <button key={action.id} onClick={() => chooseAction(action)} disabled={!selected.size} title={action.help}>{action.label}</button>)}
+          {snapshot.schema.actions.filter((action) => !action.hidden).map((action) => <button key={action.id} onClick={() => chooseAction(action)} disabled={!selected.size} title={action.help}>{action.label}</button>)}
           <button onClick={() => void unstageSelected()} disabled={!selectedDrafts.length}>Remove staged</button>
           <button className="apply-button" disabled={!canApply || !!applying} onClick={() => setApplyOpen(true)}>Apply selected</button>
         </div>
@@ -977,15 +1115,20 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
       <section className="grid-frame">
         <div className="desktop-grid">
           <DataEditor
-            width="100%" height="100%" columns={columns} rows={filteredRows.length}
+            width="100%" height="100%" columns={visibleColumns} rows={filteredRows.length}
             getCellContent={cellContent} rowMarkers="checkbox" smoothScrollX smoothScrollY
             rowSelectionMode="multi"
             freezeColumns={1} getCellsForSelection gridSelection={gridSelection}
+            rowHeight={(index: number) => {
+              const row = filteredRows[index];
+              return row ? rowHeightFor(row) : 33;
+            }}
+            onColumnResize={(column, newSize) => resizeColumn(String((column as ColumnDef).id), newSize)}
             onGridSelectionChange={onGridSelectionChange}
             onCellsEdited={(edits) => { void editReasons(edits); return true; }}
             onPaste
             onCellClicked={(cell) => {
-              const column = columns[cell[0]];
+              const column = visibleColumns[cell[0]];
               const row = filteredRows[cell[1]];
               if (column?.source === "analysis" && ["why", "evidence"].includes(column.key)) setDrawer({row, field: column.key});
             }}

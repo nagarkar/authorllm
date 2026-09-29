@@ -293,7 +293,7 @@ def main_test() -> None:
         print("drafting context (§12.4 item 1 — the L1 glue) with LOUD "
               "coverage reporting (item 4 — informational, never blocking):")
         ctx = sums.drafting_context(db, manuscript, "alpha.md")
-        check("BEFORE holds the settled prefix in reading order and AFTER "
+        check("BEFORE holds the resolved prefix in reading order and AFTER "
               "the upcoming essays, each entry labeled with its file",
               ctx.index("BEFORE") < ctx.index("[title.md]")
               < ctx.index("[part1.md]") < ctx.index("AFTER")

@@ -20,6 +20,10 @@ export interface ActionSchema {
   id: string;
   label: string;
   help: string;
+  // No action-bar button: the action is staged some other way (e.g. the
+  // critique "revise" lands via the Item column's edit-in-place). Still
+  // listed in the Help tab, which explains that path.
+  hidden?: boolean;
   reason?: {
     label: string;
     placeholder?: string;

@@ -45,11 +45,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
 NONE = "(none)"
+PROFILE_DIR = "_profiles"
 
 # ---------------------------------------------- protected terms (§15.22)
 #
@@ -287,8 +289,96 @@ def _concept_notes(db: Database, manuscript: dict, file: str,
     for node in sorted(graph.get("nodes", []),
                        key=lambda n: n.get("name") or ""):
         notes = (node.get("notes") or "").strip() or "(no notes)"
-        lines.append(f"- {node['name']} — {notes}")
+        # ALIASES ride with the definition, not only with PROTECTED
+        # TERMS. A concept reached by an alternate name is the same
+        # concept, and a filter that cannot see the alias will read two
+        # names for one thing as two things.
+        aliases = [a for a in (node.get("aliases") or []) if a]
+        also = f" (also: {', '.join(sorted(aliases))})" if aliases else ""
+        lines.append(f"- {node['name']}{also} — {notes}")
+    # EDGES: the graph's own relations between the concepts this essay
+    # touches. `scoped_concepts` already restricts them to the selected
+    # nodes, so nothing here reaches outside the slice.
+    edges = [e.get("edge") for e in graph.get("edges", []) if e.get("edge")]
+    if edges:
+        lines.append("")
+        lines.append("Relations the author has recorded between them:")
+        lines.extend(f"- {e}" for e in sorted(edges))
     return "\n".join(lines)
+
+
+def _profiles_block(manuscript: dict, keys: list[str]) -> str:
+    """The author's declared profiles, verbatim, for the keys a filter asks
+    for by name.
+
+    A profile is DECLARED CONTEXT, never law — the skill's standing rule.
+    It reaches a payload only because an artifact named it in front matter,
+    which is the author declaring that THIS concern is one their declaration
+    governs. Nothing is rendered for a filter that asks for nothing.
+
+    A key with no profile on record renders as a labelled absence rather
+    than refusing the run or rendering silence: a filter must not become
+    unrunnable because a declaration was renamed, and a prompt that leans on
+    an authority which is not there must be able to see that it is not
+    there."""
+    if not keys:
+        return ""
+    root = Path(manuscript["path"]) / PROFILE_DIR
+    out = []
+    for key in keys:
+        path = root / f"{key}.md"
+        try:
+            body = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            body = ""
+        if body:
+            out.append(f"--- {key} ---\n{body}")
+        else:
+            out.append(f"--- {key} ---\n(no profile on record under this key)")
+    return "\n\n".join(out)
+
+
+def _neighbour_summaries(db: Database, manuscript: dict, file: str) -> str:
+    """The compressed summaries of the essays before and after this one.
+
+    Rendered UNGATED, and that is the whole point of it existing here.
+    `passes.summaries_ready` blocks the write path on a stale or missing
+    summary; making a filter run depend on the book's summary state would
+    be §14.1's defect wearing a new hat. So a summary that is stale is
+    SHOWN and MARKED — the `!!` convention `write status` already uses —
+    and the reader decides how much to trust it. Nothing here can refuse
+    a run.
+
+    Declared per filter (`summaries = true`), never always: the
+    cross-essay view costs real tokens in the cached layer, and a filter
+    whose jurisdiction is genuinely one essay should not pay for it."""
+    from . import summaries as sums
+
+    try:
+        before, after = sums.before_after(db, manuscript, file)
+    except Exception:
+        # A summary read must never be able to take a filter run down.
+        return ""
+    def render(entries):
+        out = []
+        for e in entries:
+            body = (e.get("summary") or "").strip()
+            state = e.get("state") or ""
+            mark = "" if state == "fresh" else f"  !! summary {state}"
+            if not body:
+                out.append(f"[{e['file']}]{mark or '  !! no summary'}")
+                continue
+            out.append(f"[{e['file']}]{mark}\n{body}")
+        return "\n\n".join(out)
+    parts = []
+    if before:
+        parts.append("--- BEFORE this essay in the reading order "
+                     "(settled; their concepts are available here) ---\n"
+                     + render(before))
+    if after:
+        parts.append("--- AFTER this essay (forward reference only; never "
+                     "assume what they say) ---\n" + render(after))
+    return "\n\n".join(parts)
 
 
 def _is_protected(node: dict) -> bool:
@@ -624,7 +714,8 @@ def _essay_block(units: list[str]) -> str:
 
 def _frame_block(db: Database, manuscript: dict, run: dict,
                  units: list[str], text: str | None = None,
-                 dictionary: str = "") -> str:
+                 dictionary: str = "", summaries: bool = False,
+                 profiles: list[str] | None = None) -> str:
     """Block A — the second cache breakpoint.
 
     THE ESSAY and MOTIF REGISTRY appear for a GLOBAL filter only. The
@@ -658,6 +749,25 @@ def _frame_block(db: Database, manuscript: dict, run: dict,
                  prior_runs(db, manuscript["id"], run["filter"], file,
                             exclude_run_id=run["id"])),
     ]
+    if profiles:
+        # Beside CONCEPT NOTES and PROTECTED TERMS: like them it is
+        # author-declared context about what governs this concern, and like
+        # them it is constant for the life of a run.
+        sections.insert(3, _section(
+            "AUTHOR PROFILES (declared context — never law, and never "
+            "authority for a prose decision the author has not invoked it "
+            "for)", _profiles_block(manuscript, profiles)))
+    if summaries:
+        # Between the graph-derived sections and the essay sections: it
+        # is context about the BOOK, like the run history above it, not
+        # about this essay's text. The section is present for the life of
+        # a run or absent for the life of a run — the declaration is in
+        # front matter and frozen with the artifact — so it can never be
+        # a shape change mid-run.
+        sections.append(_section(
+            "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
+            "marked, and is still shown)",
+            _neighbour_summaries(db, manuscript, file)))
     if run["class"] == "global":
         sections.append(_section(f"THE ESSAY — {file} ({len(units)} units)",
                                  _essay_block(units)))
@@ -737,7 +847,8 @@ def _units_block(run: dict, units: list[str],
 def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
              units: list[str], window: tuple[int, int],
              threads: list[dict], text: str | None = None,
-             dictionary: str = "") -> Payload:
+             dictionary: str = "", summaries: bool = False,
+             profiles: list[str] | None = None) -> Payload:
     """The whole payload, from stored state only.
 
     `units` comes from the caller's ONE capture of the manuscript (the
@@ -758,7 +869,8 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
     is visible rather than mysterious."""
     return Payload(
         law=_law_block(db, manuscript["id"], run["file"], artifact_body),
-        frame=_frame_block(db, manuscript, run, units, text, dictionary),
+        frame=_frame_block(db, manuscript, run, units, text, dictionary,
+                           summaries, profiles),
         prefix=_prefix_block(run, units, window[0], threads),
         units=_units_block(run, units, window),
     )
@@ -767,7 +879,9 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
 def assemble_prelude(db: Database, manuscript: dict, run: dict,
                      artifact_body: str, units: list[str],
                      text: str | None = None, dictionary: str = "",
-                     kind: str = "registry") -> Payload:
+                     kind: str = "registry",
+                     summaries: bool = False,
+                     profiles: list[str] | None = None) -> Payload:
     """The prelude payload. Blocks B and C exist and are labelled — a
     payload whose block count changes between the prelude and the units
     would be a different shape for the reader as well as for the cache.
@@ -794,6 +908,16 @@ def assemble_prelude(db: Database, manuscript: dict, run: dict,
         _section(f"THE ESSAY — {file} ({len(units)} units)",
                  _essay_block(units)),
     ]
+    if profiles:
+        sections.insert(3, _section(
+            "AUTHOR PROFILES (declared context — never law, and never "
+            "authority for a prose decision the author has not invoked it "
+            "for)", _profiles_block(manuscript, profiles)))
+    if summaries:
+        sections.insert(-1, _section(
+            "NEIGHBOURING ESSAYS (compressed summaries — a stale one is "
+            "marked, and is still shown)",
+            _neighbour_summaries(db, manuscript, file)))
     if kind == PRONUNCIATION_PRELUDE:
         essay = text if text is not None else "\n\n".join(units)
         body = _section(HARD_TERMS_HEADER,

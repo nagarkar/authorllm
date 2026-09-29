@@ -1785,8 +1785,8 @@ why:
 | `_critique_rollback`, collect 1 (`pre-critique-rollback`) | **ambient, by declaration.** Same reasoning: the author's own uncollected edit is their work and predates the verb. |
 | `_critique_rollback`, collect 2 (`critique-rollback`) | **NO episode.** ADDED 2026-08-30 (AQ) — there was no second collect at all, so the version history held the pre-rollback snapshot and then a GAP where the restore should have been. Ambient, it would have credited whatever goal happened to be open with the UNWINDING of an edit pass. |
 | `filter_run`, `filter_record` | no collect. |
-| `filter_settle`, collect 1 (`pre-filter-settle`) | **ambient, by declaration.** The author's own uncollected edit, snapshotted before the settle overwrites the file. |
-| `filter_settle`, collect 2 (`filter-settle`) | **NO episode.** A filter pass is hygiene, not work toward a declared goal (§15.20). |
+| `filter_resolve`, collect 1 (`pre-filter-settle`) | **ambient, by declaration.** The author's own uncollected edit, snapshotted before the resolve overwrites the file. |
+| `filter_resolve`, collect 2 (`filter-settle`) | **NO episode.** A filter pass is hygiene, not work toward a declared goal (§15.20). |
 | `filter_rollback`, collect 1 (`pre-filter-rollback`) | **ambient, by declaration.** As above. |
 | `filter_rollback`, collect 2 (`filter-rollback`) | **NO episode.** The unwinding of a pass, as with `critique-rollback`. |
 
@@ -1807,7 +1807,7 @@ tidy-up to perform in passing.
 
 **The table was incomplete outside the write path too, and that omission
 also had teeth (2026-08-30).** `_critique_resolve_essay` runs two collects and
-neither was ruled on here. The second — the one that records the settle's own
+neither was ruled on here. The second — the one that records the resolve's own
 change to the essay — was ambient, so *every critique-pass resolve attached its
 transitions to whichever episode happened to be open*: this section's own bug,
 living on in the critique pass, one file away from where it was fixed. Settling
@@ -2046,7 +2046,7 @@ bare `{{…}}` is a critique-pass insertion, but in a manuscript file it is the
 author's `{{title}}` or their set notation, and the broad strip deleted every
 one of them from everything the system observes, silently. A filter never
 stages an insertion, so the narrow rule loses nothing. Every observer therefore reads the
-essay; only the settle verbs, which own the grammar, read the markers. Two
+essay; only the resolve verbs, which own the grammar, read the markers. Two
 guards are NOT free and are built with it: `critique_forms_pending`
 generalizes over `origin_type`, and `_refuse_mid_rewrite` grows a byte-level
 marked-file check — `push_doc` reads the file directly and would otherwise
@@ -2057,10 +2057,10 @@ worth challenging.
 
 **Attribution: no episode, and that is the point.** A filter's verdicts are
 `evidence` rows with `evidence_type='filter_edit'` and `episode_id = NULL` —
-byte for byte the shape `critique_edit` has always had — and the settle's
+byte for byte the shape `critique_edit` has always had — and the resolve's
 SECOND collect attaches its transitions to **no** episode, through a new
 `api.NO_EPISODE` sentinel. Its FIRST collect stays ambient, deliberately:
-that one snapshots the author's own uncollected local edits before the settle
+that one snapshots the author's own uncollected local edits before the resolve
 overwrites the file, and those predate the verb and are their work. The two
 collects of one verb have different dispositions for different reasons, and
 §15.17's table now names every one of them. Neither of the obvious homes was right. Filing a
@@ -2144,8 +2144,8 @@ the grounds that it is "pure, idempotent on unmarked text". It is not:
 were deleted from every observed copy of the manuscript, with no warning,
 because once they were gone there was nothing left to warn about — and
 `is_marked` tripped on them, refusing such a file's Doc push forever with a
-message about a settle that did not exist. Four sites narrowed
-(`read_manuscript_files`, `is_marked`, `unmark`, and the settle's
+message about a resolve that did not exist. Four sites narrowed
+(`read_manuscript_files`, `is_marked`, `unmark`, and the resolve's
 `final_text_from_marked`, which would otherwise have deleted a `{{title}}`
 from the finished essay). A filter never stages an insertion, so nothing this
 seam exists for is lost.
@@ -2153,7 +2153,7 @@ seam exists for is lost.
 6. **A re-record supersedes.** An ordinal the new reply did not reach is a
 proposal that no longer exists; left standing it appeared in the next `filter
 edits` list under a number the author reads as current, and could be accepted
-into a settle it was never part of. `passes.stage` has always done this for
+into a resolve it was never part of. `passes.stage` has always done this for
 the critique pass, and the door's two producers now agree about it.
 
 7. **`_critique_rollback` gets the same treatment as `_critique_resolve`.** It
@@ -2255,7 +2255,7 @@ when its own guard is removed.
 
 Immutability was asked for and is not implemented as a rule. It is a consequence
 of there being **exactly one writer**: `proposals.adopt`. Not the model, not
-`filter prelude`, not `filter record`, not `filter settle`, not `filter
+`filter prelude`, not `filter record`, not `filter resolve`, not `filter
 rollback`, not `filter unmark`, and not the Doc pull except as the author's own
 edit arriving through the ordinary tab write. The write itself is
 `structure.insert_toc_entry`'s discipline applied to a second table — pure text
@@ -2452,9 +2452,9 @@ So the transport becomes a **property of the run, not of the pass**. The run's
 `mode` — in its `metadata`, the house idiom for new state on an existing row — is
 absent until a transport verb chooses one: `filter push <essay>` writes the run's
 accepted forms into the essay's tab through the same surgical writer `critique
-write` uses and sets `doc`; `filter settle` with no prior push takes the local
+write` uses and sets `doc`; `filter resolve` with no prior push takes the local
 road and sets `local`. Once set the mode is frozen — switching is
-settle-then-rerun, never a toggle, because a run whose forms are half in the Doc
+resolve-then-rerun, never a toggle, because a run whose forms are half in the Doc
 and half on disk is a run nobody can reason about. Local remains the DEFAULT and
 the recommendation: its state is fully described by the bytes on disk, and doc
 mode's is not.

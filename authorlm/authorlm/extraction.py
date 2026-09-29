@@ -844,7 +844,7 @@ def extract_concepts(
             kind = "concept"
         notes = (str(item["notes"]).strip()[:300] or None) if item.get("notes") else None
         if name.lower() in banned:
-            # The ban is a write-guard, not a settled-forever verdict: when a
+            # The ban is a write-guard, not a resolved-forever verdict: when a
             # retired concept recurs in text the author actually changed,
             # surface a revival proposal instead of silently suppressing.
             if in_attention(name):

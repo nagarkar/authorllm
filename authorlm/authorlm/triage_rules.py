@@ -21,7 +21,7 @@ RULES: dict[str, dict[str, str]] = {
     "concept_duplicate_name": {
         "triage_type": "concepts",
         "action": "alias",
-        "label": "duplicates a settled concept name",
+        "label": "duplicates a resolved concept name",
     },
     "concept_unmentioned": {
         "triage_type": "concepts",
@@ -46,7 +46,7 @@ RULES: dict[str, dict[str, str]] = {
     "edge_duplicate_settled": {
         "triage_type": "edges",
         "action": "reject",
-        "label": "duplicates a settled relationship",
+        "label": "duplicates a resolved relationship",
     },
     "edge_unmentioned_endpoint": {
         "triage_type": "edges",
@@ -131,7 +131,7 @@ def _concept_decisions(db: Database, manuscript: dict,
         if canonical and canonical["id"] != node["id"]:
             decisions.append(_decision(
                 "concept_duplicate_name", node, node["name"],
-                f"a settled concept already has the name '{canonical['name']}'",
+                f"a resolved concept already has the name '{canonical['name']}'",
                 {"canonical_id": canonical["id"]}))
             continue
         finding = ungrounded.get(node["id"])

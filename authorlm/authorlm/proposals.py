@@ -307,7 +307,7 @@ def describe(row: dict) -> tuple[str, list[str]]:
 
 
 def adopt(db: Database, manuscript_id: str, row: dict) -> str:
-    """Apply the proposal to the settled object. Returns a message."""
+    """Apply the proposal to the resolved object. Returns a message."""
     payload = loads(row["payload"], {})
     kind = row["kind"]
     if kind == "note_update":
@@ -444,7 +444,7 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
     elif kind == "pronunciation":
         # THE ONLY WRITER of pronunciations.md in the whole system
         # (§15.22 §3.7). Not the model, not `filter prelude`, not
-        # `filter record`, not `filter settle`, not `filter rollback`,
+        # `filter record`, not `filter resolve`, not `filter rollback`,
         # not `filter unmark`, and not the Doc pull except as the
         # author's own edit arriving through the ordinary tab write.
         # The immutability the Sponsor asked for is a CONSEQUENCE of

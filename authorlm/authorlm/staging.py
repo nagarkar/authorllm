@@ -48,7 +48,7 @@ def is_marked(text: str) -> bool:
     `{{…}}` as an insertion, which is right for a Doc tab and wrong for
     a manuscript file — an essay containing `{{title}}` is not
     mid-settle, and treating it as such refused its Doc push forever
-    with a message about a settle that does not exist. A filter never
+    with a message about a resolve that does not exist. A filter never
     stages an insertion, so nothing this predicate guards is missed."""
     return th.has_replacement(text)
 
@@ -57,7 +57,8 @@ def is_marked(text: str) -> bool:
 
 def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                 source_text: str, entries: list[dict],
-                origin_type: str = "filter") -> list[dict]:
+                origin_type: str = "filter",
+                verb_stem: str = "filter") -> list[dict]:
     """Stage validated entries as `doc_threads` rows.
 
     `entries` carry `n`, `new`, `why` and an optional `ref`; **`old` is
@@ -104,11 +105,13 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
                 # un-pend it silently and lift the push guard on a file
                 # whose bytes still carry the markers — the same rule
                 # `passes.stage` states for the Doc pause.
+                unmark = (f" or put the text back ('{verb_stem} unmark "
+                          f"{file}')" if verb_stem == "filter" else "")
                 raise ValueError(
                     f"{file}: a staged edit at unit {n} is already "
                     f"written into the file — settle it "
-                    f"('filter settle {file}') or put the text back "
-                    f"('filter unmark {file}') before re-staging.")
+                    f"('{verb_stem} settle {file}'){unmark} before "
+                    f"re-staging.")
             db.update("doc_threads", prior["id"], fields)
             row = {**prior, **fields}
         else:
@@ -125,7 +128,7 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
     # unit 4 and now leaves it alone. Without this the stale row survived
     # as `proposed`, showed up in the next `filter edits` list under a
     # number the author would read as current, and could be accepted into
-    # a settle it was never part of.
+    # a resolve it was never part of.
     #
     # `passes.stage` does exactly this for the critique pass and for the
     # same reason; the door's two producers now agree about it.
@@ -227,14 +230,15 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
     marked = path.read_text(encoding="utf-8")
     # REPLACE forms only, for the third time and for the same reason: an
     # unmatched insertion form collapses to its old half, which for an
-    # insertion is the empty string — so a settle that looked at bare
+    # insertion is the empty string — so a resolve that looked at bare
     # `{{…}}` would DELETE the author's `{{title}}` from the finished
     # essay. The critique pass keeps both kinds, where both are its own.
     final, forms = passes.final_text_from_marked(marked, written=written,
                                                  kinds=("replace",))
     diffs = passes.record_resolution(db, manuscript_id, file, forms,
                                      origin_type=origin_type,
-                                     evidence_type=evidence_type)
+                                     evidence_type=evidence_type,
+                                     final_text=final)
     return final, forms, diffs
 
 

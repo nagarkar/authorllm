@@ -404,7 +404,7 @@ def _local_transport_guards(root: Path) -> None:
             normalized.encode()).hexdigest()[:16]}
     gdocs._save_mapping(db, manuscript, meta)
 
-    # Mark the file, exactly as `filter settle --pause` will: the pure
+    # Mark the file, exactly as `filter resolve --pause` will: the pure
     # composer's output written to disk.
     marked = MARKED_ESSAY.replace(
         "Original paragraph text.",
@@ -468,9 +468,9 @@ def _local_transport_guards(root: Path) -> None:
           "that producer's own settle verb — `critique_forms_pending` "
           "filtered on origin_type='critique', so a filter's forms "
           "pushed their markers straight into the Doc, where the next "
-          "pull would silently discard the settle (guard a)",
+          "pull would silently discard the resolve (guard a)",
           raised_a is not None and "filter pending forms" in raised_a
-          and "filter settle solo.md" in raised_a
+          and "filter resolve solo.md" in raised_a
           and "critique resolve" not in raised_a, raised_a)
     check("and `forms_pending` reports the ORIGIN, not a bool — that is "
           "what lets one message name the right remedy for either "
@@ -544,13 +544,13 @@ def _local_transport_guards(root: Path) -> None:
           not any("<<" in b for b in drive_guarded.bodies)
           and drive_guarded.bodies == [], drive_guarded.sent[:300])
 
-    # --- the pull path must not discard a settle ----------------------
+    # --- the pull path must not discard a resolve ----------------------
     pulled = []
 
     class _PullFake:
         """Enough of Drive+Docs for pull_doc to reach the write. Its
         export carries the essay WITHOUT the marks, which is exactly the
-        shape that would overwrite the settle."""
+        shape that would overwrite the resolve."""
 
         def files(self):
             class _Files:
@@ -727,7 +727,7 @@ def _identical_old_halves(root: Path) -> None:
     written = passes.staged_threads(db, mid, "solo.md", states=("written",))
     final, forms = passes.final_text_from_marked(fetched["marked"],
                                                  written=written)
-    check("F-D20 the settled essay carries NO residual marker — the "
+    check("F-D20 the resolved essay carries NO residual marker — the "
           "corruption this fixes is a literal `<<old>>{{new}}` left in "
           "the author's manuscript",
           "<<" not in final and "{{" not in final and ">>" not in final,
@@ -825,8 +825,8 @@ def _the_transport_is_frozen(root: Path) -> None:
           api.filter_status(db, manuscript)["runs"][0]["mode"] is None)
 
     with contextlib.redirect_stdout(io.StringIO()):
-        api.filter_settle(db, manuscript, {}, "solo.md", pause=True)
-    check("`filter settle --pause` TAKES the local road, and the run "
+        api.filter_resolve(db, manuscript, {}, "solo.md", pause=True)
+    check("`filter resolve --pause` TAKES the local road, and the run "
           "records it — the transport is frozen by the verb that chooses "
           "it, not at run start (D-3)",
           api._run_mode(_run_row(db, mid)) == "local",
@@ -845,15 +845,15 @@ def _the_transport_is_frozen(root: Path) -> None:
     raised = None
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            api.filter_settle(db2, ms2, {}, "solo.md", pause=True)
+            api.filter_resolve(db2, ms2, {}, "solo.md", pause=True)
     except ValueError as err:
         raised = str(err)
-    check("F-D1 a run on the DOC road refuses `filter settle --pause`, "
+    check("F-D1 a run on the DOC road refuses `filter resolve --pause`, "
           "naming the road it is already on and both ways off it — one "
           "run's forms in two places is the state the freeze exists to "
           "forbid",
           raised is not None and "put its forms in the Doc" in raised
-          and "filter settle solo.md" in raised
+          and "filter resolve solo.md" in raised
           and "filter unmark solo.md --force" in raised, raised)
     check("F-D1 ...and NOTHING moved: the file is byte-identical and no "
           "thread left 'accepted'",
@@ -885,7 +885,7 @@ def _a_paragraph_that_contains_another(root: Path) -> None:
     paragraph breaks that, and this manuscript is full of refrains. When
     they diverge the writer plants each form in the wrong paragraph,
     the read-back proof passes (the form IS present, just not where it
-    belongs), the settle resolves both threads `cleaned`, and the
+    belongs), the resolve resolves both threads `cleaned`, and the
     author's manuscript is silently corrupted.
 
     `main` fails LOUDLY on this same input — first-match-always nests the
@@ -927,10 +927,10 @@ def _a_paragraph_that_contains_another(root: Path) -> None:
           result["written"] == 2 and not result["failed"],
           str([(t["id"][:8], w) for t, w in result["failed"]]))
 
-    settle = api.filter_settle(db, manuscript, {}, "solo.md",
+    settle = api.filter_resolve(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
     final = (ms / "solo.md").read_text()
-    check("P1 the settled manuscript is correct: the containing "
+    check("P1 the resolved manuscript is correct: the containing "
           "paragraph survives whole, and neither twin's replacement "
           "landed inside it",
           "And so the wall stands, and the Dead do not pass. Or so I "
@@ -1008,7 +1008,7 @@ def _the_doc_is_the_review(root: Path) -> None:
         "<<Omega closes the essay on a falling cadence.>>"
         "{{SIX REDONE.}}",
         "Omega closes the essay on a falling cadence.")
-    settle = api.filter_settle(db, manuscript, {}, "solo.md",
+    settle = api.filter_resolve(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
     final = (ms / "solo.md").read_text()
     rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
@@ -1028,7 +1028,7 @@ def _the_doc_is_the_review(root: Path) -> None:
                 "evidence_type = 'filter_edit' ORDER BY created_at",
                 (mid,))
     signals = sorted(r["signal"] for r in ev)
-    check("the evidence is the settle's and ONLY the settle's — one row "
+    check("the evidence is the resolve's and ONLY the resolve's — one row "
           "per thread, no triage row in front of it, because no triage "
           "happened. `record_resolution` keys off `written` alone and "
           "never asks what the thread was before",
@@ -1270,7 +1270,7 @@ def _the_doc_transport_push(root: Path) -> None:
         origin_type=api.FILTER_ORIGIN)]
     check("F-D19 the DOCUMENT order of the placed forms equals the "
           "`created_at, id` order of their threads — twin self-alignment "
-          "at settle rests on nothing else, so it is asserted directly "
+          "at resolve rests on nothing else, so it is asserted directly "
           "rather than inferred",
           order_in_doc == sorted(order_in_doc)
           and by_created == ["TWO REDONE.", "FOUR REDONE.", "FIVE REDONE."],
@@ -1288,11 +1288,11 @@ def _the_doc_transport_push(root: Path) -> None:
     except LookupError as err:
         raised = str(err)
     check("F-D5 `doc push` on a doc-mode essay is refused by the DB "
-          "guard, naming `filter settle` — the byte guard is blind here "
+          "guard, naming `filter resolve` — the byte guard is blind here "
           "because the file is clean, and doc mode is the case that "
           "proves the two-guard ordering was right",
           raised is not None and "filter pending forms" in raised
-          and "filter settle solo.md" in raised, raised)
+          and "filter resolve solo.md" in raised, raised)
     check("F-D5 ...and the byte guard really is silent — only the DB "
           "guard can know anything in doc mode",
           not _staging.is_marked((ms / "solo.md").read_text()))
@@ -1307,7 +1307,7 @@ def _the_doc_transport_push(root: Path) -> None:
     check("a second push while forms are out refuses early and BY NAME "
           "rather than three functions deep in push_doc's own guard",
           raised2 is not None and "already out" in raised2
-          and "filter settle solo.md" in raised2
+          and "filter resolve solo.md" in raised2
           and "filter unmark solo.md --force" in raised2, raised2)
 
     # --- F-D11: the checkout gate discriminates -----------------------
@@ -1509,7 +1509,7 @@ def _reword_in_tab(fake, old_form: str, new_form: str) -> None:
 
 
 def _the_doc_settle(root: Path) -> None:
-    """F-D7, F-D12, F-D14 — the settle reads the DOC, three-ways it
+    """F-D7, F-D12, F-D14 — the resolve reads the DOC, three-ways it
     against local, and ends in exactly the local road's evidence."""
     from authorlm import staging as _staging
 
@@ -1534,7 +1534,7 @@ def _the_doc_settle(root: Path) -> None:
           "is the working copy, which is the whole point of the mode",
           gdocs.doc_status(db, manuscript)["solo.md"]["checked_out"] is True)
 
-    result = api.filter_settle(db, manuscript, {}, "solo.md",
+    result = api.filter_resolve(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
     final = (ms / "solo.md").read_text()
 
@@ -1542,7 +1542,7 @@ def _the_doc_settle(root: Path) -> None:
           "refuse the one verb whose job is to read the Doc back, which "
           "is why `critique resolve` has no gate either",
           result["run"]["status"] == "settled", str(result["run"]["status"]))
-    check("F-D14 the settle never marks local: the finished essay carries "
+    check("F-D14 the resolve never marks local: the finished essay carries "
           "the {{new}} halves' TEXT and no marker",
           not _staging.is_marked(final) and "<<" not in final
           and "{{" not in final, final)
@@ -1578,12 +1578,260 @@ def _the_doc_settle(root: Path) -> None:
           and result["diffs"][0]["proposal"] == "TWO AS PROPOSED."
           and result["diffs"][0]["final"] == "TWO, IN MY OWN WORDS.",
           str(result["diffs"]))
-    check("Q-2 the settle does NOT re-push, and says the tab keeps its "
+    check("Q-2 the resolve does NOT re-push, and says the tab keeps its "
           "marks until the next ordinary `doc push`",
           result["tab_still_marked"] is True
           and "<<" in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
     check("the run settled, on the doc road",
           result["run"]["status"] == "settled" and result["mode"] == "doc")
+
+
+def _a_hand_resolved_tab_settles_true(root: Path) -> None:
+    """it-4c5a8038c304 — the author resolves the forms BY HAND in the
+    Doc: deletes the markers and leaves the prose they want, instead of
+    editing inside the braces. The settle infers the verdicts from the
+    text itself (the author's ruling, 2026-08-31): old standing as-is →
+    decline; old gone → acceptance, the tab's prose being the final."""
+    print("it-4c5a8038c304: a hand-resolved tab settles as the author "
+          "ruled:")
+
+    db, manuscript, ms, fake = _doc_run(
+        root, "handres-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED.",
+                             6: "SIX AS PROPOSED."})
+    mid = manuscript["id"]
+    api.filter_push(db, manuscript, {}, "solo.md",
+                    services=lambda: (fake, fake))
+    # Unit 2: kept the new verbatim — markers deleted, plain prose left.
+    _reword_in_tab(
+        fake,
+        "<<Alpha opens the essay and says a thing worth saying twice.>>"
+        "{{TWO AS PROPOSED.}}",
+        "TWO AS PROPOSED.")
+    # Unit 4: kept the change but reworded it — markers deleted.
+    _reword_in_tab(
+        fake,
+        "<<Gamma follows, saying something else entirely.>>"
+        "{{FOUR AS PROPOSED.}}",
+        "FOUR AS PROPOSED, BUT IN MY OWN WORDS.")
+    # Unit 6: turned the change down — markers deleted, OLD text stands.
+    _reword_in_tab(
+        fake,
+        "<<Omega closes the essay on a falling cadence.>>"
+        "{{SIX AS PROPOSED.}}",
+        "Omega closes the essay on a falling cadence.")
+
+    result = api.filter_resolve(db, manuscript, {}, "solo.md",
+                               services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    rows = {loads(t["metadata"], {}).get("anchor_paragraph"): t["state"]
+            for t in api._run_threads(db, mid, _run_row(db, mid))}
+    check("old gone + new kept verbatim → cleaned (an acceptance), "
+          "NOT declined", rows[2] == "cleaned", str(rows))
+    check("old gone + new reworded → cleaned (a modified acceptance)",
+          rows[4] == "cleaned", str(rows))
+    check("old standing as-is → declined, exactly as before",
+          rows[6] == "declined", str(rows))
+    check("the manuscript carries what the author left in the tab",
+          "TWO AS PROPOSED." in final
+          and "FOUR AS PROPOSED, BUT IN MY OWN WORDS." in final
+          and "SIX AS PROPOSED." not in final
+          and "Omega closes the essay on a falling cadence." in final,
+          final)
+    check("the hand-rewording is recorded as a proposal→final diff, and "
+          "the thread's final wording is the author's",
+          len(result["diffs"]) == 1
+          and result["diffs"][0]["proposal"] == "FOUR AS PROPOSED."
+          and result["diffs"][0]["final"]
+          == "FOUR AS PROPOSED, BUT IN MY OWN WORDS.",
+          str(result["diffs"]))
+    ev = db.all("SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'filter_edit' ORDER BY created_at", (mid,))
+    check("the resolve's evidence reads accept / revise / decline — the "
+          "verdicts the author actually gave",
+          sorted(r["signal"] for r in ev[-3:])
+          == ["declined", "resolved", "revised"],
+          str([r["signal"] for r in ev]))
+
+
+def _the_lens_door(root: Path) -> None:
+    """§7.2, built (2026-08-31) — a lens finding carrying a `replacement`
+    walks through the door: staged as origin_type='lens', pushed into the
+    tab as forms, settled back under the filter road's whole contract,
+    the hand-resolution inference included. Ambiguity is refused, never
+    guessed; findings and edits stay independent verdicts."""
+    from authorlm import lenses as _lenses
+
+    print("§7.2: the lens door — findings with replacements:")
+
+    ws = root / "lensdoor-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(DOC_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    _lenses.add_lens(manuscript, "door-lens", "# Door lens\nA test lens.")
+    session, _ = api.ensure_session(db, manuscript)
+    mid = manuscript["id"]
+
+    result = _lenses.register_findings(
+        db, manuscript, session, "door-lens", "solo.md", [
+            {"quote": "says a thing worth saying twice",
+             "note": "the phrase undercuts itself",
+             "replacement": "says a thing once, and well"},
+            {"quote": "Gamma follows, saying something else entirely.",
+             "note": "flat connective",
+             "replacement": "Gamma follows, and changes the subject."},
+            {"quote": "And so the wall stands, and the Dead do not pass.",
+             "note": "twin paragraphs",
+             "replacement": "AND SO REWORDED."},
+            {"quote": "Omega closes the essay on a falling cadence.",
+             "note": "a finding with no replacement stays a finding"},
+        ])
+    check("anchored replacements stage doc_threads rows; the ambiguous "
+          "twin quote is refused (never guessed); the plain finding "
+          "stages nothing",
+          len(result["edits_staged"]) == 2
+          and len(result["edits_refused"]) == 1
+          and "2 units" in result["edits_refused"][0]["reason"]
+          and len(result["findings"]) == 4, str(result["edits_refused"]))
+    check("the harness built `new` from the unit ITSELF — the quote "
+          "replaced inside the unit's own text, `old` never supplied by "
+          "the producer",
+          any(t["proposed_new"] ==
+              "Alpha opens the essay and says a thing once, and well."
+              for t in result["edits_staged"]),
+          str([t["proposed_new"] for t in result["edits_staged"]]))
+    linked = [json.loads(r["metadata"]).get("edit_thread")
+              for r in result["findings"]]
+    check("findings and their edits are linked, and only where an edit "
+          "was staged",
+          sum(1 for x in linked if x) == 2, str(linked))
+
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", DOC_ESSAY)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+
+    push = api.lens_push(db, manuscript, {}, "solo.md",
+                         services=lambda: (fake, fake))
+    check("lens push writes the staged edits as forms; local keeps the "
+          "OLD text",
+          push["written"] == 2 and push["local_unchanged"]
+          and "<<" in fake.tab_text("solo.md"), str(push))
+    try:
+        api.lens_push(db, manuscript, {}, "solo.md",
+                      services=lambda: (fake, fake))
+        raised = False
+    except ValueError as err:
+        raised = "already out" in str(err)
+    check("a second lens push refuses while forms are out", raised)
+
+    # The author, in the Doc: hand-resolves one form (markers deleted,
+    # new text kept) and rewords the other inside its braces.
+    _reword_in_tab(
+        fake,
+        "<<Alpha opens the essay and says a thing worth saying twice.>>"
+        "{{Alpha opens the essay and says a thing once, and well.}}",
+        "Alpha opens the essay and says a thing once, and well.")
+    _reword_in_tab(
+        fake,
+        "{{Gamma follows, and changes the subject.}}",
+        "{{Gamma follows, and turns the page.}}")
+
+    settle = api.lens_resolve(db, manuscript, {}, "solo.md",
+                             services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("both verdicts land true — the hand-resolved form is an "
+          "acceptance, the braces rewording a modified acceptance",
+          settle["accepted"] == 2 and settle["declined"] == 0
+          and "says a thing once, and well." in final
+          and "Gamma follows, and turns the page." in final, final)
+    check("the modified acceptance is the learnings feedstock",
+          len(settle["diffs"]) == 1
+          and settle["diffs"][0]["final"]
+          == "Gamma follows, and turns the page.", str(settle["diffs"]))
+    ev = db.all("SELECT * FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'lens_edit' ORDER BY created_at", (mid,))
+    check("evidence lands as lens_edit — the door's own stream, NO "
+          "episode",
+          sorted(r["signal"] for r in ev) == ["resolved", "revised"]
+          and all(r["episode_id"] is None for r in ev),
+          str([r["signal"] for r in ev]))
+
+
+def _the_changed_words_pop(root: Path) -> None:
+    """Author request 2026-08-31: a one-word edit inside a
+    paragraph-sized form was invisible in the Doc. The push now
+    word-diffs old vs new deterministically and colors the differing
+    words (red in the struck half, blue in the green half) — COLOR
+    only, because the resolve reads the markdown export and bold would
+    leak literal asterisks into the resolved prose."""
+    print("the changed words pop: word-diff highlights on the form:")
+
+    old = "From Nothing, the sermon derives two opposing Fields."
+    new = "From Nothing, the sermon proposes two opposing Fields."
+    reqs = gdocs._mark_replace_requests("tab-9", 100, 100 + len(old),
+                                        old, new)
+    base = reqs[:4]
+    hi = reqs[4:]
+    check("the base form requests are unchanged: insert-new, insert-<<, "
+          "strike, green",
+          len(base) == 4 and "insertText" in base[0]
+          and base[2]["updateTextStyle"]["textStyle"]["strikethrough"]
+          is True, str(base))
+    old_base = 100 + 2
+    new_base = 100 + 4 + len(old) + 2
+    d_start = old.index("derives")
+    p_start = new.index("proposes")
+    check("exactly one red span over 'derives' and one blue span over "
+          "'proposes', at the right utf-16 offsets inside the form",
+          len(hi) == 2
+          and hi[0]["updateTextStyle"]["range"]["startIndex"]
+          == old_base + d_start
+          and hi[0]["updateTextStyle"]["range"]["endIndex"]
+          == old_base + d_start + len("derives")
+          and hi[0]["updateTextStyle"]["textStyle"]["foregroundColor"]
+          == gdocs.RED_GONE
+          and hi[1]["updateTextStyle"]["range"]["startIndex"]
+          == new_base + p_start
+          and hi[1]["updateTextStyle"]["range"]["endIndex"]
+          == new_base + p_start + len("proposes")
+          and hi[1]["updateTextStyle"]["textStyle"]["foregroundColor"]
+          == gdocs.BLUE_NEW, str(hi))
+    check("color only — no highlight request touches bold or italics",
+          all(r["updateTextStyle"]["fields"] == "foregroundColor"
+              for r in hi), str(hi))
+
+    # A cut (words removed, nothing added on that side) highlights only
+    # the struck side.
+    old2 = "The claim stands. It repeats the image in plainer words."
+    new2 = "The claim stands."
+    _, spans = gdocs._word_diff_spans(old2, new2)
+    old_spans, _ = gdocs._word_diff_spans(old2, new2)
+    check("a pure cut yields red spans and no blue",
+          old_spans and not spans, str((old_spans, spans)))
+
+    # A rewrite where most words changed is all change and no signal:
+    # no highlights at all.
+    o3, n3 = gdocs._word_diff_spans(
+        "Alpha beta gamma delta epsilon.",
+        "Entirely different words in every position here.")
+    check("a mostly-rewritten form gets NO highlight — all-highlight is "
+          "no signal", o3 == [] and n3 == [], str((o3, n3)))
+    reqs3 = gdocs._mark_replace_requests(
+        "tab-9", 50, 80, "Alpha beta gamma delta epsilon.",
+        "Entirely different words in every position here.")
+    check("...and the form request list is exactly the base four",
+          len(reqs3) == 4, str(len(reqs3)))
 
     # --- F-D12: a genuine two-sided edit refuses, and moves nothing ---
     db2, ms2, msdir2, fake2 = _doc_run(root, "conflict-ws",
@@ -1601,7 +1849,7 @@ def _the_doc_settle(root: Path) -> None:
         "Gamma, rewritten in the Doc and nowhere else.")
     raised = None
     try:
-        api.filter_settle(db2, ms2, {}, "solo.md",
+        api.filter_resolve(db2, ms2, {}, "solo.md",
                           services=lambda: (fake2, fake2))
     except ValueError as err:
         raised = str(err)
@@ -1622,8 +1870,8 @@ def _the_doc_settle(root: Path) -> None:
 
 def _a_pull_between_push_and_settle(root: Path) -> None:
     """F-D6 — `doc pull` while forms are out is legal and harmless, and
-    the settle afterwards still finds them."""
-    print("§2.6: a pull between the push and the settle:")
+    the resolve afterwards still finds them."""
+    print("§2.6: a pull between the push and the resolve:")
 
     db, manuscript, ms, fake = _doc_run(
         root, "pull-ws", {2: "TWO AS PROPOSED.", 4: "FOUR AS PROPOSED."})
@@ -1646,7 +1894,7 @@ def _a_pull_between_push_and_settle(root: Path) -> None:
           "solo.md" not in report.get("marked", []), str(report))
     check("F-D6 it wrote the OLD halves locally and never a marker — "
           "`strip_pending` collapses each form to its old half, which is "
-          "exactly why the settle must read the DOC and not this file",
+          "exactly why the resolve must read the DOC and not this file",
           "<<" not in local and "{{" not in local
           and "TWO REDONE." not in local
           and "Alpha opens the essay" in local, local)
@@ -1660,10 +1908,10 @@ def _a_pull_between_push_and_settle(root: Path) -> None:
     check("F-D6 ...and the checkout is cleared",
           not gdocs.doc_status(db, manuscript)["solo.md"]["checked_out"])
 
-    result = api.filter_settle(db, manuscript, {}, "solo.md",
+    result = api.filter_resolve(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
     final = (ms / "solo.md").read_text()
-    check("F-D6 a settle AFTER that pull still finds both forms and "
+    check("F-D6 a resolve AFTER that pull still finds both forms and "
           "takes the reworded half",
           result["forms"] == 2 and "TWO, REWORDED." in final
           and "FOUR AS PROPOSED." in final and "<<" not in final, final)
@@ -1681,7 +1929,7 @@ def _twins_settle_by_position(root: Path) -> None:
     api.filter_push(db, manuscript, {}, "solo.md",
                     services=lambda: (fake, fake))
     _reword_in_tab(fake, "{{TWIN ONE REDONE.}}", "{{THE FIRST, MY WORDING.}}")
-    result = api.filter_settle(db, manuscript, {}, "solo.md",
+    result = api.filter_resolve(db, manuscript, {}, "solo.md",
                                services=lambda: (fake, fake))
     final = (ms / "solo.md").read_text()
     check("F-D17 the reworded text lands at the FIRST twin and the "
@@ -1708,7 +1956,7 @@ def _twins_settle_by_position(root: Path) -> None:
         "<<And so the wall stands, and the Dead do not pass.>>"
         "{{TWIN ONE REDONE.}}",
         "And so the wall stands, and the Dead do not pass.")
-    result2 = api.filter_settle(db2, ms2, {}, "solo.md",
+    result2 = api.filter_resolve(db2, ms2, {}, "solo.md",
                                 services=lambda: (fake2, fake2))
     final2 = (msdir2 / "solo.md").read_text()
     check("F-D18 the TEXT outcome is strict: the surviving form's text "
@@ -1741,7 +1989,7 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
     the proposal→final diffs have always been recorded. The half that
     turns them into a rule the author can ratify lived in a CLI-private
     `_critique_learnings` and only `critique resolve` reached it, so the
-    highest-value output of a settle — *your post-edits keep doing the
+    highest-value output of a resolve — *your post-edits keep doing the
     same thing; here is the rule you may be enacting* — had never fired
     for a filter, in either mode."""
     from authorlm import placement as _placement
@@ -1762,12 +2010,12 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
             root, "learn-local", {2: "TWO AS PROPOSED.",
                                   4: "FOUR AS PROPOSED."})
         with contextlib.redirect_stdout(io.StringIO()):
-            api.filter_settle(db, manuscript, {}, "solo.md", pause=True)
+            api.filter_resolve(db, manuscript, {}, "solo.md", pause=True)
         marked = (ms / "solo.md").read_text()
         (ms / "solo.md").write_text(
             marked.replace("{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}")
                   .replace("{{FOUR AS PROPOSED.}}", "{{FOUR, MY WORDING.}}"))
-        result = api.filter_settle(db, manuscript, {}, "solo.md")
+        result = api.filter_resolve(db, manuscript, {}, "solo.md")
         check("F-D8 two modified acceptances on the LOCAL road call the "
               "shared distiller EXACTLY once — the filter pass never "
               "reached this before, in either mode, and doc mode must "
@@ -1790,7 +2038,7 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
         _reword_in_tab(fake2, "{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}")
         _reword_in_tab(fake2, "{{FOUR AS PROPOSED.}}",
                        "{{FOUR, MY WORDING.}}")
-        result2 = api.filter_settle(db2, ms2, {}, "solo.md",
+        result2 = api.filter_resolve(db2, ms2, {}, "solo.md",
                                     services=lambda: (fake2, fake2))
         check("F-D8 the same two on the DOC road call it exactly once too "
               "— the parity claim, made testable rather than asserted",
@@ -1802,11 +2050,11 @@ def _the_learnings_loop_reaches_the_filter(root: Path) -> None:
         db3, ms3, msdir3, _f3 = _doc_run(root, "learn-one",
                                          {2: "TWO AS PROPOSED."})
         with contextlib.redirect_stdout(io.StringIO()):
-            api.filter_settle(db3, ms3, {}, "solo.md", pause=True)
+            api.filter_resolve(db3, ms3, {}, "solo.md", pause=True)
         marked3 = (msdir3 / "solo.md").read_text()
         (msdir3 / "solo.md").write_text(
             marked3.replace("{{TWO AS PROPOSED.}}", "{{TWO, MY WORDING.}}"))
-        result3 = api.filter_settle(db3, ms3, {}, "solo.md")
+        result3 = api.filter_resolve(db3, ms3, {}, "solo.md")
         check("F-D8 ONE modified acceptance does not fire it — a pattern "
               "needs at least two instances, and a candidate raised from "
               "one is a guess the author has to refuse",
@@ -1844,7 +2092,7 @@ def _recovery_while_forms_are_out(root: Path) -> None:
           "the pin over a file whose forms are sitting in the Doc "
           "pointed at text that no longer exists there",
           raised is not None and "still out in the Google Doc" in raised
-          and "filter settle solo.md" in raised
+          and "filter resolve solo.md" in raised
           and "filter unmark solo.md --force" in raised, raised)
     check("F-D9 ...and NOTHING moved: the file is byte-identical and "
           "every form is still `written`",
@@ -1972,7 +2220,7 @@ def _recovery_while_forms_are_out(root: Path) -> None:
                                      {2: "TWO AS PROPOSED."})
     mid2 = ms2["id"]
     with contextlib.redirect_stdout(io.StringIO()):
-        api.filter_settle(db2, ms2, {}, "solo.md", pause=True)
+        api.filter_resolve(db2, ms2, {}, "solo.md", pause=True)
     db2.conn.execute("DELETE FROM doc_threads WHERE manuscript_id = ? AND "
                      "state = 'written'", (mid2,))
     db2.conn.commit()
@@ -2037,7 +2285,7 @@ def _chat_sees_each_run_s_transport(root: Path) -> None:
           "in the author's Doc",
           report["transport_note"] is not None
           and "duplicate-words (1)" in report["transport_note"]
-          and "filter settle solo.md" in report["transport_note"],
+          and "filter resolve solo.md" in report["transport_note"],
           str(report["transport_note"]))
     check("P3b ...and it says the OTHER run's proposals are still "
           "ordinary triage, so the note narrows chat's behaviour instead "
@@ -2143,12 +2391,12 @@ def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
           "push_doc's own guard",
           raised is not None and "'duplicate-words'" in raised
           and "already in solo.md's tab" in raised
-          and "filter settle solo.md" in raised, raised)
+          and "filter resolve solo.md" in raised, raised)
     check("P3c ...and it says WHY, which is the part a warning could not "
           "carry: two producers' forms in one tab cannot be told apart "
-          "at settle, because the join is the old text",
+          "at resolve, because the join is the old text",
           raised is not None
-          and "cannot be told apart at settle" in raised, raised)
+          and "cannot be told apart at resolve" in raised, raised)
     check("P3c ...and NOTHING moved: no request body was formed and the "
           "tab is byte-identical, so the refusal really is early rather "
           "than a rollback after a half-done write",
@@ -2164,7 +2412,7 @@ def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
 
 
 def _the_hint_after_an_unmark(root: Path) -> None:
-    """P3a — the settle's "the tab still shows the marks" line must be
+    """P3a — the resolve's "the tab still shows the marks" line must be
     keyed on whether THIS settle read the tab, not on the run's mode.
 
     `filter unmark` deliberately does not clear the mode (§2.1), so a run
@@ -2172,7 +2420,7 @@ def _the_hint_after_an_unmark(root: Path) -> None:
     just been rebuilt CLEAN. Keying the hint on the mode sent the author
     to look at struck-and-green text that is not there, and at a `doc
     push` with nothing to clear."""
-    print("P3a: the settle hint after the forms were taken back:")
+    print("P3a: the resolve hint after the forms were taken back:")
 
     db, manuscript, ms, fake = _doc_run(root, "hint-ws",
                                         {2: "TWO AS PROPOSED."})
@@ -2183,9 +2431,9 @@ def _the_hint_after_an_unmark(root: Path) -> None:
     check("the tab really was rebuilt clean — otherwise the hint would "
           "be TRUE and this test asserts nothing (§14.8)",
           "<<" not in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
-    settled = api.filter_settle(db, manuscript, {}, "solo.md",
+    settled = api.filter_resolve(db, manuscript, {}, "solo.md",
                                 services=lambda: (fake, fake))
-    check("P3a the settle does NOT claim the tab still shows the marks — "
+    check("P3a the resolve does NOT claim the tab still shows the marks — "
           "it read the FILE, and the tab it would be talking about was "
           "rebuilt clean one verb ago",
           settled["tab_still_marked"] is False,
@@ -2194,7 +2442,7 @@ def _the_hint_after_an_unmark(root: Path) -> None:
     check("P3a ...and the run's mode is STILL 'doc' at that moment, "
           "which is exactly why keying the hint on the mode was wrong",
           settled["mode"] == "doc")
-    check("P3a the hint still fires on a settle that really did read the "
+    check("P3a the hint still fires on a resolve that really did read the "
           "tab — the fix narrows it, it does not delete it",
           _a_real_doc_settle_still_hints(root))
 
@@ -2204,7 +2452,7 @@ def _a_real_doc_settle_still_hints(root: Path) -> bool:
                                         {2: "TWO AS PROPOSED."})
     api.filter_push(db, manuscript, {}, "solo.md",
                     services=lambda: (fake, fake))
-    out = api.filter_settle(db, manuscript, {}, "solo.md",
+    out = api.filter_resolve(db, manuscript, {}, "solo.md",
                             services=lambda: (fake, fake))
     return out["tab_still_marked"] is True
 
@@ -2235,14 +2483,14 @@ def _awkward_new_halves_through_the_doc(root: Path) -> None:
     landed = thread["state"] == "written"
     settled_ok = None
     if landed:
-        settle = api.filter_settle(db, manuscript, {}, "solo.md",
+        settle = api.filter_resolve(db, manuscript, {}, "solo.md",
                                    services=lambda: (fake, fake))
         settled_ok = settle["forms"] == 1
     check("F-D13 a `new` half containing a blank line either round-trips "
-          "verbatim (written, and the settle finds its form) OR fails "
+          "verbatim (written, and the resolve finds its form) OR fails "
           "the read-back and stays `accepted` — the disjunction is the "
           "claim, because there is no third outcome in which a thread is "
-          "`written` but its form is unfindable at settle",
+          "`written` but its form is unfindable at resolve",
           (landed and settled_ok) or
           (not landed and thread["state"] == "accepted"
            and result["written"] == 0),
@@ -2269,7 +2517,7 @@ def _awkward_new_halves_through_the_doc(root: Path) -> None:
           "which is right, because nothing on that path parses markdown",
           "[^3]" in wire and "\\\\[^3]" not in wire,
           [b for b in fake2.bodies if "[^3]" in b][:1])
-    settle2 = api.filter_settle(db2, ms2, {}, "solo.md",
+    settle2 = api.filter_resolve(db2, ms2, {}, "solo.md",
                                 services=lambda: (fake2, fake2))
     final2 = (msdir2 / "solo.md").read_text()
     check("F-D15 ...and it survives export→settle byte-identically "
@@ -2283,7 +2531,7 @@ def _awkward_new_halves_through_the_doc(root: Path) -> None:
           "makes the PUSHED round trip byte-clean; the inserted case is "
           "outside that proof (design §4, RISK-2). Run it by hand: "
           "`filter push` an essay whose new half carries [^3], then "
-          "`filter settle`, and compare. If it fails, the disposition is "
+          "`filter resolve`, and compare. If it fails, the disposition is "
           "a per-thread refusal at push naming the local road — NOT an "
           "escape, which would re-create §15.22's pipe-escape failure in "
           "a new place.")
@@ -2340,11 +2588,11 @@ def _the_doc_road_through_the_cli(root: Path) -> None:
 
         out2 = io.StringIO()
         with contextlib.redirect_stdout(out2):
-            cli_main(["--workspace", str(ws), "filter", "settle",
+            cli_main(["--workspace", str(ws), "filter", "resolve",
                       "solo.md"])
         settled = out2.getvalue()
         final = (ms / "solo.md").read_text()
-        check("FD the settle finalizes both, says how many were in the "
+        check("FD the resolve finalizes both, says how many were in the "
               "author's own wording, and says the tab keeps its marks "
               "until the next doc push",
               "Finalized: 2 change(s) made final in solo.md, 1 of them in "
@@ -2360,7 +2608,7 @@ def _the_doc_road_through_the_cli(root: Path) -> None:
         versions = db.all(
             "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
             "ORDER BY version_no DESC LIMIT 1", (mid,))
-        check("FD the settle was collected — the version history has the "
+        check("FD the resolve was collected — the version history has the "
               "finished essay", loads(versions[0]["files"], {}).get(
                   "solo.md", "").find("Two, as I would rather have it.") >= 0)
         settle_ids = [r["id"] for r in db.all(
@@ -2389,23 +2637,24 @@ TEMPLATE_ESSAY = (
 
 
 def _braces_are_the_authors(root: Path) -> None:
-    """AQ/FU-A — the local canonicalizer is the REPLACE form ONLY.
+    """AQ/FU-A — author `{{…}}` is prose on BOTH seams.
 
-    `strip_pending` is the DOC canonicalizer: in a Doc tab nothing put
-    `{{…}}` there but AuthorLM, so a bare one is a critique-pass
-    insertion and deleting it is ratified. Pointed at LOCAL files that
-    rule inverts — `{{title}}`, `{{a, b}}`, a Handlebars sample in an
-    essay ABOUT templating are the author's own prose — and the broad
-    strip deleted every one of them from everything the system observes,
-    silently, because once they were gone there was nothing left to warn
-    about. `is_marked` tripped on them too, refusing the file's Doc push
-    forever with a message about a settle that does not exist.
+    Local observation uses `strip_replacements` (replace forms only).
+    Doc pull/reconcile uses `strip_pending`, which must drop critique
+    paragraph insertions but leave inline author braces alone — they
+    reach the tab via `doc push`, and collapsing them made reconcile
+    auto-pull a gutted essay whenever local still matched `pushed_hash`.
+    `is_marked` must not trip on braces either, or Doc push refuses
+    forever with a message about a resolve that does not exist.
 
     A filter never stages an insertion (`insert` is refused by the
-    recorder), so narrowing loses nothing this seam exists for."""
+    recorder), so the local narrowing loses nothing this seam exists for."""
+    import hashlib
+
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
     from authorlm import threads as _th
+    from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
 
@@ -2431,6 +2680,35 @@ def _braces_are_the_authors(root: Path) -> None:
           "matter",
           _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
           _th.strip_replacements(TEMPLATE_ESSAY)[1])
+    doc_stripped, doc_warns = _th.strip_pending(TEMPLATE_ESSAY)
+    check("strip_pending (Doc pull/reconcile) leaves author braces intact "
+          "— the tab holds the pushed essay, not only AuthorLM forms",
+          doc_stripped == TEMPLATE_ESSAY and doc_warns == [],
+          repr((doc_stripped, doc_warns)))
+    with_math = TEMPLATE_ESSAY + "Energy $E={{mc}}^2$.\n"
+    math_stripped, _ = _th.strip_pending(with_math)
+    check("...including TeX grouping braces that math push carries intact",
+          "$E={{mc}}^2$" in math_stripped, repr(math_stripped))
+    mixed = (TEMPLATE_ESSAY.rstrip() + "\n\n{{critique insertion}}\n\n"
+             "Trailing prose.\n")
+    mixed_stripped, _ = _th.strip_pending(mixed)
+    check("...while still dropping a critique paragraph insertion "
+          "byte-clean, braces in the surrounding prose untouched",
+          "{{title}}" in mixed_stripped
+          and "{{a, b}}" in mixed_stripped
+          and "{{critique insertion}}" not in mixed_stripped
+          and "Trailing prose." in mixed_stripped,
+          repr(mixed_stripped))
+    # Reconcile's auto-pull fires when local_hash == pushed_hash and the
+    # stripped tab differs. After a clean push those two sides must agree.
+    pushed = normalize_markdown(TEMPLATE_ESSAY)
+    base = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    tab_canon = _th.strip_pending(pushed)[0]
+    local_hash = hashlib.sha256(pushed.encode()).hexdigest()[:16]
+    check("reconcile would NOT auto-pull after a clean brace-bearing push "
+          "— stripped tab equals local, so session-start cannot gut "
+          "{{title}} / {{a, b}}",
+          local_hash == base and tab_canon == pushed, repr(tab_canon))
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
 
@@ -2616,14 +2894,14 @@ def pronunciation_purity() -> None:
     # back, so an escaped pipe is unescaped on the author's own disk and
     # the row reparses with its cells shifted one to the left. The row
     # COUNT is unchanged by that, so §2.6's zero-rows guard never sees
-    # it — a settled row silently rewritten, which is the one thing this
+    # it — a resolved row silently rewritten, which is the one thing this
     # file exists to make impossible. So the row is SKIPPED and named.
     pipe_table = ("| Term | Say it | Note |\n| --- | --- | --- |\n"
                   "| a\\|b | ay-bee | the \\| is literal |\n"
                   "| anattā | uh-NUT-taa | Pali |\n")
     escaped, esc_warns = pron.parse(pipe_table)
     check("P7 an author-typed ESCAPED pipe row is skipped and named, "
-          "never read as shifted cells — and the settled row beside it "
+          "never read as shifted cells — and the resolved row beside it "
           "survives untouched",
           escaped == [{"term": "anattā", "say": "uh-NUT-taa",
                        "note": "Pali"}]
@@ -3023,6 +3301,50 @@ def main_test() -> None:
         check("drifted paragraph fails loudly before any Doc write", raised)
         check("strip_pending on the marked text gives back the pristine essay",
               th.strip_pending(marked)[0].strip() == ESSAY.strip())
+
+        # Local road: observation strips embed lines, but on disk the
+        # embed glues under the illustration tag as one paragraph. Compose
+        # must peel that suffix or every illustration-unit accept crashes
+        # (and blocks a mixed accepted batch).
+        from authorlm.revisions import strip_embed_lines
+        disk_illus = (
+            "# Ch\n\nHello world.\n\n"
+            "[Illustration: a lone tracker ⇢ a-lone-tracker.md]\n"
+            "![](_illustrations/a-lone-tracker-aaa11111-0000-01.png)\n\n"
+            "Goodbye.\n")
+        obs_units = passes.paragraphs_of(strip_embed_lines(disk_illus))
+        illus_threads = [
+            {"state": "accepted", "id": "p",
+             "proposed_old": obs_units[1],
+             "proposed_new": "Hello universe.",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 2})},
+            {"state": "accepted", "id": "i",
+             "proposed_old": obs_units[2],
+             "proposed_new":
+             "[Illustration: revised tracker ⇢ a-lone-tracker.md]",
+             "metadata": json.dumps({"kind": "replace",
+                                     "anchor_paragraph": 3})},
+        ]
+        try:
+            illus_marked = passes.compose_marked_text(disk_illus,
+                                                      illus_threads)
+            illus_compose_ok = True
+        except ValueError as err:
+            illus_marked, illus_compose_ok = "", "drifted" not in str(err)
+        illus_final, _ = passes.final_text_from_marked(
+            illus_marked,
+            written=[{**t, "state": "written"} for t in illus_threads],
+            kinds=("replace",)) if illus_compose_ok else ("", [])
+        check("local compose peels a glued illustration embed so an "
+              "accepted illustration-unit edit (and a mixed batch) marks",
+              illus_compose_ok
+              and "aaa11111-0000-01.png" in illus_marked
+              and "<<[Illustration: a lone tracker" in illus_marked
+              and "revised tracker" in illus_final
+              and "aaa11111-0000-01.png" in illus_final
+              and "Hello universe." in illus_final,
+              illus_marked[:200] if illus_marked else "compose raised")
 
         print("critique write order (same-anchor insert before replace):")
         # A replace of paragraph n wraps it as <<old>>{{new}}. Writing the
@@ -3703,6 +4025,9 @@ def main_test() -> None:
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
         _the_doc_settle(root)
+        _a_hand_resolved_tab_settles_true(root)
+        _the_lens_door(root)
+        _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)
         _the_learnings_loop_reaches_the_filter(root)

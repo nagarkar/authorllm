@@ -680,7 +680,7 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                     # this test — the positive case the flipped ALIAS GUIDE
                     # exists to admit.
                     {"alias": "Elective Ground", "canonical": "Choice",
-                     "sentence": "We call it Elective Ground, the settled "
+                     "sentence": "We call it Elective Ground, the resolved "
                                  "name for Choice."},
                     # Q/alias-retired-guard: the bestowed name is a RETIRED
                     # concept — a side door around the retired-name ban.
@@ -1056,7 +1056,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         write(ms / "03-names.md",
               "# Names\n\nWhat ye call Distinction is the choice of "
               "qualities parted. What ye call Persistence is the becoming "
-              "of shapes. We call it Elective Ground, the settled name for "
+              "of shapes. We call it Elective Ground, the resolved name for "
               "Choice. We once called Choice by the name "
               "RetiredAliasCandidate.\n")
         out = run(ws, "extract", "--aliases")
@@ -4353,6 +4353,99 @@ def scenario_transplant() -> None:
     check("horizontal rules survive transplant as --- paragraphs",
           hr_text == "Above.\n---\nBelow.\n", hr_text)
 
+    # Tables (it-08b8b0a0c737): a Docs table element must be rebuilt with
+    # insertTable and its cells filled last-to-first at the empty-table
+    # indices; text after the table must land after the whole table.
+    def _cell(text, **style):
+        return {"content": [{"paragraph": {"elements": [
+            {"textRun": {"content": text, "textStyle": style}}]}}]}
+    tbl_doc = {"body": {"content": [
+        {"paragraph": {"elements": [{"textRun": {"content": "Before.\n"}}]}},
+        {"table": {"rows": 2, "columns": 2, "tableRows": [
+            {"tableCells": [_cell("A\n", bold=True), _cell("B\n")]},
+            {"tableCells": [_cell("c\n"), _cell("dd\n")]}]}},
+        {"paragraph": {"elements": [{"textRun": {"content": "After.\n"}}]}},
+    ]}}
+    tbl_reqs = transplant_requests(tbl_doc, "t.x")
+    tables = [r["insertTable"] for r in tbl_reqs if "insertTable" in r]
+    check("a table element becomes one insertTable at the cursor",
+          tables == [{"rows": 2, "columns": 2,
+                      "location": {"tabId": "t.x", "index": 9}}], str(tables))
+    tbl_inserts = [(r["insertText"]["location"]["index"], r["insertText"]["text"])
+                   for r in tbl_reqs if "insertText" in r]
+    # empty 2x2 table: newline(1) + table start/end(2) + 2 rows x (1 + 2 cells x 2) = 13
+    check("cells fill last-to-first at empty-table indices, prose follows the table",
+          tbl_inserts == [(1, "Before.\n"), (20, "dd"), (18, "c"), (15, "B"),
+                          (13, "A"), (27, "After.\n")], str(tbl_inserts))
+    bolds = [r["updateTextStyle"]["range"] for r in tbl_reqs
+             if "updateTextStyle" in r
+             and r["updateTextStyle"]["textStyle"].get("bold") is True]
+    check("cell run styles are applied inside the cell",
+          bolds == [{"tabId": "t.x", "startIndex": 13, "endIndex": 14}], str(bolds))
+
+    # `_tab_runs` must descend into table cells, and `_locate_in_tab`
+    # must map across the structural index gap tables leave between
+    # cells and the next paragraph. Skipping either planted
+    # <<old>>{{new}} forms on the wrong span once tables reached tabs
+    # (it-08b8b0a0c737).
+    from authorlm.gdocs import _locate_in_tab, _tab_runs
+
+    class _Req:
+        def __init__(self, result):
+            self._result = result
+
+        def execute(self):
+            return self._result
+
+    cell_para = {
+        "startIndex": 12, "endIndex": 21,
+        "paragraph": {"elements": [
+            {"startIndex": 12, "endIndex": 21,
+             "textRun": {"content": "in-table\n"}},
+        ]},
+    }
+    table_body = [
+        {"startIndex": 1, "endIndex": 8,
+         "paragraph": {"elements": [
+             {"startIndex": 1, "endIndex": 8,
+              "textRun": {"content": "Before\n"}},
+         ]}},
+        {"startIndex": 8, "endIndex": 30,
+         "table": {"tableRows": [
+             {"tableCells": [{"content": [cell_para]}]}]}},
+        {"startIndex": 30, "endIndex": 37,
+         "paragraph": {"elements": [
+             {"startIndex": 30, "endIndex": 37,
+              "textRun": {"content": "After.\n"}},
+         ]}},
+    ]
+
+    class _TableTabDocs:
+        def documents(self):
+            class _Docs:
+                def get(self, documentId=None, includeTabsContent=None):
+                    return _Req({"tabs": [{
+                        "tabProperties": {"tabId": "t.x",
+                                          "title": "essay.md"},
+                        "documentTab": {"body": {"content": table_body}},
+                        "childTabs": [],
+                    }]})
+            return _Docs()
+
+    docs = _TableTabDocs()
+    runs = _tab_runs(docs, "doc", "t.x")
+    check("_tab_runs includes table-cell text runs",
+          runs == [(1, "Before\n"), (12, "in-table\n"), (30, "After.\n")],
+          str(runs))
+    span = _locate_in_tab(docs, "doc", "t.x", "After.")
+    check("_locate_in_tab maps post-table prose to the real Doc index "
+          "(not the end of the preceding cell / inside the table)",
+          span == (30, 36), str(span))
+    cell_span = _locate_in_tab(docs, "doc", "t.x", "in-table\n")
+    check("_locate_in_tab exclusive end after a cell does not swallow "
+          "the table's structural gap",
+          cell_span == (12, 21), str(cell_span))
+
     # Tab reordering: iterated single moves must converge to TOC order
     # under remove-then-insert semantics, and no-op once matched.
     from authorlm.gdocs import next_tab_move
@@ -5432,9 +5525,9 @@ def scenario_testbench(root: Path) -> None:
               "own state, so none can reach the network even on a fully "
               "authorized bridge",
               "refuses 'filter push' by name" in out
-              and "refuses 'filter settle --pause' by name" in out
+              and "refuses 'filter resolve --pause' by name" in out
               and "prints the run's transport" in out
-              and "names 'filter settle'" in out, out)
+              and "names 'filter resolve'" in out, out)
         check("...and each of those is PAIRED with the same verb at the "
               "other mode, so the section is proved to discriminate "
               "rather than to pass whatever it is handed",
@@ -5450,7 +5543,7 @@ def scenario_testbench(root: Path) -> None:
               "settle's summary rebuild — the filter path itself makes "
               "none, which is the design's claim stated exactly rather "
               "than loosely. On the author's own bench the keys are "
-              "scrubbed, so that one call fails and the settle warns "
+              "scrubbed, so that one call fails and the resolve warns "
               "soft: zero live spend there, one stub call here",
               StubLLMHandler.REQUESTS - before == 1,
               f"{StubLLMHandler.REQUESTS - before} calls")
@@ -5682,7 +5775,7 @@ def scenario_filter(root: Path) -> None:
         run(ws, "session", "start")
         # A declared goal with an OPEN episode, from the start: the
         # settle's attribution assertions are worthless unless there is
-        # something for the settle to be mis-attributed TO (§14.8).
+        # something for the resolve to be mis-attributed TO (§14.8).
         run(ws, "intent", "declare", "Foreground the wall as a refrain")
         db = _DB(ws / ".authorlm" / "authorlm.db")
         manuscript = _fapi.get_manuscript(db)
@@ -6004,26 +6097,26 @@ def scenario_filter(root: Path) -> None:
                       "manuscript_id = ? AND origin_type = 'filter'",
                       (mid,))))
 
-        # ---------------- F26 + the settle ----------------------------
+        # ---------------- F26 + the resolve ----------------------------
         episodes_before = {r["id"]: r["transition_ids"] for r in db.all(
             "SELECT id, transition_ids FROM editorial_episodes WHERE "
             "manuscript_id = ?", (mid,))}
-        check("there IS an open episode for the settle to be "
+        check("there IS an open episode for the resolve to be "
               "mis-attributed to (§14.8: make the guarded thing happen)",
               any(r["status"] == "open" for r in db.all(
                   "SELECT status FROM editorial_episodes WHERE "
                   "manuscript_id = ?", (mid,))))
         calls_before = StubLLMHandler.REQUESTS
-        out = run(ws, "filter", "settle", "02-wall.md")
+        out = run(ws, "filter", "resolve", "02-wall.md")
         settled_text = (ms / "02-wall.md").read_text()
-        check("the settle applied the one accepted edit — and F21's "
+        check("the resolve applied the one accepted edit — and F21's "
               "blank-line replacement resolved to TWO paragraphs, which "
               "is the whole reason a split is allowed",
               "The ledger counts.\n\nNothing in it is an accusation."
               in settled_text
               and "Moreover the wall stands" in settled_text,
               settled_text[:300])
-        check("the settle's ONE model call is the summary rebuild, and it "
+        check("the resolve's ONE model call is the summary rebuild, and it "
               "is the only call the whole chat-mode path makes",
               StubLLMHandler.REQUESTS == calls_before + 1,
               f"{calls_before} -> {StubLLMHandler.REQUESTS}")
@@ -6033,15 +6126,15 @@ def scenario_filter(root: Path) -> None:
         grew = {k: (episodes_before[k], episodes_after[k])
                 for k in episodes_before
                 if episodes_after.get(k) != episodes_before[k]}
-        check("F26 the settle's collect attaches its transitions to NO "
+        check("F26 the resolve's collect attaches its transitions to NO "
               "episode: every open episode's transition_ids is unchanged "
-              "across the settle",
+              "across the resolve",
               not grew, grew)
         check("F26 ...and no NEW episode was opened to hold them either",
               not any(_loads(episodes_after[k], []) for k in
                       set(episodes_after) - set(episodes_before)),
               sorted(set(episodes_after) - set(episodes_before)))
-        check("the settle says the attribution out loud, once",
+        check("the resolve says the attribution out loud, once",
               out.count("filed against any of your goals") == 1, out)
         check("F42 rejecting unit 2 prints the downstream list and the "
               "--from remedy — derived, never stored, and deliberately "
@@ -6060,7 +6153,7 @@ def scenario_filter(root: Path) -> None:
         # ---------------- F37-F40: approximate idempotency ------------
         out = run(ws, "filter", "run", "duplicate-words", "02-wall.md",
                   expect_exit=True)
-        check("F37 M1: a settled run on this exact text refuses and names "
+        check("F37 M1: a resolved run on this exact text refuses and names "
               "the prior run and its tallies",
               "already ran on this exact text" in out
               and "1 accepted / 1 rejected" in out and "--again" in out, out)
@@ -6083,12 +6176,12 @@ def scenario_filter(root: Path) -> None:
         # proposal must not appear in the NEW run's triage list: it lives
         # in PRIOR RUNS above, where its reason is law, and listing it
         # here would let `--accept 1` resurrect the very thing the author
-        # refused — into a settle it was never part of.
+        # refused — into a resolve it was never part of.
         settled_rejection = dict(db.one(
             "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
             "origin_type = 'filter' AND state = 'rejected' "
             "ORDER BY created_at DESC LIMIT 1", (mid,)))
-        check("the settled run's rejected proposal is still ON RECORD — "
+        check("the resolved run's rejected proposal is still ON RECORD — "
               "it is evidence, and nothing withdrew it",
               settled_rejection["state"] == "rejected",
               settled_rejection["origin_id"])
@@ -6108,7 +6201,7 @@ def scenario_filter(root: Path) -> None:
             "SELECT state FROM doc_threads WHERE id = ?",
             (settled_rejection["id"],))["state"]
         check("...so `--accept 1` targets the NEW run's proposal and "
-              "leaves the settled rejection exactly as the author left "
+              "leaves the resolved rejection exactly as the author left "
               "it (departure #3)",
               fresh_state == "rejected"
               and db.one("SELECT state FROM doc_threads WHERE "
@@ -6155,7 +6248,7 @@ def scenario_filter(root: Path) -> None:
         run(ws, "filter", "run", "duplicate-words", "02-wall.md",
             "--from", "1", "--window", "5")
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
-        out = run(ws, "filter", "settle", "02-wall.md")
+        out = run(ws, "filter", "resolve", "02-wall.md")
         check(f"F41 a run that covered 5 of {len(fresh)} units settles, "
               f"WARNS naming the uncovered range, and does not refuse — "
               f"completion is the author's call, exactly as an unwritten "
@@ -6173,7 +6266,7 @@ def scenario_filter(root: Path) -> None:
                "test by pushing.",
         }), "filter", "record", "02-wall.md")
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1", "2")
-        out = run(ws, "filter", "settle", "02-wall.md", "--pause")
+        out = run(ws, "filter", "resolve", "02-wall.md", "--pause")
         marked = (ms / "02-wall.md").read_text()
         check("F28 --pause writes MARKED text: the file's bytes carry "
               "the <<old>>{{new}} form for every accepted edit, with the "
@@ -6218,9 +6311,9 @@ def scenario_filter(root: Path) -> None:
         except LookupError as err:
             raised_a = str(err)
         check("F31(a) with the run row present, forms_pending refuses the "
-              "push and names 'filter settle'",
+              "push and names 'filter resolve'",
               raised_a is not None and "filter pending forms" in raised_a
-              and "filter settle 02-wall.md" in raised_a, raised_a)
+              and "filter resolve 02-wall.md" in raised_a, raised_a)
         written_ids = [r["id"] for r in db.all(
             "SELECT id FROM doc_threads WHERE manuscript_id = ? AND "
             "origin_type = 'filter' AND state = 'written'", (mid,))]
@@ -6255,7 +6348,7 @@ def scenario_filter(root: Path) -> None:
         check("the second form is in the file to be deleted (§14.8)",
               form8 in edited, edited[:600])
         (ms / "02-wall.md").write_text(edited.replace(form8, now[7]))
-        out = run(ws, "filter", "settle", "02-wall.md")
+        out = run(ws, "filter", "resolve", "02-wall.md")
         final = (ms / "02-wall.md").read_text()
         check("F32 the finalized text carries the author's post-edit, not "
               "the proposal — their words win",
@@ -6291,7 +6384,7 @@ def scenario_filter(root: Path) -> None:
             2: "The wall stands, and the Dead cannot pass it."}),
             "filter", "record", "02-wall.md")
         run(ws, "filter", "triage", "02-wall.md", "--accept", "1")
-        run(ws, "filter", "settle", "02-wall.md", "--pause")
+        run(ws, "filter", "resolve", "02-wall.md", "--pause")
         out = run(ws, "filter", "rollback", "02-wall.md", expect_exit=True)
         check("filter rollback REFUSES while forms are out, naming both "
               "exits — a rollback mid-pause destroys post-edits the "
@@ -6302,7 +6395,7 @@ def scenario_filter(root: Path) -> None:
               "guard stays separately reachable and is asserted at the "
               "seam, with the rows deleted from under it",
               "still out in the file on disk" in out
-              and "filter settle 02-wall.md" in out
+              and "filter resolve 02-wall.md" in out
               and "filter unmark 02-wall.md" in out, out)
         check("...and it left the marked bytes untouched",
               "<<" in (ms / "02-wall.md").read_text())
@@ -6322,7 +6415,7 @@ def scenario_filter(root: Path) -> None:
         ev_before = db.one(
             "SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
             "AND evidence_type = 'filter_edit'", (mid,))["n"]
-        run(ws, "filter", "settle", "02-wall.md")
+        run(ws, "filter", "resolve", "02-wall.md")
         changed = (ms / "02-wall.md").read_bytes()
         pin = dict(db.one(
             "SELECT source_version_id FROM filter_runs WHERE "
@@ -6360,7 +6453,7 @@ def scenario_filter(root: Path) -> None:
             "--accept", "1",
             "--reject", *[str(i) for i in range(2, staged_n + 1)],
             "--reason", "all of these are the filter overreaching")
-        out = run(ws, "filter", "settle", "02-wall.md")
+        out = run(ws, "filter", "resolve", "02-wall.md")
         check("F43 ...and it SETTLES anyway: the warning blocks nothing, "
               "and the remedy (edit the artifact) is the author's",
               "Applied: 1 change(s) made final" in out, out)
@@ -6398,7 +6491,7 @@ def scenario_filter(root: Path) -> None:
                   "--again", expect_exit=True)
         check("F50 --again while a run of the SAME filter is active is "
               "refused, naming both exits",
-              "already active" in out and "filter settle" in out
+              "already active" in out and "filter resolve" in out
               and "filter abandon" in out, out)
         check("F50 ...and there is still exactly ONE active run of that "
               "filter on that file",
@@ -7071,15 +7164,15 @@ def scenario_pronunciations(root: Path) -> None:
         untouched("filter record")
         run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
         untouched("filter triage")
-        run(ws, "filter", "settle", "02-terms.md", "--pause")
-        untouched("filter settle --pause")
+        run(ws, "filter", "resolve", "02-terms.md", "--pause")
+        untouched("filter resolve --pause")
         marked = (ms / "02-terms.md").read_text()
         (ms / "02-terms.md").write_text(
             marked.replace("which is the point of keeping one",
                            "which is why one is kept"))
         untouched("a hand post-edit of the marked essay")
-        run(ws, "filter", "settle", "02-terms.md")
-        untouched("filter settle")
+        run(ws, "filter", "resolve", "02-terms.md")
+        untouched("filter resolve")
         run(ws, "filter", "rollback", "02-terms.md")
         untouched("filter rollback")
         (ms / "02-terms.md").write_bytes(essay_before)
@@ -7096,7 +7189,7 @@ def scenario_pronunciations(root: Path) -> None:
             state="the voice note: read twice"),
             "filter", "record", "02-terms.md")
         run(ws, "filter", "triage", "02-terms.md", "--accept", "1")
-        run(ws, "filter", "settle", "02-terms.md", "--pause")
+        run(ws, "filter", "resolve", "02-terms.md", "--pause")
         run(ws, "filter", "unmark", "02-terms.md")
         untouched("filter unmark")
         run(ws, "filter", "abandon", "audio-friendly", "02-terms.md")

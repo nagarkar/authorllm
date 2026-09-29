@@ -26,7 +26,7 @@ import unicodedata
 
 FILENAME = "pronunciations.md"
 
-TITLE = "# Pronunciations"
+TITLE = "# **Pronunciations**"  # bold, like every chapter title: the Doc export bolds headings, and a plain one churned on every pull
 
 PREAMBLE = (
     "How the terms in this book are said aloud. AuthorLM proposes a row "
@@ -107,7 +107,7 @@ def _unreadable_row(cells: list[str]) -> str | None:
     author's disk and the row reparses with its cells shifted one to the
     left — `| a\\|b | ay-bee | note |` became term 'a', say 'b', note
     'ay-bee'. The row COUNT is unchanged by that, so §2.6's zero-rows
-    guard never sees it: it is a settled row silently rewritten, which is
+    guard never sees it: it is a resolved row silently rewritten, which is
     the one thing this file exists to make impossible.
 
     So a row carrying a pipe is SKIPPED and named, never guessed at. Two

@@ -6,6 +6,12 @@
 \providecommand{\AuthorLMBookTitle}{\Huge}
 \providecommand{\AuthorLMEssayBreak}{\newpage}
 \providecommand{\AuthorLMReviewNoticeBreak}{\clearpage}
+% Matter transitions (structure.lua emits them at the first file of each
+% matter). No-ops here; the book profile binds them to \frontmatter,
+% \mainmatter and \backmatter.
+\providecommand{\AuthorLMFrontMatter}{}
+\providecommand{\AuthorLMMainMatter}{}
+\providecommand{\AuthorLMBackMatter}{}
 
 \makeatletter
 \providecommand{\AuthorLMEnableReviewPageStyle}{%

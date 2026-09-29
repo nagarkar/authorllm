@@ -50,7 +50,7 @@ MATTER_VALUES = ("front", "main", "back")
 # with a kind marker, applied to a file. `toc.toml` uses a filename for
 # the same reason. A configurable name is not supported and not wanted:
 # one manuscript, one dictionary.
-SIDECAR_FILES = ("pronunciations.md",)
+SIDECAR_FILES = ("pronunciations.md", "manifest.md")
 
 
 def is_sidecar(name: str) -> bool:

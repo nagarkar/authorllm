@@ -484,6 +484,16 @@ Profile registry (key → standing rule):
   against the recorded ambition — the Rovelli/Hossenfelder "Big Idea"
   shelf, audio-first Rational Seekers — never against generic trade
   norms.
+- `audience` — consult for any question about PITCH: whether a passage
+  assumes too much or explains too much, whether a term needs a bridge,
+  whether a gloss is condescension. It records what the reader already
+  has and what they do not, and its standing test is the one to apply.
+  **Precedence, ratified 2026-09-02: where `audience` and `market`
+  disagree, `audience` governs DRAFTING and `market` governs
+  POSITIONING.** They answer different questions — who the prose may
+  assume it is talking to, versus who might buy the book — and the
+  reader-load filter and the pitch lens name `audience` in their front
+  matter so the payload carries it.
 
 **Registering a new aspect** (do all three, in order, when the author
 names one): (1) agree on the key and the standing rule in conversation;
@@ -535,6 +545,15 @@ in their own words.
 Design reference: `docs/critique-pass-design.md`. When the author brings a
 critic's report (editorial analysis, beta-reader notes, any external
 feedback document):
+0. **Ingest to Markdown first** — the intake pipeline reads Markdown.
+   A critique arriving as a PDF is converted with
+   `python3 authorlm/tools/pdf2md.py <report.pdf>` (repo tool: direct
+   text-layer extraction with per-page OCR fallback, header/page-number
+   stripping, de-hyphenation, `<!-- p.N -->` page markers) — not with
+   ad-hoc extraction scripts. A `.docx` converts with
+   `pandoc <report.docx> -t markdown` (or `textutil` on macOS). Keep the
+   converted `.md` beside the manifest in `<manuscript>/_critiques/` as
+   the report's durable copy.
 1. **Import** — parse the report conversationally (`critique.parse_units`
    handles markdown), map units to essay files via toc, classify items
    (revision tasks → intents; standing rules and preservation strands →
@@ -551,8 +570,9 @@ feedback document):
      existing id/status/source: read them to the author in prose.
    - The SESSION does the semantic layer the verb cannot: before writing
      the manifest, check each candidate item against the existing
-     critique items (`list_critique_items` + prior verdicts, via the DB
-     if needed) and the ratified law. A PARAPHRASE of an item the author
+     critique items (`list_critique_items` for what is still pending,
+     `list_critique_decisions` for the resolved verdicts and the author's
+     recorded reasons — never the DB) and the ratified law. A PARAPHRASE of an item the author
      already accepted, already rejected (their reason stands), or
      already ratified as a style element is not imported as new — it is
      listed in the per-unit accounting as a skip, with which existing
@@ -618,8 +638,13 @@ blocks on) any left uncited or cited out of range. Then, per essay:
    leaving the local file untouched and the thread `written`. The next
    essay runs only when the author says so.
    `critique rollback <essay>` restores the pin (verdicts stay as evidence).
-`critique status` shows the pass table; `critique show/reason/reopen`
-answer "what did I decide?" and amend or reopen settled items without SQL.
+`critique status` shows the pass table. "What did I already decide, and
+why?" is answered without SQL by `critique list --decided [--scope FILE]
+[--verdict accept|reject|revise] [--query TEXT]` (chat:
+`list_critique_decisions`, same filters — narrow rather than raising
+`limit`, a manuscript can carry hundreds of settled rejections), and for
+one item by `critique show <id|--query>`; `critique reason` amends a
+recorded reason, `critique reopen` sends an item back to proposed.
 Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
@@ -632,6 +657,23 @@ paragraph, each conditioned on what came before, the way the write verb's
 beat loop conditions each beat. A filter is one concern on ONE essay: a
 motif used one way in `becker.md` and the opposite way in `kindness.md`
 is a real finding and a filter cannot see it. That question is a lens.
+
+**The lens door (built 2026-08-31, design §7.2).** A lens finding may
+carry an optional `replacement` — the quoted text's substitute within its
+unit. When it anchors cleanly (quote verbatim in exactly one unit, once),
+the harness builds `new` from the unit itself and stages a doc thread with
+`origin_type='lens'`; ambiguity is refused per finding, never guessed, and
+the finding itself is always kept. `lens push <essay>` then writes the
+staged lens edits into the essay's tab as `<<old>>{{new}}` forms and
+`lens resolve <essay>` reads the tab back — the filter doc road's contract
+verbatim: the tab is the review, untouched = accept, old-restored =
+decline, reworded (or hand-resolved) = the author's words win, one
+producer's forms per tab, evidence as `lens_edit` under no episode.
+Ruling on a FINDING (`lens review` / conversation) and settling its EDIT
+are independent verdicts — accepting the finding does not apply the edit.
+When registering findings on the author's behalf, include `replacement`
+only where the fix is confidently mechanical; judgment-shaped findings
+stay findings.
 
 The artifact is `<manuscript>/_filters/<name>.md` — TOML front matter
 declaring `class` (`sequential` or `global`), then the prompt. Adding a
@@ -677,6 +719,89 @@ nothing dry about it, it is the flow. `--native` is the billed path and
 refuses unless `[filtering]` is in config.toml, which it deliberately is
 not.
 
+**The cache breakpoints are a NATIVE-path mechanism; do not cite them to
+explain chat-mode cost.** The payload's four blocks (S law / A frame /
+B filtered prefix / C this window) have cache breakpoints after S and
+after A, and on `--native` that stable prefix is written once and
+re-read at cache-read rate. In chat mode there is NO model call, so no
+breakpoint applies: the only cost is how many times the payload is
+printed into the conversation, which is once per `filter run`
+invocation — once per WINDOW.
+
+**Do NOT pass `--window`, and say why if the author asks.** The default
+is the whole essay in one reply (`span = window if window else
+len(units)`), which is both the cheapest and the most autoregressive:
+unit N conditions on the run's own output for N−1 inside a single
+generation. `--window N` splits the run into ⌈units/N⌉ invocations and
+**re-prints block A every time** — with `summaries = true` that is tens
+of thousands of tokens again per window. The ONLY reason to reach for it
+is OUTPUT length: forty-odd rewritten paragraphs plus `why` and `ref` is
+a long generation and a truncated reply is refused whole. If that
+happens, `--window 15` and turn `summaries` off first. (`--from N` is a
+different flag and IS routine — it re-opens the window at unit N after a
+settle falsified the conditioning.)
+
+**`summaries = true` in a filter's front matter** adds the compressed
+summaries of the essays before and after this one to block A — un-gated,
+so a stale summary is shown and marked `!!` rather than refusing the
+run. It costs real tokens (on a mid-sized essay, block A grows roughly
+5×), so declare it only on a filter whose findings genuinely turn on
+what another essay already covers. Design reference §9.1a carries the
+measured numbers.
+
+**The payload already carries cross-essay DEFINITIONS without it.**
+`scoped_concepts(file=…)` selects a concept if it was introduced in this
+essay OR its name or alias appears in the essay's text — so a term
+defined in `metaphysic.md` and used in `hierarchy.md` arrives with its
+notes, its aliases, and the graph edges among the selected nodes. The
+limit worth knowing: an essay only receives the definition of a concept
+whose name it ALREADY WRITES. A concept the essay needs but has not yet
+named is absent, and the cheapest fix is to write the word in once by
+hand — every later payload then picks it up. Never reach for a lens
+merely to reference another essay; reach for one when the JUDGMENT is
+cross-essay (a motif used two ways, material that belongs in a different
+essay), because a filter can only replace a unit in place and can never
+move or cut one.
+
+**"APPLY FILTER X TO ESSAY Y" IS ONE INSTRUCTION, NOT THREE.** The author's
+words on the old behaviour: *"I don't know why we have three different verbs
+required in three different steps to do that one thing."* They are right.
+`run`, `record` and `push` are the state machine's steps, not theirs — they
+never type them, YOU do. When the author asks for a filter to be applied,
+carry the whole thing to the end in ONE turn: assemble the payload, draft the
+reply, `filter apply` (which records AND pushes), then read the proposals
+back to them as prose. Do not stop in the middle to ask which road, whether
+to push, or whether they would like to triage first. The Doc tab IS the
+review, and the point of the pass is that the proposals arrive where they
+will be ruled on.
+
+**A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS THE RESULT.** `filter
+resolve` deliberately does NOT re-push — a resolve that also pushed could
+fail halfway on the network after the evidence was already recorded, so
+the verb stops at the evidence. That is a reason to push SECOND, never a
+reason not to push. The author's words: *"Why do I need to remember to
+tell you to do a doc push every time I tell you to 'resolve'?"* So every
+`filter resolve` and `lens resolve` is followed by `doc push <essay>` in
+the same turn, without being asked. It also clears the struck-and-green
+marks the resolve leaves behind in the tab, which are otherwise still
+sitting there the next time the author opens the Doc. If the push fails,
+say so and retry the PUSH — the verdicts are already safe on disk.
+
+Four things legitimately interrupt that, and nothing else does:
+- a `global` filter, whose prelude must be drafted and frozen first;
+- a run needing more than one window — the apply that COMPLETES the run is
+  the one that pushes; say how many units are left and carry on;
+- the author having asked for the LOCAL road, which is `filter record` then
+  `filter resolve --pause`, never `apply`;
+- a genuine refusal from a verb, which is reported, never worked around.
+
+`authorlm filter apply [<name>] <essay>` (reply JSON on stdin) is `record`
+and `push` in one verb. The DRAFTING step is not in it and cannot be: in chat
+mode `filter run` makes no model call, YOU answer the payload in the
+conversation, and no CLI process can stand in for that. The numbered loop
+below is the machinery `apply` wraps — read it to know what happens, never as
+a script to walk the author through.
+
 The loop, per essay:
 1. `authorlm filter run <name> <essay>` (shell, no call). Read the
    payload. For a `global` filter, `filter prelude <name> <essay>` comes
@@ -690,23 +815,37 @@ The loop, per essay:
    autoregressive rather than N independent judgments. Copy each `echo`
    from the unit; a mismatch discards the whole reply and nothing is
    staged. Pipe the JSON into `authorlm filter record <essay>`.
-3. **Read the proposals back to the author as PROSE, by paragraph.**
-   Never show them the JSON, a payload, a unit index they did not ask
-   for, an id, or a flag name — the same discipline plan and digest
-   presentation already demand. Volunteer the one or two you are LEAST
-   sure about, by number: those are where their ruling changes the
-   outcome.
-4. Verdicts: `list_filter_edits` / `triage_filter_edits` in chat, or
-   `filter triage <essay> --accept … --reject … --reason "…"` in the
-   shell. **Take a rejection's reason in the author's own words,
+3. **`authorlm filter push <essay>` — ALWAYS, immediately after a
+   successful record (author ruling 2026-09-01, verbatim: "always add
+   these to the doc using the old/new syntax just like we do for
+   lenses ... the actual doc update should flow through the same
+   deterministic code path as lensing").** The Doc road is the standing
+   protocol for every filter run, not an option to offer: the staged
+   proposals go into the essay's tab as struck-through old text with the
+   new text in green, through the same forms pipeline `lens push` uses,
+   and the author rules on them THERE. Never apply a filter's edits
+   locally without being told to in as many words, and never hand-write
+   forms into a file or a tab — the verb is the only producer. Then
+   **summarize the proposals in chat VERY BRIEFLY**: one line per
+   changed paragraph saying which paragraph and what kind of repair, the
+   tab URL once, and the one or two you are least sure about. Not the
+   old and new text — the tab shows that. Never show JSON, a payload, a
+   unit index they did not ask for, an id, or a flag name.
+4. Verdicts happen in the tab (untouched = accept, green half emptied
+   = decline, reworded = the author's words win) and `filter resolve
+   <essay>` reads them back when the author says they are done. Chat
+   verdicts (`list_filter_edits` / `triage_filter_edits`, or `filter
+   triage <essay> --accept … --reject … --reason "…"` in the shell)
+   remain available for a change the author wants to knock out before
+   looking, and are never required. **Take a rejection's reason in the author's own words,
    verbatim.** It is the highest-value evidence the run produces: the
    next run of this filter on this essay is shown their reasons before
    it starts, which is most of what stops it proposing the same thing
    twice.
-5. `authorlm filter settle <essay>` applies the accepted edits directly
+5. `authorlm filter resolve <essay>` applies the accepted edits directly
    (the default: the triage verdict already IS the ruling). `--pause`
    instead writes `<<old>>{{new}}` forms into the local file for the
-   author to read and reword in Obsidian; `filter settle` with no flag
+   author to read and reword in Obsidian; `filter resolve` with no flag
    then finalizes, their words winning. While the file is marked it will
    not push to Docs and every observer still reads the original text;
    `filter unmark <essay>` is the way out. `filter rollback <essay>`
@@ -721,7 +860,7 @@ The loop, per essay:
 
    **Step 4 is OPTIONAL on this road, and usually skipped.** The tab IS
    the review: an untouched form is an acceptance, an emptied green half
-   is a decline, a reworded one is a modified acceptance, and the settle
+   is a decline, a reworded one is a modified acceptance, and the resolve
    records all three exactly as a CLI verdict would. So `filter push`
    takes the UNTRIAGED proposals out too — never make the author rule on
    everything in chat first and then again in the Doc. Only a change
@@ -733,7 +872,7 @@ The loop, per essay:
    - **An untouched form is an acceptance.** Leaving a change alone
      means taking it. Nothing needs to be marked "yes".
    - **Edit inside the `{{ }}` braces only. Leave `<< >>` alone.**
-     Editing the old half breaks the join, and the settle records that
+     Editing the old half breaks the join, and the resolve records that
      change as a decline — their text still survives, but the verdict on
      the record is wrong.
    - **When two changes replace identical paragraphs**, `filter push`
@@ -741,12 +880,16 @@ The loop, per essay:
      deleting one outright may attach the decline to the other twin. The
      manuscript text is never affected.
 
+   **Since 2026-09-01 the Doc road is the DEFAULT for filters** (step 3
+   above). The local-road paragraphs below describe the fallback the
+   author must ask for by name.
+
    A run takes ONE road and keeps it: a push makes it a doc run, a
    settle with no prior push makes it a local run, and switching is
-   settle-then-rerun rather than a flag. Only ONE producer's forms can
+   resolve-then-rerun rather than a flag. Only ONE producer's forms can
    be in an essay's tab at a time — a second filter's `filter push` on
    the same essay is refused by name, because two producers' forms in
-   one tab cannot be told apart at settle. Local stays the DEFAULT and
+   one tab cannot be told apart at resolve. Local stays the DEFAULT and
    the recommendation, because its whole state is described by the bytes
    on disk and the Doc road's is not — a crash between `filter unmark
    --force`'s withdraw and its rebuild can leave forms in a tab that
@@ -854,6 +997,30 @@ the PDF is for print or production; that switch removes all three review
 markers. EPUB and DOCX retain publication identity metadata but do not use
 page-dependent PDF review decoration.
 
+**Print geometry (2026-09-02).** Trim size and bleed are manuscript
+properties beside the ISBNs — `authorlm manuscript set --trim-size 6x9
+--bleed no` (inches; MCP `set_manuscript_metadata(trim_size=, bleed=)`).
+`authorlm export pdf --profile book` builds the KDP interior at that trim:
+book class, essays opening recto, mirrored margins with the gutter chosen
+from the page count (two passes when the band moves), running heads (book
+on the verso, essay on the recto), captions set small-italic under the
+plates with no "Figure N" label, no review marks, and a ` - book` suffix on
+the filename so it never overwrites the review copy. It REFUSES without a
+trim size — that is the one number nothing can default — and WARNS (never
+refuses) on KDP's asks: a non-standard trim, a missing paperback ISBN, a
+page count under 24 or over 828. Paper means PDF; EPUB is for e-readers
+only and no printer takes it.
+
+**Captions.** `[Illustration: … | caption: text]` is the reader-facing
+caption; it becomes the image alt text on export, which pandoc turns into
+a figure with a caption on EVERY road (EPUB figcaption, PDF figure
+caption). A slot without a caption gets a bare picture and no figure.
+Obsidian never shows alt text and the Doc shows only the tag, so the
+caption is visible locally only inside the tag — by the author's ruling
+(2026-09-02) that is fine and no CSS snippet is wanted. The ⇢ ref comes
+BEFORE ` | caption:` in the tag. Captions are book prose: the author
+asked for them once in one sitting; propose, never rewrite silently.
+
 ## Google Docs bridge (CLI, not MCP — by design)
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can
 open a browser). When the author asks to edit in / sync with Google Docs,
@@ -911,6 +1078,54 @@ run the CLI via Bash:
   timeout (≥5 minutes) so the flow isn't killed while they approve.
 After any pull, narrate what actually changed (`authorlm diff`), separating
 prose changes from formatting churn.
+
+### "Resolve all tabs" — one instruction, the whole Doc (ratified 2026-09-02)
+Trigger phrases, in the author's words: *resolve all tabs*, *resolve
+all in the google doc*, *resolve everything in the doc*, *settle the
+doc*, *resolve the doc*. Any of them means: bring the Doc down and
+settle EVERYTHING pending across every tab, in one pass, without asking
+"shall I pull?" or "shall I resolve X?" along the way. Ask only where a
+ratified rule already demands the author's word (rendering, a verdict
+the margin keywords don't settle, a footnote draft's ruling). Run it in
+this order — the order is load-bearing, because a pull that comes after
+a resolve overwrites the resolve:
+
+1. **Pull everything first, once.** `authorlm doc pull -m <manuscript>`
+   (no file = all tabs). This alone executes margin verdicts, harvests
+   comments to address, reconciles hand-made tabs, and reports new
+   illustration slots and open `[Footnote:]` tags. Never pull again
+   mid-pass; per-tab pulls are for a named tab only.
+2. **Narrate what came down** — `authorlm diff`, prose changes apart
+   from formatting churn — before touching anything.
+3. **Forms.** `authorlm filter status` and `authorlm critique status`
+   name the tabs carrying written forms. For each: `filter resolve
+   <essay>` / `critique resolve <essay>` (explicit, one at a time),
+   then `doc push <essay>` — A RESOLVE IS NOT FINISHED UNTIL THE DOC HAS
+   THE RESULT. Refusals (broken join, no agreed base) are reported, not
+   forced.
+4. **Comments to address.** A text change implied → draft with the full
+   machinery, register with `doc propose`; a question → answer in chat.
+   Verdicts the author already gave in the margin were executed by
+   step 1; process the modified-acceptance diffs for the learnings duty.
+5. **Footnote tags** (docs/footnote-directive-design.md). Draft every
+   open tag in chat per §3 of that design, all at once, flags on
+   unverified sources; wait for the ruling; apply the agreed ones and
+   push. A declined tag stays open.
+6. **Illustrations.** New or changed descriptions get the prompt-critique
+   duty on the spot; unrendered slots and externalize offers are RELAYED
+   and rendering is offered, never started — consent rule unchanged.
+7. **Proposals and conflicts.** `list_proposals` and any tab-drift
+   conflicts from step 1 are put to the author as questions.
+8. **Close with one report**: what landed (per tab, pushed back), what
+   awaits the author's word (renders, footnote rulings, open questions),
+   and anything refused with the remedy verb. Confirm every tab that
+   was resolved was also pushed.
+
+What "resolve" never does: render an image, run a filter or critique
+pass that has not already been triaged, or auto-answer a margin thread
+whose reply was conversation rather than a verdict keyword. Those cost
+the author's money or words, and the ratified rules for each still hold
+inside this pass.
 
 ## Illustrations (tags in prose, candidates on disk, picks are pinned)
 The author declares an image as a single-line paragraph anywhere in the

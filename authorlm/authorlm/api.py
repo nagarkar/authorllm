@@ -137,7 +137,9 @@ def register_manuscript(db: Database, name: str, path: str,
                         author: str = "",
                         copyright_owner: str = "",
                         paperback_isbn: str = "",
-                        hardcover_isbn: str = "") -> dict:
+                        hardcover_isbn: str = "",
+                        trim_size: str = "",
+                        bleed: bool | str = False) -> dict:
     """Register one manuscript and its canonical publication identity."""
     root = Path(path).resolve()
     if not root.is_dir():
@@ -147,12 +149,15 @@ def register_manuscript(db: Database, name: str, path: str,
     paperback_isbn = _normalize_isbn13(paperback_isbn)
     hardcover_isbn = _normalize_isbn13(hardcover_isbn)
     _validate_format_isbns(paperback_isbn, hardcover_isbn)
+    trim_width, trim_height = parse_trim_size(trim_size)
     row = ko_fields("ms")
     row.update(
         name=name, path=str(root), author=author.strip(),
         copyright_owner=copyright_owner.strip(),
         paperback_isbn=paperback_isbn,
-        hardcover_isbn=hardcover_isbn)
+        hardcover_isbn=hardcover_isbn,
+        trim_width=trim_width, trim_height=trim_height,
+        bleed=int(parse_bleed(bleed)))
     db.insert("manuscripts", row)
     return dict(row)
 
@@ -167,7 +172,62 @@ def manuscript_metadata(manuscript: dict) -> dict:
         "copyright_owner": manuscript.get("copyright_owner", ""),
         "paperback_isbn": manuscript.get("paperback_isbn", ""),
         "hardcover_isbn": manuscript.get("hardcover_isbn", ""),
+        "trim_size": format_trim_size(manuscript.get("trim_width", 0),
+                                      manuscript.get("trim_height", 0)),
+        "trim_width": float(manuscript.get("trim_width", 0) or 0),
+        "trim_height": float(manuscript.get("trim_height", 0) or 0),
+        "bleed": bool(manuscript.get("bleed", 0)),
     }
+
+
+# KDP's standard paperback trim sizes, inches (width, height). A custom
+# size inside the accepted range still builds; the export only warns
+# that it is off the standard list, because a standard size is what
+# keeps the print run cheapest and the cover template available.
+KDP_TRIM_SIZES = (
+    (5, 8), (5.06, 7.81), (5.25, 8), (5.5, 8.5), (6, 9), (6.14, 9.21),
+    (6.69, 9.61), (7, 10), (7.44, 9.69), (7.5, 9.25), (8, 10),
+    (8.25, 6), (8.25, 8.25), (8.5, 8.5), (8.5, 11), (8.27, 11.69),
+)
+KDP_TRIM_MIN = (4.0, 6.0)
+KDP_TRIM_MAX = (8.5, 11.69)
+
+
+def parse_trim_size(value: str | None) -> tuple[float, float]:
+    """'6x9', '6 x 9', '6in x 9in', '6×9' → (6.0, 9.0) inches. Empty
+    clears (0, 0). Refuses anything outside KDP's accepted range."""
+    text = (value or "").strip().lower()
+    if not text:
+        return 0.0, 0.0
+    m = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*(?:in|\"|inch(?:es)?)?\s*[x×by]+\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:in|\"|inch(?:es)?)?", text)
+    if not m:
+        raise ValueError("trim size is WIDTHxHEIGHT in inches, e.g. 6x9")
+    width, height = float(m.group(1)), float(m.group(2))
+    if not (KDP_TRIM_MIN[0] <= width <= KDP_TRIM_MAX[0]
+            and KDP_TRIM_MIN[1] <= height <= KDP_TRIM_MAX[1]):
+        raise ValueError(
+            f"trim size {width:g}x{height:g} is outside the print range "
+            f"({KDP_TRIM_MIN[0]:g}x{KDP_TRIM_MIN[1]:g} to "
+            f"{KDP_TRIM_MAX[0]:g}x{KDP_TRIM_MAX[1]:g} inches)")
+    return width, height
+
+
+def format_trim_size(width, height) -> str:
+    width, height = float(width or 0), float(height or 0)
+    return f"{width:g}x{height:g}" if width and height else ""
+
+
+def parse_bleed(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in ("", "0", "no", "false", "off"):
+        return False
+    if text in ("1", "yes", "true", "on"):
+        return True
+    raise ValueError("bleed is yes or no")
 
 
 def _normalize_isbn13(value: str) -> str:
@@ -200,9 +260,16 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                author: str | None = None,
                                copyright_owner: str | None = None,
                                paperback_isbn: str | None = None,
-                               hardcover_isbn: str | None = None) -> dict:
+                               hardcover_isbn: str | None = None,
+                               trim_size: str | None = None,
+                               bleed: bool | str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata."""
     changes = {}
+    if trim_size is not None:
+        changes["trim_width"], changes["trim_height"] = parse_trim_size(
+            trim_size)
+    if bleed is not None:
+        changes["bleed"] = int(parse_bleed(bleed))
     if author is not None:
         changes["author"] = author.strip()
     if copyright_owner is not None:
@@ -214,7 +281,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
     if not changes:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
-            "and/or --hardcover-isbn")
+            "--hardcover-isbn, --trim-size, and/or --bleed")
     _validate_format_isbns(
         changes.get("paperback_isbn", manuscript.get("paperback_isbn", "")),
         changes.get("hardcover_isbn", manuscript.get("hardcover_isbn", "")))
@@ -1230,7 +1297,7 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
 def _drafting_context(db: Database, manuscript: dict, writeup: dict,
                       capture=None) -> str:
     """The writeup's L1 book-frame (design §12.4 item 1): compressed
-    summaries of the settled essays before this one and the upcoming
+    summaries of the resolved essays before this one and the upcoming
     ones after it. Recomputed on every read rather than stored — the
     summaries themselves are the source of truth and a rebuild between
     beats must show through. The declared placement, however, IS stored
@@ -1640,7 +1707,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # to a candidate the author has not chosen. So the truncation stays
     # ambient in that case — the same refuse-to-guess doctrine the
     # tiebreak itself rests on, applied to the episode rather than to the
-    # column. `write plan` is what settles it, and every act after that
+    # column. `write plan` is what resolves it, and every act after that
     # point is routed.
     collect(db, manuscript, config, source="write-start",
             episode=(ses.episode_for_intent(db, mid, session, block["primary"])
@@ -3939,12 +4006,14 @@ def resolve_improvement(db: Database, prefix: str, action: str,
 #    run whose artifact class changed under it says so rather than
 #    switching.
 #  - ATTRIBUTION refuses rather than guessing. Verdict evidence carries
-#    `episode_id = NULL`; the settle's collect passes NO_EPISODE. A
+#    `episode_id = NULL`; the resolve's collect passes NO_EPISODE. A
 #    filter has no goal to be filed under, so it is filed under none.
 # ====================================================================
 
 FILTER_ORIGIN = "filter"
 FILTER_EVIDENCE = "filter_edit"
+LENS_ORIGIN = "lens"
+LENS_EVIDENCE = "lens_edit"
 
 # A run whose proposals cover more than this share of the essay is
 # almost always a PROMPT fault rather than an essay that bad. It warns
@@ -4088,7 +4157,7 @@ def _filter_run_row(db: Database, manuscript: dict, file: str,
 # earlier would refuse the legitimate late choice ("I have triaged
 # thirty of these; I would like to read them in the Doc after all") for
 # no mechanical reason. Once set it is frozen for the life of the run —
-# switching is settle-then-rerun. There is no toggle and no --mode flag
+# switching is resolve-then-rerun. There is no toggle and no --mode flag
 # on any verb, because a run whose forms are half in the Doc and half on
 # disk is a run nobody can reason about.
 
@@ -4243,7 +4312,7 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
         raise ValueError(
             f"a run of '{name}' on {rel} is already active (cursor at "
             f"unit {run['cursor']} of {run['unit_count']}). '--again' "
-            f"starts a fresh one, so settle this one ('filter settle "
+            f"starts a fresh one, so settle this one ('filter resolve "
             f"{rel}') or drop it ('filter abandon {name} {rel}') first.")
     if run is None:
         # M1 — the identical-text refusal, the only HARD guarantee of
@@ -4310,7 +4379,9 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
     db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})
     run["metadata"] = json.dumps(run_meta)
     payload = fg.assemble(db, manuscript, run, body, units, (start, end),
-                          threads, text=text, dictionary=dictionary)
+                          threads, text=text, dictionary=dictionary,
+                          summaries=meta.get("summaries", False),
+                          profiles=meta.get("profiles") or [])
     if (meta.get("prelude") and not loads(run["metadata"], {}).get("prelude")):
         # Optional where the registry is required (§15.22 §3.1): a run
         # whose pronunciation prelude never ran is still a correct audio
@@ -4411,7 +4482,9 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
     if kind == fg.PRONUNCIATION_PRELUDE:
         return _pronunciation_prelude(db, manuscript, config, name, rel,
                                       text, dictionary, body, units, run,
-                                      warnings, replace, native, reply)
+                                      warnings, replace, native, reply,
+                                      meta.get("summaries", False),
+                                      meta.get("profiles") or [])
     if (run["registry"] or "").strip() and not replace:
         raise ValueError(
             f"this run already has a frozen registry ({len(run['registry'])} "
@@ -4420,7 +4493,9 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             f"which invalidates this run's cached prefix and re-bills it on "
             f"the native path — pass --replace.")
     payload = fg.assemble_prelude(db, manuscript, run, body, units,
-                                  text=text, dictionary=dictionary)
+                                  text=text, dictionary=dictionary,
+                                  summaries=meta.get("summaries", False),
+                                  profiles=meta.get("profiles") or [])
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),
@@ -4448,7 +4523,9 @@ def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,
                            name: str, rel: str, text: str, dictionary: str,
                            body: str, units: list[str], run: dict,
                            warnings: list[str], replace: bool,
-                           native: bool, reply: str | None) -> dict:
+                           native: bool, reply: str | None,
+                           summaries: bool = False,
+                           profiles: list[str] | None = None) -> dict:
     """The sequential prelude's artifact is a PROPOSAL SET (§15.22 §3.5).
 
     Nothing enters block A, nothing is frozen into the run beyond
@@ -4474,7 +4551,8 @@ def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,
             f"{pron.FILENAME} — pass --replace.")
     payload = fg.assemble_prelude(db, manuscript, run, body, units,
                                   text=text, dictionary=dictionary,
-                                  kind=fg.PRONUNCIATION_PRELUDE)
+                                  kind=fg.PRONUNCIATION_PRELUDE,
+                                  summaries=summaries, profiles=profiles)
     info = {"run": run, "filter": name, "file": rel, "payload": payload,
             "payload_hashes": payload.hashes, "payload_sizes": payload.sizes,
             "prompt_location": fg.prompt_location(), "unit_count": len(units),
@@ -4656,8 +4734,8 @@ def filter_edits(db: Database, manuscript: dict, file: str) -> dict:
                           for r in out_in_doc)
         note = (f"{sum(r['forms_out'] for r in out_in_doc)} form(s) are "
                 f"out in the Doc's tab for this essay — {which}. The "
-                f"author settles those THERE, and then 'authorlm filter "
-                f"settle {rel}' (CLI) reads the tab back. Do not offer "
+                f"author resolves those THERE, and then 'authorlm filter "
+                f"resolve {rel}' (CLI) reads the tab back. Do not offer "
                 f"to apply them from here.")
         if len(runs) > len(out_in_doc):
             note += (" The other run(s) on this essay are on the local "
@@ -4872,7 +4950,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
             f"this run already took the local road — its forms were "
             f"composed into {rel} on disk, and a run whose forms are half "
             f"in the Doc and half on disk is a run nobody can reason "
-            f"about. Finish it ('filter settle {rel}') and start a fresh "
+            f"about. Finish it ('filter resolve {rel}') and start a fresh "
             f"run if you want to read the next batch in the Doc.")
     threads = _run_threads(db, mid, run)
     already = [t for t in threads if t["state"] == "written"]
@@ -4882,7 +4960,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
         raise ValueError(
             f"{len(already)} form(s) of this run are already out — "
             f"pushing again would mark a tab that still carries them. "
-            f"Finalize ('filter settle {rel}') or take them back out "
+            f"Finalize ('filter resolve {rel}') or take them back out "
             f"('{unmark}'), then push again if you still want to.")
     # 3b. Q-1, ruled: refuse when SOMEONE ELSE's forms are already in
     #     this tab — a second filter's run, or the critique pass's.
@@ -4907,12 +4985,13 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
         owner = (_owning_filter(db, mid, outside[0])
                  if origin == FILTER_ORIGIN else None)
         whose = f"'{owner}'" if owner else f"the {origin} pass"
-        remedy = (f"filter settle {rel}" if origin == FILTER_ORIGIN
-                  else f"critique resolve {rel}")
+        remedy = {FILTER_ORIGIN: f"filter resolve {rel}",
+                  LENS_ORIGIN: f"lens resolve {rel}"}.get(
+                      origin, f"critique resolve {rel}")
         raise ValueError(
             f"{len(outside)} form(s) from {whose} are already in {rel}'s "
             f"tab. Two producers' forms in one tab cannot be told apart "
-            f"at settle — the join is the old text, and neither settle "
+            f"at resolve — the join is the old text, and neither settle "
             f"would know which forms were its own. Finish that one "
             f"('{remedy}') and then push this run.")
     # 4a. The one capture: the checkout gate, the three in-flight and
@@ -4952,7 +5031,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
             f"{len(untriaged)} you have not ruled on yet. The tab is the "
             f"review: leave a change alone to take it, empty its green "
             f"half to turn it down, reword it to make it yours. Every "
-            f"verdict is recorded when you run 'filter settle {rel}'.")
+            f"verdict is recorded when you run 'filter resolve {rel}'.")
     if rejected:
         warnings.append(
             f"{len(rejected)} change(s) you already turned down stay "
@@ -4977,7 +5056,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #    their run is on the other road has spent their attention for
     #    nothing. It also keeps `tools/testbench.py` able to assert these
     #    refusals with no key, no token and no network.
-    service, docs_service = _settle_services(services, rel)
+    service, docs_service = _resolve_services(services, rel)
     result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
                                        service, docs_service)
     # 7. Written threads advance to `written`, remembering the state they
@@ -5007,7 +5086,7 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
             "local_unchanged": path.read_text(encoding="utf-8") == disk}
 
 
-def _settle_services(services, rel: str):
+def _resolve_services(services, rel: str):
     """The Drive/Docs pair, built only at the moment a verb actually
     needs it.
 
@@ -5033,16 +5112,16 @@ def _settle_services(services, rel: str):
             f"— which loses any rewording you did there.") from err
 
 
-def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
+def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                   pause: bool = False, name: str | None = None,
                   services=None) -> dict:
     """One verb, three halves: the threads' state chooses whether this is
     an apply or a finalize, and the RUN'S TRANSPORT chooses where the
     marked text is read from (D-2).
 
-        filter settle <file>            threads accepted → APPLY directly
-        filter settle <file> --pause    threads accepted → compose, stop
-        filter settle <file>            threads written  → read, finalize
+        filter resolve <file>            threads accepted → APPLY directly
+        filter resolve <file> --pause    threads accepted → compose, stop
+        filter resolve <file>            threads written  → read, finalize
                                         mode 'local' → the marked file
                                         mode 'doc'   → the essay's tab
 
@@ -5071,7 +5150,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     run = _filter_run_row(db, manuscript, rel, name)
     mode = _run_mode(run)
     _rel, _text, _capture, _dict = _filter_capture(
-        db, manuscript, rel, "filter settle", checkout=(mode != "doc"))
+        db, manuscript, rel, "filter resolve", checkout=(mode != "doc"))
     path = Path(manuscript["path"]) / rel
     written = [t for t in _run_threads(db, mid, run)
                if t["state"] == "written"]
@@ -5081,7 +5160,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             f"this run put its forms in the Doc — 'filter push {rel}' "
             f"already chose that road, and --pause would mark the local "
             f"file as well, leaving one run's forms in two places. "
-            f"Finalize with 'filter settle {rel}' (no flag), which reads "
+            f"Finalize with 'filter resolve {rel}' (no flag), which reads "
             f"the tab back, or take the forms out of the Doc with "
             f"'filter unmark {rel} --force'.")
 
@@ -5090,7 +5169,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             raise ValueError(
                 f"{rel} is already marked — {len(written)} form(s) are "
                 f"written into the file and the author's post-edits are "
-                f"in them. Finalize with 'filter settle {rel}' (no flag), "
+                f"in them. Finalize with 'filter resolve {rel}' (no flag), "
                 f"or put the original text back with 'filter unmark "
                 f"{rel}'.")
         if mode == "doc":
@@ -5102,7 +5181,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             # file would find no forms, resolve nothing, and decline
             # every thread (D-1). `doc pull` is not part of this flow and
             # is harmless if it happens (§2.6).
-            service, docs_service = _settle_services(services, rel)
+            service, docs_service = _resolve_services(services, rel)
             fetched = gdocs.tab_marked_markdown(db, manuscript, rel,
                                                 service, docs_service)
             if fetched["state"] == "missing":
@@ -5114,9 +5193,9 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
             if fetched["state"] == "conflict":
                 raise ValueError(
                     f"'{rel}' changed both locally and in the Doc since "
-                    f"the last sync — the settle refuses to guess which "
+                    f"the last sync — the resolve refuses to guess which "
                     f"wins. Compare the local file against the Doc tab by "
-                    f"hand, then re-run 'filter settle {rel}'.")
+                    f"hand, then re-run 'filter resolve {rel}'.")
             warnings.extend(fetched["marker_warnings"])
             return _filter_finalize(db, manuscript, config, run, rel, path,
                                     warnings, marked_doc=fetched["marked"])
@@ -5141,7 +5220,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
     # road, and from now on the run says so (§2.1).
     if mode is None:
         run = _freeze_run_mode(db, run, "local")
-    # The file's OWN bytes, read directly: the settle code owns the
+    # The file's OWN bytes, read directly: the resolve code owns the
     # pending-change grammar, and it is the only code in the system that
     # is allowed to see markers.
     disk = path.read_text(encoding="utf-8")
@@ -5151,7 +5230,7 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
         db.update("doc_threads", t["id"], {"state": "written"})
     if pause:
         # The read-back assertion: the forms must be present VERBATIM in
-        # the bytes we just wrote, or the mark is undone and the settle
+        # the bytes we just wrote, or the mark is undone and the resolve
         # refuses. Nothing is left half-marked.
         back = path.read_text(encoding="utf-8")
         if back != marked:
@@ -5174,6 +5253,26 @@ def filter_settle(db: Database, manuscript: dict, config: dict, file: str,
                             warnings, direct=True)
 
 
+def _write_resolved_text(path: Path, root: Path, final: str) -> str:
+    """Write a resolve's final text back to disk WITH its illustration
+    embed lines. The Doc never carries embed lines (push strips them),
+    so the text a filter, lens, or critique resolve reads back from a
+    tab is embed-free — and writing it as-is silently unlinked every
+    rendered illustration in the essay (the tag stayed, the picture
+    under it vanished from Obsidian; 15 slots across SMSTTD,
+    2026-09-02). The ordinary pull re-inserts them; this is the same
+    step, the prior pick winning while its file exists."""
+    from . import gdocs
+    from .illus import capture_embeds, reembed
+
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = gdocs.normalize_markdown(final)
+    normalized = reembed(normalized, root, capture_embeds(prior))
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    return normalized
+
+
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
                      direct: bool = False,
@@ -5194,7 +5293,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     mid = manuscript["id"]
     # Snapshot whatever is on disk right now BEFORE it is overwritten —
     # including any local edit made outside this flow. Ambient by
-    # declaration: that work predates the settle and is the author's own.
+    # declaration: that work predates the resolve and is the author's own.
     # (Under the canonicalization the marked bytes read as the essay, so
     # this is a no-op unless there is a real uncollected edit.)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -5208,7 +5307,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                                        origin_type=FILTER_ORIGIN)
         # kinds=("replace",) on BOTH roads, for the same reason: an
         # unmatched insertion form collapses to its old half, which for
-        # an insertion is the empty string — so a settle that looked at
+        # an insertion is the empty string — so a resolve that looked at
         # bare `{{…}}` would DELETE an author's `{{title}}` from the
         # finished essay. In the tab that `{{title}}` arrived from the
         # author's own file through `push_doc`, so the hazard is real
@@ -5217,10 +5316,9 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
             marked_doc, written=written, kinds=("replace",))
         diffs = passes.record_resolution(db, mid, rel, forms,
                                          origin_type=FILTER_ORIGIN,
-                                         evidence_type=FILTER_EVIDENCE)
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
+                                         evidence_type=FILTER_EVIDENCE,
+                                         final_text=final)
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
 
     # NO episode (§1.8). Hygiene work has no goal to be filed under, and
     # `episode=None` would file it against whatever the author happens to
@@ -5249,18 +5347,24 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     # The learnings duty, on BOTH transports — the half of the loop that
-    # had never fired for a filter (§1.2). It costs a settle a SECOND
+    # had never fired for a filter (§1.2). It costs a resolve a SECOND
     # model call where the filter design claimed one, on the general tier
     # rather than the cheap one, and only when the author reworded at
     # least two proposals. It fails soft.
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
+    # The honest tallies: `forms` counts only the marker-intact forms the
+    # settle read back, which undercounts a hand-resolved tab
+    # (it-4c5a8038c304) — the thread states carry the truth.
+    states = [t["state"] for t in _run_threads(db, mid, run)]
     return {"run": run, "file": rel, "paused": False, "direct": direct,
+            "accepted": states.count("cleaned"),
+            "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "final": normalized,
             "warnings": warnings, "falsified_prefix": falsified,
             "summary": summary, "result_version_id": result_version,
             "pattern_candidate": candidate, "mode": _run_mode(run),
             # Q-2's default, matching `critique resolve` exactly: the
-            # settle does NOT re-push. A settle that pushes is a settle
+            # settle does NOT re-push. A settle that pushes is a resolve
             # that can fail halfway on the network after the evidence is
             # recorded — so the tab keeps showing the marks until the
             # author's next ordinary `doc push`, and the verb says so.
@@ -5288,6 +5392,155 @@ def _file_run_mode(db: Database, manuscript_id: str, rel: str) -> str | None:
     return None
 
 
+def lens_push(db: Database, manuscript: dict, config: dict, file: str,
+              services=None) -> dict:
+    """The lens door's DOC transport (filter-pass design §7.2, built
+    2026-08-31): write the staged lens edits for this file into its tab
+    as `<<old>>{{new}}` forms — the same surgical writer, the same
+    review contract as `filter push`: the tab IS the review, untriaged
+    proposals go too, only explicit rejections stay home.
+
+    Deliberately run-less: lens edits are file-scoped door threads with
+    no run row, no transport freeze, no unit coverage — the door's own
+    state machine (proposed → written → cleaned/declined) is the whole
+    of their lifecycle."""
+    from . import gdocs
+
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    threads = staging.door_threads(
+        db, mid, rel, states=("proposed", "accepted", "rejected", "written"),
+        origin_type=LENS_ORIGIN)
+    already = [t for t in threads if t["state"] == "written"]
+    if already:
+        raise ValueError(
+            f"{len(already)} lens form(s) are already out in {rel}'s tab — "
+            f"pushing again would mark a tab that still carries them. "
+            f"Finalize first ('lens resolve {rel}').")
+    mine = {t["id"] for t in threads}
+    outside = [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
+        "AND state = 'written' ORDER BY created_at", (mid, rel))
+        if r["id"] not in mine]
+    if outside:
+        origin = outside[0]["origin_type"]
+        owner = (_owning_filter(db, mid, outside[0])
+                 if origin == FILTER_ORIGIN else None)
+        whose = f"'{owner}'" if owner else f"the {origin} pass"
+        remedy = {FILTER_ORIGIN: f"filter resolve {rel}"}.get(
+            origin, f"critique resolve {rel}")
+        raise ValueError(
+            f"{len(outside)} form(s) from {whose} are already in {rel}'s "
+            f"tab. Two producers' forms in one tab cannot be told apart "
+            f"at resolve — finish that one ('{remedy}') and then push.")
+    _filter_capture(db, manuscript, rel, "lens push")
+    pushable = [t for t in threads if t["state"] in ("proposed", "accepted")]
+    rejected = [t for t in threads if t["state"] == "rejected"]
+    if not pushable:
+        raise LookupError(
+            f"no staged lens edits on {rel} can go to the Doc"
+            + (f" — all {len(rejected)} were turned down." if rejected
+               else " — a lens finding stages an edit only when it "
+                    "carries a `replacement`."))
+    warnings: list[str] = []
+    warnings.append(
+        f"All {len(pushable)} lens change(s) go to the Doc. The tab is "
+        f"the review: leave a change alone to take it, empty its green "
+        f"half (or restore the old text) to turn it down, reword it to "
+        f"make it yours. Every verdict is recorded at "
+        f"'lens resolve {rel}'.")
+    if rejected:
+        warnings.append(f"{len(rejected)} change(s) already turned down "
+                        f"stay home.")
+    twin_note = _twin_warning(pushable)
+    if twin_note:
+        warnings.append(twin_note)
+    path = Path(manuscript["path"]) / rel
+    disk = path.read_text(encoding="utf-8")
+    passes.compose_marked_text(disk, pushable)
+    service, docs_service = _resolve_services(services, rel)
+    result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
+                                       service, docs_service)
+    for t in result["written"]:
+        meta = loads(t.get("metadata"), {}) or {}
+        meta["pushed_from"] = t["state"]
+        db.update("doc_threads", t["id"],
+                  {"state": "written", "metadata": json.dumps(meta)})
+    return {"file": rel, "url": result["url"],
+            "written": len(result["written"]),
+            "failed": [(t, why) for t, why in result["failed"]],
+            "warnings": warnings,
+            "local_unchanged": path.read_text(encoding="utf-8") == disk}
+
+
+def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
+                services=None) -> dict:
+    """Read the tab back and finalize the lens forms — `filter resolve`'s
+    doc road for the lens door: the author's post-edits win, a
+    hand-resolved form's verdict is inferred from the prose
+    (it-4c5a8038c304), evidence lands as `lens_edit` under NO episode,
+    and the tab keeps its marks until the next ordinary `doc push`."""
+    from . import gdocs
+    from . import summaries as sums
+
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    written = staging.door_threads(db, mid, rel, states=("written",),
+                                   origin_type=LENS_ORIGIN)
+    if not written:
+        raise LookupError(
+            f"no lens forms are out in {rel} — 'lens push {rel}' writes "
+            f"the staged lens edits into its tab.")
+    # checkout=False for the reason filter_resolve's doc branch gives:
+    # the push's own levelling write checked the file out BY DESIGN.
+    _filter_capture(db, manuscript, rel, "lens resolve", checkout=False)
+    service, docs_service = _resolve_services(services, rel)
+    fetched = gdocs.tab_marked_markdown(db, manuscript, rel,
+                                        service, docs_service)
+    if fetched["state"] == "missing":
+        raise LookupError(
+            f"'{rel}' has no matching section in the master Doc export — "
+            f"the tab these forms were written to is gone. "
+            f"'doc push {rel}' rebuilds it from the local file.")
+    if fetched["state"] == "conflict":
+        raise ValueError(
+            f"'{rel}' changed both locally and in the Doc since the last "
+            f"sync — the resolve refuses to guess which wins. Compare "
+            f"them by hand, then re-run 'lens resolve {rel}'.")
+    warnings = list(fetched["marker_warnings"])
+    path = Path(manuscript["path"]) / rel
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="pre-lens-settle")
+    final, forms = passes.final_text_from_marked(
+        fetched["marked"], written=written, kinds=("replace",))
+    diffs = passes.record_resolution(db, mid, rel, forms,
+                                     origin_type=LENS_ORIGIN,
+                                     evidence_type=LENS_EVIDENCE,
+                                     final_text=final)
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="lens-settle",
+                episode=NO_EPISODE)
+    after = {t["id"]: dict(db.one(
+        "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
+        for t in written}
+    states = [t["state"] for t in after.values()]
+    summary = {"rebuilt": False, "error": None, "usage": None}
+    llm = sums.summarizer_llm(config)
+    if llm.enabled:
+        try:
+            sums.rebuild_one(db, manuscript, rel, llm)
+            summary.update(rebuilt=True, usage=llm.stats_line())
+        except Exception as err:                        # noqa: BLE001
+            summary["error"] = str(err)
+    candidate = passes.settle_learnings(db, manuscript, diffs, config)
+    return {"file": rel, "accepted": states.count("cleaned"),
+            "declined": states.count("declined"),
+            "forms": len(forms), "diffs": diffs, "warnings": warnings,
+            "summary": summary, "pattern_candidate": candidate,
+            "tab_still_marked": True}
+
+
 def filter_unmark(db: Database, manuscript: dict, file: str,
                   force: bool = False, services=None) -> dict:
     """Put the original text back and RETURN the written forms to
@@ -5297,7 +5550,7 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
 
     Returned to `accepted`, not withdrawn, and the difference matters:
     the author's verdicts survive. Unmark undoes the MARKING, not the
-    triage. `filter settle` applies them, `filter triage --undo` reopens
+    triage. `filter resolve` applies them, `filter triage --undo` reopens
     them, `filter abandon` throws them away — and the author chooses
     which, because discarding a verdict is never something a recovery
     verb does on its own.
@@ -5342,7 +5595,7 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
                 f"else. (The file on disk is untouched either way — it "
                 f"has held the old essay throughout.) "
                 f"To keep your wording, finish in the Doc and 'filter "
-                f"settle {rel}'. To keep an edit you made OUTSIDE the "
+                f"resolve {rel}'. To keep an edit you made OUTSIDE the "
                 f"marked passages, run 'doc pull {rel}' first: it brings "
                 f"that edit down to the file and leaves the tab and the "
                 f"forms alone. Then re-run with --force.")
@@ -5351,7 +5604,7 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
         # PRE-PUSH state is what lifts it.
         for t in written:
             db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
-        service, docs_service = _settle_services(services, rel)
+        service, docs_service = _resolve_services(services, rel)
         gdocs.push_doc(db, manuscript, rel, service=service,
                        docs_service=docs_service)
         return {"file": rel, "reopened": len(written), "mode": "doc",
@@ -5400,7 +5653,7 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
             f"{len(out)} form(s) of this run are still out {where}, and "
             f"you may have already reworded them — a rollback would "
             f"destroy those edits with nothing left to recover them "
-            f"from. Finalize what is there ('filter settle {rel}'), or "
+            f"from. Finalize what is there ('filter resolve {rel}'), or "
             f"take the forms back out ('{unmark}'), and then roll back "
             f"if you still want to.")
     _checkout_gate(db, manuscript, rel)
@@ -5422,7 +5675,7 @@ def filter_rollback(db: Database, manuscript: dict, config: dict, file: str,
             f"{rel} is mid-settle: its bytes carry staged forms you may "
             f"have already reworded, and a rollback would destroy those "
             f"edits with nothing left to recover them from. Finalize "
-            f"('filter settle {rel}') or put the original text back "
+            f"('filter resolve {rel}') or put the original text back "
             f"('filter unmark {rel}') first — then roll back if you "
             f"still want to.")
     with contextlib.redirect_stdout(io.StringIO()):
@@ -5447,7 +5700,7 @@ def filter_abandon(db: Database, manuscript: dict, file: str,
     if written:
         raise ValueError(
             f"{rel} is marked — {len(written)} form(s) are written into "
-            f"the file. Finalize ('filter settle {rel}') or put the text "
+            f"the file. Finalize ('filter resolve {rel}') or put the text "
             f"back ('filter unmark {rel}') before abandoning the run.")
     withdrawn = 0
     for t in threads:

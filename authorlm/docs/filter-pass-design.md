@@ -70,6 +70,8 @@ Three reasons, in order of weight:
 ---
 class = "sequential"
 state = "a running ledger of words already flagged as repeated"
+summaries = false            # optional; see §9.1a
+prelude = "pronunciations"   # optional; sequential only
 ---
 
 # <the prompt, from here to the end of the file, verbatim>
@@ -84,6 +86,15 @@ state = "a running ledger of words already flagged as repeated"
   guessing about the author's editorial method.
 - `state` is optional, one line, **documentation only** — for `filter show`
   and for the payload. The harness never parses the state itself.
+- `prelude` is optional; the only legal value is `"pronunciations"`, and only
+  on a `sequential` filter (§15.22 §3.5). A `global` filter's prelude is its
+  registry and two outputs for one call is two preludes.
+- `summaries` is optional, a **boolean**, default `false` (§9.1a). It declares
+  whether the payload carries the compressed summaries of the OTHER essays,
+  before and after this one in the reading order. It is opt-in rather than
+  always-on because the cross-essay view costs real tokens in the cached
+  layer, and a filter whose jurisdiction is genuinely one essay should not
+  pay for it.
 - Any other key is refused **by name**, so a typo (`klass`, `type`) fails at
   the moment the author writes it rather than at the first run.
 - The prompt body is everything after the closing `---`; its first prose line
@@ -116,7 +127,7 @@ thirty-four paragraphs", and that is the registry's job.
 
 The cost, stated: **two units of a global run may propose mutually
 inconsistent fixes to the same motif.** The registry is the coordination
-mechanism; the settle is where the author catches a collision. Every
+mechanism; the resolve is where the author catches a collision. Every
 `replace` names the registry entry it is about, in `ref`.
 
 **Why `sequential` units see the run's own proposals.** A word ledger is
@@ -125,10 +136,10 @@ already removed the second "moreover" there. Conditioning on the run's
 proposed prefix is what makes the pass autoregressive rather than N
 independent calls with a shared prompt.
 
-The cost, stated, and it is real: **the settle can falsify the
+The cost, stated, and it is real: **the resolve can falsify the
 conditioning.** If the author rejects unit 3, every later unit was drafted
 against a prefix that did not survive. This **warns and never blocks**
-(§15.13); the settle report prints the downstream list and the `--from n`
+(§15.13); the resolve report prints the downstream list and the `--from n`
 remedy. The list is derived, never stored. It is deliberately *not*
 automatic: re-running the tail discards the author's verdicts on those units,
 and discarding verdicts is never something a verb does on its own.
@@ -174,8 +185,8 @@ wrong. The cost is coarser diffs, which the author reads in the file anyway.
 | `new != old` | `filter record` | silently downgraded to `keep` |
 | `<< >> {{ }}` in `new` | `filter record` | refuse, naming the marker |
 | state within the 4,000-char cap | `filter record` | refuse, naming the size |
-| `proposed_old == the unit` at compose time | `filter settle` | raise, name the unit, say the text drifted |
-| the form is present verbatim after marking | `filter settle --pause` | unmark and refuse |
+| `proposed_old == the unit` at compose time | `filter resolve` | raise, name the unit, say the text drifted |
+| the form is present verbatim after marking | `filter resolve --pause` | unmark and refuse |
 
 **The whole reply is refused, never part of it** (`passes.ContractError`'s
 standing rule). A partially admitted reply is a run whose conditioning nobody
@@ -184,7 +195,7 @@ can reconstruct.
 Note the distinction warn-never-block turns on: a reply that **omits units it
 was asked about** is a contract violation — refuse, and the assistant
 re-answers; this is not the author's business. A **run that never covers some
-units of the essay** is an ordinary open editorial state — it warns at settle
+units of the essay** is an ordinary open editorial state — it warns at resolve
 and never blocks, exactly as an unwritten beat does.
 
 ---
@@ -295,7 +306,7 @@ CREATE TABLE IF NOT EXISTS filter_runs (
     cursor              INTEGER NOT NULL DEFAULT 0,
     state               TEXT,            -- opaque carried text (sequential)
     registry            TEXT,            -- opaque frozen text (global prelude)
-    result_version_id   TEXT,            -- produced at settle
+    result_version_id   TEXT,            -- produced at resolve
     status              TEXT NOT NULL DEFAULT 'active'  -- active|settled|abandoned
 );
 ```
@@ -330,7 +341,7 @@ served by a duplicate-word sweep. That is a lie of attribution.
    `weight='high'`, byte for byte the shape `critique_edit` already builds.
    **Explained rejections still reach belief learning**, because that path
    runs off the evidence stream and the explanation, not off an episode.
-2. **Transitions from the settle's collect:** attached to **no episode**,
+2. **Transitions from the resolve's collect:** attached to **no episode**,
    through `api.NO_EPISODE`. `episode=None` already means *ambient* — the
    session's most recently created open episode, whatever goal it belongs to
    — which is exactly §15.17's mis-attribution. A filter has no goal to be
@@ -391,17 +402,34 @@ The check that this step is right is that the existing suite stays green
 staging entry point that takes source-derived `old`, the local transport, the
 direct apply, the rollback — and it *calls* `passes`; it moves nothing out.
 
-### 7.2 A lens finding walking through the door — specified, not built
+### 7.2 A lens finding walking through the door — BUILT 2026-08-31
 
 Give the lens finding schema one optional field, `replacement`. When present,
 `_store_findings` locates the unit containing the quote, **refuses the
 proposal if the quote occurs in more than one unit or more than once within
 its unit** (an unanchored `str.replace` picks an occurrence, and picking is
 guessing), builds `new`, and stages it with `origin_type='lens'`. Open
-question: whether ruling on the finding settles the edit. Default: they are
-independent, and `lens review --accept` prints a line saying the edit is
-still open. Two verdicts on one object is worse than one verdict that leaves
-work visible. Nothing built this stream.
+question, ruled at build time: whether ruling on the finding settles the
+edit. They are independent, and `lens review --accept` prints a line saying
+the edit is still open. Two verdicts on one object is worse than one verdict
+that leaves work visible.
+
+As built (author's order: "We want the same user-side workflow as filters
+once the lens runs"): the refusal reasons come back per finding
+(`edits_refused`, the finding itself always kept); an anchored edit stages
+through `staging.stage_edits` with owner = the lens name (re-registers
+replace in place; supersede withdraws unreached ordinals); the finding row
+carries `metadata.edit_thread` and the register/run output marks `[edit
+staged]`. Transport: `lens push <file>` / `lens resolve <file>` — the filter
+doc road's contract verbatim (untriaged proposals go too, the tab is the
+review, one producer's forms per tab, hand-resolution verdict inference per
+it-4c5a8038c304, evidence as `lens_edit` under NO episode, settle does not
+re-push). Deliberately run-less: lens edits are file-scoped door threads;
+the door's own state machine is their whole lifecycle — no transport
+freeze, no unit coverage, no falsified prefix, and no `lens unmark` (the
+settle's inference makes the Doc road self-correcting, and `doc push`
+remains the tab rebuild). Encoded test:
+`tests/test_passes.py::_the_lens_door`.
 
 ---
 
@@ -418,13 +446,13 @@ work in.
 
 So the door gains a **local transport**:
 
-1. `filter settle <file> --pause` runs `passes.compose_marked_text` — the
+1. `filter resolve <file> --pause` runs `passes.compose_marked_text` — the
    pure function that is already the Doc composer's source of truth — and
    writes the result **to the local file**. Visible text in the file is the
    affordance, because the author opens these files in Obsidian and a hidden
    marker fails in exactly the place that matters.
 2. The author reads and post-edits the `{{new}}` halves. Their words win.
-3. `filter settle <file>` reads the local file and runs
+3. `filter resolve <file>` reads the local file and runs
    `threads.pending_forms` → `passes.final_text_from_marked` →
    `passes.record_resolution` — **all three unchanged**. Byte for byte the
    critique resolve's second half with `tab_marked_markdown` replaced by
@@ -468,7 +496,7 @@ prose, and the broad strip deleted every one of them from everything the
 system observes: the version history, the summaries, the concept scans, the
 export. Silently, because once they were gone `_ANY_MARKER` had nothing left
 to warn about. `staging.is_marked` tripped on them too, refusing such a
-file's Doc push forever with a message about a settle that did not exist.
+file's Doc push forever with a message about a resolve that did not exist.
 
 So the local grammar is the **replace form alone**: `<<old>>{{new}}`
 collapses to its old half, a surviving `<<` or `>>` is warned about, and a
@@ -483,7 +511,7 @@ The same narrowing applies at three more sites, for the same reason:
 `staging.unmark` (a recovery that damaged the file it recovered would be no
 recovery), and `staging.resolve_local`, which passes `kinds=("replace",)` to
 `final_text_from_marked` — an unmatched insertion form collapses to its old
-half, and for an insertion that is the empty string, so a settle that looked
+half, and for an insertion that is the empty string, so a resolve that looked
 at bare `{{…}}` would have deleted the author's `{{title}}` from the finished
 essay. The critique pass keeps both kinds, where both are its own.
 
@@ -492,7 +520,7 @@ it here.** `read_manuscript_files` has never returned the bytes on disk: it
 drops illustration embed lines because they are local derived machinery the
 observed manuscript must not contain. A pending form is the same kind of
 thing by a different road. Every observer goes through this seam, so one line
-covers all six; the only code that sees markers is the settle code, which
+covers all six; the only code that sees markers is the resolve code, which
 reads `Path.read_text` directly and owns the grammar.
 
 **The smaller alternative, recorded so the choice is knowing:** apply
@@ -510,11 +538,11 @@ from it. Its local-text guards were `_refuse_mid_rewrite` (a whole-file
 placeholder check) and `critique_forms_pending`, which queried
 `origin_type = 'critique'` only. A marked filter file would have pushed its
 markers straight into the Doc, and the next pull would have overwritten the
-local file and **silently discarded the settle**.
+local file and **silently discarded the resolve**.
 
 1. `critique_forms_pending` generalizes to `forms_pending(db, mid, relpath)`
    over any `origin_type`, returning the origin so the refusal names the
-   right remedy (`critique resolve` or `filter settle`).
+   right remedy (`critique resolve` or `filter resolve`).
 2. `_refuse_mid_rewrite` grows a second case: `staging.is_marked(text)`, a
    byte check on the raw file exactly as `api.is_placeholder` is. It is the
    guard that survives a database that has lost the run row. Both `push_doc`
@@ -575,9 +603,9 @@ dozens of struck-and-green spans in Google Docs is easier than reading
 `<<old>>{{new}}` in a text file, so `filter push <essay>` writes the run's
 accepted forms into the essay's tab through the same surgical writer `critique
 write` uses, and the local file keeps the OLD text, unmarked and byte-identical
-to the pin. `filter settle <essay>` then reads the TAB back — never a pulled
+to the pin. `filter resolve <essay>` then reads the TAB back — never a pulled
 local file, because `pull_doc` strips pending forms to their old halves before
-writing, which would discard the author's rewordings before the settle ever ran.
+writing, which would discard the author's rewordings before the resolve ever ran.
 
 The transport is a property of the RUN, recorded in `filter_runs.metadata` as
 `mode` and frozen by whichever verb takes it. Full design and rulings:
@@ -601,7 +629,7 @@ out keeps saying so", and refusing the local settle would strand the run
 with no exit after the recovery verb this section itself names.
 
 Only one producer's forms may occupy a tab at a time. A second filter's push on
-the same essay is refused early and by name (Q-1), because the settle join is the
+the same essay is refused early and by name (Q-1), because the resolve join is the
 old text and neither settle could tell whose forms were whose.
 
 One cost is paid rather than argued away: **doc mode's state is not fully
@@ -658,10 +686,13 @@ Block S  (system; cache breakpoint 1)
 Block A  (user; cache breakpoint 2)
   INTENTS                            in-scope active; emphasis only, never attribution
   VALIDATED BELIEFS                  sorted by statement, no confidence
-  CONCEPT NOTES                      api.scoped_concepts(file, text=capture), sorted
+  CONCEPT NOTES                      api.scoped_concepts(file, text=capture), sorted;
+                                     each node as `name (also: aliases) — notes`,
+                                     then the slice's EDGES as `from —relation→ to`
   PROTECTED TERMS                    every class: the derivation, §15.22 §1.1
   PRONUNCIATION DICTIONARY           every class: pronunciations.md, read live
   PRIOR RUNS OF THIS FILTER ON THIS FILE   dates, tallies, reasons verbatim
+  NEIGHBOURING ESSAYS                only when the filter declares summaries = true
   THE ESSAY                          global class only: every unit, numbered
   MOTIF REGISTRY                     global class only: the frozen prelude output
 
@@ -697,13 +728,78 @@ Two notes worth recording because they **invert** the write path's:
 - **`scoped_concepts(file=file)` works here and does not there.** A writeup
   truncates the essay to a placeholder, so the file-scoped graph slice is
   empty for the very file being drafted. A filter runs on an intact essay.
-- **There is no drafting context and no before/after summaries.** Requiring
-  `passes.summaries_ready` would make every filter run block on the book's
-  summary state — §14.1's defect wearing a new hat. The price is the
-  cross-essay view, and §0's jurisdiction boundary is how it is paid.
+- **There is no drafting context, and summaries are OPT-IN (§9.1a).**
+  Requiring `passes.summaries_ready` would make every filter run block on the
+  book's summary state — §14.1's defect wearing a new hat. That objection is
+  about GATING, not about value, so summaries were later admitted *un-gated*
+  behind a front-matter declaration: a stale summary is shown and marked, and
+  nothing about the book's summary state can refuse a run.
 
 `filter run` prints `payload.hashes` and `payload.sizes` per block, so a
 silent cache invalidator is findable and the author can audit what is sent.
+
+### 9.1a Summaries, the window, and what a run actually costs
+
+Two questions get asked every time someone meets this pass, and the answer to
+the second is counter-intuitive enough to be worth writing down once.
+
+**`summaries = true` — the cross-essay view, un-gated.** The section renders
+`summaries.before_after` verbatim: the essays settled BEFORE this one (their
+concepts are available here) and the ones AFTER (forward reference only). A
+summary that is missing, stale, deprecated or upstream-stale is **shown and
+marked** with the `!!` convention `write status` already uses. It is rendered
+into block A — the cached layer — because it is context about the BOOK, like
+the run history beside it, and because it must not move between the windows of
+one run. The declaration lives in front matter and is therefore frozen with the
+artifact, so the section can never appear or disappear mid-run.
+
+It is not free. On `SMSTTD/hierarchy.md`, 24 neighbouring summaries:
+
+| | block A | whole payload |
+|---|---|---|
+| `summaries = false` | 20,849 chars | ~12,200 tokens |
+| `summaries = true` | 97,158 chars | ~31,300 tokens |
+
+Block A grows 4.7×. Declare it on a filter whose findings genuinely turn on
+what another essay already covers; leave it off for a word ledger.
+
+**Where the cache breakpoints apply, and where they do not.** Breakpoint 1
+sits after block S, breakpoint 2 after block A. They are a **NATIVE-path**
+mechanism: on `--native` the stable prefix is written once at full input rate
+and re-read at cache-read rate on every subsequent call. **In chat mode there
+is no model call at all** (§9, and the flag polarity is inverted against
+`write draft`), so no breakpoint is in play. The only cost question in chat
+mode is *how many times the payload is printed into the conversation*, and
+that is once per `filter run` invocation — which is once per WINDOW.
+
+**The window, and why the default is the whole essay.**
+
+```python
+span = window if window and window > 0 else len(units)     # api.filter_run
+```
+
+`--window N` splits one run into ⌈units/N⌉ invocations, and **each invocation
+re-prints block A**. A transcript does not de-duplicate identical bytes
+appended later, so with `summaries = true` every extra window costs ~24K
+tokens again. The recommendation, plainly:
+
+- **Do not pass `--window`.** The default — the whole essay in one reply — is
+  the cheapest and the most autoregressive: unit N conditions on the run's own
+  output for N−1 inside a single generation, which is the ruling read
+  literally.
+- **Reach for it only when the reply cannot finish.** The constraint is OUTPUT
+  length, never input: forty-odd whole rewritten paragraphs plus `why` and
+  `ref` is a long generation, and a truncated reply is refused whole. If that
+  happens, `--window 15` or so, and turn `summaries` off first — windowing is
+  exactly what makes summaries expensive.
+- **On `--native` it is the opposite knob.** `_filter_native` sends ONE call
+  per invocation, so without `--window` the billed path is a single call and
+  the cached prefix is written once and never re-read — the breakpoints earn
+  nothing. `--window 1` is what produces the per-unit call structure they were
+  designed for, at higher input cost and with per-unit output headroom.
+- **`--from N` is a different flag and IS routine.** It re-opens the window at
+  unit N, and it is the documented remedy after a resolve falsifies the
+  conditioning (§1.1).
 
 ### 9.2 The reply grammar
 
@@ -721,7 +817,7 @@ chat path (the assistant writes the JSON into a heredoc) and the native path.
 ```
 
 `ref` is optional free text: what the entry names in the state or registry.
-Stored on the thread's metadata and used by the settle report to group a
+Stored on the thread's metadata and used by the resolve report to group a
 global run's proposals, which is how a motif collision becomes visible.
 `state` is required for `sequential`, optional for `global`.
 
@@ -763,7 +859,7 @@ shape.
 ## 10. Composition with standing doctrine
 
 **One capture per invocation.** `filter run`, `filter record` and
-`filter settle` each take exactly one `summaries.capture` and hand it to the
+`filter resolve` each take exactly one `summaries.capture` and hand it to the
 gate *and* to the assembly: the in-flight check, the unit split, the echo
 validation and the `old` extraction all read the one capture. §14.7's
 dangerous shape is precisely what `filter record` would otherwise be, since
@@ -782,11 +878,11 @@ warns rather than blocking.
 **Checkout gate** on `run`, on `record`, and on `settle` — the gate on
 `record` closes the same push→pull window `write propose`/`accept` closed.
 
-**Summaries are NOT required to run**, but `filter settle` rebuilds the
+**Summaries are NOT required to run**, but `filter resolve` rebuilds the
 essay's summary exactly as `critique resolve` does, because the text changed
 and a stale summary is a lie the next gate will refuse. That is one billed
 summarizer call per settle, on the cheap tier. It is announced with its usage
-line and fails soft. It marks downstream essays `upstream_stale`, and the settle
+line and fails soft. It marks downstream essays `upstream_stale`, and the resolve
 output says so.
 
 > **Corrected 2026-08-30 (§15.23, doc-settle stream).** This paragraph used to
@@ -794,7 +890,7 @@ output says so.
 > is no longer true. The learnings distiller — ≥2 modified acceptances → a
 > pattern candidate for the author to ratify — lived in the CLI's
 > `_critique_learnings` and only `critique resolve` could reach it, so the
-> highest-value output of a settle had never fired for a filter. It is hoisted
+> highest-value output of a resolve had never fired for a filter. It is hoisted
 > to `passes.settle_learnings` and called from both transports. A settle
 > therefore makes TWO calls when and only when the author reworded at least two
 > proposals: the cheap-tier rebuild, and the distiller on the general `[llm]`
@@ -834,7 +930,7 @@ filter run <name> <file>          assembles a window; NO model call
 filter record <file>              the reply JSON on stdin
 filter edits <file>               the active run's proposals, numbered
 filter triage <file> --accept … --reject … --reason "…" --revise … --text "…"
-filter settle <file> [--pause]
+filter resolve <file> [--pause]
 filter status [<file>]
 filter unmark <file>              strip_pending written back
 filter rollback <file>            restore the pin; verdicts stay as evidence
@@ -906,8 +1002,9 @@ from a chat session, which is where the author actually rules.
   code; inventing a class is code, and says so.
 - **Filter ordering and composition.** Two filters do not commute and no
   order is enforced or recommended. That is editorial practice.
-- **The lens door.** Specified in §7.2 so that when it is built it is three
-  lines and not a refactor. Nothing built this stream.
+- **The lens door.** Specified in §7.2 so that when it was built it would be
+  small and not a refactor. Built 2026-08-31 on the author's order ("We want
+  the same user-side workflow as filters once the lens runs") — see §7.2.
 - **Parsing motif families out of the figure law (§15.22).** Two `[figure]`
   elements, two grammars, no schema, and both are sentences the author may
   reword at any ratification. The prompts point at the law instead, which is

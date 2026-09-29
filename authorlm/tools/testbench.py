@@ -859,7 +859,7 @@ def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
     nothing resolved by argument — forbid it outright.
 
     What IS feasible is every refusal that reads the run's own state,
-    because `filter push` and `filter settle` both build the Doc bridge
+    because `filter push` and `filter resolve` both build the Doc bridge
     LAST, after those refusals. Not one assertion below can reach the
     network even if the operator's [gdocs] bridge is fully authorized,
     and that is a property of the ordering rather than of luck.
@@ -906,9 +906,9 @@ def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
         # (1) The local road is TAKEN by taking it, and does NOT meet the
         #     doc refusal. This is the discrimination for (4).
         _guard(db, manuscript_dir)
-        paused = cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+        paused = cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
                      "--pause", stdin_text="", scrub_keys=True)
-        report("'filter settle --pause' takes the LOCAL road, records the "
+        report("'filter resolve --pause' takes the LOCAL road, records the "
                "transport, and meets no doc-mode refusal — the "
                "discrimination without which the refusal below proves "
                "nothing",
@@ -936,11 +936,11 @@ def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
                "already out" in push_doc_mode
                and "already took the local road" not in push_doc_mode
                and "docs.google.com" not in push_doc_mode, push_doc_mode)
-        # (4) mode='doc' refuses `filter settle --pause`, by name.
-        pause_doc = cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+        # (4) mode='doc' refuses `filter resolve --pause`, by name.
+        pause_doc = cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
                         "--pause", stdin_text="", scrub_keys=True,
                         allow_fail=True)
-        report("a doc-mode run refuses 'filter settle --pause' by name — "
+        report("a doc-mode run refuses 'filter resolve --pause' by name — "
                "one run's forms half in the Doc and half on disk is the "
                "state the mode freeze exists to forbid",
                "put its forms in the Doc" in pause_doc, pause_doc)
@@ -962,11 +962,11 @@ def _doc_mode_refusals(workspace: Path, manuscript_dir: Path,
         except LookupError as err:
             refusal = str(err)
         report("with the run's forms out, the DB push guard refuses 'doc "
-               "push' and names 'filter settle' — the guard that is the "
+               "push' and names 'filter resolve' — the guard that is the "
                "ONLY one able to see anything when the transport is the "
                "Doc and the local file is clean",
                "filter pending forms" in refusal
-               and f"filter settle {TARGET}" in refusal, refusal)
+               and f"filter resolve {TARGET}" in refusal, refusal)
     finally:
         # Clear the transport BEFORE the unmark: the doc branch of
         # `filter unmark` would want --force and a Doc bridge, and this
@@ -1026,7 +1026,7 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
         raise BenchRefusal(
             f"a filter run is already active on {TARGET}. This check "
             f"would fight it for the file. Settle it ('authorlm -m "
-            f"{BENCH} filter settle {TARGET}') or drop it ('… filter "
+            f"{BENCH} filter resolve {TARGET}') or drop it ('… filter "
             f"abandon {TARGET}') first.")
 
     original = target.read_bytes()
@@ -1103,7 +1103,7 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
 
         # --- 5. the pause: the form is VISIBLE markdown on disk --------
         _guard(db, manuscript_dir)
-        cli(workspace, "-m", BENCH, "filter", "settle", TARGET, "--pause",
+        cli(workspace, "-m", BENCH, "filter", "resolve", TARGET, "--pause",
             stdin_text="", scrub_keys=True)
         if _corrupt is not None:
             target.write_text(_corrupt(target.read_text(encoding="utf-8")),
@@ -1141,7 +1141,7 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
 
         # --- 7. finalize: the exact expected bytes --------------------
         _guard(db, manuscript_dir)
-        cli(workspace, "-m", BENCH, "filter", "settle", TARGET,
+        cli(workspace, "-m", BENCH, "filter", "resolve", TARGET,
             stdin_text="", scrub_keys=True)
         final = target.read_text(encoding="utf-8")
         expected = original.decode("utf-8").replace(disk_units[1],
@@ -1154,7 +1154,7 @@ def check_filter(workspace: Path, manuscript_dir: Path, *,
         _guard(db, manuscript_dir)
         out = cli(workspace, "-m", BENCH, "filter", "run", TB_FILTER,
                   TARGET, stdin_text="", scrub_keys=True, allow_fail=True)
-        report("re-running on the settled text refuses and names the "
+        report("re-running on the resolved text refuses and names the "
                "prior run and its tallies",
                "already ran on this exact text" in out and "--again" in out,
                out)
