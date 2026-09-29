@@ -11,6 +11,7 @@ freely; the next export recreates it.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date
 from pathlib import Path
@@ -73,9 +74,14 @@ _REGION_CLOSE = re.compile(r"^\[/(?P<kind>Omit|Only)\]\s*$", re.IGNORECASE)
 
 def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
     """The output names a build answers to: its format, plus `audio`
-    for the stripped variant (the audio-clean markdown)."""
+    when the build IS the audio-clean markdown (`fmt=md` with
+    `variant=stripped`). Illustration stripping is independent — a
+    stripped PDF/DOCX/EPUB/Doc still drops plates — but must not inherit
+    audio region membership or the display-math drop: a leftover
+    `variant=stripped` in export settings would otherwise silently gut
+    equations and `[Omit: audio]` passages from every print build."""
     names = {fmt}
-    if variant == "stripped":
+    if fmt == "md" and variant == "stripped":
         names.add("audio")
     return frozenset(names)
 
@@ -88,15 +94,33 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
         [Only: audio]        …  [/Only]   kept for the named outputs only
 
     Same grammar as [Illustration: …]: plain text on every road (Obsidian,
-    the Doc bridge, pandoc), resolved here alone. Regions nest; the tag
-    lines themselves never reach a reader. A structural fault — an
-    unknown output name, a stray or unmatched close, an unclosed region —
-    raises, naming the line: a typo must never silently include or
-    exclude a passage (docs/math-and-physics-guidelines.md §5)."""
+    the Doc bridge, pandoc), resolved here alone. Regions nest — an
+    `[Only:]` inside an `[Omit:]` is the audio substitution pattern
+    (docs/math-and-physics-guidelines.md §5): the inner Only re-includes
+    its body for the named outputs even when an outer Omit would drop
+    them. The tag lines themselves never reach a reader. A structural
+    fault — an unknown output name, a stray or unmatched close, an
+    unclosed region — raises, naming the line: a typo must never
+    silently include or exclude a passage."""
     wanted = set(outputs)
-    stack: list[tuple[str, bool]] = []   # (kind, this region keeps)
+    # (kind, allows): Only stores hit; Omit stores not-hit.
+    stack: list[tuple[str, bool]] = []
     kept: list[str] = []
     prefix = f"{where}:" if where else "line "
+
+    def _line_kept() -> bool:
+        # Walk outside-in. Omit that hits this build hides; Only then
+        # resets visibility to its own hit — so Only-inside-Omit can
+        # substitute a spoken paraphrase without the conjunctive
+        # all()-of-frames rule deleting both halves.
+        visible = True
+        for kind, allows in stack:
+            if kind == "only":
+                visible = allows
+            elif not allows:
+                visible = False
+        return visible
+
     for lineno, line in enumerate(text.split("\n"), 1):
         m = _REGION_OPEN.match(line)
         if m:
@@ -122,7 +146,7 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
                        if stack else ""))
             stack.pop()
             continue
-        if all(keep for _, keep in stack):
+        if _line_kept():
             kept.append(line)
     if stack:
         raise ValueError(
@@ -130,24 +154,41 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
     return "\n".join(kept)
 
 
-def strip_display_math(text: str) -> str:
+def strip_display_math(text: str, where: str = "") -> str:
     """Drop display equations ($$ … $$, single-line by convention, or a
-    block opened and closed by lines carrying $$) — the audio default:
+    multi-line block opened and closed by a lone $$) — the audio default:
     an equation read aloud by a synthetic voice is noise. Inline math
-    stays; the style guide keeps it to what a voice can say."""
+    stays; the style guide keeps it to what a voice can say.
+
+    Malformed display math refuses by file and line (same posture as
+    resolve_regions / docs/math-and-physics-guidelines.md §6): an unclosed
+    block, or a line that starts with $$ but is neither a lone opener nor
+    a single-line $$…$$, must never silently eat the rest of the essay.
+    Before this guard, `$$\\nE=mc^2` with no closer (or a prose line like
+    `$$100 was the price.`) dropped every following paragraph from the
+    audio-clean export with no error."""
     out: list[str] = []
     in_block = False
-    for line in text.split("\n"):
+    prefix = f"{where}:" if where else "line "
+    for lineno, line in enumerate(text.split("\n"), 1):
         s = line.strip()
         if in_block:
             if "$$" in s:
                 in_block = False
             continue
-        if s.startswith("$$"):
-            if not (len(s) > 2 and s.endswith("$$")):
-                in_block = True
+        if s == "$$":
+            in_block = True
             continue
+        if s.startswith("$$") and s.endswith("$$") and len(s) > 2:
+            continue  # single-line $$…$$
+        if s.startswith("$$"):
+            raise ValueError(
+                f"{prefix}{lineno}: display math must be a lone $$ "
+                f"or a single-line $$…$$")
         out.append(line)
+    if in_block:
+        raise ValueError(
+            f"{prefix}end of file: display math ($$) never closed")
     return "\n".join(out)
 
 
@@ -280,7 +321,8 @@ SETTINGS_KEYS = {
              "manuscript name",
     "variant": "illustration handling: images (embed picked candidates) | "
                "slots (keep [Illustration: …] tags as production notes) | "
-               "stripped (remove tags — audio-clean)",
+               "stripped (remove tags; with `export md`, also the "
+               "audio-clean build — regions and display-math drop)",
     "language": "publication language code (epub metadata), default en",
     "reference_docx": "path to a pandoc reference .docx for Word styling "
                       "(fonts, margins); empty = pandoc defaults",
@@ -383,7 +425,7 @@ def publish_markdown(manuscript: dict, variant: str,
             continue
         text = resolve_regions(normalize_markdown(files[name]), outputs, name)
         if "audio" in outputs:
-            text = strip_display_math(text)
+            text = strip_display_math(text, name)
         text = normalize_markdown(text).rstrip("\n")
         if variant != "slots":
             raw = (root / name).read_text(encoding="utf-8")
@@ -452,6 +494,13 @@ def check_manuscript(manuscript: dict) -> list[str]:
             except ValueError as err:
                 problems.append(str(err))
                 break
+        # Display-math structure is independent of output: an unclosed
+        # $$ would silently truncate the audio-clean export, so the
+        # check refuses it the same way it refuses a stray [/Omit].
+        try:
+            strip_display_math(text, name)
+        except ValueError as err:
+            problems.append(str(err))
         if have_pandoc and "$" in text:
             proc = subprocess.run(
                 ["pandoc", "-f", "markdown+smart+footnotes", "-t", "html",
@@ -465,11 +514,22 @@ def check_manuscript(manuscript: dict) -> list[str]:
 
 
 def selection_slug(order: list[str]) -> str:
-    """Filename tag for a chapter selection — the selected files' stems,
-    joined, so a part-build never overwrites the whole-book artifacts."""
+    """Filename tag for a chapter selection — stems joined so a part-build
+    never overwrites the whole-book artifacts or another part-build.
+
+    Short selections stay fully readable. When the join would exceed the
+    filename budget, keep a readable head and append a content digest so
+    distinct selections (same first three stems, or long stems truncated
+    to the same prefix) cannot collide."""
     stems = [Path(name).stem for name in order]
-    slug = "+".join(stems[:3]) + ("+more" if len(stems) > 3 else "")
-    return slug[:60]
+    full = "+".join(stems)
+    if len(full) <= 60:
+        return full
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:8]
+    suffix = f"+more-{digest}" if len(stems) > 3 else f"-{digest}"
+    budget = 60 - len(suffix)
+    head = ("+".join(stems[:3]) if len(stems) > 3 else full)[:budget]
+    return head.rstrip("+") + suffix
 
 
 # ------------------------------------------------ the book profile (print interior)
@@ -635,7 +695,14 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         raise RuntimeError(
             "pandoc is required for docx/epub/pdf export — "
             "brew install pandoc")
-    out_path = md_path.with_suffix(f".{fmt}")
+    # Review and print-ready PDFs must not share a path: exporting one
+    # mode after the other would silently overwrite the other artifact
+    # (watermarked file sent to print, or clean file shared as "review").
+    if fmt == "pdf":
+        out_path = md_path.with_name(
+            md_path.stem + (".review.pdf" if review_copy else ".print.pdf"))
+    else:
+        out_path = md_path.with_suffix(f".{fmt}")
     pandoc_cwd = root
     if fmt in ("pdf", "epub"):
         command = [

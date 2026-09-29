@@ -1395,16 +1395,15 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     # Compose locally first — this is where a drifted paragraph fails
-    # loudly, before any Doc write.
+    # loudly, before any Doc write. `accepted`, not `threads`: compose
+    # and the surgical writer both honour every thread they are given
+    # (no state filter), and the critique pass's contract is unchanged
+    # — accepted edits only — stated HERE, where it belongs.
     text = (Path(manuscript["path"]) / file).read_text(encoding="utf-8")
     try:
-        passes.compose_marked_text(text, threads)
+        passes.compose_marked_text(text, accepted)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    # `accepted`, not `threads`: the writer no longer filters by state,
-    # because its two producers now disagree about which states go to
-    # the tab. The critique pass's contract is unchanged — accepted
-    # edits only — and it is stated HERE now, where it belongs.
     result = gdocs.write_pending_forms(db, manuscript, file, accepted,
                                        service, docs_service)
     for t in result["written"]:
@@ -1466,11 +1465,14 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (BUG-2 / A1).
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
-    # Apply locally: the author's post-edits win.
+    # Apply locally: the author's post-edits win. The Doc never carries
+    # illustration embed lines (push strips them), so write-back must
+    # re-insert them — the same `_write_resolved_text` path filter/lens
+    # resolve use. Writing the tab text as-is silently unlinked every
+    # rendered plate while leaving the [Illustration:] tag (SMSTTD,
+    # 2026-09-02; critique was missed when that writer was shared).
     path = Path(manuscript["path"]) / file
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
+    api._write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, file, forms, final_text=final)
     # No push: the author settles these forms in the Doc themselves, in
     # most cases. The Doc keeps them until their next ordinary 'doc push'.

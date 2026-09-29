@@ -4383,6 +4383,69 @@ def scenario_transplant() -> None:
     check("cell run styles are applied inside the cell",
           bolds == [{"tabId": "t.x", "startIndex": 13, "endIndex": 14}], str(bolds))
 
+    # `_tab_runs` must descend into table cells, and `_locate_in_tab`
+    # must map across the structural index gap tables leave between
+    # cells and the next paragraph. Skipping either planted
+    # <<old>>{{new}} forms on the wrong span once tables reached tabs
+    # (it-08b8b0a0c737).
+    from authorlm.gdocs import _locate_in_tab, _tab_runs
+
+    class _Req:
+        def __init__(self, result):
+            self._result = result
+
+        def execute(self):
+            return self._result
+
+    cell_para = {
+        "startIndex": 12, "endIndex": 21,
+        "paragraph": {"elements": [
+            {"startIndex": 12, "endIndex": 21,
+             "textRun": {"content": "in-table\n"}},
+        ]},
+    }
+    table_body = [
+        {"startIndex": 1, "endIndex": 8,
+         "paragraph": {"elements": [
+             {"startIndex": 1, "endIndex": 8,
+              "textRun": {"content": "Before\n"}},
+         ]}},
+        {"startIndex": 8, "endIndex": 30,
+         "table": {"tableRows": [
+             {"tableCells": [{"content": [cell_para]}]}]}},
+        {"startIndex": 30, "endIndex": 37,
+         "paragraph": {"elements": [
+             {"startIndex": 30, "endIndex": 37,
+              "textRun": {"content": "After.\n"}},
+         ]}},
+    ]
+
+    class _TableTabDocs:
+        def documents(self):
+            class _Docs:
+                def get(self, documentId=None, includeTabsContent=None):
+                    return _Req({"tabs": [{
+                        "tabProperties": {"tabId": "t.x",
+                                          "title": "essay.md"},
+                        "documentTab": {"body": {"content": table_body}},
+                        "childTabs": [],
+                    }]})
+            return _Docs()
+
+    docs = _TableTabDocs()
+    runs = _tab_runs(docs, "doc", "t.x")
+    check("_tab_runs includes table-cell text runs",
+          runs == [(1, "Before\n"), (12, "in-table\n"), (30, "After.\n")],
+          str(runs))
+    span = _locate_in_tab(docs, "doc", "t.x", "After.")
+    check("_locate_in_tab maps post-table prose to the real Doc index "
+          "(not the end of the preceding cell / inside the table)",
+          span == (30, 36), str(span))
+    cell_span = _locate_in_tab(docs, "doc", "t.x", "in-table\n")
+    check("_locate_in_tab exclusive end after a cell does not swallow "
+          "the table's structural gap",
+          cell_span == (12, 21), str(cell_span))
+
     # Tab reordering: iterated single moves must converge to TOC order
     # under remove-then-insert semantics, and no-op once matched.
     from authorlm.gdocs import next_tab_move
