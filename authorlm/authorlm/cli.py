@@ -1395,16 +1395,15 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     # Compose locally first — this is where a drifted paragraph fails
-    # loudly, before any Doc write.
+    # loudly, before any Doc write. `accepted`, not `threads`: compose
+    # and the surgical writer both honour every thread they are given
+    # (no state filter), and the critique pass's contract is unchanged
+    # — accepted edits only — stated HERE, where it belongs.
     text = (Path(manuscript["path"]) / file).read_text(encoding="utf-8")
     try:
-        passes.compose_marked_text(text, threads)
+        passes.compose_marked_text(text, accepted)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    # `accepted`, not `threads`: the writer no longer filters by state,
-    # because its two producers now disagree about which states go to
-    # the tab. The critique pass's contract is unchanged — accepted
-    # edits only — and it is stated HERE now, where it belongs.
     result = gdocs.write_pending_forms(db, manuscript, file, accepted,
                                        service, docs_service)
     for t in result["written"]:

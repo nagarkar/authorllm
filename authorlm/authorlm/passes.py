@@ -675,10 +675,20 @@ def mark_triaged(db: Database, pass_row: dict, file: str) -> None:
 # ------------------------------------------------- local apply/rollback
 
 def compose_marked_text(text: str, threads: list[dict]) -> str:
-    """The essay text with every ACCEPTED thread rendered as its pending
-    form — what the Doc tab shows during the pause. Pure function; the
-    push and the tests share it. Replaces are located verbatim (law);
-    insertions go after their anchor paragraph (0 = before the first).
+    """The essay text with every thread it is GIVEN rendered as its
+    pending form — what the Doc tab shows during the pause. Pure
+    function; the push and the tests share it. Replaces are located
+    verbatim (law); insertions go after their anchor paragraph
+    (0 = before the first).
+
+    EVERY thread handed in is composed. The caller chooses the set —
+    `critique write` and the local settle send accepted threads; 
+    `filter push` sends proposed and accepted, because on the Doc road
+    the tab IS the review. A state filter here would silently skip the
+    drift check for untriaged proposals: with a twin (or any later
+    substring match of `proposed_old`) still on disk, the surgical
+    writer would then plant the form on the wrong paragraph and settle
+    would corrupt the manuscript.
 
     Illustration embed lines are peeled before the drift check: proposals
     are staged against observation text (embeds stripped), while the
@@ -690,8 +700,6 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     paragraphs = paragraphs_of(text)
     by_para: dict[int, list[dict]] = {}
     for t in threads:
-        if t["state"] != "accepted":
-            continue
         meta = loads(t.get("metadata"), {}) or {}
         by_para.setdefault(meta.get("anchor_paragraph", 0), []).append(t)
     out = []

@@ -1040,6 +1040,49 @@ def _the_doc_is_the_review(root: Path) -> None:
           str(settle["diffs"]))
 
 
+def _proposed_drift_refuses_before_wrong_twin(root: Path) -> None:
+    """AW-1 left a hole: `compose_marked_text` still filtered to
+    `state='accepted'`, so `filter push`'s local drift check was a no-op
+    for the untriaged proposals that road now sends. With a twin (or any
+    later verbatim match of `proposed_old`) still on disk, the surgical
+    writer then planted the form on the WRONG paragraph — silent
+    manuscript corruption, not a loud refusal.
+
+    Concrete: stage unit 3 of DOC_ESSAY (first twin), leave it proposed,
+    rewrite unit 3 locally, push. Pre-fix the form landed on unit 5;
+    post-fix the push raises on the drift check and writes nothing."""
+    print("proposed + local drift + twin: refuse, do not plant on the other:")
+
+    twin = "And so the wall stands, and the Dead do not pass."
+    db, manuscript, ms, fake = _doc_run(
+        root, "proposed-drift-twin-ws", {3: "THREE REDONE."}, accept=False)
+    drifted = DOC_ESSAY.replace(twin, "CHANGED FIRST TWIN.", 1)
+    (ms / "solo.md").write_text(drifted)
+    bodies_before = len(fake.bodies)
+    raised = None
+    try:
+        api.filter_push(db, manuscript, {}, "solo.md",
+                        services=lambda: (fake, fake))
+    except ValueError as err:
+        raised = str(err)
+    check("an untriaged proposal whose target drifted refuses on the "
+          "local drift check — same loud failure an accepted thread "
+          "always got",
+          raised is not None and "drifted" in raised, raised)
+    check("...and NOTHING reached the Doc: the form must not land on "
+          "the surviving twin at unit 5",
+          len(fake.bodies) == bodies_before
+          and twin in fake.tab_text("solo.md")
+          and "<<" not in fake.tab_text("solo.md")
+          and "{{THREE REDONE.}}" not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    mid = manuscript["id"]
+    check("...and the proposal is still a proposal — a refused push "
+          "must not invent a verdict or advance state",
+          all(t["state"] == "proposed"
+              for t in api._run_threads(db, mid, _run_row(db, mid))))
+
+
 def _mixed_push_set_membership(root: Path) -> None:
     """Which states go to the Doc, and what the author is told."""
     print("push set membership: proposed and accepted go, rejected stays:")
@@ -3237,9 +3280,13 @@ def main_test() -> None:
 
         print("marked text (diff-write composition):")
         threads = passes.staged_threads(db, mid, "alpha.md")
-        marked = passes.compose_marked_text(ESSAY, threads)
+        # Caller owns the set: compose every thread it is given. Hand it
+        # the accepted ones only — proposed/rejected stay out, same as
+        # `critique write` / the local settle.
+        accepted_now = [t for t in threads if t["state"] == "accepted"]
+        marked = passes.compose_marked_text(ESSAY, accepted_now)
         check("accepted replace renders <<old>>{{new}}; insertion renders "
-              "{{new}} after its anchor; rejected/proposed untouched",
+              "{{new}} after its anchor; rejected/proposed not in the set",
               "<<First paragraph of alpha, plainly stated.>>{{First paragraph "
               "of alpha, stated with care.}}" in marked
               and "{{A bridging paragraph, new.}}" in marked
@@ -3247,7 +3294,7 @@ def main_test() -> None:
               and "decisively" not in marked)
         drifted = ESSAY.replace("plainly stated", "PLAINLY stated")
         try:
-            passes.compose_marked_text(drifted, threads)
+            passes.compose_marked_text(drifted, accepted_now)
             raised = False
         except ValueError as err:
             raised = "drifted" in str(err)
@@ -3970,6 +4017,7 @@ def main_test() -> None:
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
         _the_doc_is_the_review(root)
+        _proposed_drift_refuses_before_wrong_twin(root)
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)
