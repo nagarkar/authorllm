@@ -6200,6 +6200,18 @@ def main_test() -> None:
         pulled = normalize_markdown(unescape_export_math(exporter(doc_text)))
         check("math round-trips the Doc road byte for byte",
               pulled == canon, repr(pulled))
+        # Unclosed $$ used to fail open into the prose escape strip:
+        # push_doc writes normalize_markdown back to disk, so a mid-edit
+        # `\\` row break became `\` and `\{` braces vanished — permanent
+        # TeX corruption, not a cosmetic reflow.
+        orphan = ("Intro\n$$\n\\begin{matrix} a \\\\ b \\end{matrix}\n"
+                  "x \\{ y \\} and a \\| b\n")
+        got_orphan = normalize_markdown(orphan)
+        check("unclosed display math does not gut TeX on normalize",
+              "a \\\\ b" in got_orphan and "\\{ y \\}" in got_orphan
+              and "\\| b" in got_orphan
+              and normalize_markdown(got_orphan) == got_orphan,
+              repr(got_orphan))
 
         # An empty heading paragraph in the Doc (e.g. a blank Subtitle
         # line) must be dropped — never merged into the next heading
