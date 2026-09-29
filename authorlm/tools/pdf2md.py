@@ -40,6 +40,16 @@ PARA_GAP_RATIO = 1.9      # vertical gap vs typical line gap = new paragraph
 INDENT_RATIO = 1.2        # indent vs body height = new paragraph
 MIN_TEXT_LAYER_CHARS = 50  # below this, a page is treated as image-only
 
+# Well-formed roman numerals only. A character-class match on [ivxlcdm]
+# also accepts English words (did, civil, mild, mid…) and must not be
+# used as the page-number test — those words die in the margin zone.
+_ROMAN_PAGE = re.compile(
+    r"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$",
+    re.IGNORECASE)
+# Well-formed roman that is also ordinary English — strip only when the
+# same key repeats as running furniture (never as a one-off body line).
+_ROMAN_ENGLISH = frozenset({"i", "mix", "di", "li", "mi"})
+
 
 def ocr_page(page: "fitz.Page", dpi: int) -> list[dict]:
     """Render one page and return Vision text observations as line dicts."""
@@ -122,9 +132,17 @@ def is_furniture(line: dict, repeated: set[str]) -> bool:
     if not in_margin:
         return False
     text = line["text"].strip()
-    if re.fullmatch(r"[0-9]+|[ivxlcdm]+", text.lower()):
-        return True  # bare page number, arabic or roman
-    return re.sub(r"\d+", "#", text.lower()).strip() in repeated
+    key = re.sub(r"\d+", "#", text.lower()).strip()
+    if re.fullmatch(r"[0-9]+", text):
+        return True  # bare arabic page number
+    if _ROMAN_PAGE.fullmatch(text):
+        # xiv / iii / vii — folio. Single-letter and a few short tokens
+        # that are also English ("I", "mix") need the repetition signal
+        # so a body line in the margin zone is not deleted on sight.
+        if text.lower() in _ROMAN_ENGLISH:
+            return key in repeated
+        return True
+    return key in repeated
 
 
 def is_heading(line: dict, body_height: float) -> bool:
