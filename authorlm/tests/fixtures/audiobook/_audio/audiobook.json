@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "title": "Seven More Sermons To The Dead",
+  "subtitle": "Septem Plus Sermones Ad Mortuos",
+  "author": "Chinmay Nagarkar",
+  "narrator": "Adam Stone",
+  "publisher": "Chinmay Nagarkar",
+  "language": "en",
+  "copyrightYear": 2026,
+  "copyrightHolder": "Chinmay Nagarkar",
+  "chapters": [
+    {
+      "stem": "sermons",
+      "file": "chapters/sermons.json",
+      "title": "Seven More Sermons To The Dead"
+    },
+    {
+      "stem": "kindness",
+      "file": "chapters/kindness.json",
+      "title": "Kindness that Kills"
+    }
+  ],
+  "openingCredits": "chapters/_opening-credits.json",
+  "closingCredits": "chapters/_closing-credits.json",
+  "aboutAuthor": "chapters/about.json",
+  "retailSample": [
+    "09c7cca4dc346e8910c9d7ce8fe58b57",
+    "bf2991df0a2950f22e769c1eccfb923b",
+    "f1e041c54a94acf3bac775896c8c4c73"
+  ],
+  "cover": {
+    "path": "_assets/audiobook-cover.png",
+    "width": 2400,
+    "height": 2400,
+    "format": "png",
+    "color": "rgb"
+  },
+  "pronunciationDictionary": {
+    "name": "Scratch pronunciations",
+    "id": null,
+    "versionId": null
+  },
+  "cast": {
+    "narrator": {
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0
+    },
+    "herdsman": {
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97
+    },
+    "the_dead": {
+      "voiceId": "3MTvEr8xCMCC2mL9ujrI",
+      "voiceName": "Julian",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.5,
+      "similarity": 0.75,
+      "speed": 1.0
+    }
+  },
+  "model": "eleven_multilingual_v2",
+  "quality": "mp3_44100_128",
+  "paragraphGapMs": 700,
+  "generatedAt": "2026-09-06T05:59:14+00:00"
+}

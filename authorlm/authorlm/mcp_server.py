@@ -141,12 +141,18 @@ def set_manuscript_metadata(author: str | None = None,
                             hardcover_isbn: str | None = None,
                             trim_size: str | None = None,
                             bleed: bool | None = None,
+                            narrator: str | None = None,
+                            publisher: str | None = None,
+                            copyright_year: str | None = None,
+                            language: str | None = None,
                             manuscript: str | None = None) -> dict:
     """Set canonical publication identity: author, copyright owner,
-    format-specific print ISBN-13 values, and the print geometry — trim
+    format-specific print ISBN-13 values, the print geometry — trim
     size as WIDTHxHEIGHT inches (e.g. '6x9') and whether the interior
-    bleeds. ISBNs are validated and normalized; the trim size is checked
-    against the print range."""
+    bleeds — and the audiobook's narrator, the publisher, the four-digit
+    copyright year and the language code. ISBNs are validated and
+    normalized; the trim size is checked against the print range. Only
+    from the author's explicit words."""
     def run():
         db = _db()
         selected = _manuscript(db, manuscript)
@@ -154,7 +160,9 @@ def set_manuscript_metadata(author: str | None = None,
             db, selected, author=author, copyright_owner=copyright_owner,
             paperback_isbn=paperback_isbn,
             hardcover_isbn=hardcover_isbn,
-            trim_size=trim_size, bleed=bleed)
+            trim_size=trim_size, bleed=bleed, narrator=narrator,
+            publisher=publisher, copyright_year=copyright_year,
+            language=language)
     return _guard(run)
 
 
@@ -1584,6 +1592,187 @@ def resolve_improvement(task_id: str, action: str,
     declined; `note` = their reason, mandatory, recorded as evidence)."""
     def run():
         return api.resolve_improvement(_db(), task_id, action, note)
+    return _guard(run)
+
+
+# ---------------------------------------------------------------- audio
+# The audiobook (docs/audiobook-pipeline-design.md §11). AuthorLM
+# produces the manifests; audiostation generates. Nothing here spends
+# ElevenLabs credits without `confirm=True`, and the chat road states
+# the character cost first.
+
+
+@mcp.tool()
+def export_audio(chapters: list[str] | None = None,
+                 manuscript: str | None = None) -> dict:
+    """Compile the audiobook manifests — _audio/audiobook.json and
+    chapters/*.json — from the manuscript, toc.toml's voice keys,
+    _audio/cast.md and audiobook.toml. Rewrites only files whose content
+    changed, so audiostation reloads exactly what moved. `chapters`
+    limits which chapter files are rewritten. Returns what was written
+    and the warnings (inline math, over-long sections, unresolved tags)."""
+    def run():
+        from . import audio
+        db = _db()
+        return audio.export(db, _manuscript(db, manuscript),
+                            only=chapters or None)
+    return _guard(run)
+
+
+@mcp.tool()
+def audio_readiness(manuscript: str | None = None) -> dict:
+    """Is the audiobook ready to publish? Blocking problems (metadata,
+    about.md, cover, cast keys, unresolved tags, dictionary drift, retail
+    sample, stale exports), warnings, and — read-only from audiostation's
+    state files — how much is generated and stitched per chapter."""
+    def run():
+        from . import audio
+        db = _db()
+        return audio.check(db, _manuscript(db, manuscript))
+    return _guard(run)
+
+
+@mcp.tool()
+def list_voices(search: str | None = None, library: bool = False,
+                limit: int = 12, manuscript: str | None = None) -> dict:
+    """Free voice discovery: the ElevenLabs account's voices (or, with
+    library=True, the shared library matching `search`) with their preview
+    clips downloaded into the manuscript's audition gallery page. Publish
+    the page as an artifact so the author can listen; narrow to a
+    shortlist BEFORE any paid audition."""
+    def run():
+        from . import audio
+        db = _db()
+        client = audio.ElevenLabs(audio.api_key())
+        return audio.voices_gallery(_manuscript(db, manuscript), client,
+                                    search=search or "", library=library,
+                                    limit=limit)
+    return _guard(run)
+
+
+@mcp.tool()
+def audition_voices(cast: list[str], text: str | None = None,
+                    file: str | None = None, paragraphs: str | None = None,
+                    stability: float | None = None,
+                    similarity: float | None = None,
+                    speed: float | None = None, model: str | None = None,
+                    label: str | None = None, confirm: bool = False,
+                    manuscript: str | None = None) -> dict:
+    """PAID audition: render the author's own words in each candidate
+    (cast keys from cast.md, or raw ElevenLabs voice ids) at the book's
+    model, appended to the audition gallery. Give `text`, or `file` plus
+    `paragraphs` ('3-5', 1-based paragraph sections of that essay's audio
+    text). Without confirm=True nothing is rendered: the reply carries the
+    character cost for the author to approve. Vary one parameter per
+    round; never write a cast row the author has not heard."""
+    def run():
+        from . import audio
+        db = _db()
+        selected = _manuscript(db, manuscript)
+        words = text
+        if not words:
+            if not (file and paragraphs):
+                raise ValueError("give text, or file plus paragraphs")
+            words = audio.audition_text(selected, file, paragraphs)
+        candidates = [c.strip() for c in cast if c.strip()]
+        chars = len(audio.normalize(words)) * len(candidates)
+        if not confirm:
+            return {"needs_confirmation": True, "characters": chars,
+                    "candidates": candidates,
+                    "text": audio.normalize(words)[:200]}
+        client = audio.ElevenLabs(audio.api_key())
+        return audio.audition(
+            selected, client, candidates, words,
+            overrides={"stability": stability, "similarity": similarity,
+                       "speed": speed, "model": model},
+            label=label or "")
+    return _guard(run)
+
+
+@mcp.tool()
+def set_cast(key: str, voice_id: str, voice: str | None = None,
+             model: str | None = None, stability: float | None = None,
+             similarity: float | None = None, speed: float | None = None,
+             note: str | None = None, manuscript: str | None = None) -> dict:
+    """Write one row of _audio/cast.md — the settled voice for a role
+    (key such as 'narrator', 'herdsman', 'the_dead'). Only after the
+    author has heard the clip and said so. Replaces the row with the same
+    key; fields left None keep their current value."""
+    def run():
+        from . import audio
+        db = _db()
+        selected = _manuscript(db, manuscript)
+        root = audio.audio_dir(selected)
+        path = root / audio.CAST_FILENAME
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        existing, _w = audio.parse_cast(current)
+        row = next((r for r in existing if r["key"] == key), {})
+        new = {"key": key,
+               "voice": voice if voice is not None else row.get("voice", ""),
+               "voice_id": voice_id,
+               "model": model if model is not None else row.get("model", ""),
+               "stability": (f"{stability:g}" if stability is not None
+                             else row.get("stability", "")),
+               "similarity": (f"{similarity:g}" if similarity is not None
+                              else row.get("similarity", "")),
+               "speed": (f"{speed:g}" if speed is not None
+                         else row.get("speed", "")),
+               "note": note if note is not None else row.get("note", "")}
+        root.mkdir(parents=True, exist_ok=True)
+        path.write_text(audio.set_cast_row(current, new), encoding="utf-8")
+        return {"path": str(path), "row": new, "updated": bool(row)}
+    return _guard(run)
+
+
+@mcp.tool()
+def say_term(term: str, say: list[str] | None = None, cast: str | None = None,
+             file: str | None = None, dictionary: bool = False,
+             settle: str | None = None, manuscript: str | None = None) -> dict:
+    """The fast pronunciation loop: hear `term` in a real sentence from
+    the book, in the voice of the section that says it (or `cast`'s), with
+    each respelling in `say` substituted inline the way the alias rule
+    would — no dictionary push, about 150 characters per clip. Omit `say`
+    to hear the table's current reading; dictionary=True renders the
+    untouched sentence with the pushed dictionary attached to prove the
+    rule fires. Clips land in the audition gallery. `settle` writes that
+    one respelling into pronunciations.md — only on the author's word;
+    then push_pronunciations and export_audio carry it."""
+    def run():
+        from . import audio
+        db = _db()
+        selected = _manuscript(db, manuscript)
+        client = audio.ElevenLabs(audio.api_key())
+        result = audio.say(selected, client, term, says=say, cast_key=cast,
+                           file=file, use_dictionary=dictionary)
+        if settle:
+            result["settled"] = audio.settle_say(selected, term, settle)
+        return result
+    return _guard(run)
+
+
+@mcp.tool()
+def push_pronunciations(confirm: bool = False,
+                        manuscript: str | None = None) -> dict:
+    """Push pronunciations.md to the ElevenLabs dictionary named in
+    audiobook.toml. Append-only with replacement: new terms are added, a
+    changed reading is removed then re-added, rows missing from the table
+    are reported and left alone. Without confirm=True nothing is applied —
+    the reply is the plan (create / add / change / remote-only) to read to
+    the author first."""
+    def run():
+        from . import audio
+        db = _db()
+        client = audio.ElevenLabs(audio.api_key())
+        plan = audio.dictionary_plan(_manuscript(db, manuscript), client)
+        summary = {"plan": audio.describe_plan(plan), "create": plan["create"],
+                   "add": len(plan["add"]), "change": len(plan["change"]),
+                   "remote_only": plan["remote_only"]}
+        if not (plan["create"] or plan["add"] or plan["change"]):
+            return {**summary, "applied": False, "nothing_to_push": True}
+        if not confirm:
+            return {**summary, "applied": False, "needs_confirmation": True}
+        result = audio.dictionary_apply(plan, client)
+        return {**summary, "applied": True, **result}
     return _guard(run)
 
 

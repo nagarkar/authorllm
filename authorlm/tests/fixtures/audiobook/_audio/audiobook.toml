@@ -1,0 +1,38 @@
+# audiobook.toml — how this manuscript becomes an audiobook.
+#
+# AuthorLM wrote this file once, with every default, and will never write
+# it again: it is yours. `authorlm audio export` reads it and resolves
+# every rule into the sections it writes; audiostation never reads it.
+# Design: docs/audiobook-pipeline-design.md §3.
+
+schema = 1
+
+[text]
+paragraph_gap_ms = 700        # silence after every paragraph section
+rule_gap_ms = 1500            # a horizontal rule (---) is silence, not speech
+footnotes = "drop"            # drop | inline | end  (only "drop" is built)
+inline_math = "warn"          # warn | strip | refuse — warn strips the $…$ delimiters and names the line
+lists = "one-section"         # one-section | one-per-item
+max_section_chars = 5000      # the export warns above this; ElevenLabs per-request limits differ by model
+
+[headings]
+voice = "essay-default"       # essay-default | a cast key such as "narrator"
+gap_ms = { h1 = 3250, h2 = 2250, other = 1250 }   # silence BEFORE a heading; adjacent headings collapse to the smaller
+
+[tts]
+model = "eleven_multilingual_v2"   # decides the dictionary rule type: phoneme on eleven_flash_v2 / eleven_v3, alias elsewhere
+quality = "mp3_44100_128"          # ACX accepts mp3_44100_128 or mp3_44100_192
+dictionary = "Scratch pronunciations"
+
+[credits]
+voice = "narrator"
+opening = "{title}. {subtitle}. Written by {author}. Narrated by {narrator}."
+closing = "This has been {title}, written by {author} and narrated by {narrator}. Copyright {copyright_year} by {copyright_owner}. Production copyright {copyright_year} by {publisher}."
+
+[retail_sample]               # ACX: one to five minutes from the body of the book
+chapter = "sermons.md"
+heading = "Sermon One"
+paragraphs = 3
+
+[cover]
+path = "_assets/audiobook-cover.png"

@@ -1,0 +1,297 @@
+{
+  "schema": 1,
+  "file": "sermons.md",
+  "stem": "sermons",
+  "title": "Seven More Sermons To The Dead",
+  "voiceDefault": "herdsman",
+  "sections": [
+    {
+      "type": "silence",
+      "id": "05192409118c7f1211f47e428d8329da",
+      "durationMs": 800
+    },
+    {
+      "type": "speech",
+      "id": "e640b7caa27ec4e08caf9b3e7683a450",
+      "kind": "heading",
+      "text": "Seven More Sermons To The Dead",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 1
+      },
+      "level": 1
+    },
+    {
+      "type": "silence",
+      "id": "f6b60d53e2a55cab0ad71d479884cba2",
+      "durationMs": 2250
+    },
+    {
+      "type": "speech",
+      "id": "c58396ac299890cd3989505eaf6676a1",
+      "kind": "heading",
+      "text": "Prologue",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 3
+      },
+      "level": 2
+    },
+    {
+      "type": "speech",
+      "id": "dc1180f3ea44578c278b20d9812fb94a",
+      "kind": "paragraph",
+      "text": "The Dead, having received the wisdom of the seven Sermons, wandered through time and space in search of redemption. At great length, they arrived at the Herdsman’s fire beside the three great rivers and found me seated in the lotus posture. One among them ventured forth: “O stranger, we come from Jerusalem, seeking the wise man called Basilides. He gave us comfort many moons ago, and alas, we have not found him again. Pray, who art thou, and canst thou show us the way?”",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [
+        {
+          "term": "Basilides",
+          "say": "buh-SIL-ih-deez"
+        }
+      ],
+      "source": {
+        "line": 5
+      }
+    },
+    {
+      "type": "silence",
+      "id": "c58c2c58d23663e157331f86f2663968",
+      "durationMs": 2250
+    },
+    {
+      "type": "speech",
+      "id": "0f683c771b276af4da7982c20031beaf",
+      "kind": "heading",
+      "text": "Sermon One",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 7
+      },
+      "level": 2
+    },
+    {
+      "type": "speech",
+      "id": "09c7cca4dc346e8910c9d7ce8fe58b57",
+      "kind": "paragraph",
+      "text": "I fear that my friend Basilides hath long since ascended beyond the reach of mortal sight. Ye have traveled far in your quest—further than most would dare. And yet, ye persist! For this, ye have our praise. I shall guide thee now, albeit in a manner that differeth from before. Perchance this path shall better suit your understanding, that ye may at last find peace.",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [
+        {
+          "term": "Basilides",
+          "say": "buh-SIL-ih-deez"
+        }
+      ],
+      "source": {
+        "line": 9
+      }
+    },
+    {
+      "type": "silence",
+      "id": "fd9a751785a00d3b7ce59ddf2c9e0261",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "bf2991df0a2950f22e769c1eccfb923b",
+      "kind": "paragraph",
+      "text": "Harken. Do ye recall the words of Basilides on the subject of Nothing? I shall begin there, that the smallest cost ye may bear. For a scale weighted by a Name findeth its own shade; but a scale weighted by Nothing findeth Truth, unswayed.",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [
+        {
+          "term": "Basilides",
+          "say": "buh-SIL-ih-deez"
+        }
+      ],
+      "source": {
+        "line": 11
+      }
+    },
+    {
+      "type": "silence",
+      "id": "802c5bd727840da6e79256cf764cf98e",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "f1e041c54a94acf3bac775896c8c4c73",
+      "kind": "paragraph",
+      "text": "“O Stranger, all this is new to us. We have no time for qualities and fields. We are lost. We only wish to rest in peace. Pray, tell us of the Supreme God.”",
+      "cast": "the_dead",
+      "voiceId": "3MTvEr8xCMCC2mL9ujrI",
+      "voiceName": "Julian",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.5,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 14,
+        "tag": 13
+      }
+    },
+    {
+      "type": "silence",
+      "id": "e0dec95cc53ca79d30f3611380d0a325",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "488a0313c5ce1f48606aaa5ab3fe29f9",
+      "kind": "paragraph",
+      "text": "Harken. The Gnostic Basilides spoke of the Pleroma; I speak of Nothing.",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.92,
+      "pronunciations": [
+        {
+          "term": "Basilides",
+          "say": "buh-SIL-ih-deez"
+        },
+        {
+          "term": "Gnostic",
+          "say": "NOSS-tik"
+        },
+        {
+          "term": "Pleroma",
+          "say": "pleh-ROH-muh"
+        }
+      ],
+      "source": {
+        "line": 17,
+        "tag": 16
+      }
+    },
+    {
+      "type": "silence",
+      "id": "568f73e514f36d3bf4321ad9f1660269",
+      "durationMs": 2250
+    },
+    {
+      "type": "speech",
+      "id": "b8d02766e8fada379fbfd4fe0089d1c9",
+      "kind": "heading",
+      "text": "Sermon Two",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 19
+      },
+      "level": 2
+    },
+    {
+      "type": "speech",
+      "id": "89a8518d9b021f7f2dc104a6212c1b0d",
+      "kind": "paragraph",
+      "text": "Mark well. A footnote here and some emphasis and a formula E = mc^2.",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 21
+      }
+    },
+    {
+      "type": "silence",
+      "id": "728cd3d15a767c8e6e0965249a83096b",
+      "durationMs": 1500
+    },
+    {
+      "type": "speech",
+      "id": "6368a6665ddbd637de610038c2a059fd",
+      "kind": "paragraph",
+      "text": "first item of a list second item",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 25
+      }
+    },
+    {
+      "type": "silence",
+      "id": "aa58631145a9944ecea947ed9fb73f8c",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "4452ec831e9eb631ab594eeb02d482c8",
+      "kind": "paragraph",
+      "text": "A quoted line.",
+      "cast": "herdsman",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.65,
+      "similarity": 0.8,
+      "speed": 0.97,
+      "pronunciations": [],
+      "source": {
+        "line": 28
+      }
+    },
+    {
+      "type": "silence",
+      "id": "98c8e5e90394e532aae8937f262c0727",
+      "durationMs": 2000
+    }
+  ]
+}

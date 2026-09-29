@@ -1,0 +1,17 @@
+# Table of contents — structural: order is reading order.
+
+[[chapter]]
+file = "title.md"
+matter = "front"
+
+[[chapter]]
+file = "sermons.md"
+voice = "herdsman"
+
+[[chapter]]
+file = "kindness.md"
+
+[[chapter]]
+file = "about.md"
+matter = "back"
+audio = "about-author"

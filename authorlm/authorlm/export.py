@@ -16,6 +16,7 @@ import re
 from datetime import date
 from pathlib import Path
 
+from . import directives
 from .db import Database
 from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
                     normalize_markdown)
@@ -70,6 +71,19 @@ OUTPUTS = ("pdf", "docx", "epub", "md", "doc", "audio")
 _REGION_OPEN = re.compile(
     r"^\[(?P<kind>Omit|Only):\s*(?P<names>[^\]]*)\]\s*$", re.IGNORECASE)
 _REGION_CLOSE = re.compile(r"^\[/(?P<kind>Omit|Only)\]\s*$", re.IGNORECASE)
+
+
+# The full-line casting tag (docs/audiobook-pipeline-design.md §5.3):
+# `[Voice: key | stability=0.6 | speed=0.95]`. Plain text on every road
+# exactly like [Omit:] — it goes to the Doc tabs so the pull round trip
+# survives — and stripped from every READER output here. The audio
+# export consumes it (audio.py); nothing else reads it.
+VOICE_LINE = re.compile(r"^\[Voice:\s*(?P<body>[^\]]*)\]\s*$", re.IGNORECASE)
+
+
+def strip_voice_lines(text: str) -> str:
+    return "\n".join(line for line in text.split("\n")
+                     if not VOICE_LINE.match(line))
 
 
 def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
@@ -205,8 +219,8 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     order, unlisted = reading_order(files)
     tokens = footnote_prefixes(order)
     parts = [namespace_footnotes(
-        normalize_markdown(resolve_regions(
-            normalize_markdown(files[name]), {"doc"}, name)).rstrip("\n"),
+        normalize_markdown(strip_voice_lines(resolve_regions(
+            normalize_markdown(files[name]), {"doc"}, name))).rstrip("\n"),
         tokens[name])
         for name in order]
     text = "\n\n".join(part for part in parts if part)
@@ -424,6 +438,17 @@ def publish_markdown(manuscript: dict, variant: str,
                             "omitted from the export")
             continue
         text = resolve_regions(normalize_markdown(files[name]), outputs, name)
+        text = strip_voice_lines(text)
+        # An unresolved [Footnote: …] or [Explain: …] tag never reaches
+        # a reader: a shorthand instruction inside a sentence reads as
+        # damage, and a reviewer cannot act on it (footnote-directive
+        # design §6). Stripped and named, never kept as a production
+        # note the way an illustration slot is.
+        text, unresolved = directives.strip_tags(text)
+        for tag in unresolved:
+            warnings.append(f"{name}: unresolved [{tag['kind'].title()}: "
+                            f"{tag['gist'][:60]}] stripped — draft it in "
+                            f"chat and '{tag['kind']} apply'")
         if "audio" in outputs:
             text = strip_display_math(text, name)
         text = normalize_markdown(text).rstrip("\n")

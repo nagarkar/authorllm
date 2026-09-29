@@ -1416,13 +1416,118 @@ any state — a dismissal is final, and the remedy if they change their
 mind is to write the row in `pronunciations.md` themselves. So propose
 the ones a narrator would actually stumble over, and leave the rest.
 
-## The audiobook (`authorlm audio …` — AuthorLM produces, audiostation generates)
+## The audiobook (`authorlm audio …`)
 
-Design: `docs/audiobook-pipeline-design.md`. AuthorLM writes the
-manifests in `_audio/` (`audiobook.json`, `chapters/*.json`); the
-**audiostation** desktop app (`audiostation/`) generates, stitches,
-audits and packages. Nothing in chat generates chapter audio, and the only
-ElevenLabs speech AuthorLM ever requests is an audition clip.
+Design: `docs/audiobook-pipeline-design.md` (the manifests, ids, casting)
+and `docs/audiobook-review-design.md` (generation in AuthorLM, ratified
+2026-09-25). AuthorLM writes the manifests in `_audio/` (`audiobook.json`,
+`chapters/*.json`) and, since 2026-09-25, also renders, retakes and
+stitches. The **audiostation** desktop app (`audiostation/`) is an equal
+second door on the same `state/` files; its ACX audit and package are
+still the last gate. Both write the same state, so a take made by either
+is done for both.
+
+**The takes — CLI only, no MCP tools (the session runs these from Bash;
+the ElevenLabs key comes from the checkout's `.env`).** A chapter is
+named by its stem (`becker`, `chapter1`, `_opening-credits`); a paragraph
+by its number in the chapter (`-p 12`, `-p 12,14-16`) or an id prefix.
+
+- `authorlm audio status [<stem>] [-v] -m <ms>` — the board, one line per
+  fact: paragraphs, generated, remaining with its character cost, what
+  moved since a take ("¶ 14 Basilides: old → new"), the stitch and
+  whether it is stale. `-v` lists every paragraph with ● (has a take) or
+  ○. **Read this before any paid verb.**
+- `authorlm audio status --find "<words>" -m <ms>` — the paragraphs whose
+  text contains the words, with stem, number and first words. **This is
+  how a chat request becomes a paragraph:** the author says "regenerate
+  the Basilides paragraph in becker", never a number. Run the find; one
+  match → run the verb; several → list them by first words and ask.
+- `authorlm audio generate <stem> --remaining [--dry-run] -m <ms>` —
+  render every paragraph of the chapter without a take, at the book's
+  quality (`[tts].quality`, now `mp3_44100_192`). Prints the count and
+  character cost before the calls and what it spent after, with the
+  account's remaining characters. `--dry-run` prints the cost and renders
+  nothing. `-p 12,14-16` instead of `--remaining` renders those; **a
+  paragraph that already has a take is skipped and named** — generate
+  never re-renders a done id.
+- `authorlm audio retake <stem> -p 14 -m <ms>` — re-render a paragraph
+  that has a take and replace it. The only way a done id is rendered
+  again, and only on the author's word ("I don't like it").
+- `authorlm audio stitch <stem> -m <ms>` — one file, ffmpeg, two-pass
+  loudness (−20 LUFS / −3 dBTP), free. Refuses while any paragraph lacks
+  a take. A later take or retake marks the stitch stale on the board.
+
+A paid verb prints its cost and runs; a CLI call is the author's word, so
+there is no confirmation prompt — which is why you state the cost from
+`--dry-run` or the board and get a yes in chat before running `generate`
+or `retake` on more than the author just named. The character limit for
+live checks the author set stands: ≤ 2,000 a round unless they say more.
+
+**Equal doors rule.** Never run `generate`/`retake` on a chapter while
+audiostation is rendering that chapter (the app has no lock). Reloads in
+the app cannot double-render; only two deliberate renders can.
+
+**The free listen.** `authorlm audio preview <stem> | --all [-p …]
+[--force] -m <ms>` renders every paragraph without a preview with macOS
+`say` (voice and rate from `[preview]` in `audiobook.toml`; Daniel,
+175 wpm × the cast row's speed; respellings substituted inline so the
+table is heard too) into `_audio/preview/<id>.mp3`, four at a time,
+and sweeps previews whose id is gone. Nothing is kept and nothing
+costs. The whole SMSTTD book previews in about twenty minutes.
+
+**The page — the author's surface, on the Mac and the phone.** Run
+`authorlm audio serve -m <ms> --no-open` in the background from Bash
+(fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
+and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
+page is one chapter at a time with a dropdown: a card per paragraph
+(number, cast, the text, the respellings, "changed since <take>: …"),
+▶ preview and ▶ take, **Generate · cost** or **Retake · cost**, a
+chapter bar with **Generate remaining** (asks once, with the total
+cost) and **Stitch**, a sticky player that walks the chapter card by
+card ("walk on"), and **Refresh**, which exports and previews what
+changed on disk. **The page never touches the Doc** (author's ruling
+2026-09-26: "gdoc edits are more tricky as is reconciliation. We can
+keep that in chat"): reconcile at session start or `doc pull` in chat
+writes the pulled tab to disk, and the page's **stale banner** ("Changed
+since the export: becker.md, _audio/cast.md", yellow, with its own
+Refresh) picks it up like any local edit — it compares every manuscript
+file, `audiobook.toml`, `cast.md` and `pronunciations.md` against the
+export's time on each poll, and **the server re-exports and previews on
+its own within fifteen seconds** (2026-09-26: "why not just pull the
+data"); `audio status` prints the same as a STALE line. Every tap is a job
+on one queue drained by one worker; the strip under the header shows
+what runs and what waits. The server calls the same `generation.py` the
+CLI does.
+
+**The pronunciation workbench is a mode of the same page** (author's
+ruling 2026-09-26: "merge this into the app we built for audiobook
+creation so it's all in one place"): the band has Chapters /
+Pronunciations chips, `#pron` or `#pron:<term>` opens it, and a tap on a
+card's respelling chip ("Basilides → …") opens that word there. The
+server answers `/api/workbench` beside `/api/audiobook`, so the
+standalone `authorlm workbench` verb still works but is no longer the
+door. No separate port on the tailnet.
+
+**The phone reaches the page over Tailscale**, which the author installed
+on the Mac ("imac") and the phone on 2026-09-25. Nothing in AuthorLM
+knows about it. The recipe, run once by the author in their own
+terminal while the server is up:
+
+```
+tailscale serve --bg 8792
+```
+
+Then `https://imac.<tailnet>.ts.net/#<stem>` on the phone (`tailscale
+serve status` prints the exact name). `tailscale serve --https=443 off`
+withdraws it. The server binds 127.0.0.1 and stays there; only tailnet
+devices can reach the page. **The Mac has one tailnet name and every
+app on it shares it; each app owns one HTTPS port** (author's ruling
+2026-09-25, applied to the serve table the same day): AuthorLM 443 (the
+bare name), supplylm 8443 → local 8777, tradelm 9443 reserved (no server
+yet). Never map another app onto 443 `/`, and never use `--set-path`:
+Tailscale forwards the prefix and the pages use root-relative routes.
+Running `tailscale serve` is a standing change to what the Mac exposes:
+do it only on the author's word in chat (given 2026-09-25 for these).
 
 **Casting is three layers.** `voice = "key"` on a chapter in `toc.toml`
 (the essay default; invisible in the Doc), rows in `_audio/cast.md`
@@ -1456,8 +1561,12 @@ Doc with a screen reader.
 
 **Pronunciations → ElevenLabs.** `push_pronunciations` (`audio
 dictionary push`) shows the plan first — rows to add, readings that
-changed, remote-only rules left alone — and applies only with
-`confirm=True`. The dictionary is named in `audiobook.toml`; the model
+changed, and rules to remove — and applies only with `confirm=True`.
+**The push mirrors the table** (author's ruling 2026-09-26; the
+append-only rule of 2026-09-03 is reversed): a rule on ElevenLabs that
+`pronunciations.md` does not carry is removed on the next push, and a
+row without a reading carries nothing. Deleting a row is how a rule is
+dropped; nothing lives only on the server. The dictionary is named in `audiobook.toml`; the model
 there decides alias (multilingual v2 and most others) versus phoneme
 (`eleven_flash_v2`, `eleven_v3`) rules. After a push, `export_audio`
 writes the new version into `audiobook.json`.
@@ -1483,10 +1592,10 @@ CAPS, never IPA), then act on what the author reports hearing. A row is
 written only on the author's word (`settle`, or their Save).
 
 **Readiness.** `audio_readiness` (`audio check`) is the one report from
-the sources to audiostation's state: metadata, `about.md`, cover, cast
-keys, unresolved tags, dictionary drift, retail sample length, stale
-exports, and how much is generated per chapter. audiostation's ACX audit
-is the last gate on the audio itself.
+the sources to the takes: metadata, `about.md`, cover, cast keys,
+unresolved tags, dictionary drift, retail sample length, stale exports,
+and how much is generated per chapter. audiostation's ACX audit is the
+last gate on the audio itself.
 
 `audio init` (CLI only, once) seeds `audiobook.toml` and `cast.md`;
 after that AuthorLM reads them and writes only a cast row on request.

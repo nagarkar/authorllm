@@ -278,6 +278,25 @@ def add_row(text: str, row: dict) -> str:
     return newline.join(new_lines)
 
 
+def remove_row(text: str, term: str) -> tuple[str, bool]:
+    """Drop the term's row, rewriting NO other line. Returns (text,
+    removed). A term not in the table returns `text` unchanged, and the
+    file's own line ending is kept exactly as `add_row` keeps it."""
+    if not (text or "").strip():
+        return text, False
+    crlf = text.count("\r\n")
+    newline = "\r\n" if crlf > text.count("\n") - crlf else "\n"
+    lines = text.split(newline)
+    want = key(term)
+    for i, raw in enumerate(lines):
+        cells = _cells(raw)
+        if cells and not _is_delimiter(cells) and not _is_header(cells) \
+                and key(cells[0]) == want:
+            del lines[i]
+            return newline.join(lines), True
+    return text, False
+
+
 def block_lines(text: str) -> list[str]:
     """The PRONUNCIATION DICTIONARY body for the filter payload, sorted
     by `key(term)`. Note in parentheses, omitted when empty."""
