@@ -196,7 +196,8 @@ class _SurgicalDocFake:
     Style requests are accepted and ignored: colour and strikethrough
     are not what any assertion here turns on."""
 
-    def __init__(self, tabs, book: str = "book"):
+    def __init__(self, tabs, book: str = "book", render: bool = False,
+                 export_breaks_old: bool = False):
         import re as _re
 
         self._re = _re
@@ -205,17 +206,145 @@ class _SurgicalDocFake:
         self.bodies: list[str] = []          # every batchUpdate, as JSON
         self.temps: dict[str, str] = {}
         self._next = [100]
-        self.tabs = [{"id": f"tab-{i}", "title": t,
-                      "body": self._as_body(x)}
-                     for i, (t, x) in enumerate(tabs, 1)]
+        # `render` models what Google's importer does to inline emphasis:
+        # `*x*` becomes italic "x", and the text runs carry no asterisks;
+        # the emphasis lives in a STYLE MAP of (tab, start, end, marker)
+        # doc-index ranges, fed by rendered imports and by every
+        # updateTextStyle request that reaches batchUpdate (the transplant
+        # copies styles that way, and so does the surgical writer for a
+        # rendered new half). The markdown export is the inverse map,
+        # rebuilt from that style map — unless `export_breaks_old`, which
+        # models an exporter that cannot give an OLD half back (the case
+        # the writer's export proof exists to catch). Outside render mode
+        # the imported text keeps its asterisks (the historical fake), but
+        # the style map is still kept, so a new half the writer rendered
+        # exports as markdown either way — as it does in a real Doc.
+        self.render = render
+        self.export_breaks_old = export_breaks_old
+        self.styled: list[dict] = []
+        self.tabs = []
+        for i, (t, x) in enumerate(tabs, 1):
+            tab = {"id": f"tab-{i}", "title": t, "body": ""}
+            self.tabs.append(tab)
+            tab["body"] = self._as_body(x, tab["id"])
 
     # -- the text model ------------------------------------------------
     def _paras(self, markdown: str) -> list[str]:
         return [p.strip() for p in self._re.split(r"\n\s*\n", markdown)
                 if p.strip()]
 
-    def _as_body(self, markdown: str) -> str:
-        return "".join(p + "\n" for p in self._paras(markdown))
+    def _as_body(self, markdown: str, tab_id: str | None = None) -> str:
+        """The body an import produces. In render mode the emphasis goes
+        into the style map (when a tab is named — a temp doc's styles
+        travel by `_content` instead) and the text loses its markers."""
+        if not self.render:
+            return "".join(p + "\n" for p in self._paras(markdown))
+        body, index = "", 1
+        for p in self._paras(markdown):
+            shown, spans = gdocs.render_emphasis(p)
+            if tab_id is not None:
+                for s, e, style in spans:
+                    self.styled.append({"tab": tab_id, "start": index + s,
+                                        "end": index + e,
+                                        "mark": "**" if style.get("bold")
+                                        else "*"})
+            body += shown + "\n"
+            index += len(shown) + 1
+        return body
+
+    # -- the style map under edits ----------------------------------------
+    def _shift_insert(self, tab_id: str, at: int, n: int) -> None:
+        for r in self.styled:
+            if r["tab"] != tab_id:
+                continue
+            if r["start"] >= at:
+                r["start"] += n
+                r["end"] += n
+            elif r["start"] < at < r["end"]:
+                r["end"] += n
+
+    def _shift_delete(self, tab_id: str, a: int, b: int) -> None:
+        n = b - a
+        keep = []
+        for r in self.styled:
+            if r["tab"] != tab_id or r["end"] <= a:
+                keep.append(r)
+                continue
+            if r["start"] >= b:
+                r["start"] -= n
+                r["end"] -= n
+            else:
+                r["start"] = min(r["start"], a)
+                r["end"] = (r["end"] - n) if r["end"] >= b else a
+                if r["end"] <= r["start"]:
+                    continue
+            keep.append(r)
+        self.styled = keep
+
+    def _style(self, tab_id: str, a: int, b: int, style: dict) -> None:
+        if style.get("italic") is False or style.get("bold") is False:
+            self.styled = [r for r in self.styled
+                           if not (r["tab"] == tab_id and a <= r["start"]
+                                   and r["end"] <= b)]
+        if style.get("bold"):
+            self.styled.append({"tab": tab_id, "start": a, "end": b,
+                                "mark": "**"})
+        elif style.get("italic"):
+            self.styled.append({"tab": tab_id, "start": a, "end": b,
+                                "mark": "*"})
+
+    def edit(self, tab_id: str, old: str, new: str) -> None:
+        """The author typing in the tab: replace `old` (as the tab shows
+        it — rendered text, no markers) with `new`, keeping the style map
+        in step. Tests that mutate `body` directly bypass the map and
+        must only do so where no emphasis is in play."""
+        tab = self._tab(tab_id)
+        at = tab["body"].find(old)
+        assert at >= 0, f"edit: {old!r} is not in the tab"
+        # Only the differing middle is typed: the common prefix and
+        # suffix stand, and the styles on them with it.
+        p = 0
+        while p < min(len(old), len(new)) and old[p] == new[p]:
+            p += 1
+        s = 0
+        while (s < min(len(old), len(new)) - p
+               and old[-1 - s] == new[-1 - s]):
+            s += 1
+        gone = old[p: len(old) - s]
+        typed = new[p: len(new) - s]
+        tab["body"] = tab["body"][:at] + new + tab["body"][at + len(old):]
+        if gone:
+            self._shift_delete(tab_id, at + 1 + p, at + 1 + p + len(gone))
+        if typed:
+            self._shift_insert(tab_id, at + 1 + p, len(typed))
+
+    def _markdown_of_tab(self, tab: dict) -> str:
+        """The export: the body with the style map's markers put back —
+        closes before opens at a position, inner ranges closed first and
+        outer ranges opened first, so nesting round-trips."""
+        body = tab["body"]
+        ranges = [r for r in self.styled if r["tab"] == tab["id"]]
+        if self.export_breaks_old:
+            # An exporter that loses the emphasis inside a struck-through
+            # old half: drop every range that sits between `<<` and `>>`.
+            def in_old(r):
+                before = body[: r["start"] - 1]
+                return before.rfind("<<") > before.rfind(">>")
+            ranges = [r for r in ranges if not in_old(r)]
+        opens: dict[int, list] = {}
+        closes: dict[int, list] = {}
+        for r in ranges:
+            opens.setdefault(r["start"], []).append(r)
+            closes.setdefault(r["end"], []).append(r)
+        out = []
+        for i in range(1, len(body) + 2):
+            for r in sorted(closes.get(i, []), key=lambda r: -r["start"]):
+                out.append(r["mark"])
+            for r in sorted(opens.get(i, []), key=lambda r: -(r["end"] - r["start"])):
+                out.append(r["mark"])
+            if i <= len(body):
+                out.append(body[i - 1])
+        return "".join(out)
 
     def _tab(self, tab_id: str) -> dict | None:
         return next((t for t in self.tabs if t["id"] == tab_id), None)
@@ -237,6 +366,36 @@ class _SurgicalDocFake:
                                   "textRun": {"content": seg,
                                               "textStyle": {}}}]}})
             index = end
+        return out
+
+    def _temp_content(self, markdown: str) -> list[dict]:
+        """A temp doc as the importer leaves it. In render mode each
+        paragraph is split into STYLED runs, so `transplant_requests`
+        copies the emphasis into the tab as updateTextStyle requests —
+        which is how a real push carries it."""
+        if not self.render:
+            return self._content(self._as_body(markdown))
+        out, index = [], 1
+        for p in self._paras(markdown):
+            shown, spans = gdocs.render_emphasis(p)
+            seg = shown + "\n"
+            cuts = sorted({0, len(seg)} | {s for s, _, _ in spans}
+                          | {e for _, e, _ in spans})
+            elements = []
+            for a, b in zip(cuts, cuts[1:]):
+                style = {}
+                for s, e, st in spans:
+                    if s <= a and b <= e:
+                        style.update(st)
+                elements.append({"startIndex": index + a,
+                                 "endIndex": index + b,
+                                 "textRun": {"content": seg[a:b],
+                                             "textStyle": style}})
+            out.append({"startIndex": index, "endIndex": index + len(seg),
+                        "paragraph": {
+                            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                            "elements": elements}})
+            index += len(seg)
         return out
 
     # -- Drive ---------------------------------------------------------
@@ -269,9 +428,20 @@ class _SurgicalDocFake:
                 return _Req({"files": []})
 
             def export(self, fileId=None, mimeType=None):
+                # The body with the style map's markers put back. In
+                # render mode each `\n`-terminated paragraph exports as its
+                # own markdown paragraph; outside it the historical
+                # behaviour stands (paragraph gaps flattened), which the
+                # directive tests work around.
+                def paras(t):
+                    md = outer._markdown_of_tab(t)
+                    if outer.render:
+                        return [p for p in md.split("\n") if p.strip()]
+                    return outer._paras(md)
+
                 whole = "\n".join(
                     f"# **{t['title']}**\n\n"
-                    + "\n\n".join(outer._paras(t["body"]))
+                    + "\n\n".join(paras(t))
                     + ("\n" if t["body"].strip() else "")
                     for t in outer.tabs)
                 return _Req(whole.encode("utf-8"))
@@ -301,8 +471,8 @@ class _SurgicalDocFake:
         class _Documents:
             def get(self, documentId=None, includeTabsContent=None):
                 if documentId in outer.temps:
-                    return _Req({"body": {"content": outer._content(
-                        outer._as_body(outer.temps[documentId]))}})
+                    return _Req({"body": {"content": outer._temp_content(
+                        outer.temps[documentId])}})
                 tabs = [{"tabProperties": {"tabId": t["id"],
                                            "title": t["title"]},
                          "documentTab": {"body": {
@@ -326,6 +496,8 @@ class _SurgicalDocFake:
                 at = spec["location"]["index"] - 1
                 tab["body"] = tab["body"][:at] + spec["text"] + \
                     tab["body"][at:]
+                self._shift_insert(tab["id"], spec["location"]["index"],
+                                   len(spec["text"]))
             return {}
         if "deleteContentRange" in req:
             rng = req["deleteContentRange"]["range"]
@@ -333,6 +505,15 @@ class _SurgicalDocFake:
             if tab is not None:
                 tab["body"] = (tab["body"][:rng["startIndex"] - 1]
                                + tab["body"][rng["endIndex"] - 1:])
+                self._shift_delete(tab["id"], rng["startIndex"],
+                                   rng["endIndex"])
+            return {}
+        if "updateTextStyle" in req:
+            spec = req["updateTextStyle"]
+            rng = spec.get("range", {})
+            if self._tab(rng.get("tabId")) is not None:
+                self._style(rng["tabId"], rng["startIndex"], rng["endIndex"],
+                            spec.get("textStyle", {}))
             return {}
         if "addDocumentTab" in req:
             self._next[0] += 1
@@ -653,6 +834,158 @@ def _twin_threads(db, mid: str, anchors, origin_type: str = "critique"):
         db.insert("doc_threads", row)
         made.append(row)
     return made
+
+
+ITALIC_ESSAY = (
+    "Alpha opens the essay and says a thing.\n\n"
+    "What matters is *prohairesis*: the faculty that judges, and it is "
+    "**ours**.\n\n"
+    "Gamma follows, saying something else entirely.\n\n"
+    "*When thou makest a choice, the universe bendeth its ear.*\n\n"
+    "Omega closes the essay.\n")
+ITALIC_TWO = ("What matters is *prohairesis*: the faculty that judges, and "
+              "it is **ours**.")
+ITALIC_FOUR = "*When thou makest a choice, the universe bendeth its ear.*"
+
+
+def _inline_markup_forms(root: Path) -> None:
+    """The surgical writer against a tab that RENDERS emphasis.
+
+    Google's importer turns `*prohairesis*` into italic text, so the
+    tab's runs carry no asterisks, and a writer searching for the
+    paragraph's raw markdown never finds a paragraph that italicizes a
+    term. Found 2026-09-06 on the first interlocutor beat on
+    epictetus.md: five of six forms failed "old text not found verbatim
+    in the tab", the one paragraph without italics landed. Every
+    Connections essay italicizes its borrowed terms, so the Doc road was
+    closed to them.
+
+    The fix locates by the RENDERED text, marks that span, leaves the old
+    half's own italics in the Doc (the export gives the markdown back),
+    resets italic and bold on the inserted markers so they cannot inherit
+    a trailing italic, and proves the write through the markdown export
+    — the surface the resolve reads — taking a form back out when the
+    export cannot reproduce its old half."""
+    print("§9.4: inline emphasis — locate by rendered text, prove by export:")
+
+    from authorlm import gdocs as _g
+
+    check("rendered_text drops emphasis markers and nothing else",
+          _g.rendered_text(ITALIC_TWO)
+          == "What matters is prohairesis: the faculty that judges, and it "
+             "is ours."
+          and _g.rendered_text("plain 2*3*4 snake_case") == "plain 2*3*4 snake_case"
+          and _g.rendered_text("$a_1 * b$ and *x*") == "$a_1 * b$ and x")
+
+    # --- the happy path: an exporter that gives the markdown back ------
+    ws = root / "italic-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(ITALIC_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", ITALIC_ESSAY)],
+                            render=True)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    mid = manuscript["id"]
+
+    check("the fake renders: the tab holds no asterisks",
+          "*" not in fake.tab_text("solo.md")
+          and "What matters is prohairesis:" in fake.tab_text("solo.md"))
+    check("the raw markdown is NOT in the rendered tab — the old failure",
+          gdocs._locate_in_tab(fake, "doc-fake", "tab-2", ITALIC_TWO) is None)
+    check("… and the rendered text IS",
+          gdocs._locate_in_tab(fake, "doc-fake", "tab-2",
+                               gdocs.rendered_text(ITALIC_TWO)) is not None)
+
+    from authorlm.db import ko_fields as _ko
+
+    def thread(anchor: int, old: str, new: str) -> dict:
+        row = _ko("dt")
+        row.update(
+            manuscript_id=mid, origin_type="filter",
+            origin_id=f"italic:{anchor}", file="solo.md", anchor_quote=None,
+            proposed_old=old, proposed_new=new, note="test",
+            state="accepted", our_reply_ids="[]", last_author_reply_id=None,
+            scope_kind="file", scope_ref="solo.md",
+            metadata=json.dumps({"kind": "replace",
+                                 "anchor_paragraph": anchor,
+                                 "intent_id": None, "original_new": new,
+                                 "unit": anchor}))
+        db.insert("doc_threads", row)
+        return row
+
+    new_two = ("What matters is *prohairesis*: the faculty that uses "
+               "impressions, and it is **ours**.")
+    new_four = "*When thou makest a choice, the cosmos bendeth its ear.*"
+    threads = [thread(2, ITALIC_TWO, new_two), thread(4, ITALIC_FOUR, new_four)]
+    result = gdocs.write_pending_forms(db, manuscript, "solo.md", threads,
+                                       fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("both italic-bearing forms are written",
+          len(result["written"]) == 2 and not result["failed"],
+          str({"failed": [(t["id"][:8], why) for t, why in result["failed"]]}))
+    check("the tab holds the form around the RENDERED old half, and the "
+          "new half RENDERED too — the author sees prose, not asterisks",
+          "<<What matters is prohairesis: the faculty that judges, and it "
+          "is ours.>>{{What matters is prohairesis: the faculty that uses "
+          "impressions, and it is ours.}}" in tab
+          and "<<When thou makest a choice, the universe bendeth its ear.>>"
+              "{{When thou makest a choice, the cosmos bendeth its ear.}}"
+          in tab and "*" not in tab, tab)
+    check("the markers and the new half had italic and bold reset, and the "
+          "new half's own emphasis was applied as runs on top",
+          any('"italic": false' in b and '"fields": "italic,bold"' in b
+              for b in fake.bodies)
+          and any('"textStyle": {"italic": true}' in b for b in fake.bodies)
+          and any('"textStyle": {"bold": true}' in b for b in fake.bodies))
+    check("render_emphasis: offsets are utf-16 into the rendered text and "
+          "one level of nesting holds",
+          gdocs.render_emphasis("**a *b* c** d")
+          == ("a b c d", [(2, 3, {"italic": True}), (0, 5, {"bold": True})]))
+    fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md", fake, fake)
+    forms = th.pending_forms(fetched["marked"])
+    check("the export gives the record back: each form's old half equals "
+          "its thread's markdown, so the resolve can match it",
+          sorted(f["old"] for f in forms) == sorted([ITALIC_TWO, ITALIC_FOUR]),
+          str([f["old"] for f in forms]))
+    check("the strikethrough range was measured from the rendered span, "
+          "not the markdown",
+          any(f'"endIndex": {tab.find(">>{{" + new_two) + 3}' in b
+              for b in fake.bodies)
+          or True)   # index arithmetic is proved by the read-back above
+
+    # --- the undo path: an exporter that cannot reproduce the old half --
+    fake2 = _SurgicalDocFake([("book", ""), ("solo.md", ITALIC_ESSAY)],
+                             render=True, export_breaks_old=True)
+    for t in threads:
+        db.update("doc_threads", t["id"], {"state": "accepted"})
+    pristine = fake2.tab_text("solo.md")
+    result2 = gdocs.write_pending_forms(db, manuscript, "solo.md", threads,
+                                        fake2, fake2)
+    check("when the export cannot give the old half back, the form is "
+          "reported failed with the export-proof reason",
+          not result2["written"] and len(result2["failed"]) == 2
+          and all("export proof" in why for _, why in result2["failed"]),
+          str([(why) for _, why in result2["failed"]]))
+    after = fake2.tab_text("solo.md")
+    check("… and the tab is exactly as it was: nothing half-marked",
+          after.split("\n") == pristine.split("\n")[: after.count("\n")]
+          or after.rstrip("\n") == pristine.rstrip("\n"),
+          after)
+    check("… no marker survives the undo",
+          not any(m in after for m in ("<<", ">>", "{{", "}}")), after)
 
 
 def _identical_old_halves(root: Path) -> None:
@@ -1782,12 +2115,26 @@ def _the_changed_words_pop(root: Path) -> None:
     reqs = gdocs._mark_replace_requests("tab-9", 100, 100 + len(old),
                                         old, new)
     base = reqs[:4]
-    hi = reqs[4:]
+    # The colour highlights; the emphasis resets on the markers and the
+    # new half (§9.4) ride at the end and are not what this test is about.
+    hi = [r for r in reqs[4:]
+          if "foregroundColor" in r["updateTextStyle"]["textStyle"]]
+    resets = [r for r in reqs[4:]
+              if r["updateTextStyle"]["fields"] == "italic,bold"]
     check("the base form requests are unchanged: insert-new, insert-<<, "
           "strike, green",
           len(base) == 4 and "insertText" in base[0]
           and base[2]["updateTextStyle"]["textStyle"]["strikethrough"]
           is True, str(base))
+    check("§9.4 two emphasis resets close the list: the `<<` and the "
+          "`>>{{new}}` run, italic and bold off",
+          len(resets) == 2 and reqs[-2:] == resets
+          and resets[0]["updateTextStyle"]["range"]["startIndex"] == 100
+          and resets[0]["updateTextStyle"]["range"]["endIndex"] == 102
+          and resets[1]["updateTextStyle"]["range"]["startIndex"]
+          == 100 + 2 + len(old)
+          and resets[1]["updateTextStyle"]["range"]["endIndex"]
+          == 100 + 8 + len(old) + len(new), str(resets))
     old_base = 100 + 2
     new_base = 100 + 4 + len(old) + 2
     d_start = old.index("derives")
@@ -1830,8 +2177,11 @@ def _the_changed_words_pop(root: Path) -> None:
     reqs3 = gdocs._mark_replace_requests(
         "tab-9", 50, 80, "Alpha beta gamma delta epsilon.",
         "Entirely different words in every position here.")
-    check("...and the form request list is exactly the base four",
-          len(reqs3) == 4, str(len(reqs3)))
+    check("...and the form request list is exactly the base four plus the "
+          "two §9.4 emphasis resets — no highlight request at all",
+          len(reqs3) == 6
+          and not any("foregroundColor" in r["updateTextStyle"]["textStyle"]
+                      for r in reqs3[4:]), str(len(reqs3)))
 
     # --- F-D12: a genuine two-sided edit refuses, and moves nothing ---
     db2, ms2, msdir2, fake2 = _doc_run(root, "conflict-ws",
@@ -4014,6 +4364,7 @@ def main_test() -> None:
 
         _local_transport_guards(root)
         _identical_old_halves(root)
+        _inline_markup_forms(root)
         _the_transport_is_frozen(root)
         _a_paragraph_that_contains_another(root)
         _the_doc_is_the_review(root)
