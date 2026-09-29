@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "@glideapps/glide-data-grid": "6.0.3",
-    "@modelcontextprotocol/ext-apps": "1.7.5",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
