@@ -221,6 +221,7 @@ outstanding questions.
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
 | `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
+| `interlocutor add/list/show/draft/run/import` | A tradition reads the whole book (`_interlocutors/*.md`, TOML front matter + prose; design `docs/interlocutor-design.md`): `run` scans for the ratified terms and writes a payload for a clean-context subagent (no model call); `import` verifies the report against the manuscript, lands it in `_critiques/`, and imports its improvements as proposed intents with critic provenance |
 | `guide` | Generate explained suggestions, or abstain |
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
 | `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |

@@ -57,7 +57,7 @@ reason = "the book's nearest analogue to prohairesis"
 ---
 ```
 
-Keys, all validated at `interlocutor add` so a refused add leaves no file:
+Keys, all validated at `interlocutor add` so a declined add leaves no file:
 
 - `terms` — required, non-empty. Each entry has `name`, optional `aliases`,
   `kind` ∈ {`tradition`, `book`}, and for `book` a required one-line `reason`.
@@ -76,12 +76,12 @@ Keys, all validated at `interlocutor add` so a refused add leaves no file:
   book has already said about the critic. Run flag `--position` adds to it.
 
 Files named in `engaged` and `position` must be manuscript content files; a
-name that is not is refused at add.
+name that is not is out of bounds at add.
 
 The prose carries: the **corpus declaration** (which works, which
 commentators supply the objections' literature names, what is out of scope,
 and for a fragmentary tradition which reconstruction is spoken from — Q12),
-the persona, where to start, and the refusals (§5).
+the persona, where to start, and the boundaries (§5).
 
 **Precision about which essay** (author ruling 2026-09-06, on the first
 draft: "the scope is the book … it should not be misunderstood with any
@@ -96,7 +96,7 @@ essay" is defined once as that file and no other. The bootstrap prompt
 Ruling (Q13, amended): the concept comparison is an author input, never a
 subagent guess. A critic with an essay that already engages it uses that essay
 as the comparison; a critic without one waits for the author's rough
-comparison and the bootstrap refuses to run without one.
+comparison and the bootstrap will not run without one.
 
 The first artifact (Epictetus) is drafted in conversation and ratified there
 (Q3: "B for Plato, then A"). Later artifacts come from `interlocutor draft
@@ -126,9 +126,12 @@ No model call. Deterministic assembly:
    **The MENTIONS shown are a sample of the scan** (author ruling
    2026-09-06: "Do sampling, both across concepts and for locations where
    each concept exists … every time I run the interlocutor, I might get new
-   insights"). Sampling is two-stage — at most `--max-terms` terms (default
-   12) of those with hits, then at most `--max-per-term` locations (default
-   6) of each — with a seed drawn fresh per run, printed, written into the
+   insights"). Sampling is two-stage — at most `--max-terms` (default 12)
+   of the BOOK's terms with hits, the tradition's own terms always shown
+   (they are few and the point: the first run sampled "Nature", 71 units,
+   and left "prohairesis", 12 units, unshown), then at most
+   `--max-per-term` locations (default 6) of each — with a seed drawn
+   fresh per run, printed, written into the
    payload and the report, and reproducible with `--seed`. A cap of 0
    disables sampling on that axis. The full scan is kept for a coverage
    table (every term, total units, how many shown, which files carry the
@@ -141,7 +144,7 @@ No model call. Deterministic assembly:
    - THE INTERLOCUTOR — the artifact prose;
    - TERMS — the term table, kinds and reasons;
    - THE BOOK — toc in reading order with each file's summary (marked `!!`
-     when stale or missing, never refusing the run), part and matter;
+     when stale or missing, never stopping the run), part and matter;
    - AUTHOR POSITION — position essays whole, paragraphs numbered;
    - ENGAGED — engaged essays whole, paragraphs numbered;
    - CONCEPT NOTES — the ratified notes of every graph concept whose name or
@@ -248,7 +251,7 @@ Runs automatically in the same turn (amendment 4). Deterministic:
 
 1. **Baseline check.** Every file listed exists in the manuscript; every
    heading listed exists in that file (heading text compared with markup and
-   hashes stripped). A failure **refuses the whole import** (Q5): the baseline
+   hashes stripped). A failure **declines the whole import** (Q5): the baseline
    is the report's honesty claim.
 2. **Per-finding hygiene**, the lens gate's law applied here: a finding whose
    `Bears on` / `Where addressed` / `Passage` quote is not verbatim in the
@@ -288,7 +291,7 @@ on each essay the report touched, one beat each, through the ordinary road:
 drafts the reply under STYLE LAW and PROTECTED TERMS, `filter apply` stages
 the forms in the Doc tab, the author rules there. The filter's list is
 closed: a unit the registry does not name is never touched. The
-objection-and-answer format is refused in the artifact's own prose.
+objection-and-answer format is out of bounds in the artifact's own prose.
 
 **Footnotes (ruled 2026-09-06).** A finding may carry a `Footnote:` line: the
 gist of a note the passage should carry when the repair is a source to supply
@@ -305,7 +308,7 @@ open against it, what each asks for, which misattributions need a corrected
 sentence — plus the two paths. Then the intents are triaged as with any
 critic (`list_critique_items` / `triage_critique`, scope = the essay).
 
-## 5. The refusals (written into every artifact's prose)
+## 5. The boundaries (written into every artifact's prose)
 
 - No objection without a locus. An objection the critic cannot place in the
   tradition's own texts or its literature is an opinion, and it is not

@@ -85,6 +85,18 @@ REGISTRY: list[Prompt] = [
            "rules (grammar, conditioning, idempotency); the editorial law "
            "is the author's _filters/<name>.md artifact, sent beside it",
            file="filter-run.md", module=None),
+    Prompt("interlocutor", "interlocutor run",
+           "a whole-book reading from inside one tradition — the reading "
+           "protocol, the verdict scale, the locus rule and the report "
+           "contract; the tradition itself is the author's "
+           "_interlocutors/<name>.md artifact, sent beside it (no model "
+           "call: a clean-context subagent reads the payload in chat mode)",
+           file="interlocutor.md", module=None),
+    Prompt("interlocutor-draft", "interlocutor draft",
+           "bootstrap a new interlocutor's artifact from the author's own "
+           "comparison essay and the installed exemplars (no model call: "
+           "a subagent drafts, the author ratifies with `interlocutor add`)",
+           file="interlocutor-draft.md", module=None),
     Prompt("editor", "critique run",
            "the critique pass's per-essay edit proposals (paragraph-aligned "
            "JSON: keep/replace/insert + suggestions)",
