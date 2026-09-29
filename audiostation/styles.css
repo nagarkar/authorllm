@@ -1206,3 +1206,95 @@ html, body {
   font-size: 15px;
   padding: 2px 5px;
 }
+
+/* ============================================================
+   audiostation — read-only text, change highlights (design §10.3)
+   ============================================================ */
+
+.text-static {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--color-text);
+  padding: 6px 10px;
+}
+
+.text-heading { font-weight: 600; font-size: 15px; }
+
+.pron-line {
+  padding: 0 10px 6px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
+.params-line {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.change-line { margin-top: 4px; }
+
+.change-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  white-space: normal;
+  line-height: 1.5;
+  border-radius: var(--radius-sm);
+  background: rgba(224, 163, 48, 0.18);
+  color: var(--color-warn);
+  font-size: 11px;
+}
+
+/* Row state is carried by the TEXT cell, which is where the eye rests:
+   a thick coloured edge and a tint. Changed = amber, never generated =
+   dashed grey, generated = thin green. */
+.section-row > .text-cell { border-left: 5px solid transparent; }
+
+.row-changed > .text-cell {
+  border-left-color: var(--color-warn);
+  background: rgba(224, 163, 48, 0.16);
+}
+.row-changed > .section-card { background: rgba(224, 163, 48, 0.08); }
+.row-changed .text-static { color: #fff3d6; }
+
+.row-pending > .text-cell {
+  border-left: 5px dashed rgba(136, 136, 136, 0.7);
+  background: rgba(255, 255, 255, 0.025);
+}
+.row-pending .text-static { color: var(--color-text-muted); }
+
+.row-done > .text-cell { border-left-color: rgba(92, 184, 92, 0.6); }
+
+.text-why {
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--color-warn);
+  padding: 6px 10px 0;
+}
+.text-why-pending { color: var(--color-text-muted); font-weight: 500; }
+
+.status-dot { width: 12px; height: 12px; }
+.status-changed { background: var(--color-warn); box-shadow: 0 0 0 3px rgba(224, 163, 48, 0.25); }
+
+.badge-heading { background: #6c5ce7; color: #fff; }
+
+.book-changed-bar { border-left: 3px solid var(--color-warn); }
+.removed-notice { border-left: 3px solid var(--color-danger); }
+
+.acx-meta-value { color: var(--color-text); font-size: 13px; }
+.acx-credit-text { font-size: 12.5px; line-height: 1.5; color: var(--color-text-muted); }
+
+.error-text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--color-text);
+  max-height: 50vh;
+  overflow: auto;
+}

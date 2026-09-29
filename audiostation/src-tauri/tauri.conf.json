@@ -1,18 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EditorLLM Desktop",
-  "identifier": "com.editorllm.desktop",
-  "version": "0.1.0",
+  "productName": "audiostation",
+  "identifier": "com.authorlm.audiostation",
+  "version": "0.2.0",
   "build": {
     "beforeDevCommand": "npm run vite:dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run vite:build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "EditorLLM Desktop",
+        "title": "audiostation",
         "width": 1200,
         "height": 800,
         "minWidth": 1200,

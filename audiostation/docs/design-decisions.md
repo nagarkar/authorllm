@@ -1,94 +1,97 @@
-# EditorLLM Desktop — Design Decisions
+# audiostation — Design Decisions
 
-## 1. Monorepo structure
+The ratified design is `../../authorlm/docs/audiobook-pipeline-design.md`.
+These notes cover only what is specific to the desktop app.
 
-`desktop/` lives as a subfolder of the `EditorLLM` Git repository. It has its
-own `package.json` and `Cargo.toml` and is **not** wired into an npm workspace
-or Cargo workspace with the parent repo. This keeps the boundary explicit:
+## 1. Where it lives
 
-- The parent repo is GAS/Node; it has no knowledge of Rust or Tauri.
-- `desktop/` is a fully self-contained Tauri project that can be opened
-  independently in VS Code or run with `cargo tauri dev` from within the folder.
+`audiostation/` is a sibling of the `authorlm/` Python package in the
+authorllm repository, moved from `EditorLLM/desktop/` on 2026-09-04 with
+its history. It is a self-contained Tauri project (own `package.json`
+and `Cargo.toml`, no workspace with the parent). The one shared artifact
+is the JSON fixture at `authorlm/tests/fixtures/audiobook/`, read by both
+test suites.
 
-Revisit if CI or dependency conflicts arise — at that point, a Cargo workspace
-and/or npm workspaces may be warranted.
+## 2. Folder, not file; state, not manifest
 
-## 2. GAS → desktop handoff: POST to localhost
+The old app held one master manifest that it and the Google Apps Script
+add-on both wrote into. That path is gone (no HTTP server, no clipboard
+import, no v1/v2 loaders, no in-app text or voice editing). The app opens
+a folder AuthorLM wrote and writes only `state/<stem>.json` and the audio
+files. Done means: the section id has a state entry whose file exists.
+There is no dirty flag; the id changes when anything that shapes the
+audio changes.
 
-The GAS add-on sends an `AudioManifest` JSON payload via:
+## 3. Reload and highlights
 
-```
-POST http://127.0.0.1:3847/manifest
-Content-Type: application/json
-```
+A `notify` watcher on `audiobook.json` and `chapters/` debounces bursts
+(400 ms) and reloads. The reload pairs old and new sections per chapter:
+same id → unchanged; same folded text and a different id → parameters
+changed (the card names which); different text at the aligned position
+→ text changed; unpaired → new; gone → listed once in the chapter. Flags
+live in memory and clear when the id has generated audio. Book-level
+differences (order, credits, cover, dictionary version, cast, quality)
+show in a bar under the toolbar.
 
-Before sending, GAS calls `GET /status` to confirm the desktop app is running.
-If `/status` times out or returns an error, GAS falls back to copying the
-manifest JSON to the clipboard so the user can paste it manually.
+**Since the last take, not since the last load (2026-09-04).** The
+author's ask: see which paragraphs a pronunciation change dirtied, and
+why, "so the reason matches up with my memory of what I did". Two
+changes. (1) The card names each pronunciation rule that moved —
+"Basilides: buh-SIL-ih-deez → basillydeez", "added Prohairesis →
+pro-HY-ruh-sis", "removed Abraxas" — instead of the word
+"pronunciation". (2) Every generation records what its take was made
+from (`madeFrom` on the state entry: text, voice and settings, rules),
+and on ANY load a section without audio is paired to the most recent
+take with the same folded text and flagged from that snapshot, with the
+take's time ("changed since Sep 4, 22:13: …"). So the flag appears cold
+— an export while the app was closed, a relaunch — and it outranks what
+a reload can see, because the state saw every take and the reload only
+the previous file. The reload summary counts only what that reload
+found moved. The orphan sweep keeps a replaced id's state entry while a
+live paragraph with the same text still awaits its take: that entry is
+the memory the badge reads from, and it goes when the paragraph is
+generated. Takes recorded before this date carry no snapshot and pair
+by id only.
 
-**Why not a custom URL scheme (`editorllm://`)?**  
-URL scheme registration requires OS-level installer steps (plist entries on Mac,
-registry keys on Windows) and can prompt security dialogs. A local HTTP server
-is simpler, works immediately without installation steps, and is easily testable
-with `curl`.
+## 4. Continuity
 
-## 3. Voice stitching constraint
+`previous_text` / `next_text` always; `previous_request_ids` /
+`next_request_ids` when the neighbours' stored `generatedAt` is under
+two hours old and the model is not `eleven_v3`. The `request-id`
+response header is stored per section. The same-voice "blocked until
+prior generated" rule of the old app is gone: text conditioning makes
+out-of-order regeneration acceptable, and Generate All still runs in
+order.
 
-ElevenLabs' Projects API is designed for sequential generation of sections per
-voice. To preserve audio consistency (prosody, pacing), the desktop app enforces:
+## 5. Settings
 
-> A speech section with voice X can only be generated if **all prior speech
-> sections with the same voice X** have already been successfully generated
-> (have an `elevenLabsRequestId`) **and are not dirty**.
+Only the ElevenLabs API key, in the app's `tauri-plugin-store` file. The
+model, the voices, the quality, the output location — all come from the
+folder, so there is nothing else to configure and nothing to drift.
 
-This constraint is enforced in both the frontend (`manifest.ts:
-computeBlockedSections`) and the backend (`commands.rs: get_blocked_sections`).
+## 6. Mac only initially
 
-**Dirty state:** Editing a section's text after generation sets `isDirty = true`
-and clears the section's "done" status. Subsequent same-voice sections are then
-blocked until the dirty section is regenerated.
+Unchanged from the first iteration: `platforms: ["macOS"]`, no Windows
+code signing yet. The Rust code is platform-agnostic.
 
-**Rationale:** Without this constraint a user could reorder or re-record
-individual sections and lose the prosodic continuity that ElevenLabs' context
-window provides across a project.
+## 7. An equal door beside AuthorLM's generation (2026-09-25)
 
-## 4. Mac only initially
+Generation, retake and stitch now also exist as `authorlm audio` verbs,
+with a served review page the author reaches from the phone
+(`../../authorlm/docs/audiobook-review-design.md`). The app is not
+retired: the author's ruling was "I don't want it to go away completely
+until we trust the new UI". Both programs write `state/<stem>.json` in
+this app's schema and the same `audio/<id>.<quality>.mp3` files, so a
+take made by either is done for both.
 
-The initial target is macOS only (`"platforms": ["macOS"]` in
-`capabilities/default.json`, `minimumSystemVersion: "10.15"` in bundle config).
+Two consequences here. (1) The watcher also watches `state/` — the
+exclusion in §3 assumed this app was the only writer; a reload repaints
+and never generates, so watching our own writes costs a repaint per take
+and nothing else. (2) The rule: do not press Generate here on a chapter
+the server is rendering. The server serialises its own renders on one
+worker; this app has no lock, and the same-minute race is the one case
+the id-done check cannot catch.
 
-Reasons:
-- The primary users of EditorLLM are on Mac.
-- WKWebView (Mac) handles H.264 natively, which is important for future video
-  preview features.
-- Avoids Windows code-signing complexity in the first iteration.
-
-Windows/Linux can be added later — Tauri v2 supports them; the Rust code is
-already platform-agnostic.
-
-## 5. Settings storage
-
-Settings (ElevenLabs API key, output directory, default TTS model) are stored
-via `tauri-plugin-store` in the app's config directory:
-
-- **Mac:** `~/Library/Application Support/com.editorllm.desktop/`
-
-The API key is stored as a plain string in the Tauri store file. This is
-acceptable for a single-user desktop tool where the file is protected by OS
-file permissions. If stronger protection is needed in a future version,
-`tauri-plugin-stronghold` (encrypted store) or the macOS Keychain via
-`tauri-plugin-keychain` are the upgrade path.
-
-## 6. No custom URL scheme
-
-The desktop app does **not** register a custom URL scheme (`editorllm://`).
-
-Custom URL schemes require:
-1. A `CFBundleURLTypes` entry in the app's `Info.plist` (Mac).
-2. The app to be installed (not just run from the built binary during
-   development).
-3. Careful handling of OS security prompts when another app triggers the scheme.
-
-The local HTTP server approach (`127.0.0.1:3847`) avoids all of this and is
-simpler to develop, test, and debug. `curl -X POST http://127.0.0.1:3847/manifest
--d @manifest.json` is a sufficient test harness.
+The quality switch and Clear Lower Quality stay in this app but the book
+has one quality now (`[tts].quality = "mp3_44100_192"`); the switch is
+only ever set to it.

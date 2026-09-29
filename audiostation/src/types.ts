@@ -1,161 +1,141 @@
-// Shared TypeScript types for EditorLLM Desktop.
-// These mirror the Rust serde structs in src-tauri/src/types.rs.
-// Do NOT import this file from GAS source (it lives in desktop/ only).
+// Shared TypeScript types for audiostation.
+// These mirror the Rust serde structs in src-tauri/src/types.rs, which
+// mirror what AuthorLM writes (docs/audiobook-pipeline-design.md §14).
 
-export interface VoiceInfo {
-  voiceId: string;
-  name: string;
-}
-
-export interface PronunciationDictionaryLocator {
-  pronunciationDictionaryId: string;
-  versionId: string;
-}
-
-export interface AudioManifest {
-  version: 1;
-  documentTitle: string;
-  tabName: string;
-  /** ISO 8601 timestamp */
-  generatedAt: string;
-  sections: ManifestSection[];
-  /** Pronunciation dictionary locators applied to all speech sections during generation. */
-  pronunciationDictionaryLocators?: PronunciationDictionaryLocator[];
-  /** Stitched full-audio files keyed by output format (e.g. "mp3_44100_64"). */
-  audioFiles?: Record<string, string>;
-  /** Duration of the stitched output in seconds (set after successful stitch). */
-  durationSecs?: number;
-  /** Integrated loudness of the stitched output in LUFS (set after two-pass stitch). */
-  loudnessLufs?: number;
-  /** True peak of the stitched output in dBTP (set after two-pass stitch). */
-  truePeakDbtp?: number;
-}
-
-export type ManifestSection = SpeechSection | SilenceSection;
-
-export interface SpeechSection {
-  id: string;           // UUID
-  type: 'speech';
-  text: string;
-  voiceId: string;
-  /** Display name — not sent to ElevenLabs directly */
-  voiceName: string;
-  ttsModel: string;
-  stability: number;    // 0.0 – 1.0
-  similarityBoost: number; // 0.0 – 1.0
-  speed?: number;       // 0.25 – 4.0; defaults to 1.0 if absent
-
-  /** Generated audio files keyed by output format (e.g. "mp3_44100_64" → "/path/to/file.mp3"). */
-  audioFiles?: Record<string, string>;
-  /** True when text or voice was edited after generation */
-  isDirty?: boolean;
-}
-
-export type AudioQuality = 'vlow' | 'low' | 'med' | 'high';
-
-/** Map from AudioQuality label to ElevenLabs output_format string. */
-export const FORMAT_FOR_QUALITY: Record<AudioQuality, string> = {
-  vlow: 'mp3_22050_32',
-  low:  'mp3_44100_64',
-  med:  'mp3_44100_128',
-  high: 'mp3_44100_192',
-};
-
-export interface SilenceSection {
-  id: string;
-  type: 'silence';
-  durationMs: number;
-  /** Set after stitching — path to the generated silence clip. */
-  audioFilePath?: string;
-}
-
-// ---------------------------------------------------------------------------
-// UI state types (not sent to Rust — frontend only)
-// ---------------------------------------------------------------------------
-
-export type SectionStatus =
-  | 'ungenerated'
-  | 'generating'
-  | 'done'
-  | 'dirty'
-  | 'blocked'
-  | 'failed';
-
-export interface AppSettings {
-  elevenlabsApiKey: string;
-  outputDir: string;
-  defaultTtsModel: 'eleven_multilingual_v2' | 'eleven_turbo_v2_5' | 'eleven_flash_v2_5';
-}
-
-export type View = 'manifest' | 'settings';
-
-// ---------------------------------------------------------------------------
-// Master manifest — multi-chapter ACX audiobook structure
-// ---------------------------------------------------------------------------
-
-export interface BookMetadata {
-  title: string;
-  subtitle?: string;
-  author: string;
-  narrator: string;
-  publisher?: string;
-  copyrightYear?: number;
-  copyrightHolder?: string;
-  language: string;
-  asin?: string;
-  isbn?: string;
-}
-
-export interface MasterManifest {
-  version: 2;
-  documentTitle: string;
-  generatedAt: string;
-  chapters: AudioManifest[];
-  openingCredits?: AudioManifest;
-  closingCredits?: AudioManifest;
-  aboutAuthor?: AudioManifest;
-  retailSample?: RetailSampleSpec;
-  cover?: CoverSpec;
-  metadata?: BookMetadata;
-}
-
-export interface RetailSampleSpec {
-  sectionRefs: SectionRef[];
-}
-
-export interface SectionRef {
-  chapterTabName: string;
-  sectionId: string;
-}
+export interface ChapterRef { stem: string; file: string; title: string; }
 
 export interface CoverSpec {
-  imagePath?: string;
-  width?: number;
-  height?: number;
-  format?: string;
-  fileSizeBytes?: number;
-  colorSpace?: string;
+  path: string; width: number; height: number; format: string; color: string;
 }
 
-export interface PartialManifestInfo {
-  kind: string;
-  displayName: string;
-  documentTitle: string;
+export interface DictionaryRef { name: string; id?: string | null; versionId?: string | null; }
+
+export interface CastVoice {
+  voiceId: string; voiceName: string; model: string;
+  stability: number; similarity: number; speed: number;
 }
 
-export interface MergeResult {
-  sectionsPreserved: number;
-  sectionsUpdated: number;
-  orphanedFileCount: number;
-  orphanedDir?: string;
+export interface Book {
+  schema: number;
+  title: string;
+  subtitle: string;
+  author: string;
+  narrator: string;
+  publisher: string;
+  language: string;
+  copyrightYear?: number | null;
+  copyrightHolder: string;
+  chapters: ChapterRef[];
+  openingCredits?: string | null;
+  closingCredits?: string | null;
+  aboutAuthor?: string | null;
+  retailSample: string[];
+  cover?: CoverSpec | null;
+  pronunciationDictionary?: DictionaryRef | null;
+  cast: Record<string, CastVoice>;
+  model: string;
+  quality: string;
+  paragraphGapMs: number;
+  generatedAt: string;
+}
+
+export interface Pronunciation { term: string; say: string; }
+
+export interface Speech {
+  type: 'speech';
+  id: string;
+  kind: string;           // "heading" | "paragraph"
+  level?: number | null;
+  text: string;
+  cast: string;
+  voiceId: string;
+  voiceName: string;
+  model: string;
+  stability: number;
+  similarity: number;
+  speed: number;
+  pronunciations: Pronunciation[];
+  source: unknown;
+}
+
+export interface Silence { type: 'silence'; id: string; durationMs: number; }
+
+export type Section = Speech | Silence;
+
+export interface Chapter {
+  schema: number;
+  file?: string | null;
+  stem: string;
+  title: string;
+  voiceDefault: string;
+  sections: Section[];
+}
+
+export interface SectionState {
+  audioFiles: Record<string, string>;   // format → path relative to the folder
+  requestId?: string | null;
+  generatedAt?: string | null;
+}
+
+export interface ChapterState {
+  schema: number;
+  sections: Record<string, SectionState>;
+  stitched: Record<string, string>;
+  stitchKeys?: Record<string, string>;
+  durationSecs?: number | null;
+  loudnessLufs?: number | null;
+  truePeakDbtp?: number | null;
+}
+
+export interface SectionChange { kind: 'text' | 'params' | 'new'; detail: string[]; since?: string | null; }
+
+export interface LoadedChapter {
+  chapter: Chapter;
+  state: ChapterState;
+  changes: Record<string, SectionChange>;
+  removed: string[];
+  added: boolean;
+  stitchKey: string;
+}
+
+export interface Master {
+  dir: string;
+  book: Book;
+  chapters: LoadedChapter[];
+  openingCredits?: LoadedChapter | null;
+  closingCredits?: LoadedChapter | null;
+  aboutAuthor?: LoadedChapter | null;
+  bookChanges: string[];
+}
+
+export interface ReloadSummary {
+  changedSections: number;
+  removedSections: number;
+  addedChapters: string[];
+  removedChapters: string[];
+  bookChanges: string[];
+  /** State entries that differ from memory — takes AuthorLM made. */
+  takesChanged: number;
 }
 
 export interface AuditResult {
-  checkId: string;
-  label: string;
-  passed: boolean;
-  message: string;
+  checkId: string; label: string; passed: boolean; message: string;
   severity: 'Error' | 'Warning' | 'Info';
 }
 
-export type ManifestPanel = 'chapters' | 'acx' | 'raw';
+export type SectionStatus = 'ungenerated' | 'generating' | 'done' | 'changed' | 'failed';
+
+export const QUALITIES = ['mp3_22050_32', 'mp3_44100_64', 'mp3_44100_128', 'mp3_44100_192'] as const;
+export type Quality = typeof QUALITIES[number];
+
+export const QUALITY_LABEL: Record<Quality, string> = {
+  mp3_22050_32: 'V.Low (22k/32k)',
+  mp3_44100_64: 'Low (44k/64k)',
+  mp3_44100_128: 'Std (44k/128k)',
+  mp3_44100_192: 'High (44k/192k)',
+};
+
+export interface AppSettings { elevenlabsApiKey: string; }
+
+export type View = 'book' | 'settings';
+export type Panel = 'chapters' | 'acx';
