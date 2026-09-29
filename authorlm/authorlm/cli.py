@@ -1466,11 +1466,14 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # (BUG-2 / A1).
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-resolve")
-    # Apply locally: the author's post-edits win.
+    # Apply locally: the author's post-edits win. The Doc never carries
+    # illustration embed lines (push strips them), so write-back must
+    # re-insert them — the same `_write_resolved_text` path filter/lens
+    # resolve use. Writing the tab text as-is silently unlinked every
+    # rendered plate while leaving the [Illustration:] tag (SMSTTD,
+    # 2026-09-02; critique was missed when that writer was shared).
     path = Path(manuscript["path"]) / file
-    normalized = gdocs.normalize_markdown(final)
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
+    api._write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, file, forms, final_text=final)
     # No push: the author settles these forms in the Doc themselves, in
     # most cases. The Doc keeps them until their next ordinary 'doc push'.

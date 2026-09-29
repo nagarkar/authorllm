@@ -5224,7 +5224,135 @@ def check_provenance_verb() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_critique_resolve_reembeds() -> None:
+    """critique resolve must re-insert illustration embeds on write-back.
+
+    Filter/lens already go through `_write_resolved_text`. Critique
+    resolve also reads embed-free Doc markdown (`tab_marked_markdown`)
+    and used to write it straight to disk — silently unlinking every
+    rendered plate while leaving the [Illustration:] tag (same class as
+    the SMSTTD 2026-09-02 filter/lens incident)."""
+    import argparse
+    import hashlib as _hashlib
+    import json as _json
+
+    import authorlm.gdocs as gdocs_mod
+    from authorlm import illus as illus_mod
+    from authorlm.cli import _critique_resolve_essay
+    from authorlm.db import ko_fields as _ko
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-critique-reembed-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "book"
+        (ms / "_illustrations" / "prompts").mkdir(parents=True)
+        key = "a-lone-tracker"
+        prompt = "a lone tracker"
+        (ms / "_illustrations" / "prompts" / f"{key}.md").write_text(
+            prompt + "\n")
+        h = illus_mod.desc_hash(prompt)
+        pick = f"{key}-{h}-0000-01.png"
+        newer = f"{key}-{h}-0000-02.png"
+        (ms / "_illustrations" / pick).write_bytes(b"")
+        (ms / "_illustrations" / newer).write_bytes(b"")
+        local = (
+            f"# Solo\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n"
+            f"![](_illustrations/{pick})\n\n"
+            f"Original paragraph text.\n")
+        (ms / "solo.md").write_text(local)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms)])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        mid = manuscript["id"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, manuscript, {})
+        from authorlm import passes as passes_mod
+        passes_mod.ensure_pass(db, mid, db.source("system"))
+        normalized = gdocs_mod.normalize_markdown(local)
+        base_hash = _hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        meta = gdocs_mod._mapping(db, manuscript)
+        links = meta.setdefault("gdocs", {})
+        links["_master_id"] = "doc-fake"
+        links["solo.md"] = {"tab_id": "tab-1", "checked_out": False,
+                            "pushed_hash": base_hash}
+        gdocs_mod._save_mapping(db, manuscript, meta)
+
+        written_row = _ko("dt")
+        written_row.update(
+            manuscript_id=mid, origin_type="critique", origin_id="cp1",
+            file="solo.md", anchor_quote=None,
+            proposed_old="Original paragraph text.",
+            proposed_new="Resolved paragraph text.",
+            note="test", state="written", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md",
+            metadata=_json.dumps({"kind": "replace",
+                                  "anchor_paragraph": 1,
+                                  "intent_id": None,
+                                  "original_new": "Resolved paragraph text."}))
+        db.insert("doc_threads", written_row)
+
+        # Doc export: illustration tag kept, embed stripped, form pending.
+        doc_text = (
+            f"# Solo\n\n"
+            f"[Illustration: {prompt} ⇢ {key}.md]\n\n"
+            f"<<Original paragraph text.>>{{{{Resolved paragraph text.}}}}\n")
+
+        class _Fake:
+            def files(self):
+                outer = self
+
+                class _Files:
+                    def export(self, fileId=None, mimeType=None):
+                        class _Req:
+                            def execute(self):
+                                whole = (f"# **solo.md**\n\n{doc_text}")
+                                return whole.encode("utf-8")
+                        return _Req()
+                return _Files()
+
+            def documents(self):
+                class _Documents:
+                    def get(self, documentId=None, includeTabsContent=None):
+                        class _Req:
+                            def execute(self):
+                                return {"tabs": [{
+                                    "tabProperties": {"tabId": "tab-1",
+                                                      "title": "solo.md"},
+                                    "childTabs": []}]}
+                        return _Req()
+                return _Documents()
+
+        fake = _Fake()
+        orig = (gdocs_mod.get_service, gdocs_mod.get_docs_service)
+        gdocs_mod.get_service = lambda *a, **k: fake
+        gdocs_mod.get_docs_service = lambda *a, **k: fake
+        try:
+            args = argparse.Namespace(target="solo.md", workspace=str(ws))
+            with contextlib.redirect_stdout(io.StringIO()):
+                _critique_resolve_essay(db, manuscript, args)
+        finally:
+            gdocs_mod.get_service, gdocs_mod.get_docs_service = orig
+
+        on_disk = (ms / "solo.md").read_text()
+        check("critique resolve reembeds the prior illustration pick",
+              illus_mod.embed_target(on_disk, key) == pick
+              and f"![](_illustrations/{pick})" in on_disk
+              and "Resolved paragraph text." in on_disk
+              and "<<" not in on_disk,
+              on_disk)
+        check("critique resolve does not fall back to a newer candidate "
+              "when the prior pick still exists",
+              newer not in on_disk, on_disk)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
+    check_critique_resolve_reembeds()
     check_client_resolution()
     check_client_stamps()
     check_provenance_verb()
