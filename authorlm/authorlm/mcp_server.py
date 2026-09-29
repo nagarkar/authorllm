@@ -728,6 +728,160 @@ def run_sweep(kind: str, manuscript: str | None = None,
     return _guard(run)
 
 
+def _list_directive(kind: str, file: str | None, manuscript: str | None) -> dict:
+    from pathlib import Path
+
+    from . import directives as dv
+
+    db = _db()
+    ms = _manuscript(db, manuscript)
+    rows = dv.open_report(Path(ms["path"]), (kind,), [file] if file else None)
+    out = [{"file": t["file"], "gist": _loads(t["metadata"], {}).get("gist"),
+            "proposed": t["proposed_new"]}
+           for t in dv.pending(db, ms["id"], kind, file)]
+    return {"open": rows, "count": len(rows), "in_doc": out}
+
+
+def _doc_services():
+    """The Drive/Docs pair for a directive's Doc road — this workspace's
+    token, never interactive (a tool call must not pop a consent
+    window). Built only when the road is taken."""
+    from . import gdocs
+
+    config = api.load_config(_WORKSPACE)
+    return (gdocs.get_service(config, _WORKSPACE, interactive=False),
+            gdocs.get_docs_service(config, _WORKSPACE, interactive=False))
+
+
+def _apply_directive(kind: str, file: str, tag, text, items,
+                     manuscript: str | None, footnote=None) -> dict:
+    from . import directives as dv
+
+    pairs = [(i.get("tag"), i.get("text"), i.get("footnote"))
+             for i in (items or [])]
+    if tag is not None or text is not None:
+        pairs.append((tag, text, footnote))
+    db = _db()
+    ms = _manuscript(db, manuscript)
+    return dv.apply(db, ms, api.load_config(_WORKSPACE), kind, file, pairs,
+                    services=_doc_services)
+
+
+def _resolve_directive(kind: str, file: str, manuscript: str | None) -> dict:
+    from . import directives as dv
+
+    db = _db()
+    ms = _manuscript(db, manuscript)
+    return dv.resolve(db, ms, api.load_config(_WORKSPACE), kind, file,
+                      services=_doc_services)
+
+
+@mcp.tool()
+def list_footnote_tags(file: str | None = None,
+                       manuscript: str | None = None) -> dict:
+    """Open [Footnote: gist | label: XX] tags — the author's inline
+    requests for a footnote, not yet drafted — per file (or one file):
+    ordinal (the `tag` handle), line, gist, label override; plus
+    `in_doc`, the drafts already out in a tab as forms awaiting the
+    author's ruling. Collect and get_status report the open rows too.
+    Drafting is CHAT: assemble the file's style law, the concept notes
+    of the anchor paragraph, the file's existing footnotes as voice
+    exemplars, and the essay; draft one definition per tag FROM THE
+    CLAIM BEFORE ITS ANCHOR — a footnote supports the sentence it hangs
+    on, and the gist says how (house law); then apply_footnote."""
+    return _guard(lambda: _list_directive("footnote", file, manuscript))
+
+
+@mcp.tool()
+def apply_footnote(file: str, tag=None, text: str | None = None,
+                   items: list[dict] | None = None,
+                   manuscript: str | None = None) -> dict:
+    """Land the agreed footnote(s): `tag` (ordinal in the file, first
+    open tag is 1, or an unambiguous gist excerpt) + `text`, or several
+    as `items: [{tag, text}]`. The tag becomes [^label] at its exact
+    position — the file's series continues, a new file takes its stem's
+    letter, `| label: XX` in the tag overrides — and `[^label]: text`
+    joins the end of the file's definitions. Two roads, chosen by the file's checkout state. NOT
+    checked out: the text lands directly (chat was the review) — one
+    evidence row per landing, collected under no episode; 'doc push'
+    carries it later. CHECKED OUT to the Doc: nothing is written locally;
+    the drafts go into the tab as <<tag>>{{new}} forms (a footnote's
+    definition as a {{…}} insertion after the last paragraph) for the
+    author to edit or accept in the Doc, and the matching resolve tool
+    lands their ruling. Land ALL of a file's agreed drafts in ONE call
+    (`items`): a second apply while forms are out is refused until the
+    file is resolved. Returns {kind, file, mode: applied|marked, landed,
+    version_no, url, failed}."""
+    return _guard(lambda: _apply_directive("footnote", file, tag, text, items,
+                                           manuscript))
+
+
+@mcp.tool()
+def resolve_footnotes(file: str, manuscript: str | None = None) -> dict:
+    """Finish a footnote apply that went into the Doc: read the tab's
+    <<tag>>{{[^label]}} / {{[^label]: …}} forms back, honour the author's
+    edits to every green half (a deleted form is a decline — the tag
+    stays open), land the final text locally, record the evidence,
+    collect under no episode, and push the tab clean. Returns {kind,
+    file, forms, accepted, declined, diffs, version_no, url, warnings}."""
+    return _guard(lambda: _resolve_directive("footnote", file, manuscript))
+
+
+@mcp.tool()
+def list_explain_tags(file: str | None = None,
+                      manuscript: str | None = None) -> dict:
+    """Open [Explain: gist] tags — the author's inline requests for an
+    explanatory passage, not yet drafted — per file (or one file):
+    ordinal (the `tag` handle), line, gist; plus `in_doc`, the drafts
+    already out in a tab as forms awaiting the author's ruling.
+    Drafting is CHAT, exactly as for footnotes: style law, concept
+    notes, the essay with the tag marked; the passage is the author's
+    prose at that position — inline it continues the sentence's
+    paragraph, alone on a line it is a paragraph of its own; it
+    explains what the gist names and never continues the argument.
+    Then apply_explain."""
+    return _guard(lambda: _list_directive("explain", file, manuscript))
+
+
+@mcp.tool()
+def apply_explain(file: str, tag=None, text: str | None = None,
+                  footnote: str | None = None,
+                  items: list[dict] | None = None,
+                  manuscript: str | None = None) -> dict:
+    """Land the agreed explanation(s) in place of their tags: `tag`
+    (ordinal in the file or an unambiguous gist excerpt) + `text`, or
+    several as `items: [{tag, text, footnote?}]`. `footnote` is the
+    optional companion: when the explanation needs what the sentence
+    cannot carry — a source, an etymology, a qualification (the
+    footnote structure law) — give its text here and the passage lands
+    with a superscript at its end and the definition in the file's
+    block, in the same review, instead of a second [Footnote:] round.
+    The footnote supports the claim the passage makes at that point. Two roads, chosen by the file's checkout state. NOT
+    checked out: the text lands directly (chat was the review) — one
+    evidence row per landing, collected under no episode; 'doc push'
+    carries it later. CHECKED OUT to the Doc: nothing is written locally;
+    the drafts go into the tab as <<tag>>{{new}} forms (a footnote's
+    definition as a {{…}} insertion after the last paragraph) for the
+    author to edit or accept in the Doc, and the matching resolve tool
+    lands their ruling. Land ALL of a file's agreed drafts in ONE call
+    (`items`): a second apply while forms are out is refused until the
+    file is resolved. Returns {kind, file, mode: applied|marked, landed,
+    version_no, url, failed}."""
+    return _guard(lambda: _apply_directive("explain", file, tag, text, items,
+                                           manuscript, footnote))
+
+
+@mcp.tool()
+def resolve_explains(file: str, manuscript: str | None = None) -> dict:
+    """Finish an explain apply that went into the Doc: read the tab's
+    <<tag>>{{passage}} forms back, honour the author's edits to every
+    green half (a deleted form is a decline — the tag stays open), land
+    the final text locally, record the evidence, collect under no
+    episode, and push the tab clean. Returns {kind, file, forms,
+    accepted, declined, diffs, version_no, url, warnings}."""
+    return _guard(lambda: _resolve_directive("explain", file, manuscript))
+
+
 @mcp.tool()
 def scan_illustrations(file: str | None = None,
                        manuscript: str | None = None) -> dict:

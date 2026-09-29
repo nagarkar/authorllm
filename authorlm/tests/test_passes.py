@@ -3365,6 +3365,151 @@ def pronunciation_purity() -> None:
           "one line" in raised, raised)
 
 
+DIRECTIVE_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha opens the essay and names the vital lie.[Footnote: cite Becker]",
+    "Beta holds the line.[Explain: what holding means here] Then on.",
+    "[Explain: why the wall must fall]",
+    "Omega closes the essay.[Footnote: Jung's date | label: RD]",
+    "[^W1]: An earlier note.",
+]) + "\n"
+
+
+def _directives_on_the_doc_road(root: Path) -> None:
+    """The author's ruling of 2026-09-03: a directive applied to a file
+    that is CHECKED OUT goes into the tab as <<tag>>{{new}} forms, local
+    stays pristine, and `resolve` lands the author's edits. Direct apply
+    stays the local road (test_api proves that half)."""
+    print("directives on the Doc road:")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _twin_fixture(root, "directive-ws",
+                                             essay=DIRECTIVE_ESSAY)
+    mid = manuscript["id"]
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                   [(1, "Ernest Becker, *The Denial of Death* (1973), ch. 2."),
+                    ("Jung", "C. G. Jung, 1916.")], services=services)
+    tab = fake.tab_text("solo.md")
+    local = (ms / "solo.md").read_text()
+    check("apply on a checked-out file STAGES: the tab carries the "
+          "<<tag>>{{[^label]}} forms and the definitions as {{…}} "
+          "insertions after the last paragraph, in series order",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<[Footnote: cite Becker]>>{{[^W2]}}" in tab
+          and "<<[Footnote: Jung's date | label: RD]>>{{[^RD1]}}" in tab
+          and tab.index("[^W1]: An earlier note.")
+          < tab.index("{{[^W2]: Ernest Becker")
+          < tab.index("{{[^RD1]: C. G. Jung, 1916.}}"), tab)
+    check("...and the local file is PRISTINE",
+          local == DIRECTIVE_ESSAY, local)
+    check("the staged rows are `written` footnote threads — the push "
+          "gate now names 'footnote resolve' as the remedy",
+          len(passes.staged_threads(db, mid, "solo.md", states=("written",),
+                                    origin_type="footnote")) == 4
+          and gdocs.forms_pending(db, mid, "solo.md") == "footnote"
+          and _refuses(lambda: dv.apply(db, manuscript, {}, "footnote",
+                                        "solo.md", [(1, "x")],
+                                        services=services),
+                       "footnote resolve solo.md"))
+    check("an explain apply is refused too while footnote forms are out "
+          "— one producer's forms per tab, resolved before the next",
+          _refuses(lambda: dv.apply(db, manuscript, {}, "explain", "solo.md",
+                                    [(1, "x")], services=services),
+                   "footnote resolve solo.md"))
+
+    # The author edits one green half and deletes another form outright.
+    # The tab SHOWS the new half rendered (§9.4: italics as formatting,
+    # no asterisks), so the author's edit is made on that text and the
+    # export gives the markdown back from the fake's style map.
+    fake.edit("tab-2",
+              "{{[^W2]: Ernest Becker, The Denial of Death (1973), ch. 2.}}",
+              "{{[^W2]: Ernest Becker, The Denial of Death "
+              "(New York: Free Press, 1973), ch. 2.}}")
+    fake.edit("tab-2",
+              "<<[Footnote: Jung's date | label: RD]>>{{[^RD1]}}",
+              "[Footnote: Jung's date | label: RD]")
+    fake.edit("tab-2", "{{[^RD1]: C. G. Jung, 1916.}}\n", "")
+    res = dv.resolve(db, manuscript, {}, "footnote", "solo.md",
+                     services=services)
+    local = (ms / "solo.md").read_text()
+    check("resolve lands the author's edit to the green half, and a "
+          "deleted form is a decline that leaves its tag open",
+          "names the vital lie.[^W2]" in local
+          and "[^W2]: Ernest Becker, *The Denial of Death* (New York: Free "
+              "Press, 1973), ch. 2." in local
+          and "[Footnote: Jung's date | label: RD]" in local
+          and "[^RD1]" not in local and "<<" not in local
+          and "{{" not in local, local)
+    check("the resolve report counts them and records the reworded "
+          "acceptance as a diff",
+          res["accepted"] == 2 and res["declined"] == 2
+          and len(res["diffs"]) == 1
+          and "Free Press" in res["diffs"][0]["final"]
+          and res["version_no"] and res["url"], str(res))
+    check("...and pushed the tab clean — the Doc has the result",
+          "<<" not in fake.tab_text("solo.md")
+          and "[^W2]" in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
+    check("the tag's local ordinals reflect what is still open",
+          [(r["kind"], r["n"], r["gist"]) for r in dv.open_report(ms)]
+          == [("footnote", 1, "Jung's date"),
+              ("explain", 1, "what holding means here"),
+              ("explain", 2, "why the wall must fall")],
+          str(dv.open_report(ms)))
+
+    # Explain on the same road: inline and standalone, resolve accepts.
+    # (The fake's export flattened the paragraph gaps into the local
+    # file above; a real export keeps them. Restore them so the anchor
+    # paragraphs the staging computes are the tab's paragraphs.)
+    flat = (ms / "solo.md").read_text()
+    (ms / "solo.md").write_text(
+        "\n\n".join(ln for ln in flat.split("\n") if ln.strip()) + "\n")
+    rep = dv.apply(db, manuscript, {}, "explain", "solo.md",
+                   [(1, "Holding means refusing the easier story."),
+                    (2, "A wall that holds forever is a tomb.",
+                     "Cf. the Sermons' wall, which is also a door.")],
+                   services=services)
+    tab = fake.tab_text("solo.md")
+    check("an explain apply on the Doc road wraps the tag inline and the "
+          "standalone tag as a whole paragraph; a companion footnote "
+          "rides as the superscript in the form and a {{…}} definition",
+          rep["mode"] == "marked"
+          and "line.<<[Explain: what holding means here]>>{{ Holding means "
+              "refusing the easier story.}} Then on." in tab
+          and "<<[Explain: why the wall must fall]>>{{A wall that holds "
+              "forever is a tomb.[^W3]}}" in tab
+          and "{{[^W3]: Cf. the Sermons' wall, which is also a door.}}" in tab,
+          tab)
+    res = dv.resolve(db, manuscript, {}, "explain", "solo.md",
+                     services=services)
+    local = (ms / "solo.md").read_text()
+    # (The Doc fake's export flattens paragraph gaps, so this reads the
+    # landed prose line by line rather than by blank-line separation.)
+    check("resolve lands both passages in place — inline continuing its "
+          "sentence, standalone as its own line",
+          "Beta holds the line. Holding means refusing the easier story. "
+          "Then on.\nA wall that holds forever is a tomb.[^W3]\n" in local
+          and "[^W3]: Cf. the Sermons' wall, which is also a door." in local
+          and "[Explain:" not in local
+          and res["accepted"] == 3 and res["declined"] == 0, local)
+    check("evidence rows carry the producer's own type",
+          db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
+                 "AND evidence_type IN ('footnote_edit', 'explain_edit')",
+                 (mid,))["n"] == 7)
+
+
+def _refuses(fn, fragment: str) -> bool:
+    try:
+        fn()
+    except Exception as err:  # noqa: BLE001
+        return fragment in str(err)
+    return False
+
+
 def main_test() -> None:
     pronunciation_purity()
     root = Path(tempfile.mkdtemp(prefix="authorlm-passes-"))
@@ -4389,6 +4534,7 @@ def main_test() -> None:
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
+        _directives_on_the_doc_road(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)
