@@ -5954,6 +5954,236 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
             "local_unchanged": path.read_text(encoding="utf-8") == disk}
 
 
+def morph_push(db: Database, manuscript: dict, config: dict, file: str,
+               services=None, supersede: bool = False) -> dict:
+    """Morph's own DOC transport — `lens_push`'s pattern, for
+    `origin_type=morph.MORPH_ORIGIN` (design: `docs/morph-design.md`
+    §10, the one gap that blocked testing morph end to end: detection
+    and local staging worked, nothing pushed the result into the actual
+    tab). Deliberately close to `lens_push` rather than a fresh design —
+    the door threads morph stages (`findings.store_findings`) are the
+    same shape lens's are, replace and judgment-insertion alike, so the
+    same staleness/one-per-unit/collision handling applies unchanged."""
+    from . import gdocs
+    from . import lenses as _lenses
+    from . import morph as _morph
+
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    threads = staging.door_threads(
+        db, mid, rel, states=("proposed", "accepted", "rejected", "written"),
+        origin_type=_morph.MORPH_ORIGIN)
+    already = [t for t in threads if t["state"] == "written"]
+    if already and not supersede:
+        raise ValueError(
+            f"{len(already)} morph form(s) are already out in {rel}'s tab. "
+            f"Either rule on them there and 'morph resolve {rel}', or "
+            f"'morph push {rel} --supersede' to withdraw them (their forms "
+            f"leave the tab, which is rebuilt from the file; any rewording "
+            f"you typed inside them is lost) and push the new ones.")
+    if already:
+        for t in already:
+            meta = loads(t.get("metadata"), {}) or {}
+            meta["superseded"] = True
+            db.update("doc_threads", t["id"],
+                      {"state": "withdrawn", "metadata": json.dumps(meta)})
+        service, docs_service = _resolve_services(services, rel)
+        gdocs.push_doc(db, manuscript, rel, service=service,
+                       docs_service=docs_service)
+    if (gdocs.doc_status(db, manuscript).get(rel) or {}).get("checked_out"):
+        service, docs_service = _resolve_services(services, rel)
+        gdocs.pull_doc(db, manuscript, query=rel, service=service,
+                       docs_service=docs_service, with_comments=False)
+    threads = [t for t in threads if t["state"] != "withdrawn"]
+    mine = {t["id"] for t in threads}
+    outside = [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? AND file = ? "
+        "AND state = 'written' ORDER BY created_at", (mid, rel))
+        if r["id"] not in mine]
+    if outside:
+        origin = outside[0]["origin_type"]
+        owner = (_owning_filter(db, mid, outside[0])
+                 if origin == FILTER_ORIGIN else None)
+        whose = f"'{owner}'" if owner else f"the {origin} pass"
+        remedy = {FILTER_ORIGIN: f"filter resolve {rel}",
+                  LENS_ORIGIN: f"lens resolve {rel}",
+                  _morph.MORPH_ORIGIN: f"morph resolve {rel}"}.get(
+            origin, f"critique resolve {rel}")
+        raise ValueError(
+            f"{len(outside)} form(s) from {whose} are already in {rel}'s "
+            f"tab. Two producers' forms in one tab cannot be told apart "
+            f"at resolve — finish that one ('{remedy}') and then push.")
+    _filter_capture(db, manuscript, rel, "morph push")
+    pushable = [t for t in threads if t["state"] in ("proposed", "accepted")]
+    rejected = [t for t in threads if t["state"] == "rejected"]
+    if not pushable:
+        raise LookupError(
+            f"no staged morph edits on {rel} can go to the Doc"
+            + (f" — all {len(rejected)} were turned down." if rejected
+               else " — a morph finding stages an edit only when it "
+                    "carries a `replacement` or a `judgment`."))
+    warnings: list[str] = []
+    if already:
+        warnings.append(f"{len(already)} morph form(s) already out were "
+                        f"withdrawn (superseded) and the tab rebuilt first.")
+    path = Path(manuscript["path"]) / rel
+    disk = path.read_text(encoding="utf-8")
+    fresh, stale = [], []
+    for t in pushable:
+        # A judgment-insertion form has no `proposed_old` to find in the
+        # file (design §2 / the 2026-09-27 insertion fix) — it's staged
+        # against a unit, not a span, so it can't go stale the way a
+        # replace can; only replace forms need the "is the old text
+        # still there" check.
+        if not t["proposed_old"] or t["proposed_old"] in disk:
+            fresh.append(t)
+        else:
+            meta = loads(t.get("metadata"), {}) or {}
+            meta["stale_reason"] = "old text no longer in the file"
+            db.update("doc_threads", t["id"],
+                      {"state": "stale", "metadata": json.dumps(meta)})
+            stale.append(t)
+    if stale:
+        warnings.append(f"{len(stale)} staged form(s) went stale: the "
+                        f"paragraph they rewrote has since changed.")
+    pushable, deferred = _lenses.one_per_unit(fresh)
+    if not pushable:
+        raise LookupError(f"no staged morph edit on {rel} can go to the Doc "
+                          f"now: {len(stale)} went stale, {len(deferred)} "
+                          f"deferred.")
+    if deferred:
+        warnings.append(
+            f"{len(deferred)} form(s) rewrite a paragraph another form "
+            f"already claims; they stay staged and go in the next push "
+            f"after 'morph resolve {rel}'.")
+    warnings.append(
+        f"All {len(pushable)} morph change(s) go to the Doc. The tab is "
+        f"the review: leave a change alone to take it, empty its green "
+        f"half (or restore the old text) to turn it down, reword it to "
+        f"make it yours. Every verdict is recorded at "
+        f"'morph resolve {rel}'.")
+    if rejected:
+        warnings.append(f"{len(rejected)} change(s) already turned down "
+                        f"stay home.")
+    twin_note = _twin_warning([t for t in pushable if t["proposed_old"]])
+    if twin_note:
+        warnings.append(twin_note)
+    passes.compose_marked_text(disk, pushable)
+    service, docs_service = _resolve_services(services, rel)
+    result = gdocs.write_pending_forms(db, manuscript, rel, pushable,
+                                       service, docs_service)
+    for t in result["written"]:
+        meta = loads(t.get("metadata"), {}) or {}
+        meta["pushed_from"] = t["state"]
+        db.update("doc_threads", t["id"],
+                  {"state": "written", "metadata": json.dumps(meta)})
+    return {"file": rel, "url": result["url"],
+            "written": len(result["written"]),
+            "failed": [(t, why) for t, why in result["failed"]],
+            "warnings": warnings,
+            "local_unchanged": path.read_text(encoding="utf-8") == disk}
+
+
+def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
+                  services=None) -> dict:
+    """Read the tab back and finalize the morph forms — `lens_resolve`'s
+    pattern, `origin_type`/`kind` swapped to morph's own (design:
+    `docs/morph-design.md` §10). The mechanics are identical because the
+    forms are the identical shape: judgment tags are insertions ruled by
+    presence, replace forms are ruled by their old/new text, and both
+    settle through the same `<<old>>{{new}}` tab either producer uses."""
+    from . import gdocs
+    from . import lenses as _lenses
+    from . import morph as _morph
+    from . import summaries as sums
+
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    written = staging.door_threads(db, mid, rel, states=("written",),
+                                   origin_type=_morph.MORPH_ORIGIN)
+    if not written:
+        raise LookupError(
+            f"no morph forms are out in {rel} — 'morph push {rel}' writes "
+            f"the staged morph edits into its tab.")
+    # checkout=False for the reason filter_resolve's/lens_resolve's doc
+    # branch gives: the push's own levelling write checked the file out
+    # BY DESIGN.
+    _filter_capture(db, manuscript, rel, "morph resolve", checkout=False)
+    service, docs_service = _resolve_services(services, rel)
+    fetched = gdocs.tab_marked_markdown(db, manuscript, rel,
+                                        service, docs_service)
+    if fetched["state"] == "missing":
+        raise LookupError(
+            f"'{rel}' has no matching section in the master Doc export — "
+            f"the tab these forms were written to is gone. "
+            f"'doc push {rel}' rebuilds it from the local file.")
+    if fetched["state"] == "conflict":
+        raise ValueError(
+            f"'{rel}' changed both locally and in the Doc since the last "
+            f"sync — the resolve refuses to guess which wins. Compare "
+            f"them by hand, then re-run 'morph resolve {rel}'.")
+    warnings = list(fetched["marker_warnings"])
+    path = Path(manuscript["path"]) / rel
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="pre-morph-settle")
+    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
+    # paragraph, nothing struck) — ruled by presence, not matched by old
+    # text: the tag still in the tab, braced or unbraced, accepts the
+    # finding and stands in the file as an open directive; the tag gone
+    # rejects it. Ruled here, before the replace forms, so
+    # record_resolution's unmatched loop never sees them; and only
+    # morph's own insert threads are touched, never an author's `{{…}}`.
+    marked = fetched["marked"]
+    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
+        tag = t["proposed_new"]
+        braced = "{{" + tag + "}}"
+        present = braced if braced in marked else (tag if tag in marked
+                                                    else None)
+        if present is not None:
+            marked = _fold_judgment(marked, present, tag)
+            db.update("doc_threads", t["id"], {"state": "cleaned"})
+            passes._edit_evidence(db, mid, t, "resolved",
+                                  evidence_type=_morph.MORPH_EVIDENCE)
+        else:
+            db.update("doc_threads", t["id"], {"state": "declined"})
+            passes._edit_evidence(db, mid, t, "declined",
+                                  evidence_type=_morph.MORPH_EVIDENCE)
+    replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
+    final, forms = passes.final_text_from_marked(
+        marked, written=replaces, kinds=("replace",))
+    diffs = passes.record_resolution(db, mid, rel, forms,
+                                     origin_type=_morph.MORPH_ORIGIN,
+                                     evidence_type=_morph.MORPH_EVIDENCE,
+                                     final_text=final)
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config, source="morph-settle",
+                episode=NO_EPISODE)
+    after = {t["id"]: dict(db.one(
+        "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
+        for t in written}
+    states = [t["state"] for t in after.values()]
+    # The form IS the finding's verdict (author ruling 2026-09-06,
+    # applied to morph the same way): a kept form accepts the finding,
+    # an emptied one (or a deleted judgment tag) rejects it.
+    verdicts = _lenses.propagate_verdicts(db, manuscript, after.values(),
+                                          kind=_morph.MORPH_KIND)
+    summary = {"rebuilt": False, "error": None, "usage": None}
+    llm = sums.summarizer_llm(config)
+    if llm.enabled:
+        try:
+            sums.rebuild_one(db, manuscript, rel, llm)
+            summary.update(rebuilt=True, usage=llm.stats_line())
+        except Exception as err:                        # noqa: BLE001
+            summary["error"] = str(err)
+    candidate = passes.settle_learnings(db, manuscript, diffs, config)
+    return {"file": rel, "accepted": states.count("cleaned"),
+            "declined": states.count("declined"),
+            "forms": len(forms), "diffs": diffs, "warnings": warnings,
+            "summary": summary, "pattern_candidate": candidate,
+            "findings": verdicts, "tab_still_marked": True}
+
+
 def lens_unmark(db: Database, manuscript: dict, file: str,
                 force: bool = False, services=None) -> dict:
     """Take the lens forms back out of the tab: every written lens thread
@@ -5982,6 +6212,21 @@ def lens_unmark(db: Database, manuscript: dict, file: str,
     gdocs.push_doc(db, manuscript, rel, service=service,
                    docs_service=docs_service)
     return {"file": rel, "reopened": len(written)}
+
+
+def _fold_judgment(text: str, present: str, tag: str) -> str:
+    """Remove the judgment's own paragraph (`present`: the braced form or
+    the bare tag) and append the tag to the paragraph before it."""
+    i = text.find(present)
+    if i < 0:
+        return text
+    j = i
+    while j > 0 and text[j - 1] in "\n ":
+        j -= 1
+    if j == 0:
+        # Nothing before it to fold onto: keep the tag where it stands.
+        return text[:i] + tag + text[i + len(present):]
+    return text[:j] + tag + text[i + len(present):]
 
 
 def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
@@ -6022,8 +6267,36 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-lens-settle")
+    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
+    # paragraph, nothing struck). They are ruled by presence, not matched
+    # by old text: the tag still in the tab, braced or unbraced, accepts
+    # the finding and stands in the file as an open directive; the tag
+    # gone rejects it. Ruled here, before the replace forms, so
+    # record_resolution's unmatched loop never sees them; and only the
+    # lens's own insert threads are touched, never an author's `{{…}}`.
+    marked = fetched["marked"]
+    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
+        tag = t["proposed_new"]
+        braced = "{{" + tag + "}}"
+        present = braced if braced in marked else (tag if tag in marked
+                                                    else None)
+        if present is not None:
+            # Accepted: the tag folds back onto the END of the paragraph
+            # it follows, which is where the file has always carried an
+            # open judgment and where `lens repair` looks for it — the
+            # separate paragraph was the TAB's lighter form, not the
+            # record's.
+            marked = _fold_judgment(marked, present, tag)
+            db.update("doc_threads", t["id"], {"state": "cleaned"})
+            passes._edit_evidence(db, mid, t, "resolved",
+                                  evidence_type=LENS_EVIDENCE)
+        else:
+            db.update("doc_threads", t["id"], {"state": "declined"})
+            passes._edit_evidence(db, mid, t, "declined",
+                                  evidence_type=LENS_EVIDENCE)
+    replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
-        fetched["marked"], written=written, kinds=("replace",))
+        marked, written=replaces, kinds=("replace",))
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,

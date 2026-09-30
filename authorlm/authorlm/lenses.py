@@ -44,6 +44,10 @@ from pathlib import Path
 
 from .concepts import concept_pattern, node_names
 from .db import Database, ko_fields, loads, new_id
+from .findings import flag_rules  # re-exported: lenses.flag_rules is public
+                                   # API (tests call it directly); the
+                                   # implementation lives once, in
+                                   # findings.py, shared with morph.
 from .revisions import read_manuscript_files
 
 LENS_DIR = "_lenses"
@@ -54,14 +58,20 @@ _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # ------------------------------------------------------------ front matter
 
 CLASSES = ("chapter", "cross-chapter")
+# The GRAIN is the unit block E holds: the whole file, or one poem of a
+# `form = "verse"` file (verse.py; verse-and-cast-design.md, poem-grain
+# ruling 2026-09-25). Class says what the unit is read against; grain says
+# what the unit is. `siblings` is the poem-grain target: the other poems
+# of the same file, full text.
+GRAINS = ("chapter", "poem")
 INPUTS = ("glossary", "audience", "scheme", "registers", "passes",
           "reading-order")
-TARGETS = ("pointers", "neighbours", "earlier", "book")
+TARGETS = ("pointers", "neighbours", "earlier", "book", "siblings")
 EXAMPLES_MODES = ("prompt", "omit")
-KEYS = ("class", "inputs", "targets", "examples")
+KEYS = ("class", "inputs", "targets", "examples", "grain")
 DELIMITER = "---"
 DEFAULT_META = {"class": "chapter", "inputs": ["glossary"], "targets": [],
-                "examples": "prompt"}
+                "examples": "prompt", "grain": "chapter"}
 
 # The reading-order heuristics the design ratified (§9 decisions 5).
 CARD_WORDS = 400            # an entry under this is a chapter card, not a chapter
@@ -147,12 +157,21 @@ def parse_lens(text: str) -> tuple[dict, str]:
         if klass == "cross-chapter" and not targets:
             raise LensError("a 'cross-chapter' lens must declare at least "
                             f"one target: {', '.join(TARGETS)}.")
+        grain = given.get("grain", meta["grain"])
+        if grain not in GRAINS:
+            raise LensError(f"grain must be one of "
+                            f"{', '.join(repr(g) for g in GRAINS)}, "
+                            f"not {grain!r}.")
+        if "siblings" in targets and grain != "poem":
+            raise LensError("the 'siblings' target (the other poems of the "
+                            "file) needs grain = \"poem\".")
         examples = given.get("examples", meta["examples"])
         if examples not in EXAMPLES_MODES:
             raise LensError(f"examples must be one of "
                             f"{', '.join(repr(m) for m in EXAMPLES_MODES)}.")
         meta.update(**{"class": klass, "inputs": list(inputs),
-                       "targets": list(targets), "examples": examples})
+                       "targets": list(targets), "examples": examples,
+                       "grain": grain})
         body = "\n".join(lines[end + 1:])
     else:
         body = "\n".join(lines[start:])
@@ -228,25 +247,6 @@ def strip_examples(body: str) -> str:
     return body[:a.start()] + body[b.start():]
 
 
-def flag_rules(body: str) -> list[str]:
-    """The Flag rule headings a lens states, for tallies and for the
-    `rule` field's gate. Two shapes are read: `- **Heading.** …` bullets
-    and `### Flag — heading` example headings; anything else the lens
-    writes is simply not a named rule."""
-    rules: list[str] = []
-    for m in re.finditer(r"^\s*-\s+\*\*(.+?)\*\*", body, re.M):
-        rules.append(m.group(1).strip().rstrip(".:"))
-    for m in re.finditer(r"^###\s+Flag\s+[—-]+\s+(.+?)\s*$", body, re.M):
-        rules.append(m.group(1).strip().rstrip("."))
-    seen, out = set(), []
-    for r in rules:
-        k = _norm(r)
-        if k and k not in seen:
-            seen.add(k)
-            out.append(r)
-    return out
-
-
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
 
@@ -283,7 +283,7 @@ falls under, in the lens's own words. Reply with JSON only:
 "rule": "<the Flag rule's heading, as written in S>",
 "replacement": "<optional: the quote's substitute within its paragraph>",
 "footnote": "<optional: the GIST of a footnote the quoted sentence should carry — a source to be supplied, a qualification — never the finished text>",
-"judgment": "<optional: ONLY when no replacement can be written from S, A, T and E — the decision the author alone can make, in one clause>",
+"judgment": "<optional: ONLY when no replacement can be written from S, A, T and E — the decision the author alone can make, stated as two or three concrete OPTIONS to choose between, each grounded in the quoted text: name the line or stanza it touches and, where one is obvious, the candidate word, rhyme, or cut; at most two sentences; no brackets and no line breaks>",
 "target_file": "<optional: a file named in T>",
 "target_quote": "<optional: verbatim sentence(s) from that file>"}]}
 
@@ -294,9 +294,16 @@ scoping, a frame sentence, a corrected pointer. Reserve `judgment` for a
 repair that is a decision the author alone can make — cut or move a section,
 choose between two claims the chapter makes, supply a fact the payload does
 not contain, add an argument that does not yet exist — and state that
-decision in one clause; the harness plants it as a [Judgment: …] tag at the
-sentence for the author to keep or delete. A finding with neither is a note
-the author cannot act on in the Doc, and is a fault of the reply.
+decision as OPTIONS the author can pick between, not a bare instruction:
+two or three ways out, each tied to the words it would touch ("rhyme line
+four with line two — 'wisdom' has no partner; 'ignorance' could take
+'distance'"; "cut stanzas three to eight, or bring the pen back in the last
+stanza"), in at most two sentences (author ruling 2026-09-27: a judgment
+"could include more information or examples or suggestions"). The harness
+plants it as a [Judgment: …] tag after the paragraph for the author to keep
+or delete, so it must carry no brackets and no line breaks. A finding with
+neither is a note the author cannot act on in the Doc, and is a fault of
+the reply.
 
 Footnotes are requested, never written. Where the repair is a source the
 author must supply, or a qualification that would break the sentence's
@@ -318,6 +325,7 @@ class LensPayload:
     target_files: dict  # file → text, for the finding gate
     file: str
     essay_sha: str
+    poem: dict | None = None      # poem grain: {n, title, sha, text}
 
     @property
     def system(self) -> str:
@@ -344,10 +352,14 @@ class LensPayload:
     def render(self, name: str) -> str:
         """The printed form `lens run` shows: every block with its size
         and hash, so the answer can be traced to exactly what was seen."""
-        out = [f"lens '{name}' [{self.meta['class']}] on {self.file} — "
+        where = self.file + (f" — poem {self.poem['n']} “{self.poem['title']}”"
+                             if self.poem else "")
+        reg = (f"lens register {name} {self.file}"
+               + (f" --poem {self.poem['n']}" if self.poem else ""))
+        out = [f"lens '{name}' [{self.meta['class']}"
+               + (", poem grain" if self.poem else "") + f"] on {where} — "
                f"no model call was made. Answer the contract in block S "
-               f"and pipe the JSON into 'lens register {name} "
-               f"{self.file}'; or run again with --native."]
+               f"and pipe the JSON into '{reg}'; or run again with --native."]
         for label, text in self.blocks:
             if not text:
                 continue
@@ -721,6 +733,18 @@ def _targets_block(db: Database, manuscript: dict, files: dict[str, str],
             "TERMS INTRODUCED EARLIER (concept — the chapter that supplied it)",
             "\n".join(f"- {c} — {w}" for c, w in earlier)
             if earlier else "(none)"))
+    if "siblings" in wanted and meta.get("_poem") is not None:
+        from .verse import poems_of
+
+        from .verse import poem_level as _plevel
+
+        others = [p for p in poems_of(text, _plevel(files, rel))
+                  if p["n"] != meta["_poem"]["n"]]
+        chosen.setdefault(rel, files[rel])
+        parts.append(_section(
+            "SIBLINGS (the other poems of this file, full text; a finding "
+            f"about one names target_file {rel} and quotes it)",
+            "\n\n".join(p["text"] for p in others) if others else "(none)"))
     if "book" in wanted:
         rec = recurrences(files, rel)
         parts.append(_section(
@@ -747,7 +771,8 @@ def _targets_block(db: Database, manuscript: dict, files: dict[str, str],
 
 def assemble(db: Database, manuscript: dict, name: str, file: str,
              files: dict[str, str] | None = None,
-             inputs_cache: dict | None = None) -> LensPayload:
+             inputs_cache: dict | None = None,
+             poem: str | None = None) -> LensPayload:
     """The whole payload from stored state and the manuscript on disk,
     deterministically. `files` lets a sweep read the manuscript once;
     `inputs_cache` lets it render each distinct INPUTS block once."""
@@ -772,11 +797,67 @@ def assemble(db: Database, manuscript: dict, name: str, file: str,
                                meta["inputs"])
         if inputs_cache is not None:
             inputs_cache[key] = inputs
+    chosen_poem = None
+    if meta["grain"] == "poem":
+        from .verse import (find_poem, frame_of, is_verse, poem_level,
+                            poems_of)
+
+        if not is_verse(files, rel):
+            raise ValueError(
+                f"lens '{name}' has grain = \"poem\" and {rel} is not a verse "
+                "file — mark it in toc.toml (form = \"verse\") or run a "
+                "chapter-grain lens on it.")
+        level = poem_level(files, rel)
+        poems = poems_of(text, level)
+        if not poems:
+            raise ValueError(f"{rel} is marked verse but has no poems at "
+                             f"heading level {level} — set poem_level in "
+                             "toc.toml to the level its poem titles use.")
+        if poem is None:
+            raise ValueError(
+                f"lens '{name}' reads one poem at a time — name it with "
+                f"--poem <n|title>; {rel} has {len(poems)}: "
+                + "; ".join(f"{p['n']} {p['title']}" for p in poems))
+        chosen_poem = find_poem(poems, poem)
+        meta = {**meta, "_poem": chosen_poem}
+    elif poem is not None:
+        raise ValueError(f"lens '{name}' has grain = \"chapter\"; --poem "
+                         "applies only to a poem-grain lens.")
     targets, chosen = _targets_block(db, manuscript, files, rel, text, meta)
+    if chosen_poem is not None:
+        frame = frame_of(text, level)
+        essay = ((_section("THE SECTION FRAME (title and epigraph; context, "
+                           "never the subject)", frame) + "\n") if frame else "") \
+            + _section(f"THE POEM — {rel} — {chosen_poem['n']} of {len(poems)} "
+                       f"— “{chosen_poem['title']}” — sha256 "
+                       f"{_sha(chosen_poem['text'])}", chosen_poem["text"])
+        return LensPayload(law=law, inputs=inputs, targets=targets,
+                           essay=essay, meta=meta, target_files=chosen,
+                           file=rel, essay_sha=_sha(text),
+                           poem={"n": chosen_poem["n"],
+                                 "title": chosen_poem["title"],
+                                 "sha": _sha(chosen_poem["text"]),
+                                 "text": chosen_poem["text"]})
     essay = _section(f"THE CHAPTER — {rel} — sha256 {_sha(text)}", text)
     return LensPayload(law=law, inputs=inputs, targets=targets, essay=essay,
                        meta=meta, target_files=chosen, file=rel,
                        essay_sha=_sha(text))
+
+
+def assemble_poems(db: Database, manuscript: dict, name: str, file: str
+                   ) -> list[LensPayload]:
+    """Every poem of a verse file as its own payload, the INPUTS block
+    rendered once. The whole-file loop `lens run` takes at poem grain."""
+    from .verse import poems_of
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    cache: dict = {}
+    from .verse import poem_level as _plevel
+
+    return [assemble(db, manuscript, name, rel, files=files,
+                     inputs_cache=cache, poem=str(p["n"]))
+            for p in poems_of(files[rel], _plevel(files, rel))]
 
 
 # ------------------------------------------------------------- the door
@@ -784,201 +865,39 @@ def assemble(db: Database, manuscript: dict, name: str, file: str,
 RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
 
 
-def _footnote_gist(raw) -> str:
-    """A finding's `footnote` gist, made safe for the tag grammar: one
-    line, no brackets (a tag never nests and never spans lines), no
-    reserved markers. Empty when there is nothing to plant."""
-    gist = " ".join(str(raw or "").split())
-    gist = gist.replace("[", "(").replace("]", ")")
-    for m in RESERVED_MARKERS:
-        gist = gist.replace(m, "")
-    return gist.strip()
-
-
-def _edit_entry(units: list[str], raw_quote: str, replacement: str,
-                note: str, taken_units: set[int]) -> tuple[dict | None, str]:
-    """Anchor one finding's `replacement` to its unit, or refuse.
-
-    The door's law (filter-pass design §7.2), applied literally: the
-    quote must occur VERBATIM in exactly one unit and exactly once
-    within it — an unanchored replace picks an occurrence, and picking
-    is guessing. Returns (entry, "") on success or (None, reason)."""
-    hits = [i for i, u in enumerate(units, 1) if raw_quote in u]
-    if not hits:
-        return None, ("quote matches the file only after whitespace "
-                      "normalization — not verbatim at the byte level, "
-                      "so no surgical edit can anchor to it")
-    if len(hits) > 1:
-        return None, (f"quote occurs in {len(hits)} units — an edit "
-                      f"cannot anchor to an ambiguous quote")
-    n = hits[0]
-    unit = units[n - 1]
-    if unit.count(raw_quote) > 1:
-        return None, ("quote occurs more than once within its unit — "
-                      "an edit cannot anchor to an ambiguous quote")
-    if n in taken_units:
-        return None, ("its unit already carries a staged edit from "
-                      "this batch")
-    if any(m in replacement for m in RESERVED_MARKERS):
-        return None, "replacement carries reserved markers (<< >> {{ }})"
-    new = unit.replace(raw_quote, replacement)
-    if not new.strip():
-        return None, "replacement would leave the unit empty"
-    if new == unit:
-        return None, "replacement is identical to the quoted text"
-    return {"n": n, "new": new, "why": note}, ""
-
-
 def _store_findings(db: Database, manuscript: dict, session: dict,
                     lens_name: str, relpath: str, file_text: str,
                     findings: list, source: str,
                     payload: LensPayload | None = None,
                     lens_body: str = "") -> dict:
-    """The registration door's core: hygiene-gate each finding (verbatim
-    quote in the file) and store the survivors as a fresh lens batch.
+    """Lens's own thin wrapper over the shared registration door
+    (`findings.store_findings`, factored out 2026-09-26,
+    `docs/morph-design.md` §7): supplies lens's cross-chapter target
+    files/shas and poem grain from `payload`, and pins `producer_key`
+    to `"lens"` so every stored row's metadata and this call's return
+    value keep the exact shape `lens status`/`lens findings`/
+    `lens review` — and every historical row already in the database —
+    already expect."""
+    from . import findings as fnd
 
-    Since the cross-chapter design: a finding may name a `target_file`
-    from block T and a `target_quote` from it. The target file must be
-    one the lens declared and the payload resolved — a finding about a
-    chapter the lens never read is REFUSED by name (a subagent that read
-    around the payload has left it). A target quote that is not verbatim
-    in its file is kept but marked `target_unverified`. `rule` is matched
-    against the lens's Flag headings; an unknown rule is kept and marked.
-    Every stored finding carries the essay's sha and each target's sha —
-    the provenance `lens status` compares to call a batch STALE.
-
-    A finding may carry an optional `replacement` (filter-pass design
-    §7.2): the quoted text's proposed substitute within its unit. When it
-    anchors cleanly a `doc_threads` row is staged with origin 'lens'.
-    Ruling on the finding and settling the edit stay independent."""
-    from . import passes
-    from . import staging
-
-    flat = " ".join(file_text.split()).lower()
-    units = passes.paragraphs_of(file_text)
-    batch_id = new_id("lb")
-    stored, dropped = [], 0
-    refused_targets: list[dict] = []
-    entries: list[tuple[dict, dict]] = []
-    refused: list[dict] = []
-    taken_units: set[int] = set()
-    known_rules = {_norm(r): r for r in flag_rules(lens_body)} if lens_body \
-        else {}
-    target_files = payload.target_files if payload else {}
-    target_shas = payload.target_shas if payload else {}
-    index = 0
-    for f in findings:
-        if not isinstance(f, dict):
-            dropped += 1
-            continue
-        raw_quote = str(f.get("quote", ""))
-        quote = " ".join(raw_quote.split())
-        note = str(f.get("note", "")).strip()
-        if not quote or not note or quote.lower() not in flat:
-            dropped += 1
-            continue
-        tfile = str(f.get("target_file") or "").strip() or None
-        if tfile and tfile not in target_files:
-            refused_targets.append({"quote": quote[:80], "target": tfile})
-            continue
-        index += 1
-        row = ko_fields("gd")
-        row.update(
-            manuscript_id=manuscript["id"], session_id=session["id"],
-            intent_id=None, batch_id=batch_id, batch_index=index,
-            kind=LENS_KIND,
-            suggestion=f"[{lens_name}] {note}",
-            explanation=f"On “{quote}” ({relpath}): {note}",
-            state="proposed",
-        )
-        meta = {
-            "lens": lens_name, "file": relpath, "quote": quote,
-            "source": source,
-            "dedupe_key": f"lens:{lens_name}:{relpath}:{index}",
-            "essay_sha": _sha(file_text),
-            "targets": target_shas,
-        }
-        rule = str(f.get("rule") or "").strip()
-        if rule:
-            meta["rule"] = known_rules.get(_norm(rule), rule)
-            meta["rule_known"] = _norm(rule) in known_rules
-        if tfile:
-            meta["target_file"] = tfile
-            tq = " ".join(str(f.get("target_quote") or "").split())
-            if tq:
-                meta["target_quote"] = tq
-                tflat = " ".join(target_files[tfile].split())
-                if tq not in tflat:
-                    meta["target_unverified"] = ("target quote is not "
-                                                 "verbatim in the target")
-        gist = _footnote_gist(f.get("footnote"))
-        if gist:
-            meta["footnote"] = gist
-        judgment = _footnote_gist(f.get("judgment"))
-        if judgment:
-            meta["judgment"] = judgment
-        replacement = None
-        if "replacement" in f or gist:
-            replacement = str(f.get("replacement") or raw_quote)
-            if gist and "[footnote:" not in replacement.lower():
-                # Planted, never drafted (footnote design §0, §12): the
-                # tag is the author's own request grammar, inert until
-                # the footnote road resolves it.
-                replacement = replacement.rstrip() + f"[Footnote: {gist}]"
-        elif judgment:
-            # A judgment is planted the same way: the sentence unchanged,
-            # the decision it needs beside it, the finding's id in the
-            # tag so `lens repair` can find its way back. Deleting the
-            # tag in the tab rejects the finding; leaving it accepts it.
-            replacement = (raw_quote.rstrip()
-                           + f"[Judgment: {lens_name} — {judgment} "
-                             f"| id: {row['id'][:11]}]")
-        if replacement is not None:
-            entry, reason = _edit_entry(units, raw_quote, replacement,
-                                        note, taken_units)
-            if entry is None:
-                meta["edit_refused"] = reason
-                refused.append({"quote": quote[:80], "reason": reason})
-            else:
-                taken_units.add(entry["n"])
-                entries.append((entry, row))
-        row["metadata"] = json.dumps(meta)
-        db.insert("guidance_history", row)
-        stored.append(row)
-    edits = []
-    if entries:
-        # The owner is the BATCH, not the lens: stage_edits keys threads
-        # by owner:file:ordinal and replaces in place on a re-run, which
-        # for a lens would overwrite forms already out in the tab.
-        staged = staging.stage_edits(
-            db, manuscript["id"], f"{lens_name}@{batch_id[3:11]}", relpath,
-            file_text, [e for e, _ in entries], origin_type=LENS_ORIGIN,
-            verb_stem="lens")
-        by_n = {loads(t["metadata"], {}).get("anchor_paragraph"): t
-                for t in staged}
-        for entry, frow in entries:
-            thread = by_n.get(entry["n"])
-            if thread is None:
-                continue
-            fmeta = json.loads(frow["metadata"])
-            fmeta["edit_thread"] = thread["id"]
-            db.update("guidance_history", frow["id"],
-                      {"metadata": json.dumps(fmeta)})
-            frow["metadata"] = json.dumps(fmeta)
-            edits.append(thread)
-    return {"lens": lens_name, "file": relpath, "batch_id": batch_id,
-            "findings": [dict(r) for r in stored],
-            "dropped_ungrounded": dropped,
-            "refused_targets": refused_targets,
-            "edits_staged": edits, "edits_refused": refused}
+    return fnd.store_findings(
+        db, manuscript, session,
+        kind=LENS_KIND, producer=lens_name, relpath=relpath,
+        file_text=file_text, findings=findings, source=source,
+        batch_prefix="lb", origin_type=LENS_ORIGIN, verb_stem="lens",
+        producer_key="lens", rubric_body=lens_body,
+        target_files=payload.target_files if payload else None,
+        target_shas=payload.target_shas if payload else None,
+        poem=payload.poem if payload else None)
 
 
 def run_lens(db: Database, manuscript: dict, session: dict, name: str,
-             relpath: str, llm, payload: LensPayload | None = None) -> dict:
+             relpath: str, llm, payload: LensPayload | None = None,
+             poem: str | None = None) -> dict:
     """Native execution: the assembled payload, sent whole to the
     configured model. The same blocks `lens run` prints."""
     if payload is None:
-        payload = assemble(db, manuscript, name, relpath)
+        payload = assemble(db, manuscript, name, relpath, poem=poem)
     _meta, body = load_lens(manuscript, name)
     result = llm.complete_json(payload.system, payload.user)
     findings = (result or {}).get("findings", []) \
@@ -990,12 +909,14 @@ def run_lens(db: Database, manuscript: dict, session: dict, name: str,
 
 
 def register_findings(db: Database, manuscript: dict, session: dict,
-                      name: str, relpath: str, findings: list) -> dict:
+                      name: str, relpath: str, findings: list,
+                      poem: str | None = None) -> dict:
     """The registration door for externally produced findings (a Claude
     subagent answering the printed payload). Same hygiene, same store,
     same review loop. The payload is re-assembled here so target files
-    are checked against what the lens was allowed to see."""
-    payload = assemble(db, manuscript, name, relpath)
+    are checked against what the lens was allowed to see; at poem grain
+    `poem` names the one the reply answers for."""
+    payload = assemble(db, manuscript, name, relpath, poem=poem)
     _meta, body = load_lens(manuscript, name)
     files = read_manuscript_files(Path(manuscript["path"]))
     return _store_findings(db, manuscript, session, name, payload.file,
@@ -1010,14 +931,17 @@ def one_per_unit(threads: list[dict]) -> tuple[list[dict], list[dict]]:
     the same unit is common (a sweep); the earliest-staged form goes,
     the rest stay staged for the next push after the author's ruling.
     Returns (chosen, deferred), both in staging order."""
-    chosen: dict[int, dict] = {}
+    chosen: dict[tuple[str, int], dict] = {}
     deferred: list[dict] = []
     for t in sorted(threads, key=lambda t: (t.get("created_at") or "", t["id"])):
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
-        if n in chosen:
+        # Keyed by KIND as well: a judgment tag is an insertion after the
+        # paragraph and may sit beside one rewrite of it.
+        key = ("insert" if t.get("proposed_old") == "" else "replace", n)
+        if key in chosen:
             deferred.append(t)
         else:
-            chosen[n] = t
+            chosen[key] = t
     return list(chosen.values()), deferred
 
 
@@ -1033,12 +957,19 @@ def forms_out(db: Database, manuscript: dict, file: str) -> int:
 
 # ------------------------------------------------------ verdicts → findings
 
-def propagate_verdicts(db: Database, manuscript: dict, threads) -> dict:
-    """A resolved lens form IS its finding's verdict: a cleaned (accepted)
+def propagate_verdicts(db: Database, manuscript: dict, threads,
+                       kind: str = LENS_KIND) -> dict:
+    """A resolved form IS its finding's verdict: a cleaned (accepted)
     form accepts the finding, a declined form (the green half emptied —
     for a judgment tag, the tag deleted) rejects it. Recorded through
     record_review, so the evidence stream is the same as a chat verdict.
-    Only findings still `proposed` are touched."""
+    Only findings still `proposed` are touched.
+
+    `kind` defaults to lens's own (every existing caller); morph's
+    resolve passes `kind=morph.MORPH_KIND` — the logic is otherwise
+    fully generic (reads `doc_threads` state, writes `guidance_history`/
+    `editorial_reviews` through `record_review`), so this stays one
+    function rather than a second copy in `findings.py`."""
     from . import beliefs as bel
     mid = manuscript["id"]
     out = {"accepted": 0, "rejected": 0}
@@ -1050,7 +981,7 @@ def propagate_verdicts(db: Database, manuscript: dict, threads) -> dict:
         rows = db.all(
             "SELECT * FROM guidance_history WHERE manuscript_id = ? AND "
             "kind = ? AND state = 'proposed' AND metadata LIKE ?",
-            (mid, LENS_KIND, f'%"edit_thread": "{t["id"]}"%'))
+            (mid, kind, f'%"edit_thread": "{t["id"]}"%'))
         for r in rows:
             meta = loads(r["metadata"], {}) or {}
             what = "judgment" if meta.get("judgment") else "rewrite"
@@ -1177,7 +1108,11 @@ def assemble_repair(db: Database, manuscript: dict, file: str,
         f = t["finding"] or {}
         meta = loads(f.get("metadata"), {}) or {}
         block = [f"--- judgment {t['id'] or '(no id)'} — unit {t['n']} ---",
-                 f"lens: {meta.get('lens', '?')}; rule: {meta.get('rule', '?')}",
+                 # `judgment_tags` finds the row by id alone, no kind
+                 # filter — this already resolves a morph-planted tag
+                 # too, whose metadata key is `producer`, not `lens`.
+                 f"producer: {meta.get('lens') or meta.get('producer', '?')}; "
+                 f"rule: {meta.get('rule', '?')}",
                  f"tag: {t['raw']}",
                  f"finding: {f.get('explanation') or t['gist']}",
                  "unit (rewrite this whole paragraph, tag removed):",
@@ -1311,6 +1246,7 @@ def status(db: Database, manuscript: dict, file: str) -> list[dict]:
             "created_at": r.get("created_at"), "source": meta.get("source"),
             "count": 0, "states": {}, "rules": {}, "unverified": 0,
             "stale": [], "essay_sha": meta.get("essay_sha"),
+            "poem": meta.get("poem"), "poem_sha": meta.get("poem_sha"),
             "targets": meta.get("targets") or {}})
         b["count"] += 1
         b["states"][r["state"]] = b["states"].get(r["state"], 0) + 1
@@ -1318,8 +1254,21 @@ def status(db: Database, manuscript: dict, file: str) -> list[dict]:
         b["rules"][rule] = b["rules"].get(rule, 0) + 1
         if meta.get("target_unverified"):
             b["unverified"] += 1
+    poem_shas: dict[str, str] = {}
+    if any(b.get("poem_sha") for b in batches.values()):
+        from .verse import poems_of
+
+        from .verse import poem_level as _plevel
+
+        poem_shas = {p["title"]: _sha(p["text"])
+                     for p in poems_of(files[rel], _plevel(files, rel))}
     for b in batches.values():
-        if b["essay_sha"] and b["essay_sha"] != now_sha:
+        if b.get("poem_sha"):
+            # Poem grain: stale only when THIS poem changed (or vanished),
+            # never because a sibling was reworded.
+            if poem_shas.get(b["poem"]) != b["poem_sha"]:
+                b["stale"].append(f"{rel}#{b['poem']}")
+        elif b["essay_sha"] and b["essay_sha"] != now_sha:
             b["stale"].append(rel)
         for tf, sha in (b["targets"] or {}).items():
             cur = files.get(tf)

@@ -4082,6 +4082,203 @@ def gdocs_clamp(text: str, limit: int = 90) -> str:
     return clamp(text or "", limit)
 
 
+def _morph_autopush(db, manuscript, args, target: str, staged: int) -> None:
+    """`_lens_autopush`'s pattern for morph: every `morph run` that
+    stages an edit pushes it in the same turn unless `--no-push` — this
+    is the piece that actually lets the author see a proposal (design
+    §10). A push failure is reported, never fatal: the edits are safe
+    staged locally and `morph push <file>` retries."""
+    from . import api
+
+    if not staged or getattr(args, "no_push", False):
+        if staged:
+            print(ui.dim(f"{staged} edit(s) staged and NOT pushed (--no-push); "
+                         f"'morph push {target}' sends them to the tab."))
+        return
+    config = _load_config(args)
+
+    def _doc_bridge():
+        from . import gdocs as _gd
+        return (_gd.get_service(config, args.workspace, interactive=True),
+                _gd.get_docs_service(config, args.workspace, interactive=True))
+    try:
+        result = api.morph_push(db, manuscript, config, target,
+                                services=_doc_bridge,
+                                supersede=getattr(args, "supersede", False))
+    except (LookupError, ValueError, RuntimeError) as err:
+        print(ui.yellow(f"staged {staged} edit(s) but the push did not land: "
+                        f"{err} — 'morph push {target}' retries."))
+        return
+    for w in result["warnings"]:
+        print(ui.dim(w))
+    for t, why in result["failed"]:
+        print(ui.yellow(f"  failed to land: «{gdocs_clamp(t['proposed_old'])}» "
+                        f"— {why}"))
+    print(ui.green(f"Pushed {result['written']} morph form(s) into "
+                   f"{result['file']}'s tab → {result['url']}"))
+
+
+def cmd_morph(args):
+    """`morph run <file> [--full]` — combined-call paragraph-defect
+    detection (design: docs/morph-design.md). Always native (there is
+    no chat/subagent-drafted path — the rubric is fixed prose, not a
+    payload a collaborator drafts against), so it always makes the
+    call and always prints `llm.stats_line()` afterward, matching the
+    convention every other verb that spends tokens already follows."""
+    from . import api, morph
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+
+    if args.action == "run":
+        target = args.file or args.name
+        if not target:
+            raise SystemExit("usage: authorlm morph run <essay.md> [--full]")
+        session, _ = api.ensure_session(db, manuscript)
+        llm = api.LLMClient(_load_config(args))
+        if not llm.enabled:
+            raise SystemExit("error: [llm] is not enabled in config.toml — "
+                             "morph always makes a live call, there is no "
+                             "payload-print path")
+        try:
+            result = morph.run(db, manuscript, session, llm, target,
+                               full=args.full)
+        except (LookupError, morph.NoRubric) as err:
+            raise SystemExit(f"error: {err}")
+        if result.get("note"):
+            print(result["note"])
+            return
+        print(f"morph on {result['scope']}: {result['checked']} "
+              f"paragraph(s) checked, {len(result['findings'])} finding(s)"
+              + (f", {result['dropped_ungrounded']} dropped ungrounded"
+                 if result.get("dropped_ungrounded") else "") + ".")
+        for f in result["findings"]:
+            meta = _json_loads_metadata(f)
+            # A judgment is staged too, as an insertion tag (2026-09-27), so
+            # the label reads the finding's kind, not whether a thread exists.
+            if meta.get("judgment"):
+                tag = " [judgment tag staged]" if meta.get("edit_thread") \
+                    else " [judgment, tag refused]"
+            else:
+                tag = " [rewrite staged]" if meta.get("edit_thread") \
+                    else " [rewrite refused]"
+            print(f"  [{meta.get('rule', '?')}]{tag} {f['explanation']}")
+        for r in result.get("edits_refused", []):
+            print(ui.yellow(f"  refused: «{r['quote']}» — {r['reason']}"))
+        print(llm.stats_line() or "")
+        _morph_autopush(db, manuscript, args, result["scope"],
+                        len(result.get("edits_staged", [])))
+        return
+    if args.action == "push":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm morph push <essay.md> "
+                             "[--supersede]")
+        config = _load_config(args)
+
+        def _doc_bridge():
+            from . import gdocs as _gd
+            return (_gd.get_service(config, args.workspace, interactive=True),
+                    _gd.get_docs_service(config, args.workspace,
+                                         interactive=True))
+        try:
+            result = api.morph_push(db, manuscript, config, target,
+                                    services=_doc_bridge,
+                                    supersede=args.supersede)
+        except (LookupError, ValueError, RuntimeError) as err:
+            raise SystemExit(f"error: {err}")
+        for w in result["warnings"]:
+            print(ui.dim(w))
+        for t, why in result["failed"]:
+            print(ui.yellow(f"  failed to land: «{gdocs_clamp(t['proposed_old'])}» "
+                            f"— {why}"))
+        print(ui.green(f"Pushed {result['written']} morph form(s) into "
+                       f"{result['file']}'s tab → {result['url']}"))
+        return
+    if args.action == "resolve":
+        target = args.name or args.file
+        if not target:
+            raise SystemExit("usage: authorlm morph resolve <essay.md>")
+        config = _load_config(args)
+
+        def _doc_bridge():
+            from . import gdocs as _gd
+            return (_gd.get_service(config, args.workspace, interactive=True),
+                    _gd.get_docs_service(config, args.workspace,
+                                         interactive=True))
+        try:
+            result = api.morph_resolve(db, manuscript, config, target,
+                                       services=_doc_bridge)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
+        for w in result["warnings"]:
+            print(ui.dim(w))
+        print(ui.green(
+            f"Finalized: {result['accepted']} morph change(s) made final "
+            f"in {result['file']}"
+            + (f", {len(result['diffs'])} of them in your wording rather "
+               f"than mine" if result["diffs"] else "")
+            + (f"; {result['declined']} declined" if result["declined"]
+               else "") + "."))
+        for d in result["diffs"]:
+            print(ui.dim(f"  «{gdocs_clamp(d['proposal'])}» → "
+                         f"«{gdocs_clamp(d['final'])}»"))
+        fv = result.get("findings") or {}
+        if fv.get("accepted") or fv.get("rejected"):
+            print(ui.dim(f"Findings ruled by the tab: {fv['accepted']} "
+                         f"accepted, {fv['rejected']} rejected. Accepted "
+                         f"judgments now stand as [Judgment: …] tags — "
+                         f"'lens repair {result['file']}' acts on them."))
+        if result["summary"]["rebuilt"]:
+            print("summary rebuilt; downstream marked upstream_stale")
+        if result.get("pattern_candidate"):
+            print(ui.dim("Pattern candidate from your post-edits: "
+                         f"{result['pattern_candidate'][:80]}…"))
+        if result["tab_still_marked"]:
+            print(ui.dim("The Doc tab keeps its struck-and-green marks "
+                         f"until your next 'doc push {result['file']}'."))
+        return
+    if args.action == "review":
+        decisions = [d for d, on in (("accepted", args.accept),
+                                     ("rejected", args.reject),
+                                     ("modified", args.modify),
+                                     ("deferred", args.defer)) if on]
+        by_id = bool(args.name) and args.name.startswith("gd-")
+        if not args.name or not (args.name.isdigit() or by_id) \
+                or len(decisions) != 1:
+            raise SystemExit("usage: authorlm morph review <n | gd-id> "
+                             "--accept|--reject|--modify|--defer "
+                             '[--explain "why"]  (ids from morph findings)')
+        session, _ = api.ensure_session(db, manuscript)
+        result = api.review(db, manuscript, session,
+                            args.name if by_id else int(args.name),
+                            decisions[0], args.explain,
+                            llm=api.LLMClient(_load_config(args)),
+                            kinds=(morph.MORPH_KIND,))
+        print(f"Recorded: [{args.name}] {decisions[0]}"
+              + (f" — “{args.explain}”" if args.explain else ""))
+        # As with lens (§7.2): the finding's verdict and its staged edit
+        # are independent — this records the verdict on the FINDING;
+        # settling the actual edit still happens in the Doc (leave it =
+        # accept, empty/delete it = decline) and 'morph resolve <file>'
+        # reads that back and finalizes it.
+        gmeta = _json_loads_metadata(result["guidance"])
+        if gmeta.get("edit_thread"):
+            print(ui.dim(
+                "This finding's edit is staged/pushed separately — settle "
+                "it in the Doc, then 'morph resolve <file>' reads the "
+                "verdict back and finalizes the text."))
+        return
+    raise SystemExit(f"usage: authorlm morph {{run,push,resolve,review}} …  "
+                     f"(got {args.action!r})")
+
+
+def _json_loads_metadata(row) -> dict:
+    import json as _json
+
+    return _json.loads(row.get("metadata") or "{}")
+
+
 def cmd_lens(args):
     import json as _json
 
@@ -4463,7 +4660,62 @@ def cmd_lens(args):
     session, _ = api.ensure_session(db, manuscript)
     if args.action == "run":
         try:
-            payload = lenses.assemble(db, manuscript, args.name, args.file)
+            meta_, _body_ = lenses.load_lens(manuscript, args.name)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
+        if meta_.get("grain") == "poem" and not args.poem:
+            # The whole-file loop at poem grain: one payload per poem.
+            try:
+                payloads = lenses.assemble_poems(db, manuscript, args.name,
+                                                 args.file)
+            except (LookupError, ValueError) as err:
+                raise SystemExit(f"error: {err}")
+            if not args.native:
+                if not args.out:
+                    raise SystemExit(
+                        f"lens '{args.name}' reads one poem at a time; "
+                        f"{args.file} has {len(payloads)}. Pass --out <dir> "
+                        "to write one payload per poem, or --poem <n|title> "
+                        "for one.")
+                from pathlib import Path as _P
+                outdir = _P(args.out)
+                outdir.mkdir(parents=True, exist_ok=True)
+                import re as _re
+                for pl in payloads:
+                    slug_ = _re.sub(r"[^a-z0-9]+", "-",
+                                   pl.poem["title"].lower()).strip("-")[:40]
+                    path = outdir / f"{pl.poem['n']:02d}-{slug_}.payload"
+                    path.write_text(pl.render(args.name), encoding="utf-8")
+                    print(f"payload → {path}  (register: lens register "
+                          f"{args.name} {pl.file} --poem {pl.poem['n']} "
+                          f"--reply <json>)")
+                print(f"{len(payloads)} poem payload(s); no model call was "
+                      "made.")
+                return
+            llm = api.LLMClient(_load_config(args))
+            if not llm.enabled:
+                raise SystemExit("--native needs the LLM enabled")
+            total = 0
+            for pl in payloads:
+                try:
+                    res = lenses.run_lens(db, manuscript, session, args.name,
+                                          pl.file, llm, payload=pl)
+                except (LookupError, ValueError) as err:
+                    print(ui.yellow(f"  {pl.poem['title']}: {err}"))
+                    continue
+                total += len(res["findings"])
+                print(f"  {pl.poem['n']:2d} {pl.poem['title']}: "
+                      f"{len(res['findings'])} finding(s)"
+                      + (f", {res['dropped_ungrounded']} ungrounded dropped"
+                         if res["dropped_ungrounded"] else ""))
+            print(f"Lens '{args.name}' on {payloads[0].file}: {total} "
+                  f"finding(s) across {len(payloads)} poem(s).")
+            _lens_autopush(db, manuscript, args, payloads[0].file, total)
+            print(ui.dim(llm.stats_line()))
+            return
+        try:
+            payload = lenses.assemble(db, manuscript, args.name, args.file,
+                                      poem=args.poem)
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         if not args.native:
@@ -4477,8 +4729,9 @@ def cmd_lens(args):
                 print(f"payload → {args.out} ({len(text):,} chars; blocks "
                       + ", ".join(f"{k} {len(v):,}" for k, v in payload.blocks)
                       + "). No model call was made; answer block S's contract "
-                      f"and 'lens register {args.name} {payload.file} --reply "
-                      "<json>', or re-run with --native.")
+                      f"and 'lens register {args.name} {payload.file}"
+                      + (f" --poem {payload.poem['n']}" if payload.poem else "")
+                      + " --reply <json>', or re-run with --native.")
             else:
                 print(text)
             return
@@ -4515,11 +4768,13 @@ def cmd_lens(args):
         try:
             result = lenses.register_findings(db, manuscript, session,
                                               args.name, args.file,
-                                              findings)
+                                              findings, poem=args.poem)
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         line = None
-    print(f"Lens '{result['lens']}' on {result['file']}: "
+    print(f"Lens '{result['lens']}' on {result['file']}"
+          + (f" — poem “{result['poem']}”" if result.get("poem") else "")
+          + ": "
           f"{len(result['findings'])} finding(s)"
           + (f", {result['dropped_ungrounded']} ungrounded dropped"
              if result["dropped_ungrounded"] else "")
@@ -8012,6 +8267,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reply", metavar="PATH",
                    help="register: read the findings JSON from this file "
                         "instead of stdin")
+    p.add_argument("--poem", metavar="N|TITLE",
+                   help="run/register, poem-grain lenses: the one poem of "
+                        "the verse file (number or title fragment); run "
+                        "without it takes every poem, --out as a directory")
     p.add_argument("--supersede", action="store_true",
                    help="push/sweep/repair: withdraw lens forms already out "
                         "in the tab (any rewording typed inside them is "
@@ -8029,6 +8288,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--explain", help="the author's reasoning, verbatim — "
                                      "the highest-value evidence")
     p.set_defaults(func=cmd_lens)
+
+    p = sub.add_parser(
+        "morph",
+        help="paragraph-defect detection (design: docs/morph-design.md): "
+             "run <file> [--full] — combined-call check of claim-before-"
+             "evidence, discontinuity, specificity, and concept-invalidation "
+             "against a fixed neighborhood window, pushed to the Doc in the "
+             "same turn unless --no-push; push <file> retries/redoes that; "
+             "resolve <file> reads the tab back and finalizes it (lens's "
+             "own pattern, same tab, same rules); review <n> rules on one "
+             "finding (accept/reject/modify/defer, same verb `lens review` "
+             "uses). A [Judgment: …] tag morph plants is already resolved "
+             "by the existing 'lens repair <file>' — its lookup is by "
+             "finding id, not by kind, so no separate 'morph repair' verb "
+             "is needed. 'morph status'/'morph findings' don't exist yet "
+             "(lens's own are hardcoded to lens's kind).")
+    p.add_argument("action", choices=["run", "push", "resolve", "review"])
+    p.add_argument("name", nargs="?",
+                   help="manuscript file (run/push/resolve), or finding "
+                        "index/id (review)")
+    p.add_argument("file", nargs="?", help="manuscript file (alt position)")
+    p.add_argument("--full", action="store_true",
+                   help="check every prose paragraph, not just ones changed "
+                        "since the last collected version (needed for a "
+                        "first pass, or a file with no collected history)")
+    p.add_argument("--supersede", action="store_true",
+                   help="push: withdraw morph forms already out in the tab "
+                        "(any rewording typed inside them is lost) and push "
+                        "the current ones")
+    p.add_argument("--no-push", action="store_true",
+                   help="run: stage the findings but don't push them to the "
+                        "Doc in the same turn; 'morph push <file>' later")
+    p.add_argument("--accept", action="store_true")
+    p.add_argument("--reject", action="store_true")
+    p.add_argument("--modify", action="store_true")
+    p.add_argument("--defer", action="store_true")
+    p.add_argument("--explain", help="the author's reasoning, verbatim — "
+                                     "the highest-value evidence")
+    p.set_defaults(func=cmd_morph)
 
     p = sub.add_parser(
         "interlocutor",

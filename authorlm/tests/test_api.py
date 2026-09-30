@@ -6807,6 +6807,45 @@ def main_test() -> None:
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
 
+        # Verse: a Doc export writes a hard line break as two trailing
+        # spaces; the canonical form is the backslash break, rewritten
+        # before trailing whitespace is stripped, and only before a
+        # continuation line (verse-and-cast-design.md §2).
+        stanza = "Line one,  \nLine two,  \nLine three.\n\nProse.   \n\n- item\n"
+        check("normalizer turns exported hard breaks into backslash breaks",
+              normalize_markdown(stanza)
+              == "Line one,\\\nLine two,\\\nLine three.\n\nProse.\n\n- item\n",
+              repr(normalize_markdown(stanza)))
+        from authorlm.gdocs import HARD_BREAK_CHAR, rendered_text
+        stanza_md = "Every morning I rise,\\\nTo fight a *fiery* dragon."
+        from authorlm.threads import pending_forms as _pf
+        struck = ("~~<<Each day, I write a bit,~~\\\n~~Tis only a modest "
+                  "stride,~~\\\n~~The essence will be clarified.>>~~"
+                  "{{Each day,\\\nOnly a stride.}}")
+        check("the form parser drops the exporter's strikethrough fragments "
+              "at a stanza's hard breaks",
+              _pf(struck)[0]["old"] == "Each day, I write a bit,\\\nTis only "
+              "a modest stride,\\\nThe essence will be clarified.",
+              repr(_pf(struck)[0]["old"]))
+        from authorlm.gdocs import tab_anchor_text
+        check("an insertion anchor on a heading drops the heading marker and "
+              "the bold the tab never held",
+              tab_anchor_text("## **Why I wrote this book**") == "Why I wrote this book"
+              and tab_anchor_text("Plain.") == "Plain.")
+        from authorlm import lenses as _lz_contract
+        check("the lens contract asks for a judgment as concrete options, "
+              "not one clause (author ruling 2026-09-27)",
+              "OPTIONS" in _lz_contract.LENS_SYSTEM
+              and "one clause" not in _lz_contract.LENS_SYSTEM)
+        check("the tab-text renderer maps a backslash hard break to the "
+              "Doc's line-break character and drops emphasis markers",
+              rendered_text(stanza_md)
+              == "Every morning I rise," + HARD_BREAK_CHAR
+              + "To fight a fiery dragon.", repr(rendered_text(stanza_md)))
+        check("backslash breaks survive the normalizer unchanged",
+              normalize_markdown("Line one,\\\nLine two.\n")
+              == "Line one,\\\nLine two.\n")
+
         # Pandoc footnotes must reach the Doc as literal text: Google's
         # markdown importer consumes the syntax and the transplant drops
         # it (it-e63eabd58b11). escape_footnotes protects refs and
@@ -9559,6 +9598,181 @@ def main_test() -> None:
               and _json.loads(registered["findings"][0]["metadata"])[
                   "source"] == "external")
 
+        # --- verse: the poem as a structural unit (verse.py) and the lens
+        # poem grain with the siblings target (poem-grain ruling 2026-09-25)
+        from authorlm import verse as verse_mod
+
+        vroot = root / "verse-ws"
+        vms = vroot / "manuscript"
+        (vms / "_lenses").mkdir(parents=True)
+        (vms / "_profiles").mkdir()
+        (vms / "_filters").mkdir()
+        (vms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "poems.md"\nform = "verse"\n\n'
+            '[[chapter]]\nfile = "prose.md"\n')
+        poem_text = (
+            "# **Error**\n\n*To live is to become.*\n\n"
+            "## **The Dragon**\n\n*The mind is a dragon.*\n\n"
+            "Every morning I rise,\\\nTo fight a fiery dragon.\n\n"
+            "Victory is not my goal,\\\nAll good things will grow.\n\n"
+            "## **The Mirror**\n\n*Despair is blindness.*\n\n"
+            "In shadows of bliss,\\\nShe finds no embrace.\n")
+        (vms / "poems.md").write_text(poem_text)
+        (vms / "prose.md").write_text("# Prose\n\nA plain paragraph.\n")
+        vfiles = {"toc.toml": (vms / "toc.toml").read_text(),
+                  "poems.md": poem_text, "prose.md": "# Prose\n\nA plain paragraph.\n"}
+        from authorlm import morph as _morph
+        check("morph judges prose only: a stanza and a thesis line are not "
+              "prose units",
+              _morph._is_prose("A plain paragraph of prose here.")
+              and not _morph._is_prose("Every morning I rise,\\\nTo fight.")
+              and not _morph._is_prose("*The mind is a dragon.*")
+              and verse_mod.is_verse_unit("a,\\\nb")
+              and not verse_mod.is_verse_unit("Plain prose."))
+        check("form_map reads form = verse from the toc, prose by default",
+              verse_mod.form_map(vfiles) == {"poems.md": "verse", "prose.md": "prose"}
+              and verse_mod.is_verse(vfiles, "poems.md")
+              and not verse_mod.is_verse(vfiles, "prose.md"))
+        poems = verse_mod.poems_of(poem_text)
+        check("poems_of finds each ## heading with its title, thesis, and span",
+              [p["title"] for p in poems] == ["The Dragon", "The Mirror"]
+              and poems[0]["thesis"] == "The mind is a dragon."
+              and poems[0]["text"].startswith("## **The Dragon**")
+              and "She finds no embrace" not in poems[0]["text"]
+              and "She finds no embrace" in poems[1]["text"], str(poems))
+        check("the frame is the title and epigraph before the first poem",
+              verse_mod.frame_of(poem_text) == "# **Error**\n\n*To live is to become.*")
+        check("stanzas_of returns the stanzas and nothing else",
+              verse_mod.stanzas_of(poems[0]["text"])
+              == ["Every morning I rise,\\\nTo fight a fiery dragon.",
+                  "Victory is not my goal,\\\nAll good things will grow."])
+        h3_text = ("# Section\n\n### First\n\nline one,\\\nline two.\n\n"
+                   "### Second\n\nline three.\n")
+        h3_files = {"toc.toml": '[[chapter]]\nfile = "h3.md"\nform = "verse"\n'
+                                'poem_level = 3\n', "h3.md": h3_text}
+        check("poem_level is declared per file in the toc and drives the "
+              "splitter",
+              verse_mod.poem_level(h3_files, "h3.md") == 3
+              and [p["title"] for p in verse_mod.poems_of(h3_text, 3)]
+              == ["First", "Second"]
+              and verse_mod.poems_of(h3_text) == []
+              and verse_mod.verse_report(h3_files)[0]["poems"] == 2)
+        wrong_files = {**h3_files, "toc.toml": '[[chapter]]\nfile = "h3.md"\n'
+                                               'form = "verse"\n'}
+        vrep = verse_mod.verse_report(wrong_files)[0]
+        check("a verse file with no poems at its level warns and names the "
+              "levels that exist",
+              vrep["poems"] == 0 and "level 2" in vrep["warning"]
+              and "3 (2)" in vrep["warning"] and "poem_level" in vrep["warning"],
+              str(vrep))
+        check("find_poem takes a number, a title, or a fragment, and names "
+              "ambiguity",
+              verse_mod.find_poem(poems, "2")["title"] == "The Mirror"
+              and verse_mod.find_poem(poems, "dragon")["n"] == 1
+              and (lambda: (verse_mod.find_poem(poems, "The") and False)
+                   if False else True)())
+        try:
+            verse_mod.find_poem(poems, "The")
+            ambiguous = False
+        except LookupError as err:
+            ambiguous = "ambiguous" in str(err)
+        check("an ambiguous poem fragment is refused by name", ambiguous)
+
+        (vroot / ".authorlm").mkdir(parents=True, exist_ok=True)
+        from authorlm.db import Database as _VDB
+
+        vdb = _VDB(vroot / ".authorlm" / "authorlm.db")
+        vman = api.register_manuscript(vdb, "verse", str(vms))
+        api.collect(vdb, vman, {})
+        vsession, _ = api.ensure_session(vdb, vman)
+        lenses.add_lens(vman, "verse-law",
+                        "---\nclass = \"chapter\"\ngrain = \"poem\"\n---\n"
+                        "# Verse law\n\n## Examples\n\n### Flag — The turn is missing\n"
+                        "> x\nWhy.\n\n## The lens\n\nFlag a last couplet that does not turn.\n")
+        lenses.add_lens(vman, "section-arc",
+                        "---\nclass = \"cross-chapter\"\ngrain = \"poem\"\n"
+                        "targets = [\"siblings\", \"book\"]\n---\n"
+                        "# Section arc\n\nFlag two poems on one image.\n")
+        lenses.add_lens(vman, "plain-chapter", "# Plain\n\nFlag assertions.\n")
+        try:
+            lenses.parse_lens("---\nclass = \"chapter\"\ntargets = [\"siblings\"]\n---\n# x\n")
+            sib_refused = False
+        except lenses.LensError:
+            sib_refused = True
+        check("siblings needs the poem grain, and a chapter lens declares no "
+              "targets", sib_refused)
+        try:
+            lenses.assemble(vdb, vman, "verse-law", "prose.md", poem="1")
+            prose_refused = False
+        except ValueError as err:
+            prose_refused = "not a verse file" in str(err)
+        check("a poem-grain lens refuses a prose file by name", prose_refused)
+        try:
+            lenses.assemble(vdb, vman, "verse-law", "poems.md")
+            unnamed = False
+        except ValueError as err:
+            unnamed = "--poem" in str(err) and "The Mirror" in str(err)
+        check("a poem-grain lens without --poem names the poems", unnamed)
+        try:
+            lenses.assemble(vdb, vman, "plain-chapter", "poems.md", poem="1")
+            wrong_grain = False
+        except ValueError as err:
+            wrong_grain = "grain" in str(err)
+        check("--poem on a chapter-grain lens is refused", wrong_grain)
+        pl = lenses.assemble(vdb, vman, "verse-law", "poems.md", poem="mirror")
+        check("the poem payload's E block holds the frame and ONLY that poem",
+              pl.poem["title"] == "The Mirror"
+              and "THE POEM" in pl.essay and "THE SECTION FRAME" in pl.essay
+              and "She finds no embrace" in pl.essay
+              and "fiery dragon" not in pl.essay and not pl.targets, pl.essay)
+        pls = lenses.assemble_poems(vdb, vman, "verse-law", "poems.md")
+        check("assemble_poems gives one payload per poem, in order",
+              [p.poem["n"] for p in pls] == [1, 2])
+        arc = lenses.assemble(vdb, vman, "section-arc", "poems.md", poem="1")
+        check("the siblings target carries the other poems, full text, and "
+              "registers the file as a target",
+              "SIBLINGS" in arc.targets and "She finds no embrace" in arc.targets
+              and "fiery dragon" not in arc.targets.split("SIBLINGS")[1].split("VERBATIM")[0]
+              and "poems.md" in arc.target_files, arc.targets)
+        reg = lenses.register_findings(
+            vdb, vman, vsession, "verse-law", "poems.md",
+            [{"quote": "All good things will grow.", "note": "No turn.",
+              "rule": "The turn is missing"},
+             {"quote": "She finds no embrace.", "note": "wrong poem"}],
+            poem="1")
+        check("at poem grain the gate drops a quote from a sibling poem and "
+              "keeps the poem's own",
+              len(reg["findings"]) == 1 and reg["dropped_ungrounded"] == 1
+              and reg["poem"] == "The Dragon", str(reg))
+        fmeta = _json.loads(reg["findings"][0]["metadata"])
+        check("a poem-grain finding records its poem and the poem's hash",
+              fmeta["poem"] == "The Dragon" and fmeta["poem_n"] == 1
+              and fmeta["poem_sha"] == pls[0].poem["sha"]
+              and fmeta["rule_known"] is True, str(fmeta))
+        st = lenses.status(vdb, vman, "poems.md")
+        check("a poem batch is fresh while its poem is untouched",
+              st and not st[-1]["stale"] and st[-1]["poem"] == "The Dragon",
+              str(st))
+        (vms / "poems.md").write_text(
+            poem_text.replace("She finds no embrace", "She finds an embrace"))
+        api.collect(vdb, vman, {})
+        st = lenses.status(vdb, vman, "poems.md")
+        check("rewording a SIBLING leaves the poem's batch fresh",
+              not st[-1]["stale"], str(st[-1]["stale"]))
+        (vms / "poems.md").write_text(
+            poem_text.replace("All good things will grow", "All things grow"))
+        api.collect(vdb, vman, {})
+        st = lenses.status(vdb, vman, "poems.md")
+        check("rewording THE poem marks its batch stale by poem",
+              st[-1]["stale"] == ["poems.md#The Dragon"], str(st[-1]["stale"]))
+        vcol = api.collect(vdb, vman, {})
+        vcol = api.collect(vdb, vman, {}) if vcol.get("unchanged") is None else vcol
+        (vms / "poems.md").write_text(poem_text + "\n## **Third**\n\nA line.\n")
+        vcol = api.collect(vdb, vman, {})
+        check("collect reports each verse file's poem count at its level",
+              any(v["file"] == "poems.md" and v["poems"] == 3 and v["level"] == 2
+                  for v in vcol.get("verse", [])), str(vcol.get("verse")))
+
         # --- lens architecture: front matter, inputs, targets, payload,
         #     finding provenance, status, sweep (lens-architecture-design)
         lens_root = root / "lens-ws"
@@ -9797,13 +10011,21 @@ def main_test() -> None:
         j_thread = ldb.one("SELECT * FROM doc_threads WHERE id = ?",
                            (j_meta["edit_thread"],))
         j_new = j_thread["proposed_new"]
-        check("a `judgment` plants a [Judgment: …] tag after the quote, "
-              "carrying the lens and the finding id",
+        check("a `judgment` plants a [Judgment: …] tag as an INSERTION after "
+              "the quote's unit — nothing struck — carrying the lens and the "
+              "finding id (author ruling 2026-09-27)",
               len(jr["edits_staged"]) == 1
-              and f"Every Beat counts.[Judgment: plain — cut the Beat paragraph "
-                  f"or give it a claim | id: {jr['findings'][0]['id'][:11]}]" in j_new
+              and j_thread["proposed_old"] == ""
+              and j_new == (f"[Judgment: plain — cut the Beat paragraph "
+                            f"or give it a claim | id: {jr['findings'][0]['id'][:11]}]")
+              and _json.loads(j_thread["metadata"])["kind"] == "insert"
+              and _json.loads(j_thread["metadata"])["anchor_paragraph"] >= 1
               and len(_dir.scan_text(j_new, "judgment")) == 1
               and j_meta["judgment"].startswith("cut the Beat"), j_new)
+        folded = api._fold_judgment("A first paragraph.\n\n{{" + j_new + "}}\n\nNext.", "{{" + j_new + "}}", j_new)
+        check("an accepted judgment folds back onto the end of the paragraph "
+              "it follows, where the file has always carried it",
+              folded == "A first paragraph." + j_new + "\n\nNext.", repr(folded))
         stripped, removed = _dir.strip_tags(j_new)
         check("exports strip a judgment tag like any directive",
               "[Judgment" not in stripped and removed[0]["kind"] == "judgment")
@@ -9842,9 +10064,18 @@ def main_test() -> None:
         j2 = {_json.loads(r["metadata"])["judgment"]: r for r in jr2["findings"]}
         second = (lms / "02-second.md").read_text()
         for r in jr2["findings"]:
+            rmeta = _json.loads(r["metadata"])
             th = ldb.one("SELECT * FROM doc_threads WHERE id = ?",
-                         (_json.loads(r["metadata"])["edit_thread"],))
-            second = second.replace(th["proposed_old"], th["proposed_new"])
+                         (rmeta["edit_thread"],))
+            if th["proposed_old"]:
+                second = second.replace(th["proposed_old"], th["proposed_new"])
+            else:
+                # An accepted judgment insertion folds onto its unit.
+                paras = second.split("\n\n")
+                k = next(i for i, p in enumerate(paras)
+                         if rmeta["quote"] in " ".join(p.split()))
+                paras[k] = paras[k].rstrip() + th["proposed_new"]
+                second = "\n\n".join(paras)
         (lms / "02-second.md").write_text(second)
         rp = lenses.assemble_repair(ldb, lm, "02-second.md")
         check("repair payload lists each accepted judgment with its unit and finding",
@@ -9893,6 +10124,13 @@ def main_test() -> None:
         check("one form per paragraph goes to the tab; the rest stay staged",
               [t["id"] for t in opu_chosen] == ["a", "c"]
               and [t["id"] for t in opu_deferred] == ["b"])
+        opu2, opd2 = lenses.one_per_unit([
+            {"id": "r", "created_at": "1", "proposed_old": "old",
+             "metadata": '{"anchor_paragraph": 3}'},
+            {"id": "j", "created_at": "2", "proposed_old": "",
+             "metadata": '{"anchor_paragraph": 3}'}])
+        check("a judgment insertion may sit beside one rewrite of the same "
+              "paragraph", [t["id"] for t in opu2] == ["r", "j"] and not opd2)
         # --- introduced_in is deterministic: first reading-order mention,
         #     term of art first, re-derived at every collect, never triaged
         from authorlm import concepts as _cg
