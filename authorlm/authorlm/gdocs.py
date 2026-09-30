@@ -2531,52 +2531,61 @@ def push_prompt_tabs(db: Database, manuscript: dict, service,
     illus_id, children, _ = illus_subtree(doc.get("tabs", []), links)
     report: dict = {"created": [], "updated": [], "pruned": [],
                     "unknown": [], "renamed": []}
-    if illus_id is None:
-        if not local:
-            return report  # no prompts and no tab: nothing to mirror
-        reply = docs_service.documents().batchUpdate(
-            documentId=master_id,
-            body={"requests": [{"addDocumentTab": {
-                "tabProperties": {"title": ILLUS_TAB_TITLE}}}]},
-        ).execute()
-        illus_id = reply["replies"][0]["addDocumentTab"][
-            "tabProperties"]["tabId"]
-        children = []
-    links["_illustrations_tab"] = illus_id
-
-    plan = plan_prompt_sync(local, prompt_links(links), children)
-    report["unknown"] = plan["unknown"]
-    report["renamed"] = plan["renamed"]
-    for name in plan["create"]:
-        reply = docs_service.documents().batchUpdate(
-            documentId=master_id,
-            body={"requests": [{"addDocumentTab": {"tabProperties": {
-                "title": name, "parentTabId": illus_id}}}]},
-        ).execute()
-        tab_id = reply["replies"][0]["addDocumentTab"][
-            "tabProperties"]["tabId"]
-        links[ILLUS_KEY_PREFIX + name] = {"tab_id": tab_id}
-        report["created"].append(name)
-    for name in plan["create"] + plan["rewrite"]:
-        entry = links[ILLUS_KEY_PREFIX + name]
-        _rewrite_tab(service, docs_service, master_id, entry["tab_id"],
-                     local[name], f"authorlm-temp-prompt-{Path(name).stem}")
-        entry["pushed_hash"] = hashlib.sha256(
-            local[name].encode()).hexdigest()[:16]
-        if name in plan["rewrite"]:
-            report["updated"].append(name)
-    for name, tab_id in plan["prune"]:
-        docs_service.documents().batchUpdate(
-            documentId=master_id,
-            body={"requests": [{"deleteTab": {"tabId": tab_id}}]},
-        ).execute()
-        links.pop(ILLUS_KEY_PREFIX + name, None)
-        report["pruned"].append(name)
+    if illus_id is None and not local:
+        return report  # no prompts and no tab: nothing to mirror
+    # Persist whatever was done even when a Google call fails midway: a
+    # created tab whose id never reaches the stored mapping is re-created
+    # on the next push and the orphan is left as an 'unknown' hand-made
+    # tab forever. Each step leaves `links` consistent (id recorded right
+    # after creation, pushed_hash only after a successful rewrite, prune
+    # entry popped only after its deleteTab), so saving it is always safe.
     try:
-        _write_illus_root(docs_service, master_id, illus_id)
-    except Exception:
-        pass  # the sentinel is cosmetic, never fatal to a push
-    _save_mapping(db, manuscript, meta)
+        if illus_id is None:
+            reply = docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"addDocumentTab": {
+                    "tabProperties": {"title": ILLUS_TAB_TITLE}}}]},
+            ).execute()
+            illus_id = reply["replies"][0]["addDocumentTab"][
+                "tabProperties"]["tabId"]
+            children = []
+        links["_illustrations_tab"] = illus_id
+
+        plan = plan_prompt_sync(local, prompt_links(links), children)
+        report["unknown"] = plan["unknown"]
+        report["renamed"] = plan["renamed"]
+        for name in plan["create"]:
+            reply = docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"addDocumentTab": {"tabProperties": {
+                    "title": name, "parentTabId": illus_id}}}]},
+            ).execute()
+            tab_id = reply["replies"][0]["addDocumentTab"][
+                "tabProperties"]["tabId"]
+            links[ILLUS_KEY_PREFIX + name] = {"tab_id": tab_id}
+            report["created"].append(name)
+        for name in plan["create"] + plan["rewrite"]:
+            entry = links[ILLUS_KEY_PREFIX + name]
+            _rewrite_tab(service, docs_service, master_id,
+                         entry["tab_id"], local[name],
+                         f"authorlm-temp-prompt-{Path(name).stem}")
+            entry["pushed_hash"] = hashlib.sha256(
+                local[name].encode()).hexdigest()[:16]
+            if name in plan["rewrite"]:
+                report["updated"].append(name)
+        for name, tab_id in plan["prune"]:
+            docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"deleteTab": {"tabId": tab_id}}]},
+            ).execute()
+            links.pop(ILLUS_KEY_PREFIX + name, None)
+            report["pruned"].append(name)
+        try:
+            _write_illus_root(docs_service, master_id, illus_id)
+        except Exception:
+            pass  # the sentinel is cosmetic, never fatal to a push
+    finally:
+        _save_mapping(db, manuscript, meta)
     return report
 
 

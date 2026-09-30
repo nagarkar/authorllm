@@ -10557,6 +10557,77 @@ def main_test() -> None:
               "![](" not in prompt_path.read_text(),
               prompt_path.read_text())
 
+        # --- a Google failure midway through a prompt push still
+        # persists the tab ids already created; otherwise the next push
+        # re-creates them and the orphans sit forever as 'unknown'.
+        # Own workspace + own FakeGoogle, isolated from the shared stub.
+        from unittest import mock as _pmock
+
+        import authorlm.gdocs as _gd
+
+        t3_root = root / "t3-prompt-fault-ws"
+        t3_ms = t3_root / "manuscript"
+        t3_ms.mkdir(parents=True)
+        (t3_ms / "a.md").write_text("# A\n\nSome prose.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(t3_root), "init", "--name",
+                      "t3book", "--path", str(t3_ms), "--no-extract"])
+        t3_db = api.open_db(str(t3_root))
+        t3_stub = FakeGoogle()
+        t3_pushed = push_doc(t3_db, api.get_manuscript(t3_db), "a.md",
+                             service=t3_stub, docs_service=t3_stub)
+        t3_prompts = t3_ms / "_illustrations" / "prompts"
+        t3_prompts.mkdir(parents=True)
+        (t3_prompts / "p1-aaaa.md").write_text("a lighthouse at night\n")
+        (t3_prompts / "p2-bbbb.md").write_text("a harbor at dawn\n")
+        real_rewrite = _gd._rewrite_tab
+
+        def _flaky_rewrite(service, docs_service, master_id, tab_id,
+                           markdown, temp_name):
+            if "p2-bbbb" in temp_name:
+                raise RuntimeError("simulated rate limit")
+            return real_rewrite(service, docs_service, master_id, tab_id,
+                                markdown, temp_name)
+
+        with _pmock.patch.object(_gd, "_rewrite_tab", _flaky_rewrite):
+            try:
+                push_prompt_tabs(t3_db, api.get_manuscript(t3_db),
+                                 t3_stub, t3_stub)
+                t3_raised = False
+            except RuntimeError:
+                t3_raised = True
+        t3_links = doc_status(t3_db, api.get_manuscript(t3_db))
+        t3_tabs = t3_stub.state["docs"][t3_pushed["doc_id"]]
+        t3_ids = {t["title"]: t["id"] for t in t3_tabs}
+        check("a failing prompt-tab rewrite still propagates to the caller",
+              t3_raised)
+        check("the tabs created before the failure are recorded in the "
+              "stored mapping (root tab and each prompt's tab_id)",
+              t3_links.get("_illustrations_tab") == t3_ids.get(
+                  ILLUS_TAB_TITLE)
+              and t3_links.get("_illusprompt/p1-aaaa.md", {}).get("tab_id")
+              == t3_ids.get("p1-aaaa.md")
+              and t3_links.get("_illusprompt/p2-bbbb.md", {}).get("tab_id")
+              == t3_ids.get("p2-bbbb.md")
+              and bool(t3_links["_illusprompt/p1-aaaa.md"].get(
+                  "pushed_hash"))
+              and not t3_links["_illusprompt/p2-bbbb.md"].get(
+                  "pushed_hash"), str(t3_links))
+        t3_again = push_prompt_tabs(t3_db, api.get_manuscript(t3_db),
+                                    t3_stub, t3_stub)
+        t3_tabs = t3_stub.state["docs"][t3_pushed["doc_id"]]
+        t3_titles = [t["title"] for t in t3_tabs]
+        check("the push after a mid-sync failure creates no duplicate "
+              "tabs: the unwritten tab is rewritten, nothing is unknown",
+              not t3_again["created"] and not t3_again["unknown"]
+              and t3_again["updated"] == ["p2-bbbb.md"]
+              and t3_titles.count("p1-aaaa.md") == 1
+              and t3_titles.count("p2-bbbb.md") == 1
+              and t3_titles.count(ILLUS_TAB_TITLE) == 1
+              and next(t["text"] for t in t3_tabs
+                       if t["title"] == "p2-bbbb.md").strip()
+              == "a harbor at dawn", str(t3_again) + str(t3_tabs))
+
         # --- X7-3: pre-pull recovery point for _illustrations/prompts/ ---
         # These files hold the CANONICAL author text — collect_revision
         # skips '_'-prefixed dirs on purpose, so nothing else snapshots
