@@ -1341,3 +1341,62 @@ It is a note about how the reading has been going, so that the next unit continu
 a voice rather than starting one. Read it before you judge each unit, and rewrite
 it after.
 ```
+
+
+### 9.4 Inline emphasis on the Doc road (built 2026-09-06)
+
+Found on the first interlocutor beat (`epictetus-objections` on
+`epictetus.md`): five of six forms failed "old text not found verbatim in
+the tab"; the one paragraph without italics landed. Google's markdown
+importer renders `*prohairesis*` as italic text, so the tab's text runs
+carry no asterisks, and the surgical writer searched them for the
+paragraph's raw markdown. Every Connections essay italicizes its borrowed
+terms, so the Doc road had been closed to them; the record showed only one
+asterisk-bearing paragraph had ever gone through.
+
+The fix, in `gdocs.py`:
+
+- `rendered_text(markdown)` — the map from markdown to the tab's text:
+  emphasis markers dropped, everything else verbatim (math opaque,
+  footnote syntax literal, both as the importer leaves them).
+- `write_pending_forms` locates the exact record first, then the rendered
+  text; `_occurrence` counts in the rendered universe. The fallback is
+  explicit in the writer — `_locate_in_tab`'s law is still exactness.
+- `_mark_replace_requests` measures the strikethrough range from the text
+  as the tab holds it, leaves the old span's own italics in place (the
+  markdown export gives the record back), and resets italic and bold on
+  the inserted markers and the new half, which otherwise inherit a
+  trailing italic and export as `*>>{{…}}*`.
+- The read-back proof checks the rendered form. For forms placed by their
+  rendered text there is a second proof through the markdown export — the
+  surface the resolve reads and matches by equality with `proposed_old` —
+  and a form the export cannot reproduce is taken back out exactly
+  (`_unmark_replace_requests`) and reported, never left for a resolve to
+  mis-read. One export per push, only when needed.
+
+Tests: `_inline_markup_forms` in test_passes.py, against the surgical fake
+in a `render` mode that models the importer and the export's inverse
+map, plus an `export_breaks_old` mode for the undo path.
+
+Recovery sequence when a partial push left forms out and the rest must
+follow: `filter unmark <essay> --force` (rebuilds the tab from the pristine
+file; written threads return to accepted), `doc pull <essay>
+--no-comments` (the rebuild checks the file out; the pull is a clean round
+trip that clears it), then `filter push <essay>` writes all of them.
+
+**The new half is rendered too** (same day; the author, on the first
+pushed form: "The italic showed up incorrectly (with stars)"). The writer
+had always inserted `{{new}}` as literal markdown, so the green half showed
+`*Prohairesis*` with its asterisks — harmless (the export escapes them and
+`normalize_markdown` strips the escapes, so the file gets its markdown
+back) but wrong on the one surface the author rules from. `render_emphasis`
+now gives the writer the text and the styled runs; `_mark_replace_requests`
+and `_mark_insert_requests` insert the text and apply the runs after the
+emphasis reset, so the green half shows italics and the export gives the
+asterisks back from the runs' styles. `_replace_pending` compares the tab's
+new half against the rendered record, so a form the author left alone is
+not mistaken for a rewording. The export proof covers a rendered new half
+as it covers a rendered old one. The surgical fake models this with a style
+map fed by rendered imports and by every updateTextStyle request, and
+rebuilds markdown from it on export; a test that types into the fake's tab
+uses `fake.edit`, which keeps the map in step.

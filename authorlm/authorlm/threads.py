@@ -46,6 +46,15 @@ PENDING = re.compile(
     re.DOTALL)
 INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
 _ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")
+# The markdown export closes and reopens strikethrough at every hard line
+# break inside a struck span, so a verse stanza's old half comes back as
+# `~~line one,~~\ ~~line two~~` (found 2026-09-27, first lens push on a
+# verse file). The fragments are the exporter's, not the record's.
+_STRIKE_AT_BREAK = re.compile(r"~~(\\\n|  \n)~~")
+
+
+def _unstrike(old: str) -> str:
+    return _STRIKE_AT_BREAK.sub(r"\1", old)
 
 
 def classify_reply(content: str) -> str:
@@ -214,7 +223,7 @@ def pending_forms(text: str) -> list[dict]:
     {{new}} halves here."""
     found = []
     for m in PENDING.finditer(text):
-        found.append({"kind": "replace", "old": m.group("old"),
+        found.append({"kind": "replace", "old": _unstrike(m.group("old")),
                       "new": m.group("new"), "start": m.start(),
                       "end": m.end()})
     consumed = [(f["start"], f["end"]) for f in found]

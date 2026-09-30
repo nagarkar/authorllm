@@ -51,6 +51,7 @@ _THEMATIC_BREAK = re.compile(
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
+_HARD_BREAK = re.compile(r"(?<=\S) {2,}\n(?=[^\s#>|*\-\[])")
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
 
 
@@ -158,6 +159,109 @@ def _restore_math(text: str, spans: list[str]) -> str:
 
 _MATH_ACTIVE = set("*_<>~|#[]`")
 
+# Inline emphasis the markdown importer renders INTO FORMATTING: the
+# asterisks and underscores are gone from the Doc's text runs. Order
+# matters — the double forms first, so `**x**` is not read as two
+# italic markers around a bare `*`.
+_EMPHASIS = (
+    re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL),
+    re.compile(r"__(?=\S)(.+?)(?<=\S)__", re.DOTALL),
+    re.compile(r"(?<![\w*\\])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])", re.DOTALL),
+    re.compile(r"(?<![\w_\\])_(?=\S)(.+?)(?<=\S)_(?![\w_])", re.DOTALL),
+)
+
+
+_EMPHASIS_ANY = re.compile(
+    r"\*\*(?=\S)(?P<b>.+?)(?<=\S)\*\*"
+    r"|__(?=\S)(?P<b2>.+?)(?<=\S)__"
+    r"|(?<![\w*\\])\*(?=\S)(?P<i>.+?)(?<=\S)\*(?![\w*])"
+    r"|(?<![\w_\\])_(?=\S)(?P<i2>.+?)(?<=\S)_(?![\w_])", re.DOTALL)
+
+
+HARD_BREAK_CHAR = chr(11)   # U+000B: a line break inside a Doc paragraph
+
+
+def render_emphasis(markdown: str) -> tuple[str, list[tuple[int, int, dict]]]:
+    r"""(text as the Doc holds it, [(start16, end16, textStyle)]) for a
+    markdown span: the emphasis markers dropped and, for each run they
+    marked, the style the importer would have given it — so a writer can
+    insert the text and apply the runs, and the tab shows italics where
+    the markdown had `*…*` rather than the asterisks themselves. One
+    level of nesting (`**a *b* c**`) is honoured. Math spans are
+    literal text throughout: escaped for the importer, shown as TeX,
+    never emphasis."""
+    # A verse stanza's hard line breaks (backslash-newline, the canonical
+    # form since verse-and-cast-design.md section 2) are held by the Doc
+    # as line-break characters (U+000B) inside one paragraph: the text
+    # Google's importer produces, and what its markdown export gives back
+    # as two trailing spaces. Map them here so the locator and the writer
+    # both see the tab's own text (found 2026-09-27, first lens push on a
+    # verse file: five of nine forms "old text not found verbatim").
+    markdown = markdown.replace("\\\n", HARD_BREAK_CHAR)
+    out: list[str] = []
+    styles: list[tuple[int, int, dict]] = []
+    length16 = 0
+
+    def emit(text: str) -> None:
+        nonlocal length16
+        out.append(text)
+        length16 += _utf16_len(text)
+
+    def walk(text: str) -> None:
+        pos = 0
+        for m in _EMPHASIS_ANY.finditer(text):
+            emit(text[pos:m.start()])
+            inner = m.group("b") or m.group("b2") or m.group("i") or m.group("i2")
+            style = ({"bold": True} if m.group("b") or m.group("b2")
+                     else {"italic": True})
+            start = length16
+            walk(inner)
+            styles.append((start, length16, style))
+            pos = m.end()
+        emit(text[pos:])
+
+    pos = 0
+    for m in re.finditer(_DISPLAY_MATH.pattern + "|" + _INLINE_MATH.pattern,
+                         markdown, re.DOTALL):
+        walk(markdown[pos:m.start()])
+        emit(m.group(0))
+        pos = m.end()
+    walk(markdown[pos:])
+    return "".join(out), styles
+
+
+_HEADING_MARK = re.compile(r"^#{1,6}\s+")
+
+
+def tab_anchor_text(paragraph: str) -> str:
+    """What the tab holds for a paragraph used as an insertion ANCHOR:
+    the rendered text (emphasis dropped, hard breaks as line-break
+    characters) with a heading's `## ` marker gone too — the importer
+    turns the marker into a paragraph style, and a judgment tag planted
+    after a poem's title anchors on the title (found 2026-09-27)."""
+    return _HEADING_MARK.sub("", rendered_text(paragraph).strip())
+
+
+def rendered_text(markdown: str) -> str:
+    r"""What the Doc's TEXT RUNS hold for a markdown span.
+
+    `push_doc` hands the essay to Google's markdown importer, which
+    renders `*prohairesis*` as italic "prohairesis": the emphasis lives
+    in textStyle, and the asterisks are not in the text. A surgical
+    write that searches the tab for the paragraph's raw markdown
+    therefore never finds a paragraph carrying inline emphasis — the
+    Connections essays, which italicize every borrowed term, could not
+    take a single pending form (found 2026-09-06, first interlocutor
+    beat: five of six forms "old text not found verbatim in the tab").
+
+    This is the map from markdown to that text: emphasis markers
+    dropped, everything else verbatim. Math is opaque (escaped for the
+    importer, shown as TeX) and footnote syntax is escaped to literal
+    brackets, so both keep their bytes. The markdown EXPORT is the
+    inverse map, and it is what the resolve reads, which is why the
+    record keeps the markdown and only the LOCATOR looks at this."""
+    return render_emphasis(markdown)[0]
+
 
 def escape_math(markdown: str) -> str:
     r"""Math spans for Google's markdown importer, which consumes one
@@ -221,6 +325,15 @@ def normalize_markdown(text: str) -> str:
     # content. Stripping here (not just in pull) keeps push, pull, and
     # session-start reconciliation agreeing on the canonical text.
     text, _ = strip_dangling(text)
+    # A hard line break inside a paragraph (a stanza line; a Doc-side
+    # shift-enter) exports as two trailing spaces. The canonical form is
+    # the backslash break, which Google imports correctly, pandoc renders
+    # in every output, and no whitespace pass can eat — so it is rewritten
+    # BEFORE trailing whitespace is stripped. Only a break followed by a
+    # continuation line counts: spaces before a blank line or a block
+    # opener (heading, list, table, quote, tag) are churn, as before.
+    # (verse-and-cast-design.md §2)
+    text = _HARD_BREAK.sub("\\\\\n", text)
     text = "\n".join(line.rstrip() for line in text.split("\n"))
     # Empty heading paragraphs (a Doc styling artifact, e.g. a blank
     # Subtitle line) are dropped, never merged into a neighbor.
@@ -2695,9 +2808,25 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
     styled pending form <<old>>{{new}}: old struck through, new green —
     and the DIFF made visible: the words of old that go are red, the
     words of new that arrive are blue. Highlights ride after the base
-    styles so they win on their subranges; color only (see RED_GONE)."""
+    styles so they win on their subranges; color only (see RED_GONE).
+
+    `old` is the text AS THE TAB HOLDS IT (rendered — see
+    `rendered_text`), never the markdown record: the strikethrough range
+    is measured from it, and the old span's own italics stay in the Doc
+    untouched so the markdown export gives the record back. `new` is the
+    markdown record, and it is RENDERED on the way in (`render_emphasis`):
+    the tab shows italics where the record has `*…*`, never the
+    asterisks — the author rules on the green half and should see prose
+    there (author, 2026-09-06: "The italic showed up incorrectly (with
+    stars)") — and the markdown export gives the asterisks back. The
+    inserted markers and the new half have italic and bold reset first:
+    an insertion inherits the style of the character before it, and a
+    paragraph that ends in italics would otherwise export its form as
+    `*>>{{…}}*`, which the pending grammar cannot read."""
     threads_mod.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
+    new, new_styles = render_emphasis(new)
+    new16 = _utf16_len(new)
     requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": end},
                         "text": ">>" + "{{" + new + "}}"}},
@@ -2709,7 +2838,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
             "textStyle": {"strikethrough": True}, "fields": "strikethrough"}},
         {"updateTextStyle": {
             "range": {"tabId": tab_id, "startIndex": start + 4 + old16,
-                      "endIndex": start + 4 + old16 + 4 + _utf16_len(new)},
+                      "endIndex": start + 8 + old16 + new16},
             "textStyle": {"foregroundColor": GREEN},
             "fields": "foregroundColor"}},
     ]
@@ -2728,15 +2857,57 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
                       "endIndex": new_base + e16},
             "textStyle": {"foregroundColor": BLUE_NEW},
             "fields": "foregroundColor"}})
+    # Last, after the highlights the request-shape tests pin by position:
+    # the two inserted runs take the style of the character before them,
+    # so reset emphasis on the markers and the new half — a form written
+    # after an italic must never export as `*>>{{…}}*`.
+    for s, e in ((start, start + 2),
+                 (start + 2 + old16, start + 8 + old16 + new16)):
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": s, "endIndex": e},
+            "textStyle": {"italic": False, "bold": False},
+            "fields": "italic,bold"}})
+    # …and then the new half's own emphasis, as runs, on top of the reset.
+    for s16, e16, style in new_styles:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": new_base + s16,
+                      "endIndex": new_base + e16},
+            "textStyle": style, "fields": ",".join(style)}})
     return requests
+
+
+def _unmark_replace_requests(tab_id: str, start: int, tab_old: str,
+                             new: str) -> list[dict]:
+    """The exact inverse of `_mark_replace_requests` for one form whose
+    `<<` sits at doc index `start`: the tail `>>{{new}}` and the head
+    `<<` are deleted (tail first, so the head's index still holds) and
+    the old span's strikethrough and colour are taken back. Italic and
+    bold on the old span were never touched, so they need no restoring."""
+    old16 = _utf16_len(tab_old)
+    new16 = _utf16_len(rendered_text(new))
+    return [
+        {"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": start + 2 + old16,
+            "endIndex": start + 8 + old16 + new16}}},
+        {"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": start, "endIndex": start + 2}}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": start,
+                      "endIndex": start + old16},
+            "textStyle": {"strikethrough": False,
+                          "foregroundColor": {"color": {"rgbColor": {}}}},
+            "fields": "strikethrough,foregroundColor"}},
+    ]
 
 
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     """Requests inserting a green {{new}} paragraph at doc index `at`
-    (a paragraph boundary): the critique pass's insertion form."""
+    (a paragraph boundary): the critique pass's insertion form. The new
+    half is rendered like a replace form's (`render_emphasis`)."""
     threads_mod.assert_no_pending_markers("", new)
+    new, new_styles = render_emphasis(new)
     text = "\n" + "{{" + new + "}}"
-    return [
+    requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": at},
                         "text": text}},
         {"updateTextStyle": {
@@ -2744,7 +2915,19 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
                       "endIndex": at + _utf16_len(text)},
             "textStyle": {"foregroundColor": GREEN},
             "fields": "foregroundColor"}},
+        {"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": at + 1,
+                      "endIndex": at + _utf16_len(text)},
+            "textStyle": {"italic": False, "bold": False},
+            "fields": "italic,bold"}},
     ]
+    base = at + 3                              # first char after "\n{{"
+    for s16, e16, style in new_styles:
+        requests.append({"updateTextStyle": {
+            "range": {"tabId": tab_id, "startIndex": base + s16,
+                      "endIndex": base + e16},
+            "textStyle": style, "fields": ",".join(style)}})
+    return requests
 
 
 def pending_write_order(threads: list[dict]) -> list[dict]:
@@ -2801,6 +2984,12 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     (design-filter-doc-settle §9.3)."""
     if n <= 0 or not needle:
         return 0
+    # Counted in the RENDERED universe — the tab's text has no emphasis
+    # markers (see `rendered_text`), and the writer searches it for the
+    # rendered needle when the raw one is not there. A plain paragraph
+    # renders to itself, so the count is unchanged where no markup is.
+    paragraphs = [rendered_text(p) for p in paragraphs]
+    needle = rendered_text(needle)
     full = "".join(p + "\n" for p in paragraphs)
     start = sum(len(p) + 1 for p in paragraphs[: n - 1])
     count, at = 0, full.find(needle)
@@ -2846,27 +3035,51 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     # would silently drop half of one producer's push.
     ordered = pending_write_order(threads)
     written, failed = [], []
+    tab_old_of: dict[str, str] = {}     # thread id → the old text AS THE TAB HOLDS IT
     for t in ordered:
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
             if t["proposed_old"]:
-                span = _locate_in_tab(
-                    docs_service, master_id, tab_id, t["proposed_old"],
-                    _occurrence(paragraphs, n, t["proposed_old"]))
+                old = t["proposed_old"]
+                occurrence = _occurrence(paragraphs, n, old)
+                # Exactness first — a tab holding the raw bytes (nothing
+                # rendered) is the record's own text. Then the RENDERED
+                # form: the importer turned the paragraph's emphasis into
+                # formatting, and the text runs carry no asterisks. The
+                # fallback is explicit here rather than hidden in the
+                # locator, because `_locate_in_tab`'s law is exactness
+                # and every other caller means it literally.
+                tab_old = old
+                span = _locate_in_tab(docs_service, master_id, tab_id, old,
+                                      occurrence)
+                if span is None and rendered_text(old) != old:
+                    tab_old = rendered_text(old)
+                    span = _locate_in_tab(docs_service, master_id, tab_id,
+                                          tab_old, occurrence)
                 if span is None:
                     raise LookupError("old text not found verbatim in the tab")
+                tab_old_of[t["id"]] = tab_old
                 requests = _mark_replace_requests(
-                    tab_id, span[0], span[1], t["proposed_old"],
-                    t["proposed_new"])
+                    tab_id, span[0], span[1], tab_old, t["proposed_new"])
             else:
                 if n == 0:
                     at = 1  # tab body start
                 else:
                     if n > len(paragraphs):
                         raise LookupError(f"anchor paragraph {n} out of range")
+                    anchor = paragraphs[n - 1]
                     span = _locate_in_tab(
-                        docs_service, master_id, tab_id, paragraphs[n - 1],
-                        _occurrence(paragraphs, n, paragraphs[n - 1]))
+                        docs_service, master_id, tab_id, anchor,
+                        _occurrence(paragraphs, n, anchor))
+                    if span is None and tab_anchor_text(anchor) != anchor:
+                        # A stanza (hard breaks), an italic paragraph, or
+                        # a heading: the tab holds it rendered — same
+                        # fallback the replace path takes, plus the
+                        # heading marker the importer turned into style.
+                        span = _locate_in_tab(
+                            docs_service, master_id, tab_id,
+                            tab_anchor_text(anchor),
+                            _occurrence(paragraphs, n, anchor))
                     if span is None:
                         raise LookupError("anchor paragraph not found "
                                           "verbatim in the tab")
@@ -2878,13 +3091,71 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
             written.append(t)
         except Exception as err:  # noqa: BLE001 — per-thread, keep going
             failed.append((t, str(err)))
-    # Read-back proof: every written form must be present verbatim.
+    # Read-back proof: every written form must be present verbatim — in
+    # the tab's TEXT, which holds the old half as the tab renders it.
     full = "".join(c for _, c in _tab_runs(docs_service, master_id, tab_id))
     for t in list(written):
-        form = threads_mod.render_pending(t["proposed_old"], t["proposed_new"])
+        tab_old = tab_old_of.get(t["id"], t["proposed_old"])
+        tab_new = rendered_text(t["proposed_new"])
+        form = (threads_mod.render_pending(tab_old, tab_new)
+                if tab_old else threads_mod.render_insertion(tab_new))
         if form not in full:
             written.remove(t)
             failed.append((t, "read-back: form not found after write"))
+    # The export proof, for forms either half of which carried markup:
+    # the resolve reads the tab back through the MARKDOWN export and
+    # matches each form's old half to the record byte for byte, and takes
+    # the new half from there as final. A form the writer placed by its
+    # rendered text, or whose new half it rendered, is only good if that
+    # export gives the markdown back — italics inside a struck-through
+    # span are the exporter's business, not ours to assume. One export
+    # per push, only when it is needed; a form the export cannot
+    # reproduce is taken back out, exactly, and reported — never left in
+    # the tab for a resolve to mis-read.
+    rendered = [t for t in written
+                if tab_old_of.get(t["id"], t["proposed_old"]) != t["proposed_old"]
+                or rendered_text(t["proposed_new"]) != t["proposed_new"]]
+    if rendered:
+        try:
+            fetched = tab_marked_markdown(db, manuscript, file, service,
+                                          docs_service, bridge)
+            forms = threads_mod.pending_forms(fetched.get("marked") or "")
+        except Exception as err:  # noqa: BLE001 — proof unavailable is failure
+            forms, err_text = None, str(err)
+        for t in rendered:
+            ok = forms is not None and any(
+                f["old"] == t["proposed_old"] and f["new"] == t["proposed_new"]
+                and (f["kind"] == "replace") == bool(t["proposed_old"])
+                for f in forms)
+            if ok:
+                continue
+            tab_old = tab_old_of.get(t["id"], t["proposed_old"])
+            if not tab_old:
+                # An insertion the export cannot give back: leave it and
+                # report — there is no exact inverse for a form with no
+                # old half, and the resolve collapses an unmatched
+                # insertion to nothing rather than to wrong text.
+                written.remove(t)
+                failed.append((t, "export proof: the markdown export does "
+                                  "not give this insertion back verbatim "
+                                  "(inline markup) — left in the tab"))
+                continue
+            form = threads_mod.render_pending(tab_old,
+                                              rendered_text(t["proposed_new"]))
+            span = _locate_in_tab(docs_service, master_id, tab_id, form)
+            if span is not None:
+                docs_service.documents().batchUpdate(
+                    documentId=master_id,
+                    body={"requests": _unmark_replace_requests(
+                        tab_id, span[0], tab_old, t["proposed_new"])}
+                ).execute()
+            written.remove(t)
+            failed.append((t, "export proof: the markdown export does not "
+                              "give this paragraph's old half back verbatim "
+                              "(inline markup) — form taken back out"
+                           if forms is not None else
+                           f"export proof unavailable ({err_text}) — form "
+                           "taken back out"))
     return {"written": written, "failed": failed,
             "url": tab_url(master_id, tab_id)}
 
@@ -2969,7 +3240,11 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
     if close < 0:
         return False
     actual_new = full[at + len(prefix) + 2: close]
-    if replacement == thread["proposed_new"] and actual_new != replacement:
+    # The tab holds the new half RENDERED (its emphasis as formatting), so
+    # the record's markdown is compared through the same map; only a
+    # difference beyond that is the author's own rewording.
+    if replacement == thread["proposed_new"] \
+            and actual_new != rendered_text(replacement):
         import json as _json
 
         from .db import loads as _loads
