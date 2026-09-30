@@ -575,6 +575,10 @@ Profile registry (key → standing rule):
   against the recorded ambition — the Rovelli/Hossenfelder "Big Idea"
   shelf, audio-first Rational Seekers — never against generic trade
   norms.
+- `pitch` — consult for any retailer description, preorder page, back
+  cover, audiobook summary, or sales-pitch question: the copy DERIVES from
+  this file and is never improvised in chat; a change of positioning is an
+  edit to this file first. Registered 2026-09-24 for DON; SMSTTD has none yet.
 - `audience` — consult for any question about PITCH: whether a passage
   assumes too much or explains too much, whether a term needs a bridge,
   whether a gloss is condescension. It records what the reader already

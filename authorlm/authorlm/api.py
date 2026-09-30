@@ -1029,6 +1029,17 @@ def collect(db: Database, manuscript: dict, config: dict,
         report.setdefault("illustrations", {})
         report["illustrations"]["excerpt_fixes"] = excerpt_fixes
         report["illustrations"]["externalize_offers"] = offers
+    # Verse files: poem count at the declared heading level, and a warning
+    # when a file marked verse has no poems there — caught on import, not
+    # when a lens refuses (verse.py; poem-grain ruling 2026-09-25).
+    try:
+        from .verse import verse_report
+
+        vr = verse_report(read_manuscript_files(Path(manuscript["path"])))
+        if vr:
+            report["verse"] = vr
+    except Exception:  # observation must never die on a structural read
+        pass
 
     # The author never has to remember the analyzers: a collected change
     # runs incremental extraction (concepts, links, aliasing statements)

@@ -281,8 +281,20 @@ def cmd_init(args):
     except ValueError as err:
         sys.exit(f"error: {err}.")
     print(f"Registered manuscript '{args.name}' at {path}")
+    from . import illus as _illus
+
+    pin = _illus.ensure_pin(path, _load_config(args))
+    print(f"Illustration pin: {pin['model']}"
+          + (f" {pin['image_size']}" if pin["image_size"] else "")
+          + f" → {_illus.ILLUS_DIR}/{_illus.PIN_FILE} (stamped from "
+          "config.toml [illustrations]; owned by the manuscript from now on)")
+    from .extraction import extraction_enabled
+
     llm = LLMClient(_load_config(args))
-    if llm.enabled and not args.no_extract:
+    if not extraction_enabled(_load_config(args)):
+        print(ui.dim("Concept extraction is off ([extraction] enabled = "
+                     "false); the graph grows by 'concept add' only."))
+    elif llm.enabled and not args.no_extract:
         _run_extraction(db, row, llm)
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
 
@@ -2640,6 +2652,9 @@ def _print_collect_report(report):
         print(ui.dim(
             "Essay summary(ies) deprecated (file left the toc; kept, "
             "not deleted): " + ", ".join(report["summaries_deprecated"])))
+    for v in report.get("verse", []) or []:
+        if v.get("warning"):
+            print(ui.yellow("Verse: " + v["warning"]))
     if report.get("illustrations"):
         ill = report["illustrations"]
         if ill.get("unrendered"):
@@ -3060,7 +3075,38 @@ def cmd_illus(args):
         if assembled["caption"]:
             print(f"# caption (export only, not sent to the model): "
                   f"{assembled['caption']}")
+        for i, ref in enumerate(assembled["references"], 1):
+            print(f"# image {i}: {ref['role']} {ref['slug']} → "
+                  f"{illus.ILLUS_DIR}/{ref['name']}")
+        for err in assembled["reference_errors"]:
+            print(ui.yellow(f"# unresolved: {err}"))
+        pin = illus.load_pin(root)
+        if pin:
+            print(f"# model: {pin['model']}"
+                  + (f"  size: {pin['image_size']}" if pin["image_size"]
+                     else "") + "  (the manuscript's pin)")
         print(assembled["composed"])
+        return
+
+    if args.action == "pin":
+        config = _load_config(args)
+        existed = illus.pin_path(root).exists()
+        current = illus.ensure_pin(root, config)
+        if args.model or args.size is not None:
+            illus.write_pin(root, args.model or current["model"],
+                            args.size if args.size is not None
+                            else current["image_size"])
+            current = illus.load_pin(root)
+            verb = "Pinned"
+        else:
+            verb = "Pin" if existed else "Stamped"
+        print(f"{verb} {manuscript['name']}: model {current['model']}, size "
+              f"{current['image_size'] or '(model default)'} → "
+              f"{illus.pin_path(root)}")
+        if not existed:
+            print(ui.dim("Stamped from config.toml [illustrations]; the "
+                         "global setting no longer reaches this manuscript. "
+                         "Change it here with 'illus pin --model … --size …'."))
         return
 
     if args.action == "show":
@@ -3107,6 +3153,24 @@ def cmd_illus(args):
                 "'illus render <fragment>' for a fresh take, or "
                 "'illus render <fragment> --from N' to evolve the image "
                 "you approved."))
+        cast_stale = [r for r in rows if r["state"] == "stale-cast"]
+        if cast_stale:
+            print(ui.yellow(
+                f"{len(cast_stale)} slot(s) were rendered against cast plates "
+                "that have since been re-picked (or before their cast was "
+                "named): 'illus render <fragment>' redraws them against the "
+                "current picks."))
+        off = [r for r in rows if r.get("off_model")]
+        if off:
+            print(ui.yellow(
+                f"{len(off)} slot(s) stand on an OFF-MODEL plate (rendered "
+                "on a model other than the manuscript's pin): "
+                + ", ".join(f"{r['file']}:{r['line']}" for r in off)))
+        problems = illus.slot_report(root).get("cast_problems") or []
+        if problems:
+            print(ui.yellow(f"{len(problems)} cast problem(s):"))
+            for line in problems:
+                print(ui.yellow(f"  • {line}"))
         moved = [r for r in rows if r["state"] == "stale-desc"]
         if moved:
             print(ui.dim(
@@ -3180,7 +3244,9 @@ def cmd_illus(args):
             try:
                 result = illus.render_slot(db, manuscript, slot, config,
                                            from_n=args.from_n,
-                                           count=args.count)
+                                           count=args.count,
+                                           model=args.model,
+                                           size=args.size)
             except (RuntimeError, LookupError, OSError) as err:
                 # One slot's failure (a network timeout, a server hiccup)
                 # must never sink the rest of the run.
@@ -3189,6 +3255,14 @@ def cmd_illus(args):
                 failed += 1
                 continue
             rendered += 1
+            if result.get("references"):
+                print(ui.dim("  references: "
+                             + ", ".join(result["references"])))
+            if result.get("off_model"):
+                print(ui.yellow(
+                    f"  OFF-MODEL: rendered on {result['model']}; the "
+                    f"manuscript's pin is {result['pinned_model']} — the "
+                    "plate is marked so in its metadata and in 'illus list'."))
             for name in result["written"]:
                 print(f"  wrote _illustrations/{name}")
             if not result["had_embed"]:
@@ -3277,7 +3351,7 @@ def cmd_illus(args):
                           f"{max(len(cands) - 1, 0)} other candidate(s)"),
                   supports_belief=None, weight="medium")
         db.insert("evidence", ev)
-        print(f"Picked candidate {args.candidate:02d} — embed now "
+        print(f"Picked candidate {wanted:02d} — embed now "
               f"{target['name']}. Picks are pinned: renders never move them.")
         return
 
@@ -8235,7 +8309,13 @@ def build_parser() -> argparse.ArgumentParser:
                "  illus pick pendulum 2           pin candidate 2 (renders "
                "never move a pick)\n"
                "  illus prompt pendulum           show the exact composed "
-               "prompt a render sends\n"
+               "prompt a render sends, with the attached plates\n"
+               "  illus pin                       show (or stamp) this "
+               "manuscript's illustration model and size\n"
+               "  illus pin --model openai/gpt-image-2 --size 1024x1536   "
+               "change the pin (an explicit act; renders never do)\n"
+               "  illus render fear --model gemini/gemini-3-pro-image-preview"
+               "   render OFF the pin, marked off-model\n"
                "  illus prune                     delete unpicked "
                "candidates and orphaned files\n"
                "  illus scan [file]               spot-finder: stage "
@@ -8256,8 +8336,8 @@ def build_parser() -> argparse.ArgumentParser:
                "snapshot instead of the latest")
     p.add_argument("action",
                    choices=["list", "show", "render", "rerender", "pick",
-                            "import", "prune", "prompt", "scan", "triage",
-                            "externalize", "versions", "restore"])
+                            "import", "prune", "prompt", "pin", "scan",
+                            "triage", "externalize", "versions", "restore"])
     p.add_argument("name", nargs="?",
                    help="prompt fragment selecting a slot (render/pick); "
                         "render without it does every unrendered slot; "
@@ -8272,6 +8352,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from", dest="from_n", type=int, metavar="N",
                    help="render: evolve candidate N under the current "
                         "illustration law (image-conditioned continuity)")
+    p.add_argument("--model", metavar="MODEL",
+                   help="render: this render on a model OTHER than the pin "
+                        "(marked off-model); pin: set the pinned model")
+    p.add_argument("--size", metavar="WxH",
+                   help="render: an image size other than the pin (marked "
+                        "off-model); pin: set the pinned size")
     p.add_argument("--local", action="store_true",
                    help="rerender: skip the Doc push at the end")
     p.add_argument("--accept", nargs="+", type=int, metavar="N",
