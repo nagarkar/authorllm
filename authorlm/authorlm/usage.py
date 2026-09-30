@@ -356,6 +356,15 @@ class Recorder:
         if images:
             entry["images"] = images
         self._write(entry)
+        if self.budgeted:
+            # Keep budget's memoized on-disk base in step with the line
+            # just written, or a long-lived process forgets every flush.
+            try:
+                from . import budget
+
+                budget.note_flushed(self.directory, round(priced, 6))
+            except Exception:
+                pass
 
     def client(self) -> dict | None:
         """The provenance join key (§15.15), resolved once per recorder —

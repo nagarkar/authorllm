@@ -155,6 +155,21 @@ def day_base(directory: Path | str) -> float:
     return total
 
 
+def note_flushed(directory: Path | str, amount: float) -> None:
+    """Keep the memoized day base in step with an aggregate line just
+    written to disk. Without this a long-lived process (the MCP server
+    flushes per tool call) would count only the base read at first use
+    plus the current pending aggregate, dropping every earlier flush.
+    Only touches an entry that already exists, so the no-`[budget]` path
+    and a not-yet-read base stay untouched. Never raises."""
+    try:
+        key = (str(directory), _today())
+        if key in _DAY_BASE:
+            _DAY_BASE[key] += max(float(amount or 0.0), 0.0)
+    except Exception:
+        pass
+
+
 def day_total(directory: Path | str, pending: float = 0.0) -> float:
     """The ledger's own lines for today plus the un-flushed in-memory
     aggregate."""
