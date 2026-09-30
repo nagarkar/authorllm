@@ -6007,7 +6007,236 @@ def check_filter_prelude_opt_in_frame() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_findings_door_and_morph_reply() -> None:
+    """Shared findings door (findings.py) + morph reply grammar (morph.py).
+
+    Lens and morph both stage Doc edits through these helpers. The
+    confidence floor, verbatim-anchor refuse reasons, and tag hygiene
+    are pure and high blast-radius — a regression here corrupts every
+    producer that plants a replacement, judgment, or footnote."""
+    from authorlm import findings as fd
+    from authorlm import morph as morph_mod
+
+    # --- footnote / judgment gist hygiene ------------------------------
+    check("footnote_gist collapses whitespace and empties nothing",
+          fd.footnote_gist("  one\n  two  ") == "one two"
+          and fd.footnote_gist("") == ""
+          and fd.footnote_gist(None) == "")
+    check("footnote_gist demotes brackets and strips reserved markers",
+          fd.footnote_gist("see [a] <<old>>{{new}}") == "see (a) oldnew")
+
+    # --- unit_of / edit_entry: the verbatim-anchor law -----------------
+    units = [
+        "First unit names gravity once.",
+        "Second unit also names gravity once.",
+        "Third unit says foobar here and foobar there.",
+    ]
+    n, reason = fd.unit_of(units, "First unit names gravity once.")
+    check("unit_of returns the one matching unit",
+          n == 1 and reason == "")
+    n, reason = fd.unit_of(units, "still nowhere")
+    check("unit_of refuses a quote that is not verbatim",
+          n is None and "not verbatim" in reason, reason)
+    n, reason = fd.unit_of(units, "gravity once.")
+    check("unit_of refuses a quote that spans two units",
+          n is None and "ambiguous" in reason, reason)
+
+    entry, reason = fd.edit_entry(
+        units, "First unit names gravity once.",
+        "First unit names choice once.", "why", set())
+    check("edit_entry anchors a unique quote",
+          entry == {"n": 1,
+                    "new": "First unit names choice once.",
+                    "why": "why"}
+          and reason == "")
+    entry, reason = fd.edit_entry(
+        units, "foobar", "x", "why", set())
+    check("edit_entry refuses a quote that repeats inside its unit",
+          entry is None and "more than once" in reason, reason)
+    entry, reason = fd.edit_entry(
+        units, "First unit names gravity once.",
+        "still <<struck>>", "why", set())
+    check("edit_entry refuses a replacement that carries reserved markers",
+          entry is None and "reserved markers" in reason, reason)
+    entry, reason = fd.edit_entry(
+        units, "First unit names gravity once.",
+        "   ", "why", set())
+    check("edit_entry refuses a replacement that empties the unit",
+          entry is None and "empty" in reason, reason)
+    entry, reason = fd.edit_entry(
+        units, "First unit names gravity once.",
+        "First unit names gravity once.", "why", set())
+    check("edit_entry refuses a no-op replacement",
+          entry is None and "identical" in reason, reason)
+    entry, reason = fd.edit_entry(
+        units, "First unit names gravity once.",
+        "rewritten", "why", {1})
+    check("edit_entry refuses a second edit on an already-taken unit",
+          entry is None and "already carries" in reason, reason)
+    check("judgment_tag carries producer, gist, and truncated id",
+          fd.judgment_tag("morph", "too sudden", "abcdefghijklm")
+          == "[Judgment: morph — too sudden | id: abcdefghijk]")
+
+    # --- morph window + reply parse ------------------------------------
+    check("morph window clamps at both ends",
+          morph_mod._window(5, 1) == [1, 2, 3]
+          and morph_mod._window(5, 5) == [3, 4, 5]
+          and morph_mod._window(5, 3) == [1, 2, 3, 4, 5]
+          and morph_mod._window(2, 1, radius=2) == [1, 2])
+    check("morph _is_prose skips headings, tags, and footnotes",
+          morph_mod._is_prose("A plain claim stands here.")
+          and not morph_mod._is_prose("# Opening")
+          and not morph_mod._is_prose("[^1]: a note")
+          and not morph_mod._is_prose("[Judgment: morph — x | id: abc]"))
+    parsed = morph_mod._parse_reply('```json\n{"P1": {"a": 1}}\n```')
+    check("morph _parse_reply strips a fenced JSON block",
+          parsed == {"P1": {"a": 1}})
+    check("morph _parse_reply accepts bare JSON and rejects a list",
+          morph_mod._parse_reply('{"P1": {}}') == {"P1": {}}
+          and morph_mod._parse_reply("[1, 2]") == {})
+    try:
+        morph_mod._parse_reply("not json")
+        refused = False
+    except ValueError as err:
+        refused = "not valid JSON" in str(err)
+    check("morph _parse_reply refuses invalid JSON by name", refused)
+
+    # --- confidence floor: replacement vs judgment-only ----------------
+    units_m = ["Claim without evidence stands alone.",
+               "# Heading",
+               "A second claim follows."]
+    data = {
+        "P1": {
+            "claim_before_evidence": {
+                "present": True, "confidence": 0.95,
+                "replacement": "Evidence first, then the claim.",
+            },
+            "discontinuity_with_prev": {"present": False},
+            "specificity": {
+                "present": True, "confidence": 0.4,
+                "replacement": "Name the agent.",
+            },
+            "concept_invalidation": {
+                "present": True, "confidence": 0.9,
+                "judgment": "This undoes prohairesis.",
+            },
+        },
+        "P3": {
+            "claim_before_evidence": {
+                "present": True, "confidence": 0.99,
+            },
+            "discontinuity_with_prev": {"present": False},
+            "specificity": {"present": False},
+            "concept_invalidation": {"present": False},
+        },
+    }
+    found = morph_mod._findings_from_reply(data, [1, 3], units_m)
+    check("morph reply yields one finding per flagged dimension",
+          len(found) == 4, str(found))
+    check("confident replacement is kept as a replacement",
+          any(f.get("replacement") == "Evidence first, then the claim."
+              and "judgment" not in f for f in found), str(found))
+    check("below-floor replacement downgrades to judgment naming the draft",
+          any(f.get("rule") == "Specificity"
+              and "judgment" in f and "replacement" not in f
+              and "80%" in f["judgment"]
+              and "Name the agent." in f["judgment"] for f in found),
+          str(found))
+    check("confident judgment is kept as judgment",
+          any(f.get("rule") == "Concept Invalidation"
+              and f.get("judgment") == "This undoes prohairesis."
+              and "replacement" not in f for f in found), str(found))
+    check("present with neither shape becomes a bare judgment",
+          any(f["quote"] == units_m[2]
+              and "no gist given" in f.get("judgment", "")
+              for f in found), str(found))
+    check("findings quote the paragraph verbatim for the hygiene gate",
+          all(f["quote"] in units_m for f in found))
+
+    # --- store_findings: hygiene + replacement + judgment + refuse -----
+    root = Path(tempfile.mkdtemp(prefix="authorlm-findings-door-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        file_text = (
+            "# Opening\n\n"
+            "Gravity is discussed early.\n\n"
+            "Every act begins with choice.\n\n"
+            "Choice again — and choice again in one unit.\n\n"
+            "Rank is earned daily.\n"
+        )
+        (ms / "01-choice.md").write_text(file_text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms), "--no-extract"])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        session, _ = api.ensure_session(db, manuscript)
+        rubric = ("### Flag — Claim Before Evidence\nWhy.\n\n"
+                  "### Flag — Specificity\nWhy.\n")
+        result = fd.store_findings(
+            db, manuscript, session,
+            kind="morph", producer="paragraph-defects",
+            relpath="01-choice.md", file_text=file_text,
+            findings=[
+                {"quote": "still nowhere", "note": "dropped"},
+                {"quote": "Gravity is discussed early.",
+                 "note": "Evidence first.",
+                 "rule": "Claim Before Evidence",
+                 "replacement": "Evidence of gravity is discussed early."},
+                {"quote": "Every act begins with choice.",
+                 "note": "Too abstract.",
+                 "rule": "Specificity",
+                 "judgment": "Name the agent who chooses."},
+                {"quote": "choice",
+                 "note": "Ambiguous anchor.",
+                 "replacement": "decision"},
+                {"quote": "Rank is earned daily.",
+                 "note": "Footnote plant.",
+                 "footnote": "see [Jung] <<x>>"},
+            ],
+            source="native", batch_prefix="mb",
+            origin_type="morph", verb_stem="morph",
+            rubric_body=rubric)
+        check("store_findings drops an ungrounded quote",
+              result["dropped_ungrounded"] == 1, str(result))
+        # Four survivors: replacement, judgment, ambiguous refuse, footnote
+        check("store_findings keeps grounded findings including refused edits",
+              len(result["findings"]) == 4, str(len(result["findings"])))
+        metas = [json.loads(r["metadata"]) for r in result["findings"]]
+        check("a known rule is recorded with rule_known true",
+              any(m.get("rule") == "Claim Before Evidence"
+                  and m.get("rule_known") is True for m in metas),
+              str(metas))
+        check("a confident replacement stages a Doc edit thread",
+              len(result["edits_staged"]) >= 1
+              and any(m.get("edit_thread")
+                      and m.get("quote") == "Gravity is discussed early."
+                      and "footnote" not in m for m in metas),
+              str(result["edits_staged"])[:200])
+        check("a judgment plants an insert thread, not a strike",
+              any(json.loads(t["metadata"]).get("judgment") is True
+                  for t in result["edits_staged"]),
+              str([t["proposed_new"] for t in result["edits_staged"]]))
+        check("an ambiguous quote refuses the edit and records the reason",
+              any("ambiguous" in r["reason"] for r in result["edits_refused"])
+              and any(m.get("edit_refused") and m.get("quote") == "choice"
+                      for m in metas),
+              str(result["edits_refused"]))
+        fn_meta = next(m for m in metas if m.get("footnote"))
+        check("a footnote gist is stored sanitized and planted on the edit",
+              fn_meta["footnote"] == "see (Jung) x"
+              and any("[Footnote: see (Jung) x]" in (t["proposed_new"] or "")
+                      for t in result["edits_staged"]),
+              str(fn_meta))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+
 def main_test() -> None:
+    check_findings_door_and_morph_reply()
     check_directives()
     check_critique_resolve_reembeds()
     check_client_resolution()
