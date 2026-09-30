@@ -1,25 +1,14 @@
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
-import { confirm as dialogConfirm, open } from '@tauri-apps/plugin-dialog';
-import type { MergeResult, PartialManifestInfo, View } from './types';
-import { renderManifestEditor, clearSectionErrors, clearVoiceCache } from './manifest';
+import type { ReloadSummary, View } from './types';
+import { renderBookView, clearErrors, summaryText } from './book';
 import { renderSettingsView } from './settings';
-import { renderMenuBar, restoreLastFile } from './menu';
+import { renderMenuBar, restoreLastBook } from './menu';
 import { logError, logInfo } from './logger';
 
 interface GenerationProgressEvent {
-  sectionIndex: number;
-  totalSections: number;
-  voiceName: string;
-  stability: number;
-  similarityBoost: number;
-  quality: string;
-  dictVersionId?: string;
+  sectionIndex: number; totalSections: number; stem: string; voiceName: string; quality: string;
 }
-
-interface StitchProgressEvent {
-  message: string;
-}
+interface StitchProgressEvent { message: string; }
 
 export function setStatusMessage(msg: string): void {
   const bar = document.getElementById('status-bar');
@@ -30,7 +19,7 @@ export function setStatusMessage(msg: string): void {
 // View router
 // ---------------------------------------------------------------------------
 
-let currentView: View = 'manifest';
+let currentView: View = 'book';
 
 export function navigate(view: View): void {
   currentView = view;
@@ -40,62 +29,39 @@ export function navigate(view: View): void {
 function render(): void {
   const root = document.getElementById('view-root')!;
   root.innerHTML = '';
-
-  if (currentView === 'manifest') {
-    renderManifestEditor(root);
-  } else {
-    renderSettingsView(root);
-  }
+  if (currentView === 'book') renderBookView(root);
+  else renderSettingsView(root);
 }
 
 // ---------------------------------------------------------------------------
-// Partial manifest-received event (from the HTTP server via Tauri)
+// Events from Rust
 // ---------------------------------------------------------------------------
 
-async function setupManifestListener(): Promise<void> {
-  await listen<{ info: PartialManifestInfo; partial: unknown }>('partial-manifest-received', async (event) => {
-    const { info, partial } = event.payload;
-    const partialJson = JSON.stringify(partial);
-
-    setStatusMessage(`Received ${info.displayName} from GAS add-on`);
-
-    const currentPath: string | null = await invoke('get_last_file');
-
-    let targetPath: string | null = null;
-
-    if (currentPath) {
-      const confirmed = await dialogConfirm(
-        `Add "${info.displayName}" to the current manifest file?\n(${currentPath})`,
-        { title: 'Merge Manifest', okLabel: 'Add to current', cancelLabel: 'Choose file…' }
-      );
-      if (confirmed) {
-        targetPath = currentPath;
-      }
-    }
-
-    if (!targetPath) {
-      const chosen = await open({ filters: [{ name: 'Manifest', extensions: ['json'] }] });
-      if (!chosen) return;
-      targetPath = typeof chosen === 'string' ? chosen : (chosen as string[])[0];
-    }
-
-    try {
-      const result: MergeResult = await invoke('merge_partial_into_master', {
-        filePath: targetPath,
-        partialJson,
-        createIfMissing: true,
-      });
-      const msg = `Merged: ${result.sectionsPreserved} preserved, ${result.sectionsUpdated} updated` +
-        (result.orphanedFileCount > 0 ? `, ${result.orphanedFileCount} files orphaned` : '');
-      setStatusMessage(msg);
-      clearSectionErrors();
-      clearVoiceCache();
-      await invoke('set_manifest_file_path', { filePath: targetPath });
-      await invoke('save_last_file', { filePath: targetPath });
-      navigate('manifest');
-    } catch (e) {
-      setStatusMessage(`Merge failed: ${e}`);
-    }
+async function setupListeners(): Promise<void> {
+  await listen<ReloadSummary>('book-changed', (event) => {
+    setStatusMessage(`AuthorLM exported — ${summaryText(event.payload)}`);
+    if (currentView === 'book') render();
+  });
+  // AuthorLM's `audio generate` wrote a take into the shared state
+  // (design §5, guard 1): repaint so the row turns green here too.
+  await listen<ReloadSummary>('state-changed', (event) => {
+    setStatusMessage(`AuthorLM rendered — ${summaryText(event.payload)}`);
+    if (currentView === 'book') render();
+  });
+  await listen<string>('book-error', (event) => {
+    setStatusMessage(`Reload failed: ${event.payload}`);
+  });
+  await listen<GenerationProgressEvent>('generation-progress', (event) => {
+    const { sectionIndex, totalSections, stem, voiceName, quality } = event.payload;
+    setStatusMessage(`Generating ${sectionIndex} of ${totalSections} · ${stem} · ${voiceName} · ${quality}`);
+  });
+  await listen<StitchProgressEvent>('stitch-progress', (event) => {
+    setStatusMessage(event.payload.message);
+  });
+  // Progressive output: each generated section repaints the view so its
+  // row turns green while the rest of the chapter is still rendering.
+  await listen<{ stem: string; sectionId: string; format: string }>('section-generated', () => {
+    if (currentView === 'book') render();
   });
 }
 
@@ -103,51 +69,27 @@ async function setupManifestListener(): Promise<void> {
 // Boot
 // ---------------------------------------------------------------------------
 
-async function setupProgressListener(): Promise<void> {
-  await listen<GenerationProgressEvent>('generation-progress', (event) => {
-    const { sectionIndex, totalSections, voiceName, stability, similarityBoost, quality, dictVersionId } = event.payload;
-    const parts = [
-      `Generating ${sectionIndex} of ${totalSections}`,
-      `voice: ${voiceName}`,
-      `stability=${stability.toFixed(2)}`,
-      `sim=${similarityBoost.toFixed(2)}`,
-      `quality=${quality}`,
-    ];
-    if (dictVersionId) parts.push(`dict=${dictVersionId.slice(0, 8)}…`);
-    setStatusMessage(parts.join(' · '));
-  });
-  await listen<StitchProgressEvent>('stitch-progress', (event) => {
-    setStatusMessage(event.payload.message);
-  });
-}
-
 async function boot(): Promise<void> {
   const app = document.getElementById('app')!;
+  renderMenuBar(app, () => { clearErrors(); navigate('book'); });
 
-  // Persistent menu bar — survives view transitions.
-  renderMenuBar(app, () => { clearVoiceCache(); navigate('manifest'); });
-
-  // View container — cleared and re-rendered on each navigation.
   const viewRoot = document.createElement('div');
   viewRoot.id = 'view-root';
   app.appendChild(viewRoot);
 
-  // Persistent status bar — outside the scrollable area.
   const statusBar = document.createElement('div');
   statusBar.id = 'status-bar';
   app.appendChild(statusBar);
 
-  await setupManifestListener();
-  await setupProgressListener();
-  await restoreLastFile(() => navigate('manifest'));
+  await setupListeners();
+  await restoreLastBook(() => navigate('book'));
   render();
 }
 
 boot()
-  .then(() => logInfo('boot', 'App ready'))
+  .then(() => logInfo('boot', 'audiostation ready'))
   .catch((e) => logError('boot', e));
 
-// Global unhandled error capture → Rust log file.
 window.addEventListener('error', (e) => {
   logError('window.onerror', `${e.message} at ${e.filename}:${e.lineno}:${e.colno}`);
 });

@@ -1,13 +1,12 @@
 [package]
-name = "editorllm-desktop"
-version = "0.1.0"
-description = "EditorLLM Desktop — audio manifest editor"
+name = "audiostation"
+version = "0.2.0"
+description = "audiostation — the AuthorLM audio studio: generate, stitch, audit and package an audiobook from the manifests AuthorLM writes"
 authors = []
 edition = "2021"
 
-# Prevent Cargo.lock from being auto-excluded in published crates.
 [lib]
-name = "editorllm_desktop_lib"
+name = "audiostation_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -26,16 +25,13 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "native-tls"] }
-
-axum = { version = "0.7", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
 
-uuid = { version = "1", features = ["v4"] }
+# Watches the audiobook folder so an AuthorLM export shows up at once
+# (design §10.3).
+notify = "6"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 
 [profile.dev]
 incremental = true

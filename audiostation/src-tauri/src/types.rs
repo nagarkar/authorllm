@@ -1,290 +1,441 @@
+//! The audiobook folder, as AuthorLM writes it and audiostation reads it
+//! (docs/audiobook-pipeline-design.md §2, §14).
+//!
+//! Two writers, two kinds of file, never the same file:
+//!
+//!   _audio/audiobook.json      AuthorLM writes  → `Book`
+//!   _audio/chapters/<stem>.json AuthorLM writes → `Chapter`
+//!   _audio/state/<stem>.json   audiostation writes → `ChapterState`
+//!   _audio/audio/              audiostation writes
+//!
+//! The shared key is the section id: a hash AuthorLM computes over the
+//! text, the resolved voice parameters and the applicable pronunciation
+//! rules. Same id, same audio. A section is "done" when its id has a
+//! state entry whose file exists. There is no dirty flag anywhere.
+//!
+//! The JSON fixture both test suites read lives at
+//! `authorlm/tests/fixtures/audiobook/`; a field renamed here fails the
+//! Python suite in the same commit.
+
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
-/// A single ElevenLabs voice returned by the list_voices command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceInfo {
-    pub voice_id: String,
-    pub name: String,
-}
-
-/// Pronunciation dictionary locator sent to the ElevenLabs TTS API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PronunciationDictionaryLocator {
-    pub pronunciation_dictionary_id: String,
-    pub version_id: String,
-}
-
-/// Top-level audio manifest sent from the GAS add-on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioManifest {
-    pub version: u8,
-    pub document_title: String,
-    pub tab_name: String,
-    /// ISO 8601 timestamp (e.g. "2026-04-30T12:00:00Z")
-    pub generated_at: String,
-    pub sections: Vec<ManifestSection>,
-    /// Pronunciation dictionary locators applied to all speech sections.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pronunciation_dictionary_locators: Option<Vec<PronunciationDictionaryLocator>>,
-    /// Stitched full-audio files keyed by output format (e.g. "mp3_44100_64").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_files: Option<HashMap<String, String>>,
-    /// Duration of the stitched audio in seconds — filled after a successful stitch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_secs: Option<f64>,
-    /// Integrated loudness of the stitched file in LUFS — filled after a successful two-pass stitch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub loudness_lufs: Option<f64>,
-    /// True peak of the stitched file in dBTP — filled after a successful two-pass stitch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub true_peak_dbtp: Option<f64>,
-}
-
-/// A section is either speech or silence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ManifestSection {
-    #[serde(rename = "speech")]
-    Speech(SpeechSection),
-    #[serde(rename = "silence")]
-    Silence(SilenceSection),
-}
-
-impl ManifestSection {
-    pub fn id(&self) -> &str {
-        match self {
-            ManifestSection::Speech(s) => &s.id,
-            ManifestSection::Silence(s) => &s.id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechSection {
-    /// UUID
-    pub id: String,
-    pub text: String,
-    pub voice_id: String,
-    /// Display name only — not sent to ElevenLabs API.
-    pub voice_name: String,
-    pub tts_model: String,
-    pub stability: f64,
-    pub similarity_boost: f64,
-    /// Playback speed multiplier (0.25–4.0). Defaults to 1.0 if absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speed: Option<f64>,
-
-    /// Generated audio files keyed by output format (e.g. "mp3_44100_64" → "/path/to/file.mp3").
-    /// Only formats that have been generated are present.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_files: Option<HashMap<String, String>>,
-    /// True when text or voice was edited after generation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_dirty: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SilenceSection {
-    /// UUID
-    pub id: String,
-    pub duration_ms: u32,
-    /// Set after stitching — path to the generated silence clip.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_file_path: Option<String>,
-}
-
-/// Response body for GET /status
-#[derive(Serialize)]
-pub struct StatusResponse {
-    pub running: bool,
-    pub version: &'static str,
-}
+pub const BOOK_FILE: &str = "audiobook.json";
+pub const CHAPTERS_DIR: &str = "chapters";
+pub const STATE_DIR: &str = "state";
+pub const AUDIO_DIR: &str = "audio";
+pub const SILENCE_DIR: &str = "silence";
+pub const ORPHANED_DIR: &str = "_orphaned";
+pub const ACX_DIR: &str = "acx";
+pub const SCHEMA: u8 = 1;
 
 // ---------------------------------------------------------------------------
-// Master manifest — multi-chapter ACX audiobook structure
+// audiobook.json — written by AuthorLM
 // ---------------------------------------------------------------------------
 
-/// Book-level metadata for ACX/KDP submission.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct BookMetadata {
+pub struct Book {
+    pub schema: u8,
     pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
     pub author: String,
+    #[serde(default)]
     pub narrator: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub publisher: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub copyright_year: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub copyright_holder: Option<String>,
+    #[serde(default)]
+    pub publisher: String,
     #[serde(default = "default_language")]
     pub language: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asin: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub isbn: Option<String>,
+    #[serde(default)]
+    pub copyright_year: Option<u16>,
+    #[serde(default)]
+    pub copyright_holder: String,
+    #[serde(default)]
+    pub chapters: Vec<ChapterRef>,
+    #[serde(default)]
+    pub opening_credits: Option<String>,
+    #[serde(default)]
+    pub closing_credits: Option<String>,
+    #[serde(default)]
+    pub about_author: Option<String>,
+    #[serde(default)]
+    pub retail_sample: Vec<String>,
+    #[serde(default)]
+    pub cover: Option<CoverSpec>,
+    #[serde(default)]
+    pub pronunciation_dictionary: Option<DictionaryRef>,
+    #[serde(default)]
+    pub cast: HashMap<String, CastVoice>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_quality")]
+    pub quality: String,
+    #[serde(default)]
+    pub paragraph_gap_ms: u32,
+    #[serde(default)]
+    pub generated_at: String,
 }
 
 fn default_language() -> String { "en".to_string() }
+fn default_quality() -> String { "mp3_44100_128".to_string() }
 
-/// Top-level manifest — holds all chapters + special audio sections.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MasterManifest {
-    pub version: u8,                    // always 2
-    pub document_title: String,
-    pub generated_at: String,
-    #[serde(default)]
-    pub chapters: Vec<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub opening_credits: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closing_credits: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub about_author: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retail_sample: Option<RetailSampleSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cover: Option<CoverSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<BookMetadata>,
+pub struct ChapterRef {
+    pub stem: String,
+    pub file: String,
+    pub title: String,
 }
 
-impl MasterManifest {
-    pub fn new(document_title: String) -> Self {
-        Self {
-            version: 2,
-            document_title,
-            generated_at: chrono::Utc::now().to_rfc3339(),
-            chapters: Vec::new(),
-            opening_credits: None,
-            closing_credits: None,
-            about_author: None,
-            retail_sample: None,
-            cover: None,
-            metadata: None,
-        }
-    }
-
-    /// All sections across all chapters and special sections, searched by ID.
-    pub fn find_section_mut(&mut self, id: &str) -> Option<&mut ManifestSection> {
-        for ch in &mut self.chapters {
-            if let Some(s) = ch.sections.iter_mut().find(|s| s.id() == id) {
-                return Some(s);
-            }
-        }
-        for slot in [&mut self.opening_credits, &mut self.closing_credits, &mut self.about_author] {
-            if let Some(am) = slot {
-                if let Some(s) = am.sections.iter_mut().find(|s| s.id() == id) {
-                    return Some(s);
-                }
-            }
-        }
-        None
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RetailSampleSpec {
-    #[serde(default)]
-    pub section_refs: Vec<SectionRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SectionRef {
-    pub chapter_tab_name: String,
-    pub section_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverSpec {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub width: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub height: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_size_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color_space: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub color: String,
 }
 
-/// Incoming partial manifest from GAS.
-/// One or more fields may be Some — chapter exports piggyback opening/closing
-/// credits and about-author so the desktop always receives a fresh snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryRef {
+    pub name: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub version_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CastVoice {
+    #[serde(default)]
+    pub voice_id: String,
+    #[serde(default)]
+    pub voice_name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub stability: f64,
+    #[serde(default)]
+    pub similarity: f64,
+    #[serde(default)]
+    pub speed: f64,
+}
+
+// ---------------------------------------------------------------------------
+// chapters/<stem>.json — written by AuthorLM
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Chapter {
+    pub schema: u8,
+    #[serde(default)]
+    pub file: Option<String>,
+    pub stem: String,
+    pub title: String,
+    #[serde(default)]
+    pub voice_default: String,
+    #[serde(default)]
+    pub sections: Vec<Section>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Section {
+    #[serde(rename = "speech")]
+    Speech(Speech),
+    #[serde(rename = "silence")]
+    Silence(Silence),
+}
+
+impl Section {
+    pub fn id(&self) -> &str {
+        match self {
+            Section::Speech(s) => &s.id,
+            Section::Silence(s) => &s.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Speech {
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    pub text: String,
+    #[serde(default)]
+    pub cast: String,
+    pub voice_id: String,
+    #[serde(default)]
+    pub voice_name: String,
+    pub model: String,
+    pub stability: f64,
+    pub similarity: f64,
+    #[serde(default = "one")]
+    pub speed: f64,
+    #[serde(default)]
+    pub pronunciations: Vec<Pronunciation>,
+    #[serde(default)]
+    pub source: serde_json::Value,
+}
+
+fn one() -> f64 { 1.0 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Pronunciation {
+    pub term: String,
+    pub say: String,
+}
+
+/// What a generated take was made from — the text, the voice and its
+/// settings, and the pronunciation rules that applied — recorded on the
+/// state entry at generation time. On any later load, a section without
+/// audio is paired to its last take by text and the card says what
+/// changed SINCE THAT TAKE, whether or not the app was running when the
+/// export happened (author's ask, 2026-09-04: "so the reason matches up
+/// with my memory of what I did").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MadeFrom {
+    pub text: String,
+    #[serde(default)]
+    pub cast: String,
+    pub voice_id: String,
+    pub model: String,
+    pub stability: f64,
+    pub similarity: f64,
+    #[serde(default = "one")]
+    pub speed: f64,
+    #[serde(default)]
+    pub pronunciations: Vec<Pronunciation>,
+}
+
+impl From<&Speech> for MadeFrom {
+    fn from(s: &Speech) -> Self {
+        MadeFrom { text: s.text.clone(), cast: s.cast.clone(), voice_id: s.voice_id.clone(),
+                   model: s.model.clone(), stability: s.stability, similarity: s.similarity,
+                   speed: s.speed, pronunciations: s.pronunciations.clone() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Silence {
+    pub id: String,
+    pub duration_ms: u32,
+}
+
+// ---------------------------------------------------------------------------
+// state/<stem>.json — written by audiostation, and by nothing else
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterState {
+    #[serde(default = "schema_default")]
+    pub schema: u8,
+    /// section id → what has been generated for it. Paths are relative
+    /// to the audiobook folder.
+    #[serde(default)]
+    pub sections: HashMap<String, SectionState>,
+    /// output format → stitched chapter file, relative to the folder.
+    #[serde(default)]
+    pub stitched: HashMap<String, String>,
+    /// output format → the stitch key the file was made with (§10.2: a
+    /// stitched file is a function of the section sequence and the
+    /// encoder recipe; when the key no longer matches the chapter's,
+    /// the file is stale and Re-stitch lights up).
+    #[serde(default)]
+    pub stitch_keys: HashMap<String, String>,
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    #[serde(default)]
+    pub loudness_lufs: Option<f64>,
+    #[serde(default)]
+    pub true_peak_dbtp: Option<f64>,
+}
+
+fn schema_default() -> u8 { SCHEMA }
+
+impl Default for ChapterState {
+    fn default() -> Self {
+        ChapterState { schema: SCHEMA, sections: HashMap::new(), stitched: HashMap::new(),
+                       stitch_keys: HashMap::new(),
+                       duration_secs: None, loudness_lufs: None, true_peak_dbtp: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionState {
+    /// output format → file, relative to the audiobook folder.
+    #[serde(default)]
+    pub audio_files: HashMap<String, String>,
+    /// The ElevenLabs `request-id` header of the LAST generation, for
+    /// request stitching within its two-hour window (design §8).
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// RFC 3339, when that generation happened.
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    /// What that generation was made from (absent on takes recorded
+    /// before 2026-09-04; those can still be paired by id, never by text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_from: Option<MadeFrom>,
+}
+
+// ---------------------------------------------------------------------------
+// What changed on the last reload (design §10.3) — in memory only
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionChange {
+    /// "text" | "params" | "new"
+    pub kind: String,
+    /// For "params": which fields moved (voice, model, stability, …), and
+    /// each pronunciation rule by name: "Basilides: old → new",
+    /// "added Prohairesis → pro-HY-ruh-sis", "removed Abraxas".
+    #[serde(default)]
+    pub detail: Vec<String>,
+    /// When the take this is measured against was generated (RFC 3339),
+    /// when known — the badge reads "changed since <then>".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// The loaded folder, in memory
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PartialManifest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chapter: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub opening_credits: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub closing_credits: Option<AudioManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub about_author: Option<AudioManifest>,
+pub struct LoadedChapter {
+    pub chapter: Chapter,
+    pub state: ChapterState,
+    /// id → change flag, kept until that id has generated audio.
+    #[serde(default)]
+    pub changes: HashMap<String, SectionChange>,
+    /// Texts of sections that vanished on the last reload.
+    #[serde(default)]
+    pub removed: Vec<String>,
+    /// True when this chapter appeared on the last reload.
+    #[serde(default)]
+    pub added: bool,
+    /// What a stitch of this chapter would be keyed by right now.
+    #[serde(default)]
+    pub stitch_key: String,
 }
 
-impl PartialManifest {
-    /// Returns the kind of the primary (first non-None) field. Used for display only.
-    pub fn kind(&self) -> &'static str {
-        if self.chapter.is_some()              { "chapter" }
-        else if self.opening_credits.is_some() { "openingCredits" }
-        else if self.closing_credits.is_some() { "closingCredits" }
-        else if self.about_author.is_some()    { "aboutAuthor" }
-        else                                   { "unknown" }
-    }
-    /// Returns a reference to the primary (first non-None) AudioManifest.
-    pub fn inner(&self) -> Option<&AudioManifest> {
-        self.chapter.as_ref()
-            .or(self.opening_credits.as_ref())
-            .or(self.closing_credits.as_ref())
-            .or(self.about_author.as_ref())
-    }
-    pub fn display_name(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(m) = &self.chapter       { parts.push(format!("chapter:{}", m.tab_name)); }
-        if self.opening_credits.is_some()    { parts.push("openingCredits".into()); }
-        if self.closing_credits.is_some()    { parts.push("closingCredits".into()); }
-        if self.about_author.is_some()       { parts.push("aboutAuthor".into()); }
-        if parts.is_empty() { "Unknown".into() } else { parts.join("+") }
-    }
-}
-
-/// Returned to frontend after receiving a partial manifest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PartialManifestInfo {
-    pub kind: String,
-    pub display_name: String,
-    pub document_title: String,
+pub struct Master {
+    /// The `_audio/` folder, absolute.
+    pub dir: PathBuf,
+    pub book: Book,
+    /// In `book.chapters` order.
+    pub chapters: Vec<LoadedChapter>,
+    pub opening_credits: Option<LoadedChapter>,
+    pub closing_credits: Option<LoadedChapter>,
+    pub about_author: Option<LoadedChapter>,
+    /// Book-level fields that moved on the last reload.
+    #[serde(default)]
+    pub book_changes: Vec<String>,
 }
 
-/// Result of merge_partial_into_master.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MergeResult {
-    pub sections_preserved: usize,
-    pub sections_updated: usize,
-    pub orphaned_file_count: usize,
-    pub orphaned_dir: Option<String>,
+impl Master {
+    /// Every loaded chapter, chapters first then the special slots.
+    pub fn all(&self) -> Vec<&LoadedChapter> {
+        let mut out: Vec<&LoadedChapter> = self.chapters.iter().collect();
+        out.extend(self.opening_credits.iter());
+        out.extend(self.closing_credits.iter());
+        out.extend(self.about_author.iter());
+        out
+    }
+
+    pub fn all_mut(&mut self) -> Vec<&mut LoadedChapter> {
+        let mut out: Vec<&mut LoadedChapter> = self.chapters.iter_mut().collect();
+        out.extend(self.opening_credits.iter_mut());
+        out.extend(self.closing_credits.iter_mut());
+        out.extend(self.about_author.iter_mut());
+        out
+    }
+
+    pub fn find(&self, stem: &str) -> Option<&LoadedChapter> {
+        self.all().into_iter().find(|c| c.chapter.stem == stem)
+    }
+
+    pub fn find_mut(&mut self, stem: &str) -> Option<&mut LoadedChapter> {
+        self.all_mut().into_iter().find(|c| c.chapter.stem == stem)
+    }
+
+    /// The chapter holding a section id.
+    pub fn chapter_of(&self, section_id: &str) -> Option<&LoadedChapter> {
+        self.all().into_iter()
+            .find(|c| c.chapter.sections.iter().any(|s| s.id() == section_id))
+    }
+
+
+    pub fn resolve(&self, rel: &str) -> PathBuf {
+        resolve_in(&self.dir, rel)
+    }
+
+    /// The manuscript root — the folder above `_audio/` — where the
+    /// cover path in `audiobook.json` is relative to.
+    pub fn manuscript_root(&self) -> PathBuf {
+        self.dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.dir.clone())
+    }
 }
 
-/// Single ACX structural audit result.
+pub fn resolve_in(dir: &Path, rel: &str) -> PathBuf {
+    let p = Path::new(rel);
+    if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }
+}
+
+impl LoadedChapter {
+    /// A section is done at `format` when its id has a state entry whose
+    /// file exists (design §6).
+    pub fn done(&self, dir: &Path, id: &str, format: &str) -> bool {
+        self.state.sections.get(id)
+            .and_then(|s| s.audio_files.get(format))
+            .map(|rel| resolve_in(dir, rel).exists())
+            .unwrap_or(false)
+    }
+
+    pub fn all_done(&self, dir: &Path, format: &str) -> bool {
+        self.chapter.sections.iter().all(|s| match s {
+            Section::Speech(sp) => self.done(dir, &sp.id, format),
+            Section::Silence(_) => true,
+        })
+    }
+
+    pub fn speech(&self) -> Vec<&Speech> {
+        self.chapter.sections.iter().filter_map(|s| match s {
+            Section::Speech(sp) => Some(sp),
+            _ => None,
+        }).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACX audit
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditResult {
@@ -296,7 +447,6 @@ pub struct AuditResult {
 }
 
 #[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub enum AuditSeverity {
     Error,
     Warning,
@@ -307,246 +457,75 @@ pub enum AuditSeverity {
 mod tests {
     use super::*;
 
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../authorlm/tests/fixtures/audiobook/_audio")
+    }
+
     #[test]
-    fn deserialize_speech_section() {
-        let json = r#"{
-            "type": "speech",
-            "id": "abc-123",
-            "text": "Hello world",
-            "voiceId": "voice-001",
-            "voiceName": "Aria",
-            "ttsModel": "eleven_multilingual_v2",
-            "stability": 0.5,
-            "similarityBoost": 0.75
-        }"#;
-        let section: ManifestSection = serde_json::from_str(json).unwrap();
-        match section {
-            ManifestSection::Speech(s) => {
-                assert_eq!(s.id, "abc-123");
-                assert_eq!(s.text, "Hello world");
-                assert_eq!(s.voice_id, "voice-001");
-                assert_eq!(s.voice_name, "Aria");
-                assert!((s.stability - 0.5).abs() < 1e-9);
-                assert!(s.audio_files.is_none());
-                assert!(s.is_dirty.is_none());
-            }
-            _ => panic!("Expected speech section"),
+    fn fixture_book_parses() {
+        let text = std::fs::read_to_string(fixture_dir().join(BOOK_FILE)).unwrap();
+        let book: Book = serde_json::from_str(&text).unwrap();
+        assert_eq!(book.schema, SCHEMA);
+        assert_eq!(book.title, "Seven More Sermons To The Dead");
+        assert_eq!(book.chapters.iter().map(|c| c.stem.as_str()).collect::<Vec<_>>(),
+                   vec!["sermons", "kindness"]);
+        assert_eq!(book.about_author.as_deref(), Some("chapters/about.json"));
+        assert_eq!(book.retail_sample.len(), 3);
+        assert_eq!(book.cover.as_ref().unwrap().width, 2400);
+        assert_eq!(book.cast["herdsman"].speed, 0.97);
+        assert_eq!(book.pronunciation_dictionary.as_ref().unwrap().name,
+                   "Scratch pronunciations");
+    }
+
+    #[test]
+    fn fixture_chapters_parse_and_roundtrip() {
+        for entry in std::fs::read_dir(fixture_dir().join(CHAPTERS_DIR)).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let chapter: Chapter = serde_json::from_str(&text).unwrap();
+            assert_eq!(chapter.schema, SCHEMA);
+            assert!(chapter.sections.iter().any(|s| matches!(s, Section::Speech(_))),
+                    "{path:?} has speech");
+            // Round trip: what we parse is what AuthorLM wrote, field for field.
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let back: serde_json::Value = serde_json::to_value(&chapter).unwrap();
+            assert_eq!(value, back, "{path:?} round-trips");
         }
     }
 
     #[test]
-    fn deserialize_silence_section() {
-        let json = r#"{"type":"silence","id":"sil-1","durationMs":500}"#;
-        let section: ManifestSection = serde_json::from_str(json).unwrap();
-        match section {
-            ManifestSection::Silence(s) => {
-                assert_eq!(s.id, "sil-1");
-                assert_eq!(s.duration_ms, 500);
-                assert!(s.audio_file_path.is_none());
-            }
-            _ => panic!("Expected silence section"),
-        }
-    }
-
-    #[test]
-    fn deserialize_speech_with_result() {
-        let json = r#"{
-            "type": "speech",
-            "id": "s1",
-            "text": "Hi",
-            "voiceId": "v1",
-            "voiceName": "Alice",
-            "ttsModel": "eleven_multilingual_v2",
-            "stability": 0.5,
-            "similarityBoost": 0.75,
-            "audioFiles": {"mp3_44100_64": "/output/s1.mp3"}
-        }"#;
-        let section: ManifestSection = serde_json::from_str(json).unwrap();
-        match section {
-            ManifestSection::Speech(s) => {
-                let af = s.audio_files.as_ref().unwrap();
-                assert_eq!(af.get("mp3_44100_64").map(|s| s.as_str()), Some("/output/s1.mp3"));
-                assert!(s.is_dirty.is_none());
-            }
-            _ => panic!("Expected speech"),
-        }
-    }
-
-    #[test]
-    fn deserialize_dirty_speech() {
-        let json = r#"{
-            "type": "speech",
-            "id": "s1",
-            "text": "Changed",
-            "voiceId": "v1",
-            "voiceName": "Alice",
-            "ttsModel": "eleven_multilingual_v2",
-            "stability": 0.5,
-            "similarityBoost": 0.75,
-            "audioFiles": {"mp3_44100_64": "/old.mp3"},
-            "isDirty": true
-        }"#;
-        let section: ManifestSection = serde_json::from_str(json).unwrap();
-        match section {
-            ManifestSection::Speech(s) => {
-                assert_eq!(s.is_dirty, Some(true));
-                assert!(s.audio_files.is_some());
-            }
-            _ => panic!("Expected speech"),
-        }
-    }
-
-    #[test]
-    fn manifest_roundtrip() {
-        let manifest = AudioManifest {
-            version: 1,
-            document_title: "My Doc".into(),
-            tab_name: "Tab 1".into(),
-            generated_at: "2026-01-01T00:00:00Z".into(),
-            pronunciation_dictionary_locators: None,
-            audio_files: None,
-            duration_secs: None,
-            loudness_lufs: None,
-            true_peak_dbtp: None,
-            sections: vec![
-                ManifestSection::Speech(SpeechSection {
-                    id: "s1".into(),
-                    text: "Hello".into(),
-                    voice_id: "v1".into(),
-                    voice_name: "Alice".into(),
-                    tts_model: "eleven_multilingual_v2".into(),
-                    stability: 0.5,
-                    similarity_boost: 0.75,
-                    audio_files: None,
-                    speed: None, is_dirty: None,
-                }),
-                ManifestSection::Silence(SilenceSection {
-                    id: "si1".into(),
-                    duration_ms: 1000,
-                    audio_file_path: None,
-                }),
-            ],
+    fn fixture_state_parses_and_done_semantics() {
+        let dir = fixture_dir();
+        let text = std::fs::read_to_string(dir.join(STATE_DIR).join("sermons.json")).unwrap();
+        let state: ChapterState = serde_json::from_str(&text).unwrap();
+        assert_eq!(state.sections.len(), 1);
+        let (id, entry) = {
+            let (i, e) = state.sections.iter().next().unwrap();
+            (i.clone(), e.clone())
         };
-        let json = serde_json::to_string(&manifest).unwrap();
-        let roundtripped: AudioManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.document_title, manifest.document_title);
-        assert_eq!(roundtripped.tab_name, manifest.tab_name);
-        assert_eq!(roundtripped.sections.len(), 2);
+        assert_eq!(entry.request_id.as_deref(), Some("req-fixture-0001"));
+        let chapter: Chapter = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(CHAPTERS_DIR).join("sermons.json")).unwrap()).unwrap();
+        let loaded = LoadedChapter { chapter, state, changes: HashMap::new(),
+                                     removed: vec![], added: false, stitch_key: String::new() };
+        // The state names a file that does not exist in the fixture, so
+        // the section is NOT done: done means the file is there.
+        assert!(!loaded.done(&dir, &id, "mp3_44100_128"));
+        assert!(!loaded.all_done(&dir, "mp3_44100_128"));
+        // Write only the state file's shape back: relative paths survive.
+        let json = serde_json::to_string(&loaded.state).unwrap();
+        assert!(json.contains("audio/"));
+        assert!(!json.contains(dir.to_string_lossy().as_ref()));
     }
 
     #[test]
-    fn silence_audio_path_omitted_when_none() {
-        let section = ManifestSection::Silence(SilenceSection {
-            id: "sil1".into(),
-            duration_ms: 500,
-            audio_file_path: None,
-        });
-        let json = serde_json::to_string(&section).unwrap();
-        assert!(!json.contains("audioFilePath"));
-
-        let with_path = ManifestSection::Silence(SilenceSection {
-            id: "sil2".into(),
-            duration_ms: 500,
-            audio_file_path: Some("/tmp/silence_500ms.mp3".into()),
-        });
-        let json2 = serde_json::to_string(&with_path).unwrap();
-        assert!(json2.contains("audioFilePath"));
-    }
-
-    #[test]
-    fn optional_fields_omitted_in_serialization() {
-        let section = ManifestSection::Speech(SpeechSection {
-            id: "s1".into(),
-            text: "Hi".into(),
-            voice_id: "v1".into(),
-            voice_name: "A".into(),
-            tts_model: "m".into(),
-            stability: 0.5,
-            similarity_boost: 0.75,
-            audio_files: None,
-            speed: None, is_dirty: None,
-        });
-        let json = serde_json::to_string(&section).unwrap();
-        assert!(!json.contains("audioFiles"));
-        assert!(!json.contains("isDirty"));
-    }
-
-    #[test]
-    fn stitch_measurements_roundtrip() {
-        let json = r#"{
-            "version":1,"documentTitle":"D","tabName":"T","generatedAt":"2026-01-01T00:00:00Z",
-            "sections":[],
-            "durationSecs":182.4,"loudnessLufs":-20.0,"truePeakDbtp":-3.0
-        }"#;
-        let m: AudioManifest = serde_json::from_str(json).unwrap();
-        assert!((m.duration_secs.unwrap() - 182.4).abs() < 1e-9);
-        assert!((m.loudness_lufs.unwrap() - (-20.0)).abs() < 1e-9);
-        assert!((m.true_peak_dbtp.unwrap() - (-3.0)).abs() < 1e-9);
-        // Omitted when None
-        let m2 = AudioManifest { version: 1, document_title: "D".into(), tab_name: "T".into(),
-            generated_at: "2026-01-01T00:00:00Z".into(), sections: vec![],
-            pronunciation_dictionary_locators: None, audio_files: None,
-            duration_secs: None, loudness_lufs: None, true_peak_dbtp: None };
-        let out = serde_json::to_string(&m2).unwrap();
-        assert!(!out.contains("durationSecs"));
-        assert!(!out.contains("loudnessLufs"));
-    }
-
-    #[test]
-    fn book_metadata_roundtrip() {
-        let meta = BookMetadata {
-            title: "Seven Sermons".into(),
-            subtitle: None,
-            author: "C.G. Jung".into(),
-            narrator: "Adam Stone".into(),
-            publisher: None,
-            copyright_year: Some(2026),
-            copyright_holder: Some("Estate of C.G. Jung".into()),
-            language: "en".into(),
-            asin: None,
-            isbn: None,
-        };
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains("\"author\":\"C.G. Jung\""));
-        assert!(!json.contains("subtitle"));
-        assert!(!json.contains("publisher"));
-        let back: BookMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.title, "Seven Sermons");
-        assert_eq!(back.copyright_year, Some(2026));
-    }
-
-    #[test]
-    fn book_metadata_default_language() {
-        let json = r#"{"title":"T","author":"A","narrator":"N"}"#;
-        let m: BookMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(m.language, "en");
-    }
-
-    #[test]
-    fn audio_files_map_roundtrip() {
-        let mut files = HashMap::new();
-        files.insert("mp3_44100_64".to_string(), "/out/mp3_44100_64_s1.mp3".to_string());
-        files.insert("mp3_44100_128".to_string(), "/out/mp3_44100_128_s1.mp3".to_string());
-        let section = ManifestSection::Speech(SpeechSection {
-            id: "s1".into(),
-            text: "Hi".into(),
-            voice_id: "v1".into(),
-            voice_name: "A".into(),
-            tts_model: "m".into(),
-            stability: 0.5,
-            similarity_boost: 0.75,
-            audio_files: Some(files),
-            speed: None, is_dirty: None,
-        });
-        let json = serde_json::to_string(&section).unwrap();
-        let back: ManifestSection = serde_json::from_str(&json).unwrap();
-        if let ManifestSection::Speech(s) = back {
-            let af = s.audio_files.unwrap();
-            assert_eq!(af.get("mp3_44100_64").map(|s| s.as_str()), Some("/out/mp3_44100_64_s1.mp3"));
-            assert_eq!(af.get("mp3_44100_128").map(|s| s.as_str()), Some("/out/mp3_44100_128_s1.mp3"));
-            assert!(af.get("mp3_44100_192").is_none());
-        } else {
-            panic!("Expected speech");
-        }
+    fn state_default_is_empty_and_serializes_schema() {
+        let s = ChapterState::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"schema\":1"), "a fresh state file carries the schema");
+        let back: ChapterState = serde_json::from_str("{}").unwrap();
+        assert_eq!(back.schema, SCHEMA);
+        assert!(back.sections.is_empty());
     }
 }
