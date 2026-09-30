@@ -1302,7 +1302,9 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
 # The remedy each producer's pending forms are settled by. A refusal
 # that names the wrong verb is worse than a refusal that names none.
 _SETTLE_REMEDY = {"critique": "critique resolve {file}",
-                  "filter": "filter resolve {file}"}
+                  "filter": "filter resolve {file}",
+                  "footnote": "footnote resolve {file}",
+                  "explain": "explain resolve {file}"}
 
 
 def forms_pending(db: Database, manuscript_id: str,
