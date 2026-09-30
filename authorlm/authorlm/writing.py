@@ -209,6 +209,21 @@ def _intents_block(writeup: dict) -> str:
                      for m in members)
 
 
+def _original_block(db: Database, writeup: dict) -> str:
+    """The pinned original of a rewrite — the author's own prose, tag
+    lines and footnotes, which a modeled rewrite is meant to reuse
+    ("use the language of the original as much as you can", author,
+    2026-09-03). Pinned at `write start`, so byte-stable across beats.
+    The DIGEST stays the authority on what the original CLAIMS."""
+    from . import api
+
+    text = api._version_text(db, writeup.get("source_version_id"),
+                             writeup["file"])
+    if not text or api.is_placeholder(text):
+        return ""
+    return text
+
+
 def _frame_block(db: Database, manuscript: dict, writeup: dict,
                  drafting_context: str) -> str:
     """Block A — the chapter frame, and the second cache breakpoint."""
@@ -223,6 +238,11 @@ def _frame_block(db: Database, manuscript: dict, writeup: dict,
         _section("BRIEF", meta.get("brief") or ""),
         _section("DIGEST",
                  json.dumps(digest, indent=2) if digest else ""),
+        _section("THE ORIGINAL ESSAY (pinned; the author's own wording, "
+                 "illustration tag lines and footnotes — reuse them where "
+                 "the beat spec says to keep the author's text; the DIGEST "
+                 "still governs which points are in play)",
+                 _original_block(db, writeup)),
         _section("RATIFIED PLAN", json.dumps(plan, indent=2)),
         _section("CONCEPT NOTES", _concept_notes(db, manuscript, plan)),
     ])

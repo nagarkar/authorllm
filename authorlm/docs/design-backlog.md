@@ -409,3 +409,65 @@ Also cut, with a standing reason: a VOLUME-ADAPTIVE promotion threshold.
 Measurement (below) showed belief count already grows logarithmically once
 matching works, and an adaptive bar would mask a matching regression —
 lowering the bar exactly when volume rose is how that bug becomes permanent.
+
+## Voice and preference context for the drafter (from the 2026-09-06 review)
+Ratified in conversation 2026-09-06 ("Agree overall with your
+suggestions"); the deterministic half shipped as design §15.24. The
+model-side half, in build order:
+
+1. **Summarizer VOICE + EXEMPLARS.** Two sections added to
+   `prompts/summarizer.md`'s schema: VOICE (three to five lines on
+   sentence shape and characteristic moves) and EXEMPLARS (paragraph ids
+   only — the payload assembler pulls the verbatim paragraphs at draft
+   time, so an exemplar can never go stale independently of its summary's
+   `source_hash`). Exemplars are drawn only from text the author wrote:
+   essays from before the beat loop existed, and forms the author reworded
+   in the Doc. The summarizer already runs on a paid non-Anthropic model at
+   collect, so the cost is a few hundred output tokens per essay.
+2. **Exemplar bank in block S.** `writing._law_block` gains an EXEMPLARS
+   section: N verbatim paragraphs per guide, chosen at `write start` and
+   frozen in the writeup metadata (like intents) so block S stays
+   byte-identical across beats. A guide-level VOICE CARD, distilled once
+   from the essays' VOICE lines by a subagent and ratified like a law,
+   sits beside it.
+3. **Edit-derived preferences (PRELUDE/CIPHER, Gao et al. 2024).** The
+   evidence already exists — reworded forms carry old and new text, doc
+   pulls carry diffs, rejections carry reasons. A pass turns each
+   session's (proposed → author's version) pairs into a ten-line
+   preference note per guide that goes into block S, re-derived per
+   session, judged by whether the next session's edit distance falls. It
+   REPLACES `belief-distill` on the drafting road: the distiller's
+   "A revised note must not …" prohibitions are queue screens, not
+   drafting guidance, and 281 candidates have accumulated with one
+   validated belief ("Challenge common assumptions…") demoted 2026-09-05
+   for producing the contrarian openers the author rejected.
+4. **Block A trim.** The AFTER summaries' bodies (≈ half of block A's
+   31K tokens) reach the drafter though a beat may only forward-reference
+   them; ship names only, bodies on request.
+
+## Verse and cast (DON): five tool changes
+Ratified 2026-09-25 in conversation; build reference
+`docs/verse-and-cast-design.md`. Order of work (§11 there): (1) backslash
+hard breaks as the canonical verse form, normalize/audio/lint, convert
+DON's files and re-push; (2) cast references — `cast-id:`/`cast:`/`prior:`
+tag grammar, `illustration_cast.md` under Omit, N-image renders on the
+OpenAI edits endpoint, the per-manuscript illustration pin written at
+init (no automatic fallback), `stale-cast` in status; (3) `form = "verse"`,
+the spread layout in the book profile (plates inside the type area, 2x
+export upscale, pixels-per-inch check, §8a), commentary budgets, the
+PDF-level pagination check, verse lint rows; (4) poem grain + siblings target SHIPPED 2026-09-25; the two verse lens artifacts (verse-law, section-arc) await the ratified verse law;
+(5) settings standardization — `manuscript.toml` for publication identity,
+DB keeps registration only, `[gdocs]` out of config.toml into `.env`. Not
+improvement tasks: features, designed here, built when the author says.
+
+## Concept graph redo (extraction switched off meanwhile)
+Author ruling 2026-09-25: "We need to redo that whole feature because it is
+presently not user friendly." LLM extraction is OFF via `[extraction]
+enabled = false` in `authorlm/config.toml` (the switch guards init,
+`extract`, `write complete`, and analysed collects at the one seam,
+`extraction.extract_concepts`); the zero-token upkeep — realizations,
+introduced_in, PROTECTED TERMS — keeps running, and the graph grows only by
+`concept add`. The redo is a grilling session of its own, starting from
+what the author wants to own: a glossary they write, terms flagged when a
+passage uses them inconsistently, no queue of machine guesses to triage.
+Not designed yet.

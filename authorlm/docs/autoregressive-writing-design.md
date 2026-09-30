@@ -2537,3 +2537,92 @@ able to pop an OAuth consent window. The review half the Sponsor named is alread
 on MCP and is transport-independent; what doc mode owes chat is legibility, so
 `list_filter_edits` reports the run's mode and whether forms are out, and names
 the CLI verb that ends the pause.
+
+### 15.24 The clean-context road — lint, critic, and three gates on `write propose` (2026-09-06)
+
+**What the record showed.** A review of every beat and filter session
+(2026-08-29 → 09-06; 44 transcripts, 69 recorded rejection reasons)
+found the filter pass working (47 proposals accepted untouched, 18
+reworded, 3 declined) and the beat loop sending roughly one beat in three
+back. The reasons cluster: repetition of an earlier beat or essay (14),
+prose not in the author's voice (16), an argument with a missing premise
+(15), ordering (11), term drift (8), grounding (6). Three causes, all in
+what the drafter is fed and who drafts: style reaches it as law without
+exemplars; other essays reach it as a content ledger (summaries) with no
+prose, so cross-essay repetition is invisible; and in chat mode the
+drafter IS the orchestrator, whose payload assembly was a discipline, not
+a gate — skipped 8 of 11 times on 2026-09-05 ("are you even looking at
+the prior beats?").
+
+**What is built.**
+
+- `authorlm/lint.py` — deterministic prose lint, no model. ERRORs encode
+  ratified laws: a sentence opening with "What"; a term inside its own
+  definition; three or more em-dashes in a sentence; eight words verbatim
+  from anywhere in the book (the essay being drafted included — a beat
+  that repeats an earlier beat is the commonest fault). Warnings: "not X
+  but Y", a definitional sentence about a concept another essay
+  `introduced_in`, a sentence over 40 words, a reading grade above 13.
+  Info: reading grade per paragraph (Flesch–Kincaid; the author's own
+  paragraphs sit at 9–12). `delta(before, after)` isolates what an edit
+  introduced, which is what `filter record` warns on per replacement.
+- `authorlm/critic.py` + `prompts/beat-critic.md` — `write critique`
+  assembles the critic's payload deterministically: laws and learnings as
+  a numbered checklist (L1…, G1…), the last verdict, the beat spec, the
+  concept notes, protected terms, the accepted text, the eight passages
+  elsewhere in the book the draft most resembles (5-gram Jaccard, reading
+  order as tie-break — repetition is checkable without shipping the
+  book), the lint report, and the draft. Reply grammar: VERDICT then
+  PASS/FAIL, then FINDINGS lines quoting the draft's own words.
+  **Two blocks added on the first trial (good-choice.md, 2026-09-06):**
+  THE ORIGINAL ESSAY (the pinned source of a rewrite — the author's own
+  prose for this essay, the reference for voice and casing while the
+  accepted text is still empty; deliberately NOT in the lint corpus,
+  since a modeled rewrite is meant to reuse its language) and SETTLED
+  CONTEXT (the BEFORE half of the drafting context, so a back-reference
+  to an earlier essay is judgeable; AFTER is withheld because it is not
+  ground for the drafter either). Without the first, a Sonnet critic
+  produced three casing false positives in four runs (Trajectory,
+  Agency, Good Choice — capitalized in the graph, lowercase in the
+  author's prose); the prompt now says casing follows the prose and a
+  law not written in the checklist cannot be broken. The critic runs on
+  the default model: its first pass found three real faults (an asserted
+  back-reference, casing against the original, a sentence shortened at
+  the cost of "in harmony") that Sonnet had not.
+- Three gates on `write propose` (chat road; the native `write draft`
+  passes `gated=False` because it assembled its own payload):
+  1. **assembly** — `write draft --dry-run` stamps the writeup with
+     `{n, seq, hashes}`; every verdict, replan and learning bumps `seq`;
+     propose refuses unless the stamp matches the current beat and
+     sequence. This is the improvement filed 2026-09-05, built.
+  2. **lint** — no ERROR, or `--lint-override "<why>"` recorded on the
+     guidance row (a refrain, a quotation, the author's own question).
+  3. **critic** — `write critique` stamps the draft's sha256 under the
+     current sequence; propose requires `--critique <report>` with
+     VERDICT PASS on THAT sha, or `--no-critic "<why>"` (author dictated
+     it; critic still failing after two redrafts), recorded on the row.
+  The gates' outcome lands in `guidance_history.metadata.gates`, so a
+  proposal's provenance (payload hashes, lint codes, override reasons,
+  critic verdict) is on the row the verdict is recorded against.
+- `--out` on `write draft --dry-run` and `write critique`: the payload
+  goes to a file and the terminal gets sizes and hashes only, so nothing
+  of it lands in the orchestrating conversation.
+- The skill (step 3 of the beat loop; step 2 of the filter loop) now
+  names the road: payload to file → drafter SUBAGENT with an empty
+  context → extract DRAFT → `write critique --out` → critic SUBAGENT
+  (Sonnet is enough) → redraft on FAIL at most twice → `write propose
+  --critique`. Subagents run on the Claude Code plan, not an API key,
+  which is what makes the independent critic affordable in chat mode.
+
+**Cost.** Measured on the 2026-09-05 hierarchy run the payload is S ≈ 22K
+chars, A ≈ 125K, B ≤ 19K, C ≈ 3K — about 40K tokens. The road adds one
+drafter call and one critic call per beat, plus a redraft on the beats
+the critic catches: two to three times today's drafting tokens, none of
+it in the main window. Replanning costs nothing extra on this road (each
+subagent is a fresh conversation; the cache argument only exists on the
+native path).
+
+**Deliberately not done here** (design-backlog.md, "Voice and preference
+context for the drafter"): exemplar passages and a voice card in block S;
+an edit-derived preference note replacing the belief distiller on the
+drafting road; trimming block A's AFTER summaries to names.

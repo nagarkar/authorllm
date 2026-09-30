@@ -74,6 +74,12 @@ REGISTRY: list[Prompt] = [
            "one beat of the author's prose from the layered drafting payload "
            "(style law, book context, plan, graph, accepted text, beat spec)",
            file="beat-draft.md", module=None),
+    Prompt("beat-critic", "write critique",
+           "an independent check of one drafted beat before the author "
+           "sees it — laws and learnings as a checklist, repetition against "
+           "the book, argument, terms, grounding (no model call: the critic "
+           "is a clean-context subagent in chat mode)",
+           file="beat-critic.md", module=None),
     Prompt("filter-run", "filter run; filter prelude",
            "the filter pass's per-unit edit proposals — the harness's own "
            "rules (grammar, conditioning, idempotency); the editorial law "
