@@ -44,7 +44,10 @@ def footnote_prefixes(names: list[str]) -> dict[str, str]:
     the shortest unique prefix of each file's stem — the first letter,
     extended to k+1 letters wherever two files collide on their first k
     (the author's scheme, it-9e6b7613a5c5). An exhausted stem uses its
-    whole self; file names are unique, so the map is collision-free."""
+    whole self. Nested paths may share a stem (`intro.md` and
+    `part2/intro.md`); when prefixing still leaves duplicate tokens,
+    later names get a numeric suffix so pandoc cannot bind two files'
+    footnotes to one definition."""
     stems = {name: Path(name).stem for name in names}
     tokens: dict[str, str] = {}
     for name, stem in stems.items():
@@ -53,6 +56,20 @@ def footnote_prefixes(names: list[str]) -> dict[str, str]:
         while k < len(stem) and any(o[:k] == stem[:k] for o in others):
             k += 1
         tokens[name] = stem[:k]
+    # Stem prefixes alone are not injective when two paths share a stem:
+    # both exhaust to the full stem and would emit the same [^token-…]
+    # labels. Disambiguate in caller order so the map stays unique.
+    used: set[str] = set()
+    for name in names:
+        tok = tokens[name]
+        if tok not in used:
+            used.add(tok)
+            continue
+        n = 2
+        while f"{tok}-{n}" in used:
+            n += 1
+        tokens[name] = f"{tok}-{n}"
+        used.add(tokens[name])
     return tokens
 
 
