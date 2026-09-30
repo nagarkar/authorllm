@@ -306,14 +306,22 @@ def sample_hits(hits: list[dict], max_terms: int = MAX_TERMS,
         seed = random.SystemRandom().randrange(1, 10**9)
     rng = random.Random(seed)
     by_term: dict[str, list[dict]] = {}
+    kind_of: dict[str, str] = {}
     for h in hits:
-        for term, _kind in h["terms"]:
+        for term, kind in h["terms"]:
             by_term.setdefault(term, []).append(h)
+            kind_of.setdefault(term, kind)
     all_terms = list(by_term)
-    chosen_terms = all_terms
-    if max_terms and len(all_terms) > max_terms:
-        chosen_terms = sorted(rng.sample(all_terms, max_terms),
-                              key=all_terms.index)
+    # The tradition's own terms are always shown: they are few, specific,
+    # and the reason the critic is here (the first run sampled "Nature",
+    # 71 units, and left "prohairesis", 12 units, unshown). The cap on
+    # terms applies to the BOOK's terms, which are the broad ones.
+    tradition = [t for t in all_terms if kind_of[t] == "tradition"]
+    book = [t for t in all_terms if kind_of[t] != "tradition"]
+    chosen_book = book
+    if max_terms and len(book) > max_terms:
+        chosen_book = rng.sample(book, max_terms)
+    chosen_terms = [t for t in all_terms if t in tradition or t in chosen_book]
     keys: set[tuple[str, int]] = set()
     shown: dict[str, int] = {}
     for term in chosen_terms:
@@ -340,8 +348,9 @@ def coverage_block(sample: dict) -> str:
     lines = [f"Scan: {sample['total_units']} unit(s) mention a term; this "
              f"run shows {len(sample['hits'])} of them — "
              f"{len(sample['chosen_terms'])} of {len(sample['all_terms'])} "
-             f"term(s), at most {MAX_PER_TERM if sample['shown'] else 0} "
-             f"location(s) each. Seed {sample['seed']} reproduces it.", ""]
+             f"term(s) (every tradition term; the book's terms sampled), "
+             f"locations sampled per term. Seed {sample['seed']} "
+             f"reproduces it.", ""]
     files_of: dict[str, dict[str, int]] = {}
     for h in sample.get("_all_hits", []):
         for term, _ in h["terms"]:
