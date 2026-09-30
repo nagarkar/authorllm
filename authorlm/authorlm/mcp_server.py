@@ -179,48 +179,6 @@ def get_status(manuscript: str | None = None) -> dict:
     return _guard(run)
 
 
-@mcp.resource(
-    TRIAGE_APP_URI,
-    name="AuthorLM Triage App",
-    description="Interactive concept and edge analysis and triage",
-    mime_type="text/html;profile=mcp-app",
-    meta={"ui": {"prefersBorder": False}},
-)
-def triage_app_resource() -> str:
-    from .triage_server import app_html
-
-    return app_html()
-
-
-@mcp.tool(
-    title="Open Triage App",
-    meta={
-        "ui": {"resourceUri": TRIAGE_APP_URI, "visibility": ["model"]},
-        "ui/resourceUri": TRIAGE_APP_URI,
-    },
-)
-def open_triage_app(manuscript: str | None = None) -> dict:
-    """Open the interactive Triage App for concepts and edges. Use when the
-    author asks to analyze, score, compare, or bulk-triage graph items."""
-    def run():
-        db = _db()
-        ms = _manuscript(db, manuscript)
-        return {"manuscript": ms["name"], "default_tab": "concepts"}
-    return _guard(run)
-
-
-@mcp.tool(
-    title="Triage App Request",
-    description="Internal request transport for the AuthorLM Triage App.",
-    meta={"ui": {"visibility": ["app"]}},
-)
-def triage_app_request(method: str, params: dict[str, Any]) -> dict:
-    """Internal app-only transport. Open the Triage App instead of calling
-    this directly."""
-    return _guard(lambda: triage_transport.dispatch(
-        method, params, workspace=_WORKSPACE, db=_db()))
-
-
 @mcp.tool()
 def declare_intent(statement: str, scope: str | None = None,
                    book_wide: bool = False,

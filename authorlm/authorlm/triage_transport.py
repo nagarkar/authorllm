@@ -1,4 +1,4 @@
-"""One JSON request contract for the standalone and MCP App transports."""
+"""One JSON request contract behind the Triage App's local HTTP server."""
 
 from __future__ import annotations
 

@@ -81,7 +81,7 @@ The last path is the remaining inconsistency. The Triage App and interactive CLI
 | `authorlm/db.py` | Added triage tables and indexes; added transaction depth and `Database.transaction()`; identifies deterministic triage evidence as system-authored |
 | `authorlm/api.py` | Delegated graph confirm, retire, merge, and edge decisions to the shared triage mutation service |
 | `authorlm/cli.py` | Reused triage help and mutation actions in interactive triage; added `triage-app` and deterministic bulk triage; included triage tables in unregister cleanup |
-| `authorlm/mcp_server.py` | Added MCP App resource, `open_triage_app`, and app-only `triage_app_request`; `_guard` now treats `RuntimeError` as an author-readable failure |
+| `authorlm/mcp_server.py` | Added MCP App resource, `open_triage_app`, and app-only `triage_app_request` (**all three removed 2026-09-04** — the MCP App road never rendered in the author's client; the local HTTP server is the one road); `_guard` now treats `RuntimeError` as an author-readable failure |
 | `authorlm/extraction.py` | Extended `record_triage()` with an optional rejection reason; excludes deterministic retirements from author feedback |
 | `authorlm/prompt_registry.py` | Registered the two analysis system prompts and two profile prompts; the file itself had mixed provenance |
 | `pyproject.toml` | Packaged profile JSON, prompt Markdown, and compiled app HTML |

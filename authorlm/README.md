@@ -197,9 +197,10 @@ outstanding questions.
 
 ## Triage App analyzer profiles
 
-Run `authorlm triage-app -m <manuscript>` for the standalone app, or call the
-MCP tool `open_triage_app` to render the same compiled interface in an
-MCP-Apps-capable chat host. Built-in, versioned profiles live in
+Run `authorlm triage-app -m <manuscript>`: it serves the compiled app on a
+local port and opens it in the browser (the MCP App road was removed
+2026-09-04; it never rendered in the client the author uses). Built-in,
+versioned profiles live in
 `authorlm/triage_profiles/`; manuscript overrides live in
 `<manuscript>/_triage/profiles/` and replace a built-in only when `id` and
 `version` match. A profile declares its `triage_type`, prompt, output columns,
