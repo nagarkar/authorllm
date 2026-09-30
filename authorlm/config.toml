@@ -115,6 +115,13 @@ model = "openai/gpt-image-2"
 image_size = "1536x1024"
 
 [extraction]
+# The switch for LLM concept extraction (init, 'extract', the end of a
+# writeup, analysed collects). OFF by author ruling 2026-09-25: the
+# concept-graph feature is to be redone; until then the graph changes only
+# by hand ('concept add'). The zero-token graph upkeep — realizations,
+# introduced_in, PROTECTED TERMS in filter and lens payloads — is not
+# governed by this switch and keeps running.
+enabled = false
 # Two-step extraction. On by default (TrackA/3) since pass 2 stopped
 # re-sending the full source text (TrackA/1) and its payload cap accounting
 # was fixed (TrackA/2). Set to false to fall back to the single-step path.

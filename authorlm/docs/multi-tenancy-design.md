@@ -100,7 +100,6 @@ Layout of a workspace:
 ```
 <workspace>/
   workspace.toml        # tenant, identity, default_manuscript (tiny)
-  .env                  # API keys (local topology only; hosted keeps keys server-side)
   authorlm.db (+wal/shm)
   gdocs_token.json
   logs/  backups/  clients/
@@ -108,6 +107,17 @@ Layout of a workspace:
 ```
 
 The author's SMSTTD keeps its current path; nothing forces a move.
+
+**Where the pointer lives (ruled 2026-09-03).** `.env` stays in the
+checkout, gitignored, and carries `AUTHORLM_WORKSPACE=<dir>` beside the
+API keys. It cannot move into the workspace: a file inside the workspace
+cannot tell you where the workspace is. So a checkout is the tenant's
+handle, the workspace is the data, and the database may sit on another
+volume. `api.open_db` never creates a database it was not asked for, and
+the CLI reads a missing file under a pointed-at workspace as an unmounted
+volume — refuse, never offer to create. `authorlm setup --workspace DIR`
+is the one verb that writes the pointer and starts a database (`init`
+with an explicit `-w` also may, which is what every test fixture does).
 
 ### D2. A principal replaces the OS user
 
@@ -124,13 +134,14 @@ existing rows line up with new ones.
 adds the distinction the code has been blurring: **common** lives in the
 *package* (not the repo checkout — for the author these are the same
 directory, for a guest they are not). `config.toml`, `illustration-craft.md`,
-the Google client secret and the kits become package data; `.env` moves to
-the workspace. `AUTHORLM_CONFIG` / `AUTHORLM_ENV` / `AUTHORLM_CRAFT`
-overrides stay as the test pins.
+the Google client secret and the kits become package data; `.env` stays in
+the checkout (secrets plus the workspace pointer — see D1). `AUTHORLM_CONFIG`
+/ `AUTHORLM_ENV` / `AUTHORLM_CRAFT` overrides stay as the test pins.
 
 Common (package): `config.toml`, `prompts/`, `kits/`, `publication/`,
 `triage_profiles/`, `illustration-craft.md`, `google-client.json`, the skill.
-Tenant (workspace): `workspace.toml`, database, token, logs, backups, `.env`.
+Tenant (workspace): `workspace.toml`, database, token, logs, backups.
+Checkout: `.env` (keys and the `AUTHORLM_WORKSPACE` pointer).
 Manuscript (directory + row): everything under `_*/`, `toc.toml`,
 `pronunciations.md`, properties, style guides, graph, beliefs, Doc mapping.
 

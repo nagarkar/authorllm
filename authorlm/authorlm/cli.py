@@ -5656,6 +5656,10 @@ def cmd_profile(args):
 def cmd_extract(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
+    from .extraction import DISABLED_MESSAGE, extraction_enabled
+
+    if not extraction_enabled(_load_config(args)):
+        sys.exit("error: " + DISABLED_MESSAGE)
     llm = LLMClient(_load_config(args))
     if not llm.enabled:
         sys.exit(
