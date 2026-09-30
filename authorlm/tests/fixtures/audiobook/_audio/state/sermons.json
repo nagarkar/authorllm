@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "sections": {
+    "e640b7caa27ec4e08caf9b3e7683a450": {
+      "audioFiles": {
+        "mp3_44100_128": "audio/e640b7caa27ec4e08caf9b3e7683a450.mp3_44100_128.mp3"
+      },
+      "requestId": "req-fixture-0001",
+      "generatedAt": "2026-01-01T00:00:00Z"
+    }
+  },
+  "stitched": {},
+  "durationSecs": null,
+  "loudnessLufs": null,
+  "truePeakDbtp": null
+}

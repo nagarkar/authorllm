@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "file": "about.md",
+  "stem": "about",
+  "title": "About the Author",
+  "voiceDefault": "narrator",
+  "sections": [
+    {
+      "type": "silence",
+      "id": "05192409118c7f1211f47e428d8329da",
+      "durationMs": 800
+    },
+    {
+      "type": "speech",
+      "id": "9a22d7ec11f0355392c87ac5fa717108",
+      "kind": "heading",
+      "text": "About the Author",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 1
+      },
+      "level": 1
+    },
+    {
+      "type": "speech",
+      "id": "f3757b7b53b8cb292e5e356d485a4a33",
+      "kind": "paragraph",
+      "text": "Chinmay Nagarkar writes speculative philosophy.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 3
+      }
+    },
+    {
+      "type": "silence",
+      "id": "d08b11e060eef3853a83e275e8292f88",
+      "durationMs": 2000
+    }
+  ]
+}

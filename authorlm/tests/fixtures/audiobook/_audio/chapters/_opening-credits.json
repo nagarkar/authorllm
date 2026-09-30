@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "file": null,
+  "stem": "_opening-credits",
+  "title": "Opening Credits",
+  "voiceDefault": "narrator",
+  "sections": [
+    {
+      "type": "silence",
+      "id": "05192409118c7f1211f47e428d8329da",
+      "durationMs": 800
+    },
+    {
+      "type": "speech",
+      "id": "e4ae66098893d0da308408d566da5e32",
+      "kind": "paragraph",
+      "text": "Seven More Sermons To The Dead. Septem Plus Sermones Ad Mortuos. Written by Chinmay Nagarkar. Narrated by Adam Stone.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 0
+      }
+    },
+    {
+      "type": "silence",
+      "id": "03b14fd7171727efad20763abc1b8885",
+      "durationMs": 2000
+    }
+  ]
+}

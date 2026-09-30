@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "file": "kindness.md",
+  "stem": "kindness",
+  "title": "Kindness that Kills",
+  "voiceDefault": "narrator",
+  "sections": [
+    {
+      "type": "silence",
+      "id": "05192409118c7f1211f47e428d8329da",
+      "durationMs": 800
+    },
+    {
+      "type": "speech",
+      "id": "65933678e82c34c871bee01293394c2f",
+      "kind": "heading",
+      "text": "Kindness that Kills",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 1
+      },
+      "level": 1
+    },
+    {
+      "type": "speech",
+      "id": "4feddc3e05ddd73fef4960492e79b736",
+      "kind": "paragraph",
+      "text": "The Dharmic seeth that should he fail, he shall fall alone. Nature, ever patient and strong, shall bear others in his stead.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 3
+      }
+    },
+    {
+      "type": "silence",
+      "id": "6235f561732d4f5fb020cc0b59d466a7",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "6f869a3f21629e9bb83dd7b1d5971e5c",
+      "kind": "paragraph",
+      "text": "This paragraph is for the ear only.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 5
+      }
+    },
+    {
+      "type": "silence",
+      "id": "517143f20debe1531cfa0487e44b8f3d",
+      "durationMs": 700
+    },
+    {
+      "type": "speech",
+      "id": "e271650778bc7f6709bee5f68df53604",
+      "kind": "paragraph",
+      "text": "A last paragraph.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 7
+      }
+    },
+    {
+      "type": "silence",
+      "id": "19960f9cb35896c8a14d8fdc99d2674d",
+      "durationMs": 2000
+    }
+  ]
+}

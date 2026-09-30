@@ -81,7 +81,12 @@ CLASS_HELP = {
 # statement is that the key set is closed again after it.
 PRELUDES = ("pronunciations",)
 
-KEYS = ("class", "state", "prelude", "summaries", "profiles")
+# `cast` (bool) declares that the payload carries the CAST block — the
+# rows of `_audio/cast.md`, keys and role notes — so a casting filter
+# (audiobook-pipeline-design §5.4) can only ever name a real voice. Like
+# `summaries` and `profiles` it is context, not a prelude: nothing is
+# proposed before the units are judged.
+KEYS = ("class", "state", "prelude", "summaries", "profiles", "cast")
 
 DELIMITER = "---"
 
@@ -193,13 +198,20 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
             "summaries of the OTHER essays, before and after this one in "
             "the reading order. Default false: the cross-essay view is "
             "worth real tokens, so a filter asks for it.")
+    cast = meta.get("cast", False)
+    if not isinstance(cast, bool):
+        raise FilterError(
+            "`cast` is a boolean — true or false. It declares whether "
+            "this filter's payload carries the CAST block (the rows of "
+            "_audio/cast.md), which a casting filter needs so that every "
+            "[Voice:] tag it proposes names a real voice.")
     body = "\n".join(lines[end + 1:]).strip()
     if not body:
         raise FilterError("a filter is its prompt — there is nothing "
                           "after the front matter.")
     return {"class": klass, "state": (state or "").strip(),
             "prelude": prelude, "summaries": summaries,
-            "profiles": [k.strip() for k in profiles]}, body
+            "profiles": [k.strip() for k in profiles], "cast": cast}, body
 
 
 def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:

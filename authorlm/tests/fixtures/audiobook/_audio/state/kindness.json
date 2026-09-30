@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "sections": {
+    "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f": {
+      "audioFiles": {
+        "mp3_44100_128": "audio/0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f.mp3_44100_128.mp3"
+      },
+      "requestId": "req-fixture-kindness-old",
+      "generatedAt": "2026-09-01T10:00:00Z",
+      "madeFrom": {
+        "text": "A last paragraph.",
+        "cast": "narrator",
+        "voiceId": "pNInz6obpgDQGcFmaJgB",
+        "model": "eleven_multilingual_v2",
+        "stability": 0.6,
+        "similarity": 0.75,
+        "speed": 0.9,
+        "pronunciations": [
+          { "term": "Dharmic", "say": "DAR-mik" }
+        ]
+      }
+    }
+  },
+  "stitched": {},
+  "stitchKeys": {},
+  "durationSecs": null,
+  "loudnessLufs": null,
+  "truePeakDbtp": null
+}

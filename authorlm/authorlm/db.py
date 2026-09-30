@@ -43,7 +43,11 @@ CREATE TABLE IF NOT EXISTS manuscripts (
     hardcover_isbn TEXT NOT NULL DEFAULT '',
     trim_width REAL NOT NULL DEFAULT 0,
     trim_height REAL NOT NULL DEFAULT 0,
-    bleed INTEGER NOT NULL DEFAULT 0
+    bleed INTEGER NOT NULL DEFAULT 0,
+    narrator TEXT NOT NULL DEFAULT '',
+    publisher TEXT NOT NULL DEFAULT '',
+    copyright_year INTEGER NOT NULL DEFAULT 0,
+    language TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS manuscript_versions (
@@ -566,6 +570,23 @@ class Database:
             )
             self.conn.execute(
                 "ALTER TABLE manuscripts ADD COLUMN bleed INTEGER NOT NULL DEFAULT 0"
+            )
+        # Publication identity the audiobook needs (audiobook-pipeline-
+        # design §9): narrator and publisher for the credits and ID3
+        # tags, the copyright year, and the language that EPUB used to
+        # keep as an export setting — one copy, here.
+        if "narrator" not in manuscript_columns:
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN narrator TEXT NOT NULL DEFAULT ''"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN publisher TEXT NOT NULL DEFAULT ''"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN copyright_year INTEGER NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "ALTER TABLE manuscripts ADD COLUMN language TEXT NOT NULL DEFAULT ''"
             )
         if "aliases" not in self._columns("concept_nodes"):
             self.conn.execute(

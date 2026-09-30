@@ -5043,7 +5043,7 @@ def cmd_audio(args):
             plan = audio.dictionary_plan(manuscript, client)
             for line in audio.describe_plan(plan):
                 print(line)
-            if not (plan["create"] or plan["add"] or plan["change"]):
+            if not (plan["create"] or plan["add"] or plan["change"] or plan["remove"]):
                 print(ui.green("Nothing to push."))
                 return
             if not _confirm("Apply?", args.yes):
@@ -5052,11 +5052,100 @@ def cmd_audio(args):
             result = audio.dictionary_apply(plan, client)
             print(f"Dictionary {result['id']} at version "
                   f"{result['version_id']}: {result['added']} added, "
-                  f"{result['changed']} changed"
+                  f"{result['changed']} changed, "
+                  f"{result.get('removed', 0)} removed"
                   + (" (created)" if result["created"] else "") + ".")
             print(ui.dim("  Run 'audio export' to write the new version "
                          "into audiobook.json."))
             return
+        if args.action in ("generate", "retake"):
+            from . import generation
+            if not rest:
+                raise SystemExit(f"usage: audio {args.action} <chapter> "
+                                 "(-p 12,14-16 | --remaining) [--dry-run]")
+            stem = rest[0]
+            retake = args.action == "retake"
+            if retake and not args.paragraphs:
+                raise SystemExit("usage: audio retake <chapter> -p 12[,14-16]")
+            shown: list[str] = []
+
+            def progress(line: str) -> None:
+                print(ui.dim(f"  rendering {line}"))
+            result = generation.generate(
+                manuscript, stem, spec=args.paragraphs,
+                remaining=args.remaining, retake=retake,
+                dry_run=args.dry_run, progress=progress)
+            for p in result["skipped"]:
+                shown.append(f"  ¶ {p['ordinal']} already has a take — "
+                             f"'audio retake {stem} -p {p['ordinal']}' re-renders it")
+            if not result["planned"]:
+                print("\n".join(shown) if shown else
+                      f"{stem}: nothing to render.")
+                return
+            verb = "re-render" if retake else "render"
+            planned = ", ".join(str(p["ordinal"]) for p in result["planned"])
+            print(f"{stem} ¶ {planned}: {len(result['planned'])} paragraph(s), "
+                  f"{sum(p['characters'] for p in result['planned']):,} characters"
+                  f" at {result['quality']}"
+                  + (f" — dry run, nothing {verb}ed" if result["dry_run"] else ""))
+            for line in shown:
+                print(line)
+            if result["dry_run"]:
+                return
+            for r in result["rendered"]:
+                print(f"  ¶ {r['ordinal']} {r['id'][:8]}… {r['characters']:,} chars"
+                      f" · request {(r['requestId'] or '?')[:10]}")
+            acct = result["account"]
+            print(f"spent {result['characters']:,} characters"
+                  + (f" · {acct['remaining']:,} remaining on the account"
+                     if acct else ""))
+            return
+
+        if args.action == "preview":
+            from . import generation
+            if not rest and not args.all:
+                raise SystemExit("usage: audio preview <chapter> [-p 12,14-16] "
+                                 "| --all  [--force]")
+            result = generation.preview(
+                manuscript, None if args.all else rest[0], spec=args.paragraphs,
+                force=args.force, progress=lambda m: print(ui.dim(f"  {m}")))
+            for err in result["errors"]:
+                print(ui.yellow(f"  ! {err}"))
+            chars = sum(r["characters"] for r in result["rendered"])
+            print(f"{len(result['rendered'])} preview(s) rendered with "
+                  f"{result['voice']} at {result['rate']} wpm ({chars:,} characters)"
+                  f" · {result['kept']} already there"
+                  + (f" · {result['swept']} swept" if result["swept"] else ""))
+            return
+
+        if args.action == "serve":
+            from .audiobook_server import run
+            run(args.workspace, manuscript["name"], host=args.host,
+                port=args.port, open_browser=not args.no_open)
+            return
+
+        if args.action == "stitch":
+            from . import generation
+            if not rest:
+                raise SystemExit("usage: audio stitch <chapter>")
+            result = generation.stitch(manuscript, rest[0],
+                                       progress=lambda m: print(ui.dim(f"  {m}")))
+            dur = result["durationSecs"]
+            mins = f" · {int(dur // 60)}:{int(dur % 60):02d}" if dur else ""
+            print(f"{result['stem']}: {result['segments']} segments → "
+                  f"{result['rel']}{mins}")
+            return
+
+        if args.action == "status":
+            from . import generation
+            report = generation.status(manuscript, rest[0] if rest else None,
+                                       find=args.find)
+            for line in generation.describe_status(report, verbose=args.verbose):
+                print(line)
+            if args.find and not report["find"]:
+                print(ui.dim(f"  no paragraph contains «{args.find}»"))
+            return
+
     except (audio.AudioError, LookupError, RuntimeError) as err:
         raise SystemExit(ui.yellow(f"audio {args.action}: {err}"))
 
@@ -8470,9 +8559,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "audio",
-        help="the audiobook: export the manifests audiostation generates "
-             "from, audition voices, keep the cast and the ElevenLabs "
-             "dictionary, check readiness (docs/audiobook-pipeline-design.md)",
+        help="the audiobook: export the manifests, audition voices, keep "
+             "the cast and the ElevenLabs dictionary, check readiness, and "
+             "generate, retake, stitch and see the takes "
+             "(docs/audiobook-pipeline-design.md, audiobook-review-design.md)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="examples by action:\n"
                "  audio init                        seed _audio/audiobook.toml "
@@ -8491,12 +8581,47 @@ def build_parser() -> argparse.ArgumentParser:
                "hear each respelling in a real sentence, in its voice, "
                "no dictionary push; --settle keeps one\n"
                "  audio dictionary push             pronunciations.md → the "
-               "named ElevenLabs dictionary, after showing the diff")
+               "named ElevenLabs dictionary, after showing the diff\n"
+               "  audio status [becker] [--find Basilides] [-v]   the board: "
+               "takes, what moved since them, the stitch\n"
+               "  audio generate becker --remaining [--dry-run]   render every "
+               "paragraph without a take (paid; the cost prints first)\n"
+               "  audio generate becker -p 12,14-16   render those paragraphs; "
+               "a done one is skipped\n"
+               "  audio retake becker -p 14          re-render a paragraph that "
+               "has a take (paid)\n"
+               "  audio stitch becker                one file, ffmpeg, "
+               "loudness-normalised (free)\n"
+               "  audio preview becker | --all       the free listen: macOS "
+               "say, respellings substituted, one mp3 per paragraph\n"
+               "  audio serve [--port 8792] [--no-open]   the review page on "
+               "a loopback port; tailscale serve exposes it to the phone")
     p.add_argument("action",
                    choices=["init", "export", "check", "voices", "audition",
-                            "cast", "dictionary", "say"])
+                            "cast", "dictionary", "say", "generate", "retake",
+                            "stitch", "status", "preview", "serve"])
     p.add_argument("rest", nargs="*",
-                   help="cast set <key>; dictionary push; say <term>")
+                   help="cast set <key>; dictionary push; say <term>; "
+                        "generate/retake/stitch/status <chapter stem>")
+    p.add_argument("--all", action="store_true",
+                   help="preview: every chapter of the book")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="serve: bind address (default 127.0.0.1; the phone "
+                        "comes in through tailscale serve)")
+    p.add_argument("--port", type=int, default=8792,
+                   help="serve: port (default 8792)")
+    p.add_argument("--no-open", action="store_true", dest="no_open",
+                   help="serve: do not open the browser")
+    p.add_argument("--force", action="store_true",
+                   help="preview: re-render even where a preview exists")
+    p.add_argument("--remaining", action="store_true",
+                   help="generate: every paragraph of the chapter without a take")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="generate/retake: print the cost, render nothing")
+    p.add_argument("--find", metavar="WORDS",
+                   help="status: list the paragraphs whose text contains WORDS")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="status: one line per paragraph")
     p.add_argument("--say", help="say: respelling(s) to try, comma-separated "
                                  "(default: the table's)")
     p.add_argument("--dictionary", action="store_true",
@@ -8521,8 +8646,10 @@ def build_parser() -> argparse.ArgumentParser:
                                   "comma-separated")
     p.add_argument("--text", help="audition: the words to render")
     p.add_argument("--file", help="audition: take the words from this file")
-    p.add_argument("--paragraphs", help="audition: N or N-M paragraph "
-                                        "sections of --file")
+    p.add_argument("-p", "--paragraphs",
+                   help="audition: N or N-M paragraph sections of --file; "
+                        "generate/retake: paragraphs by number, 12,14-16, "
+                        "or by id")
     p.add_argument("--label", help="audition: a word for the caption")
     p.add_argument("--quality", default="mp3_44100_64",
                    help="audition: output format (default mp3_44100_64)")

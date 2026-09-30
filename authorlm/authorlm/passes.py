@@ -288,8 +288,26 @@ def summaries_message(ready: dict, pass_name: str) -> str:
 # ---------------------------------------------------- context package
 
 def paragraphs_of(text: str) -> list[str]:
+    """The essay's units. A unit is a paragraph PLUS any full-line
+    `[Voice:]` tags immediately above it (audiobook-pipeline-design
+    §5.4): the tag is metadata of the paragraph it casts, so a casting
+    proposal is a whole-unit replacement — tag line and unchanged
+    paragraph — and the rule that a filter never inserts stands. A
+    trailing tag with nothing below it stays its own unit."""
+    from .export import VOICE_LINE
     from .revisions import _paragraphs
-    return _paragraphs(text)
+
+    units = _paragraphs(text)
+    out: list[str] = []
+    carry: list[str] = []
+    for unit in units:
+        if all(VOICE_LINE.match(line) for line in unit.split("\n")):
+            carry.append(unit)
+            continue
+        out.append("\n\n".join(carry + [unit]) if carry else unit)
+        carry = []
+    out.extend(carry)
+    return out
 
 
 def echo_of(paragraph: str) -> str:

@@ -480,6 +480,25 @@ def _dictionary_block(dictionary: str) -> str:
     return "\n".join(pron.block_lines(dictionary))
 
 
+CAST_HEADER = (
+    "CAST (the roles this book is voiced in — a [Voice: key] tag may name "
+    "ONLY a key listed here; never invent one, never propose a voice or a "
+    "parameter, only who is speaking)")
+
+
+def cast_block(cast_text: str) -> str:
+    """The CAST block from `_audio/cast.md`'s text: one line per row,
+    key and role note. Voice ids and parameters are deliberately left
+    out — the filter places tags, it does not cast."""
+    from .audio import parse_cast
+
+    rows, _warnings = parse_cast(cast_text)
+    if not rows:
+        return "(no cast rows yet — `audio cast set` writes one)"
+    return "\n".join(f"- {r['key']}" + (f" — {r['note']}" if r["note"] else "")
+                     for r in rows)
+
+
 def is_hard_to_say(term: str) -> bool:
     """F1 — the hard signal, harness-computed and never model-judged.
 
@@ -715,7 +734,8 @@ def _essay_block(units: list[str]) -> str:
 def _frame_block(db: Database, manuscript: dict, run: dict,
                  units: list[str], text: str | None = None,
                  dictionary: str = "", summaries: bool = False,
-                 profiles: list[str] | None = None) -> str:
+                 profiles: list[str] | None = None,
+                 cast: str | None = None) -> str:
     """Block A — the second cache breakpoint.
 
     THE ESSAY and MOTIF REGISTRY appear for a GLOBAL filter only. The
@@ -757,6 +777,13 @@ def _frame_block(db: Database, manuscript: dict, run: dict,
             "AUTHOR PROFILES (declared context — never law, and never "
             "authority for a prose decision the author has not invoked it "
             "for)", _profiles_block(manuscript, profiles)))
+    if cast is not None:
+        # Beside the dictionary: a second author-owned table read live
+        # from its file, declared in front matter, present for the life
+        # of a run that asked for it.
+        sections.insert(sections.index(next(
+            s for s in sections if s.startswith(DICTIONARY_HEADER))) + 1,
+            _section(CAST_HEADER, cast_block(cast)))
     if summaries:
         # Between the graph-derived sections and the essay sections: it
         # is context about the BOOK, like the run history above it, not
@@ -848,7 +875,8 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
              units: list[str], window: tuple[int, int],
              threads: list[dict], text: str | None = None,
              dictionary: str = "", summaries: bool = False,
-             profiles: list[str] | None = None) -> Payload:
+             profiles: list[str] | None = None,
+             cast: str | None = None) -> Payload:
     """The whole payload, from stored state only.
 
     `units` comes from the caller's ONE capture of the manuscript (the
@@ -870,7 +898,7 @@ def assemble(db: Database, manuscript: dict, run: dict, artifact_body: str,
     return Payload(
         law=_law_block(db, manuscript["id"], run["file"], artifact_body),
         frame=_frame_block(db, manuscript, run, units, text, dictionary,
-                           summaries, profiles),
+                           summaries, profiles, cast),
         prefix=_prefix_block(run, units, window[0], threads),
         units=_units_block(run, units, window),
     )

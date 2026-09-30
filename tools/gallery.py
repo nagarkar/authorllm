@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Build a self-contained image-review page (for Artifact publishing).
+"""Build a self-contained media-review page (for Artifact publishing).
 
-Every image is embedded as a data URI, so the output needs no host and
-renders anywhere — the assistant publishes it as a claude.ai artifact
-for phone/remote review. Theme-aware (light/dark, including the
+Every image or audio clip is embedded as a data URI, so the output needs
+no host and renders anywhere — the assistant publishes it as a claude.ai
+artifact for phone/remote review. Theme-aware (light/dark, including the
 viewer's manual toggle).
 
 Usage:
     python tools/gallery.py --out page.html --title "Illustration review" \
         "img1.jpg::ascending.md — the monk among the idols" \
         "img2.png::PROPOSED for basilides.md — say yes to place" \
+        "clip.mp3::Adam Stone — stab 0.60 sim 0.75" \
         "img3.jpg"                       # caption optional
     python tools/gallery.py --out page.html --json spec.json
 
 JSON spec: {"title": ..., "note": ..., "images":
-    [{"path": ..., "caption": ...}, ...]}
+    [{"path": ..., "caption": ...}, ...]}   (audio paths ride the same list)
 
 Keep captions self-contained (file, status, next action) — the page is
 often read on a phone away from the conversation.
@@ -28,6 +29,7 @@ from pathlib import Path
 
 MIME = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png",
         ".webp": "webp", ".gif": "gif", ".svg": "svg+xml"}
+AUDIO_MIME = {".mp3": "mpeg", ".m4a": "mp4", ".wav": "wav", ".ogg": "ogg"}
 
 STYLE = """\
 :root { --bg: #14120f; --ink: #e8e2d6; --dim: #9a917f; --line: #2e2a24; }
@@ -43,6 +45,7 @@ body { font-family: Georgia, 'Times New Roman', serif; margin: 0;
 figure { margin: 0; max-width: 720px; width: 100%; }
 img { width: 100%; height: auto; display: block;
       border: 1px solid var(--line); }
+audio { width: 100%; display: block; margin-top: .4rem; }
 figcaption { margin-top: .6rem; font-size: .85rem; line-height: 1.5;
              color: var(--dim); text-align: center; }
 code { font-family: ui-monospace, Menlo, monospace; font-size: .95em; }
@@ -60,21 +63,30 @@ def esc(text: str) -> str:
 
 
 def figure(path: Path, caption: str | None) -> str:
-    mime = MIME.get(path.suffix.lower())
+    """One <figure>: an <img>, or an <audio> player for a clip."""
+    cap = (f"\n  <figcaption>{esc(caption)}</figcaption>" if caption else "")
+    alt = esc(caption or path.stem)
+    suffix = path.suffix.lower()
+    if suffix in AUDIO_MIME:
+        b64 = base64.b64encode(path.read_bytes()).decode()
+        # preload=metadata keeps a many-clip page from decoding everything
+        return (f'<figure>\n  <audio controls preload="metadata" '
+                f'src="data:audio/{AUDIO_MIME[suffix]};base64,{b64}" '
+                f'title="{alt}"></audio>{cap}\n</figure>')
+    mime = MIME.get(suffix)
     if mime is None:
         sys.exit(f"error: unsupported image type '{path.suffix}' ({path})")
     b64 = base64.b64encode(path.read_bytes()).decode()
-    cap = (f"\n  <figcaption>{esc(caption)}</figcaption>" if caption else "")
-    alt = esc(caption or path.stem)
     return (f'<figure>\n  <img src="data:image/{mime};base64,{b64}" '
             f'alt="{alt}">{cap}\n</figure>')
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Self-contained image-review page builder")
+        description="Self-contained media-review page builder")
     ap.add_argument("images", nargs="*", metavar="PATH[::CAPTION]",
-                    help="image path, optionally '::'-joined with a caption")
+                    help="image or audio path, optionally '::'-joined "
+                         "with a caption")
     ap.add_argument("--out", required=True, help="output .html path")
     ap.add_argument("--title", default="Illustration review")
     ap.add_argument("--note", help="one short paragraph under the title")
@@ -105,9 +117,9 @@ def main() -> None:
     html = "\n".join(parts) + "\n"
     if len(html) > 15_000_000:
         sys.exit(f"error: page would be {len(html) // 1_000_000} MB — "
-                 "the artifact limit is 16 MB; drop or downscale images")
+                 "the artifact limit is 16 MB; drop or downscale media")
     Path(args.out).write_text(html, encoding="utf-8")
-    print(f"{args.out}: {len(entries)} image(s), {len(html) // 1024} KB")
+    print(f"{args.out}: {len(entries)} item(s), {len(html) // 1024} KB")
 
 
 if __name__ == "__main__":

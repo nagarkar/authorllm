@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "file": null,
+  "stem": "_closing-credits",
+  "title": "Closing Credits",
+  "voiceDefault": "narrator",
+  "sections": [
+    {
+      "type": "silence",
+      "id": "05192409118c7f1211f47e428d8329da",
+      "durationMs": 800
+    },
+    {
+      "type": "speech",
+      "id": "34aff2626f1b37e98fc25df3f985bef2",
+      "kind": "paragraph",
+      "text": "This has been Seven More Sermons To The Dead, written by Chinmay Nagarkar and narrated by Adam Stone. Copyright 2026 by Chinmay Nagarkar. Production copyright 2026 by Chinmay Nagarkar.",
+      "cast": "narrator",
+      "voiceId": "pNInz6obpgDQGcFmaJgB",
+      "voiceName": "Adam Stone",
+      "model": "eleven_multilingual_v2",
+      "stability": 0.6,
+      "similarity": 0.75,
+      "speed": 1.0,
+      "pronunciations": [],
+      "source": {
+        "line": 0
+      }
+    },
+    {
+      "type": "silence",
+      "id": "03b14fd7171727efad20763abc1b8885",
+      "durationMs": 2000
+    }
+  ]
+}
