@@ -82,6 +82,89 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+def check_morph_scope_and_critic_nearest() -> None:
+    """Morph's paragraph-selection seam and the critic's resemblance ranker.
+
+    #121 pins the morph reply grammar; these paths decide WHICH paragraphs
+    get judged and which nearby passages a critic sees — both silent when
+    wrong (empty morph run, missed repetition)."""
+    from authorlm import critic as crt
+    from authorlm import morph
+    from authorlm.db import Database
+
+    draft = ("The guest who leaves with the hotel towels and the shopper "
+             "who leaves without paying do so because it helps them.")
+    files = {
+        "a.md": [
+            "Unrelated prose about stars and silence in the night.",
+            "The guest who leaves with the hotel towels and the shopper "
+            "who leaves without paying do so because it helps them today.",
+        ],
+        "b.md": ["Something about rank and possession only in this essay."],
+    }
+    hits = crt.nearest_passages(draft, files, ["a.md", "b.md"], limit=2)
+    check("nearest_passages ranks the overlapping paragraph first, "
+          "deterministically",
+          len(hits) >= 1 and hits[0][0] == "a.md" and hits[0][1] == 2
+          and hits[0][3] > 0, str(hits))
+    check("nearest_passages returns [] when the draft has no shingles",
+          crt.nearest_passages("hi", files, ["a.md"]) == [])
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-morph-scope-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "toc.toml").write_text('[[chapter]]\nfile = "ch.md"\n')
+        (ms / "ch.md").write_text(
+            "# Chapter\n\nFirst paragraph stays the same.\n\n"
+            "## A heading\n\nSecond paragraph is brand new here.\n")
+        db = Database(root / "authorlm.db")
+        manuscript = api.register_manuscript(db, "morphbook", str(ms))
+        try:
+            morph.load_rubric(manuscript)
+            check("load_rubric refuses a missing rubric by name", False)
+        except morph.NoRubric as err:
+            check("load_rubric refuses a missing rubric by name",
+                  "_morph/paragraph-defects.md" in str(err), str(err))
+        (ms / morph.MORPH_DIR).mkdir()
+        (ms / morph.MORPH_DIR / "paragraph-defects.md").write_text(
+            "# Rubric\n\n### Flag — Specificity\n\nBe concrete.\n")
+        check("load_rubric returns the author-editable body",
+              "Specificity" in morph.load_rubric(manuscript))
+
+        api.collect(db, manuscript, {})
+        v1_files = {"ch.md": (ms / "ch.md").read_text()}
+        check("targets with a single collected version returns None "
+              "(nothing to diff)",
+              morph.targets(db, manuscript, "ch.md", v1_files) is None)
+        full = morph.targets(db, manuscript, "ch.md", v1_files, full=True)
+        check("targets(full=True) selects prose only, skipping headings",
+              full == [2, 4], str(full))
+
+        (ms / "ch.md").write_text(
+            "# Chapter\n\nFirst paragraph stays the same.\n\n"
+            "## A heading\n\nSecond paragraph CHANGED for this collect.\n")
+        api.collect(db, manuscript, {})
+        v2_files = {"ch.md": (ms / "ch.md").read_text()}
+        changed = morph.targets(db, manuscript, "ch.md", v2_files)
+        check("targets without full returns only changed prose paragraphs",
+              changed == [4], str(changed))
+        # Pass the previous version's text: nothing differs from old_units.
+        same = morph.targets(db, manuscript, "ch.md", v1_files)
+        check("targets returns None when the passed text matches the "
+              "previous collected version",
+              same is None, str(same))
+
+        payload = morph.assemble(db, manuscript, "ch.md", v2_files, [4])
+        check("assemble windows the target and appends the schema contract",
+              "=== Judging P4 ===" in payload
+              and "P2:" in payload and "P4:" in payload
+              and '"P1"' in payload and "claim_before_evidence" in payload,
+              payload[:500])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_show_verbs() -> None:
     """Every entity verb exposes `show`, spelled the same way.
 
@@ -6008,6 +6091,7 @@ def check_filter_prelude_opt_in_frame() -> None:
 
 
 def main_test() -> None:
+    check_morph_scope_and_critic_nearest()
     check_directives()
     check_critique_resolve_reembeds()
     check_client_resolution()

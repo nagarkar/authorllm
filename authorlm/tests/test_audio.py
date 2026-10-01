@@ -1083,6 +1083,75 @@ def _mp3(path: Path, secs: float = 0.2) -> None:
                    check=True)
 
 
+def check_generation_helpers() -> None:
+    """Pure helpers that name moved takes, stitch files, and status cards.
+
+    Exercised only indirectly through `check_generation`'s fixture board —
+    these pins cover the edge cases that board never hits (empty diffs,
+    missing ids, filename hygiene, truncation)."""
+    from authorlm import generation as gen
+
+    check("sanitise_filename keeps safe characters and collapses the rest",
+          gen.sanitise_filename("Kindness Ch.1!") == "Kindness_Ch.1"
+          and gen.sanitise_filename("a/b:c") == "a_b_c"
+          and gen.sanitise_filename("___") == "untitled"
+          and gen.sanitise_filename("") == "untitled"
+          and gen.sanitise_filename("ok-name_1.mp3") == "ok-name_1.mp3")
+
+    chapter = {"sections": [
+        {"id": "h1", "type": "heading", "text": "Title"},
+        {"id": "a" * 32, "type": "speech", "text": "First."},
+        {"id": "silence", "type": "silence"},
+        {"id": "b" * 32, "type": "speech", "text": "Second."},
+        {"id": "c" * 32, "type": "speech", "text": "Third."},
+    ]}
+    check("ordinal_of counts speech sections only, 1-based",
+          gen.ordinal_of(chapter, "a" * 32) == 1
+          and gen.ordinal_of(chapter, "b" * 32) == 2
+          and gen.ordinal_of(chapter, "c" * 32) == 3
+          and gen.ordinal_of(chapter, "h1") is None
+          and gen.ordinal_of(chapter, "missing") is None)
+
+    check("first_words truncates with an ellipsis and keeps short text whole",
+          gen.first_words("one two three four five six seven eight nine", 8)
+          == "one two three four five six seven eight…"
+          and gen.first_words("short", 8) == "short"
+          and gen.first_words("", 8) == "")
+
+    old_p = [{"term": "Dharmic", "say": "DAR-mik"},
+             {"term": "Epictetus", "say": "ep-ih-TEE-tus"}]
+    new_p = [{"term": "Dharmic", "say": "DHAR-mik"},
+             {"term": "Basilides", "say": "ba-SIL-ih-deez"}]
+    check("pronunciation_diff names adds, changes, and removals",
+          gen.pronunciation_diff(old_p, new_p)
+          == ["Dharmic: DAR-mik → DHAR-mik",
+              "added Basilides → ba-SIL-ih-deez",
+              "removed Epictetus"]
+          and gen.pronunciation_diff([], []) == []
+          and gen.pronunciation_diff(old_p, old_p) == [])
+
+    base = {"voiceId": "v1", "cast": "Narrator", "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+            "pronunciations": []}
+    check("param_diff names voice, model, and numeric drifts",
+          gen.param_diff(base, {**base, "voiceId": "v2", "cast": "Other"})
+          == ["voice"]
+          and gen.param_diff(base, {**base, "model": "eleven_multilingual_v2"})
+          == ["model"]
+          and gen.param_diff(base, {**base, "stability": 0.6,
+                                    "similarity": 0.8, "speed": 1.1})
+          == ["stability", "similarity", "speed"]
+          and gen.param_diff(
+              {**base, "pronunciations": old_p},
+              {**base, "pronunciations": new_p})
+          == ["Dharmic: DAR-mik → DHAR-mik",
+              "added Basilides → ba-SIL-ih-deez",
+              "removed Epictetus"])
+    check("param_diff falls back to 'parameters' when nothing named differs",
+          gen.param_diff(base, dict(base)) == ["parameters"]
+          and gen.param_diff({}, {"pronunciations": []}) == ["parameters"])
+
+
 def check_generation() -> None:
     """generate / retake / stitch / status on a copy of the fixture, with
     a fake ElevenLabs (docs/audiobook-review-design.md §4–§5)."""
@@ -1465,6 +1534,7 @@ def check_audiobook_page() -> None:
 
 
 def main_test() -> None:
+    check_generation_helpers()
     check_text_rules()
     check_voice_tags()
     check_cast()
