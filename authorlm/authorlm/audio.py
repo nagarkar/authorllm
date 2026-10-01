@@ -944,6 +944,64 @@ def _stem(name: str) -> str:
     return Path(name).stem
 
 
+def _allocate_stem(name: str, used: set[str]) -> str:
+    """Next free export stem for `name`. Flat files keep `Path.stem`;
+    basename collisions among already-allocated stems get `intro-2`…"""
+    base = _stem(name)
+    stem = base
+    n = 2
+    while stem in used:
+        stem = f"{base}-{n}"
+        n += 1
+    used.add(stem)
+    return stem
+
+
+def _stems_matching(chapters: dict[str, dict], refs: list[str]) -> set[str]:
+    """Resolve author/CLI chapter refs to export stems.
+
+    Prefers an exact stem or file path; falls back to basename-stem
+    match so `intro` still selects a lone nested `part2/intro.md`."""
+    out: set[str] = set()
+    for raw in refs:
+        ref = (raw or "").strip()
+        if not ref:
+            continue
+        if ref in chapters and not ref.startswith("_"):
+            out.add(ref)
+            continue
+        file_hits = [stem for stem, ch in chapters.items()
+                     if ch.get("file") in (ref, f"{ref}.md")]
+        if file_hits:
+            out.update(file_hits)
+            continue
+        want = _stem(ref)
+        out.update(stem for stem, ch in chapters.items()
+                   if not stem.startswith("_") and ch.get("file")
+                   and Path(ch["file"]).stem == want)
+    return out
+
+
+def _chapter_by_ref(chapters: dict[str, dict], order: list[dict],
+                    ref: str) -> tuple[str, dict] | tuple[None, None]:
+    """Locate a body chapter by stem or file path (retail sample, etc.)."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None, None
+    if ref in chapters and any(c["stem"] == ref for c in order):
+        return ref, chapters[ref]
+    for stem, ch in chapters.items():
+        if ch.get("file") in (ref, f"{ref}.md") and any(
+                c["stem"] == stem for c in order):
+            return stem, ch
+    hits = [(stem, ch) for stem, ch in chapters.items()
+            if ch.get("file") and Path(ch["file"]).stem == _stem(ref)
+            and any(c["stem"] == stem for c in order)]
+    if len(hits) == 1:
+        return hits[0]
+    return None, None
+
+
 def _write_if_changed(path: Path, data: dict, ignore: tuple[str, ...] = ()
                       ) -> bool:
     """Write pretty JSON only when the content (minus `ignore` keys)
@@ -1009,6 +1067,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     chapters: dict[str, dict] = {}
     chapter_order: list[dict] = []
     about_stem = None
+    used_stems: set[str] = set()
     from .api import is_placeholder
     for name in order:
         if name == TITLE_FILE or name in (pron.FILENAME, "manifest.md"):
@@ -1034,7 +1093,10 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
         if not any(s["type"] == "speech" for s in sections):
             warnings.append(f"{name}: yields no speech — omitted")
             continue
-        stem = _stem(name)
+        # Basename alone is not unique under nested paths — without this,
+        # chapters/<stem>.json / state/<stem>.json last-wins and the first
+        # chapter's speech vanishes from the book.
+        stem = _allocate_stem(name, used_stems)
         chapter = {"schema": SCHEMA, "file": name, "stem": stem,
                    "title": title, "voiceDefault": default_key,
                    "sections": sections}
@@ -1088,9 +1150,8 @@ def _retail_sample(config: dict, chapters: dict, order: list[dict],
     rs = config["retail_sample"]
     if not (rs["chapter"] or "").strip():
         return []
-    stem = _stem(rs["chapter"])
-    chapter = chapters.get(stem)
-    if chapter is None or not any(c["stem"] == stem for c in order):
+    stem, chapter = _chapter_by_ref(chapters, order, rs["chapter"])
+    if chapter is None:
         warnings.append(f"retail_sample.chapter = {rs['chapter']!r} is not a "
                         "chapter — no retail sample")
         return []
@@ -1150,7 +1211,7 @@ def export(db, manuscript: dict, only: list[str] | None = None,
                             "environment — locator written without a version")
     built = build(manuscript, dictionary=dictionary)
     warnings = built["warnings"] + warnings
-    wanted = {_stem(o) for o in only} if only else None
+    wanted = _stems_matching(built["chapters"], only) if only else None
     written: list[str] = []
     unchanged: list[str] = []
     for stem, chapter in built["chapters"].items():
@@ -1685,12 +1746,15 @@ def say_contexts(manuscript: dict, term: str, file: str | None = None,
     built = built or build(manuscript)
     stems = [c["stem"] for c in built["book"]["chapters"]]
     if built["book"]["aboutAuthor"]:
-        stems.append(_stem(built["book"]["aboutAuthor"]))
-    want = _stem(file) if file else None
+        about = built["book"]["aboutAuthor"]
+        # aboutAuthor is `chapters/<stem>.json` — keep the stem, not Path.stem
+        # of the whole relative path (which is still the stem today).
+        stems.append(_stem(about))
+    want = _stems_matching(built["chapters"], [file]) if file else None
     out: list[dict] = []
     seen_casts: set[str] = set()
     for stem in stems:
-        if want and stem != want:
+        if want is not None and stem not in want:
             continue
         chapter = built["chapters"][stem]
         for s in chapter["sections"]:
