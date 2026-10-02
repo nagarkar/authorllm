@@ -2954,7 +2954,8 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
-def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
+def _occurrence(paragraphs: list[str], n: int, needle: str,
+                transform=None) -> int:
     """The occurrence index of unit `n`'s own text, counted in the SAME
     universe `_locate_in_tab` searches.
 
@@ -2975,6 +2976,14 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     it, and count the matches that BEGIN before that — which is exactly
     how many the locator will step over on its way there.
 
+    `transform` is the map from a local paragraph to the bytes the
+    locator will search for — `rendered_text` by default (emphasis
+    dropped; a plain paragraph renders to itself), or `tab_anchor_text`
+    when the insert fallback searches the heading-marker-stripped form
+    the importer left in the tab. Counting under one transform and
+    searching under another plants on an earlier substring of the bare
+    title (found 2026-10-01: prose "In Relegere…" before `## Relegere`).
+
     Computed from the LOCAL paragraph list, which is byte-identical to
     the tab because the levelling `push_doc` has just put it there, and
     correct only in company with the DESCENDING write order: when unit n
@@ -2990,8 +2999,11 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     # markers (see `rendered_text`), and the writer searches it for the
     # rendered needle when the raw one is not there. A plain paragraph
     # renders to itself, so the count is unchanged where no markup is.
-    paragraphs = [rendered_text(p) for p in paragraphs]
-    needle = rendered_text(needle)
+    # Callers that search `tab_anchor_text` pass that transform so the
+    # count and the locate share one universe.
+    transform = transform or rendered_text
+    paragraphs = [transform(p) for p in paragraphs]
+    needle = transform(needle)
     full = "".join(p + "\n" for p in paragraphs)
     start = sum(len(p) + 1 for p in paragraphs[: n - 1])
     count, at = 0, full.find(needle)
@@ -3078,10 +3090,16 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                         # a heading: the tab holds it rendered — same
                         # fallback the replace path takes, plus the
                         # heading marker the importer turned into style.
+                        # Occurrence MUST use tab_anchor_text too: the
+                        # bare title often appears earlier in prose, and
+                        # counting under `## Title` (zero earlier matches)
+                        # while searching for `Title` plants on that
+                        # earlier mention.
                         span = _locate_in_tab(
                             docs_service, master_id, tab_id,
                             tab_anchor_text(anchor),
-                            _occurrence(paragraphs, n, anchor))
+                            _occurrence(paragraphs, n, anchor,
+                                        transform=tab_anchor_text))
                     if span is None:
                         raise LookupError("anchor paragraph not found "
                                           "verbatim in the tab")
