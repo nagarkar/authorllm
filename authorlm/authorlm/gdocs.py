@@ -3054,6 +3054,14 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     requests = [
         {"insertText": {"location": {"tabId": tab_id, "index": at},
                         "text": text}},
+        # Before the text styles, never after: applying a named style
+        # resets the paragraph's text to that style's own colour, which
+        # took the green off every insertion (seen 2026-10-02).
+        {"updateParagraphStyle": {
+            "range": {"tabId": tab_id, "startIndex": at + 1,
+                      "endIndex": at + _utf16_len(text)},
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+            "fields": "namedStyleType"}},
         {"updateTextStyle": {
             "range": {"tabId": tab_id, "startIndex": at + 1,
                       "endIndex": at + _utf16_len(text)},
@@ -3064,11 +3072,6 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
                       "endIndex": at + _utf16_len(text)},
             "textStyle": {"italic": False, "bold": False},
             "fields": "italic,bold"}},
-        {"updateParagraphStyle": {
-            "range": {"tabId": tab_id, "startIndex": at + 1,
-                      "endIndex": at + _utf16_len(text)},
-            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
-            "fields": "namedStyleType"}},
     ]
     base = at + 3                              # first char after "\n{{"
     for s16, e16, style in new_styles:
