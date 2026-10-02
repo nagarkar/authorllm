@@ -185,8 +185,13 @@ def register_manuscript(db: Database, name: str, path: str,
                         paperback_isbn: str = "",
                         hardcover_isbn: str = "",
                         trim_size: str = "",
-                        bleed: bool | str = False) -> dict:
-    """Register one manuscript and its canonical publication identity."""
+                        bleed: bool | str = False,
+                        extraction: bool = True) -> dict:
+    """Register one manuscript and its canonical publication identity.
+
+    `extraction=False` registers it with concept extraction switched off
+    for this manuscript alone (`extraction.manuscript_extraction_enabled`)
+    — a machine-kept manuscript beside books that keep extracting."""
     root = Path(path).resolve()
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -205,6 +210,10 @@ def register_manuscript(db: Database, name: str, path: str,
         trim_width=trim_width, trim_height=trim_height,
         bleed=int(parse_bleed(bleed)))
     db.insert("manuscripts", row)
+    if not extraction:
+        from .extraction import set_manuscript_extraction
+
+        set_manuscript_extraction(db, row, False)
     return dict(row)
 
 
@@ -338,9 +347,23 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                narrator: str | None = None,
                                publisher: str | None = None,
                                copyright_year: int | str | None = None,
-                               language: str | None = None) -> dict:
-    """Update publication identity without exposing the internal KO metadata."""
+                               language: str | None = None,
+                               extraction: bool | str | None = None) -> dict:
+    """Update publication identity without exposing the internal KO metadata.
+
+    `extraction` (on/off) is the one setting here that is not identity:
+    the per-manuscript concept-extraction switch, which lives in the KO
+    metadata and is written through its own door."""
     changes = {}
+    if extraction is not None:
+        from .extraction import set_manuscript_extraction
+
+        if isinstance(extraction, bool):
+            switch = extraction
+        elif str(extraction).strip().lower() in ("on", "off"):
+            switch = str(extraction).strip().lower() == "on"
+        else:
+            raise ValueError("extraction is on or off")
     if trim_size is not None:
         changes["trim_width"], changes["trim_height"] = parse_trim_size(
             trim_size)
@@ -362,7 +385,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         changes["copyright_year"] = parse_copyright_year(copyright_year)
     if language is not None:
         changes["language"] = parse_language(language)
-    if not changes:
+    if not changes and extraction is None:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
             "--hardcover-isbn, --trim-size, --bleed, --narrator, "
@@ -370,8 +393,11 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
     _validate_format_isbns(
         changes.get("paperback_isbn", manuscript.get("paperback_isbn", "")),
         changes.get("hardcover_isbn", manuscript.get("hardcover_isbn", "")))
-    db.update("manuscripts", manuscript["id"], changes)
-    manuscript.update(changes)
+    if changes:
+        db.update("manuscripts", manuscript["id"], changes)
+        manuscript.update(changes)
+    if extraction is not None:
+        set_manuscript_extraction(db, manuscript, switch)
     return manuscript_metadata(manuscript)
 
 
@@ -1048,10 +1074,16 @@ def collect(db: Database, manuscript: dict, config: dict,
     if analyze is None:
         analyze = auto
     if analyze:
-        from .extraction import extraction_enabled
+        from .extraction import (extraction_enabled,
+                                 manuscript_extraction_enabled)
 
         llm = LLMClient(config)
         if not extraction_enabled(config):
+            report["extraction"] = "off"
+        elif not manuscript_extraction_enabled(db, manuscript):
+            # The manuscript's own switch: same report, same silence —
+            # the scans above still ran, and find nothing to do on a
+            # manuscript that has no concepts.
             report["extraction"] = "off"
         elif llm.enabled:
             try:
@@ -3203,9 +3235,9 @@ def write_complete(db: Database, manuscript: dict, config: dict,
                                               session))
     extraction = None
     llm = LLMClient(config)
-    from .extraction import extraction_enabled
+    from .extraction import extraction_allowed
 
-    if not extraction_enabled(config):
+    if not extraction_allowed(db, manuscript, config):
         extraction = {"off": True}
     elif llm.enabled:
         try:

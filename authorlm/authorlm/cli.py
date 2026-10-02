@@ -277,7 +277,8 @@ def cmd_init(args):
             db, args.name, str(path), author=args.author,
             copyright_owner=args.copyright_owner,
             paperback_isbn=args.paperback_isbn,
-            hardcover_isbn=args.hardcover_isbn)
+            hardcover_isbn=args.hardcover_isbn,
+            extraction=args.extraction != "off")
     except ValueError as err:
         sys.exit(f"error: {err}.")
     print(f"Registered manuscript '{args.name}' at {path}")
@@ -294,6 +295,10 @@ def cmd_init(args):
     if not extraction_enabled(_load_config(args)):
         print(ui.dim("Concept extraction is off ([extraction] enabled = "
                      "false); the graph grows by 'concept add' only."))
+    elif args.extraction == "off":
+        print(ui.dim("Concept extraction is off for this manuscript "
+                     "(--extraction off); 'manuscript set --extraction on' "
+                     "turns it back on."))
     elif llm.enabled and not args.no_extract:
         _run_extraction(db, row, llm)
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
@@ -313,7 +318,8 @@ def cmd_manuscript(args):
                 trim_size=args.trim_size, bleed=args.bleed,
                 narrator=args.narrator, publisher=args.publisher,
                 copyright_year=args.copyright_year,
-                language=args.language)
+                language=args.language,
+                extraction=args.extraction)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -336,6 +342,11 @@ def cmd_manuscript(args):
           + ("" if identity["trim_size"] else
              "  — needed by 'export pdf --profile book'"))
     print(f"  bleed: {'yes' if identity['bleed'] else 'no'}")
+    from .extraction import manuscript_extraction_enabled
+
+    if not manuscript_extraction_enabled(db, manuscript):
+        print("  extraction: off for this manuscript  — "
+              "'manuscript set --extraction on' turns it back on")
 
 
 def _manuscript_tables(db: Database) -> list[str]:
@@ -6074,10 +6085,14 @@ def cmd_profile(args):
 def cmd_extract(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    from .extraction import DISABLED_MESSAGE, extraction_enabled
+    from .extraction import (DISABLED_MESSAGE, MANUSCRIPT_DISABLED_MESSAGE,
+                             extraction_enabled,
+                             manuscript_extraction_enabled)
 
     if not extraction_enabled(_load_config(args)):
         sys.exit("error: " + DISABLED_MESSAGE)
+    if not manuscript_extraction_enabled(db, manuscript):
+        sys.exit("error: " + MANUSCRIPT_DISABLED_MESSAGE)
     llm = LLMClient(_load_config(args))
     if not llm.enabled:
         sys.exit(
@@ -7986,6 +8001,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the hardcover edition")
     p.add_argument("--no-extract", action="store_true",
                    help="skip automatic LLM concept extraction")
+    p.add_argument("--extraction", default=None, choices=["on", "off"],
+                   help="off registers the manuscript with concept "
+                        "extraction switched off for good, not just at "
+                        "init (a machine-kept manuscript); change it "
+                        "later with 'manuscript set --extraction'")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser(
@@ -8013,6 +8033,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bleed", default=None, choices=["yes", "no"],
                    help="whether the print interior bleeds to the page "
                         "edge (adds 0.125in to the page on three sides)")
+    p.add_argument("--extraction", default=None, choices=["on", "off"],
+                   help="concept extraction for this manuscript alone; "
+                        "the global [extraction] enabled switch still "
+                        "wins when it is off")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")

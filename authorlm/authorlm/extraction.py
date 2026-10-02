@@ -544,6 +544,53 @@ def extraction_enabled(config: dict | None) -> bool:
     return bool(section.get("enabled", True))
 
 
+MANUSCRIPT_DISABLED_MESSAGE = (
+    "concept extraction is switched off for this manuscript: the graph "
+    "changes only by hand — 'authorlm concept add <name> --notes …'. "
+    "'authorlm manuscript set --extraction on' runs the extractor again.")
+
+
+def manuscript_extraction_enabled(db: Database, manuscript: dict) -> bool:
+    """The per-manuscript switch (default on), kept in
+    `manuscripts.metadata` as `{"extraction": {"enabled": false}}` —
+    the same shape as the config section it narrows. A machine-kept
+    manuscript (a corpus document an outside tool maintains) must never
+    have concepts extracted while the books beside it in the workspace
+    keep extracting; the global switch cannot say that.
+
+    Read from the row, never from the caller's dict: the dict's
+    `metadata` is whatever it was when the manuscript was loaded, and
+    the Doc mapping and the extraction watermark rewrite that column
+    under it (see `_set_extraction_watermark`)."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = json.loads((row["metadata"] if row else None) or "{}")
+    section = meta.get("extraction") or {}
+    return bool(section.get("enabled", True))
+
+
+def set_manuscript_extraction(db: Database, manuscript: dict,
+                              enabled: bool) -> None:
+    """Write the per-manuscript switch, merged into the row's current
+    metadata (the Doc mapping and the watermark live beside it) and
+    mirrored into the caller's dict."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = json.loads((row["metadata"] if row else None) or "{}")
+    meta["extraction"] = {"enabled": bool(enabled)}
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+
+
+def extraction_allowed(db: Database, manuscript: dict,
+                       config: dict | None) -> bool:
+    """Both switches at once: the global one wins when it is off, and
+    the manuscript's own narrows it when it is on."""
+    return (extraction_enabled(config)
+            and manuscript_extraction_enabled(db, manuscript))
+
+
 def extract_concepts(
     db: Database, manuscript: dict, llm: LLMClient,
     files: list[str] | None = None, full: bool = False,
@@ -560,6 +607,8 @@ def extract_concepts(
     """
     if not extraction_enabled(getattr(llm, "config", None)):
         raise ExtractionDisabled(DISABLED_MESSAGE)
+    if not manuscript_extraction_enabled(db, manuscript):
+        raise ExtractionDisabled(MANUSCRIPT_DISABLED_MESSAGE)
     mid = manuscript["id"]
     if aliases_only and not files:
         # An aliases pass is a deliberate audit of the whole text — naming

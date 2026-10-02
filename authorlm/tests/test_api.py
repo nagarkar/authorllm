@@ -894,6 +894,132 @@ def check_extraction_failure_traced() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_manuscript_extraction_switch() -> None:
+    """Issue #128: concept extraction switched off for ONE manuscript,
+    in `manuscripts.metadata`, while a second manuscript in the same
+    workspace keeps extracting and the global switch still wins."""
+    import io
+
+    from authorlm import api as _api
+    from authorlm.extraction import (ExtractionDisabled,
+                                     extract_concepts as _extract_fn,
+                                     extraction_allowed,
+                                     manuscript_extraction_enabled)
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-msx-"))
+    try:
+        ws = root / "ws"
+        kept, book = ws / "corpus-doc", ws / "book"
+        for d, text in ((kept, "# Kept\n\nMachine-kept text.\n"),
+                        (book, "# Book\n\nThe author's text.\n")):
+            d.mkdir(parents=True)
+            (d / "01-draft.md").write_text(text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(["--workspace", str(ws), "init", "--name", "kept",
+                      "--path", str(kept), "--extraction", "off"])
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(book)])
+        db = _api.open_db(str(ws))
+        m_kept = _api.get_manuscript(db, "kept")
+        m_book = _api.get_manuscript(db, "book")
+        check("init --extraction off registers the manuscript with its "
+              "own switch off, in manuscripts.metadata, and says so",
+              json.loads(m_kept["metadata"]).get("extraction")
+              == {"enabled": False}
+              and not manuscript_extraction_enabled(db, m_kept)
+              and "off for this manuscript" in out.getvalue(),
+              m_kept["metadata"])
+        check("a manuscript registered without the flag extracts as before",
+              manuscript_extraction_enabled(db, m_book)
+              and "extraction" not in json.loads(m_book["metadata"] or "{}"))
+
+        config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
+        calls: list[str] = []
+
+        def counting(db_, manuscript_, llm_, **kw):
+            calls.append(manuscript_["name"])
+            return {"up_to_date": True}
+
+        prev = _api.run_extraction
+        _api.run_extraction = counting
+        try:
+            (kept / "01-draft.md").write_text("# Kept\n\nChanged once.\n")
+            (book / "01-draft.md").write_text("# Book\n\nChanged once.\n")
+            r_kept = _api.collect(db, m_kept, config, analyze=True)
+            r_kept_auto = None
+            (kept / "01-draft.md").write_text("# Kept\n\nChanged twice.\n")
+            r_kept_auto = _api.collect(db, m_kept, config, auto=True)
+            after_kept = list(calls)
+            r_book = _api.collect(db, m_book, config, analyze=True)
+        finally:
+            _api.run_extraction = prev
+        check("collect with analyze/auto set makes NO extraction call on "
+              "the switched-off manuscript, with the global switch on, "
+              "and reports it",
+              after_kept == [] and r_kept.get("extraction") == "off"
+              and r_kept_auto.get("extraction") == "off"
+              and r_kept.get("version_no"), str((after_kept, r_kept)))
+        check("a second manuscript in the same workspace still extracts",
+              calls == ["book"] and "extraction" not in r_book, str(calls))
+
+        class _OnLLM:
+            enabled = True
+
+        _OnLLM.config = config
+        try:
+            _extract_fn(db, m_kept, _OnLLM())
+            declined = None
+        except ExtractionDisabled as err:
+            declined = str(err)
+        check("extract_concepts declines by name on a switched-off "
+              "manuscript (the explicit verb and the MCP tool's road)",
+              declined is not None and "for this manuscript" in declined
+              and "manuscript set --extraction on" in declined,
+              str(declined))
+
+        # A Doc-mapping write beside the switch must not lose it.
+        from authorlm.gdocs import _mapping, _save_mapping
+
+        meta = _mapping(db, m_kept)
+        meta.setdefault("gdocs", {})["_master_id"] = "doc-x"
+        _save_mapping(db, m_kept, meta)
+        check("the switch survives a Doc-mapping write to the same column",
+              not manuscript_extraction_enabled(db, m_kept))
+
+        with contextlib.redirect_stdout(io.StringIO()) as shown:
+            cli_main(["--workspace", str(ws), "manuscript", "show",
+                      "-m", "kept"])
+        check("'manuscript show' names the switch when it is off",
+              "extraction: off for this manuscript" in shown.getvalue(),
+              shown.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "manuscript", "set",
+                      "--extraction", "on", "-m", "kept"])
+        check("'manuscript set --extraction on' turns it back on, and the "
+              "Doc mapping beside it is kept",
+              manuscript_extraction_enabled(db, m_kept)
+              and _mapping(db, m_kept)["gdocs"]["_master_id"] == "doc-x")
+        _api.update_manuscript_metadata(db, m_book, extraction="off")
+        check("the api door takes the same words",
+              not manuscript_extraction_enabled(db, m_book))
+        _api.update_manuscript_metadata(db, m_book, extraction=True)
+        check("the global switch still wins when it is off",
+              extraction_allowed(db, m_book, config)
+              and not extraction_allowed(
+                  db, m_book, {**config, "extraction": {"enabled": False}})
+              and not extraction_allowed(db, m_kept, {
+                  **config, "extraction": {"enabled": False}}))
+        m3 = _api.register_manuscript(db, "third", str(book),
+                                      extraction=False)
+        check("api.register_manuscript(extraction=False) writes the switch",
+              not manuscript_extraction_enabled(db, m3)
+              and json.loads(m3["metadata"])["extraction"]
+              == {"enabled": False})
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_extraction_prompt_provenance() -> None:
     """The author asked: when extraction (or its adjudication pass) runs,
     say which prompt files shaped it, so they can go read them. The list
@@ -6123,6 +6249,7 @@ def main_test() -> None:
     check_drafting_cache_layer()
     check_model_profiles()
     check_extraction_failure_traced()
+    check_manuscript_extraction_switch()
     check_extraction_prompt_provenance()
     check_extraction_skip_reasons()
     check_backup_and_restore()
