@@ -6827,11 +6827,28 @@ def main_test() -> None:
               _pf(struck)[0]["old"] == "Each day, I write a bit,\\\nTis only "
               "a modest stride,\\\nThe essence will be clarified.",
               repr(_pf(struck)[0]["old"]))
-        from authorlm.gdocs import tab_anchor_text
+        from authorlm.gdocs import tab_anchor_text, _occurrence
         check("an insertion anchor on a heading drops the heading marker and "
               "the bold the tab never held",
               tab_anchor_text("## **Why I wrote this book**") == "Why I wrote this book"
               and tab_anchor_text("Plain.") == "Plain.")
+        # Insert after a heading whose bare title already appeared in
+        # prose: counting under `## Title` while searching `Title` would
+        # pick the prose mention (occurrence 0) and plant the judgment
+        # in the wrong paragraph. The fallback locate and its occurrence
+        # share the tab_anchor_text universe.
+        _heading_units = [
+            "In Relegere we saw the herdsman turn.",
+            "## Relegere",
+            "Later prose after the title.",
+        ]
+        check("heading-insert occurrence under rendered `##` misses the "
+              "earlier bare-title prose match (the universe split)",
+              _occurrence(_heading_units, 2, "## Relegere") == 0)
+        check("heading-insert occurrence under tab_anchor_text skips the "
+              "prose mention and lands on the heading",
+              _occurrence(_heading_units, 2, "## Relegere",
+                          transform=tab_anchor_text) == 1)
         from authorlm import lenses as _lz_contract
         check("the lens contract asks for a judgment as concrete options, "
               "not one clause (author ruling 2026-09-27)",
