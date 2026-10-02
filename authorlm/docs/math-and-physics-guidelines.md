@@ -162,6 +162,14 @@ the enclosed charge divided by the permittivity of free space.
   `[Only: a, b]` ... `[/Only]` keeps the region for the named outputs and
   removes it everywhere else. Output names: `pdf`, `docx`, `epub`,
   `doc` (the export Doc), `md`, `audio`. Untagged text goes everywhere.
+- `[Omit: all]` ... `[/Omit]` removes the region from every output in
+  that list, including any added later, so a region meant for no reader
+  does not have to be kept in step with the list. `all` covers the
+  exports only: the export Doc is one of them, the Doc tabs are not. A
+  tab is the working surface, so the region and its two tag lines go to
+  the tab on a push and come back unchanged on a pull. There is no
+  `[Only: all]`; that would be untagged text, and it fails the build
+  like any other malformed tag.
 - Tags sit on their own lines, may nest one level (`Only` inside
   `Omit` is the substitution pattern above), and never split a
   paragraph.

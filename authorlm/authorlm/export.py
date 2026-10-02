@@ -68,6 +68,10 @@ def namespace_footnotes(text: str, token: str) -> str:
 # Output names an [Omit:] / [Only:] tag may address. `doc` is the
 # push-only export Doc; `audio` is the stripped (audio-clean) markdown.
 OUTPUTS = ("pdf", "docx", "epub", "md", "doc", "audio")
+# `[Omit: all]` names every output above, present and future, the export
+# Doc included. The Doc TABS are not an output: a tab is the working
+# surface and carries the region, tags and all, on every push and pull.
+ALL_OUTPUTS = "all"
 _REGION_OPEN = re.compile(
     r"^\[(?P<kind>Omit|Only):\s*(?P<names>[^\]]*)\]\s*$", re.IGNORECASE)
 _REGION_CLOSE = re.compile(r"^\[/(?P<kind>Omit|Only)\]\s*$", re.IGNORECASE)
@@ -105,6 +109,7 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
     """Apply the full-line region tags for one build.
 
         [Omit: audio, epub]  …  [/Omit]   dropped from the named outputs
+        [Omit: all]          …  [/Omit]   dropped from every output
         [Only: audio]        …  [/Only]   kept for the named outputs only
 
     Same grammar as [Illustration: …]: plain text on every road (Obsidian,
@@ -112,7 +117,10 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
     `[Only:]` inside an `[Omit:]` is the audio substitution pattern
     (docs/math-and-physics-guidelines.md §5): the inner Only re-includes
     its body for the named outputs even when an outer Omit would drop
-    them. The tag lines themselves never reach a reader. A structural
+    them. `all` is Omit's alone and stands for every name in OUTPUTS, so
+    a region meant for no reader need not be kept in step with that list;
+    an `[Only: all]` would be untagged text and is a fault. The tag lines
+    themselves never reach a reader. A structural
     fault — an unknown output name, a stray or unmatched close, an
     unclosed region — raises, naming the line: a typo must never
     silently include or exclude a passage."""
@@ -141,12 +149,20 @@ def resolve_regions(text: str, outputs: frozenset[str] | set[str],
             kind = m.group("kind").lower()
             names = {n.strip().lower()
                      for n in re.split(r"[,\s]+", m.group("names")) if n.strip()}
+            if ALL_OUTPUTS in names:
+                if kind == "only":
+                    raise ValueError(
+                        f"{prefix}{lineno}: [Only: {ALL_OUTPUTS}] is "
+                        f"untagged text — '{ALL_OUTPUTS}' belongs to "
+                        f"[Omit:] alone")
+                names = (names - {ALL_OUTPUTS}) | set(OUTPUTS)
             unknown = sorted(names - set(OUTPUTS))
             if unknown or not names:
                 raise ValueError(
                     f"{prefix}{lineno}: [{kind.title()}:] names "
                     f"{'no output' if not names else 'unknown output ' + ', '.join(unknown)}"
-                    f" (one of: {', '.join(OUTPUTS)})")
+                    f" (one of: {', '.join(OUTPUTS)}"
+                    f"{', ' + ALL_OUTPUTS if kind == 'omit' else ''})")
             hit = bool(names & wanted)
             stack.append((kind, hit if kind == "only" else not hit))
             continue

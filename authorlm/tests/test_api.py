@@ -6007,6 +6007,93 @@ def check_filter_prelude_opt_in_frame() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_omit_all(root: Path, FakeGoogle) -> None:
+    """`[Omit: all]` (issue #132): one tag that drops a region from every
+    export output, present and future, while the Doc TAB — the working
+    surface, not an output — carries the region and its tag lines out
+    and back unchanged. Own workspace, own FakeGoogle."""
+    from authorlm.audio import audio_source
+    from authorlm.export import (OUTPUTS, check_manuscript,
+                                 combined_markdown, publish_markdown,
+                                 resolve_regions)
+    from authorlm.gdocs import pull_doc, push_doc
+
+    ws = root / "omit-all-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "01-essay.md").write_text(
+        "# Essay\n\nReader prose.\n\n"
+        "[Omit: all]\nA working note inside the essay.\n[/Omit]\n\n"
+        "Closing prose.\n")
+    ledger = ("[Omit: all]\n\n# Ledger\n\nMachine-kept bookkeeping, "
+              "for no reader.\n\n[/Omit]\n")
+    (ms / "02-ledger.md").write_text(ledger)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "omitbook",
+                  "--path", str(ms), "--no-extract"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+
+    sample = "Kept.\n[Omit: all]\nGone.\n[/Omit]\nAlso kept.\n"
+    check("[Omit: all] drops the region from every output by name",
+          all("Gone." not in resolve_regions(sample, {out})
+              and "Kept." in resolve_regions(sample, {out})
+              and "Also kept." in resolve_regions(sample, {out})
+              for out in OUTPUTS), str(OUTPUTS))
+    check("'all' beside a named output is still every output",
+          "Gone." not in resolve_regions(
+              sample.replace("[Omit: all]", "[Omit: all, pdf]"), {"epub"}))
+    nested = ("[Omit: all]\nGone.\n[Only: audio]\nSpoken.\n[/Only]\n"
+              "[/Omit]\n")
+    check("an [Only:] inside [Omit: all] still re-includes for its output",
+          "Spoken." in resolve_regions(nested, {"audio"})
+          and "Gone." not in resolve_regions(nested, {"audio"})
+          and resolve_regions(nested, {"pdf"}).strip() == "")
+    try:
+        resolve_regions("[Only: all]\nx\n[/Only]", {"pdf"}, "f.md")
+        only_all = ""
+    except ValueError as err:
+        only_all = str(err)
+    check("[Only: all] is a named fault, by file and line",
+          "f.md:1" in only_all and "[Omit:] alone" in only_all, only_all)
+
+    builds = {fmt: publish_markdown(manuscript, "images", fmt=fmt)[0]
+              for fmt in ("pdf", "docx", "epub", "md")}
+    builds["audio"] = publish_markdown(manuscript, "stripped", fmt="md")[0]
+    check("a file wholly inside [Omit: all] contributes nothing to the "
+          "pdf, docx, epub, md and audio builds",
+          all("Ledger" not in text and "bookkeeping" not in text
+              and "working note" not in text and "[Omit" not in text
+              and "Reader prose." in text and "Closing prose." in text
+              for text in builds.values()),
+          str({k: v for k, v in builds.items() if "Ledger" in v}))
+    check("...nor to the audiobook's own per-file source",
+          audio_source("02-ledger.md", ledger).strip() == "")
+    check("...nor to the export Doc, which is an output like the rest",
+          "Ledger" not in combined_markdown(manuscript)[0]
+          and "Reader prose." in combined_markdown(manuscript)[0])
+    check("the export check passes a file wholly inside [Omit: all]",
+          not [p for p in check_manuscript(manuscript)
+               if not p.startswith("pandoc")],
+          str(check_manuscript(manuscript)))
+
+    stub = FakeGoogle()
+    pushed = push_doc(db, manuscript, "02-ledger.md",
+                      service=stub, docs_service=stub)
+    tab = next(t["text"] for t in stub.state["docs"][pushed["doc_id"]]
+               if t["title"] == "02-ledger.md")
+    check("the Doc TAB is not an output: the region and both tag lines "
+          "go to the tab",
+          "[Omit: all]" in tab and "Machine-kept bookkeeping" in tab
+          and "[/Omit]" in tab, tab)
+    manuscript = api.get_manuscript(db)
+    report = pull_doc(db, manuscript, "02-ledger.md", service=stub,
+                      docs_service=stub)
+    check("...and come back from a pull unchanged, byte for byte",
+          report["unchanged"] == ["02-ledger.md"]
+          and (ms / "02-ledger.md").read_text() == ledger, str(report))
+
+
 def main_test() -> None:
     check_directives()
     check_critique_resolve_reembeds()
@@ -7955,6 +8042,8 @@ def main_test() -> None:
         check("meanwhile the actually-pushed file is untouched",
               "a.md" not in report["changed"]
               and "Original a content" in (t2_ms / "a.md").read_text())
+
+        check_omit_all(root, FakeGoogle)
 
         # --- gdocs failure path: documents().get() outage during reconcile
         # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
