@@ -1083,6 +1083,150 @@ def _mp3(path: Path, secs: float = 0.2) -> None:
                    check=True)
 
 
+def check_generation_continuity() -> None:
+    """neighbours / recent_request_id / flags_from_state — stitch continuity.
+
+    Exercised only indirectly inside check_generation's TTS board. Wrong
+    neighbours put the wrong previous/next text on a call; a stale
+    request id across the stitch window breaks ElevenLabs continuity;
+    flags_from_state is how the status board names moved parameters when
+    a paragraph has no take of its own."""
+    from datetime import datetime, timedelta, timezone
+
+    from authorlm import generation as gen
+
+    narr = "voice-narrator"
+    guest = "voice-guest"
+    sections = [
+        {"id": "h1", "type": "heading", "text": "Title"},
+        {"id": "n1", "type": "speech", "voiceId": narr, "text": "One.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+        {"id": "sil", "type": "silence"},
+        {"id": "g1", "type": "speech", "voiceId": guest, "text": "Aside.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Guest", "pronunciations": []},
+        {"id": "n2", "type": "speech", "voiceId": narr, "text": "Two.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+        {"id": "n3", "type": "speech", "voiceId": narr, "text": "Three.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+    ]
+    chapter = {"sections": sections}
+    prev, nxt = gen.neighbours(chapter, "n2")
+    check("neighbours skip silence and other voices, same-voice only",
+          prev is not None and nxt is not None
+          and prev["id"] == "n1" and nxt["id"] == "n3",
+          f"prev={prev and prev.get('id')} nxt={nxt and nxt.get('id')}")
+    check("neighbours at the edge return None on the open side",
+          gen.neighbours(chapter, "n1") == (None, sections[4])
+          and gen.neighbours(chapter, "n3")[0]["id"] == "n2"
+          and gen.neighbours(chapter, "n3")[1] is None)
+    check("neighbours refuse a missing id and a non-speech section",
+          gen.neighbours(chapter, "missing") == (None, None)
+          and gen.neighbours(chapter, "sil") == (None, None)
+          and gen.neighbours(chapter, "h1") == (None, None))
+
+    now = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+    recent = {"requestId": "req-recent",
+              "generatedAt": "2026-09-15T11:00:00Z"}
+    stale = {"requestId": "req-stale",
+             "generatedAt": "2026-09-15T09:00:00Z"}  # 3h > 2h window
+    check("recent_request_id returns the id inside the stitch window",
+          gen.recent_request_id(recent, now) == "req-recent")
+    check("recent_request_id drops ids outside the stitch window",
+          gen.recent_request_id(stale, now) is None)
+    check("recent_request_id refuses missing fields and bad timestamps",
+          gen.recent_request_id(None, now) is None
+          and gen.recent_request_id({}, now) is None
+          and gen.recent_request_id({"requestId": "x"}, now) is None
+          and gen.recent_request_id(
+              {"requestId": "x", "generatedAt": "not-a-date"}, now) is None)
+    iso = {"requestId": "req-iso",
+           "generatedAt": "2026-09-15T11:30:00+00:00"}
+    check("recent_request_id accepts ISO-8601 with an offset",
+          gen.recent_request_id(iso, now) == "req-iso")
+    # Exactly at the window boundary is NOT recent (<, not <=).
+    edge_at = (now.replace(tzinfo=None)
+               - timedelta(seconds=gen.STITCH_WINDOW_SECS))
+    edge = {"requestId": "req-edge",
+            "generatedAt": edge_at.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    check("recent_request_id treats the window boundary as expired",
+          gen.recent_request_id(edge, now) is None)
+
+    # flags_from_state: a section with no take pairs to the newest other
+    # entry whose madeFrom text matches, and names what moved.
+    root = Path(tempfile.mkdtemp(prefix="authorlm-flags-"))
+    try:
+        sid_live = "a" * 32
+        sid_old = "b" * 32
+        sid_done = "c" * 32
+        speech_live = {
+            "id": sid_live, "type": "speech", "text": "Same words here.",
+            "voiceId": narr, "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.1,
+            "cast": "Narrator", "pronunciations": [],
+        }
+        speech_done = {
+            "id": sid_done, "type": "speech", "text": "Already rendered.",
+            "voiceId": narr, "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+            "cast": "Narrator", "pronunciations": [],
+        }
+        ch = {"sections": [speech_live, speech_done]}
+        audio_rel = f"audio/{sid_done}.mp3"
+        (root / "audio").mkdir(parents=True)
+        (root / audio_rel).write_bytes(b"MP3")
+        state = {"sections": {
+            sid_old: {
+                "generatedAt": "2026-09-01T10:00:00Z",
+                "madeFrom": {
+                    "text": "Same words here.", "cast": "Narrator",
+                    "voiceId": narr, "model": "eleven_turbo_v2_5",
+                    "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                    "pronunciations": [],
+                },
+            },
+            sid_done: {
+                "generatedAt": "2026-09-02T10:00:00Z",
+                "audioFiles": {"mp3_44100_128": audio_rel},
+                "madeFrom": {
+                    "text": "Already rendered.", "cast": "Narrator",
+                    "voiceId": narr, "model": "eleven_turbo_v2_5",
+                    "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                    "pronunciations": [],
+                },
+            },
+        }}
+        flags = gen.flags_from_state(root, ch, state)
+        check("flags_from_state names param drift for a section with no take",
+              sid_live in flags
+              and flags[sid_live]["kind"] == "params"
+              and flags[sid_live]["detail"] == ["speed"]
+              and flags[sid_live]["since"] == "2026-09-01T10:00:00Z",
+              str(flags))
+        check("flags_from_state skips sections that already have a take",
+              sid_done not in flags, str(flags))
+        # Newer matching madeFrom wins when two old entries share the text.
+        state["sections"]["d" * 32] = {
+            "generatedAt": "2026-09-03T10:00:00Z",
+            "madeFrom": {
+                "text": "Same words here.", "cast": "Narrator",
+                "voiceId": narr, "model": "eleven_turbo_v2_5",
+                "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                "pronunciations": [{"term": "Dharmic", "say": "DAR-mik"}],
+            },
+        }
+        flags = gen.flags_from_state(root, ch, state)
+        check("flags_from_state pairs to the newest matching madeFrom",
+              flags[sid_live]["since"] == "2026-09-03T10:00:00Z"
+              and flags[sid_live]["detail"] == [
+                  "speed", "removed Dharmic"], str(flags))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_generation() -> None:
     """generate / retake / stitch / status on a copy of the fixture, with
     a fake ElevenLabs (docs/audiobook-review-design.md §4–§5)."""
@@ -1477,6 +1621,7 @@ def main_test() -> None:
     check_workbench()
     check_audiostation_launch()
     check_casting_filter_block()
+    check_generation_continuity()
     check_generation()
     check_audiobook_page()
     print(f"\nAll {PASSED} checks passed.")
