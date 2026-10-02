@@ -1795,6 +1795,143 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
             "marker_warnings": marker_warns}
 
 
+def read_manuscript(db: Database, manuscript: dict, service,
+                    docs_service=None,
+                    bridge: DocBridge | None = None) -> dict:
+    """The whole manuscript AS IT STANDS IN THE DOC, every tab at once,
+    writing nothing: no local file, no hash, no mapping, no thread or
+    comment row changes, and no comment is replied to or resolved. The
+    read an outside caller plans new revisions from
+    (docs/outside-caller-design.md §3) — `tab_marked_markdown` reads one
+    tab and `pull_doc` reads them all but lands them locally and strips
+    the forms; this is the all-tabs read that does neither.
+
+    One export of the master Doc, split with `split_tabbed_export` on
+    the same boundary set and tab order `pull_doc` uses, plus one
+    `fetch_open_comments`. Per file:
+
+      marked    the tab's markdown with every pending form intact, or
+                None when the file has no tab in the export
+      settled   the same text with the forms collapsed to their OLD
+                half — what a pull would land
+      state     `three_way` of `settled` against the local file on the
+                recorded base: unchanged | changed | local_ahead |
+                conflict, or `missing` (no tab yet, or the tab is gone
+                from the export)
+      forms     the open forms in document order, {kind, old, new};
+                kind is replace or insert, old is '' for an insertion
+      comments  the open margin comments whose quoted text sits in this
+                tab, oldest first
+      pushed    whether a base is on record for the tab (a push or a
+                pull has agreed its text). `ensure_master` gives every
+                file a tab the first time ANY file is pushed, so a file
+                never pushed itself has an EMPTY tab and no base: its
+                `settled` is empty and its state reads `changed`. That
+                tab is not the file's text; `pushed` is how to tell.
+
+    A comment is attributed by its quote, matched against the TAB text
+    (the settled text, then the marked text, so a comment anchored on a
+    green half still finds its tab). A quote found in no tab or in
+    several is never guessed at: it lands in `unattributed_comments`.
+
+    Returns {"doc_id", "url", "files": {relpath: {...}},
+    "unattributed_comments": [...], "comments_error": str | None}. A
+    manuscript with no master Doc yet makes no Google call and reports
+    every local file as `missing`."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    from .structure import TOC_FILENAME
+
+    local = sorted(n for n in iter_manuscript_paths(bridge.root)
+                   if n != TOC_FILENAME)
+    report: dict = {"doc_id": master_id,
+                    "url": tab_url(master_id) if master_id else None,
+                    "files": {}, "unattributed_comments": [],
+                    "comments_error": None}
+
+    def blank(relpath: str) -> dict:
+        link = links.get(relpath)
+        tab_id = link.get("tab_id") if isinstance(link, dict) else None
+        return {"marked": None, "settled": None, "state": "missing",
+                "forms": [], "comments": [], "tab_id": tab_id,
+                "pushed": bool(isinstance(link, dict)
+                               and link.get("pushed_hash")),
+                "url": tab_url(master_id, tab_id) if (master_id and tab_id)
+                else None,
+                "dangling": [], "marker_warnings": []}
+
+    names = list(dict.fromkeys(mapped + local))
+    if not master_id:
+        report["files"] = {name: blank(name) for name in names}
+        return report
+
+    tab_props: list[tuple[str, str]] = []
+    if docs_service is not None:
+        try:
+            tab_doc = docs_service.documents().get(
+                documentId=master_id, includeTabsContent=True).execute()
+            walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+        except Exception:  # best-effort ordering — see split_tabbed_export
+            pass
+    data = service.files().export(
+        fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
+    pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
+    boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
+                  | set(pmapped) | {t for _, t in tab_props if t})
+    tab_order = [t for _, t in tab_props if t]
+    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+
+    for name in names:
+        entry = blank(name)
+        report["files"][name] = entry
+        if name not in mapped or name not in sections:
+            continue
+        _, entry["dangling"] = strip_dangling(sections[name])
+        marked = normalize_markdown(sections[name])
+        settled, entry["marker_warnings"] = threads_mod.strip_pending(marked)
+        path = bridge.root / name
+        current = strip_embed_lines(
+            path.read_text(encoding="utf-8") if path.exists() else "")
+        entry.update(
+            marked=marked, settled=settled,
+            state=three_way(settled, current,
+                            links[name].get("pushed_hash")),
+            forms=[{"kind": f["kind"], "old": f["old"], "new": f["new"]}
+                   for f in threads_mod.pending_forms(marked)])
+
+    try:
+        open_comments = fetch_open_comments(service, master_id)
+    except Exception as err:  # the tabs are still worth returning
+        report["comments_error"] = str(err)
+        return report
+    settled_of = {n: e["settled"] for n, e in report["files"].items()
+                  if e["settled"] is not None}
+    marked_of = {n: e["marked"] for n, e in report["files"].items()
+                 if e["marked"] is not None}
+    for c in open_comments:
+        quoted = (c.get("quotedFileContent") or {}).get("value") or ""
+        relpath, heading = locate_quote(settled_of, quoted)
+        if relpath is None:
+            relpath, heading = locate_quote(marked_of, quoted)
+        row = {"comment_id": c["id"], "quote": quoted,
+               "content": c.get("content", ""),
+               "author": (c.get("author") or {}).get("displayName"),
+               "created": c.get("createdTime"), "heading": heading,
+               "replies": [r.get("content", "")
+                           for r in c.get("replies", [])]}
+        if relpath is None:
+            report["unattributed_comments"].append(row)
+        else:
+            report["files"][relpath]["comments"].append(row)
+    return report
+
+
 def pull_doc(db: Database, manuscript: dict, query: str | None = None,
              service=None, force: bool = False,
              with_comments: bool = True, docs_service=None,

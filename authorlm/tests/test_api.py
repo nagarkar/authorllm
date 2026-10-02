@@ -6220,6 +6220,113 @@ def check_omit_all(root: Path, FakeGoogle) -> None:
           and (ms / "02-ledger.md").read_text() == ledger, str(report))
 
 
+def _snapshot(db, manuscript, ms: Path) -> tuple:
+    """Everything a read must leave alone: the local files' bytes, the
+    manuscript row's metadata, and the thread and comment tables."""
+    files = {str(f.relative_to(ms)): f.read_bytes()
+             for f in sorted(ms.rglob("*")) if f.is_file()}
+    meta = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                  (manuscript["id"],))["metadata"]
+    rows = tuple(
+        tuple(tuple(dict(r).items()) for r in db.all(
+            f"SELECT * FROM {table} WHERE manuscript_id = ? ORDER BY id",
+            (manuscript["id"],)))
+        for table in ("doc_threads", "doc_comments", "manuscript_versions"))
+    return files, meta, rows
+
+
+def check_read_manuscript(root: Path, FakeGoogle) -> None:
+    """`gdocs.read_manuscript` (issue #131): every tab as it stands in
+    the Doc — forms intact, open comments on their tab — and nothing
+    written anywhere. Own workspace, own FakeGoogle."""
+    from authorlm.gdocs import push_doc, read_manuscript
+
+    ws = root / "read-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "a.md").write_text("# A\n\nOriginal a content.\n")
+    (ms / "b.md").write_text(
+        "# B\n\nOriginal b content.\n\nSecond paragraph of b.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "readbook",
+                  "--path", str(ms), "--no-extract"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+
+    class _NoGoogle:
+        def __getattr__(self, name):
+            raise AssertionError("a manuscript with no Doc made a Google call")
+
+    bare = read_manuscript(db, manuscript, _NoGoogle(), _NoGoogle())
+    check("a manuscript with no master Doc reads as every file missing, "
+          "with no Google call",
+          bare["doc_id"] is None and set(bare["files"]) == {"a.md", "b.md"}
+          and all(f["state"] == "missing" and f["marked"] is None
+                  and f["tab_id"] is None for f in bare["files"].values()),
+          str(bare))
+
+    stub = FakeGoogle()
+    for name in ("a.md", "b.md"):
+        push_doc(db, manuscript, name, service=stub, docs_service=stub)
+    manuscript = api.get_manuscript(db)
+    # The Doc as the author and a producer left it: a's tab reworded,
+    # b's tab holding one open replacement and one open addition.
+    stub.set_tab("a.md", "# A\nReworded a content, in the Doc.\n")
+    stub.set_tab(
+        "b.md",
+        "# B\nOriginal b content.\n"
+        "<<Second paragraph of b.>>{{Second paragraph, revised.}}\n"
+        "{{An added paragraph.}}\n")
+    stub.add_comment("c-b", "Original b content.", "Say where this is from.")
+    stub.add_comment("c-green", "Second paragraph, revised.", "Good.")
+    stub.add_comment("c-lost", "text that is in no tab", "Orphan.")
+    (ms / "c.md").write_text("# C\n\nA file with no tab yet.\n")
+
+    before = _snapshot(db, manuscript, ms)
+    comments_before = json.dumps(stub.state["comments"], sort_keys=True)
+    tabs_before = json.dumps(stub.state["docs"], sort_keys=True)
+    read = read_manuscript(db, manuscript, stub, stub)
+    a, b, c = (read["files"][n] for n in ("a.md", "b.md", "c.md"))
+    check("the read returns each tab's marked markdown, forms intact, "
+          "and the settled text beside it",
+          "<<Second paragraph of b.>>{{Second paragraph, revised.}}"
+          in b["marked"] and "{{An added paragraph.}}" in b["marked"]
+          and b["settled"] == (ms / "b.md").read_text()
+          and "Reworded a content" in a["marked"]
+          and a["marked"] == a["settled"], str(b))
+    check("...the three-way state per file: a tab the author reworded is "
+          "`changed`, a tab whose settled text is the local file is "
+          "`unchanged`, a file with no tab is `missing`",
+          a["state"] == "changed" and b["state"] == "unchanged"
+          and c["state"] == "missing" and c["tab_id"] is None
+          and a["pushed"] and b["pushed"] and not c["pushed"]
+          and "tab=" in b["url"], str((a["state"], b["state"], c)))
+    check("...the open forms parsed into old and new, on the right tab",
+          b["forms"] == [
+              {"kind": "replace", "old": "Second paragraph of b.",
+               "new": "Second paragraph, revised."},
+              {"kind": "insert", "old": "", "new": "An added paragraph."}]
+          and a["forms"] == [], str(b["forms"]))
+    check("...and the open comments on the tab their quote sits in — a "
+          "quote on a green half included, an unplaceable one set aside",
+          [x["comment_id"] for x in b["comments"]] == ["c-b", "c-green"]
+          and b["comments"][0]["content"] == "Say where this is from."
+          and b["comments"][0]["quote"] == "Original b content."
+          and a["comments"] == []
+          and [x["comment_id"] for x in read["unattributed_comments"]]
+          == ["c-lost"] and read["comments_error"] is None,
+          str((b["comments"], read["unattributed_comments"])))
+    check("the read wrote NOTHING: local files and manuscripts.metadata "
+          "are byte-identical, and no thread, comment or version row "
+          "was made",
+          _snapshot(db, manuscript, ms) == before)
+    check("...and nothing in the Doc either: no reply, no resolve, no "
+          "tab touched",
+          json.dumps(stub.state["comments"], sort_keys=True)
+          == comments_before
+          and json.dumps(stub.state["docs"], sort_keys=True) == tabs_before)
+
+
 def main_test() -> None:
     check_directives()
     check_critique_resolve_reembeds()
@@ -8171,6 +8278,7 @@ def main_test() -> None:
               and "Original a content" in (t2_ms / "a.md").read_text())
 
         check_omit_all(root, FakeGoogle)
+        check_read_manuscript(root, FakeGoogle)
 
         # --- gdocs failure path: documents().get() outage during reconcile
         # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
