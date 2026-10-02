@@ -448,6 +448,8 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
             f"{len(items) if isinstance(items, list) else 'none'}")
     edits = []
     for i, (item, src) in enumerate(zip(items, paragraphs), 1):
+        if not isinstance(item, dict):
+            raise ContractError(f"paragraph entry {i} is not a JSON object")
         if item.get("n") != i:
             raise ContractError(f"entry {i} has n={item.get('n')}")
         want = echo_of(src)
@@ -469,8 +471,16 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
         edits.append({"n": i, "old": src, "new": new,
                       "why": str(item.get("why") or "").strip(),
                       "intent_id": item.get("intent_id") or None})
+    raw_ins = raw.get("insertions") or []
+    if not isinstance(raw_ins, list):
+        raise ContractError("insertions is not a JSON array")
+    raw_sug = raw.get("suggestions") or []
+    if not isinstance(raw_sug, list):
+        raise ContractError("suggestions is not a JSON array")
     insertions = []
-    for ins in raw.get("insertions") or []:
+    for k, ins in enumerate(raw_ins, 1):
+        if not isinstance(ins, dict):
+            raise ContractError(f"insertion {k} is not a JSON object")
         after = ins.get("after")
         if not isinstance(after, int) or not 0 <= after <= len(paragraphs):
             raise ContractError(f"insertion after={after} out of range")
@@ -481,7 +491,9 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
                            "why": str(ins.get("why") or "").strip(),
                            "intent_id": ins.get("intent_id") or None})
     suggestions = []
-    for s in raw.get("suggestions") or []:
+    for k, s in enumerate(raw_sug, 1):
+        if not isinstance(s, dict):
+            raise ContractError(f"suggestion {k} is not a JSON object")
         text = str(s.get("text") or "").strip()
         if text:
             suggestions.append({"kind": s.get("kind") or "other",
