@@ -12560,9 +12560,11 @@ def main_test() -> None:
         check("insert mark writes a green {{new}} paragraph at the boundary",
               insert_reqs[0]["insertText"]["text"] == "\n{{added}}"
               and insert_reqs[0]["insertText"]["location"]["index"] == 5
-              and insert_reqs[1]["updateTextStyle"]["range"]["startIndex"]
+              and insert_reqs[1]["updateParagraphStyle"]["paragraphStyle"]
+              == {"namedStyleType": "NORMAL_TEXT"}
+              and insert_reqs[2]["updateTextStyle"]["range"]["startIndex"]
               == 6
-              and "foregroundColor" in insert_reqs[1]["updateTextStyle"]
+              and "foregroundColor" in insert_reqs[2]["updateTextStyle"]
               ["textStyle"],
               str(insert_reqs))
 

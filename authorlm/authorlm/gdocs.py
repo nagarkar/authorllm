@@ -39,7 +39,10 @@ MARKDOWN_MIME = "text/markdown"
 
 # ------------------------------------------------------------- normalizer
 
-_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=])")
+# The colon: the exporter writes a URL typed or inserted as plain text as
+# `https\://…` so it will not auto-link (seen 2026-10-02 on footnote lines
+# an outside caller staged).
+_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=:])")
 _BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
 # CommonMark thematic break: ≥3 of *, -, or _ with optional spaces
 # between, ≤3 leading spaces. Must run BEFORE _BULLET — a spaced
@@ -3308,6 +3311,17 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                            if forms is not None else
                            f"export proof unavailable ({err_text}) — form "
                            "taken back out"))
+    # Inserted paragraphs carry no spacing of their own, and Google's
+    # markdown export joins neighbouring paragraphs that have none into
+    # ONE paragraph with hard line breaks, which no resolve can read back
+    # as separate forms (found 2026-10-02: a tab built from its title down
+    # by additions only). Re-apply the standard, as every content write does.
+    if any(not t["proposed_old"] for t in written):
+        try:
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
+        except Exception:  # noqa: BLE001 — spacing is re-applied by resolve
+            pass
     return {"written": written, "failed": failed,
             "url": tab_url(master_id, tab_id)}
 

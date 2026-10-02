@@ -7023,6 +7023,20 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
             f"no {origin} forms are out in {rel}'s tab — nothing to "
             f"resolve.")
         return result
+    # Paragraph spacing first: a tab whose staged additions carry none
+    # exports them as one paragraph with hard breaks (see
+    # gdocs.write_pending_forms), and this heals a tab staged before that
+    # was known.
+    try:
+        _links = (loads(db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                               (manuscript["id"],))["metadata"], {})
+                  .get("gdocs") or {})
+        _tab = (_links.get(rel) or {}).get("tab_id")
+        if _links.get("_master_id") and _tab:
+            gdocs.apply_tab_spacing(docs_service, _links["_master_id"], _tab,
+                                    gdocs.doc_spacing(manuscript))
+    except Exception:  # noqa: BLE001 — the read below reports what it finds
+        pass
     fetched = gdocs.tab_marked_markdown(db, manuscript, rel, service,
                                         docs_service)
     result["state"] = fetched["state"]
