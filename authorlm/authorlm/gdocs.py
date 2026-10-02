@@ -3042,7 +3042,12 @@ def _unmark_replace_requests(tab_id: str, start: int, tab_old: str,
 def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     """Requests inserting a green {{new}} paragraph at doc index `at`
     (a paragraph boundary): the critique pass's insertion form. The new
-    half is rendered like a replace form's (`render_emphasis`)."""
+    half is rendered like a replace form's (`render_emphasis`).
+
+    The new paragraph is set to normal text. Docs gives a paragraph made
+    by a line break the style of the one it was split from, so an
+    insertion after a heading came out as a heading (found 2026-10-02 on
+    the first tab an outside caller built from its `# title` down)."""
     threads_mod.assert_no_pending_markers("", new)
     new, new_styles = render_emphasis(new)
     text = "\n" + "{{" + new + "}}"
@@ -3059,6 +3064,11 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
                       "endIndex": at + _utf16_len(text)},
             "textStyle": {"italic": False, "bold": False},
             "fields": "italic,bold"}},
+        {"updateParagraphStyle": {
+            "range": {"tabId": tab_id, "startIndex": at + 1,
+                      "endIndex": at + _utf16_len(text)},
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+            "fields": "namedStyleType"}},
     ]
     base = at + 3                              # first char after "\n{{"
     for s16, e16, style in new_styles:
