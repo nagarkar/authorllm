@@ -70,6 +70,7 @@ __all__ = [
     "write_draft",
     "write_accept", "write_reject", "write_learn", "write_complete",
     "write_abandon", "write_digest", "get_profile",
+    "stage_revisions",
 ]
 
 
@@ -6607,3 +6608,263 @@ def filter_status(db: Database, manuscript: dict,
                 f"struck-and-green text for a finished essay, 'doc push "
                 f"<essay>' rebuilds it from the local file."
                 if doc_files else None)}
+
+
+# ====================================================================
+# Outside callers (docs/outside-caller-design.md).
+#
+# A tool that is not one of AuthorLM's own passes — ytlm keeping a
+# corpus document as a manuscript is the first — proposes text the same
+# way a pass does: as <<old>>{{new}} forms in the tab, ruled on there by
+# the author, landed by an explicit resolve. It has no run row, no
+# finding, no margin comment to start from; it has a list of revisions
+# and its own name. These two verbs are that door: `stage_revisions`
+# puts the forms out, `resolve_revisions` reads one tab back. The read
+# they are planned from is `gdocs.read_manuscript`.
+#
+# Every outside caller's threads carry ONE `origin_type`, so no caller
+# can ever collide with a pass's rows; the caller's own name rides in
+# the thread metadata and is what `resolve_revisions` selects on.
+# ====================================================================
+
+EXTERNAL_ORIGIN = "external"
+EXTERNAL_EVIDENCE = "external_edit"
+
+
+def _external_threads(db: Database, manuscript_id: str, file: str,
+                      origin: str, states=("written",)) -> list[dict]:
+    """One outside caller's threads on one file, in staging order."""
+    return [t for t in passes.staged_threads(
+                db, manuscript_id, file, states=states,
+                origin_type=EXTERNAL_ORIGIN)
+            if (loads(t.get("metadata"), {}) or {}).get("origin") == origin]
+
+
+def stage_revisions(db: Database, manuscript: dict, file: str,
+                    revisions: list[dict], origin: str,
+                    service, docs_service,
+                    config: dict | None = None) -> dict:
+    """Put an outside caller's revisions into `file`'s tab as pending
+    forms: replacements as `<<old>>{{new}}`, additions as `{{new}}`.
+    The local file is not changed; nothing lands until
+    `resolve_revisions`.
+
+    Each revision is `{old, new, note, anchor_paragraph}`:
+
+    - `old` non-empty: a REPLACEMENT of that exact text, which must sit
+      inside one paragraph of the file. `anchor_paragraph` (1-based,
+      into the file's blank-line-separated paragraphs, headings
+      included) names the paragraph; omitted, the text must occur in
+      exactly one.
+    - `old == ""`: an ADDITION, a paragraph of its own after paragraph
+      `anchor_paragraph`. Additions at one anchor read in the tab in the
+      order given. 0 is the start of the tab and is taken only for a
+      file with no paragraphs yet: the shared writer puts a head
+      insertion on the first paragraph's own line, so on a file that
+      has text the addition goes after paragraph 1 or later.
+    - `new` is one paragraph on one line, free of the reserved markers.
+    - `note` is the one-line why, kept on the thread.
+
+    `origin` is the caller's name ("ytlm"). The threads are
+    `origin_type='external'` rows with the name in their metadata.
+
+    What is held, and how it is said. A revision that cannot be staged
+    is returned in `failed` with its reason and the rest go ahead. A tab
+    that still has ANY producer's forms out takes no new ones — the
+    standing rule, here as a report and not an exception: every revision
+    comes back in `failed`. The same for a file that is mid-rewrite,
+    marked, or in conflict with its tab. Only an unknown file raises.
+
+    A file with no tab yet (new, from `docs.add_doc`) gets its tab from
+    the writer's own levelling push, so a new tab can arrive as a
+    heading plus additions. A file left checked out by an earlier push
+    is pulled first (the standing protocol, `lens_push`'s), so an edit
+    the author made in the tab is brought home, and observed, before
+    the old halves are read from the file.
+
+    Returns {"file", "origin", "written": [{"id", "index", "old", "new",
+    "note", "anchor_paragraph"}], "failed": [(revision, reason)], "url",
+    "warnings"} — `index` is the revision's place in the list handed
+    in, `failed` carries the caller's own dicts."""
+    from . import gdocs
+    from . import threads as th
+    from .revisions import _paragraphs
+
+    origin = (origin or "").strip()
+    if not origin:
+        raise ValueError("an outside caller names itself: origin is empty")
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    path = Path(manuscript["path"]) / rel
+    revisions = list(revisions or [])
+    result: dict = {"file": rel, "origin": origin, "written": [],
+                    "failed": [], "url": None, "warnings": []}
+
+    def tab_link() -> str | None:
+        links = gdocs.doc_status(db, manuscript)
+        entry = links.get(rel)
+        if links.get("_master_id") and isinstance(entry, dict) \
+                and entry.get("tab_id"):
+            return gdocs.tab_url(links["_master_id"], entry["tab_id"])
+        return None
+
+    def held(reason: str) -> dict:
+        result["failed"] = [(r, reason) for r in revisions]
+        result["url"] = tab_link()
+        return result
+
+    if not revisions:
+        result["url"] = tab_link()
+        return result
+    pending = gdocs.forms_pending(db, mid, rel)
+    if pending:
+        n = db.one(
+            "SELECT COUNT(*) AS n FROM doc_threads WHERE manuscript_id = ? "
+            "AND file = ? AND state = 'written'", (mid, rel))["n"]
+        return held(
+            f"{rel}'s tab still carries {n} unresolved {pending} form(s) — "
+            f"a tab with open revisions takes no new ones until they are "
+            f"resolved")
+    entry = gdocs.doc_status(db, manuscript).get(rel)
+    if isinstance(entry, dict) and entry.get("checked_out"):
+        try:
+            pulled = gdocs.pull_doc(db, manuscript, query=rel,
+                                    service=service,
+                                    docs_service=docs_service,
+                                    with_comments=False)
+        except LookupError as err:
+            return held(str(err))
+        for key, why in (
+                ("conflicts", "changed both locally and in the Doc since "
+                              "the last sync — settle that by hand first"),
+                ("missing", "has no section in the master Doc export — "
+                            "its tab is gone"),
+                ("marked", "carries pending forms on disk (mid-settle)"),
+                ("sidecar_unparsable", "came back from the Doc unparsable")):
+            if rel in (pulled.get(key) or []):
+                return held(f"{rel} {why}")
+        if rel in pulled.get("changed", []):
+            with contextlib.redirect_stdout(io.StringIO()):
+                collect(db, manuscript, config or {},
+                        source="pre-external-stage")
+            result["warnings"].append(
+                f"{rel} was edited in the Doc since the last push; that "
+                f"edit was pulled into the local file before staging.")
+    text = path.read_text(encoding="utf-8")
+    if is_placeholder(text):
+        return held(f"{rel} is mid-rewrite: an active writeup holds it")
+    if staging.is_marked(text):
+        return held(f"{rel} carries pending forms on disk (mid-settle)")
+    paragraphs = _paragraphs(text)
+
+    rows: list[tuple[int, dict, dict]] = []      # (index, revision, thread)
+    claimed: dict[int, list[str]] = {}
+    for index, rev in enumerate(revisions):
+        if not isinstance(rev, dict):
+            result["failed"].append((rev, "a revision is a dict of old, "
+                                          "new, note, anchor_paragraph"))
+            continue
+        old = rev.get("old") or ""
+        new = (rev.get("new") or "").strip("\n")
+        anchor = rev.get("anchor_paragraph")
+        why = None
+        try:
+            th.assert_no_pending_markers(old, new)
+        except ValueError as err:
+            why = str(err)
+        if why is None and not new.strip():
+            why = ("new text is empty — a deletion cannot be shown as a "
+                   "revision")
+        if why is None and "\n" in new:
+            why = ("new text spans lines — one paragraph, on one line, "
+                   "per revision")
+        if why is None and anchor is not None and (
+                isinstance(anchor, bool) or not isinstance(anchor, int)):
+            why = "anchor_paragraph is a whole number"
+        if why is None and old == "":
+            if anchor is None:
+                why = "an addition names the paragraph it follows"
+            elif not 0 <= anchor <= len(paragraphs):
+                why = (f"anchor paragraph {anchor} out of range — the "
+                       f"file has {len(paragraphs)}")
+            elif anchor == 0 and paragraphs:
+                why = ("anchor_paragraph 0 is for a file with no "
+                       "paragraphs yet — on this file, add after "
+                       "paragraph 1 or later")
+        elif why is None:
+            if anchor is None:
+                hits = [n for n, p in enumerate(paragraphs, 1) if old in p]
+                if len(hits) == 1:
+                    anchor = hits[0]
+                elif not hits:
+                    why = ("old text not found verbatim inside one "
+                           "paragraph of the file")
+                else:
+                    why = (f"old text occurs in paragraphs "
+                           f"{', '.join(map(str, hits))} — name one with "
+                           f"anchor_paragraph")
+            elif not 1 <= anchor <= len(paragraphs):
+                why = (f"anchor paragraph {anchor} out of range — the "
+                       f"file has {len(paragraphs)}")
+            elif old not in paragraphs[anchor - 1]:
+                why = f"old text is not in paragraph {anchor} verbatim"
+            if why is None and any(old in o or o in old
+                                   for o in claimed.get(anchor, [])):
+                why = (f"overlaps another revision of paragraph {anchor} "
+                       f"in this batch")
+        if why is not None:
+            result["failed"].append((rev, why))
+            continue
+        if old:
+            claimed.setdefault(anchor, []).append(old)
+        row = ko_fields("dt")
+        meta = loads(row.get("metadata"), {}) or {}
+        meta.update(kind="replace" if old else "insert",
+                    anchor_paragraph=anchor, original_new=new,
+                    origin=origin, index=index)
+        row.update(
+            manuscript_id=mid, origin_type=EXTERNAL_ORIGIN,
+            origin_id=f"{origin}:{rel}:{row['id']}", file=rel,
+            anchor_quote=None, proposed_old=old, proposed_new=new,
+            note=rev.get("note") or "", state="proposed",
+            our_reply_ids="[]", last_author_reply_id=None,
+            scope_kind="file", scope_ref=rel, metadata=json.dumps(meta))
+        db.insert("doc_threads", row)
+        rows.append((index, rev, row))
+    if not rows:
+        result["url"] = tab_link()
+        return result
+
+    # The writer lands each insertion at the END of its anchor paragraph,
+    # so at one anchor the LAST written sits first: hand the insertions
+    # over in reverse and the tab reads them in the caller's order
+    # (`directives._stage_doc` does the same for its definitions).
+    threads = ([t for _, _, t in rows if t["proposed_old"]]
+               + [t for _, _, t in reversed(rows) if not t["proposed_old"]])
+    try:
+        wrote = gdocs.write_pending_forms(db, manuscript, rel, threads,
+                                          service, docs_service)
+    except Exception as err:
+        for _, _, t in rows:
+            db.update("doc_threads", t["id"], {"state": "withdrawn"})
+        if not isinstance(err, (LookupError, ValueError)):
+            raise
+        result["failed"] += [(rev, str(err)) for _, rev, _ in rows]
+        result["url"] = tab_link()
+        return result
+    written_ids = {t["id"] for t in wrote["written"]}
+    reasons = {t["id"]: why for t, why in wrote["failed"]}
+    for index, rev, t in rows:
+        if t["id"] in written_ids:
+            db.update("doc_threads", t["id"], {"state": "written"})
+            meta = loads(t["metadata"], {})
+            result["written"].append({
+                "id": t["id"], "index": index, "old": t["proposed_old"],
+                "new": t["proposed_new"], "note": t["note"],
+                "anchor_paragraph": meta["anchor_paragraph"]})
+        else:
+            db.update("doc_threads", t["id"], {"state": "withdrawn"})
+            result["failed"].append(
+                (rev, reasons.get(t["id"], "not written")))
+    result["url"] = wrote["url"]
+    return result

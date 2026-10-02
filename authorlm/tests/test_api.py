@@ -6327,6 +6327,165 @@ def check_read_manuscript(root: Path, FakeGoogle) -> None:
           and json.dumps(stub.state["docs"], sort_keys=True) == tabs_before)
 
 
+def check_stage_revisions(root: Path, FakeGoogle) -> None:
+    """`api.stage_revisions` (issue #129): an outside caller's
+    replacements and additions go into a tab as pending forms, under
+    their own origin, with the standing hold on a tab that already has
+    forms out reported and not raised. Own workspace, own FakeGoogle."""
+    from authorlm import docs as docs_mod
+    from authorlm.gdocs import doc_status, forms_pending
+
+    ws = root / "stage-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    essay = ("# Topic\n\nFirst settled paragraph.\n\n"
+             "Second settled paragraph.\n\nThird settled paragraph.\n")
+    (ms / "topic.md").write_text(essay)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "stagebook",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    mid = manuscript["id"]
+    stub = FakeGoogle()
+
+    def tab(title):
+        return next(t["text"] for tabs in stub.state["docs"].values()
+                    for t in tabs if t["title"] == title)
+
+    revisions = [
+        {"old": "Second settled paragraph.",
+         "new": "Second paragraph, as the new video has it.",
+         "note": "claim c-12"},
+        {"old": "", "new": "A first added paragraph.", "note": "claim c-13",
+         "anchor_paragraph": 4},
+        {"old": "", "new": "A second added paragraph.", "note": "claim c-14",
+         "anchor_paragraph": 4},
+    ]
+    staged = api.stage_revisions(db, manuscript, "topic.md", revisions,
+                                 "ytlm", stub, stub)
+    text = tab("topic.md")
+    check("a replacement and two additions staged on one file all show "
+          "in the tab as forms, the additions in the order given",
+          len(staged["written"]) == 3 and not staged["failed"]
+          and ("<<Second settled paragraph.>>"
+               "{{Second paragraph, as the new video has it.}}") in text
+          and text.index("Third settled paragraph.")
+          < text.index("{{A first added paragraph.}}")
+          < text.index("{{A second added paragraph.}}"), text)
+    check("...the result names each written revision by its place in "
+          "the list, with its thread id and the tab's URL",
+          [w["index"] for w in staged["written"]] == [0, 1, 2]
+          and staged["written"][0]["anchor_paragraph"] == 3
+          and all(w["id"].startswith("dt") for w in staged["written"])
+          and "tab=" in staged["url"] and staged["file"] == "topic.md"
+          and staged["origin"] == "ytlm", str(staged))
+    rows = [dict(r) for r in db.all(
+        "SELECT * FROM doc_threads WHERE manuscript_id = ? ORDER BY "
+        "created_at, id", (mid,))]
+    check("...the threads are `written` rows under the outside-caller "
+          "origin, the caller's name and the note kept on each",
+          len(rows) == 3
+          and all(r["origin_type"] == api.EXTERNAL_ORIGIN == "external"
+                  and r["state"] == "written"
+                  and json.loads(r["metadata"])["origin"] == "ytlm"
+                  for r in rows)
+          and [r["note"] for r in rows]
+          == ["claim c-12", "claim c-13", "claim c-14"]
+          and forms_pending(db, mid, "topic.md") == "external", str(rows))
+    check("...and the local file is unchanged: nothing lands before a "
+          "resolve",
+          (ms / "topic.md").read_text() == essay)
+
+    tab_before = tab("topic.md")
+    again = api.stage_revisions(
+        db, manuscript, "topic.md",
+        [{"old": "First settled paragraph.", "new": "First, redone."},
+         {"old": "", "new": "One more.", "anchor_paragraph": 2}],
+        "ytlm", stub, stub)
+    check("staging onto a file with open forms writes nothing and hands "
+          "every revision back in `failed`, with the reason — reported, "
+          "not raised",
+          again["written"] == [] and len(again["failed"]) == 2
+          and again["failed"][0][0]["new"] == "First, redone."
+          and all("takes no new ones" in why and "3 unresolved external"
+                  in why for _, why in again["failed"])
+          and tab("topic.md") == tab_before
+          and db.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                     "manuscript_id = ?", (mid,))["n"] == 3
+          and "tab=" in again["url"], str(again))
+
+    # A new file, added with docs.add_doc, has no tab yet: the writer's
+    # own levelling push makes it, and the tab arrives as additions.
+    docs_mod.add_doc(manuscript, "new-topic", title="New topic")
+    fresh = api.stage_revisions(
+        db, manuscript, "new-topic.md",
+        [{"old": "", "new": "The tab's first paragraph.",
+          "anchor_paragraph": 1},
+         {"old": "", "new": "The tab's second paragraph.",
+          "anchor_paragraph": 1}],
+        "ytlm", stub, stub)
+    new_tab = tab("new-topic.md")
+    check("a file with no tab yet gets one, and arrives entirely as "
+          "additions under its heading",
+          len(fresh["written"]) == 2 and not fresh["failed"]
+          and new_tab.index("New topic")
+          < new_tab.index("{{The tab's first paragraph.}}")
+          < new_tab.index("{{The tab's second paragraph.}}")
+          and doc_status(db, manuscript)["new-topic.md"]["tab_id"]
+          and (ms / "new-topic.md").read_text() == "# New topic\n",
+          new_tab + repr((ms / "new-topic.md").read_text()))
+
+    # Per-revision faults: the good one goes, each bad one is named.
+    (ms / "mixed.md").write_text(
+        "# Mixed\n\nA twin line.\n\nA twin line.\n\nThe last one.\n")
+    mixed = api.stage_revisions(
+        db, manuscript, "mixed.md",
+        [{"old": "The last one.", "new": "The last one, redone."},
+         {"old": "Text that is nowhere.", "new": "x"},
+         {"old": "A twin line.", "new": "Which twin?"},
+         {"old": "", "new": "Past the end.", "anchor_paragraph": 9},
+         {"old": "", "new": "No anchor."},
+         {"old": "", "new": "Head of a file that has text.",
+          "anchor_paragraph": 0},
+         {"old": "", "new": "Braces {{inside}}.", "anchor_paragraph": 1},
+         {"old": "", "new": "Two\n\nparagraphs.", "anchor_paragraph": 1},
+         {"old": "A twin line.", "new": "The second twin.",
+          "anchor_paragraph": 3}],
+        "ytlm", stub, stub)
+    whys = {rev["new"]: why for rev, why in mixed["failed"]}
+    mixed_tab = tab("mixed.md")
+    check("one bad revision never holds the others: the sound ones are "
+          "written and each fault is named on its own revision",
+          [w["index"] for w in mixed["written"]] == [0, 8]
+          and "not found verbatim" in whys["x"]
+          and "paragraphs 2, 3" in whys["Which twin?"]
+          and "out of range" in whys["Past the end."]
+          and "names the paragraph" in whys["No anchor."]
+          and "no paragraphs yet" in whys["Head of a file that has text."]
+          and "reserved" in whys["Braces {{inside}}."]
+          and "one line" in whys["Two\n\nparagraphs."]
+          and len(mixed["failed"]) == 7, str(mixed["failed"]))
+    check("...and an anchored replacement of the second of two twins "
+          "lands on the second, not the first",
+          mixed_tab.index("A twin line.\n")
+          < mixed_tab.index("<<A twin line.>>{{The second twin.}}")
+          and mixed_tab.count("<<") == 2, mixed_tab)
+    check("...the faulted revisions left no thread behind",
+          db.one("SELECT COUNT(*) AS n FROM doc_threads WHERE "
+                 "manuscript_id = ? AND file = 'mixed.md'", (mid,))["n"]
+          == 2)
+    check("an unknown file is the one thing that raises",
+          _raises(lambda: api.stage_revisions(
+              db, manuscript, "no-such-file.md",
+              [{"old": "", "new": "x", "anchor_paragraph": 0}],
+              "ytlm", stub, stub), "no document matching"))
+    check("...and so is a caller that does not name itself",
+          _raises(lambda: api.stage_revisions(
+              db, manuscript, "mixed.md", [], "  ", stub, stub),
+              "names itself"))
+
+
 def main_test() -> None:
     check_directives()
     check_critique_resolve_reembeds()
@@ -8279,6 +8438,7 @@ def main_test() -> None:
 
         check_omit_all(root, FakeGoogle)
         check_read_manuscript(root, FakeGoogle)
+        check_stage_revisions(root, FakeGoogle)
 
         # --- gdocs failure path: documents().get() outage during reconcile
         # (T6, risk-register §3) — reconcile's tab-listing pass is wrapped
