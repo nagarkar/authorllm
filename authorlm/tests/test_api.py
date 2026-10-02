@@ -2700,6 +2700,89 @@ def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
     return root, ws, db, manuscript, intent
 
 
+def check_critic_checklist_and_lint_draft() -> None:
+    """Critic payload inputs the independent reader cites by number.
+
+    `parse_report` and the propose gates live in check_lint_and_propose_gates;
+    nearest_passages is claimed by open coverage #124. These seams decide
+    which laws/learnings get L#/G# labels, which concepts count as already
+    introduced elsewhere, and whether a draft is linted against its own
+    file on disk — silent when wrong (mis-cited law, missed redefinition,
+    self-overlap invisible)."""
+    from authorlm import critic as crt
+    from authorlm.db import ko_fields
+
+    root, ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-critic-checklist-")
+    ms = Path(manuscript["path"])
+    try:
+        api.add_style_law(db, manuscript, "tone", "Prefer short sentences.",
+                          guide_name="Connections essays")
+        api.add_style_law(db, manuscript, "register", "Stay in plain English.",
+                          guide_name="Connections essays")
+        text = crt.checklist(db, manuscript["id"], "01-epictetus.md",
+                             ["keep the beat short", "name the crux once"])
+        check("checklist numbers laws L1… and learnings G1… in order",
+              "L1 [tone] Prefer short sentences." in text
+              and "L2 [register] Stay in plain English." in text
+              and "G1 keep the beat short" in text
+              and "G2 name the crux once" in text, text)
+        laws_only = crt.checklist(db, manuscript["id"], "01-epictetus.md", [])
+        check("checklist with no learnings emits only the L lines",
+              "L1 [tone]" in laws_only and "L2 [register]" in laws_only
+              and "G1" not in laws_only, laws_only)
+
+        mid = manuscript["id"]
+        for name, kind, status, introduced in (
+            ("Hierarchy", "concept", "realized", "impulses.md"),
+            ("Rank", "concept", "declared", "later.md"),
+            ("Ghost", "concept", "realized", None),
+            ("Drafty", "concept", "proposed", "impulses.md"),
+            ("AliasOnly", "alias", "realized", "impulses.md"),
+        ):
+            row = ko_fields("cn")
+            row.update(manuscript_id=mid, name=name, kind=kind,
+                       status=status, introduced_in=introduced,
+                       notes=f"{name} notes", aliases="[]")
+            db.insert("concept_nodes", row)
+        proven = crt.concept_provenance(db, mid)
+        check("concept_provenance keeps realized/declared concepts with "
+              "introduced_in, drops ghosts and non-concepts",
+              set(proven) == {("Hierarchy", "impulses.md"),
+                              ("Rank", "later.md")}, str(proven))
+
+        # Self-overlap: the draft repeats a paragraph already on disk in
+        # this file. include_self=True (default) must surface it; False
+        # must not, because the corpus excludes this file.
+        (ms / "01-epictetus.md").write_text(
+            "# Epictetus\n\n"
+            "The guest who leaves with the hotel towels and the shopper "
+            "who leaves without paying do so because it helps them.\n")
+        (ms / "other.md").write_text(
+            "# Other\n\nSomething about stars and silence only.\n")
+        draft = ("The guest who leaves with the hotel towels and the shopper "
+                 "who leaves without paying do so because it helps them.")
+        with_self = crt.lint_draft(db, manuscript, "01-epictetus.md", draft)
+        without = crt.lint_draft(db, manuscript, "01-epictetus.md", draft,
+                                 include_self=False)
+        check("lint_draft include_self=True flags overlap against this file",
+              any(f.code == "overlap" and "01-epictetus.md" in (f.ref or "")
+                  for f in with_self.findings), str(with_self.findings))
+        check("lint_draft include_self=False drops this file from the corpus",
+              not any(f.code == "overlap" and "01-epictetus.md" in (f.ref or "")
+                      for f in without.findings), str(without.findings))
+        # Redefinition warning rides the provenance list: drafting
+        # Hierarchy in a different essay than the one that introduced it.
+        redef = crt.lint_draft(
+            db, manuscript, "01-epictetus.md",
+            "A hierarchy is the ordering by a hierarchy's metric.")
+        check("lint_draft feeds concept_provenance into redefinition checks",
+              any(f.code == "redefinition" and "impulses.md" in (f.ref or "")
+                  for f in redef.findings), str(redef.findings))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_lint_and_propose_gates() -> None:
     """The deterministic prose lint (authorlm/lint.py) and the three gates
     on `write propose` (review 2026-09-06): a payload assembled since the
@@ -6008,6 +6091,7 @@ def check_filter_prelude_opt_in_frame() -> None:
 
 
 def main_test() -> None:
+    check_critic_checklist_and_lint_draft()
     check_directives()
     check_critique_resolve_reembeds()
     check_client_resolution()
