@@ -819,7 +819,8 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                       forms: list[dict],
                       origin_type: str = "critique",
                       evidence_type: str = "critique_edit",
-                      final_text: str | None = None) -> list[dict]:
+                      final_text: str | None = None,
+                      threads: list[dict] | None = None) -> list[dict]:
     """Match the resolved forms back to their threads by proposal text;
     record proposal→final diffs as evidence; close the threads. Returns
     the modified-acceptance diffs (the learnings duty's feedstock).
@@ -835,9 +836,17 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
     2026-08-31: old text still standing as-is → decline; old text gone →
     acceptance, the resolved text being the final wording). Without
     `final_text` the old behavior stands: an unmatched form is a
-    decline."""
-    threads = staged_threads(db, manuscript_id, file, states=("written",),
-                             origin_type=origin_type)
+    decline.
+
+    `threads` narrows the resolution to exactly the rows handed in, for
+    a caller whose set is smaller than "every written thread of this
+    origin on the file" (`api.resolve_revisions`: one outside caller's
+    replacements, its insertions already ruled). Omitted, the set is
+    read here as it always was."""
+    if threads is None:
+        threads = staged_threads(db, manuscript_id, file,
+                                 states=("written",),
+                                 origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
     # Replaces match by their verbatim OLD half (law). Insertions have no

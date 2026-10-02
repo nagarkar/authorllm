@@ -70,7 +70,7 @@ __all__ = [
     "write_draft",
     "write_accept", "write_reject", "write_learn", "write_complete",
     "write_abandon", "write_digest", "get_profile",
-    "stage_revisions",
+    "stage_revisions", "resolve_revisions",
 ]
 
 
@@ -6867,4 +6867,291 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
             result["failed"].append(
                 (rev, reasons.get(t["id"], "not written")))
     result["url"] = wrote["url"]
+    return result
+
+
+def _own_line(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] is the whole of the line(s) it sits on
+    — the shape the writer gives an insertion form, and never the shape
+    of a `{{…}}` the author wrote inside a sentence."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return (not text[line_start:start].strip()
+            and not text[end:line_end].strip())
+
+
+def _rule_external_marked(marked: str, replaces: list[dict],
+                          inserts: list[dict]) -> tuple[str, dict]:
+    """The part of an outside caller's resolve that the shared settle
+    steps do not cover, done on the marked text BEFORE they run.
+
+    Additions. `passes.final_text_from_marked` pairs insertion forms
+    with insertion threads by position alone, which is right for a pass
+    that owns every `{{…}}` in its tab and wrong here: the tab may hold
+    another producer's insertion, or the author's own braces. So each
+    addition is paired with its own form — the same new text first, then
+    the closest reworded one — and unwrapped in place. An addition whose
+    form is gone, or emptied, is a decline; one whose braces the author
+    removed by hand, text kept, is an acceptance.
+
+    Replacements the author turned down by deleting the green half:
+    `<<old>>{{}}` and a bare `<<old>>` are put back to `old`, so the
+    shared steps read them as the old text restored — a decline — and
+    not as a rewording to nothing, or as stray markers.
+
+    Returns (marked, {thread id: (verdict, final)}) for the additions
+    alone; the replacements are still forms, or plain old text, in the
+    returned marked text."""
+    from . import threads as th
+
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
+    for t in replaces:
+        old = re.escape(t["proposed_old"])
+        marked = re.sub(
+            r"(?:~~)?<<" + old + r">>(?:~~)?(?:\{\{\s*\}\}|(?!~~|\{\{))",
+            lambda m, t=t: t["proposed_old"], marked, count=1)
+
+    forms = [f for f in th.pending_forms(marked)
+             if f["kind"] == "insert" and _own_line(marked, f["start"],
+                                                    f["end"])]
+    free = [f for f in forms if f["new"].strip()]
+    pairs: dict[str, dict] = {}
+    for t in inserts:                       # the same text, first
+        hit = next((f for f in free if f["new"] == t["proposed_new"]), None)
+        if hit is not None:
+            free.remove(hit)
+            pairs[t["id"]] = hit
+    for t in inserts:                       # then the closest rewording
+        if t["id"] in pairs or not free:
+            continue
+        best = max(free, key=lambda f: difflib.SequenceMatcher(
+            None, flat(t["proposed_new"]), flat(f["new"])).ratio())
+        if difflib.SequenceMatcher(None, flat(t["proposed_new"]),
+                                   flat(best["new"])).ratio() >= 0.5:
+            free.remove(best)
+            pairs[t["id"]] = best
+    # Unwrap the paired forms and drop the emptied ones, last to first.
+    edits = [(f["start"], f["end"], f["new"]) for f in pairs.values()]
+    edits += [(f["start"], f["end"], "") for f in forms
+              if not f["new"].strip()]
+    for start, end, replacement in sorted(edits, reverse=True):
+        marked = marked[:start] + replacement + marked[end:]
+    ruled: dict[str, tuple[str, str | None]] = {}
+    for t in inserts:
+        form = pairs.get(t["id"])
+        if form is None:
+            kept = flat(t["proposed_new"]) in flat(marked)
+            ruled[t["id"]] = ("accepted", None) if kept else ("declined",
+                                                              None)
+        elif form["new"] == t["proposed_new"]:
+            ruled[t["id"]] = ("accepted", None)
+        else:
+            ruled[t["id"]] = ("modified", form["new"])
+    return marked, ruled
+
+
+def resolve_revisions(db: Database, manuscript: dict, file: str,
+                      origin: str, service, docs_service,
+                      config: dict | None = None) -> dict:
+    """Read `file`'s tab back and land every form `origin` still has out
+    there, with the standing semantics: a form left alone is accepted;
+    an edited `{{new}}` half wins (modified); a form emptied, deleted,
+    or put back to its old text is a decline. One file per call —
+    resolving accepts whatever the author left untouched, so doing that
+    across tabs they have not read is the caller's own loop and its own
+    choice.
+
+    ONLY the named caller's forms are resolved. Any other form in the
+    tab — another caller's, a pass's, a margin proposal — stays as it
+    is in the tab, and the local file keeps its OLD half, as it always
+    has until that producer's own resolve.
+
+    The steps are the ones every pass repeats (`tab_marked_markdown` →
+    `passes.final_text_from_marked` → `passes.record_resolution` →
+    `_write_resolved_text` → a collect under NO episode), with the
+    additions ruled first (`_rule_external_marked`). Evidence is
+    `external_edit`. No model is called: no summary rebuild, no
+    learnings distiller.
+
+    Then the tab is cleared, as `directives.resolve` does: a rebuild
+    push when these were the only forms in it, and otherwise
+    `gdocs.settle_forms_in_tab`, which takes out these forms alone.
+    `tab_still_marked` says whether that worked; when it did not, the
+    local file is still right and the reason is in `warnings`.
+
+    Nothing lands when the tab is `missing` or in `conflict`: the result
+    carries the state, `landed` False, and each revision's verdict
+    `None`. With no forms of this origin out, the call makes no Google
+    call and returns `state` None and an empty list.
+
+    Returns {"file", "origin", "state", "landed", "revisions": [{"id",
+    "index", "old", "new", "note", "anchor_paragraph", "verdict",
+    "final"}], "accepted", "modified", "declined", "version_no", "url",
+    "tab_still_marked", "warnings"}. `new` is what was proposed;
+    `final` is the author's wording for a `modified` revision (None when
+    they folded it into other prose and it cannot be located), else
+    None."""
+    from . import gdocs
+    from . import threads as th
+
+    origin = (origin or "").strip()
+    mid = manuscript["id"]
+    rel = _resolve_relpath(manuscript, file)
+    written = _external_threads(db, mid, rel, origin)
+
+    def meta_of(t: dict) -> dict:
+        return loads(t.get("metadata"), {}) or {}
+
+    result: dict = {
+        "file": rel, "origin": origin, "state": None, "landed": False,
+        "revisions": [{
+            "id": t["id"], "index": meta_of(t).get("index"),
+            "old": t["proposed_old"], "new": t["proposed_new"],
+            "note": t["note"],
+            "anchor_paragraph": meta_of(t).get("anchor_paragraph"),
+            "verdict": None, "final": None}
+            for t in sorted(written,
+                            key=lambda t: meta_of(t).get("index") or 0)],
+        "accepted": 0, "modified": 0, "declined": 0, "version_no": None,
+        "url": None, "tab_still_marked": bool(written), "warnings": []}
+    if not written:
+        result["warnings"].append(
+            f"no {origin} forms are out in {rel}'s tab — nothing to "
+            f"resolve.")
+        return result
+    fetched = gdocs.tab_marked_markdown(db, manuscript, rel, service,
+                                        docs_service)
+    result["state"] = fetched["state"]
+    if fetched["state"] == "missing":
+        result["warnings"].append(
+            f"'{rel}' has no matching section in the master Doc export — "
+            f"the tab these forms were written to is gone.")
+        return result
+    if fetched["state"] == "conflict":
+        result["warnings"].append(
+            f"'{rel}' changed both locally and in the Doc since the last "
+            f"sync — nothing was landed. Compare them by hand, then "
+            f"resolve again.")
+        return result
+    result["warnings"] += list(fetched["marker_warnings"])
+    if fetched["state"] == "local_ahead":
+        result["warnings"].append(
+            f"'{rel}' was edited locally while its forms were out; the "
+            f"tab's text is what landed, and the local edit is in the "
+            f"version history (source 'pre-external-resolve').")
+
+    replaces = [t for t in written if t["proposed_old"]]
+    inserts = [t for t in written if not t["proposed_old"]]
+    marked, ruled = _rule_external_marked(fetched["marked"], replaces,
+                                          inserts)
+    final, forms = passes.final_text_from_marked(
+        marked, written=replaces, kinds=("replace",))
+    # Whatever is still a form now is somebody else's. A replacement has
+    # just collapsed to its old half; an insertion that is a paragraph
+    # of its own is dropped the way a pull drops it, and braces the
+    # author wrote inside a sentence stay.
+    final = th.strip_pending(final)[0]
+
+    # Snapshot whatever is on disk before it is overwritten (ambient:
+    # an uncollected local edit predates this verb and is the author's).
+    path = Path(manuscript["path"]) / rel
+    with contextlib.redirect_stdout(io.StringIO()):
+        collect(db, manuscript, config or {}, source="pre-external-resolve")
+    for t in inserts:
+        verdict, wording = ruled[t["id"]]
+        if verdict == "modified":
+            meta = meta_of(t)
+            meta.setdefault("original_new", t["proposed_new"])
+            db.update("doc_threads", t["id"],
+                      {"state": "cleaned", "proposed_new": wording,
+                       "metadata": json.dumps(meta)})
+            passes._edit_evidence(
+                db, mid, dict(t, proposed_new=wording,
+                              metadata=json.dumps(meta)),
+                "revised", evidence_type=EXTERNAL_EVIDENCE)
+        else:
+            db.update("doc_threads", t["id"], {
+                "state": "cleaned" if verdict == "accepted" else "declined"})
+            passes._edit_evidence(
+                db, mid, t,
+                "resolved" if verdict == "accepted" else "declined",
+                evidence_type=EXTERNAL_EVIDENCE)
+    passes.record_resolution(db, mid, rel, forms,
+                             origin_type=EXTERNAL_ORIGIN,
+                             evidence_type=EXTERNAL_EVIDENCE,
+                             final_text=final, threads=replaces)
+    _write_resolved_text(path, Path(manuscript["path"]), final)
+    # NO episode: landing staged revisions is not work toward whatever
+    # goal the author happens to have open (filter-pass design §1.8).
+    with contextlib.redirect_stdout(io.StringIO()):
+        after = collect(db, manuscript, config or {},
+                        source="external-resolve", episode=NO_EPISODE)
+    result["landed"] = True
+    result["version_no"] = after.get("version_no")
+
+    outcomes = []
+    # In document order (the anchor, then the caller's own order), which
+    # is the order `settle_forms_in_tab` wants its outcomes in.
+    for row in sorted(result["revisions"],
+                      key=lambda r: (r["anchor_paragraph"] or 0,
+                                     r["index"] or 0)):
+        fresh = dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                            (row["id"],)))
+        meta = meta_of(fresh)
+        if fresh["state"] != "cleaned":
+            row["verdict"] = "declined"
+        elif meta.get("final_unlocated"):
+            row["verdict"] = "modified"
+        elif fresh["proposed_new"] != row["new"]:
+            row["verdict"], row["final"] = "modified", fresh["proposed_new"]
+        else:
+            row["verdict"] = "accepted"
+        result[row["verdict"]] += 1
+        outcomes.append({
+            "old": row["old"],
+            "new": ("" if row["verdict"] == "declined" and not row["old"]
+                    else fresh["proposed_new"]),
+            "keep": "old" if row["verdict"] == "declined" else "new"})
+
+    # The tab. A rebuild push clears every marker at once, and is held
+    # while another producer's forms are still out — rightly, since it
+    # would wipe them. Then, or when the push cannot go (a paragraph
+    # diff that meets a margin proposal), these forms alone come out.
+    links = gdocs.doc_status(db, manuscript)
+    result["url"] = gdocs.tab_url(links.get("_master_id"),
+                                  (links.get(rel) or {}).get("tab_id"))
+    others = gdocs.forms_pending(db, mid, rel)
+    pushed = None
+    if not others:
+        try:
+            gdocs.push_doc(db, manuscript, rel, service=service,
+                           docs_service=docs_service)
+            pushed = True
+        except Exception as err:                        # noqa: BLE001
+            pushed = str(err)
+    if pushed is True:
+        result["tab_still_marked"] = False
+        return result
+    try:
+        faults = gdocs.settle_forms_in_tab(db, manuscript, rel, outcomes,
+                                           docs_service)
+    except Exception as err:                            # noqa: BLE001
+        faults = [str(err)]
+    if others:
+        result["warnings"].append(
+            f"{rel}'s tab still carries {others} forms; they were left "
+            f"as they are, and only the {origin} forms were taken out.")
+    if faults:
+        result["warnings"].append(
+            "the resolve landed locally but the tab still shows some of "
+            "its forms (" + "; ".join(
+                faults + ([pushed] if isinstance(pushed, str) else []))
+            + f") — 'doc push {rel}' clears them once the tab's other "
+              f"forms are settled.")
+    else:
+        result["tab_still_marked"] = False
     return result

@@ -3502,6 +3502,292 @@ def _directives_on_the_doc_road(root: Path) -> None:
                  (mid,))["n"] == 7)
 
 
+OUTSIDE_ESSAY = (
+    "# Topic\n\n"
+    "Alpha stays as it is.\n\n"
+    "Beta is to be replaced.\n\n"
+    "Gamma is to be reworded.\n\n"
+    "Delta is to be kept after all.\n\n"
+    "Omega closes.\n")
+
+
+def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
+    """`_twin_fixture` with a RENDERING fake: its export gives each tab
+    paragraph back as its own markdown paragraph, which a resolve that
+    writes the tab's text to disk needs."""
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(essay)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)], render=True)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript, ms, fake
+
+
+def _an_outside_caller_resolves_one_tab(root: Path) -> None:
+    """`api.resolve_revisions` (issue #130): one tab read back, the
+    named outside caller's forms landed with the standing semantics, a
+    structured verdict per revision, the tab cleared — and every other
+    producer's form left exactly where it is."""
+    print("outside callers: stage, then resolve one tab:")
+
+    # --- every verdict, on one tab --------------------------------------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-ws")
+    mid = manuscript["id"]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced.",
+         "note": "c-1"},
+        {"old": "Gamma is to be reworded.", "new": "Gamma, as proposed.",
+         "note": "c-2"},
+        {"old": "Delta is to be kept after all.", "new": "Delta, changed.",
+         "note": "c-3"},
+        {"old": "", "new": "An added close.", "note": "c-4",
+         "anchor_paragraph": 6},
+        {"old": "", "new": "An added aside.", "note": "c-5",
+         "anchor_paragraph": 2},
+        {"old": "", "new": "A second aside.", "note": "c-6",
+         "anchor_paragraph": 2},
+        {"old": "Omega closes.", "new": "Omega, redone.", "note": "c-7"},
+    ], "ytlm", fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("the fixture: seven forms out, four replacements and three "
+          "additions, the local file pristine",
+          len(staged["written"]) == 7 and not staged["failed"]
+          and tab.count("<<") == 4 and tab.count("{{") == 7
+          and tab.index("{{An added aside.}}")
+          < tab.index("{{A second aside.}}") < tab.index("<<Beta")
+          and (ms / "solo.md").read_text() == OUTSIDE_ESSAY, tab)
+
+    # The author rules in the tab. Beta and the added close are left
+    # alone; Gamma's green half and the second aside are reworded; Delta
+    # is put back to its old text; Omega's green half is deleted; the
+    # first aside is deleted outright; and Alpha, outside any form, is
+    # touched too.
+    fake.edit("tab-2", "{{Gamma, as proposed.}}",
+              "{{Gamma, in my own words.}}")
+    fake.edit("tab-2", "{{A second aside.}}",
+              "{{A second aside, reworded by hand.}}")
+    fake.edit("tab-2",
+              "<<Delta is to be kept after all.>>{{Delta, changed.}}",
+              "Delta is to be kept after all.")
+    fake.edit("tab-2", "<<Omega closes.>>{{Omega, redone.}}",
+              "<<Omega closes.>>")
+    fake.edit("tab-2", "{{An added aside.}}\n", "")
+    fake.edit("tab-2", "Alpha stays as it is.",
+              "Alpha stays, lightly touched.")
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r for r in res["revisions"]}
+    check("an untouched form is accepted — a replacement and an addition",
+          by_note["c-1"]["verdict"] == "accepted"
+          and by_note["c-4"]["verdict"] == "accepted"
+          and by_note["c-1"]["final"] is None, str(res["revisions"]))
+    check("an edited {{new}} half wins: a modified acceptance, with the "
+          "author's final text in the result",
+          by_note["c-2"]["verdict"] == "modified"
+          and by_note["c-2"]["final"] == "Gamma, in my own words."
+          and by_note["c-2"]["new"] == "Gamma, as proposed."
+          and by_note["c-6"]["verdict"] == "modified"
+          and by_note["c-6"]["final"] == "A second aside, reworded by hand.",
+          str(res["revisions"]))
+    check("the old text restored, the green half deleted, and an "
+          "addition deleted outright are all declines",
+          by_note["c-3"]["verdict"] == "declined"
+          and by_note["c-7"]["verdict"] == "declined"
+          and by_note["c-5"]["verdict"] == "declined", str(res["revisions"]))
+    check("the result is structured: revisions in the caller's order, "
+          "the tallies, the tab's state, the version it made",
+          [r["index"] for r in res["revisions"]] == list(range(7))
+          and (res["accepted"], res["modified"], res["declined"])
+          == (2, 2, 3)
+          and res["state"] == "changed" and res["landed"]
+          and res["version_no"] and "tab=" in res["url"]
+          and res["file"] == "solo.md" and res["origin"] == "ytlm",
+          str(res))
+    expected = (
+        "# Topic\n\n"
+        "Alpha stays, lightly touched.\n\n"
+        "A second aside, reworded by hand.\n\n"
+        "Beta, replaced.\n\n"
+        "Gamma, in my own words.\n\n"
+        "Delta is to be kept after all.\n\n"
+        "Omega closes.\n\n"
+        "An added close.\n")
+    check("the local file carries exactly what the author ruled — and "
+          "their edit outside any form with it",
+          (ms / "solo.md").read_text() == expected,
+          (ms / "solo.md").read_text())
+    check("the tab is re-pushed: no marker is left in it, and it holds "
+          "the landed text",
+          not res["tab_still_marked"]
+          and "<<" not in fake.tab_text("solo.md")
+          and "{{" not in fake.tab_text("solo.md")
+          and "Gamma, in my own words." in fake.tab_text("solo.md")
+          and gdocs.forms_pending(db, mid, "solo.md") is None,
+          fake.tab_text("solo.md"))
+    states = sorted(r["state"] for r in db.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ?", (mid,)))
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (mid, api.EXTERNAL_EVIDENCE)))
+    check("the threads are closed and each verdict is one evidence row "
+          "of the outside-caller type, under no episode",
+          states == ["cleaned"] * 4 + ["declined"] * 3
+          and signals == ["declined"] * 3 + ["resolved"] * 2
+          + ["revised"] * 2
+          and db.one("SELECT COUNT(*) AS n FROM evidence WHERE "
+                     "manuscript_id = ? AND evidence_type = ? AND "
+                     "episode_id IS NOT NULL",
+                     (mid, api.EXTERNAL_EVIDENCE))["n"] == 0,
+          str((states, signals)))
+    idle = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                 fake, fake)
+    check("with nothing out, a resolve is a report and not an error",
+          idle["revisions"] == [] and idle["state"] is None
+          and not idle["landed"] and "nothing to resolve"
+          in idle["warnings"][0], str(idle))
+    again = api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "Omega closes.", "new": "Omega, a second try."}],
+        "ytlm", fake, fake)
+    check("a resolved tab takes new revisions again",
+          len(again["written"]) == 1 and not again["failed"]
+          and "<<Omega closes.>>{{Omega, a second try.}}"
+          in fake.tab_text("solo.md"), str(again))
+    fake.edit("tab-2", "{{Omega, a second try.}}", "{{}}")
+    emptied = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                    fake, fake)
+    check("an EMPTIED green half is a decline, never a rewording to "
+          "nothing: the old text stands",
+          [r["verdict"] for r in emptied["revisions"]] == ["declined"]
+          and (ms / "solo.md").read_text() == expected
+          and "Omega closes.\n" in fake.tab_text("solo.md")
+          and "<<" not in fake.tab_text("solo.md"),
+          str(emptied) + (ms / "solo.md").read_text())
+
+    # --- two origins in one tab: only the named one is resolved ---------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-two-ws")
+    mid = manuscript["id"]
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+        {"old": "", "new": "An added close.", "anchor_paragraph": 6},
+    ], "ytlm", fake, fake)
+    from authorlm.db import ko_fields as _ko
+
+    def foreign(origin_type, old, new, anchor, origin=None):
+        """Another producer's form, in the tab and on record."""
+        fake.edit("tab-2", old, f"<<{old}>>{{{{{new}}}}}")
+        row = _ko("dt")
+        meta = {"kind": "replace", "anchor_paragraph": anchor,
+                "original_new": new}
+        if origin:
+            meta["origin"] = origin
+        row.update(
+            manuscript_id=mid, origin_type=origin_type,
+            origin_id=f"foreign:{origin_type}:{anchor}", file="solo.md",
+            anchor_quote=None, proposed_old=old, proposed_new=new,
+            note="theirs", state="written", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md", metadata=json.dumps(meta))
+        db.insert("doc_threads", row)
+        return row
+
+    crit = foreign("critique", "Gamma is to be reworded.",
+                   "Gamma, the critic's way.", 4)
+    other = foreign("external", "Delta is to be kept after all.",
+                    "Delta, another caller's way.", 5, origin="other-tool")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    tab = fake.tab_text("solo.md")
+    check("with two origins in the tab, the named origin's forms are "
+          "resolved and landed",
+          [r["verdict"] for r in res["revisions"]] == ["accepted"] * 2
+          and "Beta, replaced." in local and "An added close." in local
+          and "Beta is to be replaced." not in local, local)
+    check("...and the others are left alone: their threads still "
+          "`written`, their old text still the local file's, their "
+          "forms still in the tab",
+          {r["id"]: r["state"] for r in db.all(
+              "SELECT id, state FROM doc_threads WHERE id IN (?, ?)",
+              (crit["id"], other["id"]))}
+          == {crit["id"]: "written", other["id"]: "written"}
+          and "Gamma is to be reworded." in local
+          and "Delta is to be kept after all." in local
+          and "critic's way" not in local and "another caller" not in local
+          and "<<" not in local and "{{" not in local
+          and "<<Gamma is to be reworded.>>{{Gamma, the critic's way.}}"
+          in tab
+          and "<<Delta is to be kept after all.>>"
+              "{{Delta, another caller's way.}}" in tab, tab + local)
+    check("...while the named origin's own forms are taken out of the "
+          "tab one by one, since a rebuild push is held",
+          not res["tab_still_marked"] and tab.count("<<") == 2
+          and tab.count("{{") == 2 and "Beta, replaced.\n" in tab
+          and "An added close.\n" in tab
+          and "Beta is to be replaced." not in tab
+          and any("still carries critique forms" in w
+                  for w in res["warnings"]), tab + str(res["warnings"]))
+    # What the surgical settle is FOR: the critic's own resolve, later,
+    # reads this tab back and collapses every form it does not own to
+    # its old half. Had ytlm's forms stayed, that would have undone them.
+    fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md",
+                                        fake, fake)
+    later, _forms = passes.final_text_from_marked(
+        fetched["marked"],
+        written=passes.staged_threads(db, mid, "solo.md",
+                                      states=("written",)))
+    check("...so the other producer's later resolve keeps what this one "
+          "landed, and the tab reads as level with the local file",
+          fetched["state"] == "unchanged" and "Beta, replaced." in later
+          and "An added close." in later
+          and "Gamma, the critic's way." in later, later)
+    held = api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "Omega closes.", "new": "Omega, redone."}],
+        "ytlm", fake, fake)
+    check("...and that tab still takes no new revisions while the "
+          "others' forms are out",
+          not held["written"] and "takes no new ones" in held["failed"][0][1],
+          str(held))
+
+    # --- a two-sided edit lands nothing ---------------------------------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-conflict-ws")
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+    ], "ytlm", fake, fake)
+    fake.edit("tab-2", "Alpha stays as it is.", "Alpha, edited in the Doc.")
+    (ms / "solo.md").write_text(
+        OUTSIDE_ESSAY.replace("Omega closes.", "Omega, edited locally."))
+    before = (ms / "solo.md").read_text()
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    check("a tab and a local file that both moved land nothing: the "
+          "state is reported, the forms stay out, the file is untouched",
+          res["state"] == "conflict" and not res["landed"]
+          and [r["verdict"] for r in res["revisions"]] == [None]
+          and res["tab_still_marked"]
+          and (ms / "solo.md").read_text() == before
+          and gdocs.forms_pending(db, manuscript["id"], "solo.md")
+          == "external"
+          and "<<Beta is to be replaced.>>" in fake.tab_text("solo.md"),
+          str(res))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
@@ -4535,6 +4821,7 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _an_outside_caller_resolves_one_tab(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

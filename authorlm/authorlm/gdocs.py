@@ -3299,6 +3299,130 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
             "url": tab_url(master_id, tab_id)}
 
 
+def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
+                        outcomes: list[dict], docs_service,
+                        bridge: DocBridge | None = None) -> list[str]:
+    """Take SOME forms out of a tab, each to the half its resolve chose,
+    and leave every other form in the tab exactly as it stands.
+
+    A resolve normally ends with a rebuild push, which clears every
+    marker at once. That push is held while another producer's forms
+    are still out in the tab (`forms_pending`), and a rebuild would wipe
+    them if it were not — so a resolve that settles only ITS OWN forms
+    (`api.resolve_revisions`, docs/outside-caller-design.md §5) cannot
+    use it. Leaving its settled forms in the tab is not an option
+    either: the other producer's resolve reads the tab back and
+    collapses every form it does not own to the OLD half, which would
+    undo, in the local file, text this resolve has already landed.
+
+    `outcomes` are {old, new, keep}: `old` the record's old half (''
+    for an insertion), `new` the new half as the markdown export gave it
+    (the author's wording), `keep` 'new' or 'old'. They are handled in
+    the order given — document order, so that of two identical forms
+    the first outcome meets the first form. Only markers and the losing
+    half are deleted; the kept half stays where it is with its own
+    emphasis, and loses the strikethrough and the colour. A form the
+    author already took the markers off is simply not found, which is
+    not a fault. Returns the faults, as sentences; empty when the tab
+    holds none of these forms any more — and then the local file is
+    recorded as the tab's agreed base, as a push would."""
+    import hashlib
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    meta = _mapping(db, manuscript)
+    links = meta.get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    tab_id = (links.get(file) or {}).get("tab_id")
+    if not (master_id and tab_id):
+        raise LookupError(f"'{file}' has no tab in the master Doc")
+
+    def tab_text() -> str:
+        return "".join(c for _, c in _tab_runs(docs_service, master_id,
+                                               tab_id))
+
+    def find_form(full: str, outcome: dict) -> tuple[str, str, str] | None:
+        """(head, kept-or-dropped old, tail) AS THE TAB HOLDS THEM: the
+        form is head + old + tail-with-new, located by its old half for
+        a replacement and by its new half for an insertion."""
+        if outcome["old"]:
+            for tab_old in (outcome["old"], rendered_text(outcome["old"])):
+                at = full.find(f"<<{tab_old}>>")
+                if at < 0:
+                    continue
+                after = at + len(tab_old) + 4
+                if not full.startswith("{{", after):
+                    return "<<", tab_old, ">>"      # green half deleted
+                close = full.find("}}", after + 2)
+                if close < 0:
+                    return None
+                return "<<", tab_old, full[after - 2: close + 2]
+            return None
+        for tab_new in (outcome["new"], rendered_text(outcome["new"])):
+            if f"{{{{{tab_new}}}}}" in full:
+                return "{{", "", tab_new + "}}"
+        return None
+
+    faults: list[str] = []
+    for outcome in outcomes:
+        found = find_form(tab_text(), outcome)
+        if found is None:
+            continue
+        head, tab_old, tail = found
+        form = head + tab_old + tail
+        span = _locate_in_tab(docs_service, master_id, tab_id, form)
+        if span is None:
+            faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
+                          "could not be located in the tab")
+            continue
+        start, end = span
+
+        def cut(a: int, b: int) -> dict:
+            return {"deleteContentRange": {"range": {
+                "tabId": tab_id, "startIndex": a, "endIndex": b}}}
+
+        old16 = _utf16_len(tab_old)
+        if outcome["old"] and outcome["keep"] == "new" and tail != ">>":
+            # <<old>>{{new}} → new: the closing braces, then everything
+            # up to and including the opening ones.
+            requests = [cut(end - 2, end), cut(start, start + old16 + 6)]
+            kept = (start, end - old16 - 8)
+        elif outcome["old"]:
+            # → old: the tail (>>, and the green half when it is still
+            # there), then the opening marker.
+            requests = [cut(start + 2 + old16, end), cut(start, start + 2)]
+            kept = (start, start + old16)
+        elif outcome["keep"] == "new":
+            requests = [cut(end - 2, end), cut(start, start + 2)]
+            kept = (start, end - 4)
+        else:
+            # A declined insertion leaves with the paragraph break the
+            # writer put in front of it.
+            requests = [cut(start - 1 if start > 1 else start, end)]
+            kept = None
+        if kept and kept[1] > kept[0]:
+            requests.append({"updateTextStyle": {
+                "range": {"tabId": tab_id, "startIndex": kept[0],
+                          "endIndex": kept[1]},
+                "textStyle": {}, "fields": "strikethrough,foregroundColor"}})
+        docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}).execute()
+    # Read-back: none of these forms may still be in the tab.
+    full = tab_text()
+    for outcome in outcomes:
+        if find_form(full, outcome) is not None:
+            faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
+                          "is still in the tab")
+    if not faults:
+        path = bridge.root / file
+        local = strip_embed_lines(normalize_markdown(
+            path.read_text(encoding="utf-8")))
+        entry = links[file]
+        entry["pushed_hash"] = hashlib.sha256(local.encode()).hexdigest()[:16]
+        entry["checked_out"] = True
+        _save_mapping(db, manuscript, meta)
+    return faults
+
+
 def _tab_paragraph_texts(docs_service, master_id: str,
                          tab_id: str) -> list[str]:
     """Non-empty paragraph strings from a tab (table cells included),
