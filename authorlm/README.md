@@ -222,7 +222,7 @@ outstanding questions.
 | `plan` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents |
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
 | `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
-| `doc create-manuscript` | Combine every chapter (reading order per `toc.md`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `doc create-manuscript` | Combine every chapter (reading order per `toc.toml`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
@@ -327,13 +327,29 @@ model = "gemini/gemini-2.5-flash"
 ```
 
 
-**Reading order & the TOC.** A `toc.md` in the manuscript root is
-structural, not prose: its ordered file references (e.g. `1. preface.md`)
-define the authoritative reading order used by prerequisite checks,
-definition precedence (a concept's primary location is its first
-reading-order appearance; if that text is deleted, the location re-points
-and you're told), plan placement, and hierarchical extraction. Files not
-listed fall back to alphabetical order and are flagged in the briefing.
+**Reading order & the TOC.** A `toc.toml` in the manuscript root is
+structural, not prose: its ordered `[[chapter]]` tables define the
+authoritative reading order used by prerequisite checks, definition
+precedence (a concept's primary location is its first reading-order
+appearance; if that text is deleted, the location re-points and you're
+told), plan placement, and hierarchical extraction:
+
+```toml
+[[chapter]]
+file = "preface.md"
+matter = "front"     # optional: front | main (default) | back
+
+[[chapter]]
+file = "chapter1.md"
+
+[[chapter]]
+file = "section1a.md"
+parent = "chapter1.md"   # optional: nests this file under chapter1.md
+```
+
+Files not listed fall to the end in alphabetical order and are flagged in
+the briefing. Without a parseable `toc.toml`, the whole reading order is
+alphabetical. A `toc.md` is not read as a TOC.
 Concepts whose text vanishes entirely become proposals: adopt retires
 them, dismiss keeps them as declared placeholders. Full extractions larger
 than `extraction_max_chars` run hierarchically — one bounded pass per file
