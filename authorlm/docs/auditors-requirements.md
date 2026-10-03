@@ -46,7 +46,7 @@ the shape of each analyzer is deliberately unspecified.
   elements, policies, or the graph.
 - **R1.2** Auditors run on the *delta* — the changed/new paragraphs of a
   collect — never the whole manuscript, except in an explicit on-demand
-  full-audit invocation (R7.4).
+  full-audit invocation (R7.3; entry points listed in R8 'On-demand triggers').
 - **R1.3** Every finding carries an explanation tracing it to the rule it
   checked (style element id, policy id, edge/note id) — same standard as
   guidance (§11.6): the why matters more than the what.
