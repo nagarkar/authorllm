@@ -1,10 +1,10 @@
 # Audiobook review and generation from the phone — design
 
 Ratified 2026-09-25 after a grilling session (2026-09-23 to 09-25).
-Amends `audiobook-pipeline-design.md` §10, §11 and §16: generation moves
-from audiostation into AuthorLM, and a served page becomes the author's
-working surface. Everything else in that document stands, above all §6
-(the section id) and §8 (continuity).
+Amends `audiobook-pipeline-design.md` §0, §1, §2, §10, §11 and §16:
+generation moves from audiostation into AuthorLM, and a served page
+becomes the author's working surface. Everything else in that document
+stands, above all §6 (the section id) and §8 (continuity).
 
 ## 0. What this is
 

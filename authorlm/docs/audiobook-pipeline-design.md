@@ -37,9 +37,12 @@ directives as named ranges inside a Google Doc; AuthorLM's push rebuilds
 tabs and destroys every anchor, so the two cannot share a Doc. The author
 does not use the add-on. Nothing in it is kept or made compatible.
 
-**Not a generator.** AuthorLM never generates chapter audio. The only
+~~**Not a generator.** AuthorLM never generates chapter audio. The only
 speech it ever requests from ElevenLabs is an audition clip (§11). The
-credits are spent from audiostation, one section at a time, by the author.
+credits are spent from audiostation, one section at a time, by the author.~~
+Reversed 2026-09-25: AuthorLM now generates, retakes and stitches through
+its `audio` verbs and the served review page; audiostation stays as an
+equal second door. See `audiobook-review-design.md`.
 
 **Not a play.** Voice switches are per paragraph and rare (the Sermons need
 about a dozen tags; every essay needs none). A manuscript that alternates
@@ -54,6 +57,15 @@ speakers every line would need a different mechanism; it is not designed
 2. **Two writers, two kinds of file, never the same file.** AuthorLM
    writes `audiobook.json` and `chapters/*.json`; audiostation writes
    `state/*.json` and the audio. The shared key is the section id (§6).
+
+   *Amended 2026-09-25 (principles 1 and 2).* AuthorLM still alone writes
+   `audiobook.json` and `chapters/*.json`. Generation is no longer
+   audiostation's alone: AuthorLM and audiostation both write
+   `state/<stem>.json` and `audio/`, so `state/<stem>.json` is the one
+   exception to "never the same file". The shared writer is safe only
+   under the three guards in `audiobook-review-design.md` §5 (audiostation
+   watches `state/`; Python re-reads state from disk before every render;
+   no Generate in audiostation on a chapter the server is rendering).
 3. **The paragraph is the unit of audio.** A speaker change inside a
    paragraph is resolved by splitting the paragraph in the prose, never by
    an inline marker.
@@ -93,9 +105,9 @@ manuscripts/<M>/_audio/
                           about-author, retail sample, cover, dictionary locator,
                           resolved cast snapshot, schema version
   chapters/<stem>.json    AuthorLM writes: one per toc file; ordered sections
-  state/<stem>.json       audiostation writes: section id → audio files, request id,
+  state/<stem>.json       audiostation or AuthorLM writes: section id → audio files, request id,
                           generated-at; stitched output, duration, loudness
-  audio/<id>.<format>.mp3 audiostation writes
+  audio/<id>.<format>.mp3 audiostation or AuthorLM writes
   _orphaned/…             audiostation moves audio whose id no longer appears anywhere
 ```
 
