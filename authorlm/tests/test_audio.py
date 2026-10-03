@@ -1464,6 +1464,90 @@ def check_audiobook_page() -> None:
         shutil.rmtree(book, ignore_errors=True)
 
 
+def check_corrupt_state() -> None:
+    """A state file that is there but unreadable is refused, never read
+    as an empty state: the next save would overwrite every earlier take's
+    record with only the newest one."""
+    import types
+
+    from authorlm import audiobook, generation as gen
+
+    book = _book_copy()
+    root = book / "_audio"
+    state_dir = root / audio.STATE_DIR
+    path = state_dir / "kindness.json"
+    real_save = gen.save_state
+    try:
+        g = gen.load_book(root)
+        chapter = gen.load_chapter(root, g, "kindness")
+        sid = gen.speech_of(chapter)[0]["id"]
+        for label, body in (("torn JSON", '{"sections": {'),
+                            ("a JSON list", '[{"sections": {}}]')):
+            path.write_text(body, encoding="utf-8")
+            before = path.read_bytes()
+            try:
+                gen.load_state(root, "kindness")
+                check(f"load_state refuses {label}", False)
+            except audio.AudioError as err:
+                check(f"load_state refuses {label}, naming the file",
+                      str(path) in str(err) and "unreadable" in str(err), str(err))
+
+            calls: list = []
+
+            class _Client:
+                def tts(self, *a, **k):
+                    calls.append("tts")
+                    return b"MP3BYTES", "req-x"
+
+            def _spy_save(*a, **k):
+                calls.append("save")
+                return real_save(*a, **k)
+            gen.save_state = _spy_save
+            try:
+                gen.render_one(root, g, chapter, sid, _Client(), g["quality"])
+                check(f"render_one refuses {label}", False)
+            except audio.AudioError as err:
+                check(f"render_one refuses {label} before spending or saving",
+                      calls == [] and str(path) in str(err), str(calls))
+            finally:
+                gen.save_state = real_save
+            check(f"a state file holding {label} is left byte for byte",
+                  path.read_bytes() == before)
+            session = types.SimpleNamespace(root=root)
+            check(f"the server answers no file, not an error, for {label}",
+                  audiobook.audio_file_for(session, "/stitched/kindness.mp3") is None
+                  and audiobook.audio_file_for(session, f"/take/kindness/{sid}.mp3")
+                  is None)
+
+        path.unlink()
+        check("a missing state file is still an empty state",
+              gen.load_state(root, "kindness") == gen.empty_state())
+
+        # Each writer stages under its own temp name, and none is left.
+        seen: list = []
+        real_replace = os.replace
+
+        def _spy_replace(src, dst):
+            seen.append(Path(src).name)
+            return real_replace(src, dst)
+        os.replace = _spy_replace
+        try:
+            gen.save_state(root, "kindness", gen.empty_state())
+        finally:
+            os.replace = real_replace
+        check("save_state's temp name is per writer (carries the pid)",
+              len(seen) == 1 and str(os.getpid()) in seen[0]
+              and seen[0].endswith(".json.tmp"), str(seen))
+        check("save_state leaves no temp file behind",
+              not list(state_dir.glob("*.json.tmp"))
+              and not list(state_dir.glob(".*.json.tmp")))
+        check("the saved state reads back",
+              gen.load_state(root, "kindness") == gen.empty_state())
+    finally:
+        gen.save_state = real_save
+        shutil.rmtree(book, ignore_errors=True)
+
+
 def main_test() -> None:
     check_text_rules()
     check_voice_tags()
@@ -1479,6 +1563,7 @@ def main_test() -> None:
     check_casting_filter_block()
     check_generation()
     check_audiobook_page()
+    check_corrupt_state()
     print(f"\nAll {PASSED} checks passed.")
 
 
