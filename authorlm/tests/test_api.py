@@ -3198,6 +3198,114 @@ def check_intent_scope() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_scope_evidence_batched_lookup() -> None:
+    """scope_evidence resolves an intent's transition locations in ONE
+    batched statement, not one point query per transition id. The sheet
+    is rebuilt on every `list_intents(evidence=True)` and every
+    `intent scope --triage`, and the id count grows with every edit the
+    author records. The output must not move: duplicates still count
+    twice, missing ids are still skipped, and the ordering is unchanged."""
+    import io
+
+    from authorlm.db import ko_fields
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-scopeev-batch-"))
+    try:
+        ws = root / "ws"
+        ms = ws / "manuscript"
+        ms.mkdir(parents=True)
+        (ms / "toc.toml").write_text(
+            '[[chapter]]\nfile = "part.md"\n\n'
+            '[[chapter]]\nfile = "alpha.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "beta.md"\nparent = "part.md"\n\n'
+            '[[chapter]]\nfile = "gamma.md"\nparent = "part.md"\n')
+        for name in ("part.md", "alpha.md", "beta.md", "gamma.md"):
+            (ms / name).write_text(f"# {name}\n\nText.\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws), "init", "--name", "book",
+                      "--path", str(ms), "--no-extract"])
+        db = api.open_db(str(ws))
+        manuscript = api.get_manuscript(db)
+        api.ensure_session(db, manuscript)
+        version = db.one("SELECT id FROM manuscript_versions LIMIT 1")
+
+        def transitions(locations):
+            ids = []
+            for location in locations:
+                row = ko_fields("tr")
+                row.update(manuscript_id=manuscript["id"], version_before=None,
+                           version_after=version["id"] if version else "v",
+                           kind="rewrite", location=location,
+                           summary="seeded", detail="{}")
+                db.insert("editorial_transitions", row)
+                ids.append(row["id"])
+            return ids
+
+        intent = api.declare_intent(db, manuscript,
+                                    "Keep the part's argument tight")["intent"]
+        first = dict(db.one("SELECT * FROM editorial_episodes WHERE "
+                            "intent_id = ?", (intent["id"],)))
+        # Episode 1: 25 real transitions — alpha 12 (one heading-suffixed),
+        # beta 8, gamma 5.
+        ep1 = transitions(["alpha.md#Intro"] + ["alpha.md"] * 11
+                          + ["beta.md"] * 8 + ["gamma.md"] * 5)
+        # Episode 2: 25 ids — ep1's first id again (a duplicate), 23 new
+        # real ones (alpha 6, beta 11, gamma 6), and one id with no row.
+        ep2 = ([ep1[0]]
+               + transitions(["alpha.md"] * 6 + ["beta.md"] * 11
+                             + ["gamma.md"] * 6)
+               + ["tr_no_such_transition"])
+        db.update("editorial_episodes", first["id"],
+                  {"transition_ids": json.dumps(ep1), "status": "closed"})
+        second = ko_fields("ep")
+        second.update(manuscript_id=manuscript["id"],
+                      session_id=first["session_id"], intent_id=intent["id"],
+                      transition_ids=json.dumps(ep2), status="closed")
+        db.insert("editorial_episodes", second)
+        check("fixture: 2 episodes, 50 transition ids, one duplicated and "
+              "one missing", len(ep1) == 25 and len(ep2) == 25
+              and len(set(ep1) | set(ep2)) == 49, f"{len(ep1)}+{len(ep2)}")
+
+        statements: list[str] = []
+        original_run = db._run
+
+        def counting_run(sql, args, finish):
+            if "editorial_transitions" in sql:
+                statements.append(sql)
+            return original_run(sql, args, finish)
+
+        db._run = counting_run
+        try:
+            rows = api.scope_evidence(db, manuscript)
+        finally:
+            del db._run
+        check("scope_evidence looks up an intent's 50 transition ids in ONE "
+              "statement, not one point query per id",
+              len(statements) == 1, f"{len(statements)} statements")
+
+        # Snapshot taken with the per-id implementation: the duplicate
+        # counts twice, the missing id is skipped, the heading suffix is
+        # stripped, and the alpha/beta tie breaks by name.
+        mine = [r for r in rows if r["id"] == intent["id"]]
+        check("the batched lookup returns exactly what the per-id one did: "
+              "same files, same order, same counts",
+              len(mine) == 1 and mine[0]["files"] == [
+                  {"file": "alpha.md", "transitions": 19},
+                  {"file": "beta.md", "transitions": 19},
+                  {"file": "gamma.md", "transitions": 11}],
+              str(mine and mine[0]["files"]))
+        check("...and the same suggestion, with the same reason",
+              mine and mine[0]["suggested"]
+              == {"tier": "chapter", "scope": "part.md",
+                  "why": "3 essays, all under part.md"},
+              str(mine and mine[0]["suggested"]))
+        check("...and the same total of 49 counted transitions",
+              mine and sum(f["transitions"] for f in mine[0]["files"]) == 49,
+              str(mine and mine[0]["files"]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_scope_evidence() -> None:
     """The one-time triage's read (design-intent-scope §4.1): files the
     intent's episodes ACTUALLY touched, and a deterministic suggestion
@@ -6496,6 +6604,7 @@ def main_test() -> None:
     check_lint_and_propose_gates()
     check_intent_scope()
     check_scope_evidence()
+    check_scope_evidence_batched_lookup()
     check_placeholder_reader_paths()
     check_briefing_active_writeups()
     check_replan_settles_pending_proposal()

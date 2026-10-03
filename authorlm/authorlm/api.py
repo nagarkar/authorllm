@@ -773,16 +773,27 @@ def scope_evidence(db: Database, manuscript: dict,
     out = []
     for intent in rows:
         counts: dict[str, int] = {}
-        for episode in db.all(
-                "SELECT transition_ids FROM editorial_episodes "
-                "WHERE intent_id = ?", (intent["id"],)):
-            for tid in loads(episode["transition_ids"], []):
-                row = db.one(
-                    "SELECT location FROM editorial_transitions WHERE id = ?",
-                    (tid,))
-                if row:
-                    file = row["location"].split("#", 1)[0]
-                    counts[file] = counts.get(file, 0) + 1
+        # Every id, in order, duplicates kept: walking this list (not the
+        # distinct set) preserves the multiplicity and first-seen order the
+        # per-id lookup had. Locations come from one batched IN query per
+        # 500 distinct ids (under SQLite's bound-variable limit).
+        tids = [tid for episode in db.all(
+                    "SELECT transition_ids FROM editorial_episodes "
+                    "WHERE intent_id = ?", (intent["id"],))
+                for tid in loads(episode["transition_ids"], [])]
+        distinct = list(dict.fromkeys(tids))
+        locations: dict = {}
+        for start in range(0, len(distinct), 500):
+            chunk = distinct[start:start + 500]
+            for row in db.all(
+                    "SELECT id, location FROM editorial_transitions "
+                    f"WHERE id IN ({', '.join('?' * len(chunk))})",
+                    tuple(chunk)):
+                locations[row["id"]] = row["location"]
+        for tid in tids:
+            if tid in locations:
+                file = locations[tid].split("#", 1)[0]
+                counts[file] = counts.get(file, 0) + 1
         writeups = [{"id": w["id"], "file": w["file"], "status": w["status"]}
                     for w in db.all(
                         "SELECT * FROM writeups WHERE manuscript_id = ? "
