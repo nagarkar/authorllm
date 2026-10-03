@@ -3,6 +3,7 @@
 // view never edits them (docs/audiobook-pipeline-design.md §10).
 
 import { invoke } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { navigate, setStatusMessage } from './main';
 import { openFolder } from './menu';
 import type {
@@ -343,6 +344,11 @@ export async function renderBookView(root: HTMLElement): Promise<void> {
   });
   toolbar.querySelector('#btn-clear-lower')!.addEventListener('click', async () => {
     try {
+      const ok = await confirm(
+        `Delete all audio below ${QUALITY_LABEL[format as Quality] ?? format} in every chapter of this book? Regenerating it will spend ElevenLabs credits again.`,
+        { title: 'Clear Lower Quality', kind: 'warning', okLabel: 'Delete', cancelLabel: 'Cancel' },
+      );
+      if (!ok) return;
       const n = await invoke<number>('clear_lower_quality', { quality: format });
       setStatusMessage(`Cleared lower-quality audio from ${n} section(s).`);
       renderBookView(root);
