@@ -3788,6 +3788,114 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           str(res))
 
 
+def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
+    """The two doors an outside caller lacked, so that it never writes
+    AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
+    manuscript (`api.caller_metadata`, `api.set_caller_metadata`), and
+    taking back its staged revisions on one tab
+    (`api.withdraw_revisions`), with `api.outstanding_revisions` to count
+    what it still has out."""
+    print("outside callers: own settings, outstanding count, withdraw:")
+    from authorlm.extraction import manuscript_extraction_enabled
+
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-own-ws")
+    mid = manuscript["id"]
+
+    def row_meta() -> dict:
+        return json.loads(db.one("SELECT metadata FROM manuscripts WHERE "
+                                 "id = ?", (mid,))["metadata"] or "{}")
+
+    check("a caller with nothing set reads an empty dict",
+          api.caller_metadata(db, manuscript, "ytlm") == {})
+    merged = api.set_caller_metadata(db, manuscript, "ytlm",
+                                     {"title": "Dharma"})
+    merged = api.set_caller_metadata(db, manuscript, "ytlm",
+                                     {"named": True})
+    api.set_caller_metadata(db, manuscript, "other-tool", {"title": "x"})
+    meta = row_meta()
+    check("settings merge key by key under the caller's own name, and "
+          "another caller's are kept apart",
+          merged == {"title": "Dharma", "named": True}
+          and api.caller_metadata(db, manuscript, "ytlm") == merged
+          and api.caller_metadata(db, manuscript, "other-tool")
+          == {"title": "x"}
+          and meta["callers"]["ytlm"] == merged, str(meta))
+    check("...and AuthorLM's own keys in the same column are untouched: "
+          "the Doc mapping and the extraction switch",
+          meta["gdocs"]["_master_id"] == "doc-fake"
+          and meta["extraction"] == {"enabled": False}
+          and not manuscript_extraction_enabled(
+              db, manuscript), str(meta))
+
+    # A caller that wrote its settings straight into the column before
+    # this door existed kept them at the top level under its own name.
+    meta = row_meta()
+    meta["legacy-tool"] = {"title": "Old", "named": True}
+    gdocs._save_mapping(db, manuscript, meta)
+    check("settings written at the top level before the door existed "
+          "read back through it",
+          api.caller_metadata(db, manuscript, "legacy-tool")
+          == {"title": "Old", "named": True})
+    api.set_caller_metadata(db, manuscript, "legacy-tool", {"named": False})
+    meta = row_meta()
+    check("...and the first write moves them under `callers`",
+          "legacy-tool" not in meta
+          and meta["callers"]["legacy-tool"]
+          == {"title": "Old", "named": False}, str(meta))
+    check("a caller that does not name itself is turned away",
+          _refuses(lambda: api.caller_metadata(db, manuscript, " "),
+                   "names itself")
+          and _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "", {"a": 1}), "names itself"))
+
+    # --- outstanding and withdraw ---------------------------------------
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+        {"old": "", "new": "An added close.", "anchor_paragraph": 6},
+    ], "ytlm", fake, fake)
+    from authorlm.db import ko_fields as _ko
+
+    other = _ko("dt")
+    other.update(
+        manuscript_id=mid, origin_type="external",
+        origin_id="foreign:other", file="solo.md", anchor_quote=None,
+        proposed_old="Gamma is to be reworded.", proposed_new="Gamma, theirs.",
+        note="theirs", state="written", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace", "anchor_paragraph": 4,
+                             "origin": "other-tool"}))
+    db.insert("doc_threads", other)
+    check("the outstanding count is per file and per caller",
+          len(staged["written"]) == 2
+          and api.outstanding_revisions(db, manuscript, "ytlm")
+          == {"solo.md": 2}
+          and api.outstanding_revisions(db, manuscript, "other-tool")
+          == {"solo.md": 1}
+          and api.outstanding_revisions(db, manuscript, "nobody") == {})
+    gone = api.withdraw_revisions(db, manuscript, "solo.md", "ytlm")
+    states = {r["id"]: r["state"] for r in db.all(
+        "SELECT id, state FROM doc_threads WHERE manuscript_id = ?", (mid,))}
+    check("withdraw closes the caller's own written threads on the file "
+          "as `withdrawn` and names each one",
+          sorted(g["id"] for g in gone)
+          == sorted(w["id"] for w in staged["written"])
+          and [g["new"] for g in gone] == ["Beta, replaced.",
+                                           "An added close."]
+          and all(states[w["id"]] == "withdrawn" for w in staged["written"])
+          and api.outstanding_revisions(db, manuscript, "ytlm") == {},
+          str(gone))
+    check("...leaves another caller's thread written, and the local file "
+          "as it was",
+          states[other["id"]] == "written"
+          and (ms / "solo.md").read_text() == OUTSIDE_ESSAY)
+    check("...and with nothing out, withdraw is an empty list, not an "
+          "error",
+          api.withdraw_revisions(db, manuscript, "solo.md", "ytlm") == [])
+    check("an unknown file raises, as staging does",
+          _refuses(lambda: api.withdraw_revisions(
+              db, manuscript, "no-such.md", "ytlm"), "no document matching"))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
@@ -4822,6 +4930,7 @@ def main_test() -> None:
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
         _an_outside_caller_resolves_one_tab(root)
+        _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

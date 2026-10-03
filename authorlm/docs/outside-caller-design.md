@@ -326,6 +326,34 @@ no Google call is made; `state` is None and `revisions` is empty.
 
 ---
 
+## 6a. A caller's own record (added 2026-10-03)
+
+Added for nagarkar/ytlm#23: a caller reaches AuthorLM's tables only
+through these doors, never with its own SQL.
+
+```python
+api.caller_metadata(db, manuscript, origin) -> dict
+api.set_caller_metadata(db, manuscript, origin, values) -> dict
+api.outstanding_revisions(db, manuscript, origin) -> {file: int}
+api.withdraw_revisions(db, manuscript, file, origin) -> [{"id", "old", "new", "note"}]
+```
+
+- **Settings.** A caller's own keys (ytlm keeps the Doc's title and
+  whether it has named the Doc) live in `manuscripts.metadata` under
+  `callers.<origin>`, read from the row. `set_caller_metadata` merges
+  key by key and leaves the Doc mapping and the extraction switch
+  alone. Keys a caller wrote at the top level under its own name before
+  this door read back through it and move under `callers` on the first
+  write.
+- **Outstanding.** The caller's `written` threads per file: staged and
+  neither resolved nor withdrawn.
+- **Withdraw.** Closes the caller's `written` threads on one file as
+  `withdrawn`; any other producer's are left alone. The forms stay in
+  the tab until the caller rebuilds it from the local file with
+  `gdocs.push_doc`, which those threads no longer hold.
+
+---
+
 ## 7. Boundaries
 
 - No command-line verb and no MCP tool for staging or resolving. The
