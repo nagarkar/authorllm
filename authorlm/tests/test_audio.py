@@ -1083,6 +1083,108 @@ def _mp3(path: Path, secs: float = 0.2) -> None:
                    check=True)
 
 
+def check_build_request() -> None:
+    """`generation.build_request` — the compose seam that turns neighbours
+    + recent request ids + the pronunciation dictionary into one ElevenLabs
+    payload (pipeline §8). Pure; no disk, no network.
+
+    Open coverage PRs pin neighbours / recent_request_id / flags_from_state
+    (#126) and filename/diff helpers (#124). This covers the remaining
+    stitchable / eleven_v3 / locators wiring those helpers feed."""
+    from datetime import datetime, timezone
+
+    from authorlm import generation as gen
+    from authorlm.audio import AudioError
+
+    now = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    recent = "2026-10-03T11:00:00Z"   # 1h inside STITCH_WINDOW_SECS
+    stale = "2026-10-03T09:00:00Z"    # 3h outside
+
+    def speech(sid: str, text: str, model: str = "eleven_multilingual_v2",
+               voice: str = "voice-a") -> dict:
+        return {"id": sid, "type": "speech", "text": text, "voiceId": voice,
+                "model": model, "stability": 0.5, "similarity": 0.75,
+                "speed": 1.0, "pronunciations": []}
+
+    chapter = {"stem": "seam", "sections": [
+        speech("p1", "First paragraph."),
+        {"id": "sil", "type": "silence", "durationSecs": 0.4},
+        speech("p2", "Middle paragraph."),
+        speech("p3", "Other voice.", voice="voice-b"),
+        speech("p4", "Last paragraph."),
+    ]}
+    book = {"pronunciationDictionary": {"id": "dict-1", "versionId": "ver-7"}}
+    state = {"sections": {
+        "p1": {"requestId": "req-p1", "generatedAt": recent},
+        "p4": {"requestId": "req-p4", "generatedAt": stale},
+    }}
+
+    mid = gen.build_request(book, chapter, state, "p2", now=now)
+    check("build_request carries same-voice neighbour text across silence",
+          mid["previous_text"] == "First paragraph."
+          and mid["next_text"] == "Last paragraph.",
+          str({"prev": mid["previous_text"], "next": mid["next_text"]}))
+    check("build_request skips a different-voice neighbour for next_text",
+          mid["next_text"] == "Last paragraph."
+          and mid["speech"]["id"] == "p2")
+    check("build_request keeps a recent previous request id when stitchable",
+          mid["previous_request_ids"] == ["req-p1"]
+          and mid["next_request_ids"] == [],
+          str({"prev": mid["previous_request_ids"],
+               "next": mid["next_request_ids"]}))
+    check("build_request drops a neighbour request id outside the stitch window",
+          mid["next_request_ids"] == [])
+    check("build_request attaches pronunciation dictionary locators",
+          mid["locators"] == [{"pronunciation_dictionary_id": "dict-1",
+                               "version_id": "ver-7"}],
+          str(mid["locators"]))
+    check("build_request packs voice params from the speech section",
+          mid["voice"] == {"voice_id": "voice-a",
+                           "model": "eleven_multilingual_v2",
+                           "stability": 0.5, "similarity": 0.75,
+                           "speed": 1.0},
+          str(mid["voice"]))
+
+    # eleven_v3: ElevenLabs refuses previous/next_request_ids on this model
+    # family. Neighbour TEXT still rides along; only the ids must clear.
+    v3_chapter = {"stem": "v3", "sections": [
+        speech("a", "Before.", model="eleven_v3"),
+        speech("b", "Target.", model="eleven_v3"),
+        speech("c", "After.", model="eleven_v3"),
+    ]}
+    v3_state = {"sections": {
+        "a": {"requestId": "req-a", "generatedAt": recent},
+        "c": {"requestId": "req-c", "generatedAt": recent},
+    }}
+    v3 = gen.build_request(book, v3_chapter, v3_state, "b", now=now)
+    check("build_request keeps neighbour text on eleven_v3",
+          v3["previous_text"] == "Before." and v3["next_text"] == "After.")
+    check("build_request clears request ids on eleven_v3 (not stitchable)",
+          v3["previous_request_ids"] == [] and v3["next_request_ids"] == [],
+          str({"prev": v3["previous_request_ids"],
+               "next": v3["next_request_ids"]}))
+
+    bare = gen.build_request({"pronunciationDictionary": {}}, chapter,
+                             {"sections": {}}, "p1", now=now)
+    check("build_request omits locators when the dictionary has no ids",
+          bare["locators"] == [] and bare["previous_text"] is None
+          and bare["previous_request_ids"] == [],
+          str(bare["locators"]))
+
+    try:
+        gen.build_request(book, chapter, state, "sil", now=now)
+        check("build_request refuses a non-speech section", False)
+    except AudioError as err:
+        check("build_request refuses a non-speech section by name",
+              "not speech" in str(err), str(err))
+    try:
+        gen.build_request(book, chapter, state, "missing", now=now)
+        check("build_request refuses a missing section", False)
+    except AudioError as err:
+        check("build_request refuses a missing section by name",
+              "missing" in str(err) or "not speech" in str(err), str(err))
+
+
 def check_generation() -> None:
     """generate / retake / stitch / status on a copy of the fixture, with
     a fake ElevenLabs (docs/audiobook-review-design.md §4–§5)."""
@@ -1465,6 +1567,7 @@ def check_audiobook_page() -> None:
 
 
 def main_test() -> None:
+    check_build_request()
     check_text_rules()
     check_voice_tags()
     check_cast()
