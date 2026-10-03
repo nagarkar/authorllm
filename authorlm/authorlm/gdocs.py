@@ -3107,6 +3107,53 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
+# Producers that number `anchor_paragraph` in blank-line `_paragraphs`
+# space (directives, outside callers). Everyone else — critique, filter,
+# lens, findings, morph — numbers in `passes.paragraphs_of` space, where
+# a `[Voice:]` line joins the paragraph it casts. The writer must translate
+# before indexing the tab's blank-line paragraphs, or an insert after a
+# later unit lands on an earlier raw paragraph and resolve writes the
+# proposal into the wrong place.
+_RAW_ANCHOR_ORIGINS = frozenset({"footnote", "explain", "external"})
+
+
+def _raw_index_for_unit(text: str, unit_n: int) -> int:
+    """Map a 1-based `paragraphs_of` unit index to the 1-based blank-line
+    paragraph index the surgical writer locates in the tab.
+
+    Insert-after-unit and occurrence-bounded replace both plant relative
+    to a blank-line paragraph in the Doc; Voice-joined units are larger
+    than one such paragraph, so the index that stages the edit is not the
+    index the locator speaks. The last blank-line paragraph of the unit
+    is the plant point — the cast tag rides above its paragraph, and an
+    insert after the unit follows the spoken prose, not the tag."""
+    from .export import VOICE_LINE
+    from .passes import paragraphs_of
+    from .revisions import _paragraphs
+
+    if unit_n == 0:
+        return 0
+    raw = _paragraphs(text)
+    units = paragraphs_of(text)
+    if not (1 <= unit_n <= len(units)):
+        raise LookupError(f"anchor paragraph {unit_n} out of range")
+    unit_idx = 0
+    carry_indices: list[int] = []
+    for i, p in enumerate(raw, 1):
+        if all(VOICE_LINE.match(line) for line in p.split("\n")):
+            carry_indices.append(i)
+            continue
+        unit_idx += 1
+        if unit_idx == unit_n:
+            return i
+        carry_indices = []
+    for ri in carry_indices:
+        unit_idx += 1
+        if unit_idx == unit_n:
+            return ri
+    raise LookupError(f"anchor paragraph {unit_n} out of range")
+
+
 def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     """The occurrence index of unit `n`'s own text, counted in the SAME
     universe `_locate_in_tab` searches.
@@ -3194,6 +3241,11 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     for t in ordered:
         n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
+            # Staging numbers Voice-joined units; the locator indexes
+            # blank-line paragraphs. Translate unless this producer already
+            # spoke blank-line indices (directives / outside callers).
+            if n and t.get("origin_type") not in _RAW_ANCHOR_ORIGINS:
+                n = _raw_index_for_unit(text, n)
             if t["proposed_old"]:
                 old = t["proposed_old"]
                 occurrence = _occurrence(paragraphs, n, old)

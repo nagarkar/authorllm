@@ -988,6 +988,98 @@ def _inline_markup_forms(root: Path) -> None:
           not any(m in after for m in ("<<", ">>", "{{", "}}")), after)
 
 
+def _voice_joined_insert_lands_after_unit(root: Path) -> None:
+    """Findings/critique number inserts in `paragraphs_of` space; a
+    `[Voice:]` line joins the paragraph it casts, so unit N is not blank-
+    line paragraph N. The writer must translate before locating, or a
+    judgment insert after later prose plants after an earlier spoken
+    paragraph and resolve writes it into the wrong place."""
+    print("Voice-joined insert: plant after the unit, not a shifted raw para:")
+
+    from authorlm.db import ko_fields as _ko
+    from authorlm.passes import paragraphs_of
+    from authorlm.revisions import _paragraphs
+
+    essay = (
+        "# Title\n\n"
+        "[Voice: Alice]\n\n"
+        "First spoken.\n\n"
+        "Later prose about herdsman.\n\n"
+        "[Voice: Bob]\n\n"
+        "Second spoken.\n"
+    )
+    units = paragraphs_of(essay)
+    raw = _paragraphs(essay)
+    check("paragraphs_of joins Voice to the spoken paragraph below",
+          units[1] == "[Voice: Alice]\n\nFirst spoken."
+          and units[2] == "Later prose about herdsman."
+          and len(units) == 4 and len(raw) == 6, str(units))
+    check("_raw_index_for_unit maps the later-prose unit onto its raw para",
+          gdocs._raw_index_for_unit(essay, 3) == 4
+          and raw[3] == "Later prose about herdsman."
+          and gdocs._raw_index_for_unit(essay, 2) == 3, str(raw))
+    check("without Voice tags the map is identity",
+          gdocs._raw_index_for_unit("# A\n\nB\n\nC\n", 2) == 2)
+
+    db, manuscript, ms, fake = _twin_fixture(root, "voice-insert-ws", essay)
+    mid = manuscript["id"]
+    # Unit 3 = later prose. A naive raw read of n=3 would plant after
+    # "First spoken." (raw[2]); the fix plants after raw[3].
+    row = _ko("dt")
+    row.update(
+        manuscript_id=mid, origin_type="critique",
+        origin_id="voice-ins:1", file="solo.md", anchor_quote=None,
+        proposed_old="", proposed_new="[Judgment: put the herdsman first]",
+        note="test", state="accepted", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "insert", "anchor_paragraph": 3,
+                             "intent_id": None,
+                             "original_new": "[Judgment: put the herdsman first]",
+                             "unit": 3, "judgment": True}))
+    db.insert("doc_threads", row)
+    result = gdocs.write_pending_forms(db, manuscript, "solo.md", [row],
+                                       fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("the insert is written",
+          len(result["written"]) == 1 and not result["failed"],
+          str(result["failed"]))
+    # Fake body is paragraph\nparagraph\n… — plant after later prose means
+    # the judgment form sits between that sentence and Bob's Voice tag.
+    later_at = tab.find("Later prose about herdsman.")
+    form_at = tab.find("{{[Judgment: put the herdsman first]}}")
+    bob_at = tab.find("[Voice: Bob]")
+    first_at = tab.find("First spoken.")
+    check("judgment lands after later prose and before Bob — not after "
+          "First spoken (the raw-index trap)",
+          later_at >= 0 and form_at > later_at and form_at < bob_at
+          and form_at > first_at + len("First spoken."),
+          tab)
+    # Directives keep blank-line indices: insert after raw para 3
+    # ("First spoken.") must still plant there when origin is footnote.
+    row2 = _ko("dt")
+    row2.update(
+        manuscript_id=mid, origin_type="footnote",
+        origin_id="voice-fn:1", file="solo.md", anchor_quote=None,
+        proposed_old="", proposed_new="[^T1]: A note.",
+        note="cite", state="accepted", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "insert", "anchor_paragraph": 3,
+                             "intent_id": None, "original_new": "[^T1]: A note.",
+                             "directive": "footnote"}))
+    db.insert("doc_threads", row2)
+    # Rebuild from local first (writer always pushes); then plant.
+    result2 = gdocs.write_pending_forms(db, manuscript, "solo.md", [row2],
+                                        fake, fake)
+    tab2 = fake.tab_text("solo.md")
+    check("a footnote insert still reads blank-line indices",
+          len(result2["written"]) == 1 and not result2["failed"]
+          and tab2.find("{{[^T1]: A note.}}")
+          > tab2.find("First spoken.")
+          and tab2.find("{{[^T1]: A note.}}")
+          < tab2.find("Later prose about herdsman."),
+          tab2)
+
+
 def _identical_old_halves(root: Path) -> None:
     """F-D20 / F-D21 — the surgical writer locates by OCCURRENCE INDEX.
 
@@ -4794,6 +4886,7 @@ def main_test() -> None:
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
         _local_transport_guards(root)
+        _voice_joined_insert_lands_after_unit(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
         _the_transport_is_frozen(root)
