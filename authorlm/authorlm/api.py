@@ -7169,3 +7169,104 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     else:
         result["tab_still_marked"] = False
     return result
+
+
+# --------------------------------------------------------------------
+# An outside caller's own record. Two doors so that a caller never
+# writes AuthorLM's tables itself (ytlm's metalm conformance,
+# nagarkar/ytlm#23): settings it keeps on a manuscript, and taking back
+# what it staged on one tab. `outstanding_revisions` is the count it
+# plans against. outside-caller-design.md §6a.
+# --------------------------------------------------------------------
+
+CALLERS_KEY = "callers"
+
+
+def _caller_name(origin: str) -> str:
+    origin = (origin or "").strip()
+    if not origin:
+        raise ValueError("an outside caller names itself: origin is empty")
+    return origin
+
+
+def _metadata_row(db: Database, manuscript: dict) -> dict:
+    """`manuscripts.metadata` as it stands in the row, decoded."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    return loads((row["metadata"] if row else None), {}) or {}
+
+
+def caller_metadata(db: Database, manuscript: dict, origin: str) -> dict:
+    """The settings `origin` keeps on this manuscript, `{}` when none.
+
+    They live in `manuscripts.metadata` under `callers.<origin>`, beside
+    the Doc mapping and the extraction switch, and are read from the row,
+    never from the caller's dict (those neighbours rewrite the column).
+    A caller that wrote them at the top level under its own name before
+    this door existed reads them back here too."""
+    origin = _caller_name(origin)
+    meta = _metadata_row(db, manuscript)
+    own = (meta.get(CALLERS_KEY) or {}).get(origin)
+    if own is None and isinstance(meta.get(origin), dict):
+        own = meta[origin]
+    return dict(own or {})
+
+
+def set_caller_metadata(db: Database, manuscript: dict, origin: str,
+                        values: dict) -> dict:
+    """Merge `values` into `origin`'s settings on this manuscript, key by
+    key, and return the merged settings. Nothing else in the column is
+    touched; settings found at the top level (see `caller_metadata`) are
+    moved under `callers` by this first write."""
+    origin = _caller_name(origin)
+    own = caller_metadata(db, manuscript, origin)
+    own.update(values or {})
+    meta = _metadata_row(db, manuscript)
+    if isinstance(meta.get(origin), dict):
+        meta.pop(origin)
+    meta.setdefault(CALLERS_KEY, {})[origin] = own
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+    return dict(own)
+
+
+def outstanding_revisions(db: Database, manuscript: dict,
+                          origin: str) -> dict[str, int]:
+    """file → how many of `origin`'s staged revisions are still out
+    (`written`: neither landed by `resolve_revisions` nor withdrawn).
+    Files with none are absent. Counts the threads, so a form whose
+    braces the author removed by hand still counts until the resolve."""
+    origin = _caller_name(origin)
+    counts: dict[str, int] = {}
+    rows = db.all(
+        "SELECT file, metadata FROM doc_threads WHERE manuscript_id = ? "
+        "AND origin_type = ? AND state = 'written'",
+        (manuscript["id"], EXTERNAL_ORIGIN))
+    for r in rows:
+        if (loads(r["metadata"], {}) or {}).get("origin") == origin:
+            counts[r["file"]] = counts.get(r["file"], 0) + 1
+    return counts
+
+
+def withdraw_revisions(db: Database, manuscript: dict, file: str,
+                       origin: str) -> list[dict]:
+    """Take back every revision `origin` has out on `file`: its `written`
+    threads there are closed as `withdrawn`, and each is returned as
+    `{"id", "old", "new", "note"}` in staging order (`[]` when none).
+    Another producer's threads are left alone. Only an unknown file or
+    an empty `origin` raises.
+
+    The forms are still in the tab. The local file never took them, so
+    it is the settled text: the caller rebuilds the tab from it with
+    `gdocs.push_doc`, which the withdrawn threads no longer hold."""
+    origin = _caller_name(origin)
+    rel = _resolve_relpath(manuscript, file)
+    gone = []
+    with db.transaction():
+        for t in _external_threads(db, manuscript["id"], rel, origin):
+            db.update("doc_threads", t["id"], {"state": "withdrawn"})
+            gone.append({"id": t["id"], "old": t.get("proposed_old"),
+                         "new": t.get("proposed_new"),
+                         "note": t.get("note")})
+    return gone
