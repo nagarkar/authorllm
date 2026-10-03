@@ -2946,6 +2946,34 @@ def check_lint_and_propose_gates() -> None:
               "THE CHECKLIST" in payload and "ACCEPTED TEXT SO FAR" in payload
               and "LINT" in payload and "THE DRAFT" in payload
               and draft in payload and "VERDICT" in payload, payload[:300])
+        # critic.assemble block inventory — every labelled section the
+        # independent reader is promised (critic.py). Substring presence
+        # above is not enough: dropping SETTLED CONTEXT or NEAREST
+        # PASSAGES would still pass those four labels and leave the
+        # critic unable to judge a back-reference or cross-essay repeat.
+        required_blocks = (
+            "THE CHECKLIST (binding; cite the number)",
+            "LAST VERDICT",
+            "THIS BEAT",
+            "CONCEPT NOTES",
+            "PROTECTED TERMS",
+            "SETTLED CONTEXT",
+            "ACCEPTED TEXT SO FAR",
+            "THE ORIGINAL ESSAY",
+            "NEAREST PASSAGES ELSEWHERE IN THE BOOK",
+            "LINT",
+            "THE DRAFT",
+        )
+        missing = [b for b in required_blocks if b not in payload]
+        check("critic.assemble emits every labelled block the prompt promises",
+              not missing, f"missing={missing}; head={payload[:400]!r}")
+        # This fixture reworks an existing essay, so the pinned original
+        # must be the essay body — never the "(not a rewrite)" stand-in.
+        check("a rewrite critique carries the pinned original essay body",
+              "# Epictetus" in payload and "(not a rewrite)" not in payload,
+              payload[payload.find("THE ORIGINAL"):
+                      payload.find("THE ORIGINAL") + 240]
+              if "THE ORIGINAL" in payload else payload[:240])
         try:
             api.write_propose(db, manuscript, draft, "opener per the plan",
                               critique="VERDICT\nFAIL\n\nFINDINGS\n- LOGIC | «x» | y | z")
@@ -7286,6 +7314,20 @@ def main_test() -> None:
               clean == ("# Title\n\nSome -escaped . text here.\n"
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
+        # Docs export escapes a typed URL colon as `https\://…` so it will
+        # not auto-link (seen 2026-10-02 on footnote lines an outside
+        # caller staged). Colon joined the escape set in f785954; without
+        # this undo, resolve sees a different string than the local file.
+        colon = ("See https\\://example.com/a and a footnote[^1].\n\n"
+                 "[^1]: https\\://example.com/note\n")
+        check("normalizer undoes the exporter's escaped colon in URLs",
+              normalize_markdown(colon)
+              == ("See https://example.com/a and a footnote[^1].\n\n"
+                  "[^1]: https://example.com/note\n"),
+              repr(normalize_markdown(colon)))
+        check("colon unescape is idempotent once the backslash is gone",
+              normalize_markdown(normalize_markdown(colon))
+              == normalize_markdown(colon))
 
         # Verse: a Doc export writes a hard line break as two trailing
         # spaces; the canonical form is the backslash break, rewritten
@@ -12567,6 +12609,14 @@ def main_test() -> None:
               and "foregroundColor" in insert_reqs[2]["updateTextStyle"]
               ["textStyle"],
               str(insert_reqs))
+        # Order is load-bearing (#129 / 7e3a268): applying a named style
+        # AFTER the green text style resets the paragraph to the style's
+        # own colour and strips the green off every insertion.
+        keys = [next(iter(r)) for r in insert_reqs[:3]]
+        check("insert mark sets NORMAL_TEXT before the green text style",
+              keys == ["insertText", "updateParagraphStyle",
+                       "updateTextStyle"],
+              str(keys))
 
         # --- Editorial verbs lazy-open a session (CLI helper) ---
         from authorlm import sessions as ses
