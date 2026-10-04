@@ -5912,6 +5912,21 @@ def check_directives() -> None:
               _raises(lambda: dv.apply(db, ms, {}, "footnote", "becker.md",
                                        [(1, "x")]), "checked out to Google Docs")
               and (ms_dir / "becker.md").read_text() == becker)
+        abs_becker = str((ms_dir / "becker.md").resolve())
+        check("an absolute path to a checked-out file takes the same Doc "
+              "road — it must not miss the mapping key and land locally "
+              "while the Doc is still the working copy",
+              _raises(lambda: dv.apply(db, ms, {}, "footnote", abs_becker,
+                                       [(1, "x")]), "checked out to Google Docs")
+              and (ms_dir / "becker.md").read_text() == becker
+              and api._resolve_relpath(ms, abs_becker) == "becker.md")
+        outside = str((root / "other.md").resolve())
+        (root / "other.md").write_text("Alpha.[Footnote: leak]\n")
+        check("an absolute path outside the manuscript is refused — "
+              "apply never writes through a raw path join",
+              _raises(lambda: dv.apply(db, ms, {}, "footnote", outside,
+                                       [(1, "x")]), "no manuscript file")
+              and (root / "other.md").read_text() == "Alpha.[Footnote: leak]\n")
         meta[bridge.meta_key]["becker.md"]["checked_out"] = False
         _gd._save_mapping(db, ms, meta)
 

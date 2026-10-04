@@ -437,6 +437,15 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
                          "applied as text.")
     if not pairs:
         raise ValueError("nothing to apply — give at least one --tag/--text pair")
+    # Confinement: the Doc-mapping key and the write path are the same
+    # manuscript-relative name. An absolute (or `..`-escaping) argument
+    # that skipped this step missed `checked_out` and wrote locally while
+    # the Doc was still the working copy (found 2026-10-01 / confirmed
+    # 2026-10-04).
+    try:
+        file = api._resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     root = Path(manuscript["path"])
     path = root / file
     if not path.is_file():
@@ -610,6 +619,10 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
 
     _kind(kind)
     mid = manuscript["id"]
+    try:
+        file = api._resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     written = passes.staged_threads(db, mid, file, states=("written",),
                                     origin_type=kind)
     if not written:
