@@ -12677,6 +12677,94 @@ def main_test() -> None:
               ["textStyle"],
               str(insert_reqs))
 
+        # --- apply_tab_spacing: insert-only staging leaves NORMAL_TEXT
+        # paragraphs with Google's default (no spaceBelow). Without this
+        # re-apply, markdown export joins neighbouring adds into one
+        # paragraph with hard breaks, and resolve cannot read forms back.
+        from authorlm.gdocs import apply_tab_spacing, DOC_SPACING
+
+        class _SpacingDocs:
+            def __init__(self, tabs):
+                self._tabs = tabs
+                self.updates = []
+
+            def documents(self):
+                outer = self
+
+                class _Req:
+                    def __init__(self, result):
+                        self._result = result
+
+                    def execute(self):
+                        return self._result
+
+                class _Documents:
+                    def get(self, documentId=None, includeTabsContent=None):
+                        return _Req({"tabs": outer._tabs})
+
+                    def batchUpdate(self, documentId=None, body=None):
+                        outer.updates.append(body)
+                        return _Req({})
+                return _Documents()
+
+        spacing_tabs = [{
+            "tabProperties": {"tabId": "tab-solo"},
+            "documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 10,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "HEADING_1"},
+                     "elements": []}},
+                {"startIndex": 10, "endIndex": 40,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+                {"startIndex": 40, "endIndex": 70,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+                {"startIndex": 70, "endIndex": 70,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+            ]}},
+            "childTabs": [],
+        }]
+        spacing_docs = _SpacingDocs(spacing_tabs)
+        n = apply_tab_spacing(spacing_docs, "doc-1", "tab-solo", DOC_SPACING)
+        check("apply_tab_spacing merges adjacent NORMAL_TEXT into one "
+              "range and skips headings and empty spans",
+              n == 1
+              and len(spacing_docs.updates) == 1
+              and spacing_docs.updates[0]["requests"][0]
+              ["updateParagraphStyle"]["range"]
+              == {"tabId": "tab-solo", "startIndex": 10, "endIndex": 70},
+              str(spacing_docs.updates))
+        style = (spacing_docs.updates[0]["requests"][0]["updateParagraphStyle"]
+                 ["paragraphStyle"])
+        check("apply_tab_spacing writes DOC_SPACING lineSpacing / "
+              "spaceAbove / spaceBelow (the fields insert-only staging "
+              "omits and resolve re-applies before reading forms back)",
+              style["lineSpacing"] == DOC_SPACING["line_spacing"]
+              and style["spaceAbove"]["magnitude"] == DOC_SPACING["space_above"]
+              and style["spaceBelow"]["magnitude"] == DOC_SPACING["space_below"]
+              and style["spaceBelow"]["unit"] == "PT",
+              str(style))
+        empty_docs = _SpacingDocs([{
+            "tabProperties": {"tabId": "tab-empty"},
+            "documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 5,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "HEADING_1"},
+                     "elements": []}},
+            ]}},
+            "childTabs": [],
+        }])
+        check("apply_tab_spacing sends no batchUpdate when no NORMAL_TEXT "
+              "ranges qualify",
+              apply_tab_spacing(empty_docs, "doc-1", "tab-empty",
+                                DOC_SPACING) == 0
+              and empty_docs.updates == [])
+
         # --- Editorial verbs lazy-open a session (CLI helper) ---
         from authorlm import sessions as ses
         from authorlm.cli import _ensure_session

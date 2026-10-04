@@ -1083,6 +1083,85 @@ def _mp3(path: Path, secs: float = 0.2) -> None:
                    check=True)
 
 
+def check_generation_plan() -> None:
+    """`generation.plan` is the cost gate: generate never re-pays a done
+    id, retake always does, and --remaining only names what lacks a take.
+    `check_generation` exercises these only through `generate()`; a
+    regression in the skip/retake split would still spend characters
+    before any render assertion fired."""
+    from authorlm import generation as gen
+
+    book = _book_copy()
+    root = book / "_audio"
+    try:
+        loaded = gen.load_book(root)
+        chapter = gen.load_chapter(root, loaded, "kindness")
+        speech = list(gen.speech_of(chapter))
+        ids = [s["id"] for s in speech]
+        quality = loaded["quality"]
+
+        try:
+            gen.plan(root, loaded, chapter, None, False, False)
+            check("plan refuses when neither -p nor --remaining is set", False)
+        except audio.AudioError as err:
+            check("plan refuses when neither -p nor --remaining is set",
+                  "name paragraphs" in str(err) and "--remaining" in str(err),
+                  str(err))
+
+        cold = gen.plan(root, loaded, chapter, None, True, False)
+        check("--remaining with no takes plans every speech id",
+              cold["ids"] == ids and cold["skipped"] == []
+              and cold["quality"] == quality
+              and cold["characters"] == sum(len(s["text"]) for s in speech),
+              str(cold))
+
+        # Seed a real take for ¶2 so take_of sees it as done.
+        done = ids[1]
+        rel = f"audio/{done}.{quality}.mp3"
+        (root / "audio").mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"TAKE")
+        state = gen.load_state(root, "kindness")
+        state["sections"][done] = {
+            "audioFiles": {quality: rel},
+            "requestId": "req-plan",
+            "generatedAt": "2026-10-04T00:00:00Z",
+            "madeFrom": gen.made_from(speech[1]),
+        }
+        gen.save_state(root, "kindness", state)
+
+        rem = gen.plan(root, loaded, chapter, None, True, False)
+        check("--remaining skips a seeded take and counts only the rest",
+              rem["ids"] == [ids[0], ids[2], ids[3]]
+              and rem["skipped"] == []
+              and rem["characters"] == sum(len(speech[i]["text"])
+                                           for i in (0, 2, 3)),
+              str(rem))
+
+        named = gen.plan(root, loaded, chapter, "2-3", False, False)
+        check("generate -p skips a done id and lists it in skipped",
+              named["ids"] == [ids[2]] and named["skipped"] == [ids[1]]
+              and named["characters"] == len(speech[2]["text"]),
+              str(named))
+
+        retake = gen.plan(root, loaded, chapter, "2-3", False, True)
+        check("retake -p re-includes a done id and never skips",
+              retake["ids"] == [ids[1], ids[2]] and retake["skipped"] == []
+              and retake["characters"] == (len(speech[1]["text"])
+                                           + len(speech[2]["text"])),
+              str(retake))
+
+        # A state entry without the file on disk is not a take — plan must
+        # still treat the id as remaining (otherwise --remaining under-pays
+        # and the author never learns the mp3 is gone).
+        (root / rel).unlink()
+        ghost = gen.plan(root, loaded, chapter, None, True, False)
+        check("a state row whose take file is missing still counts as remaining",
+              done in ghost["ids"] and ghost["skipped"] == [],
+              str(ghost))
+    finally:
+        shutil.rmtree(book, ignore_errors=True)
+
+
 def check_generation() -> None:
     """generate / retake / stitch / status on a copy of the fixture, with
     a fake ElevenLabs (docs/audiobook-review-design.md §4–§5)."""
@@ -1477,6 +1556,7 @@ def main_test() -> None:
     check_workbench()
     check_audiostation_launch()
     check_casting_filter_block()
+    check_generation_plan()
     check_generation()
     check_audiobook_page()
     print(f"\nAll {PASSED} checks passed.")

@@ -991,6 +991,56 @@ def main_test() -> None:
               "context — the exact lie the gate exists to prevent",
               len(captures) == 1, f"{len(captures)} captures")
 
+        # P5 — opaque identity. P2/P3 count captures; this proves the
+        # handed object is what before_after / drafting_context actually
+        # read. Without it, a refactor that re-calls _context_units when
+        # `capture=` is set still passes the call-count pins if the second
+        # read happens outside the counted wrapper.
+        #
+        # Neighbour must NOT be in flight: an in-flight unit always
+        # contributes its pinned text, so a disk write underneath it
+        # cannot produce the stale-vs-frozen contrast this pin needs.
+        # title.md is front matter and never opened as a writeup above.
+        snap = sums.capture(db, manuscript)
+        title_before = (ms / "title.md").read_text()
+        (ms / "title.md").write_text(
+            "# title\n\nText another session wrote AFTER the capture.\n")
+        rereads: list = []
+        real_ctx = sums._context_units
+
+        def _count_ctx(*args, **kwargs):
+            rereads.append("_context_units")
+            return real_ctx(*args, **kwargs)
+
+        sums._context_units = _count_ctx
+        try:
+            before, _after = sums.before_after(db, manuscript, "alpha.md",
+                                               capture=snap)
+            held = sums.drafting_context(db, manuscript, "alpha.md",
+                                         capture=snap)
+        finally:
+            sums._context_units = real_ctx
+        title_held = next(e for e in before if e["file"] == "title.md")
+        check("P5 — a handed capture is opaque: before_after and "
+              "drafting_context do not re-read the disk",
+              rereads == [], str(rereads))
+        check("P5 — with the capture, title still reads fresh-or-upstream "
+              "against the SNAPSHOT bytes even though the disk moved "
+              "(gate+assembly identity; not stale)",
+              title_held["state"] in ("fresh", "upstream_stale"),
+              str(title_held))
+        before_live, _a2 = sums.before_after(db, manuscript, "alpha.md")
+        title_live = next(e for e in before_live if e["file"] == "title.md")
+        check("P5 — without a capture, the same neighbour reads stale "
+              "against the mutated disk (proving the freeze came from the "
+              "handed object)",
+              title_live["state"] == "stale", str(title_live))
+        check("P5 — drafting_context with the capture still renders "
+              "(identity handoff did not break assembly)",
+              f"[title.md]" in held
+              and f"({title_held['state']})" in held, held)
+        (ms / "title.md").write_text(title_before)
+
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
         check("the summarizer prompt is a checked-in file with the labeled "
