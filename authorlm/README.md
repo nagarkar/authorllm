@@ -631,6 +631,9 @@ the tables reads like the history of the book (RFC §18.7). See
   as the policy statement (with an LLM they are distilled).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
-- Extraction reads at most the first ~24k characters of the manuscript.
+- `extract --edges-only` sends a single payload capped at
+  `extraction_max_chars` (default 24k characters) and truncates anything
+  beyond it; other extractions split oversized scopes into multiple
+  bounded passes rather than truncating.
 - Inferred intents, replay, and cross-manuscript long-term memory are
   schema-ready but deferred (RFC growth stages 7–8).
