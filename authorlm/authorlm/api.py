@@ -1305,12 +1305,26 @@ DISPOSITIONS = ("kept", "removed")
 
 
 def _resolve_relpath(manuscript: dict, query: str) -> str:
+    """Map a file argument to the manuscript-relative path used as the
+    Doc-mapping key and the on-disk name. Absolute paths that sit under
+    the manuscript root (and relative paths that resolve there) are
+    accepted; anything outside is refused. Bare names still go through
+    `docs._match`'s exact-then-unique-substring forgiveness."""
     from .docs import _match
     from .revisions import iter_manuscript_paths
 
-    candidates = iter_manuscript_paths(Path(manuscript["path"]))
+    root = Path(manuscript["path"])
+    candidates = iter_manuscript_paths(root)
+    probe = Path(query).expanduser()
+    try:
+        resolved = (probe if probe.is_absolute() else root / probe).resolve()
+        rel = str(resolved.relative_to(root.resolve()))
+    except (ValueError, OSError):
+        rel = None
+    if rel is not None and rel in candidates:
+        return rel
     path = _match(candidates, query)
-    return str(path.relative_to(Path(manuscript["path"])))
+    return str(path.relative_to(root))
 
 
 def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
