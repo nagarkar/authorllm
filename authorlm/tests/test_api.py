@@ -11759,6 +11759,59 @@ def main_test() -> None:
             {"n-disc": ["Discernment"]})
         check("capitalization from headings and sentence starts counts",
               "n-disc" in heading_pos and heading_pos["n-disc"] < 20)
+
+        # --- _first_mentions compiles each name's pattern once, not per file ---
+        # 20 files x 50 one-name concepts, one mentioned only in the last
+        # file: the old per-file loop built 20*50 = 1000 patterns.
+        import authorlm.guidance as _guidance
+        from authorlm.concepts import mention_pattern as _real_mention_pattern
+        from authorlm.structure import ordered_items as _ordered_items
+        perf_files = {f"{i:02d}.md": "Plain filler prose about nothing named.\n"
+                      for i in range(20)}
+        perf_files["19.md"] += "At last the Quillwort appears here.\n"
+        perf_names = {f"n-{i}": [f"Zorblax{i}"] for i in range(50)}
+        perf_names["n-49"] = ["Quillwort"]
+
+        def _reference_first_mentions(files, names):
+            positions: dict[str, int] = {}
+            offset = 0
+            for _, text in _ordered_items(files):
+                for node_id, concept_names in names.items():
+                    if node_id in positions:
+                        continue
+                    starts = [m.start() for m in
+                              (_real_mention_pattern(nm).search(text)
+                               for nm in concept_names) if m]
+                    if starts:
+                        positions[node_id] = offset + min(starts)
+                offset += len(text) + 1
+            return positions
+
+        pattern_calls = [0]
+
+        def _counting_mention_pattern(name):
+            pattern_calls[0] += 1
+            return _real_mention_pattern(name)
+
+        _guidance.mention_pattern = _counting_mention_pattern
+        try:
+            perf_positions = _guidance._first_mentions(perf_files, perf_names)
+        finally:
+            _guidance.mention_pattern = _real_mention_pattern
+        check("_first_mentions builds each name's pattern once (50, not 1000)",
+              pattern_calls[0] == 50, f"calls: {pattern_calls[0]}")
+        check("_first_mentions positions match the per-file reference loop",
+              perf_positions == _reference_first_mentions(perf_files, perf_names)
+              and "n-49" in perf_positions,
+              f"positions: {perf_positions}")
+        for probe_files, probe_names in (
+                (gap_files, gap_names),
+                ({"01.md": "## Discernment\n\nVirtue is chosen for effectiveness.\n",
+                  "02.md": "Discernment is the measure of distinctions.\n"},
+                 {"n-disc": ["Discernment"]})):
+            check("_first_mentions matches the reference loop on existing fixtures",
+                  _guidance._first_mentions(probe_files, probe_names)
+                  == _reference_first_mentions(probe_files, probe_names))
         from authorlm.guidance import PREREQUISITE_FIRST
         check("leads_to is an ordering relation (cause introduced before effect)",
               "leads_to" in PREREQUISITE_FIRST)
