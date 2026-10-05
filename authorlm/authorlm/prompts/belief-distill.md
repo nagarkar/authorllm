@@ -64,6 +64,6 @@ else, reply NONE.
 
 Reply with exactly one of:
 NONE
-MATCH: <belief-id>
+MATCH: <belief label, e.g. B1>
 NEW: <one specific prohibition — what must NOT happen>
 EXAMPLE: <the concrete case that produced it, in the author's terms>

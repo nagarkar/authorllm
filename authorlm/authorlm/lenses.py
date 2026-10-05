@@ -983,10 +983,10 @@ def propagate_verdicts(db: Database, manuscript: dict, threads,
             "kind = ? AND state = 'proposed' AND metadata LIKE ?",
             (mid, kind, f'%"edit_thread": "{t["id"]}"%'))
         for r in rows:
-            meta = loads(r["metadata"], {}) or {}
-            what = "judgment" if meta.get("judgment") else "rewrite"
-            bel.record_review(db, mid, dict(r), decision,
-                              f"{what} {decision} in the Doc tab", None,
+            # No explanation: the author resolved a form, they did not
+            # type a reason. A canned "rejected in the Doc tab" used to
+            # stand in for one and was seeded as a belief.
+            bel.record_review(db, mid, dict(r), decision, None, None,
                               llm=None)
             out[decision] += 1
     return out

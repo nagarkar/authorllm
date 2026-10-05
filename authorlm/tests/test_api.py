@@ -225,7 +225,9 @@ def check_drafting_replay_needs_no_key() -> None:
         # constant (llm.py: draft() never sends temperature at all, see
         # the "NO sampling parameter at all" note there), so every
         # existing drafting fixture's key stays exactly what it was.
-        path = client._cache_path(messages, llm_mod.TEMPERATURE)
+        path = client._cache_path(messages, llm_mod.TEMPERATURE,
+                                  max_tokens=client.max_tokens,
+                                  effort=client.effort)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps({
             "model": client.model,
@@ -249,10 +251,52 @@ def check_drafting_replay_needs_no_key() -> None:
               and "1 replayed from cache" in line
               and "0 live call(s)" in line
               and "cache 0 read / 0 written" in line, line)
+
+        plain = llm_mod.LLMClient({"llm": {
+            "enabled": True, "model": "anthropic/claude-fable-5",
+            "cache_dir": str(cache_root)}})
+        missed = None
+        try:
+            plain.complete("SYSTEM", "USER")
+        except llm_mod.ReplayMiss as err:
+            missed = str(err)
+        check("on the replay road a miss with no key is one ReplayMiss "
+              "naming the variable — never a silent None that runs the "
+              "no-LLM heuristic",
+              missed and "ANTHROPIC_API_KEY" in missed
+              and plain.live_calls == 0, str(missed))
+
+        def key(**params):
+            return client._cache_path(messages, llm_mod.TEMPERATURE,
+                                      **params)
+        check("max_tokens, effort and thinking_budget each change the "
+              "recording key; leaving them unset keeps the old key",
+              len({key(), key(max_tokens=1), key(effort="low"),
+                   key(thinking_budget=0)}) == 4
+              and key() == key(max_tokens=None), "")
     finally:
         shutil.rmtree(cache_root, ignore_errors=True)
         if prev is not None:
             os.environ["ANTHROPIC_API_KEY"] = prev
+
+
+def check_link_endpoints() -> None:
+    """Extraction reads a link whose target is keyed by its relation
+    (Gemini's habit) instead of counting it malformed."""
+    from authorlm.extraction import link_endpoints
+
+    check("a link in the prompt's own shape reads as written",
+          link_endpoints({"from": "A", "relation": "creates", "to": "B"})
+          == ("A", "creates", "B"))
+    check("a target keyed by the named relation is read, not dropped",
+          link_endpoints({"from": "A", "leads_to": "B",
+                          "relation": "leads_to"})
+          == ("A", "leads_to", "B"))
+    check("with no relation field, the item's one relation key names it",
+          link_endpoints({"from": "A", "creates": "B"})
+          == ("A", "creates", "B"))
+    check("a link with no readable target still has none",
+          link_endpoints({"from": "A", "relation": "creates"})[2] == "")
 
 
 def check_drafting_cache_warning() -> None:
@@ -6620,6 +6664,7 @@ def main_test() -> None:
     check_shipped_config_bills_no_anthropic_path()
     check_drafting_key_gate()
     check_drafting_replay_needs_no_key()
+    check_link_endpoints()
     check_drafting_cache_warning()
     check_drafting_cache_layer()
     check_model_profiles()
@@ -12512,7 +12557,7 @@ def main_test() -> None:
         api.define_style_guide(db, manuscript, "Curation guide")
         seeded = pol.seed_candidate_belief(
             db, manuscript["id"], "Prefer short paragraphs in dialogue.",
-            source="test")
+            source="test", distilled=True)
         converted = api.convert_belief(
             db, manuscript, seeded["id"], "formatting",
             guide="Curation guide", reason="now enforced as style law")
