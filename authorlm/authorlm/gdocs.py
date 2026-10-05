@@ -54,7 +54,7 @@ _THEMATIC_BREAK = re.compile(
 _HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 _TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
 _EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
-_HARD_BREAK = re.compile(r"(?<=\S) {2,}\n(?=[^\s#>|*\-\[])")
+_HARD_BREAK = re.compile(r"(?<=\S) {2,}\n(?=[^\s#>|*\-\[])(?!\d+[.)]\s)")
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
 
 
@@ -120,6 +120,13 @@ def _restore_fences(text: str, spans: list[str]) -> str:
 _DISPLAY_MATH = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
 _INLINE_MATH = re.compile(
     r"(?<![\\$])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?![\d$])")
+# The same spans as Google's exporter writes them since (at least)
+# 2026-10: the `$` delimiters arrive backslash-escaped, which hides the
+# span from the two patterns above (#152). A price (`\$5 and \$10`) has
+# no closing delimiter after a non-space and stays escaped.
+_EXPORT_DISPLAY_MATH = re.compile(r"\\\$\\\$(.+?)\\\$\\\$", re.DOTALL)
+_EXPORT_INLINE_MATH = re.compile(
+    r"(?<![\\$])\\\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\\\$(?![\d$])")
 _MATH_SENTINEL = "\x00M%d\x00"
 _SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
 
@@ -285,7 +292,12 @@ def unescape_export_math(markdown: str) -> str:
     `\frac`, `\_` → `_`, `\=` → `=` (a real TeX accent, which would
     corrupt every equation with an equals sign). Pull-side only:
     normalize_markdown leaves math alone because on a local file every
-    backslash is TeX."""
+    backslash is TeX. Escaped delimiters (`\$…\$`, `\$\$…\$\$`) are
+    unescaped first so the spans are found at all (#152)."""
+    markdown = _EXPORT_DISPLAY_MATH.sub(
+        lambda m: "$$" + m.group(1) + "$$", markdown)
+    markdown = _EXPORT_INLINE_MATH.sub(
+        lambda m: "$" + m.group(1) + "$", markdown)
     return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
 
 
