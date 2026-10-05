@@ -3788,6 +3788,75 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           str(res))
 
 
+def _an_outside_caller_resolve_addition_edge_cases(root: Path) -> None:
+    """Two resolve edges for additions: a deleted plant whose words
+    already occur in the essay must not count as accepted, and a heavy
+    rewrite of the only addition must land as modified — not be dropped
+    by the similarity floor then strip_pending."""
+    print("outside callers: addition decline vs rewrite retention:")
+
+    essay = (
+        "# Topic\n\n"
+        "The cat sat on the mat.\n\n"
+        "Omega closes.\n")
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "outside-substr-ws", essay)
+    staged = api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "", "new": "The cat sat", "anchor_paragraph": 2,
+          "note": "add"}],
+        "ytlm", fake, fake)
+    check("substring fixture: the addition is out",
+          not staged["failed"] and "{{The cat sat}}" in fake.tab_text("solo.md"),
+          str(staged))
+    fake.edit("tab-2", "{{The cat sat}}\n", "")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm", fake, fake)
+    local = (ms / "solo.md").read_text()
+    check("deleting an addition whose words already occur is a decline, "
+          "not an acceptance of the older sentence",
+          res["revisions"][0]["verdict"] == "declined"
+          and res["declined"] == 1 and res["accepted"] == 0
+          and "\n\nThe cat sat\n" not in local
+          and local == essay
+          and api.outstanding_revisions(db, manuscript, "ytlm") == {},
+          str(res) + local)
+
+    # Braces removed by hand, leaving the addition as its own paragraph.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "outside-braces-ws", essay)
+    api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "", "new": "The cat sat", "anchor_paragraph": 2}],
+        "ytlm", fake, fake)
+    fake.edit("tab-2", "{{The cat sat}}", "The cat sat")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm", fake, fake)
+    local = (ms / "solo.md").read_text()
+    check("braces removed by hand, text kept as its own paragraph, is "
+          "accepted",
+          res["revisions"][0]["verdict"] == "accepted"
+          and "\n\nThe cat sat\n" in local, str(res) + local)
+
+    proposed = "Short proposal."
+    rewritten = "The author rewrote this passage from scratch."
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "outside-rewrite-ws", "# Topic\n\nOmega closes.\n")
+    api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "", "new": proposed, "anchor_paragraph": 1, "note": "r"}],
+        "ytlm", fake, fake)
+    fake.edit("tab-2", "{{" + proposed + "}}", "{{" + rewritten + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm", fake, fake)
+    local = (ms / "solo.md").read_text()
+    tab = fake.tab_text("solo.md")
+    check("a heavy rewrite of the only addition is modified and kept, "
+          "not declined and stripped",
+          res["revisions"][0]["verdict"] == "modified"
+          and res["revisions"][0]["final"] == rewritten
+          and rewritten in local and rewritten in tab
+          and proposed not in local and "{{" not in tab,
+          str(res) + local + tab)
+
+
 def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
     """The two doors an outside caller lacked, so that it never writes
     AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
@@ -4930,6 +4999,7 @@ def main_test() -> None:
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
         _an_outside_caller_resolves_one_tab(root)
+        _an_outside_caller_resolve_addition_edge_cases(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()
