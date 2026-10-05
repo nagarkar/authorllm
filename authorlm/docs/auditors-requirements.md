@@ -167,9 +167,16 @@ the shape of each analyzer is deliberately unspecified.
   lesson). Deltas, not snapshots.
 - **R6.4** Every auditor run reports # of live LLM calls and token usage
   (MVP convention).
-- **R6.5** Bounded batch: an auditor surfaces at most a handful of
-  findings per collect (rest summarized by count, retrievable on
-  demand) — the author's attention is the scarcest resource in the loop.
+- **R6.5** Bounded batch: a single collect (or catch-up collect)
+  surfaces at most **6 audit findings in total**, counting all auditors
+  together (style drift R2 and concept pollution R3), not 6 per auditor.
+  Findings beyond the cap are reported only as a count, broken down by
+  auditor, and are retrievable on demand. The same cap and the same
+  count apply to the audit findings shown in the briefing (R9 step 1)
+  — the author's attention is the scarcest resource in the loop.
+  (cap of 6 mirrors MAX_SUGGESTIONS in authorlm/authorlm/guidance.py;
+  derived from guidance.py; owner to confirm the number and the
+  per-collect rather than per-auditor scope)
 
 ## R7 — Workflow placement: automatic vs on-demand
 
