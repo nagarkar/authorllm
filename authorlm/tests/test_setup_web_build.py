@@ -66,15 +66,34 @@ def test_pages_match_the_vite_out_dirs() -> None:
               f'outDir: "../../authorlm/{out}"' in cfg)
 
 
-def test_builds_every_page_installing_only_where_needed() -> None:
+def test_builds_every_page_from_a_clean_install() -> None:
     run = FakeRun()
     done = setup_mod.build_pages(_tree(node_modules=("workbench",)), npm="npm",
                                  env={}, run=run, log=lambda m: None)
     check("every page is built", done == list(setup_mod.PAGES), done)
-    check("npm ci only where node_modules is missing, then build",
+    check("npm ci (even over an old node_modules), then build",
           run.calls == [("audiobook", ["ci"]), ("audiobook", ["run", "build"]),
                         ("triage-app", ["ci"]), ("triage-app", ["run", "build"]),
-                        ("workbench", ["run", "build"])], run.calls)
+                        ("workbench", ["ci"]), ("workbench", ["run", "build"])],
+          run.calls)
+
+
+def test_node_version_is_declared_the_standard_way() -> None:
+    import json
+    nvm = (ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+    check(".nvmrc names a major version", nvm.isdigit(), nvm)
+    for src in setup_mod.PAGES:
+        d = ROOT / "web" / src
+        pkg = json.loads((d / "package.json").read_text(encoding="utf-8"))
+        engines = (pkg.get("engines") or {}).get("node", "")
+        check(f"web/{src} declares engines.node", bool(engines), pkg)
+        check(f"web/{src} enforces it (engine-strict)",
+              "engine-strict=true" in (d / ".npmrc").read_text(encoding="utf-8"))
+        deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+        check(f"web/{src} pins no dependency to 'latest'",
+              "latest" not in deps.values(), deps)
+        check(f"web/{src} has a lockfile for npm ci",
+              (d / "package-lock.json").is_file())
 
 
 def test_a_failed_build_stops_the_install() -> None:

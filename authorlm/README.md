@@ -49,7 +49,8 @@ pip install -e ".[all]"       # everything above
 ```
 
 Installing builds the web pages (the Triage App, the audiobook page, and the
-pronunciation workbench) into the package, so it needs **Node 20+ and npm**.
+pronunciation workbench) into the package, so it needs **Node and npm**: the
+version in `.nvmrc` (`nvm use`), within each page's `engines` range.
 The built pages are not tracked in git (`setup.py`). Without npm the install
 stops, unless the pages are already built or `AUTHORLM_SKIP_WEB_BUILD=1` is
 set (then the commands that serve a page say it has not been built). After a

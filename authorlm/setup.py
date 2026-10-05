@@ -2,9 +2,11 @@
 
 The pages (`authorlm/{audiobook,triage,workbench}_dist/index.html`) are
 build output, so they are not tracked in git. Every install, wheel or
-editable, runs `npm ci` (first time) and `npm run build` in each
-`web/<page>/`, which needs Node and npm. Without npm the install stops
-and says so, unless every page is already built (then they are reused
+editable, runs `npm ci` (a clean install from the committed lockfile)
+and `npm run build` in each `web/<page>/`. That needs Node and npm at a
+version in each package.json's `engines` range: `.nvmrc` names one, and
+each `.npmrc` sets engine-strict, so a wrong Node stops `npm ci`.
+Without npm the install stops and says so, unless every page is already built (then they are reused
 with a warning) or AUTHORLM_SKIP_WEB_BUILD=1 (install without them; the
 commands that serve a page then say it has not been built).
 
@@ -49,16 +51,14 @@ def build_pages(root: Path = ROOT, npm: str | None = None,
             raise SystemExit(
                 "authorlm: building the web pages needs Node and npm, which "
                 f"were not found (missing: {', '.join(missing)}). Install "
-                "Node 20+ and retry, or set AUTHORLM_SKIP_WEB_BUILD=1 to "
-                "install without the pages.")
+                "Node (the version in authorlm/.nvmrc) and retry, or set "
+                "AUTHORLM_SKIP_WEB_BUILD=1 to install without the pages.")
         log("authorlm: npm not found; reusing the web pages already built")
         return []
     done = []
     for src in PAGES:
         cwd = root / "web" / src
-        steps = ([] if (cwd / "node_modules").is_dir() else [[npm, "ci"]]) \
-            + [[npm, "run", "build"]]
-        for cmd in steps:
+        for cmd in ([npm, "ci"], [npm, "run", "build"]):
             log(f"authorlm: {' '.join(cmd[1:])} in web/{src}")
             r = run(cmd, cwd=cwd)
             if r.returncode:
