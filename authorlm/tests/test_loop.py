@@ -759,7 +759,71 @@ def test_screen_and_folds(db, ms, target):
 
 def test_retraction(db, ms, folded_proposal, law_entry):
     """Adopting what the screen cut is the only event that can contradict a
-    belief which is actively cutting."""
+    belief which is actively cutting. Dismissing agrees with the cut and
+    must NOT count as support — a belief that scored its own firings would
+    ratchet its confidence (loop.py §2 / invariant 1)."""
+    spec = loop.spec_for("proposals/note_update")
+    target = folded_proposal["target"]
+
+    # --- dismiss must not ratchet -----------------------------------------
+    to_dismiss = prop.create(db, ms["id"], "note_update", target, note_payload(
+        "A second phrasing the screen will fold so dismiss can be tried."))
+    rows = [r for r in prop.open_proposals(db, ms["id"])
+            if r["kind"] == "note_update"]
+    idx = next(n for n, r in enumerate(rows, 1) if r["id"] == to_dismiss["id"])
+    cutter = ScriptedLLM(json.dumps({"cut": [
+        {"n": idx, "law": law_entry["id"],
+         "reason": "describes role, not being"}]}))
+    check("a second cut folds another proposal for the dismiss check",
+          len(loop.screen(db, ms["id"], spec, rows, cutter)) == 1)
+    before_dismiss = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                            (law_entry["id"],))
+    dismiss_result = api.resolve_proposal(
+        db, ms, to_dismiss["id"], "dismiss",
+        reason="the cut was right — leave the settled note alone")
+    after_dismiss = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                           (law_entry["id"],))
+    check("dismissing a folded proposal is still reachable by id",
+          dismiss_result.get("folded") is True, str(dismiss_result))
+    check("dismiss does NOT contradict the folding belief "
+          "(would ratchet on its own firings)",
+          "contradicted" not in dismiss_result, str(dismiss_result))
+    check("dismiss leaves the belief's confidence and counters untouched",
+          after_dismiss["confidence"] == before_dismiss["confidence"]
+          and after_dismiss["supporting"] == before_dismiss["supporting"]
+          and after_dismiss["contradicting"]
+          == before_dismiss["contradicting"],
+          str({"before": dict(before_dismiss), "after": dict(after_dismiss)}))
+
+    # --- missing law id → folded only, no reinforce ----------------------
+    to_orphan = prop.create(db, ms["id"], "note_update", target, note_payload(
+        "A third phrasing folded then stripped of its law id."))
+    rows = [r for r in prop.open_proposals(db, ms["id"])
+            if r["kind"] == "note_update"]
+    idx = next(n for n, r in enumerate(rows, 1) if r["id"] == to_orphan["id"])
+    cutter = ScriptedLLM(json.dumps({"cut": [
+        {"n": idx, "law": law_entry["id"],
+         "reason": "describes role, not being"}]}))
+    check("a third cut folds a proposal for the missing-law check",
+          len(loop.screen(db, ms["id"], spec, rows, cutter)) == 1)
+    meta = loads(db.one("SELECT metadata FROM knowledge_proposals WHERE id = ?",
+                        (to_orphan["id"],))["metadata"], {}) or {}
+    meta.pop("law", None)
+    db.update("knowledge_proposals", to_orphan["id"],
+              {"metadata": json.dumps(meta)})
+    before_orphan = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                           (law_entry["id"],))
+    orphan_result = api.resolve_proposal(db, ms, to_orphan["id"], "accept")
+    after_orphan = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                          (law_entry["id"],))
+    check("a folded proposal whose law is gone still returns folded",
+          orphan_result.get("folded") is True
+          and "contradicted" not in orphan_result, str(orphan_result))
+    check("...and does not touch the belief when there is no law to reject",
+          after_orphan["confidence"] == before_orphan["confidence"]
+          and after_orphan["contradicting"] == before_orphan["contradicting"])
+
+    # --- accept contradicts (the load-bearing retraction path) ------------
     before = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
                     (law_entry["id"],))
     result = api.resolve_proposal(db, ms, folded_proposal["id"], "accept")
