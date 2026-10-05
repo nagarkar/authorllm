@@ -6,14 +6,14 @@ RFC (v2.1) on the Common Core Decision Learning Engine architecture.
 
 AuthorLM does not write for you. It observes your revisions, tracks your
 ideas in a Concept Graph, proposes suggestions that explain themselves, and
-learns editorial policies from how you review those suggestions. When it has
+learns editorial beliefs from how you review those suggestions. When it has
 no evidence, it abstains.
 
 ## Requirements
 
 - **Python 3.11+**. The core is pure standard library (SQLite, difflib)
   and works fully without an LLM or network.
-- **LLM features** (concept extraction, policy distillation, bridge
+- **LLM features** (concept extraction, belief distillation, bridge
   drafting): `pip install litellm` plus an API key for your chosen model
   (see Configuration).
 - **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
@@ -183,7 +183,7 @@ to any command, before or after the subcommand:
 `--workspace`.
 
 Next time you run `session start`, the briefing reports what AuthorLM
-learned: policies strengthened or weakened, newly realized concepts,
+learned: beliefs strengthened or weakened, newly realized concepts,
 inferred relationships awaiting your confirmation, contradictions, and
 outstanding questions.
 
@@ -195,9 +195,9 @@ outstanding questions.
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
 | `setup [--workspace DIR] [--yes]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
-| `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
-| `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` skips this init only; `--extraction off` disables extraction for the manuscript until `manuscript set --extraction on`) |
+| `manuscript show/set` | Inspect or update publication identity and print settings (`--author`, `--copyright-owner`, ISBN-13 fields, `--trim-size`, `--bleed`, `--extraction on\|off`); the CLI and MCP tools share this record |
+| `export show/set/check/md/docx/epub/pdf` | Publishing exports into `_exports/` (pandoc for docx/epub/pdf); PDF defaults to a confidential review copy (`.review.pdf`); `--print-ready` → `.print.pdf`; `--profile book` → print interior at the manuscript trim size (needs `manuscript set --trim-size`); `--chapters` builds a part alongside the whole book — see [Publishing exports](#publishing-exports-_exports) |
 | `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
 | `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` |
 | `audio dictionary push` | `pronunciations.md` → the ElevenLabs dictionary named in `audiobook.toml`, append-only with replacement, after showing the plan |
@@ -218,7 +218,7 @@ outstanding questions.
 | `concept retire <name>… / --all-kind K` | Retire one or more concepts; `--all-kind` sweeps unconfirmed extracted ones |
 | `concept confirm <edge> <relation>` | Promote an inferred relationship to declared |
 | `concept unconfirm <name-or-edge>` | Undo a confirmation — back to hypothesis, re-enters triage |
-| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired policies gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
+| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired beliefs gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
 | `concept reject-edge <edge>` | Reject an inferred relationship (kept for history) |
 | `concept retire <name>` | Remove a concept (and its edges) from view and reasoning; kept for history, revived by `concept add` |
 | `concept list --all` | Include retired/rejected items in the listing |
@@ -231,12 +231,43 @@ outstanding questions.
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
-| `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
+| `lens add/list/run/register/review/push/resolve` | Author-ratified lenses (`_lenses/*.md` prompts): `run` prints a payload for a chat/subagent by default (`--native` bills the configured model); `register` is the door for external findings (JSON on stdin); `push`/`resolve` stage and land Doc-tab forms; `review <n>` records verdicts as evidence |
+| `morph run/push/resolve/review` | Paragraph-defect pass (claim-before-evidence, discontinuity, specificity, concept-invalidation; `docs/morph-design.md`): same Doc-tab push/resolve pattern as lenses |
+| `filter add/list/run/record/apply/push/resolve/…` | Unit-by-unit edit pass (`_filters/*.md`; `docs/filter-pass-design.md`): `run` prints a payload (no model call; `--native` needs a `[filtering]` config that ships absent); `resolve` is the local road; `push` then `resolve` is the Doc road |
+| `critique import/triage/run/write/resolve/…` | External critique → proposed intents/style laws → essay edit pass (`docs/critique-pass-design.md`) |
+| `summarize status/show/rebuild` | Autoregressive essay summaries in reading order (`summarize rebuild`, not `--rebuild`) |
 | `interlocutor add/list/show/draft/run/import` | A tradition reads the whole book (`_interlocutors/*.md`, TOML front matter + prose; design `docs/interlocutor-design.md`): `run` scans for the ratified terms and writes a payload for a clean-context subagent (no model call); `import` verifies the report against the manuscript, lands it in `_critiques/`, and imports its improvements as proposed intents with critic provenance |
 | `guide` | Generate explained suggestions, or abstain |
-| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
-| `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
+| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; an `--explain` becomes high-weight evidence and may seed a candidate *belief* only when the belief distiller runs (needs an LLM) |
+| `belief list/show/answer/retire/demote/merge/convert` | Curate machine-inferred editorial beliefs (`editorial_beliefs` — never authored directly). `convert` is the only door into ratified `style_laws` (needs `--aspect` and `--guide` or `--file`). Ontology: `docs/domain-vocabulary.md` |
+| `style guides/guide/attach/add/show/retire/move` | Author-declared style law: compose guides, attach a file to a guide, add or retire elements; `style show <file>` prints the effective guide |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
+
+## Publishing exports (`_exports`)
+
+Local publishing writes under `<manuscript>/_exports/`. Names are
+deliberate so modes do not silently overwrite each other
+(`export.export_published` / `export_manuscript` / `selection_slug`):
+
+| Artifact | Typical path |
+| :--- | :--- |
+| Whole-book markdown (publish or `doc create-manuscript`) | `_exports/<Title>.md` |
+| Review PDF (default `export pdf`) | `_exports/<Title>.review.pdf` |
+| Print-ready PDF (`--print-ready`) | `_exports/<Title>.print.pdf` |
+| Book-profile PDF (`--profile book`) | `_exports/<Title> - book.print.pdf` (needs trim size) |
+| Chapter selection (`--chapters a,b`) | `_exports/<Title> - <slug>.…` (`slug` = stems joined, or a truncated head + digest when long) |
+
+Constraints:
+
+- `doc create-manuscript` and `export md` both target `_exports/<Title>.md`
+  for the whole book — re-running either replaces that file.
+- Review and print PDFs never share a path; `--profile book` also suffixes
+  ` - book` so it cannot clobber the review copy.
+- `--chapters book.md` is a *part* build (that chapter and TOC
+  descendants), not the book profile. The book profile is `--profile book`.
+- `[Omit: all] … [/Omit]` drops a region from every publishing output
+  (`pdf`/`docx`/`epub`/`md`/`doc`/`audio`); Doc *tabs* still carry the
+  region. Author-facing rules: `docs/math-and-physics-guidelines.md` §5.
 
 ## Triage App analyzer profiles
 
@@ -295,18 +326,44 @@ the verdict, closes the thread with a receipt, and mirrors the result
 locally. Pushes on thread-bearing tabs are surgical paragraph diffs
 (read-back proven), so anchors survive. Every terminal verdict lands as
 evidence; explained verdicts (`doc decide … --reason`) can seed scoped
-candidate policies through a decline-by-default distiller.
+candidate beliefs through a decline-by-default distiller.
 Design: docs/margin-threads-design.md.
+
+## Outside callers (library API)
+
+A tool that is not one of AuthorLM's own passes (for example ytlm) keeps a
+corpus document through five Python entry points — no run row, no finding,
+no model call on this road. Full contract: `docs/outside-caller-design.md`.
+
+| Entry point | Role |
+| :--- | :--- |
+| `api.register_manuscript(..., extraction=False)` / `manuscript set --extraction off` | Machine-kept manuscript; concept extraction stays off |
+| `[Omit: all]` in a file | Drop a region from every publishing output |
+| `gdocs.read_manuscript` | Read every tab as it stands; write nothing |
+| `api.stage_revisions` | Stage `<<old>>{{new}}` forms for one caller `origin` |
+| `api.resolve_revisions` | Land the author's rulings; collect a version |
+
+Callers also own `api.caller_metadata` / `set_caller_metadata`,
+`outstanding_revisions`, and `withdraw_revisions` (no direct SQL). A tab
+takes one batch at a time; the next `stage_revisions` waits until
+`resolve_revisions` (or withdraw).
 
 ## How learning works
 
-- **Accepting / modifying** a suggestion strengthens the policies it relied
-  on; **rejecting** weakens them. Confidence is Laplace-smoothed support.
-- An **explained** rejection or modification seeds a *candidate policy* from
-  your explanation — you contribute evidence, never edit policy directly.
-- Candidate policies resurface as reminders (once per session); repeated
-  cross-session support (≥3, confidence ≥0.7) **validates** them; sustained
-  contradiction retires them. Promotion is deliberately conservative.
+- **Accepting / modifying** a suggestion strengthens the *beliefs* it
+  relied on; **rejecting** weakens them. Confidence is Laplace-smoothed
+  support. Beliefs live in `editorial_beliefs` and are machine-inferred —
+  you never author a row there directly (`docs/domain-vocabulary.md`).
+- An **explained** rejection or modification is high-weight evidence. It
+  seeds a candidate belief **only through the distiller** (LLM rewrite /
+  match / decline). With no LLM, or when the distiller declines, the
+  explanation stays review evidence and no belief is created — raw words
+  are never stored as a rule (author ruling 2026-10-05).
+- Candidate beliefs resurface as reminders (once per session); repeated
+  cross-session support (≥3, confidence ≥0.7) **validates** them;
+  sustained contradiction retires them. A validated belief may *act*
+  (screen proposals) but is still unratified; `belief convert` is the
+  only door into `style_laws` (author-declared, binding, no confidence).
 - Concepts you declare become **realized** when they appear in the text;
   repeated co-occurrence of concepts creates **inferred** edges that await
   your confirmation in the briefing.
@@ -429,14 +486,15 @@ What the LLM unlocks:
   actually wrote — the declared intent and the observed transitions — and
   infers the editorial decisions they show ("opened with a lived example
   before the formal definition"). Generalizable patterns become candidate
-  policies (source `episode-analysis`) that strengthen across independent
-  episodes, so the system learns your editorial judgment from your
-  *writing*, not just from your reactions to its suggestions. Inferred
-  decisions are stored on the episode; everything is a hypothesis and
-  visible in the briefing — nothing validates without accumulation.
-- **Policy distillation** — your review explanations are distilled into
-  short normative policy statements (the verbatim explanation is preserved
+  beliefs (source `episode-analysis`, already distilled) that strengthen
+  across independent episodes, so the system learns your editorial judgment
+  from your *writing*, not just from your reactions to its suggestions.
+  Inferred decisions are stored on the episode; everything is a hypothesis
+  and visible in the briefing — nothing validates without accumulation.
+- **Belief distillation** — your review explanations are distilled into
+  short normative belief statements (the verbatim explanation is preserved
   as evidence); the LLM may also decline to generalize a one-off remark.
+  With the LLM disabled or unreachable, nothing is seeded.
 - **Bridge drafting** — the top bridge suggestion includes a drafted
   paragraph to consider.
 
@@ -636,8 +694,8 @@ the tables reads like the history of the book (RFC §18.7). See
 
 ## Known MVP limitations
 
-- Without an LLM, seeded candidate policies use your explanation verbatim
-  as the policy statement (with an LLM they are distilled).
+- Without an LLM, explained reviews stay evidence only — no candidate
+  belief is seeded from the raw explanation (the distiller is required).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
 - `extract --edges-only` sends a single payload capped at
