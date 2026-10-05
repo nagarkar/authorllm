@@ -6903,9 +6903,11 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     that owns every `{{…}}` in its tab and wrong here: the tab may hold
     another producer's insertion, or the author's own braces. So each
     addition is paired with its own form — the same new text first, then
-    the closest reworded one — and unwrapped in place. An addition whose
-    form is gone, or emptied, is a decline; one whose braces the author
-    removed by hand, text kept, is an acceptance.
+    the closest reworded one (and, when leftover forms and leftovers
+    match one-for-one, a heavier rewrite still pairs) — and unwrapped
+    in place. An addition whose form is gone, or emptied, is a decline;
+    one whose braces the author removed by hand, leaving the new text
+    as its own paragraph, is an acceptance.
 
     Replacements the author turned down by deleting the green half:
     `<<old>>{{}}` and a bare `<<old>>` are put back to `old`, so the
@@ -6945,17 +6947,50 @@ def _rule_external_marked(marked: str, replaces: list[dict],
                                    flat(best["new"])).ratio() >= 0.5:
             free.remove(best)
             pairs[t["id"]] = best
+    # A heavy rewrite falls below 0.5. When every leftover form can only
+    # belong to one of our leftover additions (equal counts), pair them
+    # anyway — leaving braces on would let strip_pending delete the
+    # author's paragraph. More free forms than leftovers means another
+    # producer is in the tab; keep the floor so we do not steal theirs.
+    leftover = [t for t in inserts if t["id"] not in pairs]
+    if leftover and len(leftover) == len(free):
+        scored: list[tuple[float, dict, dict]] = []
+        for t in leftover:
+            for f in free:
+                scored.append((difflib.SequenceMatcher(
+                    None, flat(t["proposed_new"]), flat(f["new"])).ratio(),
+                    t, f))
+        scored.sort(key=lambda row: row[0], reverse=True)
+        taken_t: set[str] = set()
+        taken_f: set[int] = set()
+        for _ratio, t, f in scored:
+            if t["id"] in taken_t or id(f) in taken_f:
+                continue
+            pairs[t["id"]] = f
+            taken_t.add(t["id"])
+            taken_f.add(id(f))
+        free = [f for f in free if id(f) not in taken_f]
     # Unwrap the paired forms and drop the emptied ones, last to first.
     edits = [(f["start"], f["end"], f["new"]) for f in pairs.values()]
     edits += [(f["start"], f["end"], "") for f in forms
               if not f["new"].strip()]
     for start, end, replacement in sorted(edits, reverse=True):
         marked = marked[:start] + replacement + marked[end:]
+    # "Braces removed, text kept" means the addition still stands as its
+    # own paragraph — the way stage planted it. A whole-document
+    # substring would accept a deleted addition whose words already
+    # occur inside an earlier sentence.
+    def _own_paragraph_kept(proposed: str, text: str) -> bool:
+        target = flat(proposed)
+        if not target:
+            return False
+        return any(flat(p) == target for p in text.split("\n\n"))
+
     ruled: dict[str, tuple[str, str | None]] = {}
     for t in inserts:
         form = pairs.get(t["id"])
         if form is None:
-            kept = flat(t["proposed_new"]) in flat(marked)
+            kept = _own_paragraph_kept(t["proposed_new"], marked)
             ruled[t["id"]] = ("accepted", None) if kept else ("declined",
                                                               None)
         elif form["new"] == t["proposed_new"]:
