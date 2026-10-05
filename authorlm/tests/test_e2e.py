@@ -218,11 +218,25 @@ def scenario_editorial_loop(root: Path) -> None:
     out = run(ws, "guide")
     check("new intent matches History via plural", "Introduce 'History'" in out, out)
 
-    out = run(
-        ws, "review", "1", "--reject",
-        "--explain", "Contrast a temporal concept with its static counterpart first",
-    )
-    check("rejection seeds candidate belief", "seeded a candidate belief" in out, out)
+    # A raw explanation becomes a belief only through the distiller (author
+    # ruling 2026-10-05), so this one review runs against the stub LLM;
+    # the rest of the scenario stays LLM-free.
+    server = http.server.HTTPServer(("127.0.0.1", 0), StubLLMHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = ws / ".authorlm" / "config.toml"
+    write(config, "[llm]\nenabled = true\nprovider = \"openai\"\n"
+                  f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                  'model = "stub"\n')
+    try:
+        out = run(
+            ws, "review", "1", "--reject",
+            "--explain", "Contrast a temporal concept with its static counterpart first",
+        )
+    finally:
+        config.unlink()
+        server.shutdown()
+    check("rejection seeds candidate belief through the distiller",
+          "seeded a candidate belief" in out, out)
 
     out = run(ws, "guide")
     check("rejected suggestion is not re-proposed", "Introduce 'History'" not in out, out)
@@ -277,9 +291,9 @@ def scenario_editorial_loop(root: Path) -> None:
     _cdb = _CDB(ws / ".authorlm" / "authorlm.db")
     _cmid = _cdb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
     dup = _cbel.seed_candidate_belief(
-        _cdb, _cmid, "Trim throat-clearing openers.", source="test")
+        _cdb, _cmid, "Trim throat-clearing openers.", source="test", distilled=True)
     canon = _cbel.seed_candidate_belief(
-        _cdb, _cmid, "Cut redundant opening phrases.", source="test")
+        _cdb, _cmid, "Cut redundant opening phrases.", source="test", distilled=True)
     out = run(ws, "belief", "merge", canon["id"], canon["id"], expect_exit=True)
     check("merging a belief into itself is rejected",
           "same belief" in out, out)
@@ -303,13 +317,13 @@ def scenario_editorial_loop(root: Path) -> None:
     check("converted element lives in its guide",
           "Curation guide" in out and "1 element(s)" in out, out)
     victim = _cbel.seed_candidate_belief(
-        _cdb, _cmid, "Always use semicolons.", source="test")
+        _cdb, _cmid, "Always use semicolons.", source="test", distilled=True)
     out = run(ws, "belief", "retire", victim["id"],
               "--reason", "author rejects this rule")
     check("belief retire records author verdict",
           "banned from re-seeding" in out, out)
     reseed = _cbel.seed_candidate_belief(
-        _cdb, _cmid, "Always use semicolons.", source="test")
+        _cdb, _cmid, "Always use semicolons.", source="test", distilled=True)
     check("retired statement re-seeds as revival proposal, not a new belief",
           reseed.get("kind") == "revival_proposal", str(reseed))
 

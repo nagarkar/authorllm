@@ -169,8 +169,13 @@ def test_semantic_matching(db, ms):
     seeded = bel.seed_candidate_belief(db, ms["id"], "A raw explanation.",
                                        source="review-explanation",
                                        llm=unreachable)
-    check("an unreachable model is not read as a refusal", seeded is not None,
-          "empty reply must fall back to raw seeding, not silently decline")
+    check("an unreachable model seeds nothing: the raw explanation never "
+          "becomes a belief without the distiller", seeded is None,
+          str(seeded))
+    check("nor does a disabled one",
+          bel.seed_candidate_belief(db, ms["id"], "A raw explanation.",
+                                    source="review-explanation",
+                                    llm=None) is None)
     return first
 
 
@@ -271,7 +276,7 @@ def test_inv2_cross_session_author_evidence_validates(db, ms):
     promotion as well as for what guidance displays."""
     belief = bel.seed_candidate_belief(
         db, ms["id"], "Keep footnotes off the main line of argument.",
-        source="review-explanation", llm=None)
+        source="review-explanation", distilled=True)
     check("a fresh explanation seeds a candidate", belief is not None
           and belief["status"] == "candidate", str(belief))
 
@@ -306,7 +311,7 @@ def test_inv2_same_session_dedup(db, ms):
     things."""
     belief = bel.seed_candidate_belief(
         db, ms["id"], "Never end a chapter on a subordinate clause.",
-        source="review-explanation", llm=None)
+        source="review-explanation", distilled=True)
 
     ep = _closed_episode(db, ms["id"], "inv2c-sess")
     same_suggestion = "The same suggestion, reviewed three times in one sitting."
@@ -427,7 +432,7 @@ def test_x7_13_no_floor_for_newly_validated(db, ms):
     validated after this fix ships can ever be floored."""
     belief = bel.seed_candidate_belief(
         db, ms["id"], "X7-13(b): a fresh rule with no history at all.",
-        source="review-explanation", llm=None)
+        source="review-explanation", distilled=True)
     check("a fresh candidate belief has no floor",
           bel._validated_floor(belief) == 0, str(belief))
 
@@ -463,10 +468,10 @@ def test_x7_13_revival_does_not_double_count_merged_evidence(db, ms):
     on the canonical's next unrelated touch."""
     dup = bel.seed_candidate_belief(
         db, ms["id"], "X7-13 dup: to be merged then revived.",
-        source="review-explanation", llm=None)
+        source="review-explanation", distilled=True)
     canon = bel.seed_candidate_belief(
         db, ms["id"], "X7-13 canon: the survivor of the merge.",
-        source="review-explanation", llm=None)
+        source="review-explanation", distilled=True)
 
     ep = _closed_episode(db, ms["id"], "x713rev-sess-extra")
     g = _guidance_row(ms["id"], "x713rev-sess-extra", [dup["id"]],

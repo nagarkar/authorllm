@@ -12504,7 +12504,7 @@ def main_test() -> None:
         api.define_style_guide(db, manuscript, "Curation guide")
         seeded = pol.seed_candidate_belief(
             db, manuscript["id"], "Prefer short paragraphs in dialogue.",
-            source="test")
+            source="test", distilled=True)
         converted = api.convert_belief(
             db, manuscript, seeded["id"], "formatting",
             guide="Curation guide", reason="now enforced as style law")

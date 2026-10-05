@@ -358,32 +358,38 @@ def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | 
 def seed_candidate_belief(
     db: Database, manuscript_id: str, statement: str, source: str,
     llm: LLMClient | None = None, episode_id: str | None = None,
+    distilled: bool = False,
 ) -> dict | None:
     """An explained review outcome seeds (or reinforces) a candidate belief.
-    With an LLM available, the raw explanation is distilled into a normative
-    belief statement (the verbatim explanation is kept in metadata); the LLM
-    may also judge the explanation too situation-specific to generalize, in
-    which case no belief is seeded (returns None) — the explanation still
-    persists as review evidence either way."""
+
+    `statement` is the author's raw explanation, which becomes a belief only
+    through the distiller: it is rewritten as a normative statement (the
+    verbatim explanation kept in metadata), matched to a belief on record,
+    or judged too situation-specific (NONE). With no LLM, or no reply,
+    nothing is seeded (returns None) — the explanation still persists as
+    review evidence. Seeding the raw words is how "a one-off exception for
+    this chapter only" became a belief (author ruling 2026-10-05).
+
+    `distilled=True` is for a statement a model already wrote (episode
+    analysis, the margin distiller); it skips the distiller."""
     original = statement
     example = None
-    if llm and getattr(llm, "enabled", False):
+    if not distilled:
+        if not (llm and getattr(llm, "enabled", False)):
+            return None
         rows = live_beliefs(db, manuscript_id, source)
         reply = llm.complete(belief_distill_system(),
                              f"{belief_menu(rows)}\n\nEXPLANATION:\n{statement}")
-        # An empty reply is an unreachable model, NOT a decline. Only an
-        # explicit NONE declines; otherwise fall through and seed the raw
-        # explanation, which is what happens with no LLM configured at all.
-        if reply:
-            verdict, payload, example = parse_distiller(
-                reply, belief_labels(rows))
-            if verdict == "none":
-                return None
-            if verdict == "match":
-                return _reinforce_or_revive(db, manuscript_id, payload, original,
-                                            source=source, episode_id=episode_id)
-            statement = payload
-    # Exact match is now only a safety net (and the whole story with no LLM):
+        verdict, payload, example = parse_distiller(
+            reply, belief_labels(rows))
+        if verdict == "none":
+            return None
+        if verdict == "match":
+            return _reinforce_or_revive(db, manuscript_id, payload, original,
+                                        source=source, episode_id=episode_id)
+        statement = payload
+    # Exact match is only a safety net: semantic matching happens in the
+    # distiller above, because paraphrase is what string equality cannot see.
     # semantic matching happens in the distiller above, because paraphrase is
     # exactly what string equality cannot see.
     existing = db.one(
@@ -677,7 +683,7 @@ def seed_margin_candidate(db: Database, manuscript_id: str,
     if not statement or scope_kind not in ("file", "guide", "manuscript"):
         return None
     seeded = seed_candidate_belief(db, manuscript_id, statement,
-                                   source="margin-thread", llm=None)
+                                   source="margin-thread", distilled=True)
     if seeded and seeded.get("id"):
         scope_ref = (file if scope_kind == "file"
                      else guide_chain[0]["id"] if scope_kind == "guide"
