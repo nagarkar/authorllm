@@ -535,6 +535,26 @@ DISABLED_MESSAGE = (
     "<name> --notes …'. Set enabled = true to run the extractor again.")
 
 
+def link_endpoints(item: dict) -> tuple[str, str, str]:
+    """(from, relation, to) of one extracted link. The prompt asks for
+    `{"from", "relation", "to"}`, but Gemini often keys the target by the
+    relation itself — `{"from": A, "leads_to": B, "relation": "leads_to"}`
+    — which used to count every such link as malformed. Read that shape
+    too: the relation named by `relation`, or by the item's one key that
+    is a valid relation."""
+    src = str(item.get("from", "")).strip()
+    relation = str(item.get("relation", "")).strip()
+    dst = item.get("to")
+    if not dst:
+        keyed = [k for k in item if k in VALID_RELATIONS]
+        if relation in item:
+            dst = item[relation]
+        elif len(keyed) == 1:
+            relation = relation or keyed[0]
+            dst = item[keyed[0]]
+    return src, relation, str(dst or "").strip()
+
+
 def extraction_enabled(config: dict | None) -> bool:
     """The [extraction] enabled switch (default on). Author ruling
     2026-09-25: extraction is off until the concept-graph feature is
@@ -1050,9 +1070,7 @@ def extract_concepts(
             skipped += 1
             skipped_malformed += 1
             continue
-        src = str(item.get("from", "")).strip()
-        dst = str(item.get("to", "")).strip()
-        relation = str(item.get("relation", "")).strip()
+        src, relation, dst = link_endpoints(item)
         # Only link concepts that exist; unknown relations become 'elaborates'.
         if not src or not dst or src.lower() == dst.lower():
             skipped += 1

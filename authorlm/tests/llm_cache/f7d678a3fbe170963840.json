@@ -1,0 +1,21 @@
+{
+  "model": "gemini/gemini-2.5-flash",
+  "temperature": 0.2,
+  "thinking_budget": null,
+  "messages": [
+    {
+      "role": "system",
+      "content": "You distill an author's editorial reason into a belief the system can act on.\n\nThe author's reasons are specific. Your output must stay specific. A belief\nthat could have been written WITHOUT reading the explanation is worse than\nnone: it matches every future explanation, so it accumulates support fastest,\ngets promoted first, and ends up screening the author's queue on the strength\nof saying nothing.\n\nThese are REJECTED outputs. Each was produced from a rich explanation and\ndestroyed it:\n\n  \"Ensure terms are defined accurately.\"\n  \"Ensure clarity.\"\n  \"Remove irrelevant or unnecessary details.\"\n  \"Present information clearly.\"\n  \"Definitions must be accurate and reflect current understanding.\"\n\nEvery one states a goal nobody disputes. A usable belief instead names what\nit RULES OUT, in the author's own vocabulary. From the explanation \"Loses the\nalias 'The Chid', which Sermon Five establishes\", the belief is NOT \"define\nterms accurately\" but:\n\n  A revised note must not drop an alias the text has already established.\n\nWRITE THE BELIEF AS A PROHIBITION. Say what must NOT happen, not what\nshould. This is not a style preference \u2014 it decides what the belief DOES.\nA belief screens a queue by cutting proposals that VIOLATE it, so:\n\n  \"A revised note must not replace a settled context-bound note with a\n   generic gloss.\"        -> cuts the proposals that do that. Correct.\n\n  \"A revised note must reflect established equivalences.\"\n                          -> cuts every proposal that fails to do it, which\n                             is nearly all of them. Ruinous.\n\nIf the author's reason is approval of something done WELL, the belief is\nthe prohibition it implies \u2014 what would have been wrong instead. If you\ncannot phrase it as a prohibition, the explanation is praise rather than a\nrule: reply NONE.\n\nWRITE A BELIEF THAT:\n- names the specific move it forbids\n- keeps the author's vocabulary where they used it\n- could be disagreed with \u2014 if nobody could object, it says nothing\n- is one sentence, but is not compressed past the point of meaning\n\nEvery NEW belief must come with the concrete case that produced it, quoted or\nclosely paraphrased from the explanation. If you cannot state a concrete case,\nyou are generalizing past the evidence \u2014 reply NONE.\n\nMATCHING. You are shown the beliefs already on record, each with its example.\nReply MATCH only when this explanation is another instance of THE SAME\nSPECIFIC PRINCIPLE. A listed belief that is merely BROADER than the\nexplanation is NOT a match \u2014 folding a sharp reason into a vague rule is\nexactly how the vague rule wins and the lesson is lost. When torn between\nMATCH on a broad belief and NEW with a sharper one, choose NEW.\n\nA belief marked [retired] was retired by the author. Match it anyway if the\nprinciple is genuinely the same \u2014 that is how a revival reaches them.\n\nTHE GUARDRAIL: declining is the default posture. If the explanation is a\njudgment about this one passage that the author would not apply anywhere\nelse, reply NONE.\n\nReply with exactly one of:\nNONE\nMATCH: <belief label, e.g. B1>\nNEW: <one specific prohibition \u2014 what must NOT happen>\nEXAMPLE: <the concrete case that produced it, in the author's terms>\n"
+    },
+    {
+      "role": "user",
+      "content": "BELIEFS ON RECORD (match one, or reply NEW):\n  B1 | A draft must not present an abstract definition before grounding it in a lived example.\n      e.g. This draft opens History with its formal definition, rather than grounding it in a lived example first.\n\nEXPLANATION:\nThis was a one-off exception for this particular chapter only, not a general practice of mine"
+    }
+  ],
+  "response": "NONE",
+  "usage": {
+    "input_tokens": 803,
+    "output_tokens": 302
+  },
+  "recorded_at": "2026-10-05T13:05:01.516525+00:00"
+}

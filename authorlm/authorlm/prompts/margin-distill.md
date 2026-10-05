@@ -9,7 +9,7 @@ principle the author would apply again elsewhere.
 
 You are shown the beliefs already on record. If this feedback is another
 instance of one of them — the same principle, however differently worded —
-reply MATCH with that belief's id. Wording never decides it; the principle
+reply MATCH with that belief's label (B1, B2, …). Wording never decides it; the principle
 does. Reply NEW only when no listed belief states the same principle: a
 belief that splits into near-duplicates learns nothing, because each copy
 accumulates its own evidence and none ever earns enough confidence to act.
@@ -29,7 +29,7 @@ guide chain is provided); 'manuscript' only if it is genuinely house-wide.
 
 Reply with exactly one of:
 NONE
-MATCH: <belief-id>
+MATCH: <belief label, e.g. B1>
 NEW
 SCOPE: file|guide|manuscript
 STATEMENT: <one specific normative sentence>

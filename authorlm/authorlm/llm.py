@@ -308,6 +308,23 @@ WRITING_DEFAULTS = {
 }
 
 
+class ReplayMiss(LookupError):
+    """A record/replay client (`cache_dir` set) has no recording for this
+    exact request and no key to make one. Raised rather than returned as
+    None: on the replay road a None quietly ran the no-LLM heuristic and
+    the suite failed its assertion instead of saying what was missing.
+    A LookupError, like `require_writing_key`'s, so it names the variable
+    and the .env path the same way."""
+
+
+# Every recording a record/replay client looked up this process, hit or
+# miss — what the live suite keeps when it prunes (a recording no full run
+# asks for is stale). REPLAY_MISSES holds the misses that had no key,
+# so a caller that swallows ReplayMiss still cannot hide one.
+TOUCHED_RECORDINGS: set[Path] = set()
+REPLAY_MISSES: list[str] = []
+
+
 class DraftError(RuntimeError):
     """Any reason `draft()` produced no beat. Unlike `complete()`, which
     returns None and lets the caller reason without the LLM, the drafting
@@ -741,7 +758,8 @@ class LLMClient:
         # cache file; a client with only the constant behind it (the
         # common, unconfigured case) gets the exact same key as before,
         # so its replay fixtures are untouched.
-        cache_path = self._cache_path(messages, self.temperature)
+        cache_path = self._cache_path(messages, self.temperature,
+                                      thinking_budget=thinking_budget)
         if cache_path and cache_path.exists():
             self.replays += 1
             # Served from the record/replay cache: it did NOT spend, and
@@ -749,6 +767,7 @@ class LLMClient:
             # number the ledger's report has.
             usage.record_replay()
             return json.loads(cache_path.read_text())["response"]
+        self._require_recording_key(cache_path)
         if self.provider == "litellm":
             result = self._complete_litellm(messages,
                                             thinking_budget=thinking_budget)
@@ -771,6 +790,7 @@ class LLMClient:
                     # keeps that resilience path from splitting one
                     # logical call across two cache entries.
                     "temperature": self.temperature,
+                    "thinking_budget": thinking_budget,
                     "messages": messages,
                     "response": reply,
                     "usage": {
@@ -783,16 +803,58 @@ class LLMClient:
             ))
         return reply
 
-    def _cache_path(self, messages: list[dict], temperature) -> Path | None:
+    def _cache_path(self, messages: list[dict], temperature,
+                    **params) -> Path | None:
+        """The recording for this exact request. `params` are the other
+        knobs that change the reply (`max_tokens`, `effort`,
+        `thinking_budget`): each is keyed only when set, so a call that
+        sends none of them keeps the key it always had."""
         if not self.cache_dir:
             return None
-        payload = json.dumps(
-            {"model": self.model, "temperature": temperature,
-             "messages": _without_cache_control(messages)},
-            sort_keys=True,
-        )
+        key = {"model": self.model, "temperature": temperature,
+               "messages": _without_cache_control(messages)}
+        params = {k: v for k, v in params.items() if v is not None}
+        if params:
+            key["params"] = params
+        payload = json.dumps(key, sort_keys=True)
         digest = hashlib.sha256(payload.encode()).hexdigest()[:20]
-        return Path(self.cache_dir) / f"{digest}.json"
+        path = Path(self.cache_dir) / f"{digest}.json"
+        TOUCHED_RECORDINGS.add(path)
+        return path
+
+    def _missing_key_var(self) -> str | None:
+        """The variable a LIVE call to this model needs and lacks, or None.
+
+        Resolved through `vendor_key` — the same resolver the request
+        itself uses — rather than by reading the vendor's environment
+        variable directly. `[llm] api_key_env` wins there (an
+        OpenAI-compatible proxy uses an arbitrary token no convention can
+        derive), so checking the vendor variable alone would falsely refuse
+        a perfectly configured proxy that had just been asked for an
+        `anthropic/` model string. An unlisted vendor prefix means "let
+        litellm resolve it", which is correct for credential-file vendors
+        (vertex_ai, bedrock)."""
+        llm_cfg = self.config.get("llm", {}) or {}
+        vendor_var = VENDOR_KEY_ENV.get(vendor_of(self.model), "")
+        if not vendor_var or vendor_key(self.model, llm_cfg):
+            return None
+        return llm_cfg.get("api_key_env") or vendor_var
+
+    def _require_recording_key(self, cache_path: Path | None) -> None:
+        """On the replay road (`cache_dir` set), a miss with no key is one
+        clear ReplayMiss — never a silent drop to the no-LLM path."""
+        if not cache_path:
+            return
+        named = self._missing_key_var()
+        if named is None:
+            return
+        from . import paths
+
+        REPLAY_MISSES.append(cache_path.name)
+        raise ReplayMiss(
+            f"no recording {cache_path.name} for this {self.model} request "
+            f"and {named} is not set — add it to {paths.env_path()} to "
+            f"record it.")
 
     def complete_json(self, system: str, user: str,
                       thinking_budget: int | None = None):
@@ -861,6 +923,7 @@ class LLMClient:
             usage.record_replay()
             reply = json.loads(cache_path.read_text())["response"]
         else:
+            self._require_recording_key(cache_path)
             result = self._complete_litellm(messages)
             if result is None:
                 return None
@@ -894,26 +957,12 @@ class LLMClient:
 
     def require_writing_key(self) -> None:
         """Refuse a LIVE drafting call with no usable key, naming the exact
-        variable and the exact .env path.
-
-        The condition is resolved through `vendor_key` — the same resolver
-        the request itself uses — rather than by reading the vendor's
-        environment variable directly. `[llm] api_key_env` wins there (an
-        OpenAI-compatible proxy uses an arbitrary token no convention can
-        derive), so checking the vendor variable alone would falsely refuse
-        a perfectly configured proxy that had just been asked for an
-        `anthropic/` model string.
-
-        The guard still only fires for a vendor prefix this module knows:
-        an unlisted prefix means "let litellm resolve it", which is correct
-        for credential-file vendors (vertex_ai, bedrock)."""
+        variable and the exact .env path (`_missing_key_var` says which)."""
         from . import paths
 
-        llm_cfg = self.config.get("llm", {}) or {}
-        vendor_var = VENDOR_KEY_ENV.get(vendor_of(self.model), "")
-        if not vendor_var or vendor_key(self.model, llm_cfg):
+        named = self._missing_key_var()
+        if named is None:
             return
-        named = llm_cfg.get("api_key_env") or vendor_var
         raise LookupError(
             f"[writing] model is '{self.model}', which needs {named} — it "
             f"is not set. Add it to {paths.env_path()} (one variable per "
@@ -981,7 +1030,9 @@ class LLMClient:
         # not `self.temperature` (AE-3's per-client value): that would
         # wire [llm]/[critique] configuration, which draft() deliberately
         # never reads for this, into a key that has nothing to do with it.
-        cache_path = self._cache_path(messages, TEMPERATURE)
+        # `max_tokens` and `effort` ARE keyed: either one changes the reply.
+        cache_path = self._cache_path(messages, TEMPERATURE,
+                                      max_tokens=max_tokens, effort=effort)
         if cache_path and cache_path.exists():
             self.replays += 1
             usage.record_replay()
@@ -1002,6 +1053,7 @@ class LLMClient:
                 model=self.model)
         # Past the replay cache, so this WILL be a live call. The key gate
         # sits exactly here: a fixture needs no key, a request does.
+        self._require_recording_key(cache_path)
         self.require_writing_key()
         if self.provider == "litellm":
             text, raw_in, out, cache_read, cache_write, finish = \
@@ -1037,6 +1089,8 @@ class LLMClient:
                 {
                     "model": self.model,
                     "temperature": TEMPERATURE,
+                    "max_tokens": max_tokens,
+                    "effort": effort,
                     "messages": _without_cache_control(messages),
                     "response": text,
                     "finish_reason": finish,

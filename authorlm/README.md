@@ -464,12 +464,15 @@ server — no network or keys needed.
 
 **Live-LLM suite** (record/replay): exercises the real LiteLLM → Gemini
 path against a generated sample manuscript (never your manuscripts; reset
-to the same default state every run). Every unique payload is sent to the
-LLM **at most once** — responses are recorded in `tests/llm_cache/*.json`
-and replayed thereafter, so an unchanged suite makes zero live calls and
-runs without a key. Changing a prompt, the sample text, or the model
-re-records exactly the affected calls (or delete a cache file to force
-one). With no key and an incomplete cache, the suite skips loudly.
+to the same default state every run). It reads `GEMINI_API_KEY` from
+`authorlm/.env` like every other verb. Each request is hashed (model,
+temperature, messages, and `max_tokens`/`effort`/`thinking_budget` when
+set); a hash with no recording in `tests/llm_cache/*.json` is sent live
+once and recorded. **Commit new recordings with the change that caused
+them**: a clean checkout then makes zero billed calls. A full run that
+passes deletes recordings nothing asked for. With no key anywhere, a
+section that needs a missing recording reports one SKIP (`ReplayMiss`),
+never a failure.
 
 ## Logging & traces
 

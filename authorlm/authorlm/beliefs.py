@@ -52,12 +52,22 @@ def live_beliefs(db: Database, manuscript_id: str, source: str | None = None,
     return [dict(r) for r in db.all(sql, tuple(args))]
 
 
+def belief_labels(rows: list[dict]) -> dict[str, str]:
+    """Menu label → belief id. The menu shows B1, B2, … rather than the
+    random ids, so the same beliefs make the same prompt (the record/replay
+    suite keys on its exact bytes). A reply naming the raw id still
+    resolves."""
+    labels = {f"B{i}": r["id"] for i, r in enumerate(rows, 1)}
+    labels.update({r["id"]: r["id"] for r in rows})
+    return labels
+
+
 def belief_menu(rows: list[dict]) -> str:
     if not rows:
         return "BELIEFS ON RECORD: (none yet — every explanation is NEW)"
     lines = []
-    for r in rows:
-        line = f"  {r['id']} | {r['statement']}"
+    for i, r in enumerate(rows, 1):
+        line = f"  B{i} | {r['statement']}"
         if r["status"] == "retired":
             line += " [retired]"
         example = (loads(r.get("metadata"), {}) or {}).get("example")
@@ -71,10 +81,11 @@ def belief_menu(rows: list[dict]) -> str:
 
 
 def parse_distiller(reply: str | None,
-                    valid_ids: set[str]) -> tuple[str, str | None, str | None]:
+                    labels: dict[str, str]) -> tuple[str, str | None, str | None]:
     """(verdict, statement_or_id, example) where verdict is none | match | new.
+    `labels` is `belief_labels(rows)`; a match returns the real id.
 
-    An unparseable or unknown-id reply is treated as NONE — declining is the
+    An unparseable or unknown-label reply is treated as NONE — declining is the
     default posture, so a confused model declines rather than invents.
 
     A NEW with no EXAMPLE is also refused. That is the structural guard
@@ -90,8 +101,8 @@ def parse_distiller(reply: str | None,
     lines = text.splitlines()
     for line in lines:
         if line.strip().upper().startswith("MATCH:"):
-            bid = line.split(":", 1)[1].strip()
-            return ("match", bid, None) if bid in valid_ids else ("none", None, None)
+            bid = labels.get(line.split(":", 1)[1].strip())
+            return ("match", bid, None) if bid else ("none", None, None)
     statement = example = None
     for line in lines:
         stripped = line.strip()
@@ -365,7 +376,7 @@ def seed_candidate_belief(
         # explanation, which is what happens with no LLM configured at all.
         if reply:
             verdict, payload, example = parse_distiller(
-                reply, {r["id"] for r in rows})
+                reply, belief_labels(rows))
             if verdict == "none":
                 return None
             if verdict == "match":
@@ -649,8 +660,8 @@ def seed_margin_candidate(db: Database, manuscript_id: str,
         return None
     for line in reply.strip().splitlines():
         if line.strip().upper().startswith("MATCH:"):
-            bid = line.split(":", 1)[1].strip()
-            if bid in {r["id"] for r in rows}:
+            bid = belief_labels(rows).get(line.split(":", 1)[1].strip())
+            if bid:
                 return _reinforce_or_revive(db, manuscript_id, bid, explanation,
                                             source="margin-thread")
             return None

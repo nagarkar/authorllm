@@ -152,8 +152,10 @@ def test_semantic_matching(db, ms):
     check("support accumulated on the one belief", second["supporting"] == 2)
     check("two typed explanations promote it to validated",
           second["status"] == "validated", str(second))
-    check("the menu offered the existing belief for matching",
-          first["id"] in llm.prompts[0][1])
+    check("the menu offered the existing belief for matching, by label "
+          "not by its random id (stable prompt bytes for record/replay)",
+          f"B1 | {first['statement']}" in llm.prompts[0][1]
+          and first["id"] not in llm.prompts[0][1])
     check("only one belief exists for this source",
           len(bel.live_beliefs(db, ms["id"], "triage-note_update")) == 1)
 

@@ -11,8 +11,21 @@ every later run, so:
 
 The sample manuscript is generated fresh in a temp workspace on every run —
 tests never touch user manuscripts and always start from the same default
-state. Without GEMINI_API_KEY, the suite runs purely from the replay cache
-and skips (exit 0, loudly) if the cache is incomplete.
+state.
+
+KEYS AND RECORDING. The suite reads GEMINI_API_KEY from authorlm/.env (an
+exported variable still wins), the same place every other verb reads it.
+Any request whose hash has no recording — a changed prompt, sample text,
+model, max_tokens, effort or thinking budget — is sent live once and
+recorded. Commit the new tests/llm_cache/*.json with the change that caused
+them: a prompt change ships with its recordings, so a clean checkout makes
+zero billed calls. With no key anywhere, a section that needs a missing
+recording is reported once as SKIP (llm.ReplayMiss), never as a failure
+and never by quietly running the no-LLM path.
+
+PRUNING. A full run (no --section) that passes every section deletes the
+recordings it never asked for; they belong to prompts that no longer
+exist.
 
 SECTIONS (AL/live-suite-sections). The suite is one continuous narrative
 against a single workspace — 'bridge' declares the intent that 'episode'
@@ -46,19 +59,15 @@ from __future__ import annotations
 
 import os
 
-# Pin the project-config and .env lookups away from the real ones by
-# default, matching every other suite (test_api.py:14-18) — a bare import
-# of this module must not accidentally read the repo's config.toml or
-# .env before main_test() re-points AUTHORLM_CONFIG at this run's own
-# workspace config below. AUTHORLM_ENV stays pinned here for the whole
-# run: the suite's only documented way to supply a live key is an
-# exported GEMINI_API_KEY (see the module docstring), never an ambient
-# authorlm/.env. Without this pin, `cli.main` silently loaded a real key
-# from .env on the very first `run()` call below — after `key_available`
-# had already been computed and printed as absent — so the suite made
-# live billed calls while its own banner denied it.
+# Pin the project-config lookup away from the real one (test_api.py:14-18)
+# until main_test() re-points it at this run's own workspace config. The
+# .env lookup is pinned to authorlm/.env explicitly — that is where the key
+# lives — and main_test() loads it BEFORE printing the banner, so the
+# banner and the calls always agree about whether a key is present (the
+# old bug: .env loaded after the banner said "absent").
 os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
-os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+os.environ["AUTHORLM_ENV"] = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 import contextlib
 import io
@@ -72,6 +81,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from authorlm.cli import main  # noqa: E402
+from authorlm import llm as _llm  # noqa: E402
 from authorlm import paths as _paths  # noqa: E402
 
 CACHE_DIR = REPO / "tests" / "llm_cache"
@@ -97,6 +107,8 @@ SAMPLE_CH2 = """# Chapter 2 — Fields
 A single distinction is inert, but distinctions do not come alone: each
 distinction creates a space of further possible distinctions. We call this
 space a field.
+
+## The field as generator
 
 Think of a chessboard before the first move. The rules do not dictate a
 game; they open a field of possible games. A field is generative rather
@@ -178,13 +190,7 @@ def section_extraction(ctx: dict) -> None:
     ws, ms = ctx["ws"], ctx["ms"]
     out = run(ws, "init", "--name", "sample", "--path", str(ms))
     if "Extraction produced nothing" in out:
-        if not ctx["key_available"]:
-            print(
-                "SKIP: replay cache is incomplete for the current prompts "
-                "and GEMINI_API_KEY is not set. Export the key once to "
-                "record.")
-            return
-        raise AssertionError(f"extraction failed despite key being set:\n{out}")
+        raise AssertionError(f"extraction produced nothing:\n{out}")
     extracted = int(out.split("Extracted ")[1].split(" new concept")[0])
     check("extraction finds a philosophical vocabulary (≥3 concepts)",
           extracted >= 3, out)
@@ -210,9 +216,12 @@ def section_belief(ctx: dict) -> None:
     'bridge's guide batch in this session — it will not find one to review
     if 'bridge' didn't run first (or failed before its 'guide' call)."""
     ws = ctx["ws"]
+    # belief-distill.md replies NONE unless the explanation carries a
+    # concrete case, so this one names it (the bridge draft for History).
     out = run(ws, "review", "1", "--reject", "--explain",
-              "Always ground an abstract definition in a lived example "
-              "before formalizing it")
+              "This draft opens History with its formal definition. "
+              "Always ground an abstract definition in a lived example, "
+              "like a chess game twenty moves deep, before formalizing it")
     check("explanation distilled into a candidate belief",
           "seeded a candidate belief" in out, out)
     distilled = out.split('seeded a candidate belief: "')[1].split('"')[0]
@@ -267,7 +276,6 @@ def section_beat_draft(ctx: dict) -> None:
     the only cross-section need is manuscript registration + an active
     session, which bootstrap provides for every section (main_test)."""
     ws, ms = ctx["ws"], ctx["ms"]
-    key_available = ctx["key_available"]
     run(ws, "style", "guide", "House")
     run(ws, "style", "add", "register",
         "Plain declarative English; no rhetorical questions.",
@@ -284,25 +292,18 @@ def section_beat_draft(ctx: dict) -> None:
         {"role": "close", "concepts": ["Choice"], "budget": 60,
          "notes": "claims the field is generative, not a container"},
     ]), "write", "plan")
-    try:
-        out = run(ws, "write", "draft")
-    except AssertionError:
-        if key_available:
-            raise
-        print("SKIP: no beat-draft response in the replay cache and "
-              "GEMINI_API_KEY is not set. Export the key once to record.")
-    else:
-        check("write draft parses the model's reply and registers the "
-              "beat through the ordinary propose path",
-              "WHY" in out and "SELF-CHECK" in out
-              and "Draft registered" in out
-              and "authorlm/prompts/beat-draft.md" in out, out)
-        out = run_stdin(ws, "", "write", "accept")
-        check("the drafted beat accepts and appends exactly as a "
-              "hand-written one does",
-              "accepted" in out
-              and (ms / "02-fields.md").read_text().strip(), out)
-        run_stdin(ws, "", "write", "abandon")
+    out = run(ws, "write", "draft")
+    check("write draft parses the model's reply and registers the "
+          "beat through the ordinary propose path",
+          "WHY" in out and "SELF-CHECK" in out
+          and "Draft registered" in out
+          and "authorlm/prompts/beat-draft.md" in out, out)
+    out = run_stdin(ws, "", "write", "accept")
+    check("the drafted beat accepts and appends exactly as a "
+          "hand-written one does",
+          "accepted" in out
+          and (ms / "02-fields.md").read_text().strip(), out)
+    run_stdin(ws, "", "write", "abandon")
 
 
 # Order matters (the narrative), but 'extraction' is handled separately in
@@ -323,23 +324,21 @@ def main_test(only: str | None = None) -> None:
         sys.exit(f"error: unknown --section '{only}'. Sections: "
                  f"{', '.join(SECTION_NAMES)}.")
 
-    # Load .env (a no-op today — AUTHORLM_ENV is pinned to /nonexistent
-    # above) before reading GEMINI_API_KEY, so the banner below reflects
-    # the same environment the LLM call itself will see. Computing
-    # key_available before any env loading is what let the suite print
-    # "absent" and then make a live call moments later.
+    # Load authorlm/.env before reading GEMINI_API_KEY, so the banner
+    # below reflects the same environment the LLM calls will see.
     _paths.load_env()
     key_available = bool(os.environ.get("GEMINI_API_KEY"))
     cached_before, in_before, out_before = cache_usage()
     print(
         f"Live-LLM suite — model {MODEL}, replay cache {CACHE_DIR} "
         f"({cached_before} recorded), GEMINI_API_KEY "
-        f"{'present' if key_available else 'absent (replay-only)'}"
+        f"{'present (misses record live)' if key_available else 'absent (replay-only; misses skip)'}"
         + (f", section={only!r}" if only else "")
     )
 
     root = Path(tempfile.mkdtemp(prefix="authorlm-live-"))
     failures: list[str] = []
+    skipped: list[str] = []
     try:
         ws = root / "ws"
         ms = ws / "manuscript"
@@ -376,10 +375,25 @@ def main_test(only: str | None = None) -> None:
 
         def run_section(name: str, fn) -> None:
             before = _cache_files()
+            misses_before = len(_llm.REPLAY_MISSES)
             print(f"\n-- {name} --")
+            error = None
             try:
                 fn(ctx)
             except Exception as err:  # noqa: BLE001 — collected, not fatal
+                error = err
+            misses = _llm.REPLAY_MISSES[misses_before:]
+            if misses:
+                # The section needed a recording that isn't there and no
+                # key could make it: one SKIP, whatever the downstream
+                # symptom was — including none, when a caller swallowed
+                # the miss and the section's checks never ran.
+                print(f"SKIP: {name} — no recording for {', '.join(misses)} "
+                      f"and GEMINI_API_KEY is not set (add it to "
+                      f"{_paths.env_path()} to record).")
+                skipped.append(name)
+                return
+            if error is not None:
                 # Recording hygiene: only files this section itself wrote
                 # are candidates for removal — anything recorded by an
                 # earlier, PASSING section (or present before this run
@@ -390,7 +404,7 @@ def main_test(only: str | None = None) -> None:
                 removed = (f" (removed {len(new_files)} newly-recorded "
                           f"fixture(s): {', '.join(p.name for p in new_files)})"
                           if new_files else "")
-                print(f"SECTION FAILED: {name} — {err}{removed}")
+                print(f"SECTION FAILED: {name} — {error}{removed}")
                 failures.append(name)
 
         # Bootstrap: every section needs the manuscript registered and a
@@ -422,18 +436,33 @@ def main_test(only: str | None = None) -> None:
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
+    # New calls are counted before pruning, which only ever removes.
+    recorded, in_rec, out_rec = cache_usage()
+    pruned = []
+    if only is None and not failures and not skipped:
+        pruned = sorted(_cache_files() - _llm.TOUCHED_RECORDINGS)
+        for path in pruned:
+            path.unlink()
+
     cached_after, in_after, out_after = cache_usage()
     stats = (
-        f"LLM: {cached_after - cached_before} new live call(s) "
-        f"({in_after - in_before:,} in / {out_after - out_before:,} out tokens); "
+        f"LLM: {recorded - cached_before} new live call(s) "
+        f"({in_rec - in_before:,} in / {out_rec - out_before:,} out tokens); "
         f"replay cache covers {cached_after} call(s) "
-        f"({in_after:,} in / {out_after:,} out tokens total)."
+        f"({in_after:,} in / {out_after:,} out tokens total)"
+        + (f"; pruned {len(pruned)} unused recording(s)" if pruned else "")
+        + "."
     )
     if failures:
         print(f"\n{PASSED} check(s) passed; {len(failures)} section(s) "
               f"FAILED: {', '.join(failures)}.")
         print(stats)
         sys.exit(1)
+    if skipped:
+        print(f"\n{PASSED} check(s) passed; {len(skipped)} section(s) "
+              f"SKIPPED for missing recordings: {', '.join(skipped)}.")
+        print(stats)
+        return
     print(f"\nAll {PASSED} checks passed.")
     print(stats)
 
