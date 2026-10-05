@@ -56,7 +56,11 @@ the shape of each analyzer is deliberately unspecified.
   re-proposed. Dedupe by stable semantic key (rule id + target), not
   verbatim text — the lesson of the proposal near-dupe audit (verbatim
   hashes let reworded duplicates through; node-pair-level bans are needed
-  for edges).
+  for edges). "Ruled on" means accepted, rejected or modified, including
+  every R2.3 verdict: such a finding is never proposed again. A finding
+  the author defers is hidden for the rest of the current session only
+  and may come back in a later session. (derived from
+  authorlm/authorlm/guidance.py; owner to confirm)
 - **R1.6** Author verdicts are recorded with their reasoning verbatim,
   as high-weight evidence (§19.11).
 
@@ -71,7 +75,9 @@ the shape of each analyzer is deliberately unspecified.
 - **R2.3** Verdict semantics for drift: **ratify-as-change** (the guide
   was wrong / taste moved — update element), **accept-as-override**
   (deliberate local exception), **reject** (prose drifted — author fixes
-  the text; the auditor still doesn't).
+  the text; the auditor still doesn't). The author may also **defer**,
+  which is not a ruling: the finding is hidden for the current session
+  only and may return in a later one (see R1.5).
 - **R2.4** Files without an attached guide are skipped and *named* in the
   result (currently preface.md, christic.md, indic.md, metaphysic.md, toc.md) —
   silent skipping would read as "audited clean."
