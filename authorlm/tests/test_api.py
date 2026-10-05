@@ -2884,6 +2884,36 @@ def check_lint_and_propose_gates() -> None:
           "paragraph whole, and drops the draft's own bold",
           marked == "Rank is a **state.** It is earned each **beat.**\n\n"
                     "**A wholly new paragraph.**", repr(marked))
+    # best_match / changed_only feed write_landed and the CLI "changed
+    # paragraphs only" view — wrong ratios misreport how an accepted beat
+    # landed; wrong keep/omit hides or floods the review.
+    idx, ratio = lint_mod.best_match(
+        "Rank is a state earned each day.",
+        ["Rank is a possession.",
+         "Rank is a state earned each day.",
+         "Other prose entirely."])
+    check("lint.best_match picks the closest paragraph by word sequence",
+          idx == 1 and ratio == 1.0, str((idx, ratio)))
+    idx, ratio = lint_mod.best_match(
+        "Rank is a **state** earned each day.",
+        ["Rank is a state earned each day."])
+    check("lint.best_match strips bold before comparing",
+          idx == 0 and ratio == 1.0, str((idx, ratio)))
+    check("lint.best_match on an empty unit or empty candidates is "
+          "(None, 0.0)",
+          lint_mod.best_match("", ["a paragraph"]) == (None, 0.0)
+          and lint_mod.best_match("words here", ["", "   "]) == (None, 0.0)
+          and lint_mod.best_match("x", []) == (None, 0.0))
+    kept, omitted = lint_mod.changed_only(
+        "An untouched body paragraph.\n\n"
+        "# **A changed heading**\n\n"
+        "A **changed** body paragraph.\n\n"
+        "# Unchanged heading stays out")
+    check("lint.changed_only keeps paragraphs that carry a bold span "
+          "and counts the ones left out",
+          kept == ["# **A changed heading**",
+                   "A **changed** body paragraph."]
+          and omitted == 2, str((kept, omitted)))
     grade = lint_mod.reading_grade(
         "The guest takes hotel towels, and the shopper skips payment. "
         "They do this to cope in a world they do not trust.")
@@ -12676,6 +12706,30 @@ def main_test() -> None:
               and "foregroundColor" in insert_reqs[2]["updateTextStyle"]
               ["textStyle"],
               str(insert_reqs))
+
+        # doc_spacing feeds every insert-only Doc heal; missing settings
+        # must land on the ratified defaults (115 / 0 / 6).
+        from authorlm import gdocs as gdocs_spacing
+        with tempfile.TemporaryDirectory() as spacing_root:
+            bare_ms = {"path": spacing_root}
+            check("doc_spacing defaults to DOC_SPACING when settings.toml "
+                  "is absent",
+                  gdocs_spacing.doc_spacing(bare_ms)
+                  == gdocs_spacing.DOC_SPACING
+                  == {"line_spacing": 115, "space_above": 0,
+                      "space_below": 6},
+                  str(gdocs_spacing.doc_spacing(bare_ms)))
+            exports = Path(spacing_root) / "_exports"
+            exports.mkdir()
+            (exports / "settings.toml").write_text(
+                'title = "Spacing Fixture"\n'
+                'variant = "images"\n',
+                encoding="utf-8")
+            check("doc_spacing still defaults when settings.toml has only "
+                  "flat export keys",
+                  gdocs_spacing.doc_spacing(bare_ms)
+                  == gdocs_spacing.DOC_SPACING,
+                  str(gdocs_spacing.doc_spacing(bare_ms)))
 
         # --- Editorial verbs lazy-open a session (CLI helper) ---
         from authorlm import sessions as ses

@@ -1225,6 +1225,20 @@ def check_generation() -> None:
                   any(p.name.startswith("silence_") for p in (root / "silence").iterdir()))
             check("status shows the stitch as fresh",
                   gen.status(manuscript, "kindness")["chapters"][0]["stitchStale"] is False)
+            # Corrupt the recorded key while leaving the stitch file in
+            # place — the board must flag stale so the author does not
+            # ship audio that no longer matches the chapter recipe.
+            stale_state = gen.load_state(root, "kindness")
+            stale_state["stitchKeys"]["mp3_44100_128"] = "deadbeefdeadbeef"
+            gen.save_state(root, "kindness", stale_state)
+            check("status flags a stitch whose key no longer matches "
+                  "the chapter",
+                  gen.status(manuscript, "kindness")["chapters"][0]
+                  ["stitchStale"] is True)
+            # Restore a matching key so the retake-drop check below is
+            # still exercising a fresh stitch path.
+            stale_state["stitchKeys"]["mp3_44100_128"] = gen.stitch_key(chapter)
+            gen.save_state(root, "kindness", stale_state)
             gen.generate(manuscript, "kindness", spec="1", retake=True, client=client)
             check("a retake drops the stitch, so the chapter reads as not stitched",
                   gen.status(manuscript, "kindness")["chapters"][0]["stitched"] is None)
