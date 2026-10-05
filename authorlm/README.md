@@ -48,9 +48,13 @@ pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
 pip install -e ".[all]"       # everything above
 ```
 
-There is no build step for normal installation; the compiled Triage App is
-included in the package. Frontend contributors rebuild it with `npm install &&
-npm run build` from `web/triage-app/`. The MCP server is a long-running
+Installing builds the web pages (the Triage App, the audiobook page, and the
+pronunciation workbench) into the package, so it needs **Node 20+ and npm**.
+The built pages are not tracked in git (`setup.py`). Without npm the install
+stops, unless the pages are already built or `AUTHORLM_SKIP_WEB_BUILD=1` is
+set (then the commands that serve a page say it has not been built). After a
+frontend change or a `git pull`, rebuild a page with `npm run build` in its
+`web/<page>/` directory, or reinstall. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 

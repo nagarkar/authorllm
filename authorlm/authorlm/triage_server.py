@@ -16,7 +16,8 @@ from .triage import TriageConflict
 def app_html() -> str:
     path = Path(__file__).parent / "triage_dist" / "index.html"
     if not path.exists():
-        raise RuntimeError("the Triage App frontend has not been built")
+        raise RuntimeError("the Triage App frontend has not been built — "
+                           "cd web/triage-app && npm install && npm run build")
     return path.read_text(encoding="utf-8")
 
 
