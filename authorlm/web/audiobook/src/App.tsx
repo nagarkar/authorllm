@@ -45,9 +45,15 @@ export function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const busy = !!(status?.jobs.running || status?.jobs.queued.length);
 
+  // The chapter currently selected. A status reply for any other stem (a poll
+  // still in flight when the user switched chapters) is stale and dropped, so
+  // the view never shows one chapter while actions target another.
+  const latestStem = useRef(stem);
+
   const load = useCallback(async (s: string) => {
     try {
       const st = await request<Status>("status", s ? {stem: s} : {});
+      if (s !== latestStem.current) return;
       setStatus(st);
       setError("");
       if (!s && st.book.chapters.length) {
@@ -55,10 +61,10 @@ export function App() {
         const first = st.book.chapters.find(c => c.remaining > 0) || st.book.chapters[0];
         setStem(first.stem);
       }
-    } catch (err) { setError((err as Error).message); }
+    } catch (err) { if (s === latestStem.current) setError((err as Error).message); }
   }, []);
 
-  useEffect(() => { load(stem); }, [stem, load]);
+  useEffect(() => { latestStem.current = stem; load(stem); }, [stem, load]);
   useEffect(() => { location.hash = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem; }, [stem, mode, term]);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
   useEffect(() => {
