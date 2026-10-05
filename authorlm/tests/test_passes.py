@@ -2707,6 +2707,141 @@ def _status_can_reach_the_tab(root: Path) -> None:
           and "covers the LOCAL road only" in printed, printed)
 
 
+STATUS_ESSAYS = ("first.md", "second.md")
+
+
+def _status_history_fixture(root: Path, subdir: str):
+    """A manuscript with a long filter history: 30 runs over two essays,
+    settled and active alike, each with three proposal threads in mixed
+    states, plus author comments on the same files as noise. Rows are
+    inserted directly with fixed ids and timestamps, so the report is
+    the same on every run of the suite. The essays carry no marks, so
+    the orphan scan sends no queries of its own."""
+    from authorlm.db import ko_fields as _ko
+
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    for rel in STATUS_ESSAYS:
+        (ms / rel).write_text(f"# {rel}\n\nPlain text, no forms.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    mid = manuscript["id"]
+    states = ("proposed", "accepted", "rejected", "written", "cleaned",
+              "declined")
+    for i in range(30):
+        rel = STATUS_ESSAYS[i % 2]
+        run_id = f"fr-status-{i:02d}"
+        run = _ko("fr")
+        run.update(
+            id=run_id, created_at=f"2026-01-{1 + i // 2:02d}T00:00:{i:02d}",
+            manuscript_id=mid, filter=f"filter-{i % 3}",
+            **{"class": "sequential" if i % 2 else "global"},
+            file=rel, unit_count=5, cursor=i % 6,
+            status="active" if i % 4 == 0 else "settled",
+            metadata=json.dumps({"mode": "doc"} if i % 5 == 0 else {}))
+        db.insert("filter_runs", run)
+        # Inserted out of order, so the report's per-run order has to
+        # come from (created_at, id), not from insertion.
+        for n in (2, 0, 1):
+            t = _ko("dt")
+            t.update(
+                id=f"dt-status-{i:02d}-{n}",
+                created_at=f"2026-02-01T00:{i:02d}:0{n % 2}",
+                manuscript_id=mid, origin_type=api.FILTER_ORIGIN,
+                origin_id=f"{run_id}:{rel}:{n}", file=rel,
+                proposed_old="old", proposed_new="new", note="test",
+                state=states[(i + n) % len(states)], our_reply_ids="[]",
+                scope_kind="file", scope_ref=rel)
+            db.insert("doc_threads", t)
+    for k, rel in enumerate(STATUS_ESSAYS * 2):
+        t = _ko("dt")
+        t.update(manuscript_id=mid, origin_type="author_comment",
+                 origin_id=f"comment-{k}", file=rel, state="proposed",
+                 our_reply_ids="[]")
+        db.insert("doc_threads", t)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links[STATUS_ESSAYS[0]] = {"tab_id": "tab-7", "checked_out": False,
+                               "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript
+
+
+def _counted_status(db, manuscript, file=None):
+    """`filter_status`, with the number of doc_threads reads it sent."""
+    sent: list[str] = []
+    db.conn.set_trace_callback(sent.append)
+    try:
+        report = api.filter_status(db, manuscript, file)
+    finally:
+        db.conn.set_trace_callback(None)
+    return report, sum(1 for s in sent if "FROM doc_threads" in s)
+
+
+def _status_reads_threads_once(root: Path) -> None:
+    """`filter status` reads the filter threads ONCE, however long the
+    filter history is. Every run, settled or active, stays in the
+    report, so a read per run made the verb quadratic in the author's
+    history: a scan of every filter thread for each run."""
+    print("filter status over a long history:")
+
+    db, manuscript = _status_history_fixture(root, "status-history-ws")
+    mid = manuscript["id"]
+
+    def expected(file=None):
+        """The report the per-run read built: each run's own threads,
+        through the same tallies."""
+        where = "WHERE manuscript_id = ?" + (" AND file = ?" if file else "")
+        rows = [dict(r) for r in db.all(
+            f"SELECT * FROM filter_runs {where} ORDER BY created_at",
+            (mid, file) if file else (mid,))]
+        out = []
+        for run in rows:
+            threads = api._run_threads(db, mid, run)
+            out.append({"id": run["id"], "file": run["file"],
+                        "forms_out": sum(1 for t in threads
+                                         if t["state"] == "written"),
+                        **api._run_tallies(threads)})
+        return out
+
+    def got(report):
+        return [{k: r[k] for k in ("id", "file", "forms_out", "proposed",
+                                   "accepted", "rejected", "open")}
+                for r in report["runs"]]
+
+    report, reads = _counted_status(db, manuscript)
+    check("filter status reads doc_threads once for all 30 runs, not "
+          "once per run", reads == 1, str(reads))
+    check("...and every run keeps its own tallies and forms out, in run "
+          "order, exactly as the per-run read gave them",
+          got(report) == expected(), json.dumps(got(report), indent=1))
+    check("...with no thread counted twice and none lost: 3 per run, the "
+          "author comments on the same files left out",
+          [r["proposed"] for r in report["runs"]] == [3] * 30)
+    check("...and a doc-mode run with forms out still carries its tab URL",
+          any(r["tab_url"] == "https://docs.google.com/document/d/doc-fake"
+                             "/edit?tab=tab-7" for r in report["runs"]),
+          json.dumps([r["tab_url"] for r in report["runs"]]))
+    check("...and the report has the same three keys",
+          set(report) == {"runs", "orphaned_marks", "orphan_scan_note"}
+          and report["orphaned_marks"] == [])
+
+    one = STATUS_ESSAYS[0]
+    report, reads = _counted_status(db, manuscript, one)
+    check("filter status <essay> reads doc_threads once for its 15 runs",
+          reads == 1, str(reads))
+    check("...and reports only that essay's runs, each with its own "
+          "tallies", got(report) == expected(one)
+          and len(report["runs"]) == 15
+          and all(r["file"] == one for r in report["runs"]),
+          json.dumps(got(report), indent=1))
+
+
 def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
     """P3c / Q-1, ruled: refuse EARLY and BY NAME when another producer's
     forms are already in this essay's tab.
@@ -4924,6 +5059,7 @@ def main_test() -> None:
         _recovery_while_forms_are_out(root)
         _chat_sees_each_run_s_transport(root)
         _status_can_reach_the_tab(root)
+        _status_reads_threads_once(root)
         _a_second_run_may_not_push_into_the_same_tab(root)
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
