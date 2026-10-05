@@ -372,8 +372,9 @@ Optional LLM settings: `"timeout_seconds"` (default 120) and
 `"extraction_max_chars"` (default 24000) — the cap on manuscript text sent
 per extraction call, balancing cost against coverage (concept selection
 also degrades on very long inputs). Incremental extraction usually keeps
-payloads far below the cap; when a payload does exceed it you get an
-explicit truncation warning suggesting per-file extraction.
+payloads far below the cap; a scope that exceeds it runs as several bounded
+passes instead of being truncated. Only `extract --edges-only` still sends
+one payload cut at the cap.
 
 Any LiteLLM model string works (`gpt-4o-mini`, `claude-sonnet-5`,
 `ollama/llama3`, …) with the matching key exported. Alternatively, point at
