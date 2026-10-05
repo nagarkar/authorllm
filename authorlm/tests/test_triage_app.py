@@ -738,6 +738,13 @@ class HelpTabTest(unittest.TestCase):
     DIST = REPO / "authorlm" / "triage_dist" / "index.html"
     TITLE = "Writing essays with the beat loop — a tutorial"
 
+    def _need_dist(self):
+        """The dist is build output, not tracked in git: `pip install`
+        builds it (setup.py), and a fresh checkout has none until then."""
+        if not self.DIST.is_file():
+            self.skipTest(f"{self.DIST} not built "
+                          "(cd web/triage-app && npm ci && npm run build)")
+
     def test_canonical_tutorial_exists_and_is_substantial(self):
         self.assertTrue(self.DOC.is_file(), f"missing {self.DOC}")
         text = self.DOC.read_text(encoding="utf-8")
@@ -745,7 +752,7 @@ class HelpTabTest(unittest.TestCase):
         self.assertIn(self.TITLE, text)
 
     def test_built_dist_carries_the_tutorial(self):
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         # `assertTrue`, not `assertIn`: the haystack is an 800 kB
         # single-file bundle and assertIn would print all of it.
@@ -779,7 +786,7 @@ class HelpTabTest(unittest.TestCase):
         that same hash here and requiring an exact match makes ANY edit to
         the doc without a rebuild fail this test, regardless of which
         lines moved — no line list to keep in sync."""
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         doc_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
         expected = f"<!-- tutorial-sha256:{doc_hash} -->"
@@ -794,7 +801,7 @@ class HelpTabTest(unittest.TestCase):
         matches. This is what 'structurally detectable' cashes out to: the
         comparison fails on ANY edit, not just ones that happen to touch a
         pinned line."""
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         real_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
         perturbed = hashlib.sha256(
@@ -1099,12 +1106,14 @@ class HelpTabTest(unittest.TestCase):
             "the renderer is discarding <details> again")
         self.assertIn("<details className=\"doc-fold\"", src,
                       "the renderer no longer builds a real <details>")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         self.assertTrue("doc-fold" in built,
                         "the fold class did not reach the dist — rebuild "
                         "(cd web/triage-app && npm run build)")
 
     def test_built_dist_carries_the_help_tab_itself(self):
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         self.assertTrue("help-doc" in built,
                         "the Help tab's markup is missing from the dist")

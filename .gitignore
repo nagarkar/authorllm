@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+authorlm/build/
 
 # AuthorLM runtime state (databases, OAuth token caches)
 .authorlm/
@@ -22,3 +23,9 @@ authorlm/manuscripts/
 output/
 tmp/
 .ai-productionization/
+
+# Built web pages: `pip install` builds them (authorlm/setup.py), and
+# contributors rebuild with `npm run build` in authorlm/web/<page>/
+authorlm/authorlm/audiobook_dist/
+authorlm/authorlm/triage_dist/
+authorlm/authorlm/workbench_dist/

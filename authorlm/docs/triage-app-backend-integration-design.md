@@ -289,7 +289,7 @@ triage_profiles/*.json
 triage_dist/*.html
 ```
 
-Fresh editable and wheel installs need these files or the MCP/local app and built-in profiles will fail at runtime. The frontend source under `web/triage-app` is not needed at runtime, but is needed to rebuild `triage_dist/index.html`.
+Fresh editable and wheel installs need these files or the MCP/local app and built-in profiles will fail at runtime. The frontend source under `web/triage-app` is not needed at runtime, but is needed to rebuild `triage_dist/index.html`. `triage_dist/index.html` is build output and not tracked in git: `setup.py` builds it on every install (2026-10-05).
 
 ## Compatibility work performed
 
@@ -395,7 +395,7 @@ Before changing the CLI, MCP tools, database, or triage code:
 4. Do not pass UI-normalized display rows into low-level concept functions that expect database JSON strings.
 5. Preserve optimistic object-version checks for staged batch application.
 6. Treat `Database.transaction()` as outer-transaction atomic, not savepoint-nested.
-7. Rebuild `authorlm/triage_dist/index.html` after frontend changes.
+7. Rebuild `authorlm/triage_dist/index.html` after frontend changes (`npm run build` in `web/triage-app/`; it is not tracked in git).
 8. Run `tests/test_e2e.py`, `tests/test_api.py`, and `tests/test_triage_app.py` before handing off.
 9. Test `open_triage_app` and `triage_app_request` through the actual target MCP host before release.
 10. Commit only reviewed, attributable hunks; do not bundle unrelated dirty-worktree changes.
