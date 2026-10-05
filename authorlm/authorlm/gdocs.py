@@ -578,9 +578,11 @@ def transplant_requests(doc: dict, tab_id: str) -> list[dict]:
 #
 # Doc comments are author reactions — evidence to ingest, never Doc state
 # to preserve (push rebuilds a tab wholesale, so anchors die on every round
-# trip). Pull harvests all open comments by default, stores them verbatim,
-# and resolves each in the Doc with a receipt: resolved comments collapse
-# out of the margin (no orphan bloat) yet stay reopenable and auditable.
+# trip). Pull harvests all open comments by default and stores new ones
+# verbatim, but never resolves them: each stays open in the Doc as a margin
+# thread (a working conversation) until the author resolves it or a thread
+# verdict closes it. resolve_comments_with_receipt() remains available but
+# pull does not call it.
 # No addressing prefix is required — filtering, if ever needed, keys on the
 # comment's author identity, not a textual convention.
 
@@ -1957,8 +1959,9 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 
     By default also harvests every open comment on the master Doc
     (regardless of which file was pulled — comments are author feedback),
-    ingests them into doc_comments, and resolves each in the Doc with a
-    receipt. The report's `comments` list is the to-address queue.
+    ingests new ones into doc_comments, and leaves them open in the Doc as
+    margin threads (never auto-resolved). The report's `comments` list is
+    the to-address queue.
 
     Per-file conflict guard: if a file changed locally since the push AND
     its tab differs from it, both sides were edited — skipped unless

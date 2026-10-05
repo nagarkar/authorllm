@@ -438,10 +438,10 @@ def _print_comment_harvest(result: dict) -> None:
             print(f"  • [{c['location']}] on \"{c['quote']}\"")
             print(f"    {c['content']}")
         print(ui.dim(
-            f"Resolved {result.get('comments_resolved', 0)} in "
-            "the Doc with ingestion receipts. Address every "
-            "comment above; when acting on one, record the "
-            "author's words verbatim as the evidence/reason."))
+            "Ingested and left open in the Doc as margin threads. "
+            "Address every comment above; when acting on one, "
+            "record the author's words verbatim as the "
+            "evidence/reason."))
     if result.get("comments_error"):
         print(ui.yellow("warning: comment harvest failed "
                         f"({result['comments_error']}) — "
@@ -6070,8 +6070,8 @@ def cmd_profile(args):
                     for c in comments:
                         print(f"  • [{c['location']}] on \"{c['quote']}\"")
                         print(f"    {c['content']}")
-                    print(ui.dim("Resolved in the Doc with ingestion "
-                                 "receipts."))
+                    print(ui.dim("Ingested and left open in the Doc "
+                                 "as margin threads."))
                 if not result["changed"] and not result["conflicts"] \
                         and not comments and not result.get("adopted"):
                     print("Profiles identical to the workspace Doc — clean "
@@ -8326,7 +8326,8 @@ def build_parser() -> argparse.ArgumentParser:
                                     "verbatim — feeds the scoped distiller")
     p.add_argument("--no-comments", action="store_true",
                    help="pull: skip harvesting open Doc comments (default: "
-                        "ingest them and resolve each with a receipt)")
+                        "ingest new ones and leave them open as margin "
+                        "threads)")
     p.set_defaults(func=cmd_doc)
 
     p = sub.add_parser(
