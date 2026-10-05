@@ -73,14 +73,18 @@ def _first_mentions(files: dict[str, str], names: dict[str, list[str]]) -> dict[
     under its primary name or any alias."""
     from .structure import ordered_items
 
+    # Compile each name's pattern once, not once per file: the loop below
+    # is files x names, and collect runs it twice per recorded version.
+    patterns = {node_id: [mention_pattern(nm) for nm in concept_names]
+                for node_id, concept_names in names.items()}
     positions: dict[str, int] = {}
     offset = 0
     for _, text in ordered_items(files):
-        for node_id, concept_names in names.items():
+        for node_id, concept_patterns in patterns.items():
             if node_id in positions:
                 continue
             starts = [m.start() for m in
-                      (mention_pattern(nm).search(text) for nm in concept_names) if m]
+                      (p.search(text) for p in concept_patterns) if m]
             if starts:
                 positions[node_id] = offset + min(starts)
         offset += len(text) + 1
