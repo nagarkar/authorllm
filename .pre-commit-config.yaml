@@ -10,6 +10,6 @@ repos:
       - id: no-commit-to-branch   # branch for every change (guidelines/index.md)
         args: [--branch, main]
   - repo: https://github.com/nagarkar/metalm
-    rev: 2019efe373aca0b8b950504e80583d28151a4dad   # update with: pre-commit autoupdate --bleeding-edge --repo https://github.com/nagarkar/metalm
+    rev: 084ae47a45241c3a7517a3e31967b982609e859a   # update with: pre-commit autoupdate --bleeding-edge --repo https://github.com/nagarkar/metalm
     hooks:
       - id: metalm-gendocs   # regenerates docs/generated/; stops the commit when it changed files
