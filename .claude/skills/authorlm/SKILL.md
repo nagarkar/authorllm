@@ -1529,10 +1529,22 @@ Tailscale forwards the prefix and the pages use root-relative routes.
 Running `tailscale serve` is a standing change to what the Mac exposes:
 do it only on the author's word in chat (given 2026-09-25 for these).
 
-**Casting is three layers.** `voice = "key"` on a chapter in `toc.toml`
-(the essay default; invisible in the Doc), rows in `_audio/cast.md`
-(what each role sounds like), and rare full-line `[Voice: key |
-speed=0.92]` tags in the prose for the exceptions. The tag goes to the
+**Casting is declared in the per-manuscript `_audio/audiobook.toml`.**
+Required `[text].voice`, `[headings].voice`, and `[credits].voice` name
+roles in `_audio/cast.md`; `audio init` explicitly seeds each as
+`"narrator"`. There is no implicit voice default. Optional repeatable
+`[[chapter]]` tables with `file = "sermons.md"` and `voice = "herdsman"`
+override the text role for exactly that file, without parent inheritance.
+An explicitly configured heading voice of `"essay-default"` follows each
+file's text role; otherwise headings use their own named role.
+Missing configuration means run `authorlm audio init`, which creates only
+missing files and preserves any existing cast or configuration. An existing
+file missing a role must be edited. Legacy TOC `voice` declarations must move
+to `audiobook.toml` before export. Invalid, duplicate, missing-file, or
+unknown-cast declarations fail by name even when unused.
+Rare full-line `[Voice: key | speed=0.92]` tags in the prose mark the
+exceptions. A plain tag persists until the next tag or heading; a heading
+resets following text to the configured file role. The tag goes to the
 Doc like every other tag so the pull survives, and is stripped from
 every reader output. The paragraph is the unit of audio: a speaker
 change inside a paragraph is resolved by splitting the paragraph, never
@@ -1597,8 +1609,9 @@ unresolved tags, dictionary drift, retail sample length, stale exports,
 and how much is generated per chapter. audiostation's ACX audit is the
 last gate on the audio itself.
 
-`audio init` (CLI only, once) seeds `audiobook.toml` and `cast.md`;
-after that AuthorLM reads them and writes only a cast row on request.
+`audio init` (CLI only) seeds whichever of `audiobook.toml` and `cast.md`
+is missing, preserving an existing file byte-for-byte; it refuses when both
+exist. After that AuthorLM reads them and writes only a cast row on request.
 Every text rule (gaps, heading voice, footnotes, inline math) is a key in
 `audiobook.toml`, never a flag. Narrator, publisher, copyright year and
 language are manuscript metadata (`set_manuscript_metadata`), set only

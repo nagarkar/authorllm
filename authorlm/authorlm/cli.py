@@ -4895,8 +4895,11 @@ def cmd_audio(args):
     try:
         if args.action == "init":
             result = audio.init(manuscript)
-            print(f"Wrote {result['config']} and {result['cast']}.")
-            print(ui.dim("  Both are yours now: AuthorLM reads them and never "
+            for path in result["written"]:
+                print(f"Wrote {path}.")
+            for path in result["unchanged"]:
+                print(f"Kept {path} unchanged.")
+            print(ui.dim("  Both files are yours: AuthorLM reads them and never "
                          "rewrites them (audio cast set writes one row)."))
             return
 

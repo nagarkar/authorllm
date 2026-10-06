@@ -116,6 +116,7 @@ Seeded fully populated with a comment on every key. Keys and defaults:
 schema = 1
 
 [text]
+voice = "narrator"           # required book-wide text role in cast.md
 paragraph_gap_ms = 700        # silence after every paragraph section
 rule_gap_ms = 1500            # a horizontal rule is silence, not speech
 footnotes = "drop"            # drop | inline | end   (inline/end reserved, see §16)
@@ -124,7 +125,7 @@ lists = "one-section"         # one-section | one-per-item
 max_section_chars = 5000      # export warns above this; ElevenLabs per-request limits differ by model
 
 [headings]
-voice = "essay-default"       # essay-default | a cast key such as "narrator"
+voice = "narrator"            # required heading role; explicit essay-default follows the file text role
 gap_ms = { h1 = 3250, h2 = 2250, other = 1250 }   # silence BEFORE a heading; adjacent headings collapse to the smaller
 
 [tts]
@@ -147,8 +148,13 @@ path = "_assets/audiobook-cover.jpg"   # square, ≥ 2400 px, RGB; the print cov
 ```
 
 Placeholders in `[credits]` resolve from manuscript metadata (§9). An
-unknown key or value is an export error naming the line; a missing key
-takes the default and the export says so once.
+unknown key, wrong type, or invalid value is an export error naming the
+field. The file itself and `text.voice`, `headings.voice`, `credits.voice`
+are required; none is filled from a runtime default. A missing file names
+`authorlm audio init`. Other settings retain their defaults. The seed is
+packaged at `authorlm/audiobook-defaults.toml` and copied once by init.
+Init creates only missing files, preserving an existing config or cast
+byte-for-byte, and refuses when both already exist.
 
 ## 4. From markdown to speech text
 
@@ -188,19 +194,33 @@ pairing heuristic in §10.3.
 
 ## 5. Casting
 
-### 5.1 Layer one — the essay default in `toc.toml`
+### 5.1 Layer one — explicit roles in `_audio/audiobook.toml`
+
+`[text].voice` is the book-wide text role. `[headings].voice` and
+`[credits].voice` independently name their roles. All three are required;
+`audio init` writes `"narrator"` explicitly for each. A heading voice of
+`"essay-default"` is allowed only when explicitly configured and follows
+the file's text role.
+
+An optional exact-file text override lives in the same per-manuscript file:
 
 ```toml
 [[chapter]]
 file = "sermons.md"
-parent = "chapter1.md"
-voice = "herdsman"          # a key in cast.md; absent → "narrator"
+voice = "herdsman"          # required key in _audio/cast.md
 ```
 
-`toc.toml` is structural, never mirrored to the Doc, never exported, and
-already carries per-chapter keys (`illustrations = "none"`). For most
-essays this is the whole of casting. Headings follow the essay default
-unless `[headings].voice` names a key.
+Repeat `[[chapter]]` for additional files. A parent chapter's override never
+flows to its children; a file without an override uses `[text].voice`.
+Unknown keys, wrong types, duplicate files, missing or invalid targets,
+empty role keys, unknown cast roles, and roles without a Voice ID are
+refused by name, including declarations unused by current speech.
+`toc.toml` remains structural; any legacy `voice` there refuses export
+with a hint to move it into `_audio/audiobook.toml`.
+
+The export resolves all speech parameters before writing the existing JSON
+schema. The review page, CLI generation, and audiostation consume those
+resolved sections without selecting a fallback voice.
 
 ### 5.2 Layer two — `cast.md`
 
@@ -469,7 +489,7 @@ id.
 
 | Verb | Does | MCP tool |
 |---|---|---|
-| `audio init` | Seeds `audiobook.toml` and `cast.md`. Refuses if either exists. | — |
+| `audio init` | Seeds missing `audiobook.toml` or `cast.md`; preserves existing files. Refuses when both exist. | — |
 | `audio export [--chapters …]` | Compiles `audiobook.json` and `chapters/*.json`; rewrites only changed files; warns per inline-math span, per unresolved tag, per over-long section. | `export_audio` |
 | `audio check` | Readiness (§12). Exit 1 on any blocking item. | `audio_readiness` |
 | `audio voices [--search …]` | Account and library voices with their free preview clips into the gallery. | `list_voices` |
@@ -590,7 +610,7 @@ audiostation's ACX audit.
 ## 13. Build order (ratified)
 
 1. **One voice, end to end.** `audio init`, `audio export`, §4 rules, §6
-   ids, `toc.toml` `voice`, audiostation moved/renamed/folder-open/state
+   ids, `audiobook.toml` voice declarations, audiostation moved/renamed/folder-open/state
    /watch/highlights/continuity, deletions in §10.2. Proves the two
    programs meet on the hash. Output: stitched chapters in the narrator.
 2. **Voices and pronunciation.** `voices`, `audition`, `cast set`, the
@@ -754,7 +774,7 @@ unit, who is speaking, and mark the switches with a `[Voice: key]` line
 above the paragraph. You place tags; you never change a word of prose and
 you never choose a voice or a parameter.
 
-- The essay's default voice is already set (toc.toml). A unit stays in the
+- The essay's default voice is already set (`_audio/audiobook.toml`). A unit stays in the
   active voice unless the speaker plainly changes.
 - A switch is a replace of the unit with the tag line, one blank line, and
   the paragraph exactly as it was. Nothing else in the unit changes.
