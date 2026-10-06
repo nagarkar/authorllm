@@ -17,6 +17,10 @@ gdocs = [
     "google-auth-httplib2",
     "google-auth-oauthlib",
 ]
+dev = [
+    "pre-commit",
+    "metalm-gendocs @ git+https://github.com/nagarkar/metalm@084ae47a45241c3a7517a3e31967b982609e859a",
+]
 all = [
     "litellm",
     "mcp<2",

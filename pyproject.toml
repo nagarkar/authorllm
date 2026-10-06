@@ -1,0 +1,10 @@
+# Repo-root tool config only. The authorlm package is built from authorlm/pyproject.toml.
+
+# metalm-gendocs (guidelines/design.md#generated-docs) reads this table from the repo root.
+# src is the folder that holds the package, so modules read as `authorlm.<module>`.
+[tool.metalm-gendocs]
+src = "authorlm"
+tests = "authorlm/tests"
+out = "docs/generated"
+# audiostation sits outside src: its TypeScript UI and its Rust core.
+roots = ["audiostation/src", "audiostation/src-tauri/src"]
