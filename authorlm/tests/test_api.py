@@ -10718,6 +10718,30 @@ def main_test() -> None:
               and ldb.one("SELECT state FROM guidance_history WHERE id = ?",
                           (fn["findings"][0]["id"],))["state"] == "accepted",
               str(pv))
+        # Doc-tab forms carry no typed reason. A canned "rejected in the Doc
+        # tab" used to stand in for one, landed as high-weight evidence, and
+        # was seeded as a belief (author ruling 2026-10-05).
+        j_review = ldb.one(
+            "SELECT * FROM editorial_reviews WHERE guidance_id = ?",
+            (jr["findings"][0]["id"],))
+        j_suggestion = jr["findings"][0]["suggestion"] or ""
+        j_ev = ldb.one(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+            "evidence_type = 'author_review' AND signal = 'rejected' AND "
+            "target = ?",
+            (lm["id"], j_suggestion[:120]))
+        belief_n = ldb.one(
+            "SELECT COUNT(*) AS n FROM editorial_beliefs "
+            "WHERE manuscript_id = ?", (lm["id"],))["n"]
+        check("a Doc-tab verdict records no explanation "
+              "(nothing to distill into a belief)",
+              j_review is not None and j_review["explanation"] is None,
+              str(dict(j_review) if j_review else None))
+        check("…and the evidence stays medium-weight, not high",
+              j_ev is not None and j_ev["weight"] == "medium",
+              str(dict(j_ev) if j_ev else None))
+        check("…and no belief is seeded from a form resolve alone",
+              belief_n == 0, str(belief_n))
         # an accepted judgment stands in the file as a tag; repair acts on it
         jr2 = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
                               FakeLLM({"findings": [
