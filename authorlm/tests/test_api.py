@@ -8718,6 +8718,32 @@ def main_test() -> None:
               and not stub.state["comments"]["c-1"]["resolved"]
               and pulled_c["threads"]["counts"] == {},
               str(pulled_c.get("comments")))
+        # ...and the CLI must say so: neither the --no-comments help nor
+        # the post-pull report may claim comments were resolved with a
+        # receipt, since pull leaves them open as margin threads.
+        from authorlm import cli as _cli_c
+        _doc_sub = _cli_c.build_parser()._subparsers._group_actions[0] \
+            .choices["doc"]
+        _no_c_help = next(a.help for a in _doc_sub._actions
+                          if "--no-comments" in a.option_strings)
+        check("doc pull --no-comments help does not claim comments are "
+              "resolved with a receipt",
+              "resolve each with a receipt" not in _no_c_help
+              and "leave them open" in _no_c_help,
+              _no_c_help)
+        _harvest_out = io.StringIO()
+        with contextlib.redirect_stdout(_harvest_out):
+            _cli_c._print_comment_harvest({"comments": [
+                {"location": "01-choice.md", "quote": "Doc went",
+                 "content": "Can we make this stronger?"}]})
+        _harvest_txt = _harvest_out.getvalue()
+        check("the post-pull report does not claim comments were resolved "
+              "with ingestion receipts, and still asks to address them",
+              "Resolved" not in _harvest_txt
+              and "ingestion receipts" not in _harvest_txt
+              and "Address every comment" in _harvest_txt
+              and "left open in the Doc" in _harvest_txt,
+              _harvest_txt)
 
         # Nested braces truncate at the first }} — refuse BEFORE Doc write.
         # `_mark_replace_requests` is the form-construction gate; without
