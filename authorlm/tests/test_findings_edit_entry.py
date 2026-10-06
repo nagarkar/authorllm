@@ -2,13 +2,14 @@
 passes through before it is staged as a `<<old>>{{new}}` edit in the
 author's Doc tab.
 
-It refuses in six ways: quote not verbatim, quote in more than one unit,
-quote more than once within its unit, unit already carrying an edit from
-this batch, replacement carrying reserved markers, and a replacement that
-would empty the unit or leave it unchanged. Before this file only the
-multi-unit refusal was exercised (indirectly, in test_passes.py). This
-file calls `edit_entry` directly and pins every refusal by its reason
-string, plus the success case.
+It refuses in seven ways: quote not verbatim, quote in more than one
+unit, quote more than once within its unit, quote that is only a fragment
+of a larger word, unit already carrying an edit from this batch,
+replacement carrying reserved markers, and a replacement that would empty
+the unit or leave it unchanged. Before this file only the multi-unit
+refusal was exercised (indirectly, in test_passes.py). This file calls
+`edit_entry` directly and pins every refusal by its reason string, plus
+the success case.
 """
 
 from __future__ import annotations
@@ -90,6 +91,53 @@ def test_not_verbatim() -> None:
     _refused("quote off by whitespace", got, "not verbatim")
 
 
+def test_word_fragment() -> None:
+    check("form inside formalism is a word fragment",
+          findings._quote_is_word_fragment(
+              "Kantian formalism underwrites the claim.", "form"))
+    check("standalone form is not a fragment",
+          not findings._quote_is_word_fragment(
+              "The form of judgment matters.", "form"))
+    check("phrase spanning spaces is not a fragment",
+          not findings._quote_is_word_fragment(
+              "Kantian formalism underwrites the claim.",
+              "Kantian formalism"))
+    check("quote at unit start before space is free-standing",
+          not findings._quote_is_word_fragment("form matters here.", "form"))
+    check("quote before punctuation is free-standing",
+          not findings._quote_is_word_fragment(
+              "the form, then the matter.", "form"))
+
+    got = findings.edit_entry(
+        ["Kantian formalism underwrites the claim."],
+        "form", "structure", "prefer structure", set())
+    _refused("fragment quote refuses rather than rewriting formalism",
+             got, "fragment of a larger word")
+
+    got = findings.edit_entry(
+        ["The form of judgment matters."],
+        "form", "structure", "prefer structure", set())
+    check("whole-word quote still stages the surgical unit rewrite",
+          got == ({"n": 1, "new": "The structure of judgment matters.",
+                   "why": "prefer structure"}, ""),
+          repr(got))
+
+    got = findings.edit_entry(
+        ["Kantian formalism underwrites the claim."],
+        "Kantian formalism", "Kantian structure", "reword", set())
+    check("multi-word quote still rewrites its free-standing span",
+          got == ({"n": 1,
+                   "new": "Kantian structure underwrites the claim.",
+                   "why": "reword"}, ""),
+          repr(got))
+
+    got = findings.edit_entry(
+        ["The form of formalism."],
+        "form", "structure", "prefer structure", set())
+    _refused("word + prefix still refuses as ambiguous (unchanged gate)",
+             got, "more than once")
+
+
 def test_taken_units_untouched() -> None:
     taken = {3}
     findings.edit_entry(list(UNITS), "says a thing", "says it", "n", taken)
@@ -104,7 +152,7 @@ def main() -> None:
     tests = [test_success, test_reserved_markers,
              test_within_unit_duplicate, test_multi_unit, test_taken_unit,
              test_empty_result, test_identical_result, test_not_verbatim,
-             test_taken_units_untouched]
+             test_word_fragment, test_taken_units_untouched]
     for t in tests:
         print(f"{t.__name__}:")
         t()

@@ -584,6 +584,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 Proposal learning loop — firewall, screen, distillation, retraction.
 
+## `tests.test_morph_targets`
+
+`authorlm/tests/test_morph_targets.py`
+
+`morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
+
 ## `tests.test_normalize_fences`
 
 `authorlm/tests/test_normalize_fences.py`
