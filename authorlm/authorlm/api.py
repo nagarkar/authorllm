@@ -6574,9 +6574,25 @@ def filter_status(db: Database, manuscript: dict,
     classes = {f["name"]: f["class"] for f in flt.list_filters(manuscript)}
     links = gdocs._mapping(db, manuscript).get("gdocs", {})
     master_id = links.get("_master_id")
+    # One read of every filter-origin thread, grouped by run, instead of
+    # one `_run_threads` query per run: the report would otherwise cost
+    # a full scan of the filter threads for each run in the history.
+    # origin_id is '{run_id}:{file}:{ordinal}', so dropping the last
+    # segment gives the run's key; rows keep the global (created_at, id)
+    # order, which is the order the per-run query returned.
+    by_key: dict[str, list[dict]] = {}
+    for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = ?" + (" AND file = ?" if file else "")
+            + " ORDER BY created_at, id",
+            (mid, FILTER_ORIGIN, file) if file else (mid, FILTER_ORIGIN)):
+        t = dict(r)
+        by_key.setdefault((t["origin_id"] or "").rsplit(":", 1)[0],
+                          []).append(t)
     runs = []
     for run in rows:
-        threads = _run_threads(db, mid, run)
+        threads = [t for t in by_key.get(f"{run['id']}:{run['file']}", [])
+                   if t["file"] == run["file"]]
         drift = (classes.get(run["filter"])
                  if classes.get(run["filter"]) not in (None, run["class"])
                  else None)
