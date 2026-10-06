@@ -524,6 +524,12 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_voice_config`
+
+`authorlm/tests/test_audio_voice_config.py`
+
+Issue #173: default voices are explicitly declared in audiobook.toml.
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
@@ -583,6 +589,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_morph_targets`
+
+`authorlm/tests/test_morph_targets.py`
+
+`morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
 
 ## `tests.test_normalize_fences`
 

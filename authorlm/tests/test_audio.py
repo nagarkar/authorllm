@@ -48,6 +48,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import tomllib
 import zlib
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def _strip(d: dict) -> dict:
 # --------------------------------------------------------------- units
 
 def check_text_rules() -> None:
-    cfg = audio.load_config(Path("/nonexistent"))
+    cfg = audio.load_config(FIXTURE)
     text, warnings = audio.speech_text(
         "**Bold** and *italic* and __under__ with a [link](http://x), "
         "a note[^F1], `code`, and $E=mc^2$.", cfg)
@@ -237,8 +238,9 @@ def check_config() -> None:
     cfg_path = root / audio.AUDIO_DIR / audio.CONFIG_FILENAME
     cfg_path.write_text(audio.DEFAULT_CONFIG_TEXT, encoding="utf-8")
     cfg = audio.load_config(root)
-    check("the seeded toml parses to exactly the defaults",
-          cfg == audio._CONFIG_DEFAULTS, json.dumps(cfg))
+    # #173 requires explicit role declarations; only non-voice settings default.
+    check("the seeded toml parses to its explicit configuration",
+          cfg == tomllib.loads(audio.DEFAULT_CONFIG_TEXT), json.dumps(cfg))
     for bad, why in (("[text]\nfootnote = \"drop\"\n", "unknown key text.footnote"),
                      ("[text]\nfootnotes = \"read\"\n", "one of drop, inline, end"),
                      ("[tts]\nquality = \"wav\"\n", "one of"),
@@ -252,9 +254,11 @@ def check_config() -> None:
         except audio.AudioError as err:
             check(f"config refuses {bad.strip()!r} by name", why in str(err),
                   str(err))
-    cfg_path.write_text("[text]\nparagraph_gap_ms = 900\n", encoding="utf-8")
+    cfg_path.write_text('[text]\nvoice = "narrator"\nparagraph_gap_ms = 900\n'
+                        '[headings]\nvoice = "narrator"\n'
+                        '[credits]\nvoice = "narrator"\n', encoding="utf-8")
     cfg = audio.load_config(root)
-    check("a partial toml takes the defaults for the rest",
+    check("explicit voices with partial non-voice settings take the remaining defaults",
           cfg["text"]["paragraph_gap_ms"] == 900
           and cfg["headings"]["gap_ms"]["h1"] == 3250)
     shutil.rmtree(root, ignore_errors=True)
@@ -326,7 +330,7 @@ def check_fixture_and_hash() -> None:
                   json.dumps(built["chapters"][path.stem], indent=1)[:1500])
         sermons = built["chapters"]["sermons"]
         speech = [s for s in sermons["sections"] if s["type"] == "speech"]
-        check("the essay default voice from toc.toml casts the headings and "
+        check("the essay default voice from audiobook.toml casts the headings and "
               "paragraphs", speech[0]["cast"] == "herdsman"
               and speech[0]["kind"] == "heading")
         dead = [s for s in speech if s["cast"] == "the_dead"]
@@ -1278,6 +1282,10 @@ def check_generation() -> None:
         out, code = run_cli("-w", str(ws), "audio", "preview", "-m", "Scratch")
         check("audio preview needs a chapter or --all", code != 0 and "--all" in out, out)
 
+        # #173 moves fixture voice declarations without changing golden JSON.
+        # Export the copied sources before asserting freshness; checkout mtimes
+        # are not evidence that the golden manifest was exported after them.
+        audio.export(db, manuscript, resolve_dictionary=False)
         # The stale banner: a source saved after the export.
         fresh = gen.export_staleness(manuscript)
         check("a fresh export is not stale", fresh["stale"] is False and fresh["changed"] == [],
@@ -1340,6 +1348,9 @@ def check_audiobook_page() -> None:
     audiobook._SESSIONS.clear()
     try:
         s = audiobook.session(str(ws), "Scratch", inline=True)
+        # #173's migrated source fixture must be exported before the page
+        # promises a fresh manifest; golden checkout mtimes are arbitrary.
+        audio.export(s.db, s.manuscript, resolve_dictionary=False)
         st = s.status()
         check("status lists every chapter with counts and opens none",
               [c["stem"] for c in st["book"]["chapters"]][:2] == ["_opening-credits", "sermons"]

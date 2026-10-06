@@ -26,6 +26,12 @@ touched only for manuscript metadata and the export settings; the
 network only by the ElevenLabs client at the bottom, which the export
 uses for one optional lookup (the dictionary version by name) and the
 audition / dictionary verbs use deliberately.
+
+Decisions:
+- Export resolves explicitly configured per-paragraph voices from the manuscript's
+  `_audio/audiobook.toml` and cast into the shared manifest; both consumers
+  use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in
+  and tests/test_audio_voice_config.py::VoiceConfigTests::test_chapter_override_is_exact_file_without_inheritance. (owner)
 """
 
 from __future__ import annotations
@@ -68,7 +74,6 @@ SCHEMA = 1
 # feeds the credits (design §4). Everything else is routed by toc.toml.
 TITLE_FILE = "title.md"
 ABOUT_ROUTE = "about-author"
-DEFAULT_CAST_KEY = "narrator"
 
 KEY_ENV = "ELEVENLABS_API_KEY"
 API_BASE = "https://api.elevenlabs.io/v1"
@@ -88,7 +93,6 @@ _CONFIG_DEFAULTS: dict = {
         "max_section_chars": 5000,
     },
     "headings": {
-        "voice": "essay-default",
         "gap_ms": {"h1": 3250, "h2": 2250, "other": 1250},
     },
     "tts": {
@@ -97,7 +101,6 @@ _CONFIG_DEFAULTS: dict = {
         "dictionary": "",
     },
     "credits": {
-        "voice": DEFAULT_CAST_KEY,
         "opening": "{title}. {subtitle}. Written by {author}. "
                    "Narrated by {narrator}.",
         "closing": "This has been {title}, written by {author} and "
@@ -124,57 +127,15 @@ _ENUMS = {
 PHONEME_MODELS = ("eleven_flash_v2", "eleven_v3")
 QUALITIES = ("mp3_22050_32", "mp3_44100_64", "mp3_44100_128", "mp3_44100_192")
 
-DEFAULT_CONFIG_TEXT = f"""\
-# audiobook.toml — how this manuscript becomes an audiobook.
-#
-# AuthorLM wrote this file once, with every default, and will never write
-# it again: it is yours. `authorlm audio export` reads it and resolves
-# every rule into the sections it writes; audiostation never reads it.
-# Design: docs/audiobook-pipeline-design.md §3.
-
-schema = {SCHEMA}
-
-[text]
-paragraph_gap_ms = 700        # silence after every paragraph section
-rule_gap_ms = 1500            # a horizontal rule (---) is silence, not speech
-head_gap_ms = 800             # silence at the START of every chapter file (ACX: 0.5–1 s of room tone at the head)
-tail_gap_ms = 2000            # silence at the END of every chapter file (ACX: 1–5 s at the tail)
-footnotes = "drop"            # drop | inline | end  (only "drop" is built)
-inline_math = "warn"          # warn | strip | refuse — warn strips the $…$ delimiters and names the line
-lists = "one-section"         # one-section | one-per-item
-max_section_chars = 5000      # the export warns above this; ElevenLabs per-request limits differ by model
-
-[headings]
-voice = "essay-default"       # essay-default | a cast key such as "narrator"
-gap_ms = {{ h1 = 3250, h2 = 2250, other = 1250 }}   # silence BEFORE a heading; adjacent headings collapse to the smaller
-
-[tts]
-model = "eleven_multilingual_v2"   # decides the dictionary rule type: phoneme on {" / ".join(PHONEME_MODELS)}, alias elsewhere
-quality = "mp3_44100_128"          # ACX accepts mp3_44100_128 or mp3_44100_192
-dictionary = ""                    # the ElevenLabs pronunciation dictionary NAME (looked up, never stored as an id); empty = none
-
-[credits]
-voice = "narrator"
-opening = "{{title}}. {{subtitle}}. Written by {{author}}. Narrated by {{narrator}}."
-closing = "This has been {{title}}, written by {{author}} and narrated by {{narrator}}. Copyright {{copyright_year}} by {{copyright_owner}}. Production copyright {{copyright_year}} by {{publisher}}."
-
-[retail_sample]               # ACX: one to five minutes from the body of the book
-chapter = ""                  # e.g. "sermons.md"
-heading = ""                  # a heading inside that chapter, e.g. "Sermon One"
-paragraphs = 6                # the first N paragraph sections under that heading
-
-[cover]
-path = ""                     # e.g. "_assets/audiobook-cover.jpg" — square, ≥ 2400 px, RGB
-
-[preview]                     # the free listen (macOS `say`) before any paid render
-voice = "Daniel"              # a macOS voice; `say -v '?'` lists them; "Daniel (Enhanced)" is a free download in System Settings
-rate = 175                    # words per minute, multiplied by the cast row's speed
-"""
+# The seed is a packaged, author-editable configuration file. Voice choices
+# have no runtime defaults: load_config requires them in the manuscript copy.
+DEFAULT_CONFIG_TEXT = Path(__file__).with_name("audiobook-defaults.toml").read_text(
+    encoding="utf-8")
 
 SEED_CAST = (
     "# **Cast**\n\n"
     "Who speaks, and how. One row per role; `[Voice: key]` in the prose "
-    "and `voice = \"key\"` in toc.toml name a row here. Blank Model, "
+    "and `voice = \"key\"` in audiobook.toml name a row here. Blank Model, "
     "Stability, Similarity or Speed take the defaults (audiobook.toml's "
     "model; 0.5 / 0.75 / 1.0). AuthorLM writes a row only through "
     "`audio cast set`; the rest of this file is yours.\n\n"
@@ -207,12 +168,12 @@ def _deep_merge(base: dict, over: dict) -> dict:
 
 
 def load_config(root: Path) -> dict:
-    """`audiobook.toml` merged over the defaults. An unknown key, an
-    unknown enum value or a wrong type is refused by name (design §3):
+    """Required voice declarations plus defaults for other settings.
+    An unknown key, unknown enum or wrong type is refused by name (design §3):
     a typo must never silently fall back to a default."""
     path = root / AUDIO_DIR / CONFIG_FILENAME
     if not path.exists():
-        return json.loads(json.dumps(_CONFIG_DEFAULTS))
+        raise AudioError(f"{path}: does not exist — run 'audio init'")
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as err:
@@ -223,6 +184,9 @@ def load_config(root: Path) -> dict:
 
 def _validate_config(data: dict, where: str) -> None:
     for section, value in data.items():
+        if section == "chapter":
+            _validate_chapter_config(value, where)
+            continue
         if section == "schema":
             if value != SCHEMA:
                 raise AudioError(f"{where}: schema = {value!r}; this "
@@ -231,10 +195,13 @@ def _validate_config(data: dict, where: str) -> None:
         if section not in _CONFIG_DEFAULTS:
             raise AudioError(f"{where}: unknown table [{section}] (one of: "
                              + ", ".join(k for k in _CONFIG_DEFAULTS
-                                         if k != "schema") + ")")
+                                         if k != "schema") + ", chapter)")
         if not isinstance(value, dict):
             raise AudioError(f"{where}: [{section}] must be a table")
         for key, val in value.items():
+            if key == "voice" and section in ("text", "headings", "credits"):
+                _validate_voice_key(val, f"{where}: {section}.voice")
+                continue
             if key not in _CONFIG_DEFAULTS[section]:
                 raise AudioError(
                     f"{where}: unknown key {section}.{key} (one of: "
@@ -268,23 +235,63 @@ def _validate_config(data: dict, where: str) -> None:
     if tts.get("quality") and tts["quality"] not in QUALITIES:
         raise AudioError(f"{where}: tts.quality = {tts['quality']!r}; one of "
                          + ", ".join(QUALITIES))
+    for section in ("text", "headings", "credits"):
+        if "voice" not in data.get(section, {}):
+            raise AudioError(f"{where}: {section}.voice is required — "
+                             f"set a cast key in [{section}]")
+
+
+def _validate_voice_key(value: object, where: str) -> None:
+    if not isinstance(value, str) or not _KEY_RE.fullmatch(value):
+        raise AudioError(f"{where} must be a nonempty cast key "
+                         "([a-z][a-z0-9_-]*)")
+
+
+def _validate_chapter_config(value: object, where: str) -> None:
+    if not isinstance(value, list):
+        raise AudioError(f"{where}: chapter must be repeatable [[chapter]] tables")
+    seen: set[str] = set()
+    for index, chapter in enumerate(value, 1):
+        label = f"{where}: chapter[{index}]"
+        if not isinstance(chapter, dict):
+            raise AudioError(f"{label} must be a table with file and voice")
+        unknown = chapter.keys() - {"file", "voice"}
+        if unknown:
+            raise AudioError(f"{label}: unknown key {sorted(unknown)[0]}")
+        name = chapter.get("file")
+        if (not isinstance(name, str) or not name.strip()
+                or name != name.strip() or Path(name).is_absolute()
+                or ".." in Path(name).parts or not name.endswith(".md")):
+            raise AudioError(f"{label}.file must name a manuscript .md file")
+        if name in seen:
+            raise AudioError(f"{label}: duplicate file {name!r}")
+        seen.add(name)
+        _validate_voice_key(chapter.get("voice"), f"{label} ({name}).voice")
 
 
 def init(manuscript: dict) -> dict:
-    """Seed `audiobook.toml` and `cast.md`. Refuses if either exists —
-    these files are the author's from the moment they are written."""
+    """Seed missing audio configuration files, preserving existing bytes.
+    Refuses when both already exist: each file belongs to the author."""
     root = audio_dir(manuscript)
     config = root / CONFIG_FILENAME
     cast = root / CAST_FILENAME
     existing = [p.name for p in (config, cast) if p.exists()]
-    if existing:
+    if len(existing) == 2:
         raise AudioError(
             f"{', '.join(existing)} already exist(s) in {AUDIO_DIR}/ — "
             "AuthorLM writes them once and never again; edit them directly.")
     root.mkdir(parents=True, exist_ok=True)
-    config.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
-    cast.write_text(SEED_CAST, encoding="utf-8")
-    return {"config": str(config), "cast": str(cast)}
+    written: list[str] = []
+    unchanged: list[str] = []
+    for path, content in ((config, DEFAULT_CONFIG_TEXT), (cast, SEED_CAST)):
+        if path.exists():
+            unchanged.append(str(path))
+            continue
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(content)
+        written.append(str(path))
+    return {"config": str(config), "cast": str(cast),
+            "written": written, "unchanged": unchanged}
 
 
 # ------------------------------------------------------------------ cast
@@ -1000,7 +1007,26 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     cast, cast_warnings = load_cast(root, config)
     warnings = [f"{CAST_FILENAME}: {w}" for w in cast_warnings]
     attrs = toc_attrs(files.get("toc.toml") or "")
+    for name, file_attrs in attrs.items():
+        if "voice" in file_attrs:
+            raise AudioError(f"toc.toml: {name} has legacy voice; move it to "
+                             f"{AUDIO_DIR}/{CONFIG_FILENAME} [[chapter]] "
+                             "with file and voice")
     order, unlisted = reading_order(files)
+    for section in ("text", "headings", "credits"):
+        key = config[section]["voice"]
+        if section == "headings" and key == "essay-default":
+            continue
+        _resolve_voice(cast, key, {}, f"{CONFIG_FILENAME} {section}.voice")
+    chapter_voices: dict[str, str] = {}
+    for chapter in config.get("chapter", []):
+        name = chapter["file"]
+        if name not in order or name in (TITLE_FILE, pron.FILENAME, "manifest.md"):
+            raise AudioError(f"{CONFIG_FILENAME}: chapter file {name!r} "
+                             "is not a manuscript audio chapter")
+        _resolve_voice(cast, chapter["voice"], {},
+                       f"{CONFIG_FILENAME} chapter ({name}).voice")
+        chapter_voices[name] = chapter["voice"]
     for name in unlisted:
         warnings.append(f"{name}: not in toc.toml — appended at the end")
     rules = pronunciation_rules(files.get(pron.FILENAME) or "")
@@ -1022,11 +1048,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
         if route not in (None, ABOUT_ROUTE):
             raise AudioError(f"toc.toml: {name} has audio = {route!r}; the "
                              f"only route is \"{ABOUT_ROUTE}\"")
-        default_key = file_attrs.get("voice") or DEFAULT_CAST_KEY
-        if not isinstance(default_key, str) or not _KEY_RE.match(default_key):
-            raise AudioError(f"toc.toml: {name} has voice = {default_key!r}, "
-                             "which is not a cast key")
-        _resolve_voice(cast, default_key, {}, f"toc.toml ({name})")
+        default_key = chapter_voices.get(name, config["text"]["voice"])
         source = audio_source(name, files[name])
         sections, w, title = chapter_sections(name, source, config, cast,
                                               default_key, rules)

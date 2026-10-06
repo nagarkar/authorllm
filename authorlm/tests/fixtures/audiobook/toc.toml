@@ -6,7 +6,6 @@ matter = "front"
 
 [[chapter]]
 file = "sermons.md"
-voice = "herdsman"
 
 [[chapter]]
 file = "kindness.md"

@@ -1605,12 +1605,9 @@ def resolve_improvement(task_id: str, action: str,
 @mcp.tool()
 def export_audio(chapters: list[str] | None = None,
                  manuscript: str | None = None) -> dict:
-    """Compile the audiobook manifests — _audio/audiobook.json and
-    chapters/*.json — from the manuscript, toc.toml's voice keys,
-    _audio/cast.md and audiobook.toml. Rewrites only files whose content
-    changed, so audiostation reloads exactly what moved. `chapters`
-    limits which chapter files are rewritten. Returns what was written
-    and the warnings (inline math, over-long sections, unresolved tags)."""
+    """Export `_audio/audiobook.json` and `chapters/*.json` for `manuscript`.
+    Optional `chapters` limits the chapter files rewritten.
+    Returns written files and warnings."""
     def run():
         from . import audio
         db = _db()
