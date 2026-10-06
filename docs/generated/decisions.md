@@ -6,7 +6,7 @@ Rules that span modules, from each package's `Decisions:`. Owner rules end with 
 
 ## Owner
 
-- `authorlm.audio`: Audiobook cast selection is declared only in the manuscript's `_audio/audiobook.toml`: required `text.voice`, `headings.voice`, and `credits.voice`, plus optional `[[chapter]]` exact-file text overrides without parent inheritance. No Python role fallback or TOC voice is permitted; every configured cast reference is validated, even when no speech uses it. Explicit `headings.voice = "essay-default"` follows the file's text role. Plain voice tags persist until the next tag or heading. Export resolves every speech parameter for both consumers. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in and tests/test_audio_voice_config.py::VoiceConfigTests::test_chapter_override_is_exact_file_without_inheritance. (owner)
+- `authorlm.audio`: Export resolves explicitly configured per-paragraph voices from the manuscript's `_audio/audiobook.toml` and cast into the shared manifest; both consumers use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in and tests/test_audio_voice_config.py::VoiceConfigTests::test_chapter_override_is_exact_file_without_inheritance. (owner)
 
 ## Agent-drafted
 

@@ -572,13 +572,12 @@ Profile registry (key → standing rule):
 - `market` — consult FIRST for any publisher-facing, positioning,
   audience, or format question ("who is this for", "is it long enough",
   comp titles, audio considerations): interpret manuscript statistics
-  against the recorded ambition — the Rovelli/Hossenfelder "Big Idea"
-  shelf, audio-first Rational Seekers — never against generic trade
-  norms.
+  against the ambition recorded in that manuscript's profile, never
+  against generic trade norms.
 - `pitch` — consult for any retailer description, preorder page, back
   cover, audiobook summary, or sales-pitch question: the copy DERIVES from
   this file and is never improvised in chat; a change of positioning is an
-  edit to this file first. Registered 2026-09-24 for DON; SMSTTD has none yet.
+  edit to this file first.
 - `audience` — consult for any question about PITCH: whether a passage
   assumes too much or explains too much, whether a term needs a bridge,
   whether a gloss is condescension. It records what the reader already
@@ -1473,7 +1472,7 @@ the app cannot double-render; only two deliberate renders can.
 175 wpm × the cast row's speed; respellings substituted inline so the
 table is heard too) into `_audio/preview/<id>.mp3`, four at a time,
 and sweeps previews whose id is gone. Nothing is kept and nothing
-costs. The whole SMSTTD book previews in about twenty minutes.
+costs.
 
 **The page — the author's surface, on the Mac and the phone.** Run
 `authorlm audio serve -m <ms> --no-open` in the background from Bash
@@ -1529,27 +1528,29 @@ Tailscale forwards the prefix and the pages use root-relative routes.
 Running `tailscale serve` is a standing change to what the Mac exposes:
 do it only on the author's word in chat (given 2026-09-25 for these).
 
-**Casting is declared in the per-manuscript `_audio/audiobook.toml`.**
-Required `[text].voice`, `[headings].voice`, and `[credits].voice` name
-roles in `_audio/cast.md`; `audio init` explicitly seeds each as
-`"narrator"`. There is no implicit voice default. Optional repeatable
-`[[chapter]]` tables with `file = "sermons.md"` and `voice = "herdsman"`
-override the text role for exactly that file, without parent inheritance.
-An explicitly configured heading voice of `"essay-default"` follows each
-file's text role; otherwise headings use their own named role.
-Missing configuration means run `authorlm audio init`, which creates only
-missing files and preserves any existing cast or configuration. An existing
-file missing a role must be edited. Legacy TOC `voice` declarations must move
-to `audiobook.toml` before export. Invalid, duplicate, missing-file, or
-unknown-cast declarations fail by name even when unused.
-Rare full-line `[Voice: key | speed=0.92]` tags in the prose mark the
-exceptions. A plain tag persists until the next tag or heading; a heading
-resets following text to the configured file role. The tag goes to the
-Doc like every other tag so the pull survives, and is stripped from
-every reader output. The paragraph is the unit of audio: a speaker
-change inside a paragraph is resolved by splitting the paragraph, never
-by an inline marker. Keep the tag count low — the author edits in the
-Doc with a screen reader.
+**Set up and cast the manuscript before exporting:**
+
+1. If either `_audio/audiobook.toml` or `_audio/cast.md` is missing,
+   run `authorlm audio init -m <ms>` (CLI only), then inspect both files.
+   To change existing settings, edit the per-manuscript files directly.
+2. In `_audio/audiobook.toml`, set `[text].voice`, `[headings].voice`,
+   and `[credits].voice` to roles in `_audio/cast.md`; initialization
+   seeds all three as `"narrator"`. Set `[headings].voice = "essay-default"`
+   only when headings should follow each file's text role. For a chapter
+   exception, add a `[[chapter]]` table with `file = "chapter.md"` and
+   `voice = "speaker"`; repeat for each exact file that needs an override.
+   Without an override, a file uses `[text].voice`, never its parent's
+   role. Move any legacy TOC voice declarations here before exporting.
+3. For a passage exception, place a full-line `[Voice: speaker]` tag
+   before the paragraph, preserving blank lines between paragraphs.
+   It stays in effect until the next tag or heading; a heading resets
+   following text to the file's configured role. Split a paragraph if
+   its speaker changes. Keep tags sparse for screen-reader editing;
+   they survive the Doc round trip and disappear from reader exports.
+4. Run `export_audio` (`authorlm audio export -m <ms>`), then
+   `audio_readiness` (`authorlm audio check -m <ms>`). Surface each
+   error or warning with its next action; repair named declarations
+   before retrying, and ask for author judgment when needed.
 
 **The audition protocol (voices → shortlist → the book's own words):**
 
@@ -1609,9 +1610,6 @@ unresolved tags, dictionary drift, retail sample length, stale exports,
 and how much is generated per chapter. audiostation's ACX audit is the
 last gate on the audio itself.
 
-`audio init` (CLI only) seeds whichever of `audiobook.toml` and `cast.md`
-is missing, preserving an existing file byte-for-byte; it refuses when both
-exist. After that AuthorLM reads them and writes only a cast row on request.
 Every text rule (gaps, heading voice, footnotes, inline math) is a key in
 `audiobook.toml`, never a flag. Narrator, publisher, copyright year and
 language are manuscript metadata (`set_manuscript_metadata`), set only

@@ -22,7 +22,7 @@ max_section_chars = 5000      # the export warns above this; ElevenLabs per-requ
 voice = "narrator"            # required heading role; explicit "essay-default" follows each file's text role
 gap_ms = { h1 = 3250, h2 = 2250, other = 1250 }   # silence BEFORE a heading; adjacent headings collapse to the smaller
 
-[tts]
+[tts]                        # ElevenLabs paid narration; free previews use [preview] below
 model = "eleven_multilingual_v2"   # decides the dictionary rule type: phoneme on eleven_flash_v2 / eleven_v3, alias elsewhere
 quality = "mp3_44100_128"          # ACX accepts mp3_44100_128 or mp3_44100_192
 dictionary = ""                    # the ElevenLabs pronunciation dictionary NAME (looked up, never stored as an id); empty = none
@@ -33,18 +33,18 @@ opening = "{title}. {subtitle}. Written by {author}. Narrated by {narrator}."
 closing = "This has been {title}, written by {author} and narrated by {narrator}. Copyright {copyright_year} by {copyright_owner}. Production copyright {copyright_year} by {publisher}."
 
 [retail_sample]               # ACX: one to five minutes from the body of the book
-chapter = ""                  # e.g. "sermons.md"
-heading = ""                  # a heading inside that chapter, e.g. "Sermon One"
+chapter = ""                  # e.g. "chapter.md"
+heading = ""                  # a heading inside that chapter, e.g. "Introduction"
 paragraphs = 6                # the first N paragraph sections under that heading
 
 [cover]
 path = ""                     # e.g. "_assets/audiobook-cover.jpg" — square, ≥ 2400 px, RGB
 
-[preview]                     # the free listen (macOS `say`) before any paid render
+[preview]                    # free local previews with macOS `say`, independent of [tts].model
 voice = "Daniel"              # a macOS voice; `say -v '?'` lists them; "Daniel (Enhanced)" is a free download in System Settings
 rate = 175                    # words per minute, multiplied by the cast row's speed
 
 # Optional exact-file text override; repeat for each file, with no parent inheritance.
 # [[chapter]]
-# file = "sermons.md"
-# voice = "herdsman"          # required cast.md role for this file
+# file = "chapter.md"
+# voice = "speaker"           # required cast.md role for this file
