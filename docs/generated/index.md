@@ -2,6 +2,90 @@
 
 # Areas
 
+## `audiostation/src-tauri/src`
+
+`audiostation/src-tauri/src/lib.rs`
+
+_No docstring._
+
+## `audiostation/src-tauri/src/book`
+
+`audiostation/src-tauri/src/book.rs`
+
+Loading the audiobook folder, diffing a reload against what is in memory, sweeping orphans, and writing state — the only files this program writes (design §2, §10.2, §10.3).
+
+## `audiostation/src-tauri/src/commands`
+
+`audiostation/src-tauri/src/commands.rs`
+
+Tauri commands — the studio's verbs over a loaded audiobook folder.
+
+## `audiostation/src-tauri/src/main`
+
+`audiostation/src-tauri/src/main.rs`
+
+_No docstring._
+
+## `audiostation/src-tauri/src/stitch`
+
+`audiostation/src-tauri/src/stitch.rs`
+
+Audio stitching via ffmpeg.
+
+## `audiostation/src-tauri/src/types`
+
+`audiostation/src-tauri/src/types.rs`
+
+The audiobook folder, as AuthorLM writes it and audiostation reads it (docs/audiobook-pipeline-design.md §2, §14).
+
+## `audiostation/src-tauri/src/watcher`
+
+`audiostation/src-tauri/src/watcher.rs`
+
+Watch the audiobook folder the way AuthorLM's `collect` watches the manuscript: when `audiobook.json` or anything under `chapters/` changes, reload, diff, and tell the window (design §10.3).
+
+## `audiostation/src/book`
+
+`audiostation/src/book.ts`
+
+_No docstring._
+
+## `audiostation/src/logger`
+
+`audiostation/src/logger.ts`
+
+_No docstring._
+
+## `audiostation/src/main`
+
+`audiostation/src/main.ts`
+
+_No docstring._
+
+## `audiostation/src/menu`
+
+`audiostation/src/menu.ts`
+
+_No docstring._
+
+## `audiostation/src/settings`
+
+`audiostation/src/settings.ts`
+
+_No docstring._
+
+## `audiostation/src/types`
+
+`audiostation/src/types.ts`
+
+_No docstring._
+
+## `audiostation/src/utils`
+
+`audiostation/src/utils.ts`
+
+_No docstring._
+
 ## `authorlm`
 
 `authorlm/authorlm/__init__.py`

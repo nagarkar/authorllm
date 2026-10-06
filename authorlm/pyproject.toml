@@ -19,7 +19,7 @@ gdocs = [
 ]
 dev = [
     "pre-commit",
-    "metalm-gendocs @ git+https://github.com/nagarkar/metalm@993241280274c9e9a2ef9fa574a5f2e77906cede",
+    "metalm-gendocs @ git+https://github.com/nagarkar/metalm@368ba7b62a4d317b187a1ef69cea0bb1d95ed14e",
 ]
 all = [
     "litellm",

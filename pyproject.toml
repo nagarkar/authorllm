@@ -6,3 +6,5 @@
 src = "authorlm"
 tests = "authorlm/tests"
 out = "docs/generated"
+# audiostation sits outside src: its TypeScript UI and its Rust core.
+roots = ["audiostation/src", "audiostation/src-tauri/src"]
