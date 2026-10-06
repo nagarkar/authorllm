@@ -86,7 +86,13 @@ export function App() {
     if (!url || !audioRef.current) return;
     setNow({source, id: sec.id});
     audioRef.current.src = url;
-    audioRef.current.play().catch(() => {});
+    audioRef.current.play().catch((err: unknown) => {
+      // A newer play() or step() swapped src while this load was pending: not a failure.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Clear the playing state only if it still points at this clip.
+      setNow(cur => cur && cur.id === sec.id && cur.source === source ? null : cur);
+      setError(`Could not play ¶ ${sec.ordinal} ${source}: ${(err as Error).message}`);
+    });
     document.getElementById(`card-${sec.id}`)?.scrollIntoView({block: "center", behavior: "smooth"});
   }, []);
 
