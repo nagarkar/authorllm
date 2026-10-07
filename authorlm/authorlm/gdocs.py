@@ -3383,35 +3383,71 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                                                tab_id))
 
     def find_form(full: str, outcome: dict) -> tuple[str, str, str] | None:
-        """(head, kept-or-dropped old, tail) AS THE TAB HOLDS THEM: the
-        form is head + old + tail-with-new, located by its old half for
-        a replacement and by its new half for an insertion."""
+        """(head, kept-or-dropped old, tail) AS THE TAB HOLDS THEM.
+
+        A replacement is located by BOTH halves when the green is still
+        known (`<<old>>{{new}}`): first-`<<old>>` alone would settle
+        another producer's form that shares the old half (margin and
+        outside-caller on the same refrain). A decline still accepts an
+        emptied or bare `<<old>>`, but only after the exact proposed
+        green is ruled out. An insertion is located by its `{{new}}`,
+        and never by a match that sits inside a replace form's green
+        (`>>{{…}}` / `}{{…}}` — same lookbehind as `threads.INSERTION`)."""
         if outcome["old"]:
-            for tab_old in (outcome["old"], rendered_text(outcome["old"])):
+            olds = (outcome["old"], rendered_text(outcome["old"]))
+            news = (outcome["new"], rendered_text(outcome["new"] or ""))
+            # Exact <<old>>{{new}} first — keep=new always; keep=old when
+            # the author left our green standing and we are declining by
+            # record (should not happen) or the green is still the
+            # proposed text and they emptied a different twin.
+            for tab_old in olds:
+                for tab_new in news:
+                    if not tab_new and outcome["keep"] == "new":
+                        continue
+                    # Tail includes the closing `>>` — form is
+                    # head+old+tail = <<old>>{{new}}.
+                    if tab_new and f"<<{tab_old}>>{{{{{tab_new}}}}}" in full:
+                        return "<<", tab_old, ">>{{" + tab_new + "}}", 0
+            if outcome["keep"] == "new":
+                return None
+            for tab_old in olds:
+                emptied = f"<<{tab_old}>>{{{{}}}}"
+                if emptied in full:
+                    return "<<", tab_old, ">>{{}}", 0
                 at = full.find(f"<<{tab_old}>>")
                 if at < 0:
                     continue
                 after = at + len(tab_old) + 4
                 if not full.startswith("{{", after):
-                    return "<<", tab_old, ">>"      # green half deleted
-                close = full.find("}}", after + 2)
-                if close < 0:
-                    return None
-                return "<<", tab_old, full[after - 2: close + 2]
+                    return "<<", tab_old, ">>", 0  # green half deleted
             return None
-        for tab_new in (outcome["new"], rendered_text(outcome["new"])):
-            if f"{{{{{tab_new}}}}}" in full:
-                return "{{", "", tab_new + "}}"
+        for tab_new in (outcome["new"], rendered_text(outcome["new"] or "")):
+            needle = "{{" + tab_new + "}}"
+            start = -1
+            occ = 0
+            while True:
+                start = full.find(needle, start + 1)
+                if start < 0:
+                    break
+                # Inside a replace green, or nested braces: not ours —
+                # but each still counts toward `_locate_in_tab`'s
+                # occurrence index (it searches every verbatim hit).
+                if start > 0 and full[start - 1] in ">}":
+                    occ += 1
+                    continue
+                return "{{", "", tab_new + "}}", occ
         return None
 
     faults: list[str] = []
+    settled: list[str] = []
     for outcome in outcomes:
         found = find_form(tab_text(), outcome)
         if found is None:
             continue
-        head, tab_old, tail = found
+        head, tab_old, tail, occurrence = found
         form = head + tab_old + tail
-        span = _locate_in_tab(docs_service, master_id, tab_id, form)
+        span = _locate_in_tab(docs_service, master_id, tab_id, form,
+                              occurrence)
         if span is None:
             faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
                           "could not be located in the tab")
@@ -3448,12 +3484,13 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                 "textStyle": {}, "fields": "strikethrough,foregroundColor"}})
         docs_service.documents().batchUpdate(
             documentId=master_id, body={"requests": requests}).execute()
-    # Read-back: none of these forms may still be in the tab.
+        settled.append(form)
+    # Read-back: each form we settled must be gone. Matching by old half
+    # alone would false-fault when another producer's form shares it.
     full = tab_text()
-    for outcome in outcomes:
-        if find_form(full, outcome) is not None:
-            faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
-                          "is still in the tab")
+    for form in settled:
+        if form in full:
+            faults.append(f"a form on «{clamp(form)}» is still in the tab")
     if not faults:
         path = bridge.root / file
         local = strip_embed_lines(normalize_markdown(
