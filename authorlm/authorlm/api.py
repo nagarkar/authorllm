@@ -6909,6 +6909,53 @@ def _own_line(text: str, start: int, end: int) -> bool:
             and not text[end:line_end].strip())
 
 
+def _collapse_foreign_replaces(marked: str, replaces: list[dict]) -> str:
+    """Collapse every replace form that is not one of ours to its OLD
+    half, before the shared settle steps run.
+
+    `passes.final_text_from_marked` pairs replace forms to threads by
+    old half alone. When a margin proposal (or another caller) shares
+    that old half — two "gravity"s in one essay — the first form in
+    document order wins, and resolve lands the foreign green into the
+    local file while the caller's own form is left for settle to miss.
+    Claiming ours first (exact new, then same-old closest) and folding
+    every other replace form to old leaves only our forms for the
+    shared matcher."""
+    from . import threads as th
+
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
+    forms = [f for f in th.pending_forms(marked) if f["kind"] == "replace"]
+    claimed: set[tuple[int, int]] = set()
+    paired: set[str] = set()
+    free = list(forms)
+    for t in replaces:
+        hit = next((f for f in free
+                    if f["old"] == t["proposed_old"]
+                    and f["new"] == t["proposed_new"]), None)
+        if hit is not None:
+            free.remove(hit)
+            claimed.add((hit["start"], hit["end"]))
+            paired.add(t["id"])
+    for t in replaces:
+        if t["id"] in paired:
+            continue
+        candidates = [f for f in free if f["old"] == t["proposed_old"]]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda f: difflib.SequenceMatcher(
+            None, flat(t["proposed_new"]), flat(f["new"])).ratio())
+        free.remove(best)
+        claimed.add((best["start"], best["end"]))
+        paired.add(t["id"])
+    edits = [(f["start"], f["end"], f["old"]) for f in forms
+             if (f["start"], f["end"]) not in claimed]
+    for start, end, old in sorted(edits, reverse=True):
+        marked = marked[:start] + old + marked[end:]
+    return marked
+
+
 def _rule_external_marked(marked: str, replaces: list[dict],
                           inserts: list[dict]) -> tuple[str, dict]:
     """The part of an outside caller's resolve that the shared settle
@@ -6926,7 +6973,9 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     Replacements the author turned down by deleting the green half:
     `<<old>>{{}}` and a bare `<<old>>` are put back to `old`, so the
     shared steps read them as the old text restored — a decline — and
-    not as a rewording to nothing, or as stray markers.
+    not as a rewording to nothing, or as stray markers. Foreign replace
+    forms that share an old half are folded to old first
+    (`_collapse_foreign_replaces`).
 
     Returns (marked, {thread id: (verdict, final)}) for the additions
     alone; the replacements are still forms, or plain old text, in the
@@ -6935,6 +6984,8 @@ def _rule_external_marked(marked: str, replaces: list[dict],
 
     def flat(s: str) -> str:
         return " ".join(s.split())
+
+    marked = _collapse_foreign_replaces(marked, replaces)
 
     for t in replaces:
         old = re.escape(t["proposed_old"])
@@ -7160,14 +7211,19 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
 
     # The tab. A rebuild push clears every marker at once, and is held
     # while another producer's forms are still out — rightly, since it
-    # would wipe them. Then, or when the push cannot go (a paragraph
-    # diff that meets a margin proposal), these forms alone come out.
+    # would wipe them. `forms_pending` only sees `written` rows; margin
+    # proposals stay `proposed` while their `<<>>{{}}` forms are live in
+    # the tab, so open margin threads must force the surgical settle too
+    # (a table-bearing tab's push_doc rebuild would wipe them). Then, or
+    # when the push cannot go (a paragraph diff that meets a margin
+    # proposal), these forms alone come out.
     links = gdocs.doc_status(db, manuscript)
     result["url"] = gdocs.tab_url(links.get("_master_id"),
                                   (links.get(rel) or {}).get("tab_id"))
     others = gdocs.forms_pending(db, mid, rel)
+    margin_open = bool(th.open_threads(db, mid, rel))
     pushed = None
-    if not others:
+    if not others and not margin_open:
         try:
             gdocs.push_doc(db, manuscript, rel, service=service,
                            docs_service=docs_service)
@@ -7186,6 +7242,11 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
         result["warnings"].append(
             f"{rel}'s tab still carries {others} forms; they were left "
             f"as they are, and only the {origin} forms were taken out.")
+    elif margin_open:
+        result["warnings"].append(
+            f"{rel}'s tab still carries open margin proposals; they were "
+            f"left as they are, and only the {origin} forms were taken "
+            f"out.")
     if faults:
         result["warnings"].append(
             "the resolve landed locally but the tab still shows some of "

@@ -3900,6 +3900,82 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           not held["written"] and "takes no new ones" in held["failed"][0][1],
           str(held))
 
+    # --- settle must not take another producer's same-old form ----------
+    # A margin proposal and an outside-caller replacement can share an
+    # old half (two "gravity"s). settle_forms_in_tab used to first-match
+    # on <<old>> alone, keep the margin green as if approved, and leave
+    # the caller's form in the tab.
+    same_old_essay = (
+        "# Topic\n\n"
+        "gravity opens the chapter.\n\n"
+        "Later gravity closes it.\n")
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "outside-same-old-ws", essay=same_old_essay)
+    mid = manuscript["id"]
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "gravity", "new": "Gravitas", "anchor_paragraph": 3,
+         "note": "caller"},
+    ], "ytlm", fake, fake)
+    # Margin form on the earlier "gravity", state proposed (forms_pending
+    # is blind to it — the standing margin-thread state).
+    fake.edit("tab-2", "gravity opens", "<<gravity>>{{weight}} opens")
+    margin = _ko("dt")
+    margin.update(
+        manuscript_id=mid, origin_type="author_comment",
+        origin_id="margin-gravity", file="solo.md",
+        anchor_quote="gravity opens the chapter.",
+        proposed_old="gravity", proposed_new="weight",
+        note="margin", state="proposed", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file",
+        scope_ref="solo.md", metadata="{}")
+    db.insert("doc_threads", margin)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    tab = fake.tab_text("solo.md")
+    check("same-old settle: the caller's replacement lands, the margin "
+          "form is untouched (not silently approved)",
+          res["landed"] and res["revisions"][0]["verdict"] == "accepted"
+          and "Later Gravitas closes it." in local
+          and "gravity opens the chapter." in local
+          and "weight" not in local
+          and "<<gravity>>{{weight}}" in tab
+          and "Gravitas" in tab and "<<gravity>>{{Gravitas}}" not in tab
+          and any("open margin proposals" in w for w in res["warnings"]),
+          tab + local + str(res["warnings"]))
+
+    # Insert new-half equal to a replace form's green: settle must not
+    # strip braces out of the replace form.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "outside-insert-in-replace-ws")
+    mid = manuscript["id"]
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "", "new": "The claim", "anchor_paragraph": 6,
+         "note": "add"},
+    ], "ytlm", fake, fake)
+    fake.edit("tab-2", "Beta is to be replaced.",
+              "<<Beta is to be replaced.>>{{The claim}}")
+    foreign_row = _ko("dt")
+    foreign_row.update(
+        manuscript_id=mid, origin_type="critique",
+        origin_id="foreign:replace-claim", file="solo.md",
+        anchor_quote=None, proposed_old="Beta is to be replaced.",
+        proposed_new="The claim", note="theirs", state="written",
+        our_reply_ids="[]", last_author_reply_id=None,
+        scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace", "anchor_paragraph": 3}))
+    db.insert("doc_threads", foreign_row)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("insert settle does not unwrap a replace form whose green "
+          "equals the addition",
+          res["landed"] and "The claim" in (ms / "solo.md").read_text()
+          and "<<Beta is to be replaced.>>{{The claim}}" in tab
+          and "{{The claim}}" not in tab.replace(
+              "<<Beta is to be replaced.>>{{The claim}}", ""),
+          tab + str(res))
+
     # --- a two-sided edit lands nothing ---------------------------------
     db, manuscript, ms, fake = _outside_fixture(root, "outside-conflict-ws")
     api.stage_revisions(db, manuscript, "solo.md", [
