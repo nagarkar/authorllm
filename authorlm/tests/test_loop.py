@@ -179,6 +179,120 @@ def test_semantic_matching(db, ms):
     return first
 
 
+def test_seed_margin_candidate(db, ms):
+    """Margin feedback seeds beliefs only through the scoped distiller.
+
+    Unlike the triage door (parse_distiller), margin NEW replies carry
+    SCOPE + STATEMENT and may omit EXAMPLE; an invalid or missing scope
+    declines rather than writing an unscoped law-shaped belief.
+    """
+    guides = [{"id": "g-nearest", "name": "Nearest Guide"}]
+
+    class OffLLM:
+        enabled = False
+
+        def complete(self, system, user):
+            raise AssertionError("disabled LLM must not be called")
+
+    check("no LLM leaves margin feedback as evidence only",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Too abstract.", "essay.md", guides, None) is None)
+    check("a disabled LLM never seeds from margin feedback",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Too abstract.", "essay.md", guides,
+              OffLLM()) is None)
+
+    llm = ScriptedLLM("NONE")
+    check("NONE declines without seeding",
+          bel.seed_margin_candidate(
+              db, ms["id"], "One-off nit.", "essay.md", guides, llm) is None)
+    check("the margin prompt names file, guide chain, and verbatim feedback",
+          "FILE: essay.md" in llm.prompts[0][1]
+          and "Nearest Guide (g-nearest)" in llm.prompts[0][1]
+          and "AUTHOR FEEDBACK (verbatim): One-off nit." in llm.prompts[0][1]
+          and "none yet" in llm.prompts[0][1],
+          llm.prompts[0][1] if llm.prompts else "")
+
+    llm = ScriptedLLM("SCOPE: chapter\nSTATEMENT: Prefer concrete cases.\n"
+                      "EXAMPLE: the opening paragraph")
+    check("an unknown SCOPE declines (scope is the overreach gate)",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Too abstract.", "essay.md", guides, llm) is None)
+
+    llm = ScriptedLLM("SCOPE: file\nEXAMPLE: the opening paragraph")
+    check("SCOPE without STATEMENT declines",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Too abstract.", "essay.md", guides, llm) is None)
+
+    llm = ScriptedLLM('SCOPE: file\nSTATEMENT: "Keep metaphysics concrete."')
+    seeded = bel.seed_margin_candidate(
+        db, ms["id"], "Too abstract here.", "essay.md", guides, llm)
+    check("SCOPE file + STATEMENT seeds a margin-thread candidate",
+          seeded is not None and seeded["source"] == "margin-thread"
+          and seeded["statement"] == "Keep metaphysics concrete.",
+          str(seeded))
+    meta = loads(db.one(
+        "SELECT metadata FROM editorial_beliefs WHERE id = ?",
+        (seeded["id"],))["metadata"], {}) or {}
+    check("file scope records the file as scope_ref and keeps the "
+          "verbatim explanation; EXAMPLE is optional on this door",
+          meta.get("scope_kind") == "file"
+          and meta.get("scope_ref") == "essay.md"
+          and meta.get("original_explanation") == "Too abstract here."
+          and "example" not in meta,
+          str(meta))
+
+    llm = ScriptedLLM("SCOPE: guide\nSTATEMENT: Open with a lived example.\n"
+                      "EXAMPLE: the first sentence of essay.md")
+    guided = bel.seed_margin_candidate(
+        db, ms["id"], "Needs an example up front.", "essay.md", guides, llm)
+    guided_meta = loads(db.one(
+        "SELECT metadata FROM editorial_beliefs WHERE id = ?",
+        (guided["id"],))["metadata"], {}) or {}
+    check("SCOPE guide pins scope_ref to the nearest guide id and stores "
+          "EXAMPLE when present",
+          guided_meta.get("scope_kind") == "guide"
+          and guided_meta.get("scope_ref") == "g-nearest"
+          and guided_meta.get("example") == "the first sentence of essay.md",
+          str(guided_meta))
+
+    llm = ScriptedLLM("SCOPE: manuscript\nSTATEMENT: Prefer lived examples "
+                      "manuscript-wide.\nEXAMPLE: e")
+    book = bel.seed_margin_candidate(
+        db, ms["id"], "Same issue elsewhere.", "essay.md", guides, llm)
+    book_meta = loads(db.one(
+        "SELECT metadata FROM editorial_beliefs WHERE id = ?",
+        (book["id"],))["metadata"], {}) or {}
+    check("SCOPE manuscript pins scope_ref to the manuscript id",
+          book_meta.get("scope_kind") == "manuscript"
+          and book_meta.get("scope_ref") == ms["id"],
+          str(book_meta))
+
+    llm = ScriptedLLM("SCOPE: guide\nSTATEMENT: Empty-chain fallback rule.\n"
+                      "EXAMPLE: e")
+    fallback = bel.seed_margin_candidate(
+        db, ms["id"], "No nearest guide.", "essay.md", [], llm)
+    fallback_meta = loads(db.one(
+        "SELECT metadata FROM editorial_beliefs WHERE id = ?",
+        (fallback["id"],))["metadata"], {}) or {}
+    check("SCOPE guide with an empty chain falls back to manuscript id",
+          fallback_meta.get("scope_ref") == ms["id"],
+          str(fallback_meta))
+
+    llm = ScriptedLLM("MATCH: B1")
+    matched = bel.seed_margin_candidate(
+        db, ms["id"], "Same idea again.", "other.md", guides, llm)
+    check("MATCH B1 reinforces the first live margin-thread belief",
+          matched is not None and matched["id"] == seeded["id"]
+          and matched["supporting"] == 2,
+          str(matched))
+
+    llm = ScriptedLLM("MATCH: B99")
+    check("MATCH on an unknown label declines",
+          bel.seed_margin_candidate(
+              db, ms["id"], "Unknown match.", "essay.md", guides, llm) is None)
+
+
 def test_episode_analysis_validates_from_pure_machine_inference(db, ms):
     """T1 (risk-register INV-2, Sponsor-ratified 2026-08-25: "INV-2 is
     correct"): three independently closed episodes, each machine-analyzed
@@ -858,6 +972,8 @@ def main_test():
     test_thresholds()
     print("semantic matching")
     test_semantic_matching(db, ms)
+    print("margin-thread seed door")
+    test_seed_margin_candidate(db, ms)
     print("episode analysis (pure machine inference) — INV-2 (a)")
     test_episode_analysis_validates_from_pure_machine_inference(db, ms)
     print("INV-2 (b) cross-session author evidence validates")

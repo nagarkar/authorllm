@@ -3729,12 +3729,23 @@ DOC_SPACING = {"line_spacing": 115, "space_above": 0, "space_below": 6}
 
 
 def doc_spacing(manuscript: dict) -> dict:
-    """[gdocs.spacing] in _exports/settings.toml overrides DOC_SPACING."""
-    from .export import load_settings
+    """[gdocs.spacing] in _exports/settings.toml overrides DOC_SPACING.
+
+    Reads the TOML file directly. `export.load_settings` only keeps flat
+    export keys, so routing the nested table through it dropped the
+    override — every Doc heal silently used DOC_SPACING even when the
+    author had declared otherwise.
+    """
+    import tomllib
+    from .export import EXPORT_DIR
 
     spacing = dict(DOC_SPACING)
-    spacing.update((load_settings(manuscript).get("gdocs") or {})
-                   .get("spacing") or {})
+    path = Path(manuscript["path"]) / EXPORT_DIR / "settings.toml"
+    if path.exists():
+        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+        nesting = (loaded.get("gdocs") or {}).get("spacing") or {}
+        if isinstance(nesting, dict):
+            spacing.update(nesting)
     return spacing
 
 
