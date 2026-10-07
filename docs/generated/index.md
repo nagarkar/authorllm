@@ -608,6 +608,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_parse_distiller`
+
+`authorlm/tests/test_parse_distiller.py`
+
+`beliefs.parse_distiller` + `belief_labels` — the grammar that turns a distiller reply into a seed / match / decline.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`

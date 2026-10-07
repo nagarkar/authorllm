@@ -764,6 +764,43 @@ def test_screen_and_folds(db, ms, target):
     return fresh, law[0]
 
 
+def test_folded_edge_contradicts(db, ms, target, law_entry):
+    """`edge` on a screen-folded proposal still reaches past the cut.
+
+    For note_update, demote_to_edge returns an error string (alias-only),
+    but `_contradict_folding_belief` still runs for any non-dismiss action.
+    A regression that skipped contradict on that error path would leave a
+    wrong cutting belief unfalsifiable while the author thought they had
+    overruled it."""
+    spec = loop.spec_for("proposals/note_update")
+    to_edge = prop.create(db, ms["id"], "note_update", target, note_payload(
+        "A phrasing the screen will fold so edge can overrule the cut."))
+    rows = [r for r in prop.open_proposals(db, ms["id"])
+            if r["kind"] == "note_update"]
+    idx = next(n for n, r in enumerate(rows, 1) if r["id"] == to_edge["id"])
+    cutter = ScriptedLLM(json.dumps({"cut": [
+        {"n": idx, "law": law_entry["id"],
+         "reason": "describes role, not being"}]}))
+    check("a cut folds a proposal for the edge check",
+          len(loop.screen(db, ms["id"], spec, rows, cutter)) == 1)
+    before = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                    (law_entry["id"],))
+    result = api.resolve_proposal(db, ms, to_edge["id"], "edge")
+    after = db.one("SELECT * FROM editorial_beliefs WHERE id = ?",
+                   (law_entry["id"],))
+    check("edge on a folded note_update still reports folded",
+          result.get("folded") is True, str(result))
+    check("…even though demote_to_edge refuses non-alias kinds",
+          "error" in str(result.get("message", "")).lower(), str(result))
+    check("edge still contradicts the folding belief "
+          "(the demote error must not skip the retract path)",
+          result.get("contradicted", {}).get("belief") == law_entry["id"],
+          str(result))
+    check("contradiction is recorded on the belief",
+          after["contradicting"] == before["contradicting"] + 1)
+    check("confidence falls", after["confidence"] < before["confidence"])
+
+
 def test_retraction(db, ms, folded_proposal, law_entry):
     """Adopting what the screen cut is the only event that can contradict a
     belief which is actively cutting."""
@@ -885,6 +922,8 @@ def main_test():
     test_proposals_triage_type(db, ms, target)
     print("cli parity")
     test_cli_parity()
+    print("folded edge still contradicts")
+    test_folded_edge_contradicts(db, ms, target, law_entry)
     print("retraction")
     test_retraction(db, ms, folded_proposal, law_entry)
     print(f"\nall checks passed ({PASSED})")
