@@ -542,6 +542,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 Regression (#152): Doc-road escapes the pull left in local files.
 
+## `tests.test_doc_spacing`
+
+`authorlm/tests/test_doc_spacing.py`
+
+Doc tab spacing: [gdocs.spacing] in _exports/settings.toml.
+
 ## `tests.test_e2e`
 
 `authorlm/tests/test_e2e.py`
