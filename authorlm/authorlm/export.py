@@ -379,10 +379,43 @@ def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _toml_scalar(value) -> str:
+    """Serialize one TOML scalar. Nested tables use `_append_toml_table`."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return f'"{_toml_escape(value)}"'
+    raise TypeError(
+        f"export settings support str/int/float/bool, not {type(value).__name__}")
+
+
+def _append_toml_table(lines: list[str], prefix: list[str],
+                       table: dict) -> None:
+    """Append `[a.b]` + scalar rows, then recurse into nested tables.
+
+    Author-edited blocks such as `[gdocs.spacing]` ride here so
+    `set_setting` never flattens them away."""
+    scalars = [(k, v) for k, v in table.items() if not isinstance(v, dict)]
+    nested = [(k, v) for k, v in table.items() if isinstance(v, dict)]
+    if scalars:
+        lines.append("")
+        lines.append("[" + ".".join(prefix) + "]")
+        for key, value in scalars:
+            lines.append(f"{key} = {_toml_scalar(value)}")
+    for key, value in nested:
+        _append_toml_table(lines, prefix + [key], value)
+
+
 def load_settings(manuscript: dict) -> dict:
     """Per-manuscript export settings: _exports/settings.toml over
     defaults. Deterministic tooling — the file is the state, and the
-    author may edit it directly."""
+    author may edit it directly. Known flat keys stay string-typed for
+    export; nested tables (e.g. `[gdocs.spacing]`) pass through so Doc
+    layout overrides and other hand-edits survive `set_setting`."""
     import tomllib
 
     settings = dict(_SETTINGS_DEFAULTS)
@@ -390,8 +423,7 @@ def load_settings(manuscript: dict) -> dict:
     if path.exists():
         loaded = tomllib.loads(path.read_text(encoding="utf-8"))
         for key, value in loaded.items():
-            if key in settings:
-                settings[key] = value
+            settings[key] = value
     return settings
 
 
@@ -409,7 +441,14 @@ def set_setting(manuscript: dict, key: str, value: str) -> dict:
     lines = ["# AuthorLM export settings — 'authorlm export set <key> "
              "<value>', or edit directly."]
     for name in _SETTINGS_DEFAULTS:
-        lines.append(f'{name} = "{_toml_escape(settings[name])}"')
+        lines.append(f'{name} = "{_toml_escape(str(settings[name]))}"')
+    for name, extra in settings.items():
+        if name in _SETTINGS_DEFAULTS:
+            continue
+        if isinstance(extra, dict):
+            _append_toml_table(lines, [name], extra)
+        else:
+            lines.append(f"{name} = {_toml_scalar(extra)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return settings
 

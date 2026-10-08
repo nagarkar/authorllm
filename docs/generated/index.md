@@ -548,6 +548,12 @@ Regression (#152): Doc-road escapes the pull left in local files.
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_export_settings`
+
+`authorlm/tests/test_export_settings.py`
+
+`export.load_settings` / `set_setting` own `_exports/settings.toml`.
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
@@ -589,6 +595,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_manuscript_metadata`
+
+`authorlm/tests/test_manuscript_metadata.py`
+
+Manuscript identity parsers for catalog / audiobook / export doors.
 
 ## `tests.test_morph_targets`
 
@@ -637,6 +649,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
+
+## `tests.test_style_aspect_firewall`
+
+`authorlm/tests/test_style_aspect_firewall.py`
+
+Figure / illustration / illustration-placement must never cross prompts.
 
 ## `tests.test_summaries`
 
