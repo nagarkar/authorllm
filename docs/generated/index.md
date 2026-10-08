@@ -632,6 +632,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_selection_slug_nested`
+
+`authorlm/tests/test_selection_slug_nested.py`
+
+Nested-path part-builds must not share an `_exports` filename tag.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
