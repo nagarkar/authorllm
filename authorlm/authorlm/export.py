@@ -554,22 +554,36 @@ def check_manuscript(manuscript: dict) -> list[str]:
     return problems
 
 
+def _selection_token(name: str) -> str:
+    """One chapter's contribution to a part-build filename tag.
+
+    Flat files keep `Path.stem` so existing short slugs stay readable.
+    Nested paths include every parent directory (`part2/intro.md` →
+    `part2--intro`) so two chapters that share a basename cannot land
+    on the same `_exports/<title> - <slug>.*` path across independent
+    part-builds."""
+    path = Path(name)
+    if len(path.parts) == 1:
+        return path.stem
+    return "--".join((*path.parts[:-1], path.stem))
+
+
 def selection_slug(order: list[str]) -> str:
-    """Filename tag for a chapter selection — stems joined so a part-build
+    """Filename tag for a chapter selection — tokens joined so a part-build
     never overwrites the whole-book artifacts or another part-build.
 
     Short selections stay fully readable. When the join would exceed the
     filename budget, keep a readable head and append a content digest so
-    distinct selections (same first three stems, or long stems truncated
+    distinct selections (same first three tokens, or long tokens truncated
     to the same prefix) cannot collide."""
-    stems = [Path(name).stem for name in order]
-    full = "+".join(stems)
+    tokens = [_selection_token(name) for name in order]
+    full = "+".join(tokens)
     if len(full) <= 60:
         return full
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:8]
-    suffix = f"+more-{digest}" if len(stems) > 3 else f"-{digest}"
+    suffix = f"+more-{digest}" if len(tokens) > 3 else f"-{digest}"
     budget = 60 - len(suffix)
-    head = ("+".join(stems[:3]) if len(stems) > 3 else full)[:budget]
+    head = ("+".join(tokens[:3]) if len(tokens) > 3 else full)[:budget]
     return head.rstrip("+") + suffix
 
 
