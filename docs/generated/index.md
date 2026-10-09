@@ -638,6 +638,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
 
+## `tests.test_staging_window_ordinals`
+
+`authorlm/tests/test_staging_window_ordinals.py`
+
+Multi-window filter staging must not reuse 1..k ordinals.
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
