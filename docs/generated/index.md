@@ -548,11 +548,23 @@ Regression (#152): Doc-road escapes the pull left in local files.
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_effective_style`
+
+`authorlm/tests/test_effective_style.py`
+
+`styles.effective_style` (and `guide_chain`) compose ratified law into drafting prompts with no model in the loop. Wrong override / retire / chain math injects or drops binding law.
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
+
+## `tests.test_filtered_prefix`
+
+`authorlm/tests/test_filtered_prefix.py`
+
+`filtering.filtered_prefix` is the autoregressive conditioning block for sequential filter runs: later windows must see THIS RUN's rewrites of earlier units, not the original manuscript text.
 
 ## `tests.test_findings_edit_entry`
 
@@ -608,6 +620,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_parse_prelude`
+
+`authorlm/tests/test_parse_prelude.py`
+
+`filtering.parse_prelude` freezes the motif registry for a global filter run. Every later unit is judged against that opaque string.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`
@@ -649,6 +667,12 @@ Essay summaries (critique-pass design §4): reading order, autoregressive condit
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_writing_parse_reply`
+
+`authorlm/tests/test_writing_parse_reply.py`
+
+`writing.parse_reply` is the beat-draft door. It accepts exactly two shapes: ordered WHY / SELF-CHECK / DRAFT, or a leading BLOCKED (optional QUESTION). Mis-ordered labels and a reply in neither shape must refuse; a bare BLOCKED line AFTER DRAFT must stay manuscript prose.
 
 ## `tools.bootstrap_beliefs`
 
