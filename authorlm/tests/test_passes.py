@@ -3982,6 +3982,39 @@ def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
                    "names itself")
           and _refuses(lambda: api.set_caller_metadata(
               db, manuscript, "", {"a": 1}), "names itself"))
+    # Reserved top-level metadata keys must never be an origin: the
+    # legacy top-level→callers migration pops that key, which deleted
+    # the Doc mapping / extraction switch / clients stamp / callers bag.
+    gdocs_before = row_meta()["gdocs"]
+    extraction_before = row_meta()["extraction"]
+    check("origin 'gdocs' is refused and the Doc mapping stays put",
+          _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "gdocs", {"voice": "x"}), "reserved")
+          and _refuses(lambda: api.caller_metadata(db, manuscript, "gdocs"),
+                       "reserved")
+          and row_meta()["gdocs"] == gdocs_before
+          and gdocs.doc_status(db, manuscript).get("_master_id")
+          == "doc-fake", str(row_meta()))
+    check("origin 'extraction' / 'callers' / 'clients' are refused too",
+          _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "extraction", {"evil": True}), "reserved")
+          and _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "callers", {"pwn": True}), "reserved")
+          and _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "clients", {"x": 1}), "reserved")
+          and row_meta()["extraction"] == extraction_before
+          and "ytlm" in row_meta()["callers"], str(row_meta()))
+    check("stage/resolve/withdraw refuse a reserved origin the same way",
+          _refuses(lambda: api.stage_revisions(
+              db, manuscript, "solo.md", [], "gdocs", fake, fake),
+                   "reserved")
+          and _refuses(lambda: api.resolve_revisions(
+              db, manuscript, "solo.md", "extraction", fake, fake),
+                       "reserved")
+          and _refuses(lambda: api.withdraw_revisions(
+              db, manuscript, "solo.md", "callers"), "reserved")
+          and _refuses(lambda: api.outstanding_revisions(
+              db, manuscript, "clients"), "reserved"))
 
     # --- outstanding and withdraw ---------------------------------------
     staged = api.stage_revisions(db, manuscript, "solo.md", [

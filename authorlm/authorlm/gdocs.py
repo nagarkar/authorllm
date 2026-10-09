@@ -2433,6 +2433,17 @@ def reconcile(db: Database, manuscript: dict, service,
                     dirty = True
                 report["in_sync"].append(relpath)
             elif base and local_hash == base:
+                # Same zero-rows guard as pull_doc (§15.22 §2.6). Session
+                # start reconcile used to auto-pull here whenever local
+                # still matched the base — so a Docs export that mangled
+                # pronunciations.md into bullets wiped the dictionary on
+                # every shell open, with no --force flag and no pull_doc
+                # in the path. Refuse by name; leave local and the base
+                # untouched so the next start keeps shouting.
+                if _sidecar_would_be_emptied(relpath, doc_text, local_raw):
+                    report.setdefault("sidecar_unparsable", []).append(
+                        relpath)
+                    continue
                 path.write_text(reembed(doc_text, Path(manuscript["path"]),
                                         capture_embeds(local_raw)),
                                 encoding="utf-8")
