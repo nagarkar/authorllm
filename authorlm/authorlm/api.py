@@ -6717,9 +6717,7 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
     from . import threads as th
     from .revisions import _paragraphs
 
-    origin = (origin or "").strip()
-    if not origin:
-        raise ValueError("an outside caller names itself: origin is empty")
+    origin = _caller_name(origin)
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
     path = Path(manuscript["path"]) / rel
@@ -7025,7 +7023,7 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     from . import gdocs
     from . import threads as th
 
-    origin = (origin or "").strip()
+    origin = _caller_name(origin)
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
     written = _external_threads(db, mid, rel, origin)
@@ -7207,12 +7205,25 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
 # --------------------------------------------------------------------
 
 CALLERS_KEY = "callers"
+# Top-level keys of `manuscripts.metadata` that AuthorLM itself owns.
+# An outside caller's `origin` must not collide with them: the legacy
+# migration in `set_caller_metadata` pops a same-named top-level dict
+# into `callers.<origin>`, which would delete the Doc mapping
+# (`gdocs`), the extraction switch, the clients stamp, or the whole
+# `callers` bag.
+_RESERVED_METADATA_KEYS = frozenset({
+    CALLERS_KEY, "gdocs", "extraction", "clients",
+})
 
 
 def _caller_name(origin: str) -> str:
     origin = (origin or "").strip()
     if not origin:
         raise ValueError("an outside caller names itself: origin is empty")
+    if origin in _RESERVED_METADATA_KEYS:
+        raise ValueError(
+            f"origin {origin!r} is reserved for AuthorLM's own manuscript "
+            f"metadata — pick another name")
     return origin
 
 
@@ -7230,7 +7241,9 @@ def caller_metadata(db: Database, manuscript: dict, origin: str) -> dict:
     the Doc mapping and the extraction switch, and are read from the row,
     never from the caller's dict (those neighbours rewrite the column).
     A caller that wrote them at the top level under its own name before
-    this door existed reads them back here too."""
+    this door existed reads them back here too — but never a reserved
+    AuthorLM key (`gdocs`, `extraction`, …), which is not a legacy
+    caller bag."""
     origin = _caller_name(origin)
     meta = _metadata_row(db, manuscript)
     own = (meta.get(CALLERS_KEY) or {}).get(origin)
@@ -7244,7 +7257,9 @@ def set_caller_metadata(db: Database, manuscript: dict, origin: str,
     """Merge `values` into `origin`'s settings on this manuscript, key by
     key, and return the merged settings. Nothing else in the column is
     touched; settings found at the top level (see `caller_metadata`) are
-    moved under `callers` by this first write."""
+    moved under `callers` by this first write. A reserved AuthorLM key
+    as `origin` is refused — that pop would delete the Doc mapping or
+    the extraction switch."""
     origin = _caller_name(origin)
     own = caller_metadata(db, manuscript, origin)
     own.update(values or {})
