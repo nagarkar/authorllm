@@ -100,7 +100,7 @@ def test_adopt_revival_preserves_notes_when_proposal_omits_them() -> None:
         check("revival proposal created", row is not None)
 
         prop.adopt(db, mid, dict(row))
-        node = db.one("SELECT notes, status FROM concept_nodes WHERE id = ?",
+        node = db.one("SELECT * FROM concept_nodes WHERE id = ?",
                       (gravity["id"],))
         check("concept is live again", node["status"] == "declared",
               node["status"])
