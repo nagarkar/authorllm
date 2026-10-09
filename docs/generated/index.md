@@ -632,6 +632,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_proposal_revival_edges`
+
+`authorlm/tests/test_proposal_revival_edges.py`
+
+proposal adopt on a concept revival must restore collateral edges.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
