@@ -636,7 +636,7 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 `authorlm/tests/test_proposal_revival_edges.py`
 
-proposal adopt on a concept revival must restore collateral edges.
+proposal adopt on a concept revival: collateral edges + standing notes.
 
 ## `tests.test_setup_web_build`
 
