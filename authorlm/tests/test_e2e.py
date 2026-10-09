@@ -6041,11 +6041,11 @@ def scenario_filter(root: Path) -> None:
               "the source unit — read from the file, never from the reply",
               [r["proposed_old"] for r in rows] == [units[1], units[3]],
               [r["proposed_old"][:40] for r in rows])
-        check("F22 and its origin_id is the shared {owner}:{file}:{ordinal}"
-              " shape",
+        check("F22 and its origin_id is the shared {owner}:{file}:{unit}"
+              " shape (unit number, not a 1..k reply ordinal)",
               [r["origin_id"] for r in rows]
-              == [f"{run_row['id']}:02-wall.md:1",
-                  f"{run_row['id']}:02-wall.md:2"],
+              == [f"{run_row['id']}:02-wall.md:2",
+                  f"{run_row['id']}:02-wall.md:4"],
               [r["origin_id"] for r in rows])
         from authorlm import passes as _passes
         check("F23 passes.staged_threads with the DEFAULT origin_type "
@@ -6079,7 +6079,7 @@ def scenario_filter(root: Path) -> None:
             "ORDER BY origin_id", (mid,))]
         check("re-recording a window with FEWER proposals SUPERSEDES the "
               "ones it dropped: the reply is the authoritative answer for "
-              "its window, so an ordinal it did not reach is a proposal "
+              "its window, so a unit it did not reach is a proposal "
               "that no longer exists. Left standing, the stale row would "
               "appear in the next `filter edits` list under a number the "
               "author reads as current, and could be accepted into a "

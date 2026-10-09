@@ -5069,7 +5069,8 @@ def filter_record(db: Database, manuscript: dict, config: dict,
                                (window[0], window[1]), run["class"])
     staged = staging.stage_edits(db, mid, run["id"], rel, text,
                                  result["edits"],
-                                 origin_type=FILTER_ORIGIN)
+                                 origin_type=FILTER_ORIGIN,
+                                 window=(window[0], window[1]))
     changes = {"cursor": max(run["cursor"], window[1])}
     if result["state"] is not None:
         changes["state"] = result["state"]
