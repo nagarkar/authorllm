@@ -266,7 +266,7 @@ def store_findings(db: Database, manuscript: dict, session: dict, *,
     edits = []
     if entries:
         # The owner is the BATCH, not the producer: stage_edits keys
-        # threads by owner:file:ordinal and replaces in place on a
+        # threads by owner:file:{unit} and replaces in place on a
         # re-run, which for a shared producer name would overwrite
         # forms already out in the tab.
         staged = staging.stage_edits(
