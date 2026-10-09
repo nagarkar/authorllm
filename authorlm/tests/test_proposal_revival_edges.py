@@ -86,6 +86,45 @@ def test_adopt_revival_restores_collateral_edges() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_adopt_revival_preserves_notes_when_proposal_omits_them() -> None:
+    root, db, mid = _fixture()
+    try:
+        standing = "the pull of mass toward mass"
+        gravity = cg.add_concept(db, mid, "Gravity", notes=standing)
+        cg.retire_concept(db, mid, dict(gravity))
+
+        # Extraction often raises revival with notes=None / omitted.
+        row = prop.create(db, mid, "revival", gravity["id"], {
+            "name": "Gravity", "kind": "concept", "notes": None,
+        })
+        check("revival proposal created", row is not None)
+
+        prop.adopt(db, mid, dict(row))
+        node = db.one("SELECT notes, status FROM concept_nodes WHERE id = ?",
+                      (gravity["id"],))
+        check("concept is live again", node["status"] == "declared",
+              node["status"])
+        check("author notes survive a notes-less revival accept",
+              node["notes"] == standing, node["notes"])
+
+        # A proposal that DOES carry notes still overlays them.
+        cg.retire_concept(db, mid, dict(node))
+        row2 = prop.create(db, mid, "revival", gravity["id"], {
+            "name": "Gravity", "kind": "concept",
+            "notes": "returns with a sharper gloss",
+        })
+        prop.adopt(db, mid, dict(row2))
+        node2 = db.one("SELECT notes FROM concept_nodes WHERE id = ?",
+                       (gravity["id"],))
+        check("proposal notes win when present",
+              node2["notes"] == "returns with a sharper gloss",
+              node2["notes"])
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_adopt_revival_restores_collateral_edges()
+    test_adopt_revival_preserves_notes_when_proposal_omits_them()
     print("all ok")
