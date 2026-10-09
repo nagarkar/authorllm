@@ -7616,6 +7616,34 @@ def scenario_pronunciation_bridge(root: Path) -> None:
           report.get("sidecar_unparsable") == [_pron.FILENAME]
           and (ms / _pron.FILENAME).read_bytes() == frozen, report)
 
+    # Session-start reconcile walks the same auto-pull road without
+    # going through pull_doc. Restore a healthy dictionary whose
+    # pushed_hash matches local (the "only the tab changed" case), then
+    # feed the same mangled export: without the guard, every shell open
+    # would wipe the file and collect the empty result into history.
+    import hashlib as _hashlib
+    write(ms / _pron.FILENAME, PRON_SEED_ROWS)
+    frozen = (ms / _pron.FILENAME).read_bytes()
+    meta = _gd._mapping(db, manuscript)
+    for rel, raw in (("01-open.md", (ms / "01-open.md").read_text()),
+                     ("02-next.md", (ms / "02-next.md").read_text()),
+                     (_pron.FILENAME, PRON_SEED_ROWS)):
+        norm = _gd.strip_embed_lines(_gd.normalize_markdown(raw))
+        meta["gdocs"][rel]["pushed_hash"] = (
+            _hashlib.sha256(norm.encode()).hexdigest()[:16])
+        meta["gdocs"][rel]["checked_out"] = False
+    _gd._save_mapping(db, manuscript, meta)
+    report = _gd.reconcile(
+        db, manuscript,
+        _PronDriveService(export_of({**live, _pron.FILENAME: mangled})),
+        docs_service=docs)
+    check("E5 session-start reconcile uses the same zero-rows guard — "
+          "a mangled dictionary tab is NOT auto-pulled over a healthy "
+          "local file that still matches the base",
+          report.get("sidecar_unparsable") == [_pron.FILENAME]
+          and _pron.FILENAME not in report.get("pulled", [])
+          and (ms / _pron.FILENAME).read_bytes() == frozen, report)
+
     # FEWER rows is the author deleting a row in the Doc, which is
     # legitimate and must work.
     shorter = ("# Pronunciations\n\nHow the terms in this book are said "
