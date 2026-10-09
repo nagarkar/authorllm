@@ -317,7 +317,23 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         db.update("concept_nodes", row["target"], changes)
         message = f"Updated '{payload['name']}' with the proposed definition."
     elif kind == "revival":
+        # Must go through revive_concept: retire_concept stamps collateral
+        # edges with retired_from.by_node, and only revive_concept restores
+        # them. A bare status flip left those edges retired forever while
+        # the concept looked live again — silent graph loss on the ordinary
+        # extraction→proposal-accept path (CLI `concept revive` was fine).
+        from .concepts import revive_concept
+
         node = db.one("SELECT * FROM concept_nodes WHERE id = ?", (row["target"],))
+        if not node:
+            db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
+            return ("error: the concept no longer exists — nothing revived.")
+        edges_revived = 0
+        if node["status"] == "retired":
+            edges_revived = revive_concept(
+                db, manuscript_id, dict(node))["edges_revived"]
+            node = db.one("SELECT * FROM concept_nodes WHERE id = ?",
+                          (row["target"],))
         meta = loads(node["metadata"], {}) if node else {}
         meta.update(origin="extracted", confirmed=True)  # adoption is confirmation
         db.update(
@@ -328,8 +344,9 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
                 "metadata": json.dumps(meta),
             },
         )
-        message = (f"Revived '{payload['name']}' — it will realize against the "
-                   "text on the next collect.")
+        message = (f"Revived '{payload['name']}'"
+                   f" ({edges_revived} edge(s) restored) — it will realize "
+                   "against the text on the next collect.")
     elif kind == "edge_reproposal":
         db.update("concept_edges", row["target"], {"status": "declared"})
         message = (f"Relationship restored as declared: {payload['from_name']} "
