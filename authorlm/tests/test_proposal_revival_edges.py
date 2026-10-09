@@ -1,11 +1,14 @@
-"""proposal adopt on a concept revival must restore collateral edges.
+"""proposal adopt on a concept revival: collateral edges + standing notes.
 
 `retire_concept` retires every live edge touching the node and stamps
 `retired_from.by_node`. CLI `concept revive` calls `revive_concept`, which
-restores exactly those edges. `proposals.adopt` for kind `revival` used to
-flip the node to `declared` without that call, so accepting an extraction
-revival silently left the neighborhood retired while the concept looked
-live again.
+restores exactly those edges and leaves notes alone. `proposals.adopt`
+for kind `revival` used to (a) flip the node to `declared` without that
+call, so accepting an extraction revival left the neighborhood retired
+while the concept looked live again, and (b) write
+`notes: payload.get("notes")` unconditionally, so a revival proposal
+that omitted notes (extraction's common case) wiped the author's
+standing definition on accept.
 """
 
 from __future__ import annotations

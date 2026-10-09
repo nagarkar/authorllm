@@ -336,14 +336,19 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
                           (row["target"],))
         meta = loads(node["metadata"], {}) if node else {}
         meta.update(origin="extracted", confirmed=True)  # adoption is confirmation
-        db.update(
-            "concept_nodes", row["target"],
-            {
-                "status": "declared", "kind": payload.get("kind", "concept"),
-                "notes": payload.get("notes"), "introduced_in": None,
-                "metadata": json.dumps(meta),
-            },
-        )
+        # Overlay only the fields revival must reset. Unconditional
+        # `notes: payload.get("notes")` wrote NULL whenever extraction
+        # omitted notes (the common case), wiping the author's standing
+        # definition on accept while the concept looked revived. CLI
+        # `concept revive` never touched notes; match that, and only
+        # replace notes when the proposal actually carries some.
+        changes = {
+            "status": "declared", "kind": payload.get("kind", "concept"),
+            "introduced_in": None, "metadata": json.dumps(meta),
+        }
+        if payload.get("notes"):
+            changes["notes"] = payload["notes"]
+        db.update("concept_nodes", row["target"], changes)
         message = (f"Revived '{payload['name']}'"
                    f" ({edges_revived} edge(s) restored) — it will realize "
                    "against the text on the next collect.")
