@@ -548,6 +548,12 @@ Regression (#152): Doc-road escapes the pull left in local files.
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_export_escapes`
+
+`authorlm/tests/test_export_escapes.py`
+
+PDF running heads and settings.toml round-trips depend on two tiny escapers in `export.py`. Neither had a direct test: a title with `%` or `_` would break LaTeX mid-build, and a setting value with `"` or `\` would corrupt `_exports/settings.toml` on the next `export set`.
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
@@ -631,6 +637,18 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 `authorlm/tests/test_pdf2md_text_layer_gate.py`
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
+
+## `tests.test_peel_embed_suffix`
+
+`authorlm/tests/test_peel_embed_suffix.py`
+
+`revisions.peel_embed_suffix` keeps illustration settle from raising false "text drifted" when an embed line is glued under its `[Illustration: …]` tag.
+
+## `tests.test_refuse_sidecar`
+
+`authorlm/tests/test_refuse_sidecar.py`
+
+`structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md` and `manifest.md`.
 
 ## `tests.test_setup_web_build`
 
