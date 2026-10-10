@@ -1210,6 +1210,12 @@ def split_tabbed_export(text: str, known_files,
 
 # ---------------------------------------------------------------- mapping
 
+# Doc-bridge blobs under manuscripts.metadata. Sibling keys (extraction
+# switch, callers bag, last_extracted_version, clients, …) are owned by
+# other writers and must survive a long-held push/pull save.
+_BRIDGE_META_KEYS = ("gdocs", "gdocs_workspace")
+
+
 def _mapping(db: Database, manuscript: dict) -> dict:
     return loads(
         db.one("SELECT metadata FROM manuscripts WHERE id = ?",
@@ -1218,7 +1224,20 @@ def _mapping(db: Database, manuscript: dict) -> dict:
 
 
 def _save_mapping(db: Database, manuscript: dict, meta: dict) -> None:
-    db.update("manuscripts", manuscript["id"], {"metadata": json.dumps(meta)})
+    """Persist Doc-bridge mapping changes without clobbering sibling keys.
+
+    Callers hold `meta` across network I/O (`_rewrite_tab`, Drive export,
+    tab moves). Re-read the row and overlay only the bridge blobs present
+    in `meta`, so a concurrent `set_manuscript_extraction` (or callers /
+    watermark write) is not silently dropped when the held snapshot is
+    written back."""
+    current = _mapping(db, manuscript)
+    for key in _BRIDGE_META_KEYS:
+        if key in meta:
+            current[key] = meta[key]
+    encoded = json.dumps(current)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
 
 
 def doc_status(db: Database, manuscript: dict) -> dict:
