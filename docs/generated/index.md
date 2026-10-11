@@ -530,11 +530,23 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_concept_mention_patterns`
+
+`authorlm/tests/test_concept_mention_patterns.py`
+
+Realization vs first-mention firewall (`concept_pattern` / `mention_pattern`).
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
 
 Critique-pass tests (docs/critique-pass-design.md).
+
+## `tests.test_doc_filename`
+
+`authorlm/tests/test_doc_filename.py`
+
+`docs.doc_filename` is the only sanitizer `add_doc` uses for new chapter paths. Unsafe characters become hyphens, whitespace collapses, empty names refuse, and a missing extension becomes `.md`. Existing suites only call `add_doc` with already-safe names, so a regression here would land files with `/` or `#` in the path (or accept a blank title).
 
 ## `tests.test_doc_road_escapes`
 
@@ -578,6 +590,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_iter_manuscript_paths`
+
+`authorlm/tests/test_iter_manuscript_paths.py`
+
+`revisions.iter_manuscript_paths` is the observation visibility gate.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
@@ -620,6 +638,12 @@ The critique pass (design §5–§7): preflight gate, context package, output co
 
 The critique editor's output contract holds against wrong SHAPES, not only wrong values: a list element that is not a JSON object, or an `insertions`/`suggestions` field that is not a list, is a ContractError (so run_editor retries with the violation named), never an AttributeError that aborts the run.
 
+## `tests.test_paths_env`
+
+`authorlm/tests/test_paths_env.py`
+
+.env parse and rewrite (`paths.load_env` / `paths.set_env_value`).
+
 ## `tests.test_pdf2md_furniture`
 
 `authorlm/tests/test_pdf2md_furniture.py`
@@ -643,6 +667,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_summaries.py`
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_threads_reply_unstrike`
+
+`authorlm/tests/test_threads_reply_unstrike.py`
+
+Margin-thread reply law and Doc-export strike peel.
 
 ## `tests.test_triage_app`
 
