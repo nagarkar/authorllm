@@ -3100,10 +3100,12 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     return requests
 
 
-def pending_write_order(threads: list[dict]) -> list[dict]:
+def pending_write_order(threads: list[dict],
+                        paragraphs: list[str] | None = None) -> list[dict]:
     """Surgical-write order for a producer's accepted threads: higher
     anchors first (so earlier indices stay valid); at the same
-    anchor, inserts BEFORE replaces.
+    anchor, inserts BEFORE replaces; and among replaces in one
+    paragraph, later character offsets first.
 
     Replacing paragraph n wraps it as <<old>>{{new}}. An insert after
     n then locates the pristine paragraph text via substring search —
@@ -3111,14 +3113,36 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
     `old` and `>>`, corrupting the pending grammar. Inserts must land
     first while the anchor text is still verbatim.
 
+    The same hazard hits two replaces in one paragraph when an
+    earlier-written form's `new` contains a later form's `old`:
+    `_locate_in_tab` finds the copy inside the green half (occurrence
+    still 0 from the pristine paragraph) and nests `<<>>{{}}` inside
+    `{{}}`. Outside callers stage substring replaces in one paragraph
+    in one batch (`api.stage_revisions`); writing later offsets first
+    keeps every remaining `old` ahead of every already-wrapped green.
+    `paragraphs` is the local blank-line list the writer reads; omitted,
+    same-anchor replaces keep input order (filter/critique stage one
+    whole paragraph per unit).
+
     The descending order is also half of the twins invariant: see
     `_occurrence`, which is correct only because of it."""
     def anchor_of(t):
         return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
 
+    def pos_in_para(t):
+        old = t.get("proposed_old") or ""
+        if not paragraphs or not old:
+            return 0
+        n = anchor_of(t)
+        if not 1 <= n <= len(paragraphs):
+            return 0
+        return paragraphs[n - 1].find(old)
+
     return sorted(
         threads,
-        key=lambda t: (-anchor_of(t), 0 if t["proposed_old"] == "" else 1),
+        key=lambda t: (-anchor_of(t),
+                       0 if t["proposed_old"] == "" else 1,
+                       -pos_in_para(t)),
     )
 
 
@@ -3203,7 +3227,7 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     # and `filter push` sends the untriaged proposals too, because on
     # the Doc road the tab IS the review surface. A state filter in here
     # would silently drop half of one producer's push.
-    ordered = pending_write_order(threads)
+    ordered = pending_write_order(threads, paragraphs)
     written, failed = [], []
     tab_old_of: dict[str, str] = {}     # thread id → the old text AS THE TAB HOLDS IT
     for t in ordered:

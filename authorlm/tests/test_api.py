@@ -6637,6 +6637,28 @@ def check_stage_revisions(root: Path, FakeGoogle) -> None:
               db, manuscript, "mixed.md", [], "  ", stub, stub),
               "names itself"))
 
+    # Same-paragraph substring replaces: an earlier revision's `new`
+    # contains a later revision's `old`. Writing left-to-right planted
+    # the second form inside the first green half (`{{<<mat>>{{rug}}…}}`),
+    # read-back dropped the first, and resolve could land marker garbage.
+    # Later offsets must be written first so each remaining old stays
+    # ahead of every already-wrapped green.
+    (ms / "nest.md").write_text("The cat sat on the mat.\n")
+    nested = api.stage_revisions(
+        db, manuscript, "nest.md",
+        [{"old": "cat", "new": "mat creature", "note": "left"},
+         {"old": "mat", "new": "rug", "note": "right"}],
+        "ytlm", stub, stub)
+    nest_tab = tab("nest.md")
+    check("two replaces in one paragraph whose left new contains the "
+          "right old both land as sibling forms, not nested",
+          len(nested["written"]) == 2 and not nested["failed"]
+          and "<<cat>>{{mat creature}}" in nest_tab
+          and "<<mat>>{{rug}}" in nest_tab
+          and "{{<<" not in nest_tab and "<<<<" not in nest_tab
+          and nest_tab.index("<<cat>>") < nest_tab.index("<<mat>>"),
+          nest_tab + str(nested))
+
 
 def main_test() -> None:
     check_directives()
