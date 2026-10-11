@@ -542,6 +542,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 Regression (#152): Doc-road escapes the pull left in local files.
 
+## `tests.test_duplicate_tab_titles`
+
+`authorlm/tests/test_duplicate_tab_titles.py`
+
+Duplicate Doc tab titles must not last-win over a mapped essay.
+
 ## `tests.test_e2e`
 
 `authorlm/tests/test_e2e.py`
