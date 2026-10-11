@@ -4388,6 +4388,18 @@ def main_test() -> None:
         check("higher anchors first; inserts before replaces at same anchor",
               [t["id"] for t in order] == ["rep6", "ins5", "rep5", "ins4"],
               str([t["id"] for t in order]))
+        # Two substring replaces in one paragraph: if the left form's new
+        # contains the right form's old, writing left-first plants the
+        # right form inside the green half. Later offsets must go first.
+        same_para = gdocs.pending_write_order([
+            {"id": "left", "proposed_old": "cat", "metadata":
+             json.dumps({"anchor_paragraph": 1})},
+            {"id": "right", "proposed_old": "mat", "metadata":
+             json.dumps({"anchor_paragraph": 1})},
+        ], paragraphs=["The cat sat on the mat."])
+        check("same-paragraph replaces: later character offset first",
+              [t["id"] for t in same_para] == ["right", "left"],
+              str([t["id"] for t in same_para]))
 
         print("resolution (author post-edits win):")
         for t in threads:

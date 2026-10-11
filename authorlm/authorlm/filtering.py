@@ -812,7 +812,13 @@ def filtered_prefix(units: list[str], window_start: int,
     shared prompt. A word ledger is worthless otherwise: shown the
     ORIGINAL unit 3, unit 5 cannot know the run already removed the
     second "moreover" there, and it will remove it again — or decline to
-    remove its own on the grounds that the word has appeared once."""
+    remove its own on the grounds that the word has appeared once.
+
+    `threads` MUST be this run's rows only (`api._run_threads`). A file-
+    wide `door_threads` set — especially one that still carries a prior
+    settled run's `cleaned` rows — overlays a stale `proposed_new` on top
+    of the live disk unit and lies to every later window about what the
+    essay currently says."""
     by_unit = {}
     for t in threads:
         meta = loads(t.get("metadata"), {}) or {}

@@ -4813,10 +4813,17 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
             f"unit {start} is out of range — {rel} has {len(units)} units.")
     span = window if window and window > 0 else len(units)
     end = min(start + span - 1, len(units))
-    threads = staging.door_threads(db, mid, rel,
-                                   states=("proposed", "accepted",
-                                           "rejected", "written", "cleaned"),
-                                   origin_type=FILTER_ORIGIN)
+    # THIS RUN's threads only. `filtered_prefix` overlays earlier units
+    # with `proposed_new` so a sequential window is autoregressive on
+    # what THIS run already proposed — not on every filter thread that
+    # ever touched the file. Passing `door_threads` (all producers of
+    # origin_type=filter, including a prior settled run's `cleaned`
+    # rows) made the prefix show a stale accepted rewrite after the
+    # author had edited the disk, and made a second active filter on
+    # the same essay read the first filter's open proposals as its own
+    # prefix. `_run_threads` / `_open_run_threads` / `_falsified_prefix`
+    # already scope by run id; the assemble path must match.
+    threads = _run_threads(db, mid, run)
     run_meta = loads(run["metadata"], {})
     run_meta["window"] = [start, end]
     db.update("filter_runs", run["id"], {"metadata": json.dumps(run_meta)})

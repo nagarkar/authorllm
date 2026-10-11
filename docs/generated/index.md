@@ -542,6 +542,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 Regression (#152): Doc-road escapes the pull left in local files.
 
+## `tests.test_duplicate_tab_titles`
+
+`authorlm/tests/test_duplicate_tab_titles.py`
+
+Duplicate Doc tab titles must not last-win over a mapped essay.
+
 ## `tests.test_e2e`
 
 `authorlm/tests/test_e2e.py`
@@ -553,6 +559,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_filter_reply_json.py`
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
+
+## `tests.test_filtered_prefix_scope`
+
+`authorlm/tests/test_filtered_prefix_scope.py`
+
+FILTERED PREFIX must be THIS RUN's proposals over live disk units.
 
 ## `tests.test_findings_edit_entry`
 
