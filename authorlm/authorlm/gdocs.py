@@ -1169,6 +1169,23 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
+def duplicate_tab_titles(order: list[str] | None) -> frozenset[str]:
+    """Titles that appear more than once in the Docs tab tree.
+
+    Drive's whole-master markdown export labels every tab `# **<title>**`,
+    so two tabs that share a title are indistinguishable after export:
+    `split_tabbed_export` last-wins into one dict key. Callers that write
+    Doc→local (pull, reconcile, critique/filter resolve) must refuse those
+    titles rather than overwrite the mapped essay with the later tab's
+    body. `classify_tabs` already reports the hand-made duplicate as
+    `ambiguous`; that report alone never blocked the write."""
+    from collections import Counter
+
+    if not order:
+        return frozenset()
+    return frozenset(title for title, n in Counter(order).items() if n > 1)
+
+
 def split_tabbed_export(text: str, known_files,
                         order: list[str] | None = None) -> dict[str, str]:
     """Split a whole-master markdown export into per-file sections. Tab
@@ -1182,7 +1199,11 @@ def split_tabbed_export(text: str, known_files,
     prose heading that happens to repeat some *other* tab's title, out of
     turn, is never mistaken for a boundary (it-x7-2). A known name absent
     from `order` (no positional info for it, e.g. docs_service wasn't
-    available) still matches anywhere, as before."""
+    available) still matches anywhere, as before.
+
+    When the same title appears twice in `order`, later boundaries reset
+    the same key (last tab wins). Callers must consult
+    `duplicate_tab_titles` before writing any section to disk."""
     pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -1796,6 +1817,15 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     # title must never be mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    if file in duplicate_tab_titles(tab_order):
+        # Two Doc tabs share this title; the export last-wins into one
+        # key. Refusing is the only safe resolve — writing the later
+        # tab's body would settle the wrong essay.
+        return {"marked": None, "state": "conflict", "dangling": [],
+                "marker_warnings": [
+                    f"duplicate Doc tab titled {file!r} — rename or "
+                    "delete the extra tab before resolve can read this "
+                    "essay"]}
     if file not in sections:
         return {"marked": None, "state": "missing", "dangling": [],
                 "marker_warnings": []}
@@ -1903,11 +1933,20 @@ def read_manuscript(db: Database, manuscript: dict, service,
                   | set(pmapped) | {t for _, t in tab_props if t})
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    dup_titles = duplicate_tab_titles(tab_order)
 
     for name in names:
         entry = blank(name)
         report["files"][name] = entry
         if name not in mapped or name not in sections:
+            continue
+        if name in dup_titles:
+            # Do not surface the later tab's body as this essay's marked
+            # text — the export key is shared and last-wins.
+            entry["state"] = "conflict"
+            entry["marker_warnings"] = [
+                f"duplicate Doc tab titled {name!r} — rename or delete "
+                "the extra tab"]
             continue
         _, entry["dangling"] = strip_dangling(sections[name])
         marked = normalize_markdown(sections[name])
@@ -2059,6 +2098,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    # Duplicate titles in the live tab tree: classify already lists them
+    # as ambiguous, but that report never blocked the write — and the
+    # export last-wins into one section key, so a later hand-made twin
+    # silently replaced the mapped essay on disk.
+    dup_titles = duplicate_tab_titles(tab_order)
+    if dup_titles:
+        report["duplicate_tabs"] = sorted(dup_titles)
     targets = mapped
     prompt_targets = sorted(pmapped)
     if query:
@@ -2078,6 +2124,11 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     for relpath in targets:
         if relpath not in sections:
             report["missing"].append(relpath)
+            continue
+        # Duplicate tab title: the section body is the LATER tab's, not
+        # necessarily the mapped one. Leave local alone; --force must
+        # not reach past this (same posture as marked / sidecar_unparsable).
+        if relpath in dup_titles:
             continue
         # Warn on Doc-pasted images before normalize strips their refs:
         # the Doc's markdown bridge cannot carry images, so they'd vanish.
@@ -2186,6 +2237,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
                 continue
             if name not in sections:
                 report["missing"].append(display)
+                continue
+            if name in dup_titles:
                 continue
             text = normalize_markdown(sections[name])
             path = prompts_dir / name
@@ -2391,6 +2444,9 @@ def reconcile(db: Database, manuscript: dict, service,
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, known | titles, order=tab_order)
+    dup_titles = duplicate_tab_titles(tab_order)
+    if dup_titles:
+        report["duplicate_tabs"] = sorted(dup_titles)
     ignored = sorted(t for t in titles - known
                      if t != manuscript["name"])
     if ignored:
@@ -2410,6 +2466,14 @@ def reconcile(db: Database, manuscript: dict, service,
                     "error": "tab missing from the Doc export — local "
                              "file left untouched; the next 'doc push' "
                              "recreates the tab"})
+                continue
+            if relpath in dup_titles:
+                # Session-start auto-pull must not last-win a hand-made
+                # twin tab over the mapped essay (same guard as pull_doc).
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "duplicate Doc tab title — rename or delete "
+                             "the extra tab; local file left untouched"})
                 continue
             doc_text = normalize_markdown(sections[relpath])
             # Pending margin-thread spans are review state, not content:
@@ -2474,6 +2538,12 @@ def reconcile(db: Database, manuscript: dict, service,
                 report["errors"].append({
                     "file": display, "error": "tab missing from the Doc — "
                     "the next 'doc push' recreates it"})
+                continue
+            if name in dup_titles:
+                report["errors"].append({
+                    "file": display,
+                    "error": "duplicate Doc tab title — rename or delete "
+                             "the extra tab; local file left untouched"})
                 continue
             doc_text = normalize_markdown(sections[name])
             path = (Path(manuscript["path"]) / ILLUS_DIR / PROMPTS_SUBDIR
@@ -3909,6 +3979,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     titles = {t for _, t in tab_props if t}
     boundaries = known | titles
     tab_order = [t for _, t in tab_props if t]
+    if relpath in duplicate_tab_titles(tab_order):
+        raise LookupError(
+            f"duplicate Doc tab titled {relpath!r} — rename or delete "
+            "the extra tab before a surgical push can trust the export")
 
     def tab_markdown() -> str:
         data = service.files().export(
