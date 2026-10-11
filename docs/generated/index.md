@@ -554,6 +554,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
 
+## `tests.test_filtered_prefix_scope`
+
+`authorlm/tests/test_filtered_prefix_scope.py`
+
+FILTERED PREFIX must be THIS RUN's proposals over live disk units.
+
 ## `tests.test_findings_edit_entry`
 
 `authorlm/tests/test_findings_edit_entry.py`
