@@ -530,6 +530,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_changed_sections`
+
+`authorlm/tests/test_changed_sections.py`
+
+`extraction._changed_sections` and `_fit_inventory` bound extraction attention and prompt size.
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
@@ -547,6 +553,12 @@ Regression (#152): Doc-road escapes the pull left in local files.
 `authorlm/tests/test_e2e.py`
 
 End-to-end test of every MVP use case, driven through the real CLI.
+
+## `tests.test_export_filename`
+
+`authorlm/tests/test_export_filename.py`
+
+`export.export_filename` sanitizes the combined-export basename.
 
 ## `tests.test_filter_reply_json`
 
@@ -572,11 +584,23 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
 
+## `tests.test_hard_terms`
+
+`authorlm/tests/test_hard_terms.py`
+
+`filtering.is_hard_to_say` / `hard_terms` / `candidate_terms` are the harness-computed pronunciation prelude signals (F1 / F2).
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
 
 Interlocutor tests (docs/interlocutor-design.md).
+
+## `tests.test_is_heading`
+
+`authorlm/tests/test_is_heading.py`
+
+`filtering.is_heading` labels markdown heading units in the filter prompt so the model can leave titles alone.
 
 ## `tests.test_live_llm`
 
