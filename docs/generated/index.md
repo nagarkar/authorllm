@@ -530,6 +530,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_concept_link_merge`
+
+`authorlm/tests/test_concept_link_merge.py`
+
+link_concepts revive-after-retire / reject, and merge vs non-live twins.
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
@@ -571,6 +577,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 `authorlm/tests/test_generated_docs.py`
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
+
+## `tests.test_generation_stitch_atomic`
+
+`authorlm/tests/test_generation_stitch_atomic.py`
+
+Stitch must not destroy a good chapter mp3 when encode fails mid-flight.
 
 ## `tests.test_interlocutor`
 
