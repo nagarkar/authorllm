@@ -489,7 +489,7 @@ async fn stitch_internal(app: &tauri::AppHandle, shared: &SharedMaster, stem: &s
     let rel = if two_pass {
         let _ = app.emit("stitch-progress", StitchProgressEvent {
             message: format!("{stem}: measuring loudness of {} segments (pass 1/2)…", inputs.len()) });
-        let m = crate::stitch::measure_loudness(&dir, &inputs).await?;
+        let m = crate::stitch::measure_loudness(&dir, stem, &inputs).await?;
         let _ = app.emit("stitch-progress", StitchProgressEvent {
             message: format!("{stem}: encoding with measured normalisation (pass 2/2)…") });
         crate::stitch::concat_inputs(&dir, stem, format, &inputs, Some(&m)).await?

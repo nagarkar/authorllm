@@ -520,9 +520,14 @@ def _concat_list(work_dir: Path, name: str, inputs: list[str]) -> Path:
 _LOUDNORM = "loudnorm=I=-20:TP=-3:LRA=11"
 
 
-def measure_loudness(ffmpeg: str, work_dir: Path, inputs: list[str]) -> dict:
-    """Pass 1 of two-pass EBU R128: the measurements pass 2 normalises by."""
-    lst = _concat_list(work_dir, "stitch_measure_list.txt", inputs)
+def measure_loudness(ffmpeg: str, work_dir: Path, stem: str,
+                     inputs: list[str]) -> dict:
+    """Pass 1 of two-pass EBU R128: the measurements pass 2 normalises by.
+    The concat list is named per stem so concurrent chapter stitches do
+    not overwrite each other's lists."""
+    lst = _concat_list(work_dir,
+                       f"stitch_measure_list.{sanitise_filename(stem)}.txt",
+                       inputs)
     try:
         proc = subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
                                "-af", _LOUDNORM + ":print_format=json", "-f", "null", "-"],
@@ -548,11 +553,16 @@ def measure_loudness(ffmpeg: str, work_dir: Path, inputs: list[str]) -> dict:
 def concat_inputs(ffmpeg: str, root: Path, stem: str, quality: str,
                   inputs: list[str], measurement: dict | None) -> str:
     """Pass 2: concat, loudnorm, encode to `audio/<stem>.<quality>.mp3`
-    (ACX: 44.1 kHz, constant 192 kbps, mono). Returns the relative path."""
+    (ACX: 44.1 kHz, constant 192 kbps, mono). Encodes to a sibling `.tmp`
+    and renames into place so a failed or killed re-stitch cannot destroy
+    a previously good chapter file while state still claims the stitch is
+    current. Returns the relative path."""
     out_dir = root / TAKES_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    rel = f"{TAKES_DIR}/{sanitise_filename(stem)}.{quality}.mp3"
-    lst = _concat_list(root, "stitch_list.txt", inputs)
+    safe = sanitise_filename(stem)
+    rel = f"{TAKES_DIR}/{safe}.{quality}.mp3"
+    tmp = root / f"{TAKES_DIR}/{safe}.{quality}.mp3.tmp"
+    lst = _concat_list(root, f"stitch_list.{safe}.txt", inputs)
     if measurement:
         m = measurement
         loudnorm = (f"{_LOUDNORM}:measured_I={m['input_i']:.2f}:measured_TP={m['input_tp']:.2f}:"
@@ -561,12 +571,18 @@ def concat_inputs(ffmpeg: str, root: Path, stem: str, quality: str,
     else:
         loudnorm = _LOUDNORM
     try:
-        _run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
-              # loudnorm resamples internally; pin the rate after it.
-              "-af", f"{loudnorm},aresample=44100", "-ar", "44100", "-ac", "1",
-              "-c:a", "libmp3lame", "-b:a", "192k", str(root / rel)], "ffmpeg stitch")
+        try:
+            _run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+                  # loudnorm resamples internally; pin the rate after it.
+                  "-af", f"{loudnorm},aresample=44100", "-ar", "44100", "-ac", "1",
+                  "-c:a", "libmp3lame", "-b:a", "192k", str(tmp)], "ffmpeg stitch")
+        except AudioError:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, root / rel)
     finally:
         lst.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
     return rel
 
 
@@ -604,7 +620,7 @@ def stitch(manuscript: dict, stem: str, progress: Progress | None = None) -> dic
     if two_pass:
         if progress:
             progress(f"{stem}: measuring loudness of {len(inputs)} segments (pass 1/2)")
-        m = measure_loudness(ffmpeg, root, inputs)
+        m = measure_loudness(ffmpeg, root, stem, inputs)
         # Silence measures -inf, which pass 2 refuses; a chapter that quiet
         # gets the single-pass filter instead of an error.
         if not all(-99.0 <= m[k] <= 0.0 for k in ("input_i", "input_tp", "input_thresh")):

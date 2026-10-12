@@ -77,9 +77,13 @@ fn concat_list(work_dir: &Path, name: &str, inputs: &[String]) -> Result<String,
 }
 
 /// Pass 1 of two-pass EBU R128 loudnorm.
-pub async fn measure_loudness(dir: &Path, inputs: &[String]) -> Result<LoudnormMeasurement, String> {
+/// `stem` scopes the concat list filename so concurrent chapter stitches
+/// cannot overwrite each other's lists.
+pub async fn measure_loudness(dir: &Path, stem: &str, inputs: &[String]
+) -> Result<LoudnormMeasurement, String> {
     let ffmpeg = find_ffmpeg().ok_or_else(|| "ffmpeg not found on PATH".to_string())?;
-    let list_path = concat_list(dir, "stitch_measure_list.txt", inputs)?;
+    let list_name = format!("stitch_measure_list.{}.txt", sanitise_filename(stem));
+    let list_path = concat_list(dir, &list_name, inputs)?;
     let output = Command::new(&ffmpeg)
         .stdin(Stdio::null())
         .args(["-y", "-f", "concat", "-safe", "0", "-i", &list_path,
@@ -109,7 +113,10 @@ pub async fn measure_loudness(dir: &Path, inputs: &[String]) -> Result<LoudnormM
 }
 
 /// Phase 2: concat + loudnorm + encode into `audio/<stem>.<format>.mp3`.
-/// Returns the path RELATIVE to `dir` — what the state file stores.
+/// Encodes to a sibling `.tmp` and renames into place so a failed or
+/// killed re-stitch cannot destroy a previously good chapter file while
+/// state still claims the stitch is current. Returns the path RELATIVE
+/// to `dir` — what the state file stores.
 pub async fn concat_inputs(
     dir: &Path,
     stem: &str,
@@ -120,9 +127,12 @@ pub async fn concat_inputs(
     let ffmpeg = find_ffmpeg().ok_or_else(|| "ffmpeg not found on PATH".to_string())?;
     let out_dir = dir.join(AUDIO_DIR);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("Cannot create audio dir: {e}"))?;
-    let rel = format!("{AUDIO_DIR}/{}.{format}.mp3", sanitise_filename(stem));
+    let safe = sanitise_filename(stem);
+    let rel = format!("{AUDIO_DIR}/{safe}.{format}.mp3");
     let out_path = dir.join(&rel);
-    let list_path = concat_list(dir, "stitch_list.txt", inputs)?;
+    let tmp_path = dir.join(format!("{AUDIO_DIR}/{safe}.{format}.mp3.tmp"));
+    let list_name = format!("stitch_list.{safe}.txt");
+    let list_path = concat_list(dir, &list_name, inputs)?;
     let loudnorm = match measurement {
         Some(m) => format!(
             "loudnorm=I=-20:TP=-3:LRA=11:measured_I={:.2}:measured_TP={:.2}:\
@@ -139,15 +149,26 @@ pub async fn concat_inputs(
                "-af", &format!("{loudnorm},aresample=44100"),
                "-ar", "44100", "-ac", "1",
                "-c:a", "libmp3lame", "-b:a", "192k",
-               &out_path.to_string_lossy()])
+               &tmp_path.to_string_lossy()])
         .output()
-        .await
-        .map_err(|e| format!("ffmpeg failed to start: {e}"))?;
+        .await;
     let _ = std::fs::remove_file(&list_path);
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("ffmpeg failed to start: {e}"));
+        }
+    };
     if !output.status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("ffmpeg exited {}: {}", output.status,
                            String::from_utf8_lossy(&output.stderr)));
     }
+    std::fs::rename(&tmp_path, &out_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("rename stitched file into place: {e}")
+    })?;
     log::info!("stitch: {} → {rel}", stem);
     Ok(rel)
 }
@@ -248,5 +269,17 @@ mod tests {
         assert_eq!(sanitise_filename("Seven More: Sermons/To The Dead"), "Seven_More__Sermons_To_The_Dead");
         assert_eq!(sanitise_filename("///"), "untitled");
         assert_eq!(sanitise_filename("sermons"), "sermons");
+    }
+
+    #[test]
+    fn stitch_sidecar_names_are_stem_scoped() {
+        // Concurrent stitches must not share one global list / tmp name.
+        let a = sanitise_filename("sermons");
+        let b = sanitise_filename("kindness");
+        assert_ne!(format!("stitch_list.{a}.txt"), format!("stitch_list.{b}.txt"));
+        assert_ne!(
+            format!("audio/{a}.mp3_44100_128.mp3.tmp"),
+            format!("audio/{b}.mp3_44100_128.mp3.tmp"),
+        );
     }
 }
