@@ -117,9 +117,14 @@ def remove_alias(db: Database, manuscript_id: str, node: dict,
 def merge_concepts(db: Database, manuscript_id: str,
                    canonical: dict, duplicate: dict) -> dict:
     """Absorb `duplicate` into `canonical`: its live edges are re-pointed at
-    the canonical (self-edges and duplicates of edges the canonical already
-    has retire instead), the emptied node retires, and its name and aliases
-    become aliases of the canonical."""
+    the canonical (self-edges and duplicates of LIVE edges the canonical
+    already has retire instead), the emptied node retires, and its name and
+    aliases become aliases of the canonical.
+
+    A rejected or retired twin on the canonical is not "already has": the
+    duplicate's live edge is the author's later affirmation and is
+    re-pointed. Dropping it to honour an old reject/retire silently erased
+    live graph knowledge on merge."""
     if canonical["id"] == duplicate["id"]:
         raise ValueError("cannot merge a concept into itself")
     repointed = dropped = 0
@@ -130,9 +135,12 @@ def merge_concepts(db: Database, manuscript_id: str,
     ):
         new_from = canonical["id"] if edge["from_node"] == duplicate["id"] else edge["from_node"]
         new_to = canonical["id"] if edge["to_node"] == duplicate["id"] else edge["to_node"]
+        # Live twins only. A rejected/retired row on the same triple is
+        # historical, not a standing relationship the canonical "has".
         existing = db.one(
             "SELECT * FROM concept_edges WHERE manuscript_id = ? AND from_node = ? "
-            "AND to_node = ? AND relation = ? AND id != ?",
+            "AND to_node = ? AND relation = ? AND id != ? "
+            "AND status NOT IN ('rejected', 'retired')",
             (manuscript_id, new_from, new_to, edge["relation"], edge["id"]),
         )
         if new_from == new_to or existing:
@@ -215,14 +223,34 @@ def link_concepts(
     db: Database, manuscript_id: str, from_name: str, relation: str, to_name: str,
     status: str = "declared", source_id: str | None = None,
 ) -> dict:
+    """Declare or revive a relationship between two concepts.
+
+    Prefer a live edge when one already exists. A rejected or retired row
+    for the same triple is left alone when the caller is inferring
+    (`status='inferred'`) so extraction can still file an
+    `edge_reproposal`; an author re-assertion (`status='declared'`, the
+    default) restores that row to declared instead of silently returning
+    the dead edge — which is what broke `concept link` after retire or
+    after an earlier reject."""
     src = add_concept(db, manuscript_id, from_name, source_id=source_id)
     dst = add_concept(db, manuscript_id, to_name, source_id=source_id)
     existing = db.one(
         "SELECT * FROM concept_edges WHERE manuscript_id = ? AND from_node = ? "
-        "AND to_node = ? AND relation = ?",
+        "AND to_node = ? AND relation = ? "
+        "ORDER BY CASE WHEN status IN ('rejected', 'retired') THEN 1 ELSE 0 END, "
+        "created_at DESC LIMIT 1",
         (manuscript_id, src["id"], dst["id"], relation),
     )
     if existing:
+        if (existing["status"] in ("rejected", "retired")
+                and status == "declared"):
+            emeta = loads(existing["metadata"], {}) or {}
+            emeta.pop("retired_from", None)
+            payload = json.dumps(emeta)
+            db.update("concept_edges", existing["id"],
+                      {"status": "declared", "metadata": payload})
+            return {**dict(existing), "status": "declared",
+                    "metadata": payload}
         return dict(existing)
     row = ko_fields("ce")
     row.update(
