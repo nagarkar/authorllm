@@ -1637,6 +1637,14 @@ page-dependent PDF review decoration.
 **Print geometry (2026-09-02).** Trim size and bleed are manuscript
 properties beside the ISBNs — `authorlm manuscript set --trim-size 6x9
 --bleed no` (inches; MCP `set_manuscript_metadata(trim_size=, bleed=)`).
+`authorlm export <fmt> --file <path>` builds ONE manuscript file on its own,
+inside or outside the TOC (the papers road, e.g. `--file papers/0-axioms.md`),
+through the same pipeline and settings as the book; output and title are the
+file's stem (`_exports/0-axioms.review.pdf`, `0-axioms.docx`). Never hand-roll
+pandoc for a manuscript file: the house path carries the math font, the
+footnote and math normalisation, and the review furniture. Exclusive with
+`--chapters`. (nagarkar/authorllm#192, 2026-10-13.)
+
 `authorlm export pdf --profile book` builds the KDP interior at that trim:
 book class, essays opening recto, mirrored margins with the gutter chosen
 from the page count (two passes when the band moves), running heads (book

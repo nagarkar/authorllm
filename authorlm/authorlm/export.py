@@ -661,13 +661,20 @@ def export_published(db: Database, manuscript: dict, fmt: str,
                      variant: str | None = None,
                      only: list[str] | None = None,
                      print_ready: bool = False,
-                     profile: str | None = None) -> dict:
+                     profile: str | None = None,
+                     file: str | None = None) -> dict:
     """Publishing export: write the publishable markdown to _exports/
     and, for docx/epub/pdf, convert it locally with pandoc — images
     embed from _illustrations/, no Doc or Drive involved.
 
     `only` builds just the named chapters (with their TOC descendants)
     into separately-named files alongside the full-book export.
+
+    `file` builds exactly one manuscript file on its own, TOC or no TOC
+    (the papers road, nagarkar/authorllm#192): the same pipeline and
+    settings as the book, output named by the file's stem, titled by
+    its stem rather than the book. A standalone file carries its own
+    title line, so no book title is prepended. Exclusive with `only`.
 
     PDF profiles: `review` (default — notice page, footer, watermark),
     `print` (the same page, review marks off; `print_ready=True`), and
@@ -682,6 +689,13 @@ def export_published(db: Database, manuscript: dict, fmt: str,
 
     if print_ready and fmt != "pdf":
         raise ValueError("--print-ready is only valid for PDF exports")
+    if file and only:
+        raise ValueError("--file and --chapters are exclusive")
+    if file:
+        file = file.strip().lstrip("./")
+        if not file.endswith(".md"):
+            file += ".md"
+        only = [file]
     if profile is not None and profile not in PDF_PROFILES:
         raise ValueError(f"unknown PDF profile '{profile}' — one of "
                          + ", ".join(PDF_PROFILES))
@@ -716,7 +730,9 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     )
     if not order:
         raise LookupError("the manuscript has no content files to combine")
-    if only:
+    if file:
+        title = Path(file).stem
+    elif only:
         title = f"{title} - {selection_slug(order)}"
     if book:
         title = f"{title} - book"  # never overwrites the review copy

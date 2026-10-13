@@ -4858,7 +4858,8 @@ def cmd_export(args):
                                      variant=args.variant,
                                      only=chapters or None,
                                      print_ready=args.print_ready,
-                                     profile=args.profile)
+                                     profile=args.profile,
+                                     file=args.file)
     except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
@@ -8575,6 +8576,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chapters", action="append", metavar="FILE,FILE",
                    help="build only these chapters and everything filed "
                         "under them in the TOC (repeatable; .md optional)")
+    p.add_argument("--file", metavar="PATH",
+                   help="build exactly this one manuscript file on its "
+                        "own, inside or outside the TOC (e.g. "
+                        "papers/0-axioms.md); output named by its stem")
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")
