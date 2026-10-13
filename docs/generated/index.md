@@ -512,6 +512,12 @@ The drafting payload seam — stored state in, four blocks out.
 
 Step-two adjudication: opt-in, and inert when off.
 
+## `tests.test_alias_canonical_conflict`
+
+`authorlm/tests/test_alias_canonical_conflict.py`
+
+`proposals._content_hash` / `_alias_canonical_conflict` gate alias proposals before they reach the author's queue.
+
 ## `tests.test_api`
 
 `authorlm/tests/test_api.py`
@@ -530,11 +536,23 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_clamped_delta`
+
+`authorlm/tests/test_clamped_delta.py`
+
+`clients._clamped_delta` / `_scale_models` sit on the chat-usage discontinuity path: when a transcript file is replaced or truncated, the ledger must never invent negative spend and must never guess a per-model split of a clamped total.
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
 
 Critique-pass tests (docs/critique-pass-design.md).
+
+## `tests.test_directive_landing`
+
+`authorlm/tests/test_directive_landing.py`
+
+`directives._spaced` / `_land_explain` / `_land_ref` / `_append_definition` are the byte-identical landing seam for Explain and Footnote applies.
 
 ## `tests.test_doc_road_escapes`
 
@@ -596,11 +614,23 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 
 `morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
 
+## `tests.test_near_duplicate`
+
+`authorlm/tests/test_near_duplicate.py`
+
+`loop.similarity` / `loop.near_duplicate` are the deterministic proposal firewall (Common Core §8.9 / loop invariant “never re-ask”).
+
 ## `tests.test_normalize_fences`
 
 `authorlm/tests/test_normalize_fences.py`
 
 Fenced code must survive normalize_markdown byte-for-byte.
+
+## `tests.test_normalize_isbn13`
+
+`authorlm/tests/test_normalize_isbn13.py`
+
+`api._normalize_isbn13` / `_validate_format_isbns` are the catalog identity door for every paperback/hardcover ISBN the CLI and MCP accept.
 
 ## `tests.test_normalize_thematic_break`
 
