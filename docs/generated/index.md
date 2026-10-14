@@ -590,6 +590,18 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 Proposal learning loop — firewall, screen, distillation, retraction.
 
+## `tests.test_manifest_normalize`
+
+`authorlm/tests/test_manifest_normalize.py`
+
+`manifest._normalize` is the term cleaner behind essay debt columns.
+
+## `tests.test_mentioned_in`
+
+`authorlm/tests/test_mentioned_in.py`
+
+`hygiene.mentioned_in` is the groundedness gate for concepts and edges.
+
 ## `tests.test_morph_targets`
 
 `authorlm/tests/test_morph_targets.py`
@@ -607,6 +619,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 `authorlm/tests/test_normalize_thematic_break.py`
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
+
+## `tests.test_parse_ts_sweep_markers`
+
+`authorlm/tests/test_parse_ts_sweep_markers.py`
+
+`clients._parse_ts` and `clients.sweep_markers` bound marker lifetime.
 
 ## `tests.test_passes`
 
@@ -644,11 +662,23 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
 
+## `tests.test_support_evidence_type`
+
+`authorlm/tests/test_support_evidence_type.py`
+
+`beliefs._support_evidence_type` is the INV-2 door between machine inference and author-originated evidence.
+
 ## `tests.test_triage_app`
 
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_usage_group_key`
+
+`authorlm/tests/test_usage_group_key.py`
+
+`usage._group_key` and `usage._money` shape every usage report row.
 
 ## `tools.bootstrap_beliefs`
 
