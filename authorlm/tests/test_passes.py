@@ -4375,18 +4375,24 @@ def main_test() -> None:
         # replace first makes the subsequent insert locate `old` inside that
         # wrapped form and plant {{insert}} between old and >>, corrupting
         # the Doc. Inserts at the same anchor must precede replaces.
+        # Same-anchor inserts are themselves reversed so Docs LIFO plant
+        # matches FIFO compose/resolve (see test_same_anchor_insert_order).
         order = gdocs.pending_write_order([
             {"id": "rep6", "proposed_old": "p6", "metadata":
              json.dumps({"anchor_paragraph": 6})},
-            {"id": "ins5", "proposed_old": "", "metadata":
+            {"id": "ins5a", "proposed_old": "", "metadata":
+             json.dumps({"anchor_paragraph": 5})},
+            {"id": "ins5b", "proposed_old": "", "metadata":
              json.dumps({"anchor_paragraph": 5})},
             {"id": "rep5", "proposed_old": "p5", "metadata":
              json.dumps({"anchor_paragraph": 5})},
             {"id": "ins4", "proposed_old": "", "metadata":
              json.dumps({"anchor_paragraph": 4})},
         ])
-        check("higher anchors first; inserts before replaces at same anchor",
-              [t["id"] for t in order] == ["rep6", "ins5", "rep5", "ins4"],
+        check("higher anchors first; same-anchor inserts reversed "
+              "before replaces",
+              [t["id"] for t in order] == [
+                  "rep6", "ins5b", "ins5a", "rep5", "ins4"],
               str([t["id"] for t in order]))
 
         print("resolution (author post-edits win):")
