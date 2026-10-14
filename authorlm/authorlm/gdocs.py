@@ -3103,7 +3103,8 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
 def pending_write_order(threads: list[dict]) -> list[dict]:
     """Surgical-write order for a producer's accepted threads: higher
     anchors first (so earlier indices stay valid); at the same
-    anchor, inserts BEFORE replaces.
+    anchor, inserts BEFORE replaces; among inserts at the same
+    anchor, REVERSE of the caller's order.
 
     Replacing paragraph n wraps it as <<old>>{{new}}. An insert after
     n then locates the pristine paragraph text via substring search —
@@ -3111,15 +3112,32 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
     `old` and `>>`, corrupting the pending grammar. Inserts must land
     first while the anchor text is still verbatim.
 
+    Same-anchor inserts are reversed because `write_pending_forms`
+    re-locates the anchor and plants each insert at `span[1]` (the
+    anchor's end). A second Docs `insertText` at that same index lands
+    *before* the first plant — LIFO. `compose_marked_text` and
+    `final_text_from_marked`'s insert queue are FIFO in caller order,
+    so planting A then B put B visually first; resolve then attributed
+    the author's green edit on the visual-first form to thread A and
+    left the essay with insertions swapped. Planting B then A makes
+    Docs LIFO yield A then B, matching compose and resolve.
+
     The descending order is also half of the twins invariant: see
     `_occurrence`, which is correct only because of it."""
     def anchor_of(t):
         return (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
 
-    return sorted(
-        threads,
-        key=lambda t: (-anchor_of(t), 0 if t["proposed_old"] == "" else 1),
-    )
+    indexed = list(enumerate(threads))
+
+    def sort_key(item: tuple[int, dict]) -> tuple[int, int, int]:
+        i, t = item
+        is_insert = 0 if t["proposed_old"] == "" else 1
+        # Among inserts at one anchor, reverse caller order (-i) so
+        # Docs same-index LIFO matches FIFO compose/resolve.
+        tie = -i if is_insert == 0 else i
+        return (-anchor_of(t), is_insert, tie)
+
+    return [t for _, t in sorted(indexed, key=sort_key)]
 
 
 def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
