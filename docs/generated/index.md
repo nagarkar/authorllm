@@ -632,6 +632,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_same_anchor_insert_order`
+
+`authorlm/tests/test_same_anchor_insert_order.py`
+
+Same-anchor multi-insert plant order must match compose/resolve FIFO.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
