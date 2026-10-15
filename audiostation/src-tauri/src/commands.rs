@@ -348,7 +348,10 @@ async fn generate_one(app: &tauri::AppHandle, shared: &SharedMaster, api_key: &s
         log::error!("[generate] {id} failed: {e}");
         e
     })?;
-    std::fs::write(dir.join(&rel), &audio).map_err(|e| format!("Write audio: {e}"))?;
+    // Sibling `.tmp` + rename: a failed or killed retake must not destroy a
+    // previously good take while state still names that path (Python twin:
+    // generation.write_take_bytes).
+    write_audio_atomic(&dir.join(&rel), &audio)?;
     record_generation(shared, &stem, id, format, rel.clone(), request_id)?;
     // The row turns green as it lands, not when the whole chapter returns.
     let _ = app.emit("section-generated", SectionGeneratedEvent {
@@ -360,6 +363,24 @@ async fn generate_one(app: &tauri::AppHandle, shared: &SharedMaster, api_key: &s
 fn check_format(quality: &str) -> Result<String, String> {
     if QUALITIES.contains(&quality) { Ok(quality.to_string()) }
     else { Err(format!("unknown quality {quality}; one of {}", QUALITIES.join(", "))) }
+}
+
+/// Write take bytes via a sibling `.tmp` then rename into place.
+fn write_audio_atomic(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = dest.with_file_name(format!(
+        "{}.tmp",
+        dest.file_name()
+            .ok_or_else(|| format!("audio path has no file name: {}", dest.display()))?
+            .to_string_lossy()
+    ));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Write audio: {e}"));
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Rename audio into place: {e}")
+    })
 }
 
 #[tauri::command]
@@ -883,6 +904,48 @@ mod tests {
         m.book.pronunciation_dictionary.as_mut().unwrap().version_id = Some("V1".into());
         let (_stem, req) = build_request(&m, &second.id).unwrap();
         assert_eq!(req.locators[0]["version_id"], "V1");
+    }
+
+    #[test]
+    fn write_audio_atomic_replaces_without_truncating_first() {
+        let dir = std::env::temp_dir().join(format!(
+            "audiostation-take-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("abababababababababababababababab.mp3_44100_128.mp3");
+        std::fs::write(&dest, b"GOOD-TAKE").unwrap();
+        write_audio_atomic(&dest, b"NEW-TAKE").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEW-TAKE");
+        let tmp = dir.join(format!("{}.tmp", dest.file_name().unwrap().to_string_lossy()));
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_audio_atomic_failed_write_leaves_previous_take() {
+        let dir = std::env::temp_dir().join(format!(
+            "audiostation-take-atomic-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("abababababababababababababababab.mp3_44100_128.mp3");
+        std::fs::write(&dest, b"GOOD-TAKE").unwrap();
+        // Nonexistent parent: sibling tmp write fails before the final path
+        // is opened, so an existing take at `dest` stays intact.
+        let missing = dir.join("no-such-dir").join("take.mp3");
+        let err = write_audio_atomic(&missing, b"PARTIAL").unwrap_err();
+        assert!(err.starts_with("Write audio:"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"GOOD-TAKE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
