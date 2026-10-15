@@ -578,6 +578,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_lint_shingles`
+
+`authorlm/tests/test_lint_shingles.py`
+
+Lint word-normalization, syllable count, and n-gram shingles.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
@@ -589,6 +595,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_marker_liveness`
+
+`authorlm/tests/test_marker_liveness.py`
+
+Client session markers: liveness, host-id extraction, and clear.
 
 ## `tests.test_morph_targets`
 
@@ -632,11 +644,23 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_select_chapters`
+
+`authorlm/tests/test_select_chapters.py`
+
+`structure.select_chapters` is the part-build / interlocutor door that turns a named parent into that part plus its TOC descendants.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
+
+## `tests.test_stale_suggestions`
+
+`authorlm/tests/test_stale_suggestions.py`
+
+`hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
 
 ## `tests.test_summaries`
 
@@ -649,6 +673,12 @@ Essay summaries (critique-pass design §4): reading order, autoregressive condit
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_usage_split_client`
+
+`authorlm/tests/test_usage_split_client.py`
+
+`usage._split` and `usage._client_name` are the report's join keys.
 
 ## `tools.bootstrap_beliefs`
 
