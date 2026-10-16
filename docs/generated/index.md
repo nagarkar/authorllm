@@ -518,6 +518,12 @@ Step-two adjudication: opt-in, and inert when off.
 
 API-layer tests + CLI/MCP parity checklist (P11).
 
+## `tests.test_apply_accepted`
+
+`authorlm/tests/test_apply_accepted.py`
+
+`staging.apply_accepted` is the local-road compose that turns accepted filter/critique threads into finished essay bytes.
+
 ## `tests.test_audio`
 
 `authorlm/tests/test_audio.py`
@@ -548,6 +554,12 @@ Regression (#152): Doc-road escapes the pull left in local files.
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_episode_for_intent`
+
+`authorlm/tests/test_episode_for_intent.py`
+
+`sessions.episode_for_intent` must find an intent's open episode in ANY session, not only the current one.
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
@@ -577,6 +589,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 `authorlm/tests/test_interlocutor.py`
 
 Interlocutor tests (docs/interlocutor-design.md).
+
+## `tests.test_lint_checks`
+
+`authorlm/tests/test_lint_checks.py`
+
+Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
 
 ## `tests.test_live_llm`
 
@@ -644,11 +662,23 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
 
+## `tests.test_sweeps_narrowing`
+
+`authorlm/tests/test_sweeps_narrowing.py`
+
+`sweeps._changed_files` / `_claims_for` are the deterministic narrowing step before the ontology sweep spends tokens.
+
 ## `tests.test_triage_app`
 
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_usage_four`
+
+`authorlm/tests/test_usage_four.py`
+
+`clients._four` coerces every JSONL usage object into the four counters the chat-usage sweep bills against.
 
 ## `tools.bootstrap_beliefs`
 
