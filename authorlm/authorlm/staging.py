@@ -209,18 +209,20 @@ def unmark(path: Path) -> tuple[str, list[str]]:
 def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
                   origin_type: str = "filter",
                   evidence_type: str = "filter_edit"
-                  ) -> tuple[str, list[dict], list[dict]]:
-    """Read the marked local file back and finalize it.
+                  ) -> tuple[str, list[dict]]:
+    """Read the marked local file and compute the final text + forms.
 
-    Byte for byte the critique resolve's second half, with
+    Byte for byte the critique resolve's first half, with
     `gdocs.tab_marked_markdown` replaced by `path.read_text`:
-    `threads.pending_forms` → `passes.final_text_from_marked` →
-    `passes.record_resolution`, all three unchanged. The author's
+    `door_threads` → `passes.final_text_from_marked`. The author's
     post-edits to the `{{new}}` halves win, as always.
 
-    Returns `(final_text, forms, diffs)`. It does NOT write the file:
-    the caller snapshots first (an uncollected local edit must never be
-    lost to this write) and owns the normalization."""
+    Returns `(final_text, forms)`. It does NOT write the file and does
+    NOT record verdicts: the caller must write final bytes first, then
+    `passes.record_resolution` (critique resolve's order). Recording
+    before the write left a crash window where threads were `cleaned`
+    while the file still held markers — `filter unmark` then collapsed
+    accepted greens back to OLD with no re-apply path."""
     written = door_threads(db, manuscript_id, file, states=("written",),
                            origin_type=origin_type)
     if not written:
@@ -233,13 +235,11 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
     # insertion is the empty string — so a resolve that looked at bare
     # `{{…}}` would DELETE the author's `{{title}}` from the finished
     # essay. The critique pass keeps both kinds, where both are its own.
-    final, forms = passes.final_text_from_marked(marked, written=written,
-                                                 kinds=("replace",))
-    diffs = passes.record_resolution(db, manuscript_id, file, forms,
-                                     origin_type=origin_type,
-                                     evidence_type=evidence_type,
-                                     final_text=final)
-    return final, forms, diffs
+    # `evidence_type` is unused here; the caller passes it to
+    # `record_resolution` after the durable write.
+    _ = evidence_type
+    return passes.final_text_from_marked(marked, written=written,
+                                         kinds=("replace",))
 
 
 def rollback(db: Database, manuscript: dict, file: str,

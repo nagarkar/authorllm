@@ -632,6 +632,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_resolve_write_before_record`
+
+`authorlm/tests/test_resolve_write_before_record.py`
+
+Settle must write final bytes before flipping threads off `written`.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
