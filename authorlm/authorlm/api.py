@@ -5749,16 +5749,21 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
                      direct: bool = False,
                      marked_doc: str | None = None) -> dict:
-    """Read the marked text back, record the resolution, write the final
-    text, collect under NO episode, rebuild the summary.
+    """Read the marked text back, write the final text, record the
+    resolution, collect under NO episode, rebuild the summary.
+
+    Write-before-record matches critique resolve: a crash after verdicts
+    land but before disk is updated must not leave markers on a file
+    whose threads are already `cleaned` (unmark would then restore OLD
+    and drop accepted greens with no re-apply path).
 
     ONE thing differs between the transports and it is where the marked
     text comes from: `marked_doc` is the tab's export on the doc road and
     None on the local road, where the file's own bytes are read. From
     `diffs` onward the two roads are literally the same code — same
-    `final_text_from_marked`, same `record_resolution`, same
-    `filter_edit` evidence with `episode_id = NULL`, same NO_EPISODE
-    collect, same summary rebuild."""
+    `final_text_from_marked`, same durable write, same
+    `record_resolution`, same `filter_edit` evidence with
+    `episode_id = NULL`, same NO_EPISODE collect, same summary rebuild."""
     from . import gdocs
     from . import summaries as sums
 
@@ -5771,7 +5776,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-filter-settle")
     if marked_doc is None:
-        final, forms, diffs = staging.resolve_local(
+        final, forms = staging.resolve_local(
             db, mid, rel, path, origin_type=FILTER_ORIGIN,
             evidence_type=FILTER_EVIDENCE)
     else:
@@ -5786,11 +5791,12 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
         # there too. A filter never stages an insertion.
         final, forms = passes.final_text_from_marked(
             marked_doc, written=written, kinds=("replace",))
-        diffs = passes.record_resolution(db, mid, rel, forms,
-                                         origin_type=FILTER_ORIGIN,
-                                         evidence_type=FILTER_EVIDENCE,
-                                         final_text=final)
+    # Durable bytes BEFORE verdict rows flip off `written`.
     normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+    diffs = passes.record_resolution(db, mid, rel, forms,
+                                     origin_type=FILTER_ORIGIN,
+                                     evidence_type=FILTER_EVIDENCE,
+                                     final_text=final)
 
     # NO episode (§1.8). Hygiene work has no goal to be filed under, and
     # `episode=None` would file it against whatever the author happens to
@@ -6195,11 +6201,12 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    # Write before record — same crash window as filter finalize.
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=_morph.MORPH_ORIGIN,
                                      evidence_type=_morph.MORPH_EVIDENCE,
                                      final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="morph-settle",
                 episode=NO_EPISODE)
@@ -6341,11 +6348,12 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    # Write before record — same crash window as filter finalize.
+    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
                                      final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)
@@ -6444,6 +6452,22 @@ def filter_unmark(db: Database, manuscript: dict, file: str,
                 "text": path.read_text(encoding="utf-8"),
                 "marker_warnings": []}
     _checkout_gate(db, manuscript, rel)
+    # Markers on disk with no `written` row means a settle recorded
+    # verdicts then died before writing final text (the old order).
+    # Collapsing to OLD would drop accepted greens while threads stay
+    # `cleaned` — resolve then refuses. Refuse loudly instead.
+    on_disk = path.read_text(encoding="utf-8") if path.exists() else ""
+    if not written and staging.is_marked(on_disk):
+        cleaned = staging.door_threads(db, mid, rel, states=("cleaned",),
+                                       origin_type=FILTER_ORIGIN)
+        raise ValueError(
+            f"{rel} still has pause markers on disk but no filter form "
+            f"is `written`"
+            + (f" ({len(cleaned)} already `cleaned`)" if cleaned else "")
+            + ". Unmark would restore every OLD half and permanently "
+            f"drop accepted greens — there is nothing left to re-apply. "
+            f"Apply the cleaned proposed_new texts by hand, or restore "
+            f"{rel} from version history and settle again.")
     text, marker_warnings = staging.unmark(path)
     for t in written:
         db.update("doc_threads", t["id"], {"state": _pushed_from(t)})
@@ -6998,8 +7022,8 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     has until that producer's own resolve.
 
     The steps are the ones every pass repeats (`tab_marked_markdown` →
-    `passes.final_text_from_marked` → `passes.record_resolution` →
-    `_write_resolved_text` → a collect under NO episode), with the
+    `passes.final_text_from_marked` → `_write_resolved_text` →
+    `passes.record_resolution` → a collect under NO episode), with the
     additions ruled first (`_rule_external_marked`). Evidence is
     `external_edit`. No model is called: no summary rebuild, no
     learnings distiller.
@@ -7102,6 +7126,11 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config or {}, source="pre-external-resolve")
+    # Durable local bytes before any thread leaves `written`. Insert
+    # verdicts and replace `record_resolution` both flip state; a crash
+    # between those updates and the write left markers on disk with no
+    # written rows to recover through unmark/resolve.
+    _write_resolved_text(path, Path(manuscript["path"]), final)
     for t in inserts:
         verdict, wording = ruled[t["id"]]
         if verdict == "modified":
@@ -7125,7 +7154,6 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
                              origin_type=EXTERNAL_ORIGIN,
                              evidence_type=EXTERNAL_EVIDENCE,
                              final_text=final, threads=replaces)
-    _write_resolved_text(path, Path(manuscript["path"]), final)
     # NO episode: landing staged revisions is not work toward whatever
     # goal the author happens to have open (filter-pass design §1.8).
     with contextlib.redirect_stdout(io.StringIO()):

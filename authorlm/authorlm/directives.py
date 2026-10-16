@@ -638,10 +638,12 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     path = Path(manuscript["path"]) / file
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source=f"pre-{kind}-resolve")
+    # Write before record (critique resolve's order): crash after
+    # verdicts with markers still on disk made unmark restore OLD.
+    api._write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, file, forms, origin_type=kind,
                                      evidence_type=f"{kind}_edit",
                                      final_text=final)
-    api._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
                             episode=api.NO_EPISODE)
