@@ -15,7 +15,7 @@ from .db import Database, ko_fields
 ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
     "citation", "rhetoric", "figure", "tone", "illustration",
-    "illustration-placement", "pronunciation",
+    "illustration-placement", "pronunciation", "clip",
     "concept-note", "concept-identity", "concept-lifecycle",
     "concept-relation",
 }
@@ -26,6 +26,10 @@ ASPECTS = {
 # exists so that spec's aspect is a real one: until the author ratifies
 # law under it, `active_law` finds nothing and the screen is inert by
 # construction.
+#
+# 'clip' is generated-video law (look, motion, sound), consumed only by
+# media_gen.clip_law and composed into Veo prompts — never into prose or
+# image prompts (docs/video-clips-design.md).
 #
 # 'figure' is figurative language — metaphor and analogy law for PROSE.
 # 'illustration' is image law, consumed only by the illustration

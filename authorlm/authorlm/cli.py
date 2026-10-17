@@ -2697,6 +2697,65 @@ def _print_landed(row: dict) -> None:
         print(ui.yellow(f"  {reason}"))
 
 
+def _clip_take_verbs(args, db, manuscript, root) -> None:
+    """`clip ensure|job|pick|attach` (docs/video-clips-design.md §8c, §8f).
+    Paths only, never bytes."""
+    import json
+    from pathlib import Path
+
+    from . import media_gen
+
+    if not args.key:
+        sys.exit(f"usage: clip {args.action} <key|job-id> …")
+    try:
+        if args.action == "job":
+            print(json.dumps(media_gen.poll(manuscript, args.key), indent=1))
+            return
+        if args.action == "pick":
+            if not args.take:
+                sys.exit("usage: clip pick <key> --take NN")
+            out = media_gen.pick(root, args.key, args.take)
+            print(f"{out['key']}: chosen {out['chosen']}")
+            return
+        if args.action == "attach":
+            if not args.spec_file:
+                sys.exit("usage: clip attach <key> --file VIDEO.mp4")
+            out = media_gen.attach(root, args.key, Path(args.spec_file))
+            print(f"{out['key']}: attached {out['path']}")
+            return
+        plan = media_gen.plan(db, manuscript, args.key, args.model)
+    except (LookupError, ValueError, RuntimeError) as err:
+        sys.exit(str(err))
+    if plan["fresh_takes"] and not args.generate:
+        for t in plan["fresh_takes"]:
+            print(t["path"])
+        return
+    print(f"{plan['key']}: {plan['model']}, {plan['duration']}s at "
+          f"{plan['resolution']} {plan['aspect_ratio']} — about "
+          f"${plan['est_usd']:.2f} (today so far ${plan['day_spent_usd']:.2f})")
+    if plan["references"] or plan["first_frame"]:
+        print(ui.dim("  images: " + ", ".join(
+            x for x in [plan["first_frame"], plan["last_frame"],
+                        *plan["references"]] if x)))
+    for reason in plan["reasons"]:
+        print(ui.red(f"  {reason}"))
+    for cap in plan["needs_confirm"]:
+        print(ui.yellow(f"  {cap} — needs --confirm"))
+    if args.dry_run or not args.generate:
+        if args.dry_run:
+            print(ui.dim("--- prompt ---\n" + plan["prompt"]))
+        if not args.generate:
+            print(ui.dim("No fresh take. '--generate' starts one (billed)."))
+        return
+    try:
+        job = media_gen.start(db, manuscript, args.key, args.model,
+                              confirm=args.confirm)
+    except (ValueError, RuntimeError) as err:
+        sys.exit(str(err))
+    print(f"Started job {job['id']} (about ${job['est_usd']:.2f}). "
+          f"'clip job {job['id']}' checks it and downloads the take.")
+
+
 def cmd_clip(args):
     """`clip spec <key> --text …|--file F` (or `--batch specs.json`) lands
     a spec — directly when the file is local, as pending forms in the Doc
@@ -2720,6 +2779,9 @@ def cmd_clip(args):
         return (_gd.get_service(config, args.workspace, interactive=True),
                 _gd.get_docs_service(config, args.workspace, interactive=True))
 
+    if args.action in ("ensure", "job", "pick", "attach"):
+        _clip_take_verbs(args, db, manuscript, root)
+        return
     if args.action == "resolve":
         out = media_road.resolve_specs(db, manuscript, _load_config(args),
                                        args.key, _services)
@@ -8971,13 +9033,29 @@ def build_parser() -> argparse.ArgumentParser:
                "  clip set kailash --clear end\n"
                "  clip resolve ecce-homo.md        file checked out: spec "
                "forms were written into the tab; this lands them\n"
+               "  clip ensure man-at-desk --dry-run   model, length, cost, prompt\n"
+               "  clip ensure man-at-desk --generate  start a take (billed)\n"
+               "  clip job man-at-desk-20261017120000 check, download the take\n"
+               "  clip pick man-at-desk --take 02\n"
+               "  clip attach man-at-desk --file own.mp4\n"
                "Keys: 'media list'. A clip gets its key at collect.")
-    p.add_argument("action", choices=["spec", "set", "resolve"])
+    p.add_argument("action", choices=["spec", "set", "resolve", "ensure",
+                                      "job", "pick", "attach"])
     p.add_argument("key", nargs="?",
                    help="spec/set: the clip's key (from 'media list'); "
                         "resolve: the file")
     p.add_argument("--batch", help="spec: a JSON file {key: spec} — staged "
                                    "together when the file is checked out")
+    p.add_argument("--generate", action="store_true",
+                   help="ensure: start a generation (billed), even when a "
+                        "fresh take exists")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="ensure: show the model, length, cost and the exact "
+                        "prompt; spend nothing")
+    p.add_argument("--confirm", action="store_true",
+                   help="ensure: go ahead past a per-call or per-day cap")
+    p.add_argument("--model", help="ensure: a Veo model other than the pin")
+    p.add_argument("--take", help="pick: the take number (NN or iNN)")
     p.add_argument("--supersede", action="store_true",
                    help="spec, file checked out: withdraw this file's clip "
                         "forms already in the tab, then stage these")
