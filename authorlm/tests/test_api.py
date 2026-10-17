@@ -11365,6 +11365,46 @@ def main_test() -> None:
               comment_bearing(db, manuscript,
                               manuscript_bridge(manuscript),
                               "01-choice.md", stub) is True, "")
+
+        # it-06cb8c2057c3: a new file's first push must land its content
+        # even while an unattributable comment makes every tab bearing.
+        # An empty tab has no anchors to protect, so it rebuilds; and
+        # diff_push itself must not crash on a tab with no paragraphs.
+        from authorlm.gdocs import diff_push
+
+        fresh_md = "# Fresh\n\nA brand new essay's opening line.\n"
+        (ms / "07-fresh.md").write_text(fresh_md)
+
+        def fresh_tab():
+            return next(t["text"] for t in stub.state["docs"]["doc-2"]
+                        if t["title"] == "07-fresh.md")
+
+        push_doc(db, manuscript, "07-fresh.md", service=stub,
+                 docs_service=stub)
+        check("a new file's first push lands its content beside an "
+              "unattributable comment",
+              "brand new essay" in fresh_tab(), fresh_tab())
+        stub.set_tab("07-fresh.md", "")  # the tab exists but is empty
+        try:
+            refilled = push_doc(db, manuscript, "07-fresh.md",
+                                service=stub, docs_service=stub)
+        except IndexError as err:
+            refilled = {"raised": repr(err)}
+        check("an empty tab takes the rebuild path even when "
+              "comment-bearing, and its content lands",
+              "mode" not in refilled and "raised" not in refilled
+              and "brand new essay" in fresh_tab(),
+              str((refilled, fresh_tab())))
+        stub.set_tab("07-fresh.md", "")
+        try:
+            surgical = diff_push(db, manuscript, "07-fresh.md", stub, stub)
+        except IndexError as err:
+            surgical = {"raised": repr(err)}
+        check("diff_push on an empty tab inserts the content instead of "
+              "raising IndexError",
+              surgical.get("mode") == "diff"
+              and "brand new essay" in fresh_tab(),
+              str((surgical, fresh_tab())))
         stub.state["comments"]["c-anchor"]["resolved"] = True
         stub.state["comments"]["c-nowhere"]["resolved"] = True
         cleared = push_doc(db, manuscript, "06-orrery.md", service=stub,
