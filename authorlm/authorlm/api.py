@@ -2998,6 +2998,22 @@ def write_draft(db: Database, manuscript: dict, config: dict,
             "guidance_id": proposal["guidance_id"], "usage": usage}
 
 
+def _beat_already_on_disk(existing: str, accepted: str) -> bool:
+    """True when `accepted` is already the essay's final section.
+
+    `write_accept` writes the beat to disk before it records the review
+    and advances the cursor. A crash (or exception) between those leaves
+    the proposal still `proposed` while the file already holds the beat;
+    a bare retry must finish the DB half without appending again."""
+    body = existing.rstrip("\n")
+    beat = accepted.rstrip("\n")
+    if not beat:
+        return False
+    if body == beat:
+        return True
+    return body.endswith("\n\n" + beat)
+
+
 def write_accept(db: Database, manuscript: dict, config: dict,
                  text: str | None = None, reason: str | None = None,
                  prefix: str | None = None,
@@ -3006,7 +3022,11 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     revision is collected (transitions attach to the episode), the verdict
     is recorded through the review pathway, and the cursor advances. With
     reworded text on stdin the decision is 'modified' and the draft→final
-    diff is recoverable (draft in the guidance row, final in the version)."""
+    diff is recoverable (draft in the guidance row, final in the version).
+
+    Idempotent on resume: if a prior attempt already landed the beat on
+    disk but died before the proposal/cursor commit, a retry finishes the
+    commit without duplicating the text."""
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
@@ -3027,8 +3047,9 @@ def write_accept(db: Database, manuscript: dict, config: dict,
         # to the essay and would ship — the "never in a finished essay"
         # leak. (write_complete is the second, independent check.)
         existing = ""
-    prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
-    path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
+    if not _beat_already_on_disk(existing, accepted):
+        prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
+        path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
 
     session, _ = ensure_session(db, manuscript)
     # ONE episode for the whole verb, resolved BEFORE the collect: the

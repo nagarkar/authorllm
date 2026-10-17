@@ -650,6 +650,12 @@ Essay summaries (critique-pass design §4): reading order, autoregressive condit
 
 _No docstring._
 
+## `tests.test_write_accept_idempotent`
+
+`authorlm/tests/test_write_accept_idempotent.py`
+
+write_accept must not duplicate a beat after a crash mid-accept.
+
 ## `tools.bootstrap_beliefs`
 
 `authorlm/tools/bootstrap_beliefs.py`
