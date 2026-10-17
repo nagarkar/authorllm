@@ -1685,6 +1685,7 @@ open a browser). When the author asks to edit in / sync with Google Docs,
 run the CLI via Bash:
 - push: `authorlm doc push <file> -m <manuscript>` → prints the Doc URL;
   the file is now *checked out* (warn the author against local edits).
+  `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a table-comment stop.
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
   A pull also harvests every open Doc comment (no addressing prefix
