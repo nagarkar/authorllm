@@ -820,11 +820,20 @@ def _reading_order_files(bridge: DocBridge) -> list[str]:
     tab it does not have is a dictionary the author cannot reach from
     the place they actually work."""
     from .revisions import read_manuscript_files
-    from .structure import is_sidecar, reading_order
+    from .structure import (TOC_FILENAME, content_files, is_outside,
+                            is_sidecar, reading_order, toc_outside)
 
     files = read_manuscript_files(bridge.root)
     order, _ = reading_order(files)
-    return order + [n for n in sorted(files) if is_sidecar(n)]
+    # Files declared `outside` the book (toc.toml; papers, side pieces)
+    # leave the reading order but are still mirrored: each gets a tab,
+    # appended after the book and before the sidecars, so a new paper's
+    # first push can land (nagarkar/authorllm#194).
+    outside = toc_outside(files.get(TOC_FILENAME) or "")
+    mirrored = sorted(n for n in content_files(files)
+                      if is_outside(n, outside) and not is_sidecar(n))
+    return (order + [n for n in mirrored if n not in order]
+            + [n for n in sorted(files) if is_sidecar(n)])
 
 
 def _doc_tabs(docs_service, master_id: str) -> list[tuple[str, str]]:
