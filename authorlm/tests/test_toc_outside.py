@@ -70,5 +70,27 @@ class OutsideTests(unittest.TestCase):
         self.assertEqual(structure.toc_attrs(text)["b.md"], {"matter": "back"})
 
 
+
+class OutsideTabs(unittest.TestCase):
+    def test_outside_files_still_get_a_tab(self):
+        """An outside file leaves the reading order but is mirrored: the
+        bridge's tab list must carry it (nagarkar/authorllm#194)."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "toc.toml").write_text(TOC)
+            (root / "a.md").write_text("# A\n")
+            (root / "b.md").write_text("# B\n")
+            (root / "side.md").write_text("# Side\n")
+            (root / "papers").mkdir()
+            (root / "papers" / "p.md").write_text("# P\n")
+            bridge = gdocs.DocBridge("doc_links", root, "T", True, True)
+            order = gdocs._reading_order_files(bridge)
+            self.assertEqual(order[:2], ["a.md", "b.md"])
+            self.assertIn("papers/p.md", order)
+            self.assertIn("side.md", order)
+            from authorlm.revisions import read_manuscript_files
+            book, _ = structure.reading_order(read_manuscript_files(root))
+            self.assertNotIn("papers/p.md", book)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
