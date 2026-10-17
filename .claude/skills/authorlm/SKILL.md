@@ -1961,6 +1961,38 @@ pairs at once. **Two roads, chosen by the file's checkout state
 A declined draft leaves the tag open; nothing is deleted on a "no".
 Exports strip an unresolved tag and warn.
 
+## Media for podcasts (`[Clip: …]`, `[Collage: …]`, `[Montage: …]` — design: authorlm/docs/video-clips-design.md)
+
+Podcast-only full-line tags in the chapter file itself, each on its own
+line with blank lines around it. Three shapes:
+
+- `[Clip: …]` prose `[/Clip]` — a SPAN: one clip plays under those words.
+- `[Collage: title]` clips only `[/Collage]` — a CUTAWAY: narration stops,
+  the clips play (e.g. the movie scene itself), narration resumes. No prose
+  inside.
+- `[Montage: title]` clips and prose `[/Montage]` — several clips play in
+  order under the author's voice reading that prose. Must hold prose.
+
+Inside a Collage or Montage a `[Clip]` has no close. Fields: `start`/`end`
+(frames on a generated clip, trim timestamps on `youtube:`/`use:` video),
+`cast`, `prior`, `look`, `text` (exact on-screen words), `use` (as-is
+asset), `youtube`. A description generates; no description must point
+(`use:`/`youtube:`). Never put timeline timing in a tag. Every book export
+drops the tag lines and keeps every word of prose.
+
+- `authorlm media list [file] [--key K] [--json]` / MCP `list_media`:
+  every clip, collage, montage and illustration with what AuthorLM
+  knows. Read-only.
+  Keys are provisional until minting is built.
+- Collect and `get_status` report media that is not ready (`media`).
+  **Duty:** raise them unprompted. A `draft` (spec under 150 words) is
+  drafted IN CHAT from the shorthand, the words it plays under, its
+  neighbouring clips and the cast — a 150+ word spec specific enough to
+  generate from or search stock with. Landing a spec (`_clips/prompts/`)
+  is not built yet: show the draft and let the author paste or keep it.
+- Built: slice 1 only (grammar, validation, export stripping, `media
+  list`). Nothing generates, nothing spends.
+
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
 and the author confirms the behavior is wrong, file it *at that moment*

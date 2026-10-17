@@ -2608,6 +2608,79 @@ def _print_open_directives(rows: list[dict]) -> None:
                      "'explain apply <file> --tag N --text …'."))
 
 
+def _print_media_not_ready(rows: list[dict]) -> None:
+    """Clips, collages and montages not ready, per file (docs/video-clips-design.md
+    §8e) — collect's report."""
+    by_file: dict[str, list[dict]] = {}
+    for row in rows:
+        by_file.setdefault(row["file"], []).append(row)
+    for file, items in by_file.items():
+        drafts = sum(1 for r in items if r["status"] == "draft")
+        bad = len(items) - drafts
+        parts = ([f"{drafts} draft clip{'s' if drafts != 1 else ''}"] if drafts
+                 else []) + ([f"{bad} invalid"] if bad else [])
+        print(ui.yellow(f"{file}: {', '.join(parts)}"))
+        for r in items:
+            where = f"line {r['line']}  " if r["line"] else ""
+            what = (f"{r['kind']} {r['key']}" if r["key"] else r["kind"])
+            note = ("spec under 150 words — draft it in chat"
+                    if r["status"] == "draft" else "; ".join(r["problems"]))
+            print(f"  • {where}{what}: {note}")
+    print(ui.dim("  'media list' for the full entries."))
+
+
+def cmd_media(args):
+    """`media list [file] [--key K] [--json]` — every clip, collage,
+    montage and illustration with what AuthorLM knows about it
+    (docs/video-clips-design.md §8f, §8g). Read-only; paths, never bytes."""
+    import json
+    from pathlib import Path
+
+    from . import media
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    listing = media.list_media(Path(manuscript["path"]),
+                               [args.file] if args.file else None, args.key)
+    if args.json:
+        print(json.dumps(listing, indent=2, ensure_ascii=False))
+        return
+    if not listing["media"] and not listing["problems"]:
+        print("No clips, collages, montages or illustrations.")
+        return
+    file = None
+    for e in listing["media"]:
+        if e["file"] != file:
+            file = e["file"]
+            print(ui.bold(file))
+        if e["kind"] == "clip":
+            shape = e["shape"] + ("/" + e["kind_of"])
+            extra = (f"  ~{e['estimated_seconds']}s under "
+                     f"{len(e['words'].split())} words"
+                     if e["shape"] == "span" else "")
+        elif e["kind"] in ("collage", "montage"):
+            shape = f"{len(e['children'])} clips"
+            extra = f"  «{e['title']}»" + (
+                f"  ~{e['estimated_seconds']}s under "
+                f"{len(e['words'].split())} words"
+                if e["kind"] == "montage" else "")
+        else:
+            shape = "image"
+            extra = f"  {e['chosen']}" if e.get("chosen") else ""
+        status = e["status"]
+        colour = (ui.green if status == "ready" else
+                  ui.yellow if status in ("draft", "unrendered") else ui.red)
+        print(f"  {e['line']:>4}  {e['kind']:<12} {colour(status):<8} "
+              f"{e['key']}  ({shape}){extra}")
+        for err in e["errors"]:
+            print(ui.red(f"          {err}"))
+        for w in e["warnings"]:
+            print(ui.dim(f"          {w}"))
+    for p in listing["problems"]:
+        print(ui.red(p))
+    print(ui.dim("Keys are provisional until minting at collect is built."))
+
+
 def _print_collect_report(report):
     if report.get("staged"):
         for item in report["staged"]:
@@ -2712,6 +2785,8 @@ def _print_collect_report(report):
                 "file (renders survive)."))
     if report.get("directives"):
         _print_open_directives(report["directives"])
+    if report.get("media"):
+        _print_media_not_ready(report["media"])
     if report.get("auto_analysis"):
         aa = report["auto_analysis"]
         print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
@@ -8715,6 +8790,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="print the launch command instead of running it")
     p.set_defaults(func=cmd_audiostation)
+
+    p = sub.add_parser(
+        "media",
+        help="every clip, collage, montage and illustration, with what AuthorLM "
+             "knows about it (docs/video-clips-design.md); read-only",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  media list                     all files\n"
+               "  media list ecce-homo.md        one file\n"
+               "  media list --key tired-man-office-dusk --json\n")
+    p.add_argument("action", choices=["list"])
+    p.add_argument("file", nargs="?", help="one file (default: all)")
+    p.add_argument("--key", help="one entry by key")
+    p.add_argument("--json", action="store_true",
+                   help="the full entries, as podlm and agents read them")
+    p.set_defaults(func=cmd_media)
 
     for kind, what, example in (
             ("footnote",

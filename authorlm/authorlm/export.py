@@ -231,12 +231,17 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     namespaced per file (footnote_prefixes): they are only file-unique
     in the sources, and pandoc would bind colliding labels to one
     definition across essays. Region tags resolve for the `doc` output."""
+    from .media import strip_for_book
+
+    def strip_media(text: str, name: str) -> str:
+        return strip_for_book(text, name)[0]
+
     files = read_manuscript_files(Path(manuscript["path"]))
     order, unlisted = reading_order(files)
     tokens = footnote_prefixes(order)
     parts = [namespace_footnotes(
-        normalize_markdown(strip_voice_lines(resolve_regions(
-            normalize_markdown(files[name]), {"doc"}, name))).rstrip("\n"),
+        normalize_markdown(strip_voice_lines(strip_media(resolve_regions(
+            normalize_markdown(files[name]), {"doc"}, name), name))).rstrip("\n"),
         tokens[name])
         for name in order]
     text = "\n\n".join(part for part in parts if part)
@@ -448,6 +453,7 @@ def publish_markdown(manuscript: dict, variant: str,
     Returns (text, order, warnings)."""
     from .illus import (ILLUS_DIR, capture_embeds, parse_tag,
                         slot_candidates, slot_key)
+    from .media import strip_for_book
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
@@ -476,6 +482,9 @@ def publish_markdown(manuscript: dict, variant: str,
                             "omitted from the export")
             continue
         text = resolve_regions(normalize_markdown(files[name]), outputs, name)
+        # Clip, Collage and Montage tags are podcast-only (docs/video-clips-design.md
+        # §6): the tag lines go, every word of prose stays.
+        text, _media_tags = strip_for_book(text, name)
         text = strip_voice_lines(text)
         # An unresolved [Footnote: …] or [Explain: …] tag never reaches
         # a reader: a shorthand instruction inside a sentence reads as
@@ -559,6 +568,13 @@ def check_manuscript(manuscript: dict) -> list[str]:
             except ValueError as err:
                 problems.append(str(err))
                 break
+        # Clip, Collage and Montage structure (docs/video-clips-design.md §8i).
+        from .media import scan_text as media_scan
+
+        items, media_problems = media_scan(text)
+        problems.extend(f"{name}: {p}" for p in media_problems)
+        problems.extend(f"{name}:{it['line']}: {e}" for it in items
+                        for e in it["errors"])
         # Display-math structure is independent of output: an unclosed
         # $$ would silently truncate the audio-clean export, so the
         # check refuses it the same way it refuses a stray [/Omit].

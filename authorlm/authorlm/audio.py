@@ -615,9 +615,13 @@ def _spoken(block: dict, config: dict) -> tuple[str, list[str]]:
 
 def audio_source(name: str, raw: str) -> str:
     """The stripped export's per-file pipeline: normalize, resolve the
-    `audio` regions, strip the inline directive tags and display math.
+    `audio` regions, strip the media tag lines (prose stays), the
+    inline directive tags and display math.
     Illustration and image lines fall out in `blocks_of`."""
+    from .media import strip_for_book
+
     text = resolve_regions(normalize_markdown(raw), {"audio"}, name)
+    text, _media_tags = strip_for_book(text, name)
     text, _unresolved = directives.strip_tags(text)
     text = strip_display_math(text)
     return normalize_markdown(text)
