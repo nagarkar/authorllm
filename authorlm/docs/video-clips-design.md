@@ -457,7 +457,7 @@ built, never before, so no skill describes something that does not exist.
 | YouTube search via the Data API only, failing loudly | ytlm (`nagarkar/ytlm`) | new search verb beside `src/ytlm/api.py` | `ytlm/.claude/skills/ytlm/SKILL.md` (verbs); `ytlm/docs/design/` |
 | Quote location across neighbouring caption segments → proposed `start:`/`end:`, expanded to whole sentences (start at the first sentence's start, end before the next sentence begins; §8l) | ytlm | the `segments` / `search` code | same as above |
 | Video download and excerpt cutting, cached in the ytlm workspace on the external drive, returning paths | ytlm | `src/ytlm/adapters/ytdlp.py` (today audio only) | same as above |
-| Read `authorlm media list --json`; get excerpt paths from ytlm; build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
+| Read `authorlm media list --json`; get excerpt paths from ytlm; trim each excerpt precisely by looking at the section (frames, audio, word timings) so no stray fragment plays (§8l); build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
 | Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
 
 ## 8l. YouTube briefs and generation specs (ruled 2026-10-17)
@@ -485,6 +485,15 @@ was saying, she stumbled upon a solution whereby nearly 99% of all test
 subjects accepted the program as long as they were given a choice, even if
 they were only aware of the choice at a near unconscious level." (3:49 to
 4:01 of [part 1](https://www.youtube.com/watch?v=cHZl2naX1Xk&t=229); the next sentence starts at 4:00.8).
+
+**The tag's span is generous; podlm trims it (ruled 2026-10-17).** The
+author's `start:`/`end:` cover the whole passage wanted, with room to
+spare. podlm makes the final cut: it downloads the excerpt (from ytlm),
+LOOKS at that section (frames and audio, with the transcript's word
+timings), and sets the exact in and out points so only the needed
+sentences play — no stray word or half-sentence from before or after
+(e.g. "The first Matrix I designed…" starting at 2:49 after Neo's line).
+The trimmed points are podlm's production record, not the tag's.
 
 A brief never says how to render anything. In a file each section is a
 line; inside a tag in the Doc (a review form) the sections run on one
