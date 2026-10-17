@@ -394,6 +394,70 @@ Checked at collect, reported, never auto-fixed.
   `youtube:` + `start:`/`end:` for the author to confirm, then podlm
   fetches, trims and stitches. AuthorLM only checks and lists the tags.
 
+## 8k. Where podcast text lives, and who fetches (ruled 2026-10-17)
+
+- **Both roads stay.** (1) A book chapter tagged in place: a multimedia
+  edition of the audiobook, collages and inserts over the author reading
+  the book (Ecce Homo is the trial). (2) Monologues in their own
+  manuscripts, which may be series: `SpiritualHindu` first, later e.g. a
+  series on nothingness or on choice.
+- **Existing monologues** are made by corpuslm (`monologue new/run/
+  export`), one manuscript per monologue (`monologue-picture-story`,
+  `monologue-two-returns`, on the external drive). Find manuscripts with
+  `list_manuscripts`, never by listing a folder.
+- **A series manuscript holds its monologues as files** (ruled
+  2026-10-17): `SpiritualHindu/picture-story.md`, `…/two-returns.md`, one
+  style guide, Doc and concept graph per series. corpuslm's
+  one-manuscript-per-monologue pattern was never an explicit decision and
+  is replaced: corpuslm writes new monologues into a series, and the two
+  existing ones move by hand (no back-compat while prototyping).
+- **ytlm owns YouTube sources**, as AuthorLM owns text: search, transcript,
+  quote location, and (new) video download and excerpt cutting, cached on
+  the external drive, returning paths. podlm builds reels and the timeline
+  from those paths; its own yt-dlp download in `collage.py` moves to ytlm.
+
+### Search bake-off (2026-10-17)
+
+Eight briefs worded as clip tags (the Architect scene, "the problem is
+choice", Kastrup's ten books, Peterson's lobsters, Jung's Face to Face,
+Watts' Dream of Life, Feynman's magnets, Spira's screen analogy), top 5
+from yt-dlp `ytsearch` (keyless) and the YouTube Data API `search.list`
+(free quota). Both put a correct video at rank 1 for all eight on a loose
+title match. Read closely, the API was more specific: it ranked the actual
+Architect scene upload first (yt-dlp: a commentary video) and the exact
+Spira screen-analogy clip first (yt-dlp: a general Spira talk). yt-dlp
+found the bare "the problem is choice" clip first. Latency: API ~0.4 s,
+yt-dlp ~1.4 s. An earlier web search could not surface the scene at all.
+
+Transcripts settle the times: of 10 candidates, 9 had captions (one had
+transcripts disabled) and the quote was located in each. The Architect
+scene's line falls at 2:45 of `cHZl2naX1Xk`, but split across two
+caption segments ("Choice the problem is" / "choice"), so quote location
+must match across neighbouring segments, not one at a time.
+
+**Ruled 2026-10-17: the YouTube Data API only, no yt-dlp search
+fallback.** When the API fails (no key, quota spent, network), the verb
+stops and says so; it never falls back to a weaker search that would
+quietly return worse candidates. Then: keep the candidates that have a
+transcript; locate the quote across a sliding window of segments; propose
+`youtube:` + `start:`/`end:` with a pad, for the author to confirm by
+watching. (yt-dlp stays for downloading, which is a different job.)
+
+### Where each change goes (recorded 2026-10-17; not yet filed as issues)
+
+These rulings live here for now. Each change belongs to the repo that
+owns the behaviour; that repo's skill is updated when the behaviour is
+built, never before, so no skill describes something that does not exist.
+
+| change | repo | code | skill and docs to update when built |
+|---|---|---|---|
+| Series manuscripts: write each monologue as a file in a series manuscript (`SpiritualHindu/<name>.md`); move `monologue-picture-story` and `monologue-two-returns` in by hand | corpuslm (`nagarkar/corpuslm`) | `src/corpuslm/cli.py` (`monologue new/run/export`), `moments.py`, the AuthorLM registration call | `corpuslm/.claude/skills/corpuslm/SKILL.md` (the monologue rows); corpuslm design docs |
+| YouTube search via the Data API only, failing loudly | ytlm (`nagarkar/ytlm`) | new search verb beside `src/ytlm/api.py` | `ytlm/.claude/skills/ytlm/SKILL.md` (verbs); `ytlm/docs/design/` |
+| Quote location across neighbouring caption segments → proposed `start:`/`end:` | ytlm | the `segments` / `search` code | same as above |
+| Video download and excerpt cutting, cached in the ytlm workspace on the external drive, returning paths | ytlm | `src/ytlm/adapters/ytdlp.py` (today audio only) | same as above |
+| Read `authorlm media list --json`; get excerpt paths from ytlm; build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
+| Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
+
 ## 9. Still open
 
 - A composed view, `style show <file> --aspect illustration` with each
