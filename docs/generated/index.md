@@ -536,6 +536,12 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_critique_dedupe_key`
+
+`authorlm/tests/test_critique_dedupe_key.py`
+
+`critique._dedupe_key` is the cross-source idempotency normalizer for critique import.
+
 ## `tests.test_doc_road_escapes`
 
 `authorlm/tests/test_doc_road_escapes.py`
@@ -632,6 +638,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_resolve_pointers`
+
+`authorlm/tests/test_resolve_pointers.py`
+
+`lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
@@ -644,11 +656,29 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
 
+## `tests.test_summary_of`
+
+`authorlm/tests/test_summary_of.py`
+
+`filters.summary_of` and `lenses.summary_of` are what `filter list` and `lens list` print for each artifact.
+
 ## `tests.test_triage_app`
 
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_validate_reply`
+
+`authorlm/tests/test_validate_reply.py`
+
+`filtering.validate_reply` is §2.5's filter-reply door: every pasted or model reply for `filter record` / settle must pass here before any `<<old>>{{new}}` is staged.
+
+## `tests.test_verse_poem_level`
+
+`authorlm/tests/test_verse_poem_level.py`
+
+`verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
 
 ## `tools.bootstrap_beliefs`
 
