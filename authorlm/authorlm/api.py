@@ -6168,6 +6168,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     from . import morph as _morph
     from . import summaries as sums
+    from . import threads as th
 
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
@@ -6198,39 +6199,28 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-morph-settle")
-    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
-    # paragraph, nothing struck) — ruled by presence, not matched by old
-    # text: the tag still in the tab, braced or unbraced, accepts the
-    # finding and stands in the file as an open directive; the tag gone
-    # rejects it. Ruled here, before the replace forms, so
-    # record_resolution's unmatched loop never sees them; and only
-    # morph's own insert threads are touched, never an author's `{{…}}`.
-    marked = fetched["marked"]
-    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
-        tag = t["proposed_new"]
-        braced = "{{" + tag + "}}"
-        present = braced if braced in marked else (tag if tag in marked
-                                                    else None)
-        if present is not None:
-            marked = _fold_judgment(marked, present, tag)
-            db.update("doc_threads", t["id"], {"state": "cleaned"})
-            passes._edit_evidence(db, mid, t, "resolved",
-                                  evidence_type=_morph.MORPH_EVIDENCE)
-        else:
-            db.update("doc_threads", t["id"], {"state": "declined"})
-            passes._edit_evidence(db, mid, t, "declined",
-                                  evidence_type=_morph.MORPH_EVIDENCE)
+    # Judgment tags first (`_rule_judgments`), so record_resolution's
+    # unmatched loop never sees them. Nothing is written until the local
+    # file is known to merge — the same shape as `lens_resolve`.
+    marked, rulings = _rule_judgments(fetched["marked"], written)
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    final, _ = th.strip_form_remnants(
+        final, [t["proposed_new"] for t in written])
+    landed = _door_final_text(rel, fetched, final, path, "morph resolve")
+    _apply_judgment_rulings(db, mid, rulings, _morph.MORPH_EVIDENCE)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=_morph.MORPH_ORIGIN,
                                      evidence_type=_morph.MORPH_EVIDENCE,
-                                     final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+                                     final_text=landed)
+    _write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="morph-settle",
                 episode=NO_EPISODE)
+    still_marked = _clear_door_forms(db, manuscript, rel, written,
+                                     fetched["marked"], docs_service,
+                                     final, warnings)
     after = {t["id"]: dict(db.one(
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
@@ -6253,7 +6243,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
             "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "warnings": warnings,
             "summary": summary, "pattern_candidate": candidate,
-            "findings": verdicts, "tab_still_marked": True}
+            "findings": verdicts, "tab_still_marked": still_marked}
 
 
 def lens_unmark(db: Database, manuscript: dict, file: str,
@@ -6301,15 +6291,146 @@ def _fold_judgment(text: str, present: str, tag: str) -> str:
     return text[:j] + tag + text[i + len(present):]
 
 
+def _rule_judgments(marked: str, written: list[dict]
+                    ) -> tuple[str, list[tuple[dict, bool]]]:
+    """Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their
+    own paragraph, nothing struck), ruled by presence, not matched by
+    old text: the tag still in the tab, braced or unbraced, accepts the
+    finding and folds back onto the END of the paragraph it follows
+    (where the file has always carried an open judgment and where
+    `lens repair` looks for it); the tag gone rejects it. Only the
+    door's own insert threads are ruled, never an author's `{{…}}`.
+    Pure: returns (marked text, [(thread, accepted)]) and writes
+    nothing, so a resolve can still stop before any verdict lands."""
+    rulings = []
+    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
+        tag = t["proposed_new"]
+        braced = "{{" + tag + "}}"
+        present = braced if braced in marked else (tag if tag in marked
+                                                    else None)
+        if present is not None:
+            marked = _fold_judgment(marked, present, tag)
+        rulings.append((t, present is not None))
+    return marked, rulings
+
+
+def _apply_judgment_rulings(db: Database, mid: str, rulings,
+                            evidence_type: str) -> None:
+    for t, accepted in rulings:
+        db.update("doc_threads", t["id"],
+                  {"state": "cleaned" if accepted else "declined"})
+        passes._edit_evidence(db, mid, t,
+                              "resolved" if accepted else "declined",
+                              evidence_type=evidence_type)
+
+
+def _merge_local_edits(base: str, local: str, resolved: str) -> str | None:
+    """Three-way, line by line: `base` is the tab's text as last agreed
+    (its forms collapsed to the old half), `local` the file as it now
+    stands, `resolved` the tab's text with the forms settled. Each
+    side's changes against the base are kept; None when a local change
+    touches lines the resolve also changed (it-459f2c04ef77)."""
+    b, lo, r = (x.split("\n") for x in (base, local, resolved))
+
+    def edits(other):
+        return [(i1, i2, other[j1:j2]) for tag, i1, i2, j1, j2 in
+                difflib.SequenceMatcher(None, b, other,
+                                        autojunk=False).get_opcodes()
+                if tag != "equal"]
+
+    ours, theirs = edits(lo), edits(r)
+    for a1, a2, ra in ours:
+        for c1, c2, rc in theirs:
+            if (a1, a2, ra) == (c1, c2, rc):
+                continue
+            if a1 <= c2 and c1 <= a2:
+                return None
+    merged = list(b)
+    every = {(e[0], e[1], tuple(e[2])) for e in ours + theirs}
+    for i1, i2, lines in sorted(every, key=lambda e: (e[0], e[1]),
+                                reverse=True):
+        merged[i1:i2] = list(lines)
+    return "\n".join(merged)
+
+
+def _door_final_text(rel: str, fetched: dict, final: str, path: Path,
+                     verb: str) -> str:
+    """The text a door's resolve writes: the resolved tab text, with any
+    local edit made since the last push kept (it-459f2c04ef77). The
+    resolve used to write the tab's text over the file and silently
+    revert such an edit. An edit that meets a form's own lines cannot
+    be kept beside it, and stops the resolve before anything settles."""
+    from . import gdocs
+    from .revisions import strip_embed_lines
+
+    if fetched["state"] != "local_ahead":
+        return final
+    local = gdocs.normalize_markdown(strip_embed_lines(
+        path.read_text(encoding="utf-8")))
+    merged = _merge_local_edits(fetched["collapsed"], local,
+                                gdocs.normalize_markdown(final))
+    if merged is None:
+        raise ValueError(
+            f"'{rel}' was edited locally since the last push, on a line "
+            f"that also carries one of the tab's forms, so the resolve "
+            f"cannot keep both and has settled nothing. Make that edit in "
+            f"the Doc tab instead (or undo it in {rel}), then re-run "
+            f"'{verb} {rel}'.")
+    return merged
+
+
+def _clear_door_forms(db: Database, manuscript: dict, rel: str,
+                      written: list[dict], marked: str, docs_service,
+                      base_text: str, warnings: list[str]) -> bool:
+    """Take a door's settled forms out of the tab IN PLACE — the markers
+    and each form's losing half, nothing else — so no follow-up push is
+    needed to clear them, and a comment anchored on any other text in
+    the tab keeps its anchor. Never a rebuild: the author's constraint
+    is that clearing the tab must not orphan a comment
+    (it-459f2c04ef77). Returns True when some form is still there."""
+    from . import gdocs
+
+    rows = [dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                        (t["id"],))) for t in written]
+
+    def where(r: dict) -> int:
+        old = r.get("proposed_old") or ""
+        at = marked.find(f"<<{old}>>" if old
+                         else "{{" + (r.get("proposed_new") or "") + "}}")
+        return at if at >= 0 else len(marked)
+
+    outcomes = [{"old": r.get("proposed_old") or "",
+                 "new": r.get("proposed_new") or "",
+                 "keep": "new" if r["state"] == "cleaned" else "old"}
+                for r in sorted(rows, key=where)
+                if r["state"] in ("cleaned", "declined")]
+    try:
+        faults = gdocs.settle_forms_in_tab(
+            db, manuscript, rel, outcomes, docs_service,
+            base_text=base_text,
+            remnants=[r.get("proposed_new") or "" for r in rows])
+    except Exception as err:                            # noqa: BLE001
+        faults = [str(err)]
+    if faults:
+        warnings.append(
+            f"the resolve landed locally, but {rel}'s tab still shows some "
+            f"of its forms (" + "; ".join(faults) + "). Nothing was "
+            f"rebuilt; 'doc push {rel}' takes settled forms out in place.")
+    return bool(faults)
+
+
 def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                 services=None) -> dict:
     """Read the tab back and finalize the lens forms — `filter resolve`'s
     doc road for the lens door: the author's post-edits win, a
     hand-resolved form's verdict is inferred from the prose
     (it-4c5a8038c304), evidence lands as `lens_edit` under NO episode,
-    and the tab keeps its marks until the next ordinary `doc push`."""
+    a local edit made since the push is kept, and the settled forms are
+    taken out of the tab in place (`_clear_door_forms`,
+    it-459f2c04ef77)."""
     from . import gdocs
     from . import summaries as sums
+    from . import threads as th
 
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
@@ -6339,44 +6460,28 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-lens-settle")
-    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
-    # paragraph, nothing struck). They are ruled by presence, not matched
-    # by old text: the tag still in the tab, braced or unbraced, accepts
-    # the finding and stands in the file as an open directive; the tag
-    # gone rejects it. Ruled here, before the replace forms, so
-    # record_resolution's unmatched loop never sees them; and only the
-    # lens's own insert threads are touched, never an author's `{{…}}`.
-    marked = fetched["marked"]
-    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
-        tag = t["proposed_new"]
-        braced = "{{" + tag + "}}"
-        present = braced if braced in marked else (tag if tag in marked
-                                                    else None)
-        if present is not None:
-            # Accepted: the tag folds back onto the END of the paragraph
-            # it follows, which is where the file has always carried an
-            # open judgment and where `lens repair` looks for it — the
-            # separate paragraph was the TAB's lighter form, not the
-            # record's.
-            marked = _fold_judgment(marked, present, tag)
-            db.update("doc_threads", t["id"], {"state": "cleaned"})
-            passes._edit_evidence(db, mid, t, "resolved",
-                                  evidence_type=LENS_EVIDENCE)
-        else:
-            db.update("doc_threads", t["id"], {"state": "declined"})
-            passes._edit_evidence(db, mid, t, "declined",
-                                  evidence_type=LENS_EVIDENCE)
+    # Judgment tags first (`_rule_judgments`), so record_resolution's
+    # unmatched loop never sees them. Nothing is written until the local
+    # file is known to merge.
+    marked, rulings = _rule_judgments(fetched["marked"], written)
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    final, _ = th.strip_form_remnants(
+        final, [t["proposed_new"] for t in written])
+    landed = _door_final_text(rel, fetched, final, path, "lens resolve")
+    _apply_judgment_rulings(db, mid, rulings, LENS_EVIDENCE)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
-                                     final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+                                     final_text=landed)
+    _write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)
+    still_marked = _clear_door_forms(db, manuscript, rel, written,
+                                     fetched["marked"], docs_service,
+                                     final, warnings)
     after = {t["id"]: dict(db.one(
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
@@ -6399,7 +6504,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
             "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "warnings": warnings,
             "summary": summary, "pattern_candidate": candidate,
-            "findings": verdicts, "tab_still_marked": True}
+            "findings": verdicts, "tab_still_marked": still_marked}
 
 
 def filter_unmark(db: Database, manuscript: dict, file: str,

@@ -4379,8 +4379,13 @@ def cmd_morph(args):
             print(ui.dim("Pattern candidate from your post-edits: "
                          f"{result['pattern_candidate'][:80]}…"))
         if result["tab_still_marked"]:
-            print(ui.dim("The Doc tab keeps its struck-and-green marks "
-                         f"until your next 'doc push {result['file']}'."))
+            print(ui.yellow("Some forms are still in the Doc tab (see "
+                            "above); 'doc push "
+                            f"{result['file']}' takes them out in place."))
+        else:
+            print(ui.dim("The Doc tab is cleared of these forms, in "
+                         "place; comments in the margin keep their "
+                         "anchors."))
         return
     if args.action == "review":
         decisions = [d for d, on in (("accepted", args.accept),
@@ -4792,9 +4797,14 @@ def cmd_lens(args):
                     print(ui.dim("Pattern candidate from your post-edits: "
                                  f"{result['pattern_candidate'][:80]}…"))
                 if result["tab_still_marked"]:
+                    print(ui.yellow(
+                        "Some forms are still in the Doc tab (see above); "
+                        f"'doc push {result['file']}' takes them out in "
+                        "place."))
+                else:
                     print(ui.dim(
-                        "The Doc tab keeps its struck-and-green marks "
-                        f"until your next 'doc push {result['file']}'."))
+                        "The Doc tab is cleared of these forms, in place; "
+                        "comments in the margin keep their anchors."))
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         return
