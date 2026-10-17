@@ -1288,6 +1288,23 @@ def comment_bearing(db: Database, manuscript: dict, bridge: DocBridge,
     return False
 
 
+def _tab_is_empty(db: Database, manuscript: dict, bridge: DocBridge,
+                  relpath: str, docs_service) -> bool:
+    """True when the file's tab exists but holds no paragraphs. A failed
+    read counts as not empty: when the tab's state is unknown, the safe
+    path is the surgical one."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath)
+    master_id = links.get("_master_id")
+    if docs_service is None or not master_id or not (
+            isinstance(entry, dict) and entry.get("tab_id")):
+        return False
+    try:
+        return not _doc_paragraphs(docs_service, master_id, entry["tab_id"])
+    except Exception:
+        return False
+
+
 def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
                  markdown: str, temp_name: str) -> None:
     """Rebuild one tab's body from markdown: temp-doc import (Google owns
@@ -1435,7 +1452,11 @@ def push_doc(db: Database, manuscript: dict, query: str,
     # margin-thread anchors). Detect delimiters in prose only.
     has_table = bool(_TABLE_DELIM.search(
         _lift_fences(path.read_text(encoding="utf-8"))[0]))
-    if not has_table and (
+    # An empty tab carries no anchors to protect: a new file's first
+    # push must land its content, and the paragraph diff has nothing to
+    # align against (it-06cb8c2057c3).
+    if not has_table and not _tab_is_empty(
+            db, manuscript, bridge, relpath, docs_service) and (
             threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
         # Surgical path: a rebuild would orphan the open margin threads
@@ -3972,7 +3993,14 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                         documentId=temp["id"]).execute()
                 finally:
                     service.files().delete(fileId=temp["id"]).execute()
-                if i1 < len(doc_paras):
+                if not doc_paras:
+                    # Empty tab: nothing to insert before or after, so
+                    # the block lands at the body's start (index 1),
+                    # ahead of the tab's lone trailing newline
+                    # (it-06cb8c2057c3).
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id), 0))
+                elif i1 < len(doc_paras):
                     # Insert BEFORE an existing paragraph: imported
                     # paragraphs each end with a newline, so the block
                     # closes cleanly against what follows.
