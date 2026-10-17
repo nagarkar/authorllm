@@ -294,20 +294,20 @@ class MediaTests(unittest.TestCase):
             "problem is choice. | youtube: TBD]\n\n"
             "[/Collage]\n", encoding="utf-8")
         media.maintain_keys(self.root)
-        out = media.set_fields(self.root, "source-the-matrix-reloaded", {
+        out = media.set_fields(self.root, "the-problem-is-choice", {
             "youtube": "https://www.youtube.com/watch?v=cHZl2naX1Xk",
             "start": "2:43", "end": "2:50"})
         self.assertEqual(out["tag"], "[Clip: source: The Matrix Reloaded "
-                         "quote: The problem is… ⇢ source-the-matrix-reloaded."
+                         "quote: The problem is… ⇢ the-problem-is-choice."
                          "md | youtube: https://www.youtube.com/watch?v="
                          "cHZl2naX1Xk | start: 2:43 | end: 2:50]")
         clip = [e for e in media.list_media(self.root)["media"]
                 if e["kind"] == "clip"][0]
         self.assertEqual(clip["status"], "ready", clip["errors"])
-        out = media.set_fields(self.root, "source-the-matrix-reloaded", {"end": None})
+        out = media.set_fields(self.root, "the-problem-is-choice", {"end": None})
         self.assertNotIn("end:", out["tag"])
         with self.assertRaises(ValueError):
-            media.set_fields(self.root, "source-the-matrix-reloaded",
+            media.set_fields(self.root, "the-problem-is-choice",
                              {"colour": "red"})
 
     def test_missing_spec_file_is_an_error(self):
@@ -354,6 +354,14 @@ class MediaTests(unittest.TestCase):
             "source: The Matrix Reloaded quote: \"accepted the program as long "
             "as they were given a choice\"")
         self.assertTrue(any("fragment" in r for r in reasons), reasons)
+
+    def test_key_names_what_the_clip_shows(self):
+        (self.root / "ecce.md").write_text(
+            "[Collage: c]\n\n[Clip: source: The Matrix Reloaded moment: Neo "
+            "opens the door with the key | youtube: TBD]\n\n[/Collage]\n",
+            encoding="utf-8")
+        rows = media.maintain_keys(self.root)
+        self.assertEqual(rows[1]["key"], "neo-opens-the-door")
 
     def test_kind_change_moves_the_file(self):
         path = self.root / "ecce.md"
