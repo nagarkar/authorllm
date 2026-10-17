@@ -5924,6 +5924,29 @@ def check_directives() -> None:
               dv.open_report(ms_dir) == []
               and (ms_dir / "quiet.md").read_text() == "# Quiet\n\nNo request here.\n")
 
+        # it-816cd7998fec: an essay that ENDS on an illustration tag and
+        # its derived embed line, with no definitions yet. The definition
+        # lands after the true last paragraph — the tag and its embed —
+        # never between the two, and the embed survives intact.
+        sky_tag = ("[Illustration: A sky of parted clouds from which no "
+                   "hand descends ⇢ a-sky-of-parted.md | caption: No hand "
+                   "descends. *Nothing* falls.]")
+        sky_embed = "![](_illustrations/a-sky-of-parted-82891df3-2e99-01.jpg)"
+        (ms_dir / "sky.md").write_text(
+            "# Sky\n\nThe clouds part.[Footnote: cite the Psalm]\n\n"
+            + sky_tag + "\n" + sky_embed + "\n")
+        rep = dv.apply(db, ms, {}, "footnote", "sky.md",
+                       [(1, "Psalm 121.")])
+        sky_out = (ms_dir / "sky.md").read_text()
+        check("direct road: a footnote on an essay ending in an "
+              "illustration tag + embed lands its definition after them, "
+              "the tag and embed kept together",
+              rep["mode"] == "applied" and not rep["failed"]
+              and "The clouds part.[^S1]\n" in sky_out
+              and sky_out.endswith(sky_tag + "\n" + sky_embed
+                                   + "\n\n[^S1]: Psalm 121.\n"),
+              repr(sky_out))
+
         # Refusals: empty text, reserved grammar, a tag in the text, a
         # consumed tag, an unknown file.
         (ms_dir / "becker.md").write_text(becker)

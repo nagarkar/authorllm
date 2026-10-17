@@ -552,8 +552,11 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
     # over in reverse so the tab reads the definitions in series order.
     # (`pending_write_order` is a stable sort and keeps that order.)
     threads = replaces + list(reversed(inserts))
+    # Atomic: a superscript whose definition could not be placed is a
+    # marker pointing nowhere, so the file's forms land together or not
+    # at all (it-816cd7998fec).
     result = gdocs.write_pending_forms(db, manuscript, file, threads,
-                                       service, docs_service)
+                                       service, docs_service, atomic=True)
     written_ids = {t["id"] for t in result["written"]}
     for t in threads:
         if t["id"] in written_ids:
