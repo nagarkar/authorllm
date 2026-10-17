@@ -26,9 +26,11 @@ has no close. Book exports drop every tag line and keep every word of
 prose. A tag never carries timeline timing; podlm owns the timeline and
 aligns the words this module hands it to its own transcript.
 
-Collect gives every clip its KEY (§8a): its text moves to
-`_clips/prompts/<key>.md`, the canonical spec, and the tag keeps an
-excerpt and `⇢ <key>.md`. `set_spec` lands a drafted spec and
+Collect gives every tag its KEY (§8a): its text moves to a file in the
+folder of its kind — a YOUTUBE BRIEF (`_clips/youtube-briefs/`: what to
+search for), a GENERATION SPEC (`_clips/specs/`: what a video model
+renders) or a NOTE (`_clips/notes/`: a title or label) — and the tag
+keeps an excerpt and `⇢ <key>.md`. Each kind has its own check. `set_spec` lands a drafted spec and
 `set_fields` writes confirmed fields (a YouTube url and times) into a
 tag. Nothing here calls a model or spends. A clip not yet collected has
 a PROVISIONAL key in `media list`.
@@ -41,7 +43,7 @@ from pathlib import Path
 
 from .revisions import read_manuscript_files
 
-DRAFT_WORDS = 150          # §8e: a spec under this is a draft
+DRAFT_WORDS = 150          # §8e: a generation spec under this is a draft
 WORDS_PER_MINUTE = 150     # estimated_seconds is a generation hint only
 MAX_CAST = 3
 
@@ -198,8 +200,13 @@ def scan_text(text: str) -> tuple[list[dict], list[str]]:
         m = CONTAINER_OPEN.match(line)
         if m:
             kind = m.group("kind").lower()
+            title, ref = m.group("body").strip(), None
+            rm = _REF.search(title)
+            if rm:
+                ref = rm.group("ref")
+                title = title[:rm.start()].rstrip(" …").strip()
             item = {"kind": kind, "i": i, "line": i + 1, "close": None,
-                    "title": m.group("body").strip(), "children": [],
+                    "title": title, "ref": ref, "children": [],
                     "n": len(items), "errors": []}
             if box:
                 item["errors"].append(
@@ -387,7 +394,7 @@ def _check(item: dict, root: Path, known: dict) -> None:
 def _status(item: dict) -> str:
     if item["errors"]:
         return "invalid"
-    if item["kind_of"] == "generated" and item["spec_words"] < DRAFT_WORDS:
+    if item.get("draft_reasons"):
         return "draft"
     return "ready"
 
@@ -441,16 +448,22 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
     for item in items:
         if item["kind"] in CONTAINERS:
             continue
+        item["spec_kind"] = spec_kind("clip", item["fields"])
+        item["spec_text"] = item["description"]
         if item["ref"]:
-            full = known["specs"].get(item["ref"])
-            if full is None:
-                item["errors"].append(f"spec file {CLIPS_DIR}/{PROMPTS_SUBDIR}/"
-                                      f"{item['ref']} is missing")
+            entry = known["specs"].get(item["ref"])
+            if entry is None:
+                item["errors"].append(
+                    f"{spec_relpath(item['spec_kind'], item['ref'])} is missing")
             else:
-                item["description"] = " ".join(full.split())
-        desc = item["description"]
-        item["spec_words"] = len(desc.split()) if item["fields"].get(
-            "youtube") is None and "use" not in item["fields"] else 0
+                item["spec_text"] = entry["text"]
+                item["description"] = " ".join(entry["text"].split())
+                if entry["kind"] != item["spec_kind"]:
+                    item["warnings"] = [f"its text is a {entry['kind']} — the "
+                                        "next collect moves it; draft it anew "
+                                        f"as a {item['spec_kind']}"]
+        item["draft_reasons"] = check_text(item["spec_kind"], item["spec_text"])
+        item["spec_words"] = len(item["description"].split())
         _check(item, root, known)
         if region_error:
             item["errors"].append(f"regions do not resolve: {region_error}")
@@ -506,9 +519,21 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
             if kind == "montage" and not words:
                 errors.append("a Montage plays under prose and holds none — "
                               "clips alone are a [Collage]")
+            if item["ref"]:
+                entry = known["specs"].get(item["ref"])
+                if entry is None:
+                    errors.append(f"{spec_relpath('note', item['ref'])} "
+                                  "is missing")
+                else:
+                    item["title"] = " ".join(entry["text"].split())
             entry = {"kind": kind, "file": name, "line": item["line"],
                      "title": item["title"],
-                     "key_base": f"{kind}-" + (_slug(item["title"]) or "untitled"),
+                     "keyed": bool(item["ref"]),
+                     "spec_kind": "note",
+                     "spec_path": (spec_relpath("note", item["ref"])
+                                   if item["ref"] else None),
+                     "key_base": (item["ref"][:-3] if item["ref"] else
+                                  f"{kind}-" + (_slug(item["title"]) or "untitled")),
                      "children_idx": item["children"],
                      "status": "invalid" if errors else "ready",
                      "errors": errors, "warnings": []}
@@ -535,15 +560,15 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
                 base = _slug(Path(f["use"]).stem.replace("-", " ").replace("_", " "))
             else:   # generated, or a quoted clip whose url is not set yet
                 base = _slug(item["description"])
-            label = item["kind_of"] != "generated"
             entry = {"kind": "clip", "file": name, "line": item["line"],
                      "shape": item["shape"], "kind_of": item["kind_of"],
                      "keyed": bool(item["ref"]),
-                     "spec_path": (f"{CLIPS_DIR}/{PROMPTS_SUBDIR}/{item['ref']}"
+                     "spec_kind": item["spec_kind"],
+                     "spec_path": (spec_relpath(item["spec_kind"], item["ref"])
                                    if item["ref"] else None),
                      "key_base": base or "clip",
-                     "description": "" if label else item["description"],
-                     "label": item["description"] if label else "",
+                     "description": item["description"],
+                     "draft_reasons": item["draft_reasons"],
                      "fields": f, "spec_words": item["spec_words"],
                      "status": _status(item),
                      "errors": item["errors"], "warnings": item["warnings"],
@@ -553,6 +578,13 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
                       "after_sentence"):
                 if k in item:
                     entry[k] = item[k]
+            if item["spec_kind"] == "youtube_brief":
+                entry["youtube_brief"] = parse_sections(item["spec_text"],
+                                                        BRIEF_LABELS)
+                entry.update(brief_terms(item["spec_text"]))
+            elif item["spec_kind"] == "generation_spec":
+                entry["generation_spec"] = parse_sections(item["spec_text"],
+                                                          SPEC_LABELS)
         entry["_line_index"] = item["i"]
         out.append(entry)
     for i, slot in illus_lines.items():
@@ -659,8 +691,8 @@ def list_media(root: Path, files: list[str] | None = None,
     if key:
         entries = [e for e in entries if e["key"] == key]
     return {"media": entries, "problems": problems,
-            "keys_provisional": any(e["kind"] == "clip" and not e["keyed"]
-                                    for e in entries)}
+            "keys_provisional": any(e["kind"] in ("clip",) + CONTAINERS
+                                    and not e["keyed"] for e in entries)}
 
 
 def not_ready(root: Path, files: list[str] | None = None) -> list[dict]:
@@ -670,7 +702,7 @@ def not_ready(root: Path, files: list[str] | None = None) -> list[dict]:
     listing = list_media(root, files)
     rows = [{"file": e["file"], "line": e["line"], "kind": e["kind"],
              "key": e["key"], "status": e["status"],
-             "problems": e["errors"]}
+             "problems": e["errors"] + e.get("draft_reasons", [])}
             for e in listing["media"]
             if e["kind"] in ("clip",) + CONTAINERS and e["status"] != "ready"]
     rows.extend({"file": p.split(":", 1)[0], "line": None, "kind": "problem",
@@ -682,21 +714,152 @@ def not_ready(root: Path, files: list[str] | None = None) -> list[dict]:
 # ------------------------------------------------------------------ keys and specs
 
 CLIPS_DIR = "_clips"
-PROMPTS_SUBDIR = "prompts"
 EXCERPT_WORDS = 8
 
+# Three kinds of canonical text, each in its own folder and checked by its
+# own function (ruled 2026-10-17): a YOUTUBE BRIEF says what to look for,
+# so the search and the quote location succeed; a GENERATION SPEC sets the
+# stage for a video model; a NOTE is a container's title or an as-is
+# asset's label.
+SPEC_DIRS = {"youtube_brief": "youtube-briefs", "generation_spec": "specs",
+             "note": "notes"}
+BRIEF_LABELS = ("source", "moment", "quote", "on screen")
+SPEC_LABELS = ("subject", "setting", "look", "camera", "light", "motion",
+               "sound", "continuity", "on-screen text")
 
-def specs_dir(root: Path) -> Path:
-    return Path(root) / CLIPS_DIR / PROMPTS_SUBDIR
+
+def spec_kind(kind: str, fields: dict) -> str:
+    """Which canonical text a tag owns: a youtube: clip a YouTube brief, a
+    clip that will be generated a generation spec, anything else a note."""
+    if kind != "clip":
+        return "note"
+    if fields.get("youtube"):
+        return "youtube_brief"
+    if fields.get("use"):
+        return "note"
+    return "generation_spec"
 
 
-def load_specs(root: Path) -> dict[str, str]:
-    """{<key>.md: canonical text} from _clips/prompts/."""
-    directory = specs_dir(root)
-    if not directory.is_dir():
+def specs_dir(root: Path, kind: str) -> Path:
+    return Path(root) / CLIPS_DIR / SPEC_DIRS[kind]
+
+
+def spec_relpath(kind: str, ref: str) -> str:
+    return f"{CLIPS_DIR}/{SPEC_DIRS[kind]}/{ref}"
+
+
+def load_specs(root: Path) -> dict[str, dict]:
+    """{<key>.md: {kind, text}} across the three folders. Keys are unique
+    across all of them."""
+    out: dict[str, dict] = {}
+    for kind in SPEC_DIRS:
+        directory = specs_dir(root, kind)
+        if directory.is_dir():
+            for p in sorted(directory.glob("*.md")):
+                out[p.name] = {"kind": kind,
+                               "text": p.read_text(encoding="utf-8").strip()}
+    return out
+
+
+def _labels_for(kind: str) -> tuple[str, ...]:
+    return {"youtube_brief": BRIEF_LABELS,
+            "generation_spec": SPEC_LABELS}.get(kind, ())
+
+
+def parse_sections(text: str, labels: tuple[str, ...]) -> dict[str, str]:
+    """`label: value` sections, on their own lines in a file or run
+    together on one line inside a tag in the Doc. Text before the first
+    label is kept under ''."""
+    if not labels:
         return {}
-    return {p.name: p.read_text(encoding="utf-8").strip()
-            for p in sorted(directory.glob("*.md"))}
+    pattern = re.compile(r"(?i)(?:^|(?<=\s))(" + "|".join(
+        re.escape(l) for l in sorted(labels, key=len, reverse=True))
+        + r")\s*:\s*")
+    found = list(pattern.finditer(text))
+    out: dict[str, str] = {}
+    if found and text[:found[0].start()].strip():
+        out[""] = text[:found[0].start()].strip()
+    for n, m in enumerate(found):
+        end = found[n + 1].start() if n + 1 < len(found) else len(text)
+        out[m.group(1).lower()] = " ".join(text[m.end():end].split())
+    return out
+
+
+def format_sections(text: str, kind: str) -> str:
+    """The canonical file form: one `label: value` line per section in the
+    kind's order; text without sections is kept as written."""
+    labels = _labels_for(kind)
+    sections = parse_sections(text, labels)
+    if not sections or list(sections) == [""]:
+        return text.strip()
+    lines = [sections[""]] if "" in sections else []
+    lines += [f"{l}: {sections[l]}" for l in labels if l in sections]
+    return "\n".join(lines)
+
+
+def check_youtube_brief(text: str) -> list[str]:
+    """Why a YouTube brief is not yet enough to search with: it names a
+    source (the work or person), and a quote or a moment to find."""
+    s = parse_sections(text, BRIEF_LABELS)
+    reasons = []
+    if not s.get("source"):
+        reasons.append("YouTube brief has no 'source:' (the work or person: "
+                       "title, year, channel)")
+    if not (s.get("quote") or s.get("moment")):
+        reasons.append("YouTube brief needs a 'quote:' (exact words spoken) or "
+                       "a 'moment:' (the scene) to find")
+    quote = s.get("quote", "").strip().strip('"“”').strip()
+    if quote and not is_whole_sentences(quote):
+        reasons.append("YouTube brief 'quote:' is a fragment — quote whole "
+                       "sentences, from a capital to the closing . ! or ?, so "
+                       "the clip never cuts a sentence")
+    return reasons
+
+
+def is_whole_sentences(quote: str) -> bool:
+    """A quote is whole when it starts a sentence (a capital, or a digit)
+    and ends one (. ! ? or …, before any closing quote mark). Ruled
+    2026-10-17: a clip never starts or ends mid-sentence."""
+    q = quote.strip().strip('"“”‘’\'').strip()
+    if not q:
+        return False
+    starts = q[0].isupper() or q[0].isdigit()
+    ends = q.rstrip(')]"”’\'')[-1:] in (".", "!", "?", "…")
+    return starts and ends
+
+
+def check_generation_spec(text: str) -> list[str]:
+    """Why a generation spec is not yet enough to generate from: 150+
+    words, and every section present ('none' is an answer)."""
+    s = parse_sections(text, SPEC_LABELS)
+    reasons = []
+    words = len(text.split())
+    if words < DRAFT_WORDS:
+        reasons.append(f"generation spec has {words} words; it needs "
+                       f"{DRAFT_WORDS}+")
+    missing = [l for l in SPEC_LABELS if l not in s]
+    if missing:
+        reasons.append("generation spec is missing " +
+                       ", ".join(f"'{l}:'" for l in missing))
+    return reasons
+
+
+def check_text(kind: str, text: str) -> list[str]:
+    if kind == "youtube_brief":
+        return check_youtube_brief(text)
+    if kind == "generation_spec":
+        return check_generation_spec(text)
+    return []
+
+
+def brief_terms(text: str) -> dict:
+    """What ytlm searches with: `query` (source + moment) for the video
+    search, `quote` (unquoted) for locating the moment in its transcript."""
+    s = parse_sections(text, BRIEF_LABELS)
+    quote = s.get("quote", "").strip().strip('"“”')
+    return {"query": " ".join(v for v in (s.get("source"), s.get("moment"))
+                              if v),
+            "quote": quote}
 
 
 def _excerpt(full: str) -> str:
@@ -711,13 +874,27 @@ def _split_body(body: str) -> tuple[str, str]:
     return (body, "") if not m else (body[:m.start()], body[m.start():])
 
 
+def _tag_line(kind: str, text: str, ref: str, tail: str = "") -> str:
+    body = (f"{text} ⇢ {ref}" if text else f"⇢ {ref}")
+    return f"[{kind.title()}: {body}{tail}]"
+
+
 def _clip_line(excerpt: str, ref: str, tail: str) -> str:
-    body = (f"{excerpt} ⇢ {ref}" if excerpt else f"⇢ {ref}")
-    return f"[Clip: {body}{tail}]"
+    return _tag_line("clip", excerpt, ref, tail)
 
 
-def _mint_name(description: str, fields: dict, taken: set[str]) -> str:
-    if description:
+def _mint_name(description: str, fields: dict, taken: set[str],
+               prefix: str = "") -> str:
+    # A brief or spec opens with a label ("source:", "subject:"), so name
+    # the key after what the clip shows: its moment, quote or subject.
+    sections = parse_sections(description, BRIEF_LABELS + SPEC_LABELS)
+    named = next((sections[l] for l in ("moment", "quote", "subject")
+                  if sections.get(l)), "")
+    if prefix:
+        base = f"{prefix}-" + (_slug(description) or "untitled")
+    elif named:
+        base = _slug(named)
+    elif description:
         base = _slug(description)
     elif fields.get("youtube") and _youtube_id(fields["youtube"]):
         base = "yt-" + _youtube_id(fields["youtube"]).lower()
@@ -732,28 +909,37 @@ def _mint_name(description: str, fields: dict, taken: set[str]) -> str:
     return name
 
 
-def _clip_lines(text: str):
-    """(line index, body) for every [Clip] tag line outside code fences."""
+def _clip_lines(text: str, containers: bool = False):
+    """(line index, kind, body) for every [Clip] tag line — and, with
+    `containers`, every [Collage]/[Montage] opening — outside fences."""
     fenced = False
     for i, line in enumerate(text.split("\n")):
         if _FENCE.match(line):
             fenced = not fenced
             continue
-        if not fenced:
-            m = CLIP_OPEN.match(line)
-            if m:
-                yield i, m.group("body")
+        if fenced:
+            continue
+        m = CLIP_OPEN.match(line)
+        if m:
+            yield i, "clip", m.group("body")
+            continue
+        m = CONTAINER_OPEN.match(line) if containers else None
+        if m:
+            yield i, m.group("kind").lower(), m.group("body")
 
 
 def maintain_keys(root: Path, files: list[str] | None = None) -> list[dict]:
-    """Collect's step, run before the snapshot (§8a): every [Clip] gets
-    its key. An un-keyed clip's text moves to `_clips/prompts/<key>.md`
-    (canonical, even when empty) and the tag keeps an excerpt and
-    `⇢ <key>.md`. A keyed clip's excerpt is regenerated from its
-    canonical file; an edit to the excerpt does not hold and is reported.
-    A missing spec file is reported, never recreated by guessing.
-    Returns one row per change: {file, line, key, minted | excerpt_fixed |
-    missing}."""
+    """Collect's step, run before the snapshot (§8a): every [Clip],
+    [Collage] and [Montage] gets its key. An un-keyed tag's text moves to
+    its kind's folder (`_clips/youtube-briefs/`, `_clips/specs/` or
+    `_clips/notes/`, canonical even when empty) and the tag keeps an
+    excerpt and `⇢ <key>.md`. A keyed tag's excerpt is regenerated from its
+    file; an excerpt edit does not hold and is reported. A tag whose kind
+    changed (a description replaced by `youtube:`) has its file MOVED to
+    the new kind's folder, reported, and checked as the new kind — which
+    flags it for a fresh draft. A missing file is reported, never
+    recreated by guessing. Rows: {file, line, key, minted | excerpt_fixed |
+    moved | missing}."""
     from .revisions import iter_manuscript_paths
 
     root = Path(root)
@@ -766,33 +952,49 @@ def maintain_keys(root: Path, files: list[str] | None = None) -> list[dict]:
         raw = path.read_text(encoding="utf-8", errors="replace")
         lines = raw.split("\n")
         changed = False
-        for i, body in _clip_lines(raw):
-            parsed = parse_fields(body)
-            _desc, tail = _split_body(body)
-            if parsed["ref"]:
-                full = specs.get(parsed["ref"])
-                if full is None:
+        for i, kind, body in _clip_lines(raw, containers=True):
+            if kind == "clip":
+                parsed = parse_fields(body)
+                _desc, tail = _split_body(body)
+            else:
+                # A container's text is its title; it has no fields.
+                parsed = parse_fields(body.replace("|", "/"))
+                parsed["fields"], tail = {}, ""
+            want_kind = spec_kind(kind, parsed["fields"])
+            ref = parsed["ref"]
+            if ref:
+                entry = specs.get(ref)
+                if entry is None:
                     report.append({"file": rel, "line": i + 1,
-                                   "key": parsed["ref"][:-3], "missing": True})
+                                   "key": ref[:-3], "missing": True})
                     continue
-                want = _clip_line(_excerpt(full), parsed["ref"], tail)
+                if entry["kind"] != want_kind:
+                    src = specs_dir(root, entry["kind"]) / ref
+                    dst = specs_dir(root, want_kind) / ref
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    src.rename(dst)
+                    report.append({"file": rel, "line": i + 1, "key": ref[:-3],
+                                   "moved": True, "from": entry["kind"],
+                                   "to": want_kind})
+                    entry["kind"] = want_kind
+                want = _tag_line(kind, _excerpt(entry["text"]), ref, tail)
                 if lines[i] != want:
-                    report.append({"file": rel, "line": i + 1,
-                                   "key": parsed["ref"][:-3],
+                    report.append({"file": rel, "line": i + 1, "key": ref[:-3],
                                    "excerpt_fixed": True})
                     lines[i] = want
                     changed = True
                 continue
-            name = _mint_name(parsed["description"], parsed["fields"], taken)
+            name = _mint_name(parsed["description"], parsed["fields"], taken,
+                              "" if kind == "clip" else kind)
             taken.add(name)
-            directory = specs_dir(root)
+            directory = specs_dir(root, want_kind)
             directory.mkdir(parents=True, exist_ok=True)
-            (directory / name).write_text(
-                parsed["description"] + "\n", encoding="utf-8")
-            specs[name] = parsed["description"]
-            lines[i] = _clip_line(_excerpt(parsed["description"]), name, tail)
+            canonical = format_sections(parsed["description"], want_kind)
+            (directory / name).write_text(canonical + "\n", encoding="utf-8")
+            specs[name] = {"kind": want_kind, "text": canonical}
+            lines[i] = _tag_line(kind, _excerpt(canonical), name, tail)
             report.append({"file": rel, "line": i + 1, "key": name[:-3],
-                           "minted": True})
+                           "minted": True, "to": want_kind})
             changed = True
         if changed:
             path.write_text("\n".join(lines), encoding="utf-8")
@@ -808,27 +1010,87 @@ def find_clip(root: Path, key: str) -> dict:
         if not rel.endswith(".md"):
             continue
         raw = path.read_text(encoding="utf-8", errors="replace")
-        for i, body in _clip_lines(raw):
-            parsed = parse_fields(body)
+        for i, kind, body in _clip_lines(raw, containers=True):
+            parsed = parse_fields(body if kind == "clip"
+                                  else body.replace("|", "/"))
             if parsed["ref"] == ref:
+                if kind != "clip":
+                    parsed["fields"] = {}
                 return {"file": rel, "path": path, "i": i, "body": body,
-                        **parsed}
-    raise LookupError(f"no [Clip] carries ⇢ {ref} — 'media list' shows the "
-                      "keys; a clip gets its key at collect")
+                        "kind": kind, **parsed}
+    raise LookupError(f"no [Clip], [Collage] or [Montage] carries ⇢ {ref} — "
+                      "'media list' shows the keys; a tag gets its key at "
+                      "collect")
 
 
 def set_spec(root: Path, key: str, text: str) -> dict:
-    """Land a spec (§8e): the canonical text of a keyed clip, then the
-    tag's excerpt refreshed. Returns {file, key, words, spec_path}."""
+    """Land a YouTube brief, generation spec or note (§8e) in the folder
+    of the tag's kind, then refresh the tag's excerpt. Returns {file, key,
+    spec_kind, words, spec_path, reasons} — `reasons` from the kind's
+    check, empty when it is ready."""
     clip = find_clip(root, key)
     text = text.strip()
     if not text:
-        raise ValueError("an empty spec — nothing to land")
-    path = specs_dir(root) / clip["ref"]
-    path.write_text(text + "\n", encoding="utf-8")
+        raise ValueError("empty text — nothing to land")
+    kind = spec_kind(clip["kind"], clip["fields"])
+    canonical = format_sections(text, kind)
+    path = specs_dir(root, kind) / clip["ref"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(canonical + "\n", encoding="utf-8")
     maintain_keys(root, [clip["file"]])
-    return {"file": clip["file"], "key": clip["ref"][:-3],
-            "words": len(text.split()), "spec_path": str(path)}
+    return {"file": clip["file"], "key": clip["ref"][:-3], "spec_kind": kind,
+            "words": len(canonical.split()), "spec_path": str(path),
+            "reasons": check_text(kind, canonical)}
+
+
+def spec_form(root: Path, key: str, text: str) -> dict:
+    """The pending form that shows a drafted spec in place (§8e Doc road):
+    {file, i, old, new} where `new` is the tag with the WHOLE spec inline,
+    still carrying `⇢ <key>.md`, so the author reads and edits it in the
+    tab. `absorb_specs` turns an accepted form back into excerpt + file."""
+    clip = find_clip(root, key)
+    _desc, tail = _split_body(clip["body"]) if clip["kind"] == "clip" else ("", "")
+    lines = clip["path"].read_text(encoding="utf-8").split("\n")
+    return {"file": clip["file"], "i": clip["i"], "old": lines[clip["i"]],
+            "new": _tag_line(clip["kind"], " ".join(text.split()),
+                             clip["ref"], tail),
+            "key": clip["ref"][:-3]}
+
+
+def absorb_specs(root: Path, text: str, keys: set[str]) -> tuple[str, list[dict]]:
+    """A resolved tab text → its spec files. For each named key whose tag
+    now carries more than its excerpt (an accepted or edited spec form),
+    the inline text becomes the canonical spec and the tag goes back to
+    excerpt + `⇢`. A declined form left the excerpt standing: nothing
+    lands. Returns (text, [{key, words}])."""
+    specs = load_specs(root)
+    lines = text.split("\n")
+    landed: list[dict] = []
+    for i, kind, body in list(_clip_lines(text, containers=True)):
+        parsed = parse_fields(body if kind == "clip" else body.replace("|", "/"))
+        ref = parsed["ref"]
+        if not ref or ref[:-3] not in keys:
+            continue
+        inline = parsed["description"]
+        # A declined form leaves the excerpt; parse_fields has already
+        # dropped its trailing ellipsis.
+        current = (specs.get(ref) or {}).get("text", "")
+        if not inline or inline == _excerpt(current).rstrip(" …"):
+            continue
+        want_kind = spec_kind(kind, parsed["fields"] if kind == "clip" else {})
+        canonical = format_sections(inline, want_kind)
+        directory = specs_dir(root, want_kind)
+        directory.mkdir(parents=True, exist_ok=True)
+        old = specs.get(ref)
+        if old and old["kind"] != want_kind:
+            (specs_dir(root, old["kind"]) / ref).unlink(missing_ok=True)
+        (directory / ref).write_text(canonical + "\n", encoding="utf-8")
+        _desc, tail = _split_body(body) if kind == "clip" else ("", "")
+        lines[i] = _tag_line(kind, _excerpt(canonical), ref, tail)
+        landed.append({"key": ref[:-3], "spec_kind": want_kind,
+                       "words": len(canonical.split()),
+                       "reasons": check_text(want_kind, canonical)})
+    return "\n".join(lines), landed
 
 
 def set_fields(root: Path, key: str, updates: dict) -> dict:
@@ -836,6 +1098,9 @@ def set_fields(root: Path, key: str, updates: dict) -> dict:
     removes it; the others keep their order. Validated by name only —
     `media list` checks the combinations. Returns {file, line, tag}."""
     clip = find_clip(root, key)
+    if clip["kind"] != "clip":
+        raise ValueError(f"{key} is a {clip['kind']}: a container has a "
+                         "title, not fields")
     unknown = sorted(set(updates) - set(FIELDS))
     if unknown:
         raise ValueError(f"unknown field(s) {', '.join(unknown)} "

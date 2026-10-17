@@ -177,9 +177,9 @@ As illustrations do (`illus.py`):
 `_clips/` in the manuscript folder, beside `_illustrations/` and
 `_audio/`, same naming convention. The Doc never carries video.
 
-- Canonical spec: `_clips/prompts/<key>.md` (description with motion,
-  `cast:`, `prior:`, `text:`); the inline tag keeps a short excerpt and
-  `⇢ <key>.md`.
+- Canonical text: a file in the folder of its kind (§8l:
+  `_clips/youtube-briefs/`, `_clips/specs/`, `_clips/notes/`); the inline
+  tag keeps a short excerpt and `⇢ <key>.md`.
 - Candidates: `_clips/<key>-<deschash8>-<lawhash4>-NN.mp4`; inserted
   assets number `iNN`.
 
@@ -284,9 +284,11 @@ dusk]`, or an empty `[Collage: …]` — and fill it in later.
    tab as a pending form (`<<shorthand>>{{full spec}}`), editable in
    place; `clip resolve` lands it, as `footnote resolve` does.
 4. **Landing.** Unlike a footnote, the tag is not consumed: the accepted
-   spec goes to `_clips/prompts/<key>.md` (canonical) and the tag keeps
+   text goes to its kind's file (§8l, canonical) and the tag keeps
    the shorthand as its excerpt plus `⇢ <key>.md`.
-5. **Draft status.** Under 150 words a clip is a `draft`; a generating
+5. **Draft status.** A YouTube brief without a source and a quote or
+   moment, or a generation spec under 150 words or missing a section,
+   is a `draft` (§8l); a generating
    verb declines with "spec is a draft".
 6. For a quoted clip, incomplete means a missing url or times; the
    proposal suggests candidates for what is missing rather than a
@@ -431,7 +433,7 @@ yt-dlp ~1.4 s. An earlier web search could not surface the scene at all.
 
 Transcripts settle the times: of 10 candidates, 9 had captions (one had
 transcripts disabled) and the quote was located in each. The Architect
-scene's line falls at 2:45 of `cHZl2naX1Xk`, but split across two
+scene's line falls at [2:45 of part 1](https://www.youtube.com/watch?v=cHZl2naX1Xk&t=165), but split across two
 caption segments ("Choice the problem is" / "choice"), so quote location
 must match across neighbouring segments, not one at a time.
 
@@ -453,10 +455,54 @@ built, never before, so no skill describes something that does not exist.
 |---|---|---|---|
 | Series manuscripts: write each monologue as a file in a series manuscript (`SpiritualHindu/<name>.md`); move `monologue-picture-story` and `monologue-two-returns` in by hand | corpuslm (`nagarkar/corpuslm`) | `src/corpuslm/cli.py` (`monologue new/run/export`), `moments.py`, the AuthorLM registration call | `corpuslm/.claude/skills/corpuslm/SKILL.md` (the monologue rows); corpuslm design docs |
 | YouTube search via the Data API only, failing loudly | ytlm (`nagarkar/ytlm`) | new search verb beside `src/ytlm/api.py` | `ytlm/.claude/skills/ytlm/SKILL.md` (verbs); `ytlm/docs/design/` |
-| Quote location across neighbouring caption segments → proposed `start:`/`end:` | ytlm | the `segments` / `search` code | same as above |
+| Quote location across neighbouring caption segments → proposed `start:`/`end:`, expanded to whole sentences (start at the first sentence's start, end before the next sentence begins; §8l) | ytlm | the `segments` / `search` code | same as above |
 | Video download and excerpt cutting, cached in the ytlm workspace on the external drive, returning paths | ytlm | `src/ytlm/adapters/ytdlp.py` (today audio only) | same as above |
-| Read `authorlm media list --json`; get excerpt paths from ytlm; build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
+| Read `authorlm media list --json`; get excerpt paths from ytlm; trim each excerpt precisely by looking at the section (frames, audio, word timings) so no stray fragment plays (§8l); build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
 | Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
+
+## 8l. YouTube briefs and generation specs (ruled 2026-10-17)
+
+A YouTube clip and a generated clip need different writing, so they are
+different kinds of text, stored apart and checked by different code.
+
+| | YouTube brief | generation spec | note |
+|---|---|---|---|
+| for | a `youtube:` clip | a clip to be generated | a Collage or Montage title, a `use:` clip's label |
+| read by | ytlm's search (`query`) and quote location (`quote`) | the video model (slice 3) | people |
+| sections | `source:` the work or person (title, year, channel) · `moment:` the scene · `quote:` exact words spoken · `on screen:` who and what | `subject:` · `setting:` · `look:` · `camera:` · `light:` · `motion:` · `sound:` · `continuity:` · `on-screen text:` ('none' is an answer) | — |
+| ready when | a source, and a quote or a moment; no word minimum | 150+ words and every section | always |
+| file | `_clips/youtube-briefs/<key>.md` | `_clips/specs/<key>.md` | `_clips/notes/<key>.md` |
+| code | `media.check_youtube_brief`, `media.brief_terms` | `media.check_generation_spec` | — |
+
+**Whole sentences (ruled 2026-10-17).** A clip never starts or ends
+mid-sentence. A brief's `quote:` is whole sentences, from a capital to the
+closing `.`, `!` or `?`; `media.check_youtube_brief` marks a fragment as a
+draft. The `start:`/`end:` written into the tag span exactly those
+sentences: start at the first sentence's first word, end before the next
+sentence begins. Example: the Architect's line is not "accepted the
+program as long as they were given a choice" but the whole sentence "As I
+was saying, she stumbled upon a solution whereby nearly 99% of all test
+subjects accepted the program as long as they were given a choice, even if
+they were only aware of the choice at a near unconscious level." (3:49 to
+4:01 of [part 1](https://www.youtube.com/watch?v=cHZl2naX1Xk&t=229); the next sentence starts at 4:00.8).
+
+**The tag's span is generous; podlm trims it (ruled 2026-10-17).** The
+author's `start:`/`end:` cover the whole passage wanted, with room to
+spare. podlm makes the final cut: it downloads the excerpt (from ytlm),
+LOOKS at that section (frames and audio, with the transcript's word
+timings), and sets the exact in and out points so only the needed
+sentences play — no stray word or half-sentence from before or after
+(e.g. "The first Matrix I designed…" starting at 2:49 after Neo's line).
+The trimmed points are podlm's production record, not the tag's.
+
+A brief never says how to render anything. In a file each section is a
+line; inside a tag in the Doc (a review form) the sections run on one
+line and are parsed the same way. `media list` reports `spec_kind`,
+`draft_reasons`, and for a brief the parsed sections plus `query` and
+`quote`. A tag whose kind changes (a description replaced by `youtube:`)
+has its file moved by the next collect and is checked as the new kind,
+which flags it for a fresh draft. `_clips/prompts/` (slice 2's single
+folder) is gone; SMSTTD's files were moved by hand.
 
 ## 9. Still open
 
@@ -491,15 +537,24 @@ Deliberate gaps in slice 1:
 
 - **Keys minted at collect** (`media.maintain_keys`, run beside
   `maintain_excerpts` before the snapshot). Every `[Clip]` without `⇢`
-  gets `_clips/prompts/<key>.md` holding its text (canonical, even when
+  gets a file in its kind's folder (§8l) holding its text (canonical, even when
   empty: a pointer clip's label or a YouTube search brief), and the tag
   keeps an 8-word excerpt and `⇢ <key>.md`. Keys: a slug of the text,
   else `yt-<id>`, else the `use:` stem, made unique by `-2`, `-3`.
   Excerpts are regenerated from the spec; an excerpt edit does not hold
   and is reported. A missing spec file is reported, never recreated.
-- **Landing a spec:** `clip spec <key> --text|--file` / MCP
-  `set_clip_spec`. Direct landing only; the Doc pending-form road of §8e
-  (`<<shorthand>>{{spec}}` in the tab, `clip resolve`) is not built.
+- **Landing a spec:** `clip spec <key> --text|--file`, or `clip spec
+  --batch specs.json` ({key: spec}) / MCP `set_clip_spec(specs)`. The
+  file's checkout chooses the road, as for the directives: a local file
+  lands the specs at once; a file checked out to the Doc gets them as
+  pending forms in its tab, `<<[Clip: excerpt… ⇢ key.md | …]>>{{[Clip:
+  whole spec ⇢ key.md | …]}}`, local pristine. The author edits or accepts
+  in place (deleting a form declines it); `clip resolve <file>` / MCP
+  `resolve_clip_specs` reads the tab back, moves each accepted text into
+  its kind's file (§8l), puts the tag back to excerpt + `⇢`, records
+  `clip_spec_edit` evidence, collects under no episode and pushes the tab
+  (`authorlm/media_road.py`). `doc push` names `clip resolve` while forms
+  are out.
 - **Writing fields:** `clip set <key> --youtube … --start … --end …
   [--clear FIELD]` / MCP `set_clip_fields`, for the values the author
   confirmed (e.g. from ytlm's quote location).
@@ -507,9 +562,16 @@ Deliberate gaps in slice 1:
 - `media list` reads a keyed clip's description from its spec file and
   reports `keyed` and `spec_path`.
 
-Still open: Collage and Montage keys stay provisional (a slug of the
-title); no evidence rows are recorded when a spec lands yet.
+- **Collage and Montage keys** are minted the same way: `[Montage: Choice
+  as prison and escape ⇢ montage-choice-as-prison-and.md]`; the spec file
+  holds the title (room for a fuller note). Containers carry no fields.
 
-**Next:** the Doc pending-form road for specs; slice 3, `clip ensure | job
+Trial on SMSTTD `ecce-homo.md` (2026-10-17): the pull's collect minted
+six keys, the push showed them in the tab, and four search-brief specs
+were staged as forms there for review.
+
+Still open: a direct (local) landing records no evidence row.
+
+**Next:** slice 3, `clip ensure | job
 | attach | pick` and `illus ensure` with Veo (§8j); slice 4, looks and the
 Studio library (§8d).

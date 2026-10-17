@@ -1338,7 +1338,8 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
 _SETTLE_REMEDY = {"critique": "critique resolve {file}",
                   "filter": "filter resolve {file}",
                   "footnote": "footnote resolve {file}",
-                  "explain": "explain resolve {file}"}
+                  "explain": "explain resolve {file}",
+                  "clip": "clip resolve {file}"}
 
 
 def forms_pending(db: Database, manuscript_id: str,
@@ -4102,7 +4103,8 @@ def _hold_commented(canonical: list[str], local: list[str],
 
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
-              bridge: DocBridge | None = None) -> dict:
+              bridge: DocBridge | None = None,
+              clearing: tuple[str, ...] = ()) -> dict:
     """Push local changes into a tab by editing only the changed
     paragraphs — anchors (margin threads, ingested comments) on
     untouched text survive by construction. Diffs in EXPORT space (both
@@ -4223,8 +4225,13 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         # never quietly held.
         for tag, i1, i2, j1, j2 in SequenceMatcher(
                 None, canonical, local_paras, autojunk=False).get_opcodes():
+            # `clearing` names withdrawn forms' keys (a supersede): a
+            # paragraph whose markers belong only to them may be
+            # overwritten with the local text, which never held them.
             if tag != "equal" and any(
                     ("<<" in tab_paras[i] or "{{" in tab_paras[i])
+                    and not (clearing and any(k in tab_paras[i]
+                                              for k in clearing))
                     for i in range(i1, i2)):
                 raise LookupError(
                     "diff push: the edit overlaps a pending margin "

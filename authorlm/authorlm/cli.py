@@ -2623,8 +2623,8 @@ def _print_media_not_ready(rows: list[dict]) -> None:
         for r in items:
             where = f"line {r['line']}  " if r["line"] else ""
             what = (f"{r['kind']} {r['key']}" if r["key"] else r["kind"])
-            note = ("spec under 150 words — draft it in chat"
-                    if r["status"] == "draft" else "; ".join(r["problems"]))
+            note = "; ".join(r["problems"]) + (
+                " — draft it in chat" if r["status"] == "draft" else "")
             print(f"  • {where}{what}: {note}")
     print(ui.dim("  'media list' for the full entries."))
 
@@ -2654,7 +2654,10 @@ def cmd_media(args):
             file = e["file"]
             print(ui.bold(file))
         if e["kind"] == "clip":
-            shape = e["shape"] + ("/" + e["kind_of"])
+            shape = e["shape"] + ("/" + e["kind_of"]) + (
+                ", YouTube brief" if e["spec_kind"] == "youtube_brief" else
+                ", generation spec" if e["spec_kind"] == "generation_spec"
+                else "")
             extra = (f"  ~{e['estimated_seconds']}s under "
                      f"{len(e['words'].split())} words"
                      if e["shape"] == "span" else "")
@@ -2674,6 +2677,8 @@ def cmd_media(args):
               f"{e['key']}  ({shape}){extra}")
         for err in e["errors"]:
             print(ui.red(f"          {err}"))
+        for reason in e.get("draft_reasons", []):
+            print(ui.yellow(f"          {reason}"))
         for w in e["warnings"]:
             print(ui.dim(f"          {w}"))
     for p in listing["problems"]:
@@ -2682,18 +2687,82 @@ def cmd_media(args):
         print(ui.dim("Clips without ⇢ get their key at the next collect."))
 
 
+def _print_landed(row: dict) -> None:
+    what = {"youtube_brief": "YouTube brief", "generation_spec":
+            "generation spec", "note": "note"}[row["spec_kind"]]
+    state = "ready" if not row["reasons"] else "a draft"
+    print(f"{what[0].upper() + what[1:]} landed for {row['key']} ({state})"
+          + (f": {row['spec_path']}" if row.get("spec_path") else "."))
+    for reason in row["reasons"]:
+        print(ui.yellow(f"  {reason}"))
+
+
 def cmd_clip(args):
-    """`clip spec <key> --text …|--file F` lands a spec; `clip set <key>
-    --youtube URL --start m:ss --end m:ss …` writes confirmed fields
-    (docs/video-clips-design.md §8e). A file checked out to the Doc is
-    left alone: pull first, run this, then push."""
+    """`clip spec <key> --text …|--file F` (or `--batch specs.json`) lands
+    a spec — directly when the file is local, as pending forms in the Doc
+    tab when it is checked out; `clip resolve <file>` finishes that road;
+    `clip set <key> --youtube URL --start m:ss --end m:ss …` writes
+    confirmed fields (docs/video-clips-design.md §8e). `set` leaves a
+    checked-out file alone: pull first, run it, then push."""
+    import json
     from pathlib import Path
 
-    from . import directives, media
+    from . import directives, media, media_road
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     root = Path(manuscript["path"])
+
+    def _services():
+        from . import gdocs as _gd
+
+        config = _load_config(args)
+        return (_gd.get_service(config, args.workspace, interactive=True),
+                _gd.get_docs_service(config, args.workspace, interactive=True))
+
+    if args.action == "resolve":
+        out = media_road.resolve_specs(db, manuscript, _load_config(args),
+                                       args.key, _services)
+        for row in out["landed"]:
+            _print_landed(row)
+        if out["declined"]:
+            print(f"{out['declined']} form(s) declined — those specs are unchanged.")
+        for w in out["warnings"]:
+            print(ui.yellow(w))
+        if out["url"]:
+            print(f"Tab pushed: {out['url']}")
+        return
+    if args.action == "spec":
+        if args.batch:
+            specs = json.loads(Path(args.batch).read_text(encoding="utf-8"))
+        else:
+            if not args.key or bool(args.text) == bool(args.spec_file):
+                sys.exit("usage: clip spec <key> --text '…' | --file SPEC.md, "
+                         "or clip spec --batch specs.json ({key: spec})")
+            specs = {args.key: args.text if args.text else
+                     Path(args.spec_file).read_text(encoding="utf-8")}
+        try:
+            files = {media.find_clip(root, k)["file"] for k in specs}
+        except LookupError as err:
+            sys.exit(str(err))
+        if any(directives._checked_out(db, manuscript, f) for f in files):
+            out = media_road.stage_specs(db, manuscript, specs, _services,
+                                         supersede=args.supersede)
+            if out["withdrawn"]:
+                print(f"{out['withdrawn']} earlier form(s) withdrawn.")
+            print(f"{len(out['staged'])} spec form(s) written into the "
+                  f"{out['file']} tab — read and edit them there, then "
+                  f"'clip resolve {out['file']}'.")
+            for key, why in out["failed"]:
+                print(ui.red(f"  {key}: {why}"))
+            if out["url"]:
+                print(out["url"])
+            return
+        for key, text in specs.items():
+            _print_landed(media.set_spec(root, key, text))
+        return
+    if not args.key:
+        sys.exit("usage: clip set <key> --youtube URL --start m:ss --end m:ss …")
     try:
         clip = media.find_clip(root, args.key)
     except LookupError as err:
@@ -2701,16 +2770,6 @@ def cmd_clip(args):
     if directives._checked_out(db, manuscript, clip["file"]):
         sys.exit(f"{clip['file']} is checked out to the Doc — 'doc pull "
                  f"{clip['file']}' first, run this again, then 'doc push'.")
-    if args.action == "spec":
-        if bool(args.text) == bool(args.spec_file):
-            sys.exit("usage: clip spec <key> --text '…' | --file SPEC.md")
-        text = (args.text if args.text else
-                Path(args.spec_file).read_text(encoding="utf-8"))
-        out = media.set_spec(root, args.key, text)
-        status = "a draft" if out["words"] < media.DRAFT_WORDS else "ready"
-        print(f"Spec landed for {out['key']} ({out['words']} words — "
-              f"{status}): {out['spec_path']}")
-        return
     updates = {name: getattr(args, name) for name in
                ("youtube", "start", "end", "use", "text", "cast", "prior",
                 "look") if getattr(args, name) is not None}
@@ -2839,6 +2898,8 @@ def _print_collect_report(report):
         for row in report["media_keys"]:
             what = ("key minted" if row.get("minted") else
                     "spec file missing" if row.get("missing") else
+                    f"its text moved to {row['to']} — draft it anew"
+                    if row.get("moved") else
                     "excerpt refreshed (an excerpt edit does not hold — edit "
                     "the spec file)")
             print(ui.dim(f"Clip {row['key']} ({row['file']}:{row['line']}): "
@@ -4379,13 +4440,8 @@ def cmd_morph(args):
             print(ui.dim("Pattern candidate from your post-edits: "
                          f"{result['pattern_candidate'][:80]}…"))
         if result["tab_still_marked"]:
-            print(ui.yellow("Some forms are still in the Doc tab (see "
-                            "above); 'doc push "
-                            f"{result['file']}' takes them out in place."))
-        else:
-            print(ui.dim("The Doc tab is cleared of these forms, in "
-                         "place; comments in the margin keep their "
-                         "anchors."))
+            print(ui.dim("The Doc tab keeps its struck-and-green marks "
+                         f"until your next 'doc push {result['file']}'."))
         return
     if args.action == "review":
         decisions = [d for d, on in (("accepted", args.accept),
@@ -4797,14 +4853,9 @@ def cmd_lens(args):
                     print(ui.dim("Pattern candidate from your post-edits: "
                                  f"{result['pattern_candidate'][:80]}…"))
                 if result["tab_still_marked"]:
-                    print(ui.yellow(
-                        "Some forms are still in the Doc tab (see above); "
-                        f"'doc push {result['file']}' takes them out in "
-                        "place."))
-                else:
                     print(ui.dim(
-                        "The Doc tab is cleared of these forms, in place; "
-                        "comments in the margin keep their anchors."))
+                        "The Doc tab keeps its struck-and-green marks "
+                        f"until your next 'doc push {result['file']}'."))
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         return
@@ -8918,9 +8969,18 @@ def build_parser() -> argparse.ArgumentParser:
                "https://www.youtube.com/watch?v=cHZl2naX1Xk --start 2:43 "
                "--end 2:50\n"
                "  clip set kailash --clear end\n"
+               "  clip resolve ecce-homo.md        file checked out: spec "
+               "forms were written into the tab; this lands them\n"
                "Keys: 'media list'. A clip gets its key at collect.")
-    p.add_argument("action", choices=["spec", "set"])
-    p.add_argument("key", help="the clip's key (from 'media list')")
+    p.add_argument("action", choices=["spec", "set", "resolve"])
+    p.add_argument("key", nargs="?",
+                   help="spec/set: the clip's key (from 'media list'); "
+                        "resolve: the file")
+    p.add_argument("--batch", help="spec: a JSON file {key: spec} — staged "
+                                   "together when the file is checked out")
+    p.add_argument("--supersede", action="store_true",
+                   help="spec, file checked out: withdraw this file's clip "
+                        "forms already in the tab, then stage these")
     p.add_argument("--text", help="spec: the spec text; set: the on-screen "
                                   "words (text: field)")
     p.add_argument("--file", dest="spec_file", help="spec: read the spec "
