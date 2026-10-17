@@ -1994,14 +1994,21 @@ drops the tag lines and keeps every word of prose.
   enough to generate from or search stock with. For a YouTube clip the
   text is a search brief: no minimum, but propose a richer one when the
   url or times are missing. Land only what the author accepts:
-  `clip spec <key> --text …` / MCP `set_clip_spec`.
+  `clip spec <key> --text …` or `--batch specs.json` / MCP
+  `set_clip_spec({key: spec})`. The checkout chooses the road: a local file
+  lands at once; a file checked out to the Doc gets pending forms in its
+  tab (the tag with the whole spec inline). Tell the author to review
+  there; when they say done, `clip resolve <file>` / MCP
+  `resolve_clip_specs`, which lands the accepted specs and pushes. A
+  deleted form is a decline.
 - Confirmed YouTube url and times (the author watched them) go in with
   `clip set <key> --youtube URL --start m:ss --end m:ss` / MCP
   `set_clip_fields`. Never write unconfirmed values.
-- Both verbs leave a file checked out to the Doc alone: `doc pull`, run
-  the verb, `doc push` (the Doc-road protocol).
-- Not built: the Doc pending-form road for specs, generation (Veo),
-  takes and choosing. Nothing here spends.
+- `clip set` leaves a file checked out to the Doc alone: `doc pull`, run
+  it, `doc push` (the Doc-road protocol).
+- Collage and Montage get keys too (`⇢ montage-….md`, the title in the
+  spec file); they carry no fields.
+- Not built: generation (Veo), takes and choosing. Nothing here spends.
 
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)

@@ -824,23 +824,47 @@ def _clip_guard(db, ms, key: str):
 
 
 @mcp.tool()
-def set_clip_spec(key: str, text: str, manuscript: str | None = None) -> dict:
-    """Land a drafted spec for a [Clip] (docs/video-clips-design.md §8e):
-    `text` becomes the canonical spec in _clips/prompts/<key>.md and the
-    tag's excerpt is refreshed. Draft it IN CHAT first, from the shorthand,
-    the words the clip plays under, its neighbouring clips and the cast; a
-    generated clip's spec under 150 words stays a draft. Land only what the
-    author accepted. A file checked out to the Doc is left alone (pull
-    first). Keys come from list_media."""
+def set_clip_spec(specs: dict[str, str], manuscript: str | None = None) -> dict:
+    """Land drafted specs for clips, collages or montages
+    (docs/video-clips-design.md §8e). `specs` is {key: spec}. Draft each IN
+    CHAT first, from the shorthand, the words the clip plays under, its
+    neighbouring clips and the cast; a generated clip's spec under 150
+    words stays a draft. The file's checkout chooses the road: a local
+    file lands the specs in _clips/prompts/<key>.md now (chat was the
+    review); a file checked out to the Doc gets them as pending forms in
+    its tab (the tag with the whole spec inline), for the author to read
+    and edit there, then resolve_clip_specs. Keys come from list_media; one
+    file per call when staging."""
     def run():
         from pathlib import Path
 
-        from . import media
+        from . import directives, media, media_road
 
         db = _db()
         ms = _manuscript(db, manuscript)
-        _clip_guard(db, ms, key)
-        return media.set_spec(Path(ms["path"]), key, text)
+        root = Path(ms["path"])
+        files = {media.find_clip(root, k)["file"] for k in specs}
+        if any(directives._checked_out(db, ms, f) for f in files):
+            return media_road.stage_specs(db, ms, specs, _doc_services)
+        return {"mode": "applied",
+                "landed": [media.set_spec(root, k, t) for k, t in specs.items()]}
+    return _guard(run)
+
+
+@mcp.tool()
+def resolve_clip_specs(file: str, manuscript: str | None = None) -> dict:
+    """Finish the Doc road for clip specs: read the tab back, land every
+    spec form the author accepted (with their edits) in its spec file, put
+    the tags back to excerpt + ⇢, collect, and push the tab. A deleted
+    form is a decline. Run it when the author says they have reviewed the
+    specs in the Doc."""
+    def run():
+        from . import media_road
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return media_road.resolve_specs(db, ms, api.load_config(_WORKSPACE),
+                                        file, _doc_services)
     return _guard(run)
 
 

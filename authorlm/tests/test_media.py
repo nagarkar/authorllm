@@ -233,7 +233,8 @@ class MediaTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         rows = media.maintain_keys(self.root)
         self.assertEqual([r["key"] for r in rows],
-                         ["tired-man-at-a", "tired-man-at-a-2", "temple"])
+                         ["tired-man-at-a", "tired-man-at-a-2", "collage-c",
+                          "temple"])
         text = path.read_text(encoding="utf-8")
         self.assertIn("[Clip: tired man at a desk late at night ⇢ "
                       "tired-man-at-a.md]", text)
@@ -301,6 +302,51 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(rows[0]["missing"])
         clip = self.one("[Clip: gone ⇢ gone.md]\nx\n[/Clip]\n")
         self.assertTrue(any("is missing" in e for e in clip["errors"]))
+
+    def test_container_keys(self):
+        path = self.root / "ecce.md"
+        path.write_text("[Montage: Choice as prison and escape]\n\n"
+                        "[Clip: | use: _assets/temple.mp4]\n\nProse here.\n\n"
+                        "[/Montage]\n", encoding="utf-8")
+        media.maintain_keys(self.root)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("[Montage: Choice as prison and escape ⇢ "
+                      "montage-choice-as-prison-and.md]", text)
+        montage = [e for e in media.list_media(self.root)["media"]
+                   if e["kind"] == "montage"][0]
+        self.assertEqual(montage["key"], "montage-choice-as-prison-and")
+        self.assertEqual(montage["title"], "Choice as prison and escape")
+        self.assertEqual(montage["status"], "ready", montage["errors"])
+        self.assertEqual(media.list_media(self.root)["keys_provisional"], False)
+        with self.assertRaises(ValueError):
+            media.set_fields(self.root, "montage-choice-as-prison-and",
+                             {"use": "x.mp4"})
+
+    def test_spec_form_and_absorb(self):
+        path = self.root / "ecce.md"
+        path.write_text("[Clip: tired man | cast: ecce-man]\nWords.\n[/Clip]\n",
+                        encoding="utf-8")
+        media.maintain_keys(self.root)
+        form = media.spec_form(self.root, "tired-man", LONG)
+        self.assertEqual(form["old"], "[Clip: tired man ⇢ tired-man.md | "
+                         "cast: ecce-man]")
+        self.assertEqual(form["new"], f"[Clip: {LONG} ⇢ tired-man.md | "
+                         "cast: ecce-man]")
+        # The author edits the form in the tab, then accepts it.
+        edited = LONG.replace("word", "scene", 1)
+        resolved = path.read_text(encoding="utf-8").replace(
+            form["old"], f"[Clip: {edited} ⇢ tired-man.md | cast: ecce-man]")
+        out, landed = media.absorb_specs(self.root, resolved, {"tired-man"})
+        self.assertEqual(landed, [{"key": "tired-man", "words": 150}])
+        self.assertIn("[Clip: scene word word word word word word word… ⇢ "
+                      "tired-man.md | cast: ecce-man]", out)
+        spec = (self.root / "_clips" / "prompts" / "tired-man.md").read_text(
+            encoding="utf-8").strip()
+        self.assertEqual(spec, edited)
+        # A declined form leaves the excerpt: nothing lands.
+        out2, landed2 = media.absorb_specs(self.root, out, {"tired-man"})
+        self.assertEqual(landed2, [])
+        self.assertEqual(out2, out)
 
     # -- exports
 

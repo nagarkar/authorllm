@@ -2683,17 +2683,72 @@ def cmd_media(args):
 
 
 def cmd_clip(args):
-    """`clip spec <key> --text …|--file F` lands a spec; `clip set <key>
-    --youtube URL --start m:ss --end m:ss …` writes confirmed fields
-    (docs/video-clips-design.md §8e). A file checked out to the Doc is
-    left alone: pull first, run this, then push."""
+    """`clip spec <key> --text …|--file F` (or `--batch specs.json`) lands
+    a spec — directly when the file is local, as pending forms in the Doc
+    tab when it is checked out; `clip resolve <file>` finishes that road;
+    `clip set <key> --youtube URL --start m:ss --end m:ss …` writes
+    confirmed fields (docs/video-clips-design.md §8e). `set` leaves a
+    checked-out file alone: pull first, run it, then push."""
+    import json
     from pathlib import Path
 
-    from . import directives, media
+    from . import directives, media, media_road
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     root = Path(manuscript["path"])
+
+    def _services():
+        from . import gdocs as _gd
+
+        config = _load_config(args)
+        return (_gd.get_service(config, args.workspace, interactive=True),
+                _gd.get_docs_service(config, args.workspace, interactive=True))
+
+    if args.action == "resolve":
+        out = media_road.resolve_specs(db, manuscript, _load_config(args),
+                                       args.key, _services)
+        for row in out["landed"]:
+            state = "a draft" if row["words"] < media.DRAFT_WORDS else "ready"
+            print(f"Spec landed for {row['key']} ({row['words']} words — {state}).")
+        if out["declined"]:
+            print(f"{out['declined']} form(s) declined — those specs are unchanged.")
+        for w in out["warnings"]:
+            print(ui.yellow(w))
+        if out["url"]:
+            print(f"Tab pushed: {out['url']}")
+        return
+    if args.action == "spec":
+        if args.batch:
+            specs = json.loads(Path(args.batch).read_text(encoding="utf-8"))
+        else:
+            if not args.key or bool(args.text) == bool(args.spec_file):
+                sys.exit("usage: clip spec <key> --text '…' | --file SPEC.md, "
+                         "or clip spec --batch specs.json ({key: spec})")
+            specs = {args.key: args.text if args.text else
+                     Path(args.spec_file).read_text(encoding="utf-8")}
+        try:
+            files = {media.find_clip(root, k)["file"] for k in specs}
+        except LookupError as err:
+            sys.exit(str(err))
+        if any(directives._checked_out(db, manuscript, f) for f in files):
+            out = media_road.stage_specs(db, manuscript, specs, _services)
+            print(f"{len(out['staged'])} spec form(s) written into the "
+                  f"{out['file']} tab — read and edit them there, then "
+                  f"'clip resolve {out['file']}'.")
+            for key, why in out["failed"]:
+                print(ui.red(f"  {key}: {why}"))
+            if out["url"]:
+                print(out["url"])
+            return
+        for key, text in specs.items():
+            out = media.set_spec(root, key, text)
+            status = "a draft" if out["words"] < media.DRAFT_WORDS else "ready"
+            print(f"Spec landed for {out['key']} ({out['words']} words — "
+                  f"{status}): {out['spec_path']}")
+        return
+    if not args.key:
+        sys.exit("usage: clip set <key> --youtube URL --start m:ss --end m:ss …")
     try:
         clip = media.find_clip(root, args.key)
     except LookupError as err:
@@ -2701,16 +2756,6 @@ def cmd_clip(args):
     if directives._checked_out(db, manuscript, clip["file"]):
         sys.exit(f"{clip['file']} is checked out to the Doc — 'doc pull "
                  f"{clip['file']}' first, run this again, then 'doc push'.")
-    if args.action == "spec":
-        if bool(args.text) == bool(args.spec_file):
-            sys.exit("usage: clip spec <key> --text '…' | --file SPEC.md")
-        text = (args.text if args.text else
-                Path(args.spec_file).read_text(encoding="utf-8"))
-        out = media.set_spec(root, args.key, text)
-        status = "a draft" if out["words"] < media.DRAFT_WORDS else "ready"
-        print(f"Spec landed for {out['key']} ({out['words']} words — "
-              f"{status}): {out['spec_path']}")
-        return
     updates = {name: getattr(args, name) for name in
                ("youtube", "start", "end", "use", "text", "cast", "prior",
                 "look") if getattr(args, name) is not None}
@@ -8886,9 +8931,15 @@ def build_parser() -> argparse.ArgumentParser:
                "https://www.youtube.com/watch?v=cHZl2naX1Xk --start 2:43 "
                "--end 2:50\n"
                "  clip set kailash --clear end\n"
+               "  clip resolve ecce-homo.md        file checked out: spec "
+               "forms were written into the tab; this lands them\n"
                "Keys: 'media list'. A clip gets its key at collect.")
-    p.add_argument("action", choices=["spec", "set"])
-    p.add_argument("key", help="the clip's key (from 'media list')")
+    p.add_argument("action", choices=["spec", "set", "resolve"])
+    p.add_argument("key", nargs="?",
+                   help="spec/set: the clip's key (from 'media list'); "
+                        "resolve: the file")
+    p.add_argument("--batch", help="spec: a JSON file {key: spec} — staged "
+                                   "together when the file is checked out")
     p.add_argument("--text", help="spec: the spec text; set: the on-screen "
                                   "words (text: field)")
     p.add_argument("--file", dest="spec_file", help="spec: read the spec "
