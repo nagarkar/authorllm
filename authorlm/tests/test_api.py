@@ -9570,6 +9570,34 @@ def main_test() -> None:
         check("--file content is the file's own text",
               "# A standalone paper" in Path(file_result["markdown"]).read_text()
               and "# Intro" not in Path(file_result["markdown"]).read_text())
+        # --notice: a recipient-specific line for one review copy.
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as pandoc_run):
+            export_published(db, manuscript, fmt="pdf", variant="images",
+                             file="papers/p0",
+                             notice="Provided to X for review only.")
+        notice_command = pandoc_run.call_args.args[0]
+        check("--notice reaches the review filter as metadata",
+              "authorlm-review-notice=Provided to X for review only."
+              in notice_command, str(notice_command))
+        refused = False
+        try:
+            export_published(db, manuscript, fmt="pdf", file="papers/p0",
+                             print_ready=True, notice="X")
+        except ValueError:
+            refused = True
+        check("--notice is declined on a print-ready PDF", refused)
+        # A one-off file observation does not see (an excerpt in _drafts/)
+        # is built through the same road and never joins the book.
+        (ms / "_drafts").mkdir(exist_ok=True)
+        (ms / "_drafts" / "excerpt.md").write_text("# An excerpt\n\nText.\n")
+        excerpt = export_published(db, manuscript, fmt="md",
+                                   file="_drafts/excerpt.md")
+        check("--file builds an unobserved one-off file",
+              excerpt["files"] == ["_drafts/excerpt.md"]
+              and "# An excerpt" in Path(excerpt["markdown"]).read_text(),
+              excerpt["files"])
         exclusive = False
         try:
             export_published(db, manuscript, fmt="md", file="papers/p0",

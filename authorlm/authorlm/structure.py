@@ -53,6 +53,28 @@ MATTER_VALUES = ("front", "main", "back")
 SIDECAR_FILES = ("pronunciations.md", "manifest.md")
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s", re.M)
+
+
+def first_heading_level(text: str) -> int | None:
+    """Level of the first markdown heading in a file (1 for '#'), or None
+    when the file has no heading."""
+    match = _HEADING_RE.search(text)
+    return len(match.group(1)) if match else None
+
+
+def is_continuation(name: str, text: str, level: int | None) -> bool:
+    """A continuation file carries on the essay before it instead of
+    starting a new one: its first heading is at `level` or deeper (the
+    manuscript's export setting `continuation_level`; None = no file is a
+    continuation). The title page never is. Exports run it on without a
+    page break and the audiobook folds it into the previous chapter."""
+    if not level or name == "title.md":
+        return False
+    found = first_heading_level(text)
+    return found is not None and found >= level
+
+
 def is_sidecar(name: str) -> bool:
     """Structural, but markdown and Doc-mirrored.
 
@@ -90,6 +112,24 @@ def refuse_sidecar(name: str) -> None:
 def content_files(files: dict[str, str]) -> dict[str, str]:
     """Manuscript files that count as prose (structural files removed)."""
     return {k: v for k, v in files.items() if not is_structural(k)}
+
+
+def toc_outside(toc_text: str) -> list[str]:
+    """The `outside` list of toc.toml: files mirrored to the Doc that are
+    not part of the book (papers, side pieces). An entry ending in '/'
+    names a folder. [] when absent or unparseable."""
+    try:
+        data = tomllib.loads(toc_text or "")
+    except (tomllib.TOMLDecodeError, TypeError):
+        return []
+    entries = data.get("outside", [])
+    return [e for e in entries if isinstance(e, str) and e]
+
+
+def is_outside(name: str, outside: list[str]) -> bool:
+    """True when `name` is declared outside the book by `outside`."""
+    return any(name == e or (e.endswith("/") and name.startswith(e))
+               for e in outside)
 
 
 def _toc_chapters(toc_text: str) -> list[dict]:
@@ -135,12 +175,18 @@ def matter_map(files: dict[str, str]) -> dict[str, str]:
 
 
 def serialize_toc_tree(entries: list[tuple[str, int]],
-                       attrs: dict[str, dict] | None = None) -> str:
+                       attrs: dict[str, dict] | None = None,
+                       outside: list[str] | None = None) -> str:
     """toc.toml text for ordered (filename, depth) entries, carrying the
-    given per-file attributes through (Doc-side reorders must not strip
-    matter assignments)."""
+    given per-file attributes and the `outside` list through (Doc-side
+    reorders must not strip matter assignments or out-of-book files)."""
     lines = ["# Table of contents — structural: order is reading order.",
              "# matter = \"front\" | \"main\" (default) | \"back\""]
+    if outside:
+        lines += ["# outside: Doc tabs that are not part of the book "
+                  "(a trailing / names a folder).",
+                  "outside = [" + ", ".join(f'"{e}"' for e in outside)
+                  + "]"]
     parents = tree_to_parents(entries)
     for name, parent in parents:
         lines += ["", "[[chapter]]", f'file = "{name}"']
@@ -260,8 +306,10 @@ def reading_order(files: dict[str, str]) -> tuple[list[str], list[str]]:
     TOC order when toc.toml parses (depth-first flatten of the tree);
     alphabetical otherwise. Unlisted files are appended alphabetically
     and reported so the author can complete the TOC."""
-    names = sorted(content_files(files))
     toc_text = files.get(TOC_FILENAME)
+    outside = toc_outside(toc_text or "")
+    names = sorted(n for n in content_files(files)
+                   if not is_outside(n, outside))
     if not toc_text:
         return names, []
     ordered = [n for n, _ in parse_toc_tree(toc_text) if n in names]
@@ -293,6 +341,11 @@ def select_chapters(files: dict[str, str],
         name = raw.strip()
         if name not in positions and f"{name}.md" in positions:
             name = f"{name}.md"
+        if name not in positions and name in files:
+            # A file declared outside the book is not in the reading
+            # order, but naming it alone still builds it (--file).
+            positions[name] = len(positions)
+            order = order + [name]
         if name not in positions:
             raise LookupError(
                 f"no such chapter '{raw}' (one of: {', '.join(order)})")

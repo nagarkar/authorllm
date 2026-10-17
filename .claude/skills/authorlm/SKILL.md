@@ -1634,6 +1634,19 @@ the PDF is for print or production; that switch removes all three review
 markers. EPUB and DOCX retain publication identity metadata but do not use
 page-dependent PDF review decoration.
 
+**Continuation files (2026-10-17).** `authorlm export set continuation_level 2`
+(`_exports/settings.toml`; empty by default) makes any file whose first heading
+is H2 or deeper carry on the essay before it: no page break in the PDF, and the
+audiobook folds it into the previous chapter. Use it to split a long essay into
+one file per section for editing (each new file starts with its existing `##`
+heading) without changing the printed book or the audio chapters.
+
+**Review notice.** `export pdf --notice "…"` adds a recipient line (e.g. "provided
+to X solely for …") in bold on the notice page and in every footer, beside the
+standard confidential wording; review PDFs only. `--file` also builds a one-off
+markdown file under the manuscript root that is not part of the book (an
+excerpt in `_drafts/`).
+
 **Print geometry (2026-09-02).** Trim size and bleed are manuscript
 properties beside the ISBNs — `authorlm manuscript set --trim-size 6x9
 --bleed no` (inches; MCP `set_manuscript_metadata(trim_size=, bleed=)`).

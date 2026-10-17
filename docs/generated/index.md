@@ -530,6 +530,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_continuation`
+
+`authorlm/tests/test_continuation.py`
+
+Continuation files: export setting `continuation_level`.
+
 ## `tests.test_critique`
 
 `authorlm/tests/test_critique.py`
@@ -643,6 +649,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_summaries.py`
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_toc_outside`
+
+`authorlm/tests/test_toc_outside.py`
+
+toc.toml `outside`: Doc tabs that are not part of the book.
 
 ## `tests.test_triage_app`
 

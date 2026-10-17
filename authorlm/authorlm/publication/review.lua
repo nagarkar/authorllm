@@ -49,10 +49,19 @@ function Pandoc(doc)
   local author = meta_text(doc.meta, "author")
   local owner = meta_text(doc.meta, "copyright-owner")
   local year = meta_text(doc.meta, "copyright-year")
-  local notice = pandoc.Div({
+  -- A recipient-specific line (export --notice) leads the page in bold
+  -- and repeats in every footer beside the standard wording.
+  local custom = meta_text(doc.meta, "authorlm-review-notice")
+  local lead = {
     pandoc.Header(1, inlines(
       "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT"),
       pandoc.Attr("", {"unnumbered"})),
+  }
+  if custom ~= "" then
+    table.insert(lead, pandoc.Para({pandoc.Strong(inlines(custom))}))
+  end
+  local notice = pandoc.Div(lead)
+  notice.content:extend({
     pandoc.Para(inlines("Author: " .. author)),
     pandoc.Para(inlines("© " .. year .. " " .. owner
       .. ". All rights reserved.")),
@@ -74,11 +83,12 @@ function Pandoc(doc)
       "The author may consider voluntarily provided feedback when revising "
       .. "the manuscript. Feedback will not be attributed publicly without "
       .. "the reviewer's permission.")),
-  }, pandoc.Attr("", {"authorlm-review-notice"}))
+  })
+  notice.attr = pandoc.Attr("", {"authorlm-review-notice"})
 
   table.insert(doc.blocks, 1,
     pandoc.RawBlock("latex", "\\AuthorLMReviewMode{" .. latex_escape(owner)
-      .. "}{" .. latex_escape(year) .. "}"))
+      .. "}{" .. latex_escape(year) .. "}{" .. latex_escape(custom) .. "}"))
   table.insert(doc.blocks, 2, notice)
   table.insert(doc.blocks, 3,
     pandoc.RawBlock("latex", "\\AuthorLMReviewNoticeBreak{}"))

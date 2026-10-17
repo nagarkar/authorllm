@@ -59,7 +59,7 @@ from .export import (VOICE_LINE, load_settings, resolve_regions,
 from .gdocs import normalize_markdown
 from .illus import parse_tag as parse_illustration_tag
 from .revisions import read_manuscript_files
-from .structure import reading_order, toc_attrs
+from .structure import is_continuation, reading_order, toc_attrs
 
 AUDIO_DIR = "_audio"
 CONFIG_FILENAME = "audiobook.toml"
@@ -1035,6 +1035,9 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     chapters: dict[str, dict] = {}
     chapter_order: list[dict] = []
     about_stem = None
+    from .export import continuation_level
+    level = continuation_level(manuscript)
+    previous: dict | None = None
     from .api import is_placeholder
     for name in order:
         if name == TITLE_FILE or name in (pron.FILENAME, "manifest.md"):
@@ -1056,11 +1059,23 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
         if not any(s["type"] == "speech" for s in sections):
             warnings.append(f"{name}: yields no speech — omitted")
             continue
+        if previous is not None and is_continuation(name, files[name],
+                                                       level):
+            # Continues the essay before it: one chapter, not two.
+            previous["sections"] += sections
+            previous.setdefault("continuations", []).append(name)
+            # Silence ids are positional; renumber the joined run so
+            # none collides (speech ids hash text, and are unchanged).
+            for i, s in enumerate(previous["sections"]):
+                if s["type"] == "silence":
+                    s["id"] = silence_id(s["durationMs"], i)
+            continue
         stem = _stem(name)
         chapter = {"schema": SCHEMA, "file": name, "stem": stem,
                    "title": title, "voiceDefault": default_key,
                    "sections": sections}
         chapters[stem] = chapter
+        previous = chapter
         if route == ABOUT_ROUTE:
             about_stem = stem
         else:
