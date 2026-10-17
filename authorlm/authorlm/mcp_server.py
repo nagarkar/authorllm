@@ -811,6 +811,72 @@ def list_media(file: str | None = None, key: str | None = None,
     return _guard(run)
 
 
+def _clip_guard(db, ms, key: str):
+    from pathlib import Path
+
+    from . import directives, media
+
+    clip = media.find_clip(Path(ms["path"]), key)
+    if directives._checked_out(db, ms, clip["file"]):
+        raise ValueError(f"{clip['file']} is checked out to the Doc — pull it "
+                         "first (doc pull), then call this again, then push")
+    return clip
+
+
+@mcp.tool()
+def set_clip_spec(key: str, text: str, manuscript: str | None = None) -> dict:
+    """Land a drafted spec for a [Clip] (docs/video-clips-design.md §8e):
+    `text` becomes the canonical spec in _clips/prompts/<key>.md and the
+    tag's excerpt is refreshed. Draft it IN CHAT first, from the shorthand,
+    the words the clip plays under, its neighbouring clips and the cast; a
+    generated clip's spec under 150 words stays a draft. Land only what the
+    author accepted. A file checked out to the Doc is left alone (pull
+    first). Keys come from list_media."""
+    def run():
+        from pathlib import Path
+
+        from . import media
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        _clip_guard(db, ms, key)
+        return media.set_spec(Path(ms["path"]), key, text)
+    return _guard(run)
+
+
+@mcp.tool()
+def set_clip_fields(key: str, youtube: str | None = None,
+                    start: str | None = None, end: str | None = None,
+                    use: str | None = None, text: str | None = None,
+                    cast: str | None = None, prior: str | None = None,
+                    look: str | None = None, clear: list[str] | None = None,
+                    manuscript: str | None = None) -> dict:
+    """Write fields into a [Clip] tag: e.g. the confirmed `youtube` url
+    and `start`/`end` timestamps (m:ss) the author chose after watching.
+    Given fields are set, `clear` names fields to remove, the rest keep
+    their order. Returns the new tag line and the clip's errors from
+    list_media. Write only values the author confirmed. A file checked out
+    to the Doc is left alone (pull first)."""
+    def run():
+        from pathlib import Path
+
+        from . import media
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        _clip_guard(db, ms, key)
+        given = {"youtube": youtube, "start": start, "end": end, "use": use,
+                 "text": text, "cast": cast, "prior": prior, "look": look}
+        updates = {k: v for k, v in given.items() if v is not None}
+        for name in clear or []:
+            updates[name] = None
+        out = media.set_fields(Path(ms["path"]), key, updates)
+        entry = media.list_media(Path(ms["path"]), [out["file"]], key)["media"]
+        out["errors"] = entry[0]["errors"] if entry else []
+        return out
+    return _guard(run)
+
+
 @mcp.tool()
 def list_footnote_tags(file: str | None = None,
                        manuscript: str | None = None) -> dict:

@@ -480,16 +480,36 @@ Tests: `tests/test_media.py`. No file writes, no model, no spend.
 
 Deliberate gaps in slice 1:
 
-- Keys are **provisional** (a slug of the description, `yt-<id>-<start>`
-  for YouTube, the file stem for `use:`), made unique in reading order;
-  minting at collect (§8a) and `_clips/prompts/` come with slice 2.
+- Keys were **provisional** in slice 1; slice 2 mints them.
 - `look:` and library-qualified names (`studio:…`) are warnings, not
   checked: looks and Studio (§8d) are not built.
 - `prior:` resolves against provisional keys.
 - Line numbers and chosen images come from the bytes on disk, not the
   observation seam, which drops embed lines.
 
-**Next:** slice 2, minting keys and the directive road (§8e: spec
-landing, `clip resolve`); slice 3, `clip ensure | job | attach | pick`
-and `illus ensure` with a video vendor (§9); slice 4, looks and the Studio
-library (§8d).
+**Slice 2, built 2026-10-17:**
+
+- **Keys minted at collect** (`media.maintain_keys`, run beside
+  `maintain_excerpts` before the snapshot). Every `[Clip]` without `⇢`
+  gets `_clips/prompts/<key>.md` holding its text (canonical, even when
+  empty: a pointer clip's label or a YouTube search brief), and the tag
+  keeps an 8-word excerpt and `⇢ <key>.md`. Keys: a slug of the text,
+  else `yt-<id>`, else the `use:` stem, made unique by `-2`, `-3`.
+  Excerpts are regenerated from the spec; an excerpt edit does not hold
+  and is reported. A missing spec file is reported, never recreated.
+- **Landing a spec:** `clip spec <key> --text|--file` / MCP
+  `set_clip_spec`. Direct landing only; the Doc pending-form road of §8e
+  (`<<shorthand>>{{spec}}` in the tab, `clip resolve`) is not built.
+- **Writing fields:** `clip set <key> --youtube … --start … --end …
+  [--clear FIELD]` / MCP `set_clip_fields`, for the values the author
+  confirmed (e.g. from ytlm's quote location).
+- Both verbs leave a file checked out to the Doc alone: pull, run, push.
+- `media list` reads a keyed clip's description from its spec file and
+  reports `keyed` and `spec_path`.
+
+Still open: Collage and Montage keys stay provisional (a slug of the
+title); no evidence rows are recorded when a spec lands yet.
+
+**Next:** the Doc pending-form road for specs; slice 3, `clip ensure | job
+| attach | pick` and `illus ensure` with Veo (§8j); slice 4, looks and the
+Studio library (§8d).

@@ -1983,15 +1983,25 @@ drops the tag lines and keeps every word of prose.
 - `authorlm media list [file] [--key K] [--json]` / MCP `list_media`:
   every clip, collage, montage and illustration with what AuthorLM
   knows. Read-only.
-  Keys are provisional until minting is built.
+- **Keys are minted at collect:** a clip's text moves to
+  `_clips/prompts/<key>.md` (canonical) and the tag keeps `excerpt… ⇢
+  <key>.md`. Edit the spec file, not the excerpt (an excerpt edit does not
+  hold).
 - Collect and `get_status` report media that is not ready (`media`).
-  **Duty:** raise them unprompted. A `draft` (spec under 150 words) is
-  drafted IN CHAT from the shorthand, the words it plays under, its
-  neighbouring clips and the cast — a 150+ word spec specific enough to
-  generate from or search stock with. Landing a spec (`_clips/prompts/`)
-  is not built yet: show the draft and let the author paste or keep it.
-- Built: slice 1 only (grammar, validation, export stripping, `media
-  list`). Nothing generates, nothing spends.
+  **Duty:** raise them unprompted. A `draft` (a generated clip's spec under
+  150 words) is drafted IN CHAT from the shorthand, the words it plays
+  under, its neighbouring clips and the cast: a 150+ word spec specific
+  enough to generate from or search stock with. For a YouTube clip the
+  text is a search brief: no minimum, but propose a richer one when the
+  url or times are missing. Land only what the author accepts:
+  `clip spec <key> --text …` / MCP `set_clip_spec`.
+- Confirmed YouTube url and times (the author watched them) go in with
+  `clip set <key> --youtube URL --start m:ss --end m:ss` / MCP
+  `set_clip_fields`. Never write unconfirmed values.
+- Both verbs leave a file checked out to the Doc alone: `doc pull`, run
+  the verb, `doc push` (the Doc-road protocol).
+- Not built: the Doc pending-form road for specs, generation (Veo),
+  takes and choosing. Nothing here spends.
 
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
