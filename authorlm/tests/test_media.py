@@ -19,7 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from authorlm import audio, export, media
 
 TOC = '[[chapter]]\nfile = "ecce.md"\n'
-LONG = " ".join(["word"] * 150)
+FILL = " ".join(["word"] * 120)
+# A complete generation spec: every section, 150+ words.
+SPEC = ("subject: a tired man at a desk " + FILL + " setting: an office at "
+        "dusk look: muted photoreal camera: slow push in light: low "
+        "window light motion: slow sound: room tone continuity: none "
+        "on-screen text: none")
+LONG = SPEC
 
 
 class MediaTests(unittest.TestCase):
@@ -82,9 +88,10 @@ class MediaTests(unittest.TestCase):
         self.assertNotIn("words", collage)
         self.assertEqual(quoted["shape"], "point")
         self.assertEqual(quoted["kind_of"], "quoted")
-        self.assertEqual(quoted["label"], "lobster line")
-        self.assertEqual(quoted["description"], "")
-        self.assertEqual(quoted["status"], "ready")
+        self.assertEqual(quoted["description"], "lobster line")
+        self.assertEqual(quoted["spec_kind"], "youtube_brief")
+        # Two words is not a brief: no source, no quote or moment.
+        self.assertEqual(quoted["status"], "draft")
         # Every clip in a cutaway shares its edges.
         self.assertEqual(used["before_sentence"], "Then comes the line:")
         self.assertEqual(used["after_sentence"], "That is the reaction.")
@@ -240,7 +247,7 @@ class MediaTests(unittest.TestCase):
                       "tired-man-at-a.md]", text)
         self.assertIn("[Clip: ⇢ temple.md | use: _assets/temple.mp4 | "
                       "start: 0:01]", text)
-        spec = self.root / "_clips" / "prompts" / "tired-man-at-a.md"
+        spec = self.root / "_clips" / "specs" / "tired-man-at-a.md"
         self.assertEqual(spec.read_text(encoding="utf-8").strip(),
                          "tired man at a desk late at night")
         # Idempotent, and an excerpt edit does not hold.
@@ -266,10 +273,15 @@ class MediaTests(unittest.TestCase):
             "[Clip: tired man]\nWords.\n[/Clip]\n", encoding="utf-8")
         media.maintain_keys(self.root)
         out = media.set_spec(self.root, "tired-man", LONG)
-        self.assertEqual(out["words"], 150)
+        self.assertEqual(out["spec_kind"], "generation_spec")
+        self.assertEqual(out["reasons"], [])
         text = (self.root / "ecce.md").read_text(encoding="utf-8")
-        self.assertIn("[Clip: word word word word word word word word… ⇢ "
+        self.assertIn("[Clip: subject: a tired man at a desk word… ⇢ "
                       "tired-man.md]", text)
+        # The file holds one section per line.
+        stored = (self.root / "_clips" / "specs" / "tired-man.md").read_text(
+            encoding="utf-8")
+        self.assertIn("\nsetting: an office at dusk\n", stored)
         clip = [e for e in media.list_media(self.root)["media"]
                 if e["kind"] == "clip"][0]
         self.assertEqual(clip["status"], "ready")
@@ -278,22 +290,25 @@ class MediaTests(unittest.TestCase):
 
     def test_set_fields_writes_confirmed_youtube(self):
         (self.root / "ecce.md").write_text(
-            "[Collage: c]\n\n[Clip: Neo answers | youtube: TBD]\n\n"
+            "[Collage: c]\n\n[Clip: source: The Matrix Reloaded quote: The "
+            "problem is choice | youtube: TBD]\n\n"
             "[/Collage]\n", encoding="utf-8")
         media.maintain_keys(self.root)
-        out = media.set_fields(self.root, "neo-answers", {
+        out = media.set_fields(self.root, "source-the-matrix-reloaded", {
             "youtube": "https://www.youtube.com/watch?v=cHZl2naX1Xk",
             "start": "2:43", "end": "2:50"})
-        self.assertEqual(out["tag"], "[Clip: Neo answers ⇢ neo-answers.md | "
-                         "youtube: https://www.youtube.com/watch?v=cHZl2naX1Xk"
-                         " | start: 2:43 | end: 2:50]")
+        self.assertEqual(out["tag"], "[Clip: source: The Matrix Reloaded "
+                         "quote: The problem is… ⇢ source-the-matrix-reloaded."
+                         "md | youtube: https://www.youtube.com/watch?v="
+                         "cHZl2naX1Xk | start: 2:43 | end: 2:50]")
         clip = [e for e in media.list_media(self.root)["media"]
                 if e["kind"] == "clip"][0]
         self.assertEqual(clip["status"], "ready", clip["errors"])
-        out = media.set_fields(self.root, "neo-answers", {"end": None})
+        out = media.set_fields(self.root, "source-the-matrix-reloaded", {"end": None})
         self.assertNotIn("end:", out["tag"])
         with self.assertRaises(ValueError):
-            media.set_fields(self.root, "neo-answers", {"colour": "red"})
+            media.set_fields(self.root, "source-the-matrix-reloaded",
+                             {"colour": "red"})
 
     def test_missing_spec_file_is_an_error(self):
         (self.root / "ecce.md").write_text(
@@ -302,6 +317,47 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(rows[0]["missing"])
         clip = self.one("[Clip: gone ⇢ gone.md]\nx\n[/Clip]\n")
         self.assertTrue(any("is missing" in e for e in clip["errors"]))
+
+    def test_youtube_brief_vs_generation_spec(self):
+        entries = self.listing(
+            "[Collage: c]\n\n"
+            "[Clip: source: The Matrix Reloaded (2003), the Architect scene "
+            "moment: Neo answers the Architect quote: \"Choice. The problem is "
+            "choice.\" on screen: Neo and the Architect | youtube: "
+            "https://www.youtube.com/watch?v=cHZl2naX1Xk | start: 2:43 | "
+            "end: 2:50]\n\n"
+            "[Clip: the Architect scene | youtube: "
+            "https://www.youtube.com/watch?v=cHZl2naX1Xk]\n\n[/Collage]\n\n"
+            "[Clip: a tired man | cast: ecce-man]\nWords.\n[/Clip]\n")["media"]
+        full, thin, generated = [e for e in entries if e["kind"] == "clip"]
+        self.assertEqual(full["spec_kind"], "youtube_brief")
+        self.assertEqual(full["status"], "ready", full["draft_reasons"])
+        self.assertEqual(full["query"], "The Matrix Reloaded (2003), the "
+                         "Architect scene Neo answers the Architect")
+        self.assertEqual(full["quote"], "Choice. The problem is choice.")
+        self.assertEqual(full["youtube_brief"]["on screen"],
+                         "Neo and the Architect")
+        # A brief needs a source and a quote or moment — no word minimum.
+        self.assertEqual(thin["status"], "draft")
+        self.assertTrue(any("'source:'" in r for r in thin["draft_reasons"]))
+        # A generation spec is checked by its own rules.
+        self.assertEqual(generated["spec_kind"], "generation_spec")
+        self.assertTrue(any("missing" in r for r in generated["draft_reasons"]))
+
+    def test_kind_change_moves_the_file(self):
+        path = self.root / "ecce.md"
+        path.write_text("[Clip: the Architect scene]\nx\n[/Clip]\n",
+                        encoding="utf-8")
+        media.maintain_keys(self.root)
+        self.assertTrue((self.root / "_clips/specs/the-architect-scene.md").exists())
+        media.set_fields(self.root, "the-architect-scene",
+                         {"youtube": "https://www.youtube.com/watch?v=cHZl2naX1Xk"})
+        rows = media.maintain_keys(self.root)
+        self.assertTrue(rows[0]["moved"])
+        self.assertEqual(rows[0]["to"], "youtube_brief")
+        self.assertTrue((self.root / "_clips/youtube-briefs/"
+                         "the-architect-scene.md").exists())
+        self.assertFalse((self.root / "_clips/specs/the-architect-scene.md").exists())
 
     def test_container_keys(self):
         path = self.root / "ecce.md"
@@ -333,16 +389,18 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(form["new"], f"[Clip: {LONG} ⇢ tired-man.md | "
                          "cast: ecce-man]")
         # The author edits the form in the tab, then accepts it.
-        edited = LONG.replace("word", "scene", 1)
+        edited = LONG.replace("a tired man", "an exhausted man", 1)
         resolved = path.read_text(encoding="utf-8").replace(
             form["old"], f"[Clip: {edited} ⇢ tired-man.md | cast: ecce-man]")
         out, landed = media.absorb_specs(self.root, resolved, {"tired-man"})
-        self.assertEqual(landed, [{"key": "tired-man", "words": 150}])
-        self.assertIn("[Clip: scene word word word word word word word… ⇢ "
+        self.assertEqual([(r["key"], r["spec_kind"], r["reasons"])
+                          for r in landed],
+                         [("tired-man", "generation_spec", [])])
+        self.assertIn("[Clip: subject: an exhausted man at a desk word… ⇢ "
                       "tired-man.md | cast: ecce-man]", out)
-        spec = (self.root / "_clips" / "prompts" / "tired-man.md").read_text(
+        spec = (self.root / "_clips" / "specs" / "tired-man.md").read_text(
             encoding="utf-8").strip()
-        self.assertEqual(spec, edited)
+        self.assertEqual(spec, media.format_sections(edited, "generation_spec"))
         # A declined form leaves the excerpt: nothing lands.
         out2, landed2 = media.absorb_specs(self.root, out, {"tired-man"})
         self.assertEqual(landed2, [])

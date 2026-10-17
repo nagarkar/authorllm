@@ -177,9 +177,9 @@ As illustrations do (`illus.py`):
 `_clips/` in the manuscript folder, beside `_illustrations/` and
 `_audio/`, same naming convention. The Doc never carries video.
 
-- Canonical spec: `_clips/prompts/<key>.md` (description with motion,
-  `cast:`, `prior:`, `text:`); the inline tag keeps a short excerpt and
-  `⇢ <key>.md`.
+- Canonical text: a file in the folder of its kind (§8l:
+  `_clips/youtube-briefs/`, `_clips/specs/`, `_clips/notes/`); the inline
+  tag keeps a short excerpt and `⇢ <key>.md`.
 - Candidates: `_clips/<key>-<deschash8>-<lawhash4>-NN.mp4`; inserted
   assets number `iNN`.
 
@@ -284,9 +284,11 @@ dusk]`, or an empty `[Collage: …]` — and fill it in later.
    tab as a pending form (`<<shorthand>>{{full spec}}`), editable in
    place; `clip resolve` lands it, as `footnote resolve` does.
 4. **Landing.** Unlike a footnote, the tag is not consumed: the accepted
-   spec goes to `_clips/prompts/<key>.md` (canonical) and the tag keeps
+   text goes to its kind's file (§8l, canonical) and the tag keeps
    the shorthand as its excerpt plus `⇢ <key>.md`.
-5. **Draft status.** Under 150 words a clip is a `draft`; a generating
+5. **Draft status.** A YouTube brief without a source and a quote or
+   moment, or a generation spec under 150 words or missing a section,
+   is a `draft` (§8l); a generating
    verb declines with "spec is a draft".
 6. For a quoted clip, incomplete means a missing url or times; the
    proposal suggests candidates for what is missing rather than a
@@ -458,6 +460,29 @@ built, never before, so no skill describes something that does not exist.
 | Read `authorlm media list --json`; get excerpt paths from ytlm; build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
 | Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
 
+## 8l. YouTube briefs and generation specs (ruled 2026-10-17)
+
+A YouTube clip and a generated clip need different writing, so they are
+different kinds of text, stored apart and checked by different code.
+
+| | YouTube brief | generation spec | note |
+|---|---|---|---|
+| for | a `youtube:` clip | a clip to be generated | a Collage or Montage title, a `use:` clip's label |
+| read by | ytlm's search (`query`) and quote location (`quote`) | the video model (slice 3) | people |
+| sections | `source:` the work or person (title, year, channel) · `moment:` the scene · `quote:` exact words spoken · `on screen:` who and what | `subject:` · `setting:` · `look:` · `camera:` · `light:` · `motion:` · `sound:` · `continuity:` · `on-screen text:` ('none' is an answer) | — |
+| ready when | a source, and a quote or a moment; no word minimum | 150+ words and every section | always |
+| file | `_clips/youtube-briefs/<key>.md` | `_clips/specs/<key>.md` | `_clips/notes/<key>.md` |
+| code | `media.check_youtube_brief`, `media.brief_terms` | `media.check_generation_spec` | — |
+
+A brief never says how to render anything. In a file each section is a
+line; inside a tag in the Doc (a review form) the sections run on one
+line and are parsed the same way. `media list` reports `spec_kind`,
+`draft_reasons`, and for a brief the parsed sections plus `query` and
+`quote`. A tag whose kind changes (a description replaced by `youtube:`)
+has its file moved by the next collect and is checked as the new kind,
+which flags it for a fresh draft. `_clips/prompts/` (slice 2's single
+folder) is gone; SMSTTD's files were moved by hand.
+
 ## 9. Still open
 
 - A composed view, `style show <file> --aspect illustration` with each
@@ -491,7 +516,7 @@ Deliberate gaps in slice 1:
 
 - **Keys minted at collect** (`media.maintain_keys`, run beside
   `maintain_excerpts` before the snapshot). Every `[Clip]` without `⇢`
-  gets `_clips/prompts/<key>.md` holding its text (canonical, even when
+  gets a file in its kind's folder (§8l) holding its text (canonical, even when
   empty: a pointer clip's label or a YouTube search brief), and the tag
   keeps an 8-word excerpt and `⇢ <key>.md`. Keys: a slug of the text,
   else `yt-<id>`, else the `use:` stem, made unique by `-2`, `-3`.
@@ -504,8 +529,8 @@ Deliberate gaps in slice 1:
   pending forms in its tab, `<<[Clip: excerpt… ⇢ key.md | …]>>{{[Clip:
   whole spec ⇢ key.md | …]}}`, local pristine. The author edits or accepts
   in place (deleting a form declines it); `clip resolve <file>` / MCP
-  `resolve_clip_specs` reads the tab back, moves each accepted spec into
-  its spec file, puts the tag back to excerpt + `⇢`, records
+  `resolve_clip_specs` reads the tab back, moves each accepted text into
+  its kind's file (§8l), puts the tag back to excerpt + `⇢`, records
   `clip_spec_edit` evidence, collects under no episode and pushes the tab
   (`authorlm/media_road.py`). `doc push` names `clip resolve` while forms
   are out.

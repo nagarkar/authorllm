@@ -1983,24 +1983,31 @@ drops the tag lines and keeps every word of prose.
 - `authorlm media list [file] [--key K] [--json]` / MCP `list_media`:
   every clip, collage, montage and illustration with what AuthorLM
   knows. Read-only.
-- **Keys are minted at collect:** a clip's text moves to
-  `_clips/prompts/<key>.md` (canonical) and the tag keeps `excerpt… ⇢
-  <key>.md`. Edit the spec file, not the excerpt (an excerpt edit does not
-  hold).
-- Collect and `get_status` report media that is not ready (`media`).
-  **Duty:** raise them unprompted. A `draft` (a generated clip's spec under
-  150 words) is drafted IN CHAT from the shorthand, the words it plays
-  under, its neighbouring clips and the cast: a 150+ word spec specific
-  enough to generate from or search stock with. For a YouTube clip the
-  text is a search brief: no minimum, but propose a richer one when the
-  url or times are missing. Land only what the author accepts:
+- **Keys are minted at collect:** a tag's text moves to a file in its
+  kind's folder and the tag keeps `excerpt… ⇢ <key>.md`. Edit the file,
+  not the excerpt (an excerpt edit does not hold).
+- **Two kinds of writing, never mixed** (`media list` gives `spec_kind`):
+  - a `youtube:` clip takes a **YouTube brief** (`_clips/youtube-briefs/`):
+    what to look for, so the search and quote location succeed —
+    `source:` (work or person: title, year, channel), `moment:` (the
+    scene), `quote:` (exact words spoken), `on screen:` (who and what).
+    Ready with a source plus a quote or moment; no word minimum. Never
+    describe how to film or render it.
+  - a clip to be generated takes a **generation spec** (`_clips/specs/`):
+    `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
+    `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),
+    150+ words.
+  - a Collage/Montage title or a `use:` label is a note (`_clips/notes/`).
+- Collect and `get_status` report media that is not ready (`media`), with
+  the reasons. **Duty:** raise them unprompted and draft IN CHAT, from the
+  shorthand, the words the clip plays under, its neighbouring clips and
+  the cast, in the right kind. Land only what the author accepts:
   `clip spec <key> --text …` or `--batch specs.json` / MCP
-  `set_clip_spec({key: spec})`. The checkout chooses the road: a local file
-  lands at once; a file checked out to the Doc gets pending forms in its
-  tab (the tag with the whole spec inline). Tell the author to review
-  there; when they say done, `clip resolve <file>` / MCP
-  `resolve_clip_specs`, which lands the accepted specs and pushes. A
-  deleted form is a decline.
+  `set_clip_spec({key: text})`. The checkout chooses the road: a local
+  file lands at once; a file checked out to the Doc gets pending forms in
+  its tab. Tell the author to review there; when they say done,
+  `clip resolve <file>` / MCP `resolve_clip_specs`, which lands the
+  accepted text and pushes. A deleted form is a decline.
 - Confirmed YouTube url and times (the author watched them) go in with
   `clip set <key> --youtube URL --start m:ss --end m:ss` / MCP
   `set_clip_fields`. Never write unconfirmed values.

@@ -2623,8 +2623,8 @@ def _print_media_not_ready(rows: list[dict]) -> None:
         for r in items:
             where = f"line {r['line']}  " if r["line"] else ""
             what = (f"{r['kind']} {r['key']}" if r["key"] else r["kind"])
-            note = ("spec under 150 words — draft it in chat"
-                    if r["status"] == "draft" else "; ".join(r["problems"]))
+            note = "; ".join(r["problems"]) + (
+                " — draft it in chat" if r["status"] == "draft" else "")
             print(f"  • {where}{what}: {note}")
     print(ui.dim("  'media list' for the full entries."))
 
@@ -2654,7 +2654,10 @@ def cmd_media(args):
             file = e["file"]
             print(ui.bold(file))
         if e["kind"] == "clip":
-            shape = e["shape"] + ("/" + e["kind_of"])
+            shape = e["shape"] + ("/" + e["kind_of"]) + (
+                ", YouTube brief" if e["spec_kind"] == "youtube_brief" else
+                ", generation spec" if e["spec_kind"] == "generation_spec"
+                else "")
             extra = (f"  ~{e['estimated_seconds']}s under "
                      f"{len(e['words'].split())} words"
                      if e["shape"] == "span" else "")
@@ -2674,12 +2677,24 @@ def cmd_media(args):
               f"{e['key']}  ({shape}){extra}")
         for err in e["errors"]:
             print(ui.red(f"          {err}"))
+        for reason in e.get("draft_reasons", []):
+            print(ui.yellow(f"          {reason}"))
         for w in e["warnings"]:
             print(ui.dim(f"          {w}"))
     for p in listing["problems"]:
         print(ui.red(p))
     if listing["keys_provisional"]:
         print(ui.dim("Clips without ⇢ get their key at the next collect."))
+
+
+def _print_landed(row: dict) -> None:
+    what = {"youtube_brief": "YouTube brief", "generation_spec":
+            "generation spec", "note": "note"}[row["spec_kind"]]
+    state = "ready" if not row["reasons"] else "a draft"
+    print(f"{what[0].upper() + what[1:]} landed for {row['key']} ({state})"
+          + (f": {row['spec_path']}" if row.get("spec_path") else "."))
+    for reason in row["reasons"]:
+        print(ui.yellow(f"  {reason}"))
 
 
 def cmd_clip(args):
@@ -2709,8 +2724,7 @@ def cmd_clip(args):
         out = media_road.resolve_specs(db, manuscript, _load_config(args),
                                        args.key, _services)
         for row in out["landed"]:
-            state = "a draft" if row["words"] < media.DRAFT_WORDS else "ready"
-            print(f"Spec landed for {row['key']} ({row['words']} words — {state}).")
+            _print_landed(row)
         if out["declined"]:
             print(f"{out['declined']} form(s) declined — those specs are unchanged.")
         for w in out["warnings"]:
@@ -2732,7 +2746,10 @@ def cmd_clip(args):
         except LookupError as err:
             sys.exit(str(err))
         if any(directives._checked_out(db, manuscript, f) for f in files):
-            out = media_road.stage_specs(db, manuscript, specs, _services)
+            out = media_road.stage_specs(db, manuscript, specs, _services,
+                                         supersede=args.supersede)
+            if out["withdrawn"]:
+                print(f"{out['withdrawn']} earlier form(s) withdrawn.")
             print(f"{len(out['staged'])} spec form(s) written into the "
                   f"{out['file']} tab — read and edit them there, then "
                   f"'clip resolve {out['file']}'.")
@@ -2742,10 +2759,7 @@ def cmd_clip(args):
                 print(out["url"])
             return
         for key, text in specs.items():
-            out = media.set_spec(root, key, text)
-            status = "a draft" if out["words"] < media.DRAFT_WORDS else "ready"
-            print(f"Spec landed for {out['key']} ({out['words']} words — "
-                  f"{status}): {out['spec_path']}")
+            _print_landed(media.set_spec(root, key, text))
         return
     if not args.key:
         sys.exit("usage: clip set <key> --youtube URL --start m:ss --end m:ss …")
@@ -2884,6 +2898,8 @@ def _print_collect_report(report):
         for row in report["media_keys"]:
             what = ("key minted" if row.get("minted") else
                     "spec file missing" if row.get("missing") else
+                    f"its text moved to {row['to']} — draft it anew"
+                    if row.get("moved") else
                     "excerpt refreshed (an excerpt edit does not hold — edit "
                     "the spec file)")
             print(ui.dim(f"Clip {row['key']} ({row['file']}:{row['line']}): "
@@ -4424,13 +4440,8 @@ def cmd_morph(args):
             print(ui.dim("Pattern candidate from your post-edits: "
                          f"{result['pattern_candidate'][:80]}…"))
         if result["tab_still_marked"]:
-            print(ui.yellow("Some forms are still in the Doc tab (see "
-                            "above); 'doc push "
-                            f"{result['file']}' takes them out in place."))
-        else:
-            print(ui.dim("The Doc tab is cleared of these forms, in "
-                         "place; comments in the margin keep their "
-                         "anchors."))
+            print(ui.dim("The Doc tab keeps its struck-and-green marks "
+                         f"until your next 'doc push {result['file']}'."))
         return
     if args.action == "review":
         decisions = [d for d, on in (("accepted", args.accept),
@@ -4842,14 +4853,9 @@ def cmd_lens(args):
                     print(ui.dim("Pattern candidate from your post-edits: "
                                  f"{result['pattern_candidate'][:80]}…"))
                 if result["tab_still_marked"]:
-                    print(ui.yellow(
-                        "Some forms are still in the Doc tab (see above); "
-                        f"'doc push {result['file']}' takes them out in "
-                        "place."))
-                else:
                     print(ui.dim(
-                        "The Doc tab is cleared of these forms, in place; "
-                        "comments in the margin keep their anchors."))
+                        "The Doc tab keeps its struck-and-green marks "
+                        f"until your next 'doc push {result['file']}'."))
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
         return
@@ -8940,6 +8946,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolve: the file")
     p.add_argument("--batch", help="spec: a JSON file {key: spec} — staged "
                                    "together when the file is checked out")
+    p.add_argument("--supersede", action="store_true",
+                   help="spec, file checked out: withdraw this file's clip "
+                        "forms already in the tab, then stage these")
     p.add_argument("--text", help="spec: the spec text; set: the on-screen "
                                   "words (text: field)")
     p.add_argument("--file", dest="spec_file", help="spec: read the spec "
