@@ -291,7 +291,7 @@ class MediaTests(unittest.TestCase):
     def test_set_fields_writes_confirmed_youtube(self):
         (self.root / "ecce.md").write_text(
             "[Collage: c]\n\n[Clip: source: The Matrix Reloaded quote: The "
-            "problem is choice | youtube: TBD]\n\n"
+            "problem is choice. | youtube: TBD]\n\n"
             "[/Collage]\n", encoding="utf-8")
         media.maintain_keys(self.root)
         out = media.set_fields(self.root, "source-the-matrix-reloaded", {
@@ -343,6 +343,17 @@ class MediaTests(unittest.TestCase):
         # A generation spec is checked by its own rules.
         self.assertEqual(generated["spec_kind"], "generation_spec")
         self.assertTrue(any("missing" in r for r in generated["draft_reasons"]))
+
+    def test_brief_quote_must_be_whole_sentences(self):
+        self.assertFalse(media.is_whole_sentences(
+            "accepted the program as long as they were given a choice"))
+        self.assertTrue(media.is_whole_sentences(
+            "\"As I was saying, she stumbled upon a solution. Choice.\""))
+        self.assertTrue(media.is_whole_sentences("Choice. The problem is choice."))
+        reasons = media.check_youtube_brief(
+            "source: The Matrix Reloaded quote: \"accepted the program as long "
+            "as they were given a choice\"")
+        self.assertTrue(any("fragment" in r for r in reasons), reasons)
 
     def test_kind_change_moves_the_file(self):
         path = self.root / "ecce.md"

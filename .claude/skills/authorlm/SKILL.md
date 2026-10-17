@@ -1992,7 +1992,11 @@ drops the tag lines and keeps every word of prose.
     `source:` (work or person: title, year, channel), `moment:` (the
     scene), `quote:` (exact words spoken), `on screen:` (who and what).
     Ready with a source plus a quote or moment; no word minimum. Never
-    describe how to film or render it.
+    describe how to film or render it. **Whole sentences only:** the
+    `quote:` runs from a sentence's first word to its closing `.` `!` `?`
+    (fetch the transcript and copy the full sentence; a fragment is a
+    draft), and the `start:`/`end:` you propose cover exactly those
+    sentences: begin at the first word, end before the next sentence.
   - a clip to be generated takes a **generation spec** (`_clips/specs/`):
     `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
     `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),

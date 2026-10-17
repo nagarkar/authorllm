@@ -808,7 +808,24 @@ def check_youtube_brief(text: str) -> list[str]:
     if not (s.get("quote") or s.get("moment")):
         reasons.append("YouTube brief needs a 'quote:' (exact words spoken) or "
                        "a 'moment:' (the scene) to find")
+    quote = s.get("quote", "").strip().strip('"“”').strip()
+    if quote and not is_whole_sentences(quote):
+        reasons.append("YouTube brief 'quote:' is a fragment — quote whole "
+                       "sentences, from a capital to the closing . ! or ?, so "
+                       "the clip never cuts a sentence")
     return reasons
+
+
+def is_whole_sentences(quote: str) -> bool:
+    """A quote is whole when it starts a sentence (a capital, or a digit)
+    and ends one (. ! ? or …, before any closing quote mark). Ruled
+    2026-10-17: a clip never starts or ends mid-sentence."""
+    q = quote.strip().strip('"“”‘’\'').strip()
+    if not q:
+        return False
+    starts = q[0].isupper() or q[0].isdigit()
+    ends = q.rstrip(')]"”’\'')[-1:] in (".", "!", "?", "…")
+    return starts and ends
 
 
 def check_generation_spec(text: str) -> list[str]:
