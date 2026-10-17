@@ -3430,15 +3430,23 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                               doc_spacing(manuscript))
         except Exception:  # noqa: BLE001 — spacing is re-applied by resolve
             pass
-    if atomic and failed and written:
-        # A form failed AFTER writing (read-back, export proof): take the
-        # rest back out too. The local file is pristine and no row is in
-        # 'written' yet, so a plain push levels the tab to it again.
-        push_doc(db, manuscript, file, service=service,
-                 docs_service=docs_service, bridge=bridge)
+    if atomic and failed:
+        # A form failed AFTER writing (read-back, export proof): take
+        # every form this call planted back out IN PLACE — markers and
+        # inserted text only, never a rebuild, so no margin comment on
+        # the tab is lost or orphaned. Document order (ascending anchor),
+        # as `settle_forms_in_tab` wants; a form not in the tab (never
+        # written, or already taken out) is simply not found.
+        outcomes = [{"old": tab_old_of.get(t["id"], t["proposed_old"]),
+                     "new": t["proposed_new"], "keep": "old"}
+                    for t in reversed(ordered)]
+        faults = settle_forms_in_tab(db, manuscript, file, outcomes,
+                                     docs_service, bridge=bridge)
         failed += [(t, "taken back out: another form of this file failed, "
                        "and a file's forms land together or not at all")
                    for t in written]
+        failed += [(t, f"rollback: {fault}") for fault in faults
+                   for t in ordered[:1]]
         written = []
     return {"written": written, "failed": failed,
             "url": tab_url(master_id, tab_id)}

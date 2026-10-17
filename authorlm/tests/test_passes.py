@@ -3995,6 +3995,50 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           and gdocs.forms_pending(db2, ms2["id"], "solo.md") is None
           and (msdir2 / "solo.md").read_text() == SKY_ESSAY, str(states))
 
+    # A failure AFTER writing (here: one definition's read-back) takes
+    # every planted form back out IN PLACE — never a rebuild, so a margin
+    # comment on the tab keeps its anchor (the author: "make sure that
+    # any comments on that tab are not lost or orphaned").
+    db3, ms3, msdir3, _plain = _outside_fixture(root, "sky-ws-3",
+                                                essay=SKY_ESSAY)
+    meta = gdocs._mapping(db3, ms3)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db3, ms3, meta)
+    fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.threads_mod.render_insertion
+
+    def job_never_reads_back(new):
+        return ("never in the tab" if "Job 38." in new
+                else real_insertion(new))
+
+    gdocs.threads_mod.render_insertion = job_never_reads_back
+    try:
+        rep = dv.apply(db3, ms3, {}, "footnote", "solo.md",
+                       [(1, "Psalm 121."), (2, "Job 38.")],
+                       services=lambda: (fake3, fake3))
+    finally:
+        gdocs.threads_mod.render_insertion = real_insertion
+    tab = fake3.tab_text("solo.md")
+    states = {r["state"] for r in db3.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'footnote'", (ms3["id"],))}
+    check("atomic after writing: a read-back failure takes every form "
+          "back out, anchors and definitions alike, and says why",
+          rep["landed"] == [] and rep["failed"]
+          and any("read-back" in why for _, why in rep["failed"])
+          and not any(m in tab for m in ("<<", ">>", "{{", "}}"))
+          and "Beta holds.[Footnote: cite Job]" in tab
+          and states == {"withdrawn"}
+          and gdocs.forms_pending(db3, ms3["id"], "solo.md") is None,
+          f"{rep}\n{tab}\n{states}")
+    check("...in place: no rebuild (no temp-doc import after the levelling "
+          "push) and the margin comment's anchor is intact",
+          not fake3.temps and not fake3.orphaned
+          and fake3.anchored_text() == "Beta holds.",
+          f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
+          f"anchored={fake3.anchored_text()!r}")
+
 
 OUTSIDE_ESSAY = (
     "# Topic\n\n"
