@@ -312,8 +312,9 @@ AuthorLM makes the model call.
 
 - A collage key uses the same verbs; `ensure` covers every child.
   AuthorLM does not stitch.
-- **The choice.** AuthorLM is the store of record: the embed line under
-  the tag points at the chosen take. The author chooses in podlm's
+- **The choice.** AuthorLM is the store of record: `_clips/chosen.json`
+  maps each clip key to its chosen take (revised 2026-10-17 from an embed
+  line under the tag, which the Doc never carries and a pull would lose). The author chooses in podlm's
   gallery (or a text listing when the takes are too many), as podlm's
   thumbnails are chosen; podlm registers it with `clip pick`. podlm never
   chooses on its own. One choice per clip, not per episode.
@@ -572,6 +573,33 @@ were staged as forms there for review.
 
 Still open: a direct (local) landing records no evidence row.
 
-**Next:** slice 3, `clip ensure | job
-| attach | pick` and `illus ensure` with Veo (§8j); slice 4, looks and the
-Studio library (§8d).
+**Slice 3, built 2026-10-17 (`authorlm/media_gen.py`):** Veo through the
+Gemini API over plain REST (no SDK), as illustrations call Gemini.
+
+- **Pin and caps** in `_clips/settings.toml` over defaults: model
+  `veo-3.1-fast-generate-preview` (about $0.10/s at 720p; Standard about
+  $0.40/s, Lite $0.05/s, list prices of 2026-10-17 — verify), resolution
+  720p, 16:9, `max_call_usd = 2.0`, `max_day_usd = 10.0`. Today's spend is
+  summed from the job files.
+- **Length** from the narration (`estimated_seconds`), rounded up to Veo's
+  4, 6 or 8 seconds; reference images or 1080p force 8.
+- **Prompt** = the generation spec's sections, the exact on-screen text
+  (or "no on-screen text"), and the effective `clip` law — a new style
+  aspect, video-only. Frames (`start:`/`end:`) go as `image`/`lastFrame`,
+  `cast:` plates as `referenceImages` (asset); images switch person
+  generation to `allow_adult`.
+- **Verbs:** `clip ensure <key>` returns fresh takes' paths, or the plan
+  with `--dry-run` (model, length, cost, prompt — nothing spent);
+  `--generate` starts a job (billed), `--confirm` passes a cap; `clip job
+  <id>` polls and downloads the take to
+  `_clips/<key>-<deschash8>-<lawhash4>-NN.mp4`; the first take is chosen;
+  `clip pick <key> --take NN`; `clip attach <key> --file F` adds `iNN`.
+  MCP: `clip_ensure` (dry run by default), `clip_job`, `clip_pick`,
+  `clip_attach`. Jobs, sent requests (image paths, not bytes) and raw
+  responses are kept in `_clips/jobs/` for podlm to diagnose.
+- `media list` reports each clip's takes with `stale-desc` and its chosen
+  take.
+
+Not built: `illus ensure`; extension of a take; a negative prompt.
+
+**Next:** slice 4, looks and the Studio library (§8d); `illus ensure`.

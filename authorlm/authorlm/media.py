@@ -685,9 +685,19 @@ def list_media(root: Path, files: list[str] | None = None,
                 e["status"] = "invalid"
             elif where[0] == e["file"] and where[1] > e["_line_index"]:
                 e["warnings"].append(f"prior: '{prior}' comes later in the file")
+    from . import media_gen
+
     for n, e in enumerate(entries):
         e["order"] = n
         e.pop("_line_index", None)
+        if e["kind"] == "clip" and e.get("keyed"):
+            spec_file = root / e["spec_path"] if e.get("spec_path") else None
+            spec = (spec_file.read_text(encoding="utf-8").strip()
+                    if spec_file and spec_file.exists() else e["description"])
+            e["takes"] = media_gen.takes(root, e["key"],
+                                         media_gen.desc_hash(spec, e["fields"]))
+            name = media_gen.chosen(root, e["key"])
+            e["chosen"] = f"{CLIPS_DIR}/{name}" if name else None
     if key:
         entries = [e for e in entries if e["key"] == key]
     return {"media": entries, "problems": problems,

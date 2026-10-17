@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import audio, export, media
+from authorlm import audio, export, media, media_gen
 
 TOC = '[[chapter]]\nfile = "ecce.md"\n'
 FILL = " ".join(["word"] * 120)
@@ -424,6 +424,101 @@ class MediaTests(unittest.TestCase):
         out2, landed2 = media.absorb_specs(self.root, out, {"tired-man"})
         self.assertEqual(landed2, [])
         self.assertEqual(out2, out)
+
+    # -- slice 3: generation (fake HTTP; nothing is spent)
+
+    class _DB:
+        """No style law: effective_style finds nothing."""
+        def one(self, *a, **k):
+            return None
+
+        def all(self, *a, **k):
+            return []
+
+    def _generated_clip(self, words=10):
+        (self.root / "ecce.md").write_text(
+            "[Clip: x]\n" + " ".join(["word"] * words) + "\n[/Clip]\n",
+            encoding="utf-8")
+        media.maintain_keys(self.root)
+        key = media.list_media(self.root)["media"][0]["key"]
+        media.set_spec(self.root, key, SPEC)
+        return key
+
+    def test_plan_is_a_dry_run(self):
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        p = media_gen.plan(self._DB(), ms, key)
+        self.assertEqual(p["reasons"], [])
+        self.assertEqual(p["model"], "veo-3.1-fast-generate-preview")
+        self.assertEqual(p["duration"], 4)          # 10 words ≈ 4 s
+        self.assertEqual(p["est_usd"], 0.40)        # 4 s × $0.10
+        self.assertIn("SUBJECT: a tired man", p["prompt"])
+        self.assertIn("No on-screen text", p["prompt"])
+        self.assertEqual(p["fresh_takes"], [])
+        self.assertFalse((self.root / "_clips" / "jobs").exists())
+
+    def test_brief_clip_is_not_generated(self):
+        (self.root / "ecce.md").write_text(
+            "[Collage: c]\n\n[Clip: source: X quote: Y. | youtube: "
+            "https://www.youtube.com/watch?v=cHZl2naX1Xk]\n\n[/Collage]\n",
+            encoding="utf-8")
+        media.maintain_keys(self.root)
+        key = [e for e in media.list_media(self.root)["media"]
+               if e["kind"] == "clip"][0]["key"]
+        p = media_gen.plan(self._DB(), {"path": str(self.root), "id": "m"}, key)
+        self.assertTrue(any("only a clip with a generation spec" in r
+                            for r in p["reasons"]))
+
+    def test_caps_need_confirm(self):
+        key = self._generated_clip(words=10)
+        (self.root / "_clips" / "settings.toml").write_text(
+            "max_call_usd = 0.10\n", encoding="utf-8")
+        ms = {"path": str(self.root), "id": "m"}
+        self.assertTrue(media_gen.plan(self._DB(), ms, key)["needs_confirm"])
+        with self.assertRaises(ValueError):
+            media_gen.start(self._DB(), ms, key, http=lambda *a, **k: {})
+
+    def test_start_poll_take_pick_attach(self):
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        calls = []
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append((method, url, body))
+            if url.endswith(":predictLongRunning"):
+                return {"name": "models/veo/operations/op1"}
+            if url.endswith("operations/op1"):
+                return {"done": True, "response": {"generateVideoResponse": {
+                    "generatedSamples": [{"video": {"uri": "https://x/v.mp4"}}]}}}
+            return b"MP4BYTES"
+        job = media_gen.start(self._DB(), ms, key, http=http)
+        body = calls[0][2]
+        self.assertEqual(body["parameters"]["durationSeconds"], "4")
+        self.assertEqual(body["parameters"]["personGeneration"], "allow_all")
+        self.assertEqual(job["state"], "running")
+        self.assertTrue((self.root / "_clips/jobs" /
+                         f"{job['id']}.request.json").exists())
+        done = media_gen.poll(ms, job["id"], http=http)
+        self.assertEqual(done["state"], "done")
+        take = self.root / done["take"]
+        self.assertEqual(take.read_bytes(), b"MP4BYTES")
+        self.assertTrue(take.name.endswith("-01.mp4"))
+        entry = media.list_media(self.root, None, key)["media"][0]
+        self.assertEqual(entry["chosen"], done["take"])
+        self.assertEqual(entry["takes"][0]["stale"], [])
+        # Fresh take: ensure returns it rather than generating.
+        self.assertEqual(len(media_gen.plan(self._DB(), ms, key)["fresh_takes"]), 1)
+        # Attach an outside take, pick it; a spec edit makes takes stale.
+        src = self.root / "own.mp4"
+        src.write_bytes(b"OWN")
+        att = media_gen.attach(self.root, key, src)
+        self.assertTrue(att["path"].endswith("-i02.mp4"))
+        self.assertEqual(media_gen.pick(self.root, key, "i02")["chosen"],
+                         att["path"])
+        media.set_spec(self.root, key, SPEC.replace("tired", "weary"))
+        entry = media.list_media(self.root, None, key)["media"][0]
+        self.assertIn("stale-desc", entry["takes"][0]["stale"])
 
     # -- exports
 

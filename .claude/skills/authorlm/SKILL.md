@@ -2024,7 +2024,15 @@ drops the tag lines and keeps every word of prose.
   it, `doc push` (the Doc-road protocol).
 - Collage and Montage get keys too (`⇢ montage-….md`, the title in the
   spec file); they carry no fields.
-- Not built: generation (Veo), takes and choosing. Nothing here spends.
+- **Generation (Veo, billed):** `clip ensure <key> --dry-run` / MCP
+  `clip_ensure` (a dry run by default) shows the model, length, cost and the
+  exact prompt and spends nothing. **Generate only after the author says yes
+  to the stated cost:** `clip ensure <key> --generate` (`--confirm` past a
+  cap) starts a job; `clip job <id>` / `clip_job` polls and downloads the
+  take (the first take is chosen). The author chooses takes (in podlm's
+  gallery or in chat); record it with `clip pick <key> --take NN` /
+  `clip_pick`, never on your own. `clip attach` / `clip_attach` brings in a
+  video made elsewhere. Pin and caps: `_clips/settings.toml`.
 
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)

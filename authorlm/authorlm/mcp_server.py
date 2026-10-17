@@ -864,6 +864,71 @@ def set_clip_spec(specs: dict[str, str], supersede: bool = False,
 
 
 @mcp.tool()
+def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
+                confirm: bool = False, model: str | None = None,
+                manuscript: str | None = None) -> dict:
+    """A generated clip's takes (docs/video-clips-design.md §8c, §8f). By
+    default a DRY RUN: the model, length, estimated cost, the exact prompt,
+    the gate's reasons, and any fresh takes' paths — nothing spent. With
+    generate=True and dry_run=False it starts a Veo generation (BILLED) and
+    returns the job; poll it with clip_job. Only with the author's yes for
+    the stated cost. `confirm` passes a per-call or per-day cap. Paths
+    only."""
+    def run():
+        from . import media_gen
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        plan = media_gen.plan(db, ms, key, model)
+        if dry_run or not generate:
+            return {"plan": plan}
+        return {"job": media_gen.start(db, ms, key, model, confirm=confirm)}
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_job(job_id: str, manuscript: str | None = None) -> dict:
+    """Check a clip generation job; when Veo is done it downloads the take
+    (paths only) and, if the clip has no chosen take yet, chooses it."""
+    def run():
+        from . import media_gen
+
+        db = _db()
+        return media_gen.poll(_manuscript(db, manuscript), job_id)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_pick(key: str, take: str, manuscript: str | None = None) -> dict:
+    """Register the take the AUTHOR chose for a clip (e.g. in podlm's
+    gallery); never choose on their behalf. AuthorLM is the store of
+    record (_clips/chosen.json)."""
+    def run():
+        from pathlib import Path
+
+        from . import media_gen
+
+        db = _db()
+        return media_gen.pick(Path(_manuscript(db, manuscript)["path"]), key, take)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_attach(key: str, path: str, manuscript: str | None = None) -> dict:
+    """Bring a video made elsewhere in as take iNN of a clip; returns its
+    path."""
+    def run():
+        from pathlib import Path
+
+        from . import media_gen
+
+        db = _db()
+        return media_gen.attach(Path(_manuscript(db, manuscript)["path"]), key,
+                                Path(path))
+    return _guard(run)
+
+
+@mcp.tool()
 def resolve_clip_specs(file: str, manuscript: str | None = None) -> dict:
     """Finish the Doc road for clip specs: read the tab back, land every
     spec form the author accepted (with their edits) in its spec file, put
