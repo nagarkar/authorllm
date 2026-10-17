@@ -6697,6 +6697,11 @@ def cmd_doc(args):
     if args.action in ("push", "pull"):
         from . import gdocs
 
+        if args.rebuild and not (args.action == "push" and args.name):
+            # Opt-in to orphaning is per tab, named: a bare --rebuild
+            # would orphan every comment in the manuscript.
+            sys.exit("--rebuild takes one file: 'doc push <file> "
+                     "--rebuild' (it orphans that tab's comments)")
         _ensure_session(db, manuscript)
         config = _load_config(args)
         try:
@@ -6737,7 +6742,9 @@ def cmd_doc(args):
                 for target in targets:
                     result = gdocs.push_doc(db, manuscript, target,
                                             title=args.title, service=service,
-                                            docs_service=docs_service)
+                                            docs_service=docs_service,
+                                            rebuild=(args.rebuild
+                                                     and target == args.name))
                     normalized_any = normalized_any or result["locally_normalized"]
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
@@ -8517,6 +8524,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="pull: take the Doc's version even if the local file "
                         "changed since the push (local edits stay in history)")
+    p.add_argument("--rebuild", action="store_true",
+                   help="push: rebuild the file's tab even though it carries "
+                        "comments, accepting that their anchors are "
+                        "orphaned (default: such tabs push surgically)")
     p.add_argument("--approve", action="store_true",
                    help="decide: approve the thread (apply and close)")
     p.add_argument("--decline", action="store_true",

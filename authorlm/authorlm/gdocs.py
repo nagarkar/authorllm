@@ -1414,10 +1414,13 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
 
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
-             docs_service=None, bridge: DocBridge | None = None) -> dict:
+             docs_service=None, bridge: DocBridge | None = None,
+             rebuild: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
-    → transplant into the tab → temp deleted. Marks the file checked out."""
+    → transplant into the tab → temp deleted. Marks the file checked out.
+    A tab carrying open threads or comment anchors pushes by paragraph
+    diff instead, unless `rebuild` (the author accepting the orphans)."""
     import hashlib
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -1442,21 +1445,16 @@ def push_doc(db: Database, manuscript: dict, query: str,
             f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
     _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
-    # A tab carrying a table cannot be pushed by paragraph diff: the Docs
-    # API reports every cell as a paragraph while the markdown export
-    # carries the table as one block, so the two sides never align and
-    # diff_push refuses (seen on manifest.md the day tables started
-    # reaching tabs, it-08b8b0a0c737). Such tabs rebuild instead; the
-    # comment anchors that a rebuild orphans are the known price.
-    # Fence bodies can contain markdown table examples; those are not
-    # Docs tables and must not force a rebuild (which orphans open
-    # margin-thread anchors). Detect delimiters in prose only.
-    has_table = bool(_TABLE_DELIM.search(
-        _lift_fences(path.read_text(encoding="utf-8"))[0]))
+    # A tab that carries comments is never rebuilt, tables or not
+    # (it-cd0fb0ad59fb; the author: "any comments on that tab are not
+    # lost or orphaned"). diff_push aligns each Docs table as ONE unit
+    # against the export's table block, so a tab with a table pushes
+    # surgically like any other. `rebuild` is the author's explicit
+    # opt-in (`doc push --rebuild`) to orphan the anchors knowingly.
     # An empty tab carries no anchors to protect: a new file's first
     # push must land its content, and the paragraph diff has nothing to
     # align against (it-06cb8c2057c3).
-    if not has_table and not _tab_is_empty(
+    if not rebuild and not _tab_is_empty(
             db, manuscript, bridge, relpath, docs_service) and (
             threads_mod.open_threads(db, manuscript["id"], relpath)
             or comment_bearing(db, manuscript, bridge, relpath, service)):
@@ -3900,11 +3898,31 @@ def apply_tab_spacing(docs_service, master_id: str, tab_id: str,
     return len(requests)
 
 
+def _cell_texts(table: dict) -> list[str]:
+    """Every cell's text of a Docs table element, row-major."""
+    return ["".join(e["textRun"].get("content", "")
+                    for block in cell.get("content", [])
+                    if "paragraph" in block
+                    for e in block["paragraph"].get("elements", [])
+                    if "textRun" in e).strip()
+            for row in table.get("tableRows", [])
+            for cell in row.get("tableCells", [])]
+
+
 def _doc_paragraphs(docs_service, master_id: str,
                     tab_id: str) -> list[dict]:
     """Non-empty paragraphs of a tab with their doc index ranges:
     [{start, end, text}] in order. Rule paragraphs surface as '---' so
-    they align positionally with the markdown export."""
+    they align positionally with the markdown export.
+
+    A table surfaces as ONE unit {start, end, text, table: True, cells,
+    lead_start, lead_blank}: the markdown export carries a table as one
+    block, so the table element, not its cell paragraphs, is what aligns
+    against it (it-cd0fb0ad59fb). `lead_start`/`lead_blank` describe the
+    paragraph just before the table — Docs keeps one there always (it
+    is where a new table's newline goes), and an edit must neither
+    delete it while the table stands nor insert text at the table's own
+    start index."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
     out: list[dict] = []
@@ -3912,8 +3930,28 @@ def _doc_paragraphs(docs_service, master_id: str,
     def walk(tabs):
         for tab in tabs:
             if tab.get("tabProperties", {}).get("tabId") == tab_id:
+                prev = None
                 for item in tab.get("documentTab", {}).get("body", {}).get(
                         "content", []):
+                    last, prev = prev, item
+                    table = item.get("table")
+                    if table is not None:
+                        lead_para = (last or {}).get("paragraph")
+                        lead_text = "".join(
+                            e.get("textRun", {}).get("content", "")
+                            for e in (lead_para or {}).get("elements", []))
+                        cells = _cell_texts(table)
+                        out.append({
+                            "start": item.get("startIndex", 0),
+                            "end": item.get("endIndex", 0),
+                            "text": "\n".join(cells), "cells": cells,
+                            "table": True,
+                            "lead_start": (last or {}).get("startIndex"),
+                            "lead_blank": lead_para is not None
+                            and not lead_text.strip()
+                            and not any("horizontalRule" in e for e in
+                                        lead_para.get("elements", []))})
+                        continue
                     para = item.get("paragraph")
                     if not para:
                         continue
@@ -3938,6 +3976,32 @@ def _doc_paragraphs(docs_service, master_id: str,
 
 def _md_paragraphs(markdown: str) -> list[str]:
     return [p for p in re.split(r"\n\s*\n", markdown) if p.strip()]
+
+
+def _refuse_table_orphans(service, master_id: str, relpath: str,
+                          tables: list[dict]) -> None:
+    """Stop a surgical push that would replace a table carrying open
+    comment anchors (it-cd0fb0ad59fb). A comment counts when its quoted
+    text sits inside the table's cells; an unreadable margin counts as
+    bearing, because the safe path is the one that cannot destroy it."""
+    flat = [_flat(t.get("text", "")) for t in tables]
+    try:
+        comments = fetch_open_comments(service, master_id)
+    except Exception:
+        held, count = 1, "an unknown number of"
+    else:
+        held = 0
+        for c in comments:
+            quote = _flat((c.get("quotedFileContent") or {}).get("value", ""))
+            if quote and any(quote in f for f in flat):
+                held += 1
+        count = str(held)
+    if held:
+        raise LookupError(
+            f"'{relpath}': this push changes a table that carries {count} "
+            "open comment(s), and replacing the table would orphan them. "
+            "Resolve or move the comments, or pass --rebuild to accept "
+            "orphaning them.")
 
 
 def diff_push(db: Database, manuscript: dict, relpath: str,
@@ -4071,11 +4135,29 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     "thread — settle the thread first "
                     f"[{tag} {i1}:{i2} tab={tab_paras[i1:i2]!r} "
                     f"local={local_paras[j1:j2]!r}]")
+            # A table is one unit here (it-cd0fb0ad59fb): a changed table
+            # is replaced whole, so every comment anchored inside it would
+            # go with it. The author's rule is that no comment on a tab is
+            # lost, so a table edit that would take one stops, named.
+            doomed = ([d for d in doc_paras[i1:i2] if d.get("table")]
+                      if tag in ("replace", "delete") else [])
+            if doomed:
+                _refuse_table_orphans(service, master_id, relpath, doomed)
+            start = None
             if tag in ("replace", "delete") and i2 > i1:
                 start = doc_paras[i1]["start"]
                 end = doc_paras[i2 - 1]["end"]
+                first = doc_paras[i1]
+                if first.get("table") and first.get("lead_blank"):
+                    # The empty paragraph Docs keeps before a table goes
+                    # with it; a replacing insertTable makes a fresh one.
+                    start = first["lead_start"]
                 if i2 == len(doc_paras):
-                    end -= 1  # the tab's final newline is not deletable
+                    if not doc_paras[-1].get("table"):
+                        end -= 1  # the tab's final newline is not deletable
+                elif (doc_paras[i2].get("table")
+                      and end == doc_paras[i2]["start"]):
+                    end -= 1  # the newline before a kept table must stay
                 requests.append({"deleteContentRange": {"range": {
                     "tabId": tab_id, "startIndex": start,
                     "endIndex": end}}})
@@ -4101,11 +4183,45 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     # (it-06cb8c2057c3).
                     requests.append(_shift_requests(
                         transplant_requests(temp_doc, tab_id), 0))
+                elif start is not None or (
+                        i1 < len(doc_paras)
+                        and not doc_paras[i1].get("table")):
+                    # Insert BEFORE an existing paragraph (or where the
+                    # replaced span began): imported paragraphs each end
+                    # with a newline, so the block closes cleanly
+                    # against what follows.
+                    position = (start if start is not None
+                                else doc_paras[i1]["start"])
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id),
+                        position - 1))
+                elif i1 < len(doc_paras) and doc_paras[i1]["lead_blank"]:
+                    # Before a kept table: a table's start index is not
+                    # inside any paragraph, so the block goes into the
+                    # empty paragraph Docs keeps ahead of it.
+                    position = doc_paras[i1]["lead_start"]
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id),
+                        position - 1))
                 elif i1 < len(doc_paras):
-                    # Insert BEFORE an existing paragraph: imported
-                    # paragraphs each end with a newline, so the block
-                    # closes cleanly against what follows.
-                    position = doc_paras[i1]["start"]
+                    # Before a kept table whose lead paragraph has text
+                    # (that paragraph is doc_paras[i1 - 1]): open a fresh
+                    # paragraph after it, as the append below does.
+                    if i1 == 0:
+                        raise LookupError(
+                            "diff push: no paragraph stands before the "
+                            "tab's opening table to insert into")
+                    position = doc_paras[i1 - 1]["end"] - 1
+                    requests.append([{"insertText": {
+                        "location": {"tabId": tab_id, "index": position},
+                        "text": "\n"}}])
+                    requests.append(_shift_requests(
+                        transplant_requests(temp_doc, tab_id), position))
+                elif doc_paras[-1].get("table"):
+                    # Append after a closing table: the paragraph Docs
+                    # keeps after every table is empty here (else it
+                    # would be the last unit), so the block lands in it.
+                    position = doc_paras[-1]["end"]
                     requests.append(_shift_requests(
                         transplant_requests(temp_doc, tab_id),
                         position - 1))

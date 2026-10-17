@@ -2159,6 +2159,363 @@ class _CommentedDocFake(_SurgicalDocFake):
         return super()._apply(req)
 
 
+# Structural markers for a table inside a flat tab body. Each costs one
+# doc index, as Docs' own structure does: the table's start and end, each
+# row, each cell (whose paragraph follows it, newline-terminated).
+_TS, _RS, _CS, _TE = "", "", "", ""
+_MARKS = (_TS, _RS, _CS, _TE)
+
+
+def _md_table_rows(block: str) -> list[list[str]] | None:
+    lines = block.strip().split("\n")
+    if not all(line.strip().startswith("|") for line in lines):
+        return None
+    return [[c.strip() for c in line.strip().strip("|").split("|")]
+            for line in lines if not gdocs._TABLE_DELIM.match(line.strip())]
+
+
+def _table_str(rows: list[list[str]]) -> str:
+    return (_TS + "".join(_RS + "".join(_CS + c + "\n" for c in row)
+                          for row in rows) + _TE)
+
+
+class _TableDocFake(_CommentedDocFake):
+    """`_CommentedDocFake` whose tabs can hold Docs TABLES
+    (it-cd0fb0ad59fb). A table sits in the flat body as marker
+    characters, one doc index each, laid out the way
+    `transplant_requests` measured a real one: start, a marker per row,
+    a marker per cell followed by its newline-terminated paragraph, end.
+    The importer turns a pipe-table block into a table element preceded
+    by the empty paragraph `insertTable` always leaves; `documents.get`
+    reports it as a table element with cell paragraphs; the export
+    writes it back as ONE pipe-table block. It enforces Docs' rules: text
+    goes only inside a paragraph, a delete takes a table whole or not at
+    all, and the newline before a kept table stays. `quote=None` is a
+    tab with no comments at all."""
+
+    def __init__(self, tabs, quote=None, title=None, **kw):
+        if quote is None:
+            _SurgicalDocFake.__init__(self, tabs, **kw)
+            self.quote, self.anchor_tab = None, None
+            self.anchor, self.orphaned = [0, 0], False
+        else:
+            super().__init__(tabs, quote, title, **kw)
+
+    def comments(self):
+        if self.quote is None:
+            return _SurgicalDocFake.comments(self)
+        return super().comments()
+
+    def _as_body(self, markdown, tab_id=None):
+        body = ""
+        for p in self._paras(markdown):
+            rows = _md_table_rows(p)
+            if rows is not None:
+                body += "\n" + _table_str(rows)
+                continue
+            body += _SurgicalDocFake._as_body(self, p, None)
+        if body.endswith(_TE):
+            body += "\n"
+        return body
+
+    def _content(self, body):
+        out, i = [], 0
+        while i < len(body):
+            if body[i] == _TS:
+                j, rows = i + 1, []
+                while body[j] != _TE:
+                    if body[j] == _RS:
+                        rows.append([])
+                        j += 1
+                    else:  # a cell marker, then its paragraph
+                        k = body.index("\n", j + 1) + 1
+                        seg = body[j + 1:k]
+                        rows[-1].append({"content": [{
+                            "startIndex": j + 2, "endIndex": k + 1,
+                            "paragraph": {"elements": [{
+                                "startIndex": j + 2, "endIndex": k + 1,
+                                "textRun": {"content": seg,
+                                            "textStyle": {}}}]}}]})
+                        j = k
+                out.append({"startIndex": i + 1, "endIndex": j + 2,
+                            "table": {"rows": len(rows),
+                                      "columns": len(rows[0]),
+                                      "tableRows": [{"tableCells": r}
+                                                    for r in rows]}})
+                i = j + 1
+                continue
+            k = body.index("\n", i) + 1
+            out.extend(_SurgicalDocFake._content(self, body[i:k]))
+            out[-1]["startIndex"] = i + 1
+            out[-1]["endIndex"] = k + 1
+            for e in out[-1]["paragraph"]["elements"]:
+                e["startIndex"], e["endIndex"] = i + 1, k + 1
+            i = k
+        return out
+
+    def _temp_content(self, markdown):
+        out = []
+        for p in self._paras(markdown):
+            rows = _md_table_rows(p)
+            if rows is None:
+                out.extend(_SurgicalDocFake._temp_content(self, p))
+                continue
+            out.append({"table": {"tableRows": [{"tableCells": [
+                {"content": [{"paragraph": {"elements": [{"textRun": {
+                    "content": c + "\n", "textStyle": {}}}]}}]}
+                for c in row]} for row in rows]}})
+        return out
+
+    def export_tab(self, tab) -> str:
+        md = self._markdown_of_tab(tab)
+        blocks = []
+        for seg in self._re.split(f"({_TS}.*?{_TE})", md,
+                                  flags=self._re.S):
+            if seg.startswith(_TS):
+                rows = [[c for c in r.split(_CS)[1:]]
+                        for r in seg[1:-1].split(_RS)[1:]]
+                rows = [[c.rstrip("\n") for c in r] for r in rows]
+                lines = ["| " + " | ".join(r) + " |" for r in rows]
+                lines.insert(1, "| " + " | ".join(":----" for _ in rows[0])
+                             + " |")
+                blocks.append("\n".join(lines))
+            else:
+                blocks += [p for p in seg.split("\n") if p.strip()]
+        return "\n\n".join(blocks)
+
+    def files(self):
+        base, outer = super().files(), self
+
+        class _Req:
+            def __init__(self_, result):
+                self_._result = result
+
+            def execute(self_):
+                return self_._result
+
+        class _Files:
+            def __getattr__(self_, name):
+                return getattr(base, name)
+
+            def export(self_, fileId=None, mimeType=None):
+                whole = "\n".join(
+                    f"# **{t['title']}**\n\n" + outer.export_tab(t)
+                    + ("\n" if t["body"].strip() else "")
+                    for t in outer.tabs)
+                return _Req(whole.encode("utf-8"))
+        return _Files()
+
+    def _apply(self, req):
+        if "insertTable" in req:
+            spec = req["insertTable"]
+            empty = [[""] * spec["columns"] for _ in range(spec["rows"])]
+            return self._apply({"insertText": {
+                "location": spec["location"],
+                "text": "\n" + _table_str(empty)}})
+        if "insertText" in req:
+            loc = req["insertText"]["location"]
+            tab = self._tab(loc.get("tabId"))
+            if tab is not None:
+                at = loc["index"] - 1
+                assert not (at < len(tab["body"])
+                            and tab["body"][at] in _MARKS), (
+                    f"insertText at {loc['index']}: not inside a paragraph")
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            tab = self._tab(rng.get("tabId"))
+            if tab is not None:
+                body = tab["body"]
+                seg = body[rng["startIndex"] - 1: rng["endIndex"] - 1]
+                depth = 0
+                for ch in seg:
+                    depth += {_TS: 1, _TE: -1}.get(ch, 0)
+                    assert depth >= 0, f"delete {rng}: cuts into a table"
+                    assert depth or ch not in (_RS, _CS), (
+                        f"delete {rng}: cuts into a table")
+                assert depth == 0, f"delete {rng}: cuts into a table"
+                after = rng["endIndex"] - 1
+                assert not (after < len(body) and body[after] == _TS
+                            and seg.endswith("\n")), (
+                    f"delete {rng}: takes the newline before a table")
+        return super()._apply(req)
+
+
+_TBL_A = "Agency opens the paper by naming what a choice costs."
+_TBL_A_NEW = "Agency opens the paper by naming what every choice costs."
+_TBL_B = "The table above scores each account against the axioms."
+_TBL_C = "Omega closes the paper on a falling cadence."
+_TBL_DOC = "\n\n".join([
+    "# Agency",
+    _TBL_A,
+    "| Account | Score |\n| --- | --- |\n| Choice scores | 3 |\n"
+    "| Habit | 1 |",
+    _TBL_B,
+    _TBL_C,
+]) + "\n"
+
+
+def _table_fixture(root: Path, name: str, fake_of, text: str = _TBL_DOC):
+    ws = root / name
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "agency.md").write_text(text)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    fake = fake_of([("book", ""), ("agency.md", text)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["agency.md"] = {"tab_id": "tab-2", "checked_out": True,
+                          "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return ws, db, manuscript, ms, fake
+
+
+def _tab_md(fake, title: str = "agency.md") -> str:
+    return gdocs.normalize_markdown(fake.export_tab(
+        next(t for t in fake.tabs if t["title"] == title)))
+
+
+def _a_table_tab_keeps_its_comments(root: Path) -> None:
+    """it-cd0fb0ad59fb. A tab carrying a table always rebuilt on push,
+    orphaning every comment anchor in it ("the known price"). The
+    author: "I wanna make sure that any comments on that tab are not
+    lost or orphaned." Now a table is one aligned unit in the surgical
+    push: prose edits leave it alone, a table edit replaces only the
+    table, and a table edit that would take a comment with it stops,
+    named, unless the author passes --rebuild."""
+    print("it-cd0fb0ad59fb: a table tab with comments is never rebuilt:")
+
+    def commented(quote):
+        return lambda tabs: _TableDocFake(tabs, quote, "agency.md",
+                                          render=True)
+
+    # 1. Prose edit beside a table, comment on another paragraph.
+    _, db, manuscript, ms, fake = _table_fixture(
+        root, "tbl-prose-ws", commented(_TBL_C))
+    table_before = fake.tab_text("agency.md").split(_TS)[1].split(_TE)[0]
+    temps = len(fake.temps)
+    (ms / "agency.md").write_text(_TBL_DOC.replace(_TBL_A, _TBL_A_NEW))
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    tab = fake.tab_text("agency.md")
+    check("a prose edit on a table tab pushes surgically, not by rebuild",
+          push.get("mode") == "diff" and push.get("ops") == 1, str(push))
+    check("the comment on the untouched paragraph keeps its anchor",
+          not fake.orphaned and fake.anchored_text() == _TBL_C, tab)
+    check("the table is untouched and the tab matches the file",
+          tab.split(_TS)[1].split(_TE)[0] == table_before
+          and len(fake.temps) == temps + 1
+          and _tab_md(fake) == gdocs.normalize_markdown(
+              (ms / "agency.md").read_text()), _tab_md(fake))
+
+    # 2. A table edit, the comment on prose: the table alone is replaced.
+    changed = _TBL_DOC.replace("| Habit | 1 |", "| Habit | 2 |")
+    (ms / "agency.md").write_text(changed.replace(_TBL_A, _TBL_A_NEW))
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("a table edit replaces the table as one unit, surgically",
+          push.get("mode") == "diff" and push.get("ops") == 1
+          and _tab_md(fake) == gdocs.normalize_markdown(
+              (ms / "agency.md").read_text()), f"{push}\n{_tab_md(fake)}")
+    check("and the prose comment survives it",
+          not fake.orphaned and fake.anchored_text() == _TBL_C)
+
+    # 3. Prose inserted right before a table, and after a closing table.
+    grown = changed.replace(_TBL_A, _TBL_A_NEW).replace(
+        "| Account", "A new lead-in to the scores.\n\n| Account")
+    (ms / "agency.md").write_text(grown)
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("a paragraph inserted before a kept table lands before it",
+          push.get("mode") == "diff" and _tab_md(fake)
+          == gdocs.normalize_markdown(grown) and not fake.orphaned,
+          _tab_md(fake))
+    ends = "# Agency\n\n" + _TBL_C + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    _, db4, man4, ms4, fake4 = _table_fixture(
+        root, "tbl-tail-ws", commented(_TBL_C), text=ends)
+    (ms4 / "agency.md").write_text(ends + "\nA closing line.\n")
+    push = gdocs.push_doc(db4, man4, "agency.md", service=fake4,
+                          docs_service=fake4)
+    check("a paragraph appended after a closing table lands after it",
+          push.get("mode") == "diff" and _tab_md(fake4)
+          == gdocs.normalize_markdown(ends + "\nA closing line.\n")
+          and not fake4.orphaned, _tab_md(fake4))
+
+    # 4. A comment INSIDE the table: a table edit stops, named, and
+    #    nothing reaches the tab; --rebuild is the knowing opt-in.
+    _, db2, man2, ms2, fake2 = _table_fixture(
+        root, "tbl-cell-ws", commented("Choice scores"))
+    before = fake2.tab_text("agency.md")
+    (ms2 / "agency.md").write_text(changed)
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2)
+        err = None
+    except LookupError as e:
+        err = str(e)
+    check("a table edit that would orphan a comment in the table stops, "
+          "naming the file, the count and the remedy",
+          err is not None and "agency.md" in err and "1 open comment" in err
+          and "--rebuild" in err, str(err))
+    check("and leaves the tab and the comment untouched",
+          fake2.tab_text("agency.md") == before and not fake2.orphaned)
+    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                          docs_service=fake2, rebuild=True)
+    check("rebuild=True rebuilds the tab, accepting the orphan",
+          push.get("mode") is None and fake2.orphaned
+          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
+          f"{push}\n{_tab_md(fake2)}")
+
+    # 5. A table tab with no comments still pushes, by rebuild as before.
+    _, db3, man3, ms3, fake3 = _table_fixture(
+        root, "tbl-bare-ws", lambda tabs: _TableDocFake(tabs, render=True))
+    (ms3 / "agency.md").write_text(changed)
+    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                          docs_service=fake3)
+    check("a table tab with no comments still pushes (rebuild)",
+          push.get("mode") is None
+          and _tab_md(fake3) == gdocs.normalize_markdown(changed),
+          f"{push}\n{_tab_md(fake3)}")
+
+    # 6. The CLI: --rebuild reaches push_doc for the named file only, and
+    #    a bare --rebuild (the whole manuscript) is not accepted.
+    ws5, db5, man5, ms5, fake5 = _table_fixture(
+        root, "tbl-cli-ws", commented(_TBL_C))
+    seen = []
+    real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+
+    def spy(db_, m_, target, **kw):
+        seen.append((target, kw.get("rebuild")))
+        return {"relpath": target, "url": "u", "doc_id": "doc-fake",
+                "created": False, "locally_normalized": False}
+    gdocs.push_doc = spy
+    gdocs.get_service = lambda *a, **k: fake5
+    gdocs.get_docs_service = lambda *a, **k: fake5
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws5), "doc", "push", "agency.md",
+                      "--rebuild"])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(ws5), "doc", "push",
+                          "--rebuild"])
+            bare = None
+        except SystemExit as e:
+            bare = str(e.code)
+    finally:
+        gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+    check("doc push <file> --rebuild passes rebuild for that file only",
+          ("agency.md", True) in seen
+          and all(not r for t, r in seen if t != "agency.md"), str(seen))
+    check("a bare doc push --rebuild is not accepted",
+          bare is not None and "--rebuild takes one file" in bare, str(bare))
+
+
 _ALPHA_OLD = "Alpha opens the essay and says a thing worth saying twice."
 _ALPHA_NEW = "Alpha opens the essay and says a thing once, and well."
 _GAMMA_OLD = "Gamma follows, saying something else entirely."
@@ -5333,6 +5690,7 @@ def main_test() -> None:
         _the_lens_door(root)
         _lens_resolve_clears_its_forms_in_place(root)
         _lens_resolve_keeps_a_local_edit(root)
+        _a_table_tab_keeps_its_comments(root)
         _a_brace_remnant_is_taken_out(root)
         _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)
