@@ -2489,8 +2489,12 @@ def reconcile(db: Database, manuscript: dict, service,
                     if dirty:
                         _save_mapping(db, manuscript, meta)
                         dirty = False
-                    push_doc(db, manuscript, relpath, service=service,
-                             docs_service=docs_service)
+                    pushed = push_doc(db, manuscript, relpath,
+                                      service=service,
+                                      docs_service=docs_service)
+                    if pushed.get("held"):
+                        report.setdefault("held", {})[relpath] = (
+                            pushed["held"])
                     meta = _mapping(db, manuscript)
                     links = meta.get("gdocs", {})
                     report["pushed"].append(relpath)
@@ -4004,6 +4008,99 @@ def _refuse_table_orphans(service, master_id: str, relpath: str,
             "orphaning them.")
 
 
+def _open_comment_anchors(db: Database, manuscript: dict, service,
+                          master_id: str) -> list[dict]:
+    """Every open margin comment as {comment_id, quoted, content}: the
+    live Doc first (fetch_open_comments), the ingested doc_comments rows
+    when the Doc cannot be read. Pull leaves ingested comments open in
+    the Doc, so those rows are the last known open set; a stale row can
+    only hold a paragraph a little longer, never orphan one."""
+    try:
+        live = fetch_open_comments(service, master_id)
+    except Exception:
+        return [{"comment_id": r["comment_id"], "quoted": r["quoted"] or "",
+                 "content": r["content"] or ""}
+                for r in db.all(
+                    "SELECT comment_id, quoted, content FROM doc_comments "
+                    "WHERE manuscript_id = ? AND state = 'ingested' "
+                    "ORDER BY comment_created, comment_id",
+                    (manuscript["id"],))]
+    return [{"comment_id": c["id"],
+             "quoted": (c.get("quotedFileContent") or {}).get("value", ""),
+             "content": c.get("content", "")} for c in live]
+
+
+def _anchored_paragraphs(texts: list[str],
+                         comments: list[dict]) -> dict[int, list[dict]]:
+    """Paragraph index → the open comments whose quoted anchor text lies
+    in it, matched on flattened whitespace the way locate_quote matches.
+    A quote that spans paragraphs marks each one it touches; a quote met
+    more than once marks every occurrence (the Drive API gives the quote,
+    not its position, and over-holding is the side that loses nothing).
+    A quote found nowhere marks nothing."""
+    spans, joined = [], ""
+    for text in texts:
+        start = len(joined)
+        joined += _flat(text)
+        spans.append((start, len(joined)))
+        joined += " "
+    marks: dict[int, list[dict]] = {}
+    for c in comments:
+        needle = _flat(c.get("quoted") or "")
+        if not needle:
+            continue
+        at = joined.find(needle)
+        while at >= 0:
+            end = at + len(needle)
+            for i, (s, e) in enumerate(spans):
+                if s < end and e > at and c not in marks.get(i, []):
+                    marks.setdefault(i, []).append(c)
+            at = joined.find(needle, at + 1)
+    return marks
+
+
+def _hold_commented(canonical: list[str], local: list[str],
+                    marks: dict[int, list[dict]]
+                    ) -> tuple[list[str], list[dict]]:
+    """The paragraphs this push may write, and the ones it holds back
+    (it-e26a44f924be). The author: "Any particular paragraph that is
+    being pushed in a targeted manner has a comment it should not be
+    pushed until that comment is addressed." A changed (replaced or
+    deleted) tab paragraph carrying an open comment keeps its OLD text
+    in the target; every other change goes through. A one-for-one
+    replace holds paragraph by paragraph; an uneven replace or a delete
+    that touches a commented paragraph is held as a block, since its
+    paragraphs do not pair. Insertions touch no existing anchor."""
+    from difflib import SequenceMatcher
+
+    if not marks:
+        return list(local), []
+    target: list[str] = []
+    held: list[dict] = []
+
+    def hold(i: int, new: str) -> None:
+        held.append({"paragraph": canonical[i], "local": new,
+                     "comments": [dict(c) for c in marks[i]]})
+
+    for tag, i1, i2, j1, j2 in SequenceMatcher(
+            None, canonical, local, autojunk=False).get_opcodes():
+        if tag == "equal" or not any(i in marks for i in range(i1, i2)):
+            target += local[j1:j2]
+        elif tag == "replace" and i2 - i1 == j2 - j1:
+            for k in range(i2 - i1):
+                if i1 + k in marks:
+                    target.append(canonical[i1 + k])
+                    hold(i1 + k, local[j1 + k])
+                else:
+                    target.append(local[j1 + k])
+        else:
+            target += canonical[i1:i2]
+            for i in range(i1, i2):
+                if i in marks:
+                    hold(i, "\n\n".join(local[j1:j2]))
+    return target, held
+
+
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
               bridge: DocBridge | None = None,
@@ -4016,7 +4113,15 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     temp-doc pipeline so Google owns md→rich conversion, and PROVES the
     result by read-back equivalence (one retry, then a loud conflict —
     never a silent rebuild). Bails to a conflict whenever an edit
-    overlaps a pending thread span."""
+    overlaps a pending thread span.
+
+    A changed paragraph carrying an open margin comment is HELD at its
+    old tab text (it-e26a44f924be) and returned under "held" with its
+    comments; the rest of the change lands. The local file keeps its new
+    text. `pushed_hash` then records what the tab actually holds, so the
+    next pull reads the file as local_ahead (only local moved off the
+    base), never a conflict, and never overwrites the held text; the
+    next push after the comment is resolved lands it."""
     import hashlib as _hashlib
 
     from difflib import SequenceMatcher
@@ -4088,6 +4193,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             split_tabbed_export(whole, boundaries, order=tab_order)
             .get(relpath, ""))
 
+    anchors: list[dict] | None = None
     for attempt in (1, 2):
         tab_md = tab_markdown()
         tab_paras = _md_paragraphs(tab_md)
@@ -4113,28 +4219,51 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 f"({len(doc_paras)} vs {len(tab_paras)} paragraphs) — "
                 "settle threads and use a rebuild push")
 
+        # Replaces use <<old>>{{new}}; critique insertions are {{new}}
+        # alone — both block any overlapping surgical edit, whole push,
+        # BEFORE the comment hold below: a pending form is settled first,
+        # never quietly held.
+        for tag, i1, i2, j1, j2 in SequenceMatcher(
+                None, canonical, local_paras, autojunk=False).get_opcodes():
+            # `clearing` names withdrawn forms' keys (a supersede): a
+            # paragraph whose markers belong only to them may be
+            # overwritten with the local text, which never held them.
+            if tag != "equal" and any(
+                    ("<<" in tab_paras[i] or "{{" in tab_paras[i])
+                    and not (clearing and any(k in tab_paras[i]
+                                              for k in clearing))
+                    for i in range(i1, i2)):
+                raise LookupError(
+                    "diff push: the edit overlaps a pending margin "
+                    "thread — settle the thread first "
+                    f"[{tag} {i1}:{i2} tab={tab_paras[i1:i2]!r} "
+                    f"local={local_paras[j1:j2]!r}]")
+
+        # Hold every changed paragraph an open comment is anchored in
+        # (it-e26a44f924be); `target` is what this push writes.
+        if anchors is None:
+            anchors = _open_comment_anchors(db, manuscript, service,
+                                            master_id)
+        target, held = _hold_commented(
+            canonical, local_paras,
+            _anchored_paragraphs([d["text"] for d in doc_paras], anchors))
+        if held and target == canonical:
+            entry["pushed_hash"] = _hashlib.sha256(threads_mod.strip_pending(
+                tab_md)[0].encode()).hexdigest()[:16]
+            entry["checked_out"] = True
+            links[relpath] = entry
+            _save_mapping(db, manuscript, meta)
+            return {"relpath": relpath, "mode": "diff", "ops": 0,
+                    "held": held}
+
         requests: list[dict] = []
-        opcodes = SequenceMatcher(None, canonical, local_paras,
+        opcodes = SequenceMatcher(None, canonical, target,
                                   autojunk=False).get_opcodes()
         ops = 0
         for tag, i1, i2, j1, j2 in reversed(opcodes):
             if tag == "equal":
                 continue
             ops += 1
-            # Replaces use <<old>>{{new}}; critique insertions are
-            # {{new}} alone — both must block overlapping surgical edits.
-            # `clearing` names withdrawn forms' keys (a supersede): a
-            # paragraph whose markers belong only to them may be
-            # overwritten with the local text, which never held them.
-            if any(("<<" in tab_paras[i] or "{{" in tab_paras[i])
-                   and not (clearing and any(k in tab_paras[i]
-                                             for k in clearing))
-                   for i in range(i1, i2)):
-                raise LookupError(
-                    "diff push: the edit overlaps a pending margin "
-                    "thread — settle the thread first "
-                    f"[{tag} {i1}:{i2} tab={tab_paras[i1:i2]!r} "
-                    f"local={local_paras[j1:j2]!r}]")
             # A table is one unit here (it-cd0fb0ad59fb): a changed table
             # is replaced whole, so every comment anchored inside it would
             # go with it. The author's rule is that no comment on a tab is
@@ -4162,7 +4291,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                     "tabId": tab_id, "startIndex": start,
                     "endIndex": end}}})
             if tag in ("replace", "insert") and j2 > j1:
-                chunk = "\n\n".join(local_paras[j1:j2]) + "\n"
+                chunk = "\n\n".join(target[j1:j2]) + "\n"
                 chunk = escape_math(escape_footnotes(chunk))
                 media = MediaInMemoryUpload(chunk.encode("utf-8"),
                                             mimetype=MARKDOWN_MIME)
@@ -4243,18 +4372,27 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": flat}).execute()
 
+        verify_md = tab_markdown()
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
-                  for p in _md_paragraphs(tab_markdown())]
-        if verify == local_paras:
+                  for p in _md_paragraphs(verify_md)]
+        if verify == target:
             if flat:
                 apply_tab_spacing(docs_service, master_id, tab_id,
                                   doc_spacing(manuscript))
+            # A partial push records what the tab now holds, not the
+            # local file: pull then sees only local moved (local_ahead)
+            # and keeps the held paragraphs' new text.
+            pushed = (threads_mod.strip_pending(verify_md)[0] if held
+                      else local_md)
             entry["pushed_hash"] = _hashlib.sha256(
-                local_md.encode()).hexdigest()[:16]
+                pushed.encode()).hexdigest()[:16]
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
-            return {"relpath": relpath, "mode": "diff", "ops": ops}
+            out = {"relpath": relpath, "mode": "diff", "ops": ops}
+            if held:
+                out["held"] = held
+            return out
         if attempt == 2:
             raise LookupError(
                 "diff push: read-back verification failed twice — the "

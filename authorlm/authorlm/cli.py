@@ -6523,6 +6523,26 @@ def cmd_belief(args):
         print("Answer recorded as declared evidence. Question closed.")
 
 
+def _print_held(result: dict) -> None:
+    """Name each paragraph a push held back because an open comment is
+    anchored in it (it-e26a44f924be), with the comment, and the road."""
+    from .gdocs import clamp
+
+    held = result.get("held") or []
+    if not held:
+        return
+    print(ui.yellow(f"Held {len(held)} paragraph(s) in {result['relpath']}: "
+                    "an open comment is anchored in each; they push once "
+                    "the comment is addressed."))
+    for h in held:
+        print(f"  ¶ {clamp(h['paragraph'], 70)}")
+        for c in h["comments"]:
+            print(f"    [{c['comment_id']}] «{clamp(c['quoted'], 50)}» "
+                  f"{c['content']}")
+    print(ui.dim("  A change request: doc propose <comment-id> (old/new "
+                 "beside the comment). A question: answer in chat."))
+
+
 def cmd_doc(args):
     from . import docs
 
@@ -6748,6 +6768,7 @@ def cmd_doc(args):
                     normalized_any = normalized_any or result["locally_normalized"]
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
+                    _print_held(result)
                 if normalized_any:
                     print(ui.dim("Some files were normalized locally first "
                                  "(canonical markdown)."))
