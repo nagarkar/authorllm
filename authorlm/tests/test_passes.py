@@ -2117,12 +2117,15 @@ class _CommentedDocFake(_SurgicalDocFake):
         assert at >= 0, tab["body"]
         self.anchor = [at + 1, at + 1 + len(quote)]
         self.orphaned = False
+        self.resolved = False   # the author resolved it in the margin
 
     def comments(self):
         outer = self
 
         class _Req:
             def execute(self_):
+                if outer.resolved:
+                    return {"comments": []}
                 return {"comments": [{
                     "id": "c-1", "content": "a margin note",
                     "resolved": False, "replies": [],
@@ -2446,22 +2449,21 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == gdocs.normalize_markdown(ends + "\nA closing line.\n")
           and not fake4.orphaned, _tab_md(fake4))
 
-    # 4. A comment INSIDE the table: a table edit stops, named, and
-    #    nothing reaches the tab; --rebuild is the knowing opt-in.
+    # 4. A comment INSIDE the table: the changed table is held at its
+    #    old text and reported (it-e26a44f924be holds any changed unit
+    #    an open comment is anchored in); --rebuild is the knowing
+    #    opt-in.
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
     (ms2 / "agency.md").write_text(changed)
-    try:
-        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                       docs_service=fake2)
-        err = None
-    except LookupError as e:
-        err = str(e)
-    check("a table edit that would orphan a comment in the table stops, "
-          "naming the file, the count and the remedy",
-          err is not None and "agency.md" in err and "1 open comment" in err
-          and "--rebuild" in err, str(err))
+    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                          docs_service=fake2)
+    held = push.get("held") or []
+    check("a table edit that would orphan a comment in the table is held "
+          "and reported with the comment",
+          len(held) == 1 and held[0]["comments"][0]["quoted"]
+          == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
     push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
@@ -2514,6 +2516,134 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           and all(not r for t, r in seen if t != "agency.md"), str(seen))
     check("a bare doc push --rebuild is not accepted",
           bare is not None and "--rebuild takes one file" in bare, str(bare))
+
+
+_HOLD_P1 = "The reader looks for an escape from the argument."
+_HOLD_P1_NEW = _HOLD_P1.replace("escape", "shake")
+_HOLD_P2 = "Beta stands where the argument began."
+_HOLD_P2_NEW = "Beta stands where the argument first began."
+_HOLD_DOC = "\n\n".join(["# Escape", _HOLD_P1, _HOLD_P2,
+                         "Omega closes the paper."]) + "\n"
+_HOLD_LOCAL = _HOLD_DOC.replace(_HOLD_P1, _HOLD_P1_NEW).replace(
+    _HOLD_P2, _HOLD_P2_NEW)
+
+
+def _a_commented_paragraph_is_held(root: Path) -> None:
+    """it-e26a44f924be. A surgical push rewrote a paragraph carrying an
+    open margin comment and orphaned it ("escape" became "shake"). The
+    author: "Any particular paragraph that is being pushed in a targeted
+    manner has a comment it should not be pushed until that comment is
+    addressed." The paragraph is held at its old text, every other change
+    lands, the hold is reported, and the next push after the comment is
+    resolved lands it."""
+    print("it-e26a44f924be: a paragraph with an open comment is held:")
+
+    def commented(quote):
+        return lambda tabs: _TableDocFake(tabs, quote, "agency.md",
+                                          render=True)
+
+    # 1. The held paragraph keeps its old text and its anchor; the other
+    #    change lands; the report names the comment.
+    _, db, manuscript, ms, fake = _table_fixture(
+        root, "hold-ws", commented("escape"), text=_HOLD_DOC)
+    (ms / "agency.md").write_text(_HOLD_LOCAL)
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    tab = _tab_md(fake)
+    check("the commented paragraph is held at its old text; the other "
+          "change lands",
+          push.get("mode") == "diff" and _HOLD_P1 in tab
+          and _HOLD_P1_NEW not in tab and _HOLD_P2_NEW in tab, tab)
+    check("the comment keeps its anchor",
+          not fake.orphaned and fake.anchored_text() == "escape")
+    held = push.get("held") or []
+    check("the result reports the held paragraph with its comment",
+          len(held) == 1 and held[0]["paragraph"] == _HOLD_P1
+          and held[0]["comments"] == [{"comment_id": "c-1",
+                                       "quoted": "escape",
+                                       "content": "a margin note"}],
+          str(held))
+    check("the local file keeps its new text",
+          (ms / "agency.md").read_text() == _HOLD_LOCAL)
+
+    # 2. A pull after the partial push reads the file as local ahead,
+    #    never a conflict, and does not overwrite it.
+    with contextlib.redirect_stdout(io.StringIO()):
+        pull = gdocs.pull_doc(db, manuscript, "agency.md", service=fake,
+                              docs_service=fake)
+    check("a pull after a partial push keeps the file (local ahead, no "
+          "conflict)",
+          "agency.md" in pull.get("local_ahead", [])
+          and "agency.md" not in pull.get("conflicts", [])
+          and (ms / "agency.md").read_text() == _HOLD_LOCAL, str(pull))
+
+    # 3. While the comment is open, a second push holds it again.
+    again = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                           docs_service=fake)
+    check("a second push while the comment is open holds again, ops 0",
+          again.get("ops") == 0 and len(again.get("held") or []) == 1
+          and _HOLD_P1 in _tab_md(fake), str(again))
+
+    # 4. The author resolves the comment; the next push lands it.
+    fake.resolved = True
+    done = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("after the comment is resolved the next push lands the held "
+          "paragraph",
+          not done.get("held") and _tab_md(fake)
+          == gdocs.normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
+
+    # 5. An unlocatable comment holds nothing.
+    _, db2, man2, ms2, fake2 = _table_fixture(
+        root, "hold-lost-ws", commented("escape"), text=_HOLD_DOC)
+    fake2.quote = "words that stand nowhere in this tab"
+    (ms2 / "agency.md").write_text(_HOLD_LOCAL)
+    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                          docs_service=fake2)
+    check("a comment whose anchor is not in the tab holds nothing",
+          push.get("mode") == "diff" and not push.get("held")
+          and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
+          f"{push}\n{_tab_md(fake2)}")
+
+    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    _, db3, man3, ms3, fake3 = _table_fixture(
+        root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
+    (ms3 / "agency.md").write_text(_HOLD_LOCAL)
+    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                          docs_service=fake3, rebuild=True)
+    check("rebuild=True overrides the hold",
+          push.get("mode") is None and not push.get("held")
+          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
+          f"{push}\n{_tab_md(fake3)}")
+
+    # 7. The CLI names each held paragraph and its comment.
+    ws4, db4, man4, ms4, fake4 = _table_fixture(
+        root, "hold-cli-ws", commented("escape"), text=_HOLD_DOC)
+    real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+
+    def spy(db_, m_, target, **kw):
+        out = {"relpath": target, "url": "u", "doc_id": "doc-fake",
+               "created": False, "locally_normalized": False}
+        if target == "agency.md":
+            out["held"] = [{"paragraph": _HOLD_P1, "local": _HOLD_P1_NEW,
+                            "comments": [{"comment_id": "c-1",
+                                          "quoted": "escape",
+                                          "content": "a margin note"}]}]
+        return out
+    gdocs.push_doc = spy
+    gdocs.get_service = lambda *a, **k: fake4
+    gdocs.get_docs_service = lambda *a, **k: fake4
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws4), "doc", "push", "agency.md"])
+    finally:
+        gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+    out = buf.getvalue()
+    check("doc push prints each held paragraph with its comment id, quote "
+          "and content",
+          "Held" in out and "c-1" in out and "escape" in out
+          and "a margin note" in out and "doc propose" in out, out)
 
 
 _ALPHA_OLD = "Alpha opens the essay and says a thing worth saying twice."
@@ -5691,6 +5821,7 @@ def main_test() -> None:
         _lens_resolve_clears_its_forms_in_place(root)
         _lens_resolve_keeps_a_local_edit(root)
         _a_table_tab_keeps_its_comments(root)
+        _a_commented_paragraph_is_held(root)
         _a_brace_remnant_is_taken_out(root)
         _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)

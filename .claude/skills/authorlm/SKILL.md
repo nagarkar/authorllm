@@ -1685,7 +1685,11 @@ open a browser). When the author asks to edit in / sync with Google Docs,
 run the CLI via Bash:
 - push: `authorlm doc push <file> -m <manuscript>` → prints the Doc URL;
   the file is now *checked out* (warn the author against local edits).
-  `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a table-comment stop.
+  `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a held paragraph.
+  **Held paragraphs** (it-e26a44f924be): a push holds back every changed paragraph (or table) an open comment is anchored in, pushes the rest, and prints "Held N paragraph(s)" with each comment's id, quote and content (`held` in the result). The local file keeps its new text and stays local ahead; a pull does not overwrite it. Address each held comment, then push again:
+  1. A change request: register the edit beside the comment with `doc propose <comment-id>` ({"old","new","note"}; the anchor stays). A question: answer in chat.
+  2. The author reviews in the margin; the next pull applies the verdict and closes the thread.
+  3. `doc push <file>` again: a held paragraph lands once no open comment is anchored in it. While a proposal is still pending in that paragraph, a push that changes it stops with "settle the thread first" (pull the verdict before pushing).
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
   A pull also harvests every open Doc comment (no addressing prefix
