@@ -433,7 +433,7 @@ yt-dlp ~1.4 s. An earlier web search could not surface the scene at all.
 
 Transcripts settle the times: of 10 candidates, 9 had captions (one had
 transcripts disabled) and the quote was located in each. The Architect
-scene's line falls at 2:45 of `cHZl2naX1Xk`, but split across two
+scene's line falls at [2:45 of part 1](https://www.youtube.com/watch?v=cHZl2naX1Xk&t=165), but split across two
 caption segments ("Choice the problem is" / "choice"), so quote location
 must match across neighbouring segments, not one at a time.
 
@@ -455,7 +455,7 @@ built, never before, so no skill describes something that does not exist.
 |---|---|---|---|
 | Series manuscripts: write each monologue as a file in a series manuscript (`SpiritualHindu/<name>.md`); move `monologue-picture-story` and `monologue-two-returns` in by hand | corpuslm (`nagarkar/corpuslm`) | `src/corpuslm/cli.py` (`monologue new/run/export`), `moments.py`, the AuthorLM registration call | `corpuslm/.claude/skills/corpuslm/SKILL.md` (the monologue rows); corpuslm design docs |
 | YouTube search via the Data API only, failing loudly | ytlm (`nagarkar/ytlm`) | new search verb beside `src/ytlm/api.py` | `ytlm/.claude/skills/ytlm/SKILL.md` (verbs); `ytlm/docs/design/` |
-| Quote location across neighbouring caption segments → proposed `start:`/`end:` | ytlm | the `segments` / `search` code | same as above |
+| Quote location across neighbouring caption segments → proposed `start:`/`end:`, expanded to whole sentences (start at the first sentence's start, end before the next sentence begins; §8l) | ytlm | the `segments` / `search` code | same as above |
 | Video download and excerpt cutting, cached in the ytlm workspace on the external drive, returning paths | ytlm | `src/ytlm/adapters/ytdlp.py` (today audio only) | same as above |
 | Read `authorlm media list --json`; get excerpt paths from ytlm; build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
 | Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
@@ -473,6 +473,18 @@ different kinds of text, stored apart and checked by different code.
 | ready when | a source, and a quote or a moment; no word minimum | 150+ words and every section | always |
 | file | `_clips/youtube-briefs/<key>.md` | `_clips/specs/<key>.md` | `_clips/notes/<key>.md` |
 | code | `media.check_youtube_brief`, `media.brief_terms` | `media.check_generation_spec` | — |
+
+**Whole sentences (ruled 2026-10-17).** A clip never starts or ends
+mid-sentence. A brief's `quote:` is whole sentences, from a capital to the
+closing `.`, `!` or `?`; `media.check_youtube_brief` marks a fragment as a
+draft. The `start:`/`end:` written into the tag span exactly those
+sentences: start at the first sentence's first word, end before the next
+sentence begins. Example: the Architect's line is not "accepted the
+program as long as they were given a choice" but the whole sentence "As I
+was saying, she stumbled upon a solution whereby nearly 99% of all test
+subjects accepted the program as long as they were given a choice, even if
+they were only aware of the choice at a near unconscious level." (3:49 to
+4:01 of [part 1](https://www.youtube.com/watch?v=cHZl2naX1Xk&t=229); the next sentence starts at 4:00.8).
 
 A brief never says how to render anything. In a file each section is a
 line; inside a tag in the Doc (a review form) the sections run on one
