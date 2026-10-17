@@ -785,6 +785,33 @@ def _resolve_directive(kind: str, file: str, manuscript: str | None) -> dict:
 
 
 @mcp.tool()
+def list_media(file: str | None = None, key: str | None = None,
+               manuscript: str | None = None) -> dict:
+    """Every [Clip], [Collage], [Montage] and [Illustration] in reading
+    order, each with everything AuthorLM knows (docs/video-clips-design.md
+    §8f): kind, key (provisional until minting), shape (span | point in a
+    collage | montage), kind_of
+    (generated | quoted | used), fields, status (ready | draft | invalid |
+    unrendered), errors and warnings. A span or a montage carries the words
+    it plays under (spoken form), first/last sentence and
+    estimated_seconds; a collage (a cutaway: narration stops) carries the
+    sentence before it and the one after; a clip inside a montage carries
+    the sentences around it. Paths only,
+    never bytes. Scope with `file` or `key` — a whole manuscript is ~5 KB
+    per clip. A draft clip (spec under 150 words) is drafted in CHAT from
+    the shorthand, the words it plays under, its neighbours and the cast."""
+    def run():
+        from pathlib import Path
+
+        from . import media
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return media.list_media(Path(ms["path"]), [file] if file else None, key)
+    return _guard(run)
+
+
+@mcp.tool()
 def list_footnote_tags(file: str | None = None,
                        manuscript: str | None = None) -> dict:
     """Open [Footnote: gist | label: XX] tags — the author's inline

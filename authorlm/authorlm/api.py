@@ -450,7 +450,20 @@ def status(db: Database, manuscript: dict) -> dict:
         "session": dict(session) if session else None,
         "counts": counts,
         "directives": open_tags,
+        "media": _media_not_ready(manuscript),
     }
+
+
+def _media_not_ready(manuscript: dict) -> list[dict]:
+    """Clips, collages and montages not ready (docs/video-clips-design.md
+    §8e): drafts, broken field combinations, structural faults. Read
+    only; a failure here must never break a collect or a status."""
+    from . import media
+
+    try:
+        return media.not_ready(Path(manuscript["path"]))
+    except (OSError, ValueError):
+        return []
 
 
 def ensure_session(db: Database, manuscript: dict) -> tuple[dict, bool]:
@@ -1129,6 +1142,11 @@ def collect(db: Database, manuscript: dict, config: dict,
         open_tags = []
     if open_tags:
         report["directives"] = open_tags
+    # Media tags that are not ready are reported the same way
+    # (docs/video-clips-design.md §8e): no model runs, nothing is written.
+    media_rows = _media_not_ready(manuscript)
+    if media_rows:
+        report["media"] = media_rows
     return report
 
 

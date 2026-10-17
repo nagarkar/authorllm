@@ -326,6 +326,12 @@ The reader-load manifest — a DERIVED report, refreshed on every push.
 
 AuthorLM MCP server — the conversational surface (P11: thin wrapper).
 
+## `authorlm.media`
+
+`authorlm/authorlm/media.py`
+
+Media for podcasts: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` tags, and the one umbrella listing, `media list` (design: docs/video-clips-design.md).
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`
@@ -595,6 +601,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_media`
+
+`authorlm/tests/test_media.py`
+
+Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
 
 ## `tests.test_morph_targets`
 

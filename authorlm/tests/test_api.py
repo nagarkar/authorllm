@@ -13458,6 +13458,9 @@ def main_test() -> None:
             # (confirm-gated). `audio init` is CLI-only: a one-time seed.
             "export_audio", "audio_readiness", "list_voices",
             "audition_voices", "set_cast", "push_pronunciations", "say_term",
+            # Media for podcasts (video-clips-design §8f/§8g): the one
+            # umbrella listing; read-only, paths never bytes.
+            "list_media",
             # The Triage App and the pronunciation workbench are NOT here:
             # each is a local page served by its CLI verb (`triage-app`,
             # `workbench`). The MCP App road was removed 2026-09-04 — it

@@ -40,6 +40,10 @@ def yellow(text: str) -> str:
     return _wrap("33", text)
 
 
+def red(text: str) -> str:
+    return _wrap("31", text)
+
+
 def red_strike(text: str) -> str:
     """Red + strikethrough: the OLD half of a proposed edit."""
     return _wrap("31;9", text)
