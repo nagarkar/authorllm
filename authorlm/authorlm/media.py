@@ -198,8 +198,13 @@ def scan_text(text: str) -> tuple[list[dict], list[str]]:
         m = CONTAINER_OPEN.match(line)
         if m:
             kind = m.group("kind").lower()
+            title, ref = m.group("body").strip(), None
+            rm = _REF.search(title)
+            if rm:
+                ref = rm.group("ref")
+                title = title[:rm.start()].rstrip(" …").strip()
             item = {"kind": kind, "i": i, "line": i + 1, "close": None,
-                    "title": m.group("body").strip(), "children": [],
+                    "title": title, "ref": ref, "children": [],
                     "n": len(items), "errors": []}
             if box:
                 item["errors"].append(
@@ -506,9 +511,18 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
             if kind == "montage" and not words:
                 errors.append("a Montage plays under prose and holds none — "
                               "clips alone are a [Collage]")
+            if item["ref"]:
+                full = known["specs"].get(item["ref"])
+                if full is None:
+                    errors.append(f"spec file {CLIPS_DIR}/{PROMPTS_SUBDIR}/"
+                                  f"{item['ref']} is missing")
+                else:
+                    item["title"] = " ".join(full.split())
             entry = {"kind": kind, "file": name, "line": item["line"],
                      "title": item["title"],
-                     "key_base": f"{kind}-" + (_slug(item["title"]) or "untitled"),
+                     "keyed": bool(item["ref"]),
+                     "key_base": (item["ref"][:-3] if item["ref"] else
+                                  f"{kind}-" + (_slug(item["title"]) or "untitled")),
                      "children_idx": item["children"],
                      "status": "invalid" if errors else "ready",
                      "errors": errors, "warnings": []}
@@ -659,8 +673,8 @@ def list_media(root: Path, files: list[str] | None = None,
     if key:
         entries = [e for e in entries if e["key"] == key]
     return {"media": entries, "problems": problems,
-            "keys_provisional": any(e["kind"] == "clip" and not e["keyed"]
-                                    for e in entries)}
+            "keys_provisional": any(e["kind"] in ("clip",) + CONTAINERS
+                                    and not e["keyed"] for e in entries)}
 
 
 def not_ready(root: Path, files: list[str] | None = None) -> list[dict]:
@@ -711,13 +725,20 @@ def _split_body(body: str) -> tuple[str, str]:
     return (body, "") if not m else (body[:m.start()], body[m.start():])
 
 
+def _tag_line(kind: str, text: str, ref: str, tail: str = "") -> str:
+    body = (f"{text} ⇢ {ref}" if text else f"⇢ {ref}")
+    return f"[{kind.title()}: {body}{tail}]"
+
+
 def _clip_line(excerpt: str, ref: str, tail: str) -> str:
-    body = (f"{excerpt} ⇢ {ref}" if excerpt else f"⇢ {ref}")
-    return f"[Clip: {body}{tail}]"
+    return _tag_line("clip", excerpt, ref, tail)
 
 
-def _mint_name(description: str, fields: dict, taken: set[str]) -> str:
-    if description:
+def _mint_name(description: str, fields: dict, taken: set[str],
+               prefix: str = "") -> str:
+    if prefix:
+        base = f"{prefix}-" + (_slug(description) or "untitled")
+    elif description:
         base = _slug(description)
     elif fields.get("youtube") and _youtube_id(fields["youtube"]):
         base = "yt-" + _youtube_id(fields["youtube"]).lower()
@@ -732,17 +753,23 @@ def _mint_name(description: str, fields: dict, taken: set[str]) -> str:
     return name
 
 
-def _clip_lines(text: str):
-    """(line index, body) for every [Clip] tag line outside code fences."""
+def _clip_lines(text: str, containers: bool = False):
+    """(line index, kind, body) for every [Clip] tag line — and, with
+    `containers`, every [Collage]/[Montage] opening — outside fences."""
     fenced = False
     for i, line in enumerate(text.split("\n")):
         if _FENCE.match(line):
             fenced = not fenced
             continue
-        if not fenced:
-            m = CLIP_OPEN.match(line)
-            if m:
-                yield i, m.group("body")
+        if fenced:
+            continue
+        m = CLIP_OPEN.match(line)
+        if m:
+            yield i, "clip", m.group("body")
+            continue
+        m = CONTAINER_OPEN.match(line) if containers else None
+        if m:
+            yield i, m.group("kind").lower(), m.group("body")
 
 
 def maintain_keys(root: Path, files: list[str] | None = None) -> list[dict]:
@@ -766,16 +793,21 @@ def maintain_keys(root: Path, files: list[str] | None = None) -> list[dict]:
         raw = path.read_text(encoding="utf-8", errors="replace")
         lines = raw.split("\n")
         changed = False
-        for i, body in _clip_lines(raw):
-            parsed = parse_fields(body)
-            _desc, tail = _split_body(body)
+        for i, kind, body in _clip_lines(raw, containers=True):
+            if kind == "clip":
+                parsed = parse_fields(body)
+                _desc, tail = _split_body(body)
+            else:
+                # A container's text is its title; it has no fields.
+                parsed = parse_fields(body.replace("|", "/"))
+                parsed["fields"], tail = {}, ""
             if parsed["ref"]:
                 full = specs.get(parsed["ref"])
                 if full is None:
                     report.append({"file": rel, "line": i + 1,
                                    "key": parsed["ref"][:-3], "missing": True})
                     continue
-                want = _clip_line(_excerpt(full), parsed["ref"], tail)
+                want = _tag_line(kind, _excerpt(full), parsed["ref"], tail)
                 if lines[i] != want:
                     report.append({"file": rel, "line": i + 1,
                                    "key": parsed["ref"][:-3],
@@ -783,14 +815,16 @@ def maintain_keys(root: Path, files: list[str] | None = None) -> list[dict]:
                     lines[i] = want
                     changed = True
                 continue
-            name = _mint_name(parsed["description"], parsed["fields"], taken)
+            name = _mint_name(parsed["description"], parsed["fields"], taken,
+                              "" if kind == "clip" else kind)
             taken.add(name)
             directory = specs_dir(root)
             directory.mkdir(parents=True, exist_ok=True)
             (directory / name).write_text(
                 parsed["description"] + "\n", encoding="utf-8")
             specs[name] = parsed["description"]
-            lines[i] = _clip_line(_excerpt(parsed["description"]), name, tail)
+            lines[i] = _tag_line(kind, _excerpt(parsed["description"]), name,
+                                 tail)
             report.append({"file": rel, "line": i + 1, "key": name[:-3],
                            "minted": True})
             changed = True
@@ -808,13 +842,17 @@ def find_clip(root: Path, key: str) -> dict:
         if not rel.endswith(".md"):
             continue
         raw = path.read_text(encoding="utf-8", errors="replace")
-        for i, body in _clip_lines(raw):
-            parsed = parse_fields(body)
+        for i, kind, body in _clip_lines(raw, containers=True):
+            parsed = parse_fields(body if kind == "clip"
+                                  else body.replace("|", "/"))
             if parsed["ref"] == ref:
+                if kind != "clip":
+                    parsed["fields"] = {}
                 return {"file": rel, "path": path, "i": i, "body": body,
-                        **parsed}
-    raise LookupError(f"no [Clip] carries ⇢ {ref} — 'media list' shows the "
-                      "keys; a clip gets its key at collect")
+                        "kind": kind, **parsed}
+    raise LookupError(f"no [Clip], [Collage] or [Montage] carries ⇢ {ref} — "
+                      "'media list' shows the keys; a tag gets its key at "
+                      "collect")
 
 
 def set_spec(root: Path, key: str, text: str) -> dict:
@@ -831,11 +869,56 @@ def set_spec(root: Path, key: str, text: str) -> dict:
             "words": len(text.split()), "spec_path": str(path)}
 
 
+def spec_form(root: Path, key: str, text: str) -> dict:
+    """The pending form that shows a drafted spec in place (§8e Doc road):
+    {file, i, old, new} where `new` is the tag with the WHOLE spec inline,
+    still carrying `⇢ <key>.md`, so the author reads and edits it in the
+    tab. `absorb_specs` turns an accepted form back into excerpt + file."""
+    clip = find_clip(root, key)
+    _desc, tail = _split_body(clip["body"]) if clip["kind"] == "clip" else ("", "")
+    lines = clip["path"].read_text(encoding="utf-8").split("\n")
+    return {"file": clip["file"], "i": clip["i"], "old": lines[clip["i"]],
+            "new": _tag_line(clip["kind"], " ".join(text.split()),
+                             clip["ref"], tail),
+            "key": clip["ref"][:-3]}
+
+
+def absorb_specs(root: Path, text: str, keys: set[str]) -> tuple[str, list[dict]]:
+    """A resolved tab text → its spec files. For each named key whose tag
+    now carries more than its excerpt (an accepted or edited spec form),
+    the inline text becomes the canonical spec and the tag goes back to
+    excerpt + `⇢`. A declined form left the excerpt standing: nothing
+    lands. Returns (text, [{key, words}])."""
+    specs = load_specs(root)
+    lines = text.split("\n")
+    landed: list[dict] = []
+    for i, kind, body in list(_clip_lines(text, containers=True)):
+        parsed = parse_fields(body if kind == "clip" else body.replace("|", "/"))
+        ref = parsed["ref"]
+        if not ref or ref[:-3] not in keys:
+            continue
+        inline = parsed["description"]
+        # A declined form leaves the excerpt; parse_fields has already
+        # dropped its trailing ellipsis.
+        if not inline or inline == _excerpt(specs.get(ref, "")).rstrip(" …"):
+            continue
+        directory = specs_dir(root)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ref).write_text(inline + "\n", encoding="utf-8")
+        _desc, tail = _split_body(body) if kind == "clip" else ("", "")
+        lines[i] = _tag_line(kind, _excerpt(inline), ref, tail)
+        landed.append({"key": ref[:-3], "words": len(inline.split())})
+    return "\n".join(lines), landed
+
+
 def set_fields(root: Path, key: str, updates: dict) -> dict:
     """Write fields into a keyed clip's tag: a value sets the field, None
     removes it; the others keep their order. Validated by name only —
     `media list` checks the combinations. Returns {file, line, tag}."""
     clip = find_clip(root, key)
+    if clip["kind"] != "clip":
+        raise ValueError(f"{key} is a {clip['kind']}: a container has a "
+                         "title, not fields")
     unknown = sorted(set(updates) - set(FIELDS))
     if unknown:
         raise ValueError(f"unknown field(s) {', '.join(unknown)} "

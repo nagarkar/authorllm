@@ -497,9 +497,18 @@ Deliberate gaps in slice 1:
   else `yt-<id>`, else the `use:` stem, made unique by `-2`, `-3`.
   Excerpts are regenerated from the spec; an excerpt edit does not hold
   and is reported. A missing spec file is reported, never recreated.
-- **Landing a spec:** `clip spec <key> --text|--file` / MCP
-  `set_clip_spec`. Direct landing only; the Doc pending-form road of §8e
-  (`<<shorthand>>{{spec}}` in the tab, `clip resolve`) is not built.
+- **Landing a spec:** `clip spec <key> --text|--file`, or `clip spec
+  --batch specs.json` ({key: spec}) / MCP `set_clip_spec(specs)`. The
+  file's checkout chooses the road, as for the directives: a local file
+  lands the specs at once; a file checked out to the Doc gets them as
+  pending forms in its tab, `<<[Clip: excerpt… ⇢ key.md | …]>>{{[Clip:
+  whole spec ⇢ key.md | …]}}`, local pristine. The author edits or accepts
+  in place (deleting a form declines it); `clip resolve <file>` / MCP
+  `resolve_clip_specs` reads the tab back, moves each accepted spec into
+  its spec file, puts the tag back to excerpt + `⇢`, records
+  `clip_spec_edit` evidence, collects under no episode and pushes the tab
+  (`authorlm/media_road.py`). `doc push` names `clip resolve` while forms
+  are out.
 - **Writing fields:** `clip set <key> --youtube … --start … --end …
   [--clear FIELD]` / MCP `set_clip_fields`, for the values the author
   confirmed (e.g. from ytlm's quote location).
@@ -507,9 +516,16 @@ Deliberate gaps in slice 1:
 - `media list` reads a keyed clip's description from its spec file and
   reports `keyed` and `spec_path`.
 
-Still open: Collage and Montage keys stay provisional (a slug of the
-title); no evidence rows are recorded when a spec lands yet.
+- **Collage and Montage keys** are minted the same way: `[Montage: Choice
+  as prison and escape ⇢ montage-choice-as-prison-and.md]`; the spec file
+  holds the title (room for a fuller note). Containers carry no fields.
 
-**Next:** the Doc pending-form road for specs; slice 3, `clip ensure | job
+Trial on SMSTTD `ecce-homo.md` (2026-10-17): the pull's collect minted
+six keys, the push showed them in the tab, and four search-brief specs
+were staged as forms there for review.
+
+Still open: a direct (local) landing records no evidence row.
+
+**Next:** slice 3, `clip ensure | job
 | attach | pick` and `illus ensure` with Veo (§8j); slice 4, looks and the
 Studio library (§8d).

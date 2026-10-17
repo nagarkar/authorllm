@@ -332,6 +332,12 @@ AuthorLM MCP server — the conversational surface (P11: thin wrapper).
 
 Media for podcasts: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` tags, and the one umbrella listing, `media list` (design: docs/video-clips-design.md).
 
+## `authorlm.media_road`
+
+`authorlm/authorlm/media_road.py`
+
+The Doc road for clip specs (docs/video-clips-design.md §8e).
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`

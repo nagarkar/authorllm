@@ -1338,7 +1338,8 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
 _SETTLE_REMEDY = {"critique": "critique resolve {file}",
                   "filter": "filter resolve {file}",
                   "footnote": "footnote resolve {file}",
-                  "explain": "explain resolve {file}"}
+                  "explain": "explain resolve {file}",
+                  "clip": "clip resolve {file}"}
 
 
 def forms_pending(db: Database, manuscript_id: str,
