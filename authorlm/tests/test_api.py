@@ -13460,7 +13460,7 @@ def main_test() -> None:
             "audition_voices", "set_cast", "push_pronunciations", "say_term",
             # Media for podcasts (video-clips-design §8f/§8g): the one
             # umbrella listing; read-only, paths never bytes.
-            "list_media",
+            "list_media", "set_clip_spec", "set_clip_fields",
             # The Triage App and the pronunciation workbench are NOT here:
             # each is a local page served by its CLI verb (`triage-app`,
             # `workbench`). The MCP App road was removed 2026-09-04 — it

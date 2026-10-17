@@ -2678,7 +2678,57 @@ def cmd_media(args):
             print(ui.dim(f"          {w}"))
     for p in listing["problems"]:
         print(ui.red(p))
-    print(ui.dim("Keys are provisional until minting at collect is built."))
+    if listing["keys_provisional"]:
+        print(ui.dim("Clips without ⇢ get their key at the next collect."))
+
+
+def cmd_clip(args):
+    """`clip spec <key> --text …|--file F` lands a spec; `clip set <key>
+    --youtube URL --start m:ss --end m:ss …` writes confirmed fields
+    (docs/video-clips-design.md §8e). A file checked out to the Doc is
+    left alone: pull first, run this, then push."""
+    from pathlib import Path
+
+    from . import directives, media
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    root = Path(manuscript["path"])
+    try:
+        clip = media.find_clip(root, args.key)
+    except LookupError as err:
+        sys.exit(str(err))
+    if directives._checked_out(db, manuscript, clip["file"]):
+        sys.exit(f"{clip['file']} is checked out to the Doc — 'doc pull "
+                 f"{clip['file']}' first, run this again, then 'doc push'.")
+    if args.action == "spec":
+        if bool(args.text) == bool(args.spec_file):
+            sys.exit("usage: clip spec <key> --text '…' | --file SPEC.md")
+        text = (args.text if args.text else
+                Path(args.spec_file).read_text(encoding="utf-8"))
+        out = media.set_spec(root, args.key, text)
+        status = "a draft" if out["words"] < media.DRAFT_WORDS else "ready"
+        print(f"Spec landed for {out['key']} ({out['words']} words — "
+              f"{status}): {out['spec_path']}")
+        return
+    updates = {name: getattr(args, name) for name in
+               ("youtube", "start", "end", "use", "text", "cast", "prior",
+                "look") if getattr(args, name) is not None}
+    for name in args.clear or []:
+        updates[name] = None
+    if not updates:
+        sys.exit("usage: clip set <key> [--youtube URL] [--start T] [--end T] "
+                 "[--use PATH] [--text '…'] [--cast a,b] [--prior KEY] "
+                 "[--look NAME] [--clear FIELD]…")
+    try:
+        out = media.set_fields(root, args.key, updates)
+    except ValueError as err:
+        sys.exit(str(err))
+    print(f"{out['file']}:{out['line']}  {out['tag']}")
+    entry = media.list_media(root, [out["file"]], args.key)["media"]
+    if entry and entry[0]["errors"]:
+        for err in entry[0]["errors"]:
+            print(ui.red(f"  {err}"))
 
 
 def _print_collect_report(report):
@@ -2785,6 +2835,14 @@ def _print_collect_report(report):
                 "file (renders survive)."))
     if report.get("directives"):
         _print_open_directives(report["directives"])
+    if report.get("media_keys"):
+        for row in report["media_keys"]:
+            what = ("key minted" if row.get("minted") else
+                    "spec file missing" if row.get("missing") else
+                    "excerpt refreshed (an excerpt edit does not hold — edit "
+                    "the spec file)")
+            print(ui.dim(f"Clip {row['key']} ({row['file']}:{row['line']}): "
+                         f"{what}."))
     if report.get("media"):
         _print_media_not_ready(report["media"])
     if report.get("auto_analysis"):
@@ -8806,6 +8864,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true",
                    help="the full entries, as podlm and agents read them")
     p.set_defaults(func=cmd_media)
+
+    p = sub.add_parser(
+        "clip",
+        help="land a clip's spec, or write confirmed fields into its tag "
+             "(docs/video-clips-design.md §8e)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  clip spec tired-man-at-a --file spec.md\n"
+               "  clip set neo-answers-the-problem --youtube "
+               "https://www.youtube.com/watch?v=cHZl2naX1Xk --start 2:43 "
+               "--end 2:50\n"
+               "  clip set kailash --clear end\n"
+               "Keys: 'media list'. A clip gets its key at collect.")
+    p.add_argument("action", choices=["spec", "set"])
+    p.add_argument("key", help="the clip's key (from 'media list')")
+    p.add_argument("--text", help="spec: the spec text; set: the on-screen "
+                                  "words (text: field)")
+    p.add_argument("--file", dest="spec_file", help="spec: read the spec "
+                                                    "from this file")
+    for name in ("youtube", "start", "end", "use", "cast", "prior", "look"):
+        p.add_argument(f"--{name}", help=f"set: the {name}: field")
+    p.add_argument("--clear", action="append", metavar="FIELD",
+                   help="set: remove a field (repeatable)")
+    p.set_defaults(func=cmd_clip)
 
     for kind, what, example in (
             ("footnote",

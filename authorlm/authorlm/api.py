@@ -920,6 +920,14 @@ def collect(db: Database, manuscript: dict, config: dict,
         excerpt_fixes = maintain_excerpts(Path(manuscript["path"]))
     except OSError:
         excerpt_fixes = []
+    # Clip keys are minted, and clip excerpts maintained, at the same
+    # moment and for the same reason (docs/video-clips-design.md §8a).
+    try:
+        from .media import maintain_keys
+
+        media_keys = maintain_keys(Path(manuscript["path"]))
+    except OSError:
+        media_keys = []
 
     session = ses.active_session(db, mid)
     before = db.one(
@@ -1147,6 +1155,8 @@ def collect(db: Database, manuscript: dict, config: dict,
     media_rows = _media_not_ready(manuscript)
     if media_rows:
         report["media"] = media_rows
+    if media_keys:
+        report["media_keys"] = media_keys
     return report
 
 

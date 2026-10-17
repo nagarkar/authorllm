@@ -222,6 +222,86 @@ class MediaTests(unittest.TestCase):
         rows = media.not_ready(self.root)
         self.assertEqual([r["status"] for r in rows], ["draft", "invalid"])
 
+    # -- slice 2: keys, specs, fields
+
+    def test_collect_mints_keys_and_maintains_excerpts(self):
+        body = ("[Clip: tired man at a desk late at night]\nWords.\n[/Clip]\n\n"
+                "[Clip: tired man at a desk late at night]\nMore.\n[/Clip]\n\n"
+                "[Collage: c]\n\n[Clip: | use: _assets/temple.mp4 | start: 0:01]"
+                "\n\n[/Collage]\n")
+        path = self.root / "ecce.md"
+        path.write_text(body, encoding="utf-8")
+        rows = media.maintain_keys(self.root)
+        self.assertEqual([r["key"] for r in rows],
+                         ["tired-man-at-a", "tired-man-at-a-2", "temple"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("[Clip: tired man at a desk late at night ⇢ "
+                      "tired-man-at-a.md]", text)
+        self.assertIn("[Clip: ⇢ temple.md | use: _assets/temple.mp4 | "
+                      "start: 0:01]", text)
+        spec = self.root / "_clips" / "prompts" / "tired-man-at-a.md"
+        self.assertEqual(spec.read_text(encoding="utf-8").strip(),
+                         "tired man at a desk late at night")
+        # Idempotent, and an excerpt edit does not hold.
+        self.assertEqual(media.maintain_keys(self.root), [])
+        path.write_text(text.replace("tired man at a desk late at night ⇢ "
+                                     "tired-man-at-a.md",
+                                     "edited excerpt ⇢ tired-man-at-a.md"),
+                        encoding="utf-8")
+        fixed = media.maintain_keys(self.root)
+        self.assertTrue(fixed[0]["excerpt_fixed"])
+        self.assertIn("tired man at a desk late at night ⇢ tired-man-at-a.md",
+                      path.read_text(encoding="utf-8"))
+        # Keys survive in media list; the spec is the description.
+        clips = [e for e in media.list_media(self.root)["media"]
+                 if e["kind"] == "clip"]
+        self.assertEqual(clips[0]["key"], "tired-man-at-a")
+        self.assertTrue(clips[0]["keyed"])
+        self.assertEqual(clips[0]["description"],
+                         "tired man at a desk late at night")
+
+    def test_set_spec_lands_and_refreshes_excerpt(self):
+        (self.root / "ecce.md").write_text(
+            "[Clip: tired man]\nWords.\n[/Clip]\n", encoding="utf-8")
+        media.maintain_keys(self.root)
+        out = media.set_spec(self.root, "tired-man", LONG)
+        self.assertEqual(out["words"], 150)
+        text = (self.root / "ecce.md").read_text(encoding="utf-8")
+        self.assertIn("[Clip: word word word word word word word word… ⇢ "
+                      "tired-man.md]", text)
+        clip = [e for e in media.list_media(self.root)["media"]
+                if e["kind"] == "clip"][0]
+        self.assertEqual(clip["status"], "ready")
+        with self.assertRaises(LookupError):
+            media.set_spec(self.root, "no-such-key", "x")
+
+    def test_set_fields_writes_confirmed_youtube(self):
+        (self.root / "ecce.md").write_text(
+            "[Collage: c]\n\n[Clip: Neo answers | youtube: TBD]\n\n"
+            "[/Collage]\n", encoding="utf-8")
+        media.maintain_keys(self.root)
+        out = media.set_fields(self.root, "neo-answers", {
+            "youtube": "https://www.youtube.com/watch?v=cHZl2naX1Xk",
+            "start": "2:43", "end": "2:50"})
+        self.assertEqual(out["tag"], "[Clip: Neo answers ⇢ neo-answers.md | "
+                         "youtube: https://www.youtube.com/watch?v=cHZl2naX1Xk"
+                         " | start: 2:43 | end: 2:50]")
+        clip = [e for e in media.list_media(self.root)["media"]
+                if e["kind"] == "clip"][0]
+        self.assertEqual(clip["status"], "ready", clip["errors"])
+        out = media.set_fields(self.root, "neo-answers", {"end": None})
+        self.assertNotIn("end:", out["tag"])
+        with self.assertRaises(ValueError):
+            media.set_fields(self.root, "neo-answers", {"colour": "red"})
+
+    def test_missing_spec_file_is_an_error(self):
+        (self.root / "ecce.md").write_text(
+            "[Clip: gone ⇢ gone.md]\nx\n[/Clip]\n", encoding="utf-8")
+        rows = media.maintain_keys(self.root)
+        self.assertTrue(rows[0]["missing"])
+        clip = self.one("[Clip: gone ⇢ gone.md]\nx\n[/Clip]\n")
+        self.assertTrue(any("is missing" in e for e in clip["errors"]))
+
     # -- exports
 
     def test_strip_for_book(self):
