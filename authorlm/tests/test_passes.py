@@ -2101,6 +2101,285 @@ def _the_lens_door(root: Path) -> None:
           str([r["signal"] for r in ev]))
 
 
+class _CommentedDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` plus ONE open margin comment anchored on
+    `quote` in one tab. The anchor is a doc-index range that moves with
+    every insert and delete before it, the way Docs moves it; a delete
+    that touches the anchored text orphans the comment, which is what a
+    rebuild does to every anchor in the tab (it-459f2c04ef77)."""
+
+    def __init__(self, tabs, quote: str, title: str, **kw):
+        super().__init__(tabs, **kw)
+        self.quote = quote
+        tab = next(t for t in self.tabs if t["title"] == title)
+        self.anchor_tab = tab["id"]
+        at = tab["body"].find(quote)
+        assert at >= 0, tab["body"]
+        self.anchor = [at + 1, at + 1 + len(quote)]
+        self.orphaned = False
+
+    def comments(self):
+        outer = self
+
+        class _Req:
+            def execute(self_):
+                return {"comments": [{
+                    "id": "c-1", "content": "a margin note",
+                    "resolved": False, "replies": [],
+                    "quotedFileContent": {"value": outer.quote}}]}
+
+        class _Comments:
+            def list(self_, **kw):
+                return _Req()
+        return _Comments()
+
+    def anchored_text(self) -> str:
+        body = self._tab(self.anchor_tab)["body"]
+        return body[self.anchor[0] - 1: self.anchor[1] - 1]
+
+    def _apply(self, req: dict) -> dict:
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            if rng.get("tabId") == self.anchor_tab:
+                a, b = rng["startIndex"], rng["endIndex"]
+                s, e = self.anchor
+                if a < e and b > s:
+                    self.orphaned = True
+                elif b <= s:
+                    self.anchor = [s - (b - a), e - (b - a)]
+        if "insertText" in req:
+            spec = req["insertText"]
+            if spec["location"].get("tabId") == self.anchor_tab:
+                at, n = spec["location"]["index"], len(spec["text"])
+                s, e = self.anchor
+                if at <= s:
+                    self.anchor = [s + n, e + n]
+                elif at < e:
+                    self.orphaned = True
+        return super()._apply(req)
+
+
+_ALPHA_OLD = "Alpha opens the essay and says a thing worth saying twice."
+_ALPHA_NEW = "Alpha opens the essay and says a thing once, and well."
+_GAMMA_OLD = "Gamma follows, saying something else entirely."
+_GAMMA_NEW = "Gamma follows, and changes the subject."
+_OMEGA = "Omega closes the essay on a falling cadence."
+
+
+def _lens_forms_out(root: Path, name: str, fake_of):
+    """A manuscript whose solo.md has two lens forms out in its tab
+    (Alpha and Gamma rewritten), pushed through `fake_of(tabs)`."""
+    from authorlm import lenses as _lenses
+
+    ws = root / name
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(DOC_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    _lenses.add_lens(manuscript, "tidy-lens", "# Tidy lens\nA test lens.")
+    session, _ = api.ensure_session(db, manuscript)
+    staged = _lenses.register_findings(
+        db, manuscript, session, "tidy-lens", "solo.md", [
+            {"quote": "says a thing worth saying twice",
+             "note": "undercuts itself",
+             "replacement": "says a thing once, and well"},
+            {"quote": _GAMMA_OLD, "note": "flat",
+             "replacement": _GAMMA_NEW}])
+    assert len(staged["edits_staged"]) == 2, staged
+    fake = fake_of([("book", ""), ("solo.md", DOC_ESSAY)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    push = api.lens_push(db, manuscript, {}, "solo.md",
+                         services=lambda: (fake, fake))
+    assert push["written"] == 2, push
+    assert "<<" in fake.tab_text("solo.md"), fake.tab_text("solo.md")
+    return db, manuscript, ms, fake
+
+
+def _lens_resolve_clears_its_forms_in_place(root: Path) -> None:
+    """it-459f2c04ef77 (1). `lens resolve` used to leave its settled
+    forms in the tab "until your next doc push" — and that push then
+    failed, because the tab carries comments (so it goes surgical) and
+    the surgical push will not edit a paragraph holding `<<`/`{{`. The
+    author's constraint: clearing the tab must never orphan a comment.
+    So the resolve takes ITS OWN settled forms out in place — markers
+    and the losing half only — and a later push meets settled forms
+    the same way."""
+    print("it-459f2c04ef77: lens resolve clears the tab in place:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lensclear-ws",
+        lambda tabs: _CommentedDocFake(tabs, _OMEGA, "solo.md",
+                                       render=True))
+    check("the margin comment survives the lens push",
+          not fake.orphaned and fake.anchored_text() == _OMEGA,
+          fake.tab_text("solo.md"))
+    temps = len(fake.temps)
+    settle = api.lens_resolve(db, manuscript, {}, "solo.md",
+                              services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    check("both forms accepted and landed locally",
+          settle["accepted"] == 2
+          and _ALPHA_NEW in (ms / "solo.md").read_text()
+          and _GAMMA_NEW in (ms / "solo.md").read_text(), str(settle))
+    check("the resolve took its forms out of the tab: no markers, the "
+          "kept halves stand, the losing halves are gone",
+          not any(m in tab for m in ("<<", ">>", "{{", "}}"))
+          and _ALPHA_NEW in tab and _GAMMA_NEW in tab
+          and _ALPHA_OLD not in tab and _GAMMA_OLD not in tab, tab)
+    check("in place: no rebuild (no temp-doc import) and the comment's "
+          "anchor text is intact",
+          len(fake.temps) == temps and not fake.orphaned
+          and fake.anchored_text() == _OMEGA,
+          f"temps {temps}->{len(fake.temps)} anchored="
+          f"{fake.anchored_text()!r}")
+    check("the result says the tab is clear",
+          settle["tab_still_marked"] is False, str(settle["warnings"]))
+    push = gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                          docs_service=fake)
+    check("the next ordinary push has nothing left to do, and still "
+          "orphans nothing",
+          push.get("mode") == "diff" and push.get("ops") == 0
+          and not fake.orphaned, str(push))
+
+    # Forms settled in the record but still standing in the tab (what an
+    # older resolve left behind): the surgical push takes them out in
+    # place instead of stopping on "overlaps a pending margin thread".
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lensclear2-ws",
+        lambda tabs: _CommentedDocFake(tabs, _OMEGA, "solo.md",
+                                       render=True))
+    rows = db2.all("SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+                   "state = 'written'", (manuscript2["id"],))
+    for r in rows:
+        db2.update("doc_threads", r["id"], {
+            "state": "cleaned" if r["proposed_old"].startswith("Alpha")
+            else "declined"})
+    (ms2 / "solo.md").write_text(DOC_ESSAY.replace(_ALPHA_OLD, _ALPHA_NEW))
+    try:
+        gdocs.push_doc(db2, manuscript2, "solo.md", service=fake2,
+                       docs_service=fake2)
+        err = None
+    except LookupError as e:
+        err = str(e)
+    tab2 = fake2.tab_text("solo.md")
+    check("a push meeting already-settled forms clears them in place and "
+          "lands — cleaned keeps new, declined keeps old",
+          err is None and not any(m in tab2 for m in ("<<", "{{", "}}"))
+          and _ALPHA_NEW in tab2 and _GAMMA_OLD in tab2
+          and _GAMMA_NEW not in tab2, f"{err}\n{tab2}")
+    check("and the comment is not orphaned",
+          not fake2.orphaned and fake2.anchored_text() == _OMEGA)
+
+
+def _lens_resolve_keeps_a_local_edit(root: Path) -> None:
+    """it-459f2c04ef77 (2). A local fix made after the push was reverted
+    by the resolve, which wrote the file from the tab. Now: an edit
+    that does not overlap a form is merged in; one that does stops the
+    resolve, naming the file, with nothing settled."""
+    print("it-459f2c04ef77: lens resolve keeps a post-push local edit:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lenslocal-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    path = ms / "solo.md"
+    path.write_text(path.read_text().replace(
+        _OMEGA, "Omega closes the essay on a rising cadence."))
+    settle = api.lens_resolve(db, manuscript, {}, "solo.md",
+                              services=lambda: (fake, fake))
+    final = path.read_text()
+    check("the local edit survives the resolve, beside both lens changes",
+          "Omega closes the essay on a rising cadence." in final
+          and _OMEGA not in final
+          and _ALPHA_NEW in final and _GAMMA_NEW in final, final)
+    check("the tab is cleared of its forms all the same",
+          "<<" not in fake.tab_text("solo.md")
+          and settle["tab_still_marked"] is False,
+          fake.tab_text("solo.md"))
+    base = (gdocs._mapping(db, manuscript)["gdocs"]["solo.md"]
+            .get("pushed_hash"))
+    tab_now = gdocs.tab_marked_markdown(db, manuscript, "solo.md",
+                                        fake, fake)
+    check("the local edit stays ahead of the tab, so the next pull keeps "
+          "it rather than overwriting it",
+          base is not None and tab_now["state"] == "local_ahead",
+          tab_now["state"])
+
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lenslocal2-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    path2 = ms2 / "solo.md"
+    path2.write_text(path2.read_text().replace(
+        _GAMMA_OLD, "Gamma follows, saying something else, locally."))
+    try:
+        api.lens_resolve(db2, manuscript2, {}, "solo.md",
+                         services=lambda: (fake2, fake2))
+        err = None
+    except ValueError as e:
+        err = str(e)
+    written = db2.all("SELECT id FROM doc_threads WHERE manuscript_id = ? "
+                      "AND state = 'written'", (manuscript2["id"],))
+    check("a local edit overlapping a form stops the resolve, naming the "
+          "file, and settles nothing",
+          err is not None and "solo.md" in err and len(written) == 2
+          and "saying something else, locally." in path2.read_text(),
+          str(err))
+
+
+def _a_brace_remnant_is_taken_out(root: Path) -> None:
+    """it-459f2c04ef77 (3). The author hand-resolved a form in the Doc by
+    deleting `<<old>>{{` and left the closing `}}`. Both the resolve and
+    the pull kept it at the end of the paragraph. A `}}` is stripped
+    only where it closes a known form's new half — never globally."""
+    print("it-459f2c04ef77: a hand-resolve's `}}` remnant:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lensremnant-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    form = f"<<{_ALPHA_OLD}>>{{{{{_ALPHA_NEW}}}}}"
+    assert form in fake.tab_text("solo.md"), fake.tab_text("solo.md")
+    fake.edit("tab-2", form, _ALPHA_NEW + "}}")
+    # And an author's own `}}` that is no form's remnant stays.
+    fake.edit("tab-2", _OMEGA, _OMEGA + " Set {{a}} and x}}.")
+    api.lens_resolve(db, manuscript, {}, "solo.md",
+                     services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("resolve: the remnant is gone from the local file",
+          _ALPHA_NEW + "}}" not in final and _ALPHA_NEW in final, final)
+    check("resolve: and from the tab",
+          _ALPHA_NEW + "}}" not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("the author's own braces elsewhere are untouched",
+          "Set {{a}} and x}}." in final, final)
+
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lensremnant2-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    for r in db2.all("SELECT id FROM doc_threads WHERE manuscript_id = ? "
+                     "AND state = 'written'", (manuscript2["id"],)):
+        db2.update("doc_threads", r["id"], {"state": "cleaned"})
+    fake2.edit("tab-2", f"<<{_ALPHA_OLD}>>{{{{{_ALPHA_NEW}}}}}",
+               _ALPHA_NEW + "}}")
+    fake2.edit("tab-2", f"<<{_GAMMA_OLD}>>{{{{{_GAMMA_NEW}}}}}",
+               _GAMMA_NEW)
+    gdocs.pull_doc(db2, manuscript2, "solo.md", service=fake2,
+                   with_comments=False, docs_service=fake2)
+    pulled = (ms2 / "solo.md").read_text()
+    check("pull: the remnant of a known form does not reach the file",
+          _ALPHA_NEW in pulled and "}}" not in pulled, pulled)
+
+
 def _the_changed_words_pop(root: Path) -> None:
     """Author request 2026-08-31: a one-word edit inside a
     paragraph-sized form was invisible in the Doc. The push now
@@ -5052,6 +5331,9 @@ def main_test() -> None:
         _the_doc_settle(root)
         _a_hand_resolved_tab_settles_true(root)
         _the_lens_door(root)
+        _lens_resolve_clears_its_forms_in_place(root)
+        _lens_resolve_keeps_a_local_edit(root)
+        _a_brace_remnant_is_taken_out(root)
         _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)

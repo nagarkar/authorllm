@@ -1790,7 +1790,9 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
 
     Returns {"marked": str | None, "state": "unchanged"|"changed"
     |"local_ahead"|"conflict"|"missing", "dangling": [...],
-    "marker_warnings": [...]}."""
+    "marker_warnings": [...], "collapsed": str}. `collapsed` is the
+    form-collapsed text the state was classified on — the base a resolve
+    merges a `local_ahead` file's own edits against."""
     bridge = bridge or manuscript_bridge(manuscript)
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
@@ -1836,7 +1838,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     current = strip_embed_lines(current_raw)
     state = three_way(collapsed, current, entry.get("pushed_hash"))
     return {"marked": marked, "state": state, "dangling": dangling,
-            "marker_warnings": marker_warns}
+            "marker_warnings": marker_warns, "collapsed": collapsed}
 
 
 def read_manuscript(db: Database, manuscript: dict, service,
@@ -2116,6 +2118,15 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # state living only in the Doc; canonical local text is the old
         # half until the author approves (docs/margin-threads-design.md).
         text, marker_warns = threads_mod.strip_pending(text)
+        # A `}}` the author left when hand-resolving one of this file's
+        # own forms is not prose (it-459f2c04ef77); any other `}}` is.
+        text, remnant = threads_mod.strip_form_remnants(
+            text, form_news(db, manuscript["id"], relpath))
+        if remnant:
+            marker_warns = marker_warns + [
+                f"a stray '}}}}' after «{clamp(n)}» (a hand-resolved "
+                f"form's leftover) was left out of the local file; "
+                f"delete it in the Doc" for n in remnant]
         if marker_warns:
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
         path = bridge.root / relpath
@@ -3374,9 +3385,48 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
             "url": tab_url(master_id, tab_id)}
 
 
+def settled_form_outcomes(db: Database, manuscript_id: str,
+                          relpath: str) -> list[dict]:
+    """`settle_forms_in_tab` outcomes for the forms this file's record
+    has already SETTLED — rows in 'cleaned' (keep the new half) or
+    'declined' (keep the old) — so that a form still standing in the tab
+    after its verdict came in can be taken out in place
+    (it-459f2c04ef77). A row whose form matches one still 'written' is
+    left out: that form in the tab is the pending one, and only its own
+    resolve may settle it."""
+    rows = db.all(
+        "SELECT state, proposed_old, proposed_new FROM doc_threads "
+        "WHERE manuscript_id = ? AND file = ? "
+        "AND state IN ('cleaned', 'declined', 'written') "
+        "ORDER BY created_at, id", (manuscript_id, relpath))
+
+    def key(r) -> tuple[str, str]:
+        old = r["proposed_old"] or ""
+        return (old, "" if old else (r["proposed_new"] or ""))
+
+    pending = {key(r) for r in rows if r["state"] == "written"}
+    return [{"old": r["proposed_old"] or "", "new": r["proposed_new"] or "",
+             "keep": "new" if r["state"] == "cleaned" else "old"}
+            for r in rows
+            if r["state"] != "written" and any(key(r))
+            and key(r) not in pending]
+
+
+def form_news(db: Database, manuscript_id: str, relpath: str) -> list[str]:
+    """The new halves of every form this file's record knows — what
+    `threads.form_remnants` may strip a stray `}}` after."""
+    return [r["proposed_new"] for r in db.all(
+        "SELECT proposed_new FROM doc_threads WHERE manuscript_id = ? "
+        "AND file = ? AND COALESCE(proposed_new, '') != ''",
+        (manuscript_id, relpath))]
+
+
 def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                         outcomes: list[dict], docs_service,
-                        bridge: DocBridge | None = None) -> list[str]:
+                        bridge: DocBridge | None = None,
+                        record_base: bool = True,
+                        base_text: str | None = None,
+                        remnants=()) -> list[str]:
     """Take SOME forms out of a tab, each to the half its resolve chose,
     and leave every other form in the tab exactly as it stands.
 
@@ -3400,7 +3450,16 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
     author already took the markers off is simply not found, which is
     not a fault. Returns the faults, as sentences; empty when the tab
     holds none of these forms any more — and then the local file is
-    recorded as the tab's agreed base, as a push would."""
+    recorded as the tab's agreed base, as a push would.
+
+    In place, always — never a rebuild — so a comment anchored on any
+    text that stays keeps its anchor (it-459f2c04ef77). `base_text`
+    records THAT text as the agreed base instead of the local file: the
+    resolved tab text, when the local file carries an edit the tab has
+    not seen and must stay ahead of it. `record_base=False` records
+    nothing (a caller about to push records its own). `remnants` are new
+    halves whose stray closing `}}` — left when the author hand-resolved
+    a form by deleting only `<<old>>{{` — is deleted as well."""
     import hashlib
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -3438,6 +3497,24 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
         return None
 
     faults: list[str] = []
+    shown = {s for n in remnants if n for s in (n, rendered_text(n))}
+    if shown:
+        full = tab_text()
+        # Last to first, so the text before each remnant is unchanged
+        # when it is located: the tab text up to and including the `}}`
+        # ends at the remnant's doc index, whatever repeats before it.
+        for close, _ in reversed(threads_mod.form_remnants(full, shown)):
+            span = _locate_in_tab(docs_service, master_id, tab_id,
+                                  full[:close + 2])
+            if span is not None:
+                docs_service.documents().batchUpdate(
+                    documentId=master_id, body={"requests": [
+                        {"deleteContentRange": {"range": {
+                            "tabId": tab_id, "startIndex": span[1] - 2,
+                            "endIndex": span[1]}}}]}).execute()
+    if outcomes:
+        full = tab_text()
+        outcomes = [o for o in outcomes if find_form(full, o) is not None]
     for outcome in outcomes:
         found = find_form(tab_text(), outcome)
         if found is None:
@@ -3487,10 +3564,11 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
         if find_form(full, outcome) is not None:
             faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
                           "is still in the tab")
-    if not faults:
+    if not faults and record_base:
         path = bridge.root / file
         local = strip_embed_lines(normalize_markdown(
-            path.read_text(encoding="utf-8")))
+            base_text if base_text is not None
+            else path.read_text(encoding="utf-8")))
         entry = links[file]
         entry["pushed_hash"] = hashlib.sha256(local.encode()).hexdigest()[:16]
         entry["checked_out"] = True
@@ -3898,6 +3976,22 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
 
     local_md = _strip_embeds(normalize_markdown(
         (bridge.root / relpath).read_text(encoding="utf-8")))
+
+    # Forms whose verdict is already in the record (cleaned/declined) but
+    # which still stand in the tab are not pending threads: take them out
+    # in place first, so the paragraph diff below neither stops on their
+    # markers nor miscounts the tab's paragraphs (it-459f2c04ef77). The
+    # base is left for this push to record.
+    settled = settled_form_outcomes(db, mid, relpath)
+    news = form_news(db, mid, relpath)
+    if settled or news:
+        faults = settle_forms_in_tab(
+            db, manuscript, relpath, settled, docs_service, bridge=bridge,
+            record_base=False, remnants=news)
+        if faults:
+            raise LookupError(
+                f"diff push: settled forms could not be taken out of "
+                f"{relpath}'s tab in place ({'; '.join(faults)})")
 
     # Same boundary set and positional order pull_doc/reconcile use — every
     # live tab title, not just mapped essay files, is a split boundary; a
