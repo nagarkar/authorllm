@@ -885,8 +885,15 @@ def _clip_line(excerpt: str, ref: str, tail: str) -> str:
 
 def _mint_name(description: str, fields: dict, taken: set[str],
                prefix: str = "") -> str:
+    # A brief or spec opens with a label ("source:", "subject:"), so name
+    # the key after what the clip shows: its moment, quote or subject.
+    sections = parse_sections(description, BRIEF_LABELS + SPEC_LABELS)
+    named = next((sections[l] for l in ("moment", "quote", "subject")
+                  if sections.get(l)), "")
     if prefix:
         base = f"{prefix}-" + (_slug(description) or "untitled")
+    elif named:
+        base = _slug(named)
     elif description:
         base = _slug(description)
     elif fields.get("youtube") and _youtube_id(fields["youtube"]):
