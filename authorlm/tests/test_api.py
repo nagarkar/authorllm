@@ -9543,6 +9543,68 @@ def main_test() -> None:
               and pdf_command[pdf_command.index("-o") + 1]
               == pdf_result["pdf"],
               pdf_result["pdf"])
+        # The --file road (nagarkar/authorllm#192): one manuscript file on
+        # its own, inside or outside the TOC, through the same pipeline;
+        # output and title named by the file's stem, no book title.
+        (ms / "papers").mkdir(exist_ok=True)
+        (ms / "papers" / "p0.md").write_text(
+            "# A standalone paper\n\nWith $x^2$ in it.\n")
+        manuscript = api.get_manuscript(db)
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as pandoc_run):
+            file_result = export_published(
+                db, manuscript, fmt="pdf", variant="images",
+                file="papers/p0")
+        file_command = pandoc_run.call_args.args[0]
+        check("--file builds exactly the named file, outside the TOC",
+              file_result["files"] == ["papers/p0.md"], file_result["files"])
+        check("--file names the output by the file's stem, not the book",
+              Path(file_result["markdown"]).name == "p0.md"
+              and Path(file_result["pdf"]).name == "p0.review.pdf",
+              file_result["markdown"])
+        check("--file keeps the house PDF settings (defaults, review copy)",
+              "--defaults" in file_command
+              and "authorlm-review-copy=true" in file_command,
+              str(file_command))
+        check("--file content is the file's own text",
+              "# A standalone paper" in Path(file_result["markdown"]).read_text()
+              and "# Intro" not in Path(file_result["markdown"]).read_text())
+        # --notice: a recipient-specific line for one review copy.
+        with (_patch("shutil.which", return_value="/usr/bin/pandoc"),
+              _patch("subprocess.run", return_value=_SimpleNamespace(
+                  returncode=0, stderr="")) as pandoc_run):
+            export_published(db, manuscript, fmt="pdf", variant="images",
+                             file="papers/p0",
+                             notice="Provided to X for review only.")
+        notice_command = pandoc_run.call_args.args[0]
+        check("--notice reaches the review filter as metadata",
+              "authorlm-review-notice=Provided to X for review only."
+              in notice_command, str(notice_command))
+        refused = False
+        try:
+            export_published(db, manuscript, fmt="pdf", file="papers/p0",
+                             print_ready=True, notice="X")
+        except ValueError:
+            refused = True
+        check("--notice is declined on a print-ready PDF", refused)
+        # A one-off file observation does not see (an excerpt in _drafts/)
+        # is built through the same road and never joins the book.
+        (ms / "_drafts").mkdir(exist_ok=True)
+        (ms / "_drafts" / "excerpt.md").write_text("# An excerpt\n\nText.\n")
+        excerpt = export_published(db, manuscript, fmt="md",
+                                   file="_drafts/excerpt.md")
+        check("--file builds an unobserved one-off file",
+              excerpt["files"] == ["_drafts/excerpt.md"]
+              and "# An excerpt" in Path(excerpt["markdown"]).read_text(),
+              excerpt["files"])
+        exclusive = False
+        try:
+            export_published(db, manuscript, fmt="md", file="papers/p0",
+                             only=["01-choice.md"])
+        except ValueError:
+            exclusive = True
+        check("--file and --chapters are exclusive", exclusive)
         check("PDF export starts the whole essay before its epigraph",
               "::: {.authorlm-file .authorlm-essay .authorlm-matter-main}\n"
               "An opening epigraph.\n\n# Intro"

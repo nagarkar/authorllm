@@ -21,7 +21,7 @@ from .db import Database
 from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
                     normalize_markdown)
 from .revisions import read_manuscript_files
-from .structure import reading_order, select_chapters
+from .structure import is_continuation, reading_order, select_chapters
 
 EXPORT_DIR = "_exports"
 EXPORT_KEY = "_export"  # metadata.gdocs key; '_' keeps reconcile/pull away
@@ -364,11 +364,23 @@ SETTINGS_KEYS = {
     "pdf_mathfont": "math font for pdf export (unicode-math), default "
                     "'STIX Two Math' — the companion of STIX Two Text; "
                     "empty = LaTeX default",
+    "continuation_level": "heading level (1-6) at or below which a file "
+                          "continues the essay before it: a file whose "
+                          "first heading is this deep or deeper gets no "
+                          "page break and joins the previous audiobook "
+                          "chapter; empty = every file starts anew",
 }
 _SETTINGS_DEFAULTS = {"title": "", "variant": "images",
                       "language": "en", "reference_docx": "",
                       "cover_image": "", "pdf_engine": "xelatex",
-                      "pdf_font": "", "pdf_mathfont": "STIX Two Math"}
+                      "pdf_font": "", "pdf_mathfont": "STIX Two Math",
+                      "continuation_level": ""}
+
+
+def continuation_level(manuscript: dict) -> int | None:
+    """The manuscript's continuation_level setting as a number, or None."""
+    value = str(load_settings(manuscript)["continuation_level"]).strip()
+    return int(value) if value else None
 
 
 def _settings_path(manuscript: dict) -> Path:
@@ -391,7 +403,7 @@ def load_settings(manuscript: dict) -> dict:
         loaded = tomllib.loads(path.read_text(encoding="utf-8"))
         for key, value in loaded.items():
             if key in settings:
-                settings[key] = value
+                settings[key] = str(value)
     return settings
 
 
@@ -402,6 +414,10 @@ def set_setting(manuscript: dict, key: str, value: str) -> dict:
             f"{', '.join(sorted(SETTINGS_KEYS))})")
     if key == "variant" and value not in ("images", "slots", "stripped"):
         raise ValueError("variant must be images | slots | stripped")
+    if key == "continuation_level" and value.strip() not in (
+            "", "1", "2", "3", "4", "5", "6"):
+        raise ValueError("continuation_level must be a heading level "
+                         "1-6, or empty to turn it off")
     settings = load_settings(manuscript)
     settings[key] = value
     path = _settings_path(manuscript)
@@ -418,6 +434,7 @@ def publish_markdown(manuscript: dict, variant: str,
                      only: list[str] | None = None,
                      semantic_sections: bool = False,
                      fmt: str = "md",
+                     extra: dict[str, str] | None = None,
                      ) -> tuple[str, list[str], list[str]]:
     """The publishable single-file markdown with illustration slots
     resolved per the variant and [Omit:]/[Only:] regions resolved for
@@ -425,13 +442,17 @@ def publish_markdown(manuscript: dict, variant: str,
     also drops display math. `semantic_sections` wraps each source file
     with format-neutral Pandoc roles; plain Markdown exports remain wrapper-free.
     `only` narrows it to the named chapters and their TOC descendants —
-    a part of the book, built exactly like the whole.
+    a part of the book, built exactly like the whole. `extra` adds files
+    observation does not see (a one-off excerpt under _drafts/) so that
+    `only` can name them.
     Returns (text, order, warnings)."""
     from .illus import (ILLUS_DIR, capture_embeds, parse_tag,
                         slot_candidates, slot_key)
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
+    if extra:
+        files.update(extra)
     if only:
         order = select_chapters(files, only)
     else:
@@ -440,6 +461,7 @@ def publish_markdown(manuscript: dict, variant: str,
     from .structure import matter_map
 
     matter = matter_map(files)
+    level = continuation_level(manuscript)
     outputs = publish_outputs(fmt, variant)
     warnings: list[str] = []
     parts: list[str] = []
@@ -500,6 +522,8 @@ def publish_markdown(manuscript: dict, variant: str,
             if semantic_sections:
                 role = ("authorlm-title-page" if name == "title.md"
                         else "authorlm-essay")
+                if is_continuation(name, files[name], level):
+                    role += " .authorlm-continuation"
                 text = (f"::: {{.authorlm-file .{role} "
                         f".authorlm-matter-{matter.get(name, 'main')}}}\n"
                         f"{text}\n:::")
@@ -661,13 +685,27 @@ def export_published(db: Database, manuscript: dict, fmt: str,
                      variant: str | None = None,
                      only: list[str] | None = None,
                      print_ready: bool = False,
-                     profile: str | None = None) -> dict:
+                     profile: str | None = None,
+                     file: str | None = None,
+                     notice: str | None = None) -> dict:
     """Publishing export: write the publishable markdown to _exports/
     and, for docx/epub/pdf, convert it locally with pandoc — images
     embed from _illustrations/, no Doc or Drive involved.
 
     `only` builds just the named chapters (with their TOC descendants)
     into separately-named files alongside the full-book export.
+
+    `file` builds exactly one manuscript file on its own, TOC or no TOC
+    (the papers road, nagarkar/authorllm#192): the same pipeline and
+    settings as the book, output named by the file's stem, titled by
+    its stem rather than the book. A standalone file carries its own
+    title line, so no book title is prepended. Exclusive with `only`.
+    `file` may also name a markdown file observation does not see, such
+    as a one-off excerpt in _drafts/: it is built, never collected.
+
+    `notice` adds a recipient-specific line to a review PDF ("provided to
+    X solely for ...") on the notice page and in every page footer,
+    beside the standard confidential wording.
 
     PDF profiles: `review` (default — notice page, footer, watermark),
     `print` (the same page, review marks off; `print_ready=True`), and
@@ -682,6 +720,17 @@ def export_published(db: Database, manuscript: dict, fmt: str,
 
     if print_ready and fmt != "pdf":
         raise ValueError("--print-ready is only valid for PDF exports")
+    if file and only:
+        raise ValueError("--file and --chapters are exclusive")
+    notice = (notice or "").strip()
+    if notice and (fmt != "pdf" or print_ready or profile == "book"):
+        raise ValueError("--notice is only valid for a review PDF "
+                         "(not with --print-ready or --profile book)")
+    if file:
+        file = file.strip().lstrip("./")
+        if not file.endswith(".md"):
+            file += ".md"
+        only = [file]
     if profile is not None and profile not in PDF_PROFILES:
         raise ValueError(f"unknown PDF profile '{profile}' — one of "
                          + ", ".join(PDF_PROFILES))
@@ -710,17 +759,25 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         raise RuntimeError(
             "review PDF needs manuscript metadata: " + ", ".join(missing)
             + " — set it with 'authorlm manuscript set'")
+    root = Path(manuscript["path"])
+    extra = None
+    if file and file not in read_manuscript_files(root):
+        candidate = (root / file).resolve()
+        if (candidate.is_file() and candidate.suffix == ".md"
+                and root.resolve() in candidate.parents):
+            extra = {file: candidate.read_text(encoding="utf-8")}
     text, order, warnings = publish_markdown(
         manuscript, variant, only,
-        semantic_sections=(fmt in ("pdf", "epub")), fmt=fmt,
+        semantic_sections=(fmt in ("pdf", "epub")), fmt=fmt, extra=extra,
     )
     if not order:
         raise LookupError("the manuscript has no content files to combine")
-    if only:
+    if file:
+        title = Path(file).stem
+    elif only:
         title = f"{title} - {selection_slug(order)}"
     if book:
         title = f"{title} - book"  # never overwrites the review copy
-    root = Path(manuscript["path"])
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
     md_path = export_dir / export_filename(title)
@@ -783,6 +840,8 @@ def export_published(db: Database, manuscript: dict, fmt: str,
             command += ["--metadata", "authorlm-review-copy=true",
                         "--metadata", f"copyright-owner={copyright_owner}",
                         "--metadata", f"copyright-year={date.today().year}"]
+            if notice:
+                command += ["--metadata", f"authorlm-review-notice={notice}"]
         if book:
             running = _latex_escape(settings["title"] or manuscript["name"])
             command += ["-V", "header-includes=\\providecommand{"

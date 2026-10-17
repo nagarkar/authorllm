@@ -1598,8 +1598,9 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     (never-pushed local files) are preserved after their previous
     predecessor; per-file attributes (matter) ride through unchanged.
     Returns the new (name, depth) tree."""
-    from .structure import (TOC_FILENAME, is_sidecar, parents_to_tree,
-                            serialize_toc_tree, toc_attrs)
+    from .structure import (TOC_FILENAME, is_outside, is_sidecar,
+                            parents_to_tree, serialize_toc_tree, toc_attrs,
+                            toc_outside)
 
     # SIDECAR GUARD 3 of 3 (§15.22 §2.5 row 25), and the one that does the
     # most damage if it is missing: writing `pronunciations.md` into
@@ -1608,7 +1609,12 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     # scan mines it, and it ships inside the book. Guarded here as well
     # as at both call sites, because this function writes the file and a
     # guard on the caller is a guard on the caller.
-    doc_pairs = [(n, p) for n, p in doc_pairs if not is_sidecar(n)]
+    toc_path = Path(manuscript["path"]) / TOC_FILENAME
+    toc_text = (toc_path.read_text(encoding="utf-8")
+                if toc_path.exists() else "")
+    outside = toc_outside(toc_text)
+    doc_pairs = [(n, p) for n, p in doc_pairs
+                 if not is_sidecar(n) and not is_outside(n, outside)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -1620,10 +1626,8 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
         pos = (next((k + 1 for k, (n, _) in enumerate(new_tree)
                      if n == pred), 0) if pred else 0)
         new_tree.insert(pos, (name, depth))
-    toc_path = Path(manuscript["path"]) / TOC_FILENAME
-    attrs = (toc_attrs(toc_path.read_text(encoding="utf-8"))
-             if toc_path.exists() else {})
-    toc_path.write_text(serialize_toc_tree(new_tree, attrs),
+    attrs = toc_attrs(toc_text) if toc_text else {}
+    toc_path.write_text(serialize_toc_tree(new_tree, attrs, outside),
                         encoding="utf-8")
     return new_tree
 
@@ -1633,8 +1637,8 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
     moved since the last sync (local_moved / insync); a doc-side change
     means 'pull first'."""
-    from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
-                            tree_to_parents)
+    from .structure import (TOC_FILENAME, is_outside, is_sidecar,
+                            parse_toc_tree, toc_outside, tree_to_parents)
 
     meta = _mapping(db, manuscript)
     links = meta.get("gdocs", {})
@@ -1658,8 +1662,10 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     # holds it against a desired list that cannot would be a PERMANENT
     # `unsynced`, and tab-order sync would stop working the day the
     # dictionary first appeared.
+    outside = toc_outside(toc_path.read_text(encoding="utf-8"))
     doc_pairs = [(n, p if p in linked else None)
-                 for n, p in doc_pairs if n in linked and not is_sidecar(n)]
+                 for n, p in doc_pairs if n in linked and not is_sidecar(n)
+                 and not is_outside(n, outside)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
@@ -2216,7 +2222,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # content: only-Doc-moved rewrites toc.toml; only-local-moved defers to
     # the next push; both → conflict, touch nothing.
     if doc_pairs and query is None and bridge.toc_sync:
-        from .structure import (TOC_FILENAME, is_sidecar, parse_toc_tree,
+        from .structure import (TOC_FILENAME, is_outside, is_sidecar,
+                                parse_toc_tree, toc_outside,
                                 tree_to_parents)
 
         linked = {f for f, e in links.items()
@@ -2228,10 +2235,15 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # it in `doc_struct` would report a permanent conflict — and,
         # worse, a `doc_moved` verdict would hand it to
         # rewrite_toc_from_doc.
+        toc_path = bridge.root / TOC_FILENAME
+        # Tabs declared outside the book (papers, side pieces) are
+        # mirrored but have no place in the reading order.
+        outside = (toc_outside(toc_path.read_text(encoding="utf-8"))
+                   if toc_path.exists() else [])
         doc_struct = [(n, p if p in linked else None)
                       for n, p in doc_pairs
-                      if n in linked and not is_sidecar(n)]
-        toc_path = bridge.root / TOC_FILENAME
+                      if n in linked and not is_sidecar(n)
+                      and not is_outside(n, outside)]
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
         tabbed = {n for n, _ in doc_struct}
