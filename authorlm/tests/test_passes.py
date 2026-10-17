@@ -4403,6 +4403,130 @@ def _directives_on_the_doc_road(root: Path) -> None:
                  (mid,))["n"] == 7)
 
 
+SKY_TAG = ("[Illustration: A sky of parted clouds from which no hand "
+           "descends ⇢ a-sky-of-parted.md | caption: No hand descends. "
+           "*Nothing* falls.]")
+SKY_EMBED = "![](_illustrations/a-sky-of-parted-82891df3-2e99-01.jpg)"
+SKY_ESSAY = ("# Sky\n\nThe clouds part.[Footnote: cite the Psalm]\n\n"
+             "Beta holds.[Footnote: cite Job]\n\n"
+             + SKY_TAG + "\n" + SKY_EMBED + "\n")
+
+
+def _footnotes_after_a_closing_illustration(root: Path) -> None:
+    """it-816cd7998fec. The author: "Illustration tag at the end of an
+    essay should not prevent us from adding footnotes." An essay whose
+    last paragraph is an illustration tag (followed locally by its
+    derived embed line, which the push strips) takes its definitions
+    after the tag AS THE TAB RENDERS IT — and a file's anchors and
+    definitions land together or not at all."""
+    print("footnotes after a closing illustration (Doc road):")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _outside_fixture(root, "sky-ws",
+                                                essay=SKY_ESSAY)
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                   [(1, "Psalm 121."), (2, "Job 38.")], services=services)
+    tab = fake.tab_text("solo.md")
+    shown_tag = gdocs.rendered_text(SKY_TAG)
+    check("the definitions land after the closing illustration tag as the "
+          "tab renders it, in series order, with every anchor",
+          rep["mode"] == "marked" and not rep["failed"]
+          and len(rep["landed"]) == 2
+          and "<<[Footnote: cite the Psalm]>>{{[^S1]}}" in tab
+          and "<<[Footnote: cite Job]>>{{[^S2]}}" in tab
+          and tab.index(shown_tag) < tab.index("{{[^S1]: Psalm 121.}}")
+          < tab.index("{{[^S2]: Job 38.}}")
+          and "_illustrations/" not in tab, f"{rep}\n{tab}")
+    check("...and the local file is PRISTINE, embed line and all",
+          (ms / "solo.md").read_text() == SKY_ESSAY)
+
+    # Atomicity: when a definition cannot be placed, NOTHING is written —
+    # never anchors without definitions.
+    db2, ms2, msdir2, fake2 = _outside_fixture(root, "sky-ws-2",
+                                               essay=SKY_ESSAY)
+    meta = gdocs._mapping(db2, ms2)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db2, ms2, meta)
+    real_locate = gdocs._locate_in_tab
+
+    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0):
+        if "Illustration" in needle and "<<" not in needle:
+            return None
+        return real_locate(docs, master, tab_id, needle, occurrence)
+
+    gdocs._locate_in_tab = blind_to_the_tag
+    try:
+        rep = dv.apply(db2, ms2, {}, "footnote", "solo.md",
+                       [(1, "Psalm 121."), (2, "Job 38.")],
+                       services=lambda: (fake2, fake2))
+    finally:
+        gdocs._locate_in_tab = real_locate
+    tab = fake2.tab_text("solo.md")
+    states = {r["state"] for r in db2.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'footnote'", (ms2["id"],))}
+    check("atomic: one definition that cannot be placed writes NOTHING — "
+          "no anchor, no definition — and the report says why",
+          rep["landed"] == [] and rep["failed"]
+          and any("anchor paragraph" in why for _, why in rep["failed"])
+          and "<<" not in tab and "{{" not in tab
+          and "[Footnote: cite the Psalm]" in tab, f"{rep}\n{tab}")
+    check("...every staged row is withdrawn, so no forms are pending and "
+          "the local file is pristine",
+          states == {"withdrawn"}
+          and gdocs.forms_pending(db2, ms2["id"], "solo.md") is None
+          and (msdir2 / "solo.md").read_text() == SKY_ESSAY, str(states))
+
+    # A failure AFTER writing (here: one definition's read-back) takes
+    # every planted form back out IN PLACE — never a rebuild, so a margin
+    # comment on the tab keeps its anchor (the author: "make sure that
+    # any comments on that tab are not lost or orphaned").
+    db3, ms3, msdir3, _plain = _outside_fixture(root, "sky-ws-3",
+                                                essay=SKY_ESSAY)
+    meta = gdocs._mapping(db3, ms3)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db3, ms3, meta)
+    fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.threads_mod.render_insertion
+
+    def job_never_reads_back(new):
+        return ("never in the tab" if "Job 38." in new
+                else real_insertion(new))
+
+    gdocs.threads_mod.render_insertion = job_never_reads_back
+    try:
+        rep = dv.apply(db3, ms3, {}, "footnote", "solo.md",
+                       [(1, "Psalm 121."), (2, "Job 38.")],
+                       services=lambda: (fake3, fake3))
+    finally:
+        gdocs.threads_mod.render_insertion = real_insertion
+    tab = fake3.tab_text("solo.md")
+    states = {r["state"] for r in db3.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'footnote'", (ms3["id"],))}
+    check("atomic after writing: a read-back failure takes every form "
+          "back out, anchors and definitions alike, and says why",
+          rep["landed"] == [] and rep["failed"]
+          and any("read-back" in why for _, why in rep["failed"])
+          and not any(m in tab for m in ("<<", ">>", "{{", "}}"))
+          and "Beta holds.[Footnote: cite Job]" in tab
+          and states == {"withdrawn"}
+          and gdocs.forms_pending(db3, ms3["id"], "solo.md") is None,
+          f"{rep}\n{tab}\n{states}")
+    check("...in place: no rebuild (no temp-doc import after the levelling "
+          "push) and the margin comment's anchor is intact",
+          not fake3.temps and not fake3.orphaned
+          and fake3.anchored_text() == "Beta holds.",
+          f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
+          f"anchored={fake3.anchored_text()!r}")
+
+
 OUTSIDE_ESSAY = (
     "# Topic\n\n"
     "Alpha stays as it is.\n\n"
@@ -5836,6 +5960,7 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:

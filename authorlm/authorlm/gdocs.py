@@ -3216,9 +3216,78 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     return count
 
 
+def _insertion_anchor(paragraphs: list[str], n: int) -> tuple[int, str]:
+    """The unit an insertion after paragraph `n` anchors on, and its
+    text, as the TAB holds it: the derived illustration embed lines are
+    peeled off (the push strips them — the tab shows only the
+    `[Illustration: …]` tag), and a unit that was nothing but embeds
+    hands the anchor back to the paragraph before it (it-816cd7998fec:
+    an essay ending on an illustration took no footnote definitions)."""
+    from .revisions import peel_embed_suffix
+
+    while n > 0:
+        core = peel_embed_suffix(paragraphs[n - 1])[0].strip()
+        if core:
+            return n, core
+        n -= 1
+    return 0, ""
+
+
+def _locate_form(t: dict, paragraphs: list[str], docs_service,
+                 master_id: str, tab_id: str) -> tuple[list[dict], str]:
+    """The batchUpdate requests that plant thread `t`'s pending form in
+    the tab as it stands now, and the old half as the tab holds it
+    ("" for an insertion). Raises LookupError when it cannot be placed."""
+    n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
+    if t["proposed_old"]:
+        old = t["proposed_old"]
+        occurrence = _occurrence(paragraphs, n, old)
+        # Exactness first — a tab holding the raw bytes (nothing
+        # rendered) is the record's own text. Then the RENDERED
+        # form: the importer turned the paragraph's emphasis into
+        # formatting, and the text runs carry no asterisks. The
+        # fallback is explicit here rather than hidden in the
+        # locator, because `_locate_in_tab`'s law is exactness
+        # and every other caller means it literally.
+        tab_old = old
+        span = _locate_in_tab(docs_service, master_id, tab_id, old,
+                              occurrence)
+        if span is None and rendered_text(old) != old:
+            tab_old = rendered_text(old)
+            span = _locate_in_tab(docs_service, master_id, tab_id,
+                                  tab_old, occurrence)
+        if span is None:
+            raise LookupError("old text not found verbatim in the tab")
+        return (_mark_replace_requests(tab_id, span[0], span[1], tab_old,
+                                       t["proposed_new"]), tab_old)
+    if n > len(paragraphs):
+        raise LookupError(f"anchor paragraph {n} out of range")
+    n, anchor = _insertion_anchor(paragraphs, n)
+    if n == 0:
+        at = 1  # tab body start
+    else:
+        span = _locate_in_tab(
+            docs_service, master_id, tab_id, anchor,
+            _occurrence(paragraphs, n, anchor))
+        if span is None and tab_anchor_text(anchor) != anchor:
+            # A stanza (hard breaks), an italic paragraph (an
+            # illustration caption), or a heading: the tab holds it
+            # rendered — same fallback the replace path takes, plus the
+            # heading marker the importer turned into style.
+            span = _locate_in_tab(
+                docs_service, master_id, tab_id, tab_anchor_text(anchor),
+                _occurrence(paragraphs, n, anchor))
+        if span is None:
+            raise LookupError("anchor paragraph not found "
+                              "verbatim in the tab")
+        at = span[1]
+    return _mark_insert_requests(tab_id, at, t["proposed_new"]), ""
+
+
 def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
-                        bridge: DocBridge | None = None) -> dict:
+                        bridge: DocBridge | None = None,
+                        atomic: bool = False) -> dict:
     """Render every thread it is GIVEN into `file`'s Doc tab as a
     pending form (critique design §6.3 step 3). The tab is first brought
     level with the local file (a plain push, since the local file is
@@ -3230,7 +3299,11 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     Two producers now: `critique write` and `filter push`. Neither is
     named in the signature — the threads arrive as an argument and the
     caller owns their state transitions — which is why this took a
-    rename and not an `origin_type` parameter."""
+    rename and not an `origin_type` parameter.
+
+    `atomic` (the directive road): every form is located before any is
+    written, and a failure after writing takes the written ones back
+    out — the file's forms land together or `written` is empty."""
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
@@ -3253,56 +3326,31 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     ordered = pending_write_order(threads)
     written, failed = [], []
     tab_old_of: dict[str, str] = {}     # thread id → the old text AS THE TAB HOLDS IT
+    if atomic:
+        # All or nothing (it-816cd7998fec): locate EVERY form on the
+        # levelled, still-pristine tab before writing any. One that
+        # cannot be placed means none is written — a footnote anchor
+        # without its definition is a marker pointing nowhere.
+        misses = []
+        for t in ordered:
+            try:
+                _locate_form(t, paragraphs, docs_service, master_id, tab_id)
+            except Exception as err:  # noqa: BLE001 — collected, reported
+                misses.append((t, str(err)))
+        if misses:
+            missed = {t["id"] for t, _ in misses}
+            return {"written": [], "url": tab_url(master_id, tab_id),
+                    "failed": misses + [
+                        (t, "not written: another form of this file could "
+                            "not be placed, and a file's forms land "
+                            "together or not at all")
+                        for t in ordered if t["id"] not in missed]}
     for t in ordered:
-        n = (loads(t.get("metadata"), {}) or {}).get("anchor_paragraph", 0)
         try:
-            if t["proposed_old"]:
-                old = t["proposed_old"]
-                occurrence = _occurrence(paragraphs, n, old)
-                # Exactness first — a tab holding the raw bytes (nothing
-                # rendered) is the record's own text. Then the RENDERED
-                # form: the importer turned the paragraph's emphasis into
-                # formatting, and the text runs carry no asterisks. The
-                # fallback is explicit here rather than hidden in the
-                # locator, because `_locate_in_tab`'s law is exactness
-                # and every other caller means it literally.
-                tab_old = old
-                span = _locate_in_tab(docs_service, master_id, tab_id, old,
-                                      occurrence)
-                if span is None and rendered_text(old) != old:
-                    tab_old = rendered_text(old)
-                    span = _locate_in_tab(docs_service, master_id, tab_id,
-                                          tab_old, occurrence)
-                if span is None:
-                    raise LookupError("old text not found verbatim in the tab")
+            requests, tab_old = _locate_form(t, paragraphs, docs_service,
+                                             master_id, tab_id)
+            if tab_old:
                 tab_old_of[t["id"]] = tab_old
-                requests = _mark_replace_requests(
-                    tab_id, span[0], span[1], tab_old, t["proposed_new"])
-            else:
-                if n == 0:
-                    at = 1  # tab body start
-                else:
-                    if n > len(paragraphs):
-                        raise LookupError(f"anchor paragraph {n} out of range")
-                    anchor = paragraphs[n - 1]
-                    span = _locate_in_tab(
-                        docs_service, master_id, tab_id, anchor,
-                        _occurrence(paragraphs, n, anchor))
-                    if span is None and tab_anchor_text(anchor) != anchor:
-                        # A stanza (hard breaks), an italic paragraph, or
-                        # a heading: the tab holds it rendered — same
-                        # fallback the replace path takes, plus the
-                        # heading marker the importer turned into style.
-                        span = _locate_in_tab(
-                            docs_service, master_id, tab_id,
-                            tab_anchor_text(anchor),
-                            _occurrence(paragraphs, n, anchor))
-                    if span is None:
-                        raise LookupError("anchor paragraph not found "
-                                          "verbatim in the tab")
-                    at = span[1]
-                requests = _mark_insert_requests(tab_id, at,
-                                                 t["proposed_new"])
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": requests}).execute()
             written.append(t)
@@ -3384,6 +3432,24 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                               doc_spacing(manuscript))
         except Exception:  # noqa: BLE001 — spacing is re-applied by resolve
             pass
+    if atomic and failed:
+        # A form failed AFTER writing (read-back, export proof): take
+        # every form this call planted back out IN PLACE — markers and
+        # inserted text only, never a rebuild, so no margin comment on
+        # the tab is lost or orphaned. Document order (ascending anchor),
+        # as `settle_forms_in_tab` wants; a form not in the tab (never
+        # written, or already taken out) is simply not found.
+        outcomes = [{"old": tab_old_of.get(t["id"], t["proposed_old"]),
+                     "new": t["proposed_new"], "keep": "old"}
+                    for t in reversed(ordered)]
+        faults = settle_forms_in_tab(db, manuscript, file, outcomes,
+                                     docs_service, bridge=bridge)
+        failed += [(t, "taken back out: another form of this file failed, "
+                       "and a file's forms land together or not at all")
+                   for t in written]
+        failed += [(t, f"rollback: {fault}") for fault in faults
+                   for t in ordered[:1]]
+        written = []
     return {"written": written, "failed": failed,
             "url": tab_url(master_id, tab_id)}
 
