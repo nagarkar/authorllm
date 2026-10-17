@@ -824,17 +824,28 @@ def _clip_guard(db, ms, key: str):
 
 
 @mcp.tool()
-def set_clip_spec(specs: dict[str, str], manuscript: str | None = None) -> dict:
-    """Land drafted specs for clips, collages or montages
-    (docs/video-clips-design.md §8e). `specs` is {key: spec}. Draft each IN
-    CHAT first, from the shorthand, the words the clip plays under, its
-    neighbouring clips and the cast; a generated clip's spec under 150
-    words stays a draft. The file's checkout chooses the road: a local
-    file lands the specs in _clips/prompts/<key>.md now (chat was the
-    review); a file checked out to the Doc gets them as pending forms in
-    its tab (the tag with the whole spec inline), for the author to read
-    and edit there, then resolve_clip_specs. Keys come from list_media; one
-    file per call when staging."""
+def set_clip_spec(specs: dict[str, str], supersede: bool = False,
+                  manuscript: str | None = None) -> dict:
+    """Land drafted text for clips, collages or montages
+    (docs/video-clips-design.md §8e). `specs` is {key: text}. The tag's
+    kind decides what the text is, where it lives and how it is checked:
+    - a `youtube:` clip takes a YOUTUBE BRIEF: what to look for so the
+      search and the quote location succeed, as `source:` (work or person,
+      title, year, channel), `moment:` (the scene), `quote:` (exact words
+      spoken), `on screen:` (who and what). Ready with a source and a quote
+      or moment; no word minimum. Never describe how to render it.
+    - a clip to be generated takes a GENERATION SPEC for the video model:
+      `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
+      `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),
+      150+ words.
+    - a container or a `use:` clip takes a note (its title or label).
+    Draft IN CHAT first from the shorthand, the words the clip plays under,
+    its neighbours and the cast. The file's checkout chooses the road: a
+    local file lands now; a file checked out to the Doc gets pending forms
+    in its tab for the author to review, then resolve_clip_specs. Keys come
+    from list_media (`spec_kind` says which text a tag takes). `supersede`
+    withdraws this file's spec forms already out in the tab, unruled, and
+    stages these instead."""
     def run():
         from pathlib import Path
 
@@ -845,7 +856,8 @@ def set_clip_spec(specs: dict[str, str], manuscript: str | None = None) -> dict:
         root = Path(ms["path"])
         files = {media.find_clip(root, k)["file"] for k in specs}
         if any(directives._checked_out(db, ms, f) for f in files):
-            return media_road.stage_specs(db, ms, specs, _doc_services)
+            return media_road.stage_specs(db, ms, specs, _doc_services,
+                                          supersede=supersede)
         return {"mode": "applied",
                 "landed": [media.set_spec(root, k, t) for k, t in specs.items()]}
     return _guard(run)

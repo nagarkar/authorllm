@@ -5,8 +5,9 @@ checked out to the Doc, `stage_specs` writes each spec into the tab as a
 pending form, `<<[Clip: excerpt… ⇢ key.md | …]>>{{[Clip: whole spec ⇢
 key.md | …]}}`, and the local file stays pristine. The author edits or
 accepts in place (deleting a form declines it). `resolve_specs` reads the
-tab back, moves every accepted spec into `_clips/prompts/<key>.md`, puts
-the tag back to excerpt + `⇢`, records the evidence, collects under no
+tab back, moves every accepted text into its kind's file (a YouTube brief,
+a generation spec or a note, `media.SPEC_DIRS`), puts the tag back to
+excerpt + `⇢`, records the evidence, collects under no
 episode and pushes the tab. The same machinery as the footnote and
 explain directives (directives.py), with one difference: a clip's tag is
 never consumed, only its spec file changes.
@@ -35,10 +36,13 @@ def _services(services, file: str, step: str):
 
 
 def stage_specs(db, manuscript: dict, specs: dict[str, str],
-                services=None) -> dict:
+                services=None, supersede: bool = False) -> dict:
     """Write each {key: spec} as a pending form into its file's tab. All
-    keys must sit in one file (one tab, one resolve). Returns {file,
-    staged: [key], failed: [(key, reason)], url}."""
+    keys must sit in one file (one tab, one resolve). `supersede`
+    withdraws this file's clip forms already out (the author has not
+    ruled on them) before staging: writing the new forms first brings the
+    tab level with the pristine local file, which clears the old marks.
+    Returns {file, staged: [key], failed: [(key, reason)], withdrawn, url}."""
     from . import gdocs
     from .db import ko_fields
     from .revisions import _paragraphs
@@ -53,11 +57,39 @@ def stage_specs(db, manuscript: dict, specs: dict[str, str],
                          + ", ".join(sorted(files)))
     file = files.pop()
     mid = manuscript["id"]
-    pending = gdocs.forms_pending(db, mid, file)
-    if pending:
-        remedy = gdocs._SETTLE_REMEDY.get(pending, "settle the staged edits")
-        raise ValueError(f"{file} already carries {pending} forms in its tab — "
-                         f"run '{remedy.format(file=file)}' before staging more.")
+    withdrawn = 0
+    if supersede:
+        out = pending(db, mid, file)
+        for t in out:
+            meta = json.loads(t.get("metadata") or "{}")
+            meta["superseded"] = True
+            db.update("doc_threads", t["id"],
+                      {"state": "withdrawn", "metadata": json.dumps(meta)})
+            withdrawn += 1
+        if out:
+            # As lens and morph supersede (api.lens_push): the withdrawn
+            # forms leave the tab only when it is rebuilt from the file,
+            # and the push leaves the file checked out, so pull it down.
+            service, docs_service = _services(services, file, "staging")
+            # Paragraph by paragraph, overwriting only the withdrawn forms
+            # (a tab with open comments is never rebuilt wholesale).
+            keys = tuple(f"⇢ {json.loads(t.get('metadata') or '{}')['key']}.md"
+                         for t in out)
+            gdocs.diff_push(db, manuscript, file, service, docs_service,
+                            clearing=keys)
+            if (gdocs.doc_status(db, manuscript).get(file) or {}).get(
+                    "checked_out"):
+                gdocs.pull_doc(db, manuscript, query=file, service=service,
+                               docs_service=docs_service, with_comments=False)
+    pending_origin = gdocs.forms_pending(db, mid, file)
+    if pending_origin:
+        remedy = gdocs._SETTLE_REMEDY.get(pending_origin,
+                                          "settle the staged edits")
+        hint = (" (or restage with --supersede to withdraw them)"
+                if pending_origin == ORIGIN else "")
+        raise ValueError(f"{file} already carries {pending_origin} forms in its "
+                         f"tab — run '{remedy.format(file=file)}' before "
+                         f"staging more{hint}.")
     text = (root / file).read_text(encoding="utf-8")
     lines = text.split("\n")
     threads = []
@@ -86,7 +118,7 @@ def stage_specs(db, manuscript: dict, specs: dict[str, str],
     for t in threads:
         db.update("doc_threads", t["id"],
                   {"state": "written" if t["id"] in written else "withdrawn"})
-    return {"file": file, "mode": "marked",
+    return {"file": file, "mode": "marked", "withdrawn": withdrawn,
             "staged": [json.loads(t["metadata"])["key"] for t in threads
                        if t["id"] in written],
             "failed": [(json.loads(t["metadata"])["key"], why)

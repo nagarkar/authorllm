@@ -3942,7 +3942,8 @@ def _md_paragraphs(markdown: str) -> list[str]:
 
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
-              bridge: DocBridge | None = None) -> dict:
+              bridge: DocBridge | None = None,
+              clearing: tuple[str, ...] = ()) -> dict:
     """Push local changes into a tab by editing only the changed
     paragraphs — anchors (margin threads, ingested comments) on
     untouched text survive by construction. Diffs in EXPORT space (both
@@ -4058,7 +4059,12 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             ops += 1
             # Replaces use <<old>>{{new}}; critique insertions are
             # {{new}} alone — both must block overlapping surgical edits.
+            # `clearing` names withdrawn forms' keys (a supersede): a
+            # paragraph whose markers belong only to them may be
+            # overwritten with the local text, which never held them.
             if any(("<<" in tab_paras[i] or "{{" in tab_paras[i])
+                   and not (clearing and any(k in tab_paras[i]
+                                             for k in clearing))
                    for i in range(i1, i2)):
                 raise LookupError(
                     "diff push: the edit overlaps a pending margin "
