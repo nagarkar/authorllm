@@ -678,6 +678,68 @@ def render_preview(root: Path, speech: dict, voice: str, rate: int,
     return out
 
 
+PREVIEW_STAMP = ".voice"
+
+
+def preview_settings(manuscript: dict) -> tuple[str, int]:
+    config = audio.load_config(Path(manuscript["path"]))
+    return config["preview"]["voice"], int(config["preview"]["rate"])
+
+
+def check_preview_voice(root: Path, voice: str, rate: int) -> int:
+    """A section id covers the text, the cast row and the respellings,
+    not the preview voice or rate ([preview] in audiobook.toml), so a
+    change there leaves every preview stale: clear them all, and the
+    next listen renders each anew. The stamp records what the previews
+    were made with; a folder without one adopts the current settings.
+    Returns how many previews were cleared."""
+    folder = root / PREVIEW_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = folder / PREVIEW_STAMP
+    want = f"{voice}\n{rate}\n"
+    if stamp.exists() and stamp.read_text(encoding="utf-8") == want:
+        return 0
+    cleared = 0
+    if stamp.exists():
+        for path in folder.glob("*.mp3"):
+            if ".part" not in path.name:
+                path.unlink()
+                cleared += 1
+    stamp.write_text(want, encoding="utf-8")
+    return cleared
+
+
+_RENDERING: dict[Path, threading.Lock] = {}
+_RENDERING_GUARD = threading.Lock()
+
+
+def ensure_preview(manuscript: dict, stem: str, section_id: str,
+                   renderer: Callable[[Path, dict, str, int], Path] | None = None
+                   ) -> Path | None:
+    """The lazy listen: the preview of one paragraph, rendered now if it
+    is missing (about a second and a half for a typical paragraph, far
+    less than the paragraph takes to play). None when the chapter has no
+    such id. One render per id at a time: a tap and the page's prefetch
+    of the same paragraph wait on one lock, and the second finds the file."""
+    root = audio.audio_dir(manuscript)
+    book = load_book(root)
+    voice, rate = preview_settings(manuscript)
+    check_preview_voice(root, voice, rate)
+    out = preview_path(root, section_id)
+    if out.exists():
+        return out
+    speech = next((sp for sp in speech_of(load_chapter(root, book, stem))
+                   if sp["id"] == section_id), None)
+    if speech is None:
+        return None
+    with _RENDERING_GUARD:
+        lock = _RENDERING.setdefault(out, threading.Lock())
+    with lock:
+        if not out.exists():
+            (renderer or render_preview)(root, speech, voice, rate)
+    return out
+
+
 def sweep_previews(root: Path, book: dict) -> int:
     """Delete previews whose id no chapter references. Returns the count."""
     folder = root / PREVIEW_DIR
@@ -709,9 +771,8 @@ def preview(manuscript: dict, stem: str | None = None, spec: str | None = None,
 
     root = audio.audio_dir(manuscript)
     book = load_book(root)
-    config = audio.load_config(Path(manuscript["path"]))
-    voice = config["preview"]["voice"]
-    rate = int(config["preview"]["rate"])
+    voice, rate = preview_settings(manuscript)
+    check_preview_voice(root, voice, rate)
     renderer = renderer or (lambda r, sp, v, rt: render_preview(r, sp, v, rt))
     stems = [s for s, _ in chapter_files(book)] if stem is None else [stem]
     todo: list[tuple[str, dict]] = []

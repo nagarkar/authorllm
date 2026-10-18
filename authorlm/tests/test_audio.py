@@ -1360,7 +1360,9 @@ def check_audiobook_page() -> None:
         ch = st["chapter"]
         check("a chapter comes with its paragraphs, text, and audio urls",
               ch["total"] == 4 and ch["sections"][1]["text"].startswith("The Dharmic")
-              and ch["sections"][1]["previewUrl"] is None and ch["sections"][1]["takeUrl"] is None
+              and ch["sections"][1]["preview"] is None and ch["sections"][1]["takeUrl"] is None
+              and ch["sections"][1]["previewUrl"]
+              == f"/preview/kindness/{ch['sections'][1]['id']}.mp3?m=Scratch"
               and ch["sections"][3]["moved"]["detail"] == ["speed", "removed Dharmic"], str(ch)[:400])
         job = s.enqueue("preview", stem="kindness")
         check("a preview job runs inline in tests and reports",
@@ -1369,9 +1371,17 @@ def check_audiobook_page() -> None:
         job = s.enqueue("preview", stem="kindness", force=True)
         check("a forced preview job re-renders the previews already there",
               job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
-        check("previews show up as urls that name their manuscript",
+        check("preview urls name their chapter and manuscript",
               st["chapter"]["sections"][0]["previewUrl"]
-              == f"/preview/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
+              == f"/preview/kindness/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
+        # The lazy listen: a missing preview renders when it is asked for.
+        lazy = ch["sections"][2]["id"]
+        gen.preview_path(s.root, lazy).unlink()
+        got = audiobook.audio_file_for(s, f"/preview/kindness/{lazy}.mp3")
+        check("a missing preview renders on request",
+              got is not None and got.read_bytes() == b"PREVIEW-" + lazy.encode())
+        check("an id the chapter does not have renders nothing",
+              audiobook.audio_file_for(s, f"/preview/kindness/{'0' * 32}.mp3") is None)
         job = s.enqueue("generate", stem="kindness", ids=[ch["sections"][1]["id"]])
         check("a generate job carries its cost and ordinal and renders",
               job["characters"] == ch["sections"][1]["characters"] and job["ordinals"] == [2]
@@ -1402,12 +1412,22 @@ def check_audiobook_page() -> None:
             _os2.utime(p_, (_t2.time() - 60, _t2.time() - 60))
         _os2.utime(book / "kindness.md", None)
         check("a source newer than the export wants a refresh", s.wants_refresh() is True)
-        s.enqueue("refresh", stem="kindness")
+        job = s.enqueue("refresh", stem="kindness")
         check("the refresh re-exports and clears the want", s.wants_refresh() is False)
+        check("the refresh renders no previews", "rendered" not in job["message"], job["message"])
         jobs = s.jobs()
         check("jobs lists the recent ones newest last",
               jobs["running"] is None and jobs["queued"] == []
               and [j["kind"] for j in jobs["recent"]] == ["preview", "preview", "generate", "retake", "generate", "refresh"])
+        stamp = s.root / gen.PREVIEW_DIR / gen.PREVIEW_STAMP
+        stamp.write_text("Another Voice\n175\n", encoding="utf-8")
+        _os2.utime(book / "kindness.md", None)
+        for p_ in [root / "audiobook.json", *(root / "chapters").glob("*.json")]:
+            _os2.utime(p_, (_t2.time() - 60, _t2.time() - 60))
+        job = s.enqueue("refresh", stem="kindness")
+        check("a new preview voice clears every preview on refresh",
+              "cleared for the new voice" in job["message"]
+              and not list((s.root / gen.PREVIEW_DIR).glob("*.mp3")), job["message"])
         out = audiobook.dispatch("status", {"manuscript": "Scratch", "stem": "kindness"},
                                  workspace=str(ws), inline=True)
         check("dispatch routes to the same session", out["chapter"]["generated"] == 4)
@@ -1439,12 +1459,12 @@ def check_audiobook_page() -> None:
             check("the server serves the built page at /", resp.status == 200
                   and "/api/audiobook" in page)
             sid = ch["sections"][0]["id"]
-            with urllib.request.urlopen(f"{base}/preview/{sid}.mp3") as resp:
+            with urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3") as resp:
                 body = resp.read()
             check("a preview streams whole with Accept-Ranges",
                   resp.status == 200 and body == b"PREVIEW-" + sid.encode()
                   and resp.headers["Accept-Ranges"] == "bytes")
-            req = urllib.request.Request(f"{base}/preview/{sid}.mp3", headers={"Range": "bytes=8-11"})
+            req = urllib.request.Request(f"{base}/preview/kindness/{sid}.mp3", headers={"Range": "bytes=8-11"})
             with urllib.request.urlopen(req) as resp:
                 part = resp.read()
             check("a byte range answers 206 with the slice",
@@ -1452,11 +1472,11 @@ def check_audiobook_page() -> None:
                   and resp.headers["Content-Range"] == f"bytes 8-11/{8 + 32}")
             with urllib.request.urlopen(f"{base}/take/kindness/{ch['sections'][1]['id']}.mp3") as resp:
                 check("a take streams from the book's quality", resp.read() == b"MP3BYTES")
-            with urllib.request.urlopen(f"{base}/preview/{sid}.mp3?m=Scratch") as resp:
+            with urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3?m=Scratch") as resp:
                 check("?m= names the manuscript an audio url plays from",
                       resp.read() == b"PREVIEW-" + sid.encode())
             try:
-                urllib.request.urlopen(f"{base}/preview/{sid}.mp3?m=Nowhere")
+                urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3?m=Nowhere")
                 check("an unknown ?m= manuscript is a 404", False)
             except urllib.error.HTTPError as err:
                 check("an unknown ?m= manuscript is a 404", err.code == 404)
