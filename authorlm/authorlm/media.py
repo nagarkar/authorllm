@@ -66,7 +66,13 @@ _FOOTNOTE_REF = re.compile(r"\[\^[^\]]+\]")
 _SENTINEL = "⟦media{}⟧"            # ⟦media3⟧ — survives regions
 _SENTINEL_RE = re.compile(r"⟦media(\d+)⟧")
 
-FIELDS = ("start", "end", "cast", "prior", "look", "text", "use", "youtube")
+FIELDS = ("start", "end", "cast", "prior", "look", "text", "use", "youtube",
+          "audio")
+# What happens to a clip's own sound (ruled 2026-10-17). `mute`: silent
+# under the voice; `duck`: kept low under the voice (good music); `full`:
+# played at its own level, which only a Collage allows — narration stops.
+AUDIO = ("mute", "duck", "full")
+AUDIO_DEFAULT = {"span": "mute", "montage": "mute", "point": "full"}
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
@@ -297,6 +303,20 @@ def _spoken_segments(text: str, marks: list[int], where: str
 
 # ------------------------------------------------------------------ validation
 
+def _check_audio(item: dict) -> None:
+    """The `audio:` field: one of AUDIO, and never `full` under the voice."""
+    value = item["fields"].get("audio")
+    if value is None:
+        return
+    if value not in AUDIO:
+        item["errors"].append(f"audio: '{value}' is not one of "
+                              f"{', '.join(AUDIO)}")
+    elif value == "full" and item["shape"] != "point":
+        item["errors"].append("audio: full plays the clip's sound at its own "
+                              "level, which only a Collage allows (narration "
+                              "stops there); under the voice use duck or mute")
+
+
 def _check(item: dict, root: Path, known: dict) -> None:
     """The field rules of §5 and the reference rules of §8i, in place:
     `kind_of` (generated | quoted | used), `errors`, `warnings`."""
@@ -465,6 +485,7 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
         item["draft_reasons"] = check_text(item["spec_kind"], item["spec_text"])
         item["spec_words"] = len(item["description"].split())
         _check(item, root, known)
+        _check_audio(item)
         if region_error:
             item["errors"].append(f"regions do not resolve: {region_error}")
         elif item["i"] not in survived:
@@ -570,6 +591,7 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
                      "description": item["description"],
                      "draft_reasons": item["draft_reasons"],
                      "fields": f, "spec_words": item["spec_words"],
+                     "audio": f.get("audio") or AUDIO_DEFAULT[item["shape"]],
                      "status": _status(item),
                      "errors": item["errors"], "warnings": item["warnings"],
                      "takes": [], "chosen": None}

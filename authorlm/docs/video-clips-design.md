@@ -120,6 +120,7 @@ secondary sources; verify field names against vendor docs before build.
 | `text:` | exact on-screen words, never paraphrased | quoted string |
 | `use:` | an asset used as is, no generation | path |
 | `youtube:` | quoted video | url |
+| `audio:` | the clip's own sound (ruled 2026-10-17): `mute` — silent; `duck` — kept low under the narration (e.g. a good score); `full` — at its own level, Collage only (narration stops) | `mute` \| `duck` \| `full`; default `mute` under the voice (span, Montage), `full` in a Collage |
 
 A value containing `/` or an extension is a path; otherwise it is a key
 resolved in that field's namespace. `excerpt:`, `file:` and `slot:` are
@@ -458,7 +459,7 @@ built, never before, so no skill describes something that does not exist.
 | YouTube search via the Data API only, failing loudly | ytlm (`nagarkar/ytlm`) | new search verb beside `src/ytlm/api.py` | `ytlm/.claude/skills/ytlm/SKILL.md` (verbs); `ytlm/docs/design/` |
 | Quote location across neighbouring caption segments → proposed `start:`/`end:`, expanded to whole sentences (start at the first sentence's start, end before the next sentence begins; §8l) | ytlm | the `segments` / `search` code | same as above |
 | Video download and excerpt cutting, cached in the ytlm workspace on the external drive, returning paths | ytlm | `src/ytlm/adapters/ytdlp.py` (today audio only) | same as above |
-| Read `authorlm media list --json`; get excerpt paths from ytlm; trim each excerpt precisely by looking at the section (frames, audio, word timings) so no stray fragment plays (§8l); build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
+| Read `authorlm media list --json`; get excerpt paths from ytlm; trim each excerpt precisely by looking at the section (frames, audio, word timings) so no stray fragment plays (§8l); honour each clip's `audio` (`mute`, `duck` the clip's sound under the narration, or `full` in a Collage); build Collage reels and Montage layers | podlm (`nagarkar/podlm`) | `src/podlm/pipeline/editorial/collage.py` (its own yt-dlp download moves to ytlm), a new media stage | `podlm/.claude/skills/podlm/SKILL.md` (the collage section, today `collage.yaml`); `podlm/docs/` |
 | Write confirmed `youtube:` / `start:` / `end:` back into a tag | authorllm | slice 2 (§10) | `authorllm/.claude/skills/authorlm/SKILL.md` (Media section) |
 
 ## 8l. YouTube briefs and generation specs (ruled 2026-10-17)

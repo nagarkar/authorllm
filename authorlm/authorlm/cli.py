@@ -2834,7 +2834,7 @@ def cmd_clip(args):
                  f"{clip['file']}' first, run this again, then 'doc push'.")
     updates = {name: getattr(args, name) for name in
                ("youtube", "start", "end", "use", "text", "cast", "prior",
-                "look") if getattr(args, name) is not None}
+                "look", "audio") if getattr(args, name) is not None}
     for name in args.clear or []:
         updates[name] = None
     if not updates:
@@ -9063,8 +9063,10 @@ def build_parser() -> argparse.ArgumentParser:
                                   "words (text: field)")
     p.add_argument("--file", dest="spec_file", help="spec: read the spec "
                                                     "from this file")
-    for name in ("youtube", "start", "end", "use", "cast", "prior", "look"):
-        p.add_argument(f"--{name}", help=f"set: the {name}: field")
+    for name in ("youtube", "start", "end", "use", "cast", "prior", "look",
+                 "audio"):
+        p.add_argument(f"--{name}", help=f"set: the {name}: field"
+                       + (" (mute | duck | full)" if name == "audio" else ""))
     p.add_argument("--clear", action="append", metavar="FIELD",
                    help="set: remove a field (repeatable)")
     p.set_defaults(func=cmd_clip)

@@ -1981,7 +1981,9 @@ line with blank lines around it. Three shapes:
 Inside a Collage or Montage a `[Clip]` has no close. Fields: `start`/`end`
 (frames on a generated clip, trim timestamps on `youtube:`/`use:` video),
 `cast`, `prior`, `look`, `text` (exact on-screen words), `use` (as-is
-asset), `youtube`. A description generates; no description must point
+asset), `youtube`, `audio` (the clip's own sound: `mute`, `duck` under the
+narration — e.g. a good score — or `full`, Collage only; default mute
+under the voice, full in a Collage). A description generates; no description must point
 (`use:`/`youtube:`). Never put timeline timing in a tag. Every book export
 drops the tag lines and keeps every word of prose.
 
