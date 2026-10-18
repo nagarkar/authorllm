@@ -1478,7 +1478,9 @@ costs.
 `authorlm audio serve -m <ms> --no-open` in the background from Bash
 (fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
 and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
-page is one chapter at a time with a dropdown: a card per paragraph
+page is one chapter at a time with a dropdown, under a manuscript
+dropdown listing every manuscript with an audio export (`-m` is only
+the one it opens on; links are `#<manuscript>/<stem>`): a card per paragraph
 (number, cast, the text, the respellings, "changed since <take>: …"),
 ▶ preview and ▶ take, **Generate · cost** or **Retake · cost**, a
 chapter bar with **Generate remaining** (asks once, with the total
