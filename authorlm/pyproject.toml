@@ -39,6 +39,7 @@ packages = ["authorlm", "authorlm.adapters"]
 [tool.setuptools.package-data]
 authorlm = [
     "audiobook-defaults.toml",
+    "brand/*",
     "prompts/*.md",
     "publication/*",
     "triage_profiles/*.json",

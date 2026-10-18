@@ -21,6 +21,7 @@ body{font-family:Quicksand,"Segoe UI",system-ui,sans-serif;font-weight:600;font-
 header{position:sticky;top:0;z-index:5;background:var(--band);color:var(--band-ink);padding:10px 14px 10px;border-radius:0 0 14px 14px}
 .title-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
 header h1{margin:0;font-size:20px;letter-spacing:.3px}
+.brand-icon{width:24px;height:24px;margin-right:8px;vertical-align:-4px}
 .count{font-variant-numeric:tabular-nums;opacity:.9;font-size:13px;white-space:nowrap}
 .bar{display:flex;gap:8px;align-items:center;margin-top:8px}
 select{flex:1 1 8rem;min-width:0;min-height:44px;font:inherit;font-weight:700;font-size:15px;padding:8px 10px;border-radius:10px;border:0;background:var(--band-ink);color:var(--band)}
