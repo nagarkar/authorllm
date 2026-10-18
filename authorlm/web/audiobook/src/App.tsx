@@ -143,6 +143,15 @@ export function App() {
 
   const onEnded = useCallback(() => { if (continuous) step(1); else setNow(null); }, [continuous, step]);
 
+  // Previews render on first request (about a second and a half), so while
+  // one paragraph plays, ask for the next: walking on never waits.
+  useEffect(() => {
+    if (!now || now.source !== "preview" || !continuous) return;
+    const i = playable.findIndex(s => s.id === now.id);
+    const next = playable[i + 1]?.previewUrl;
+    if (next) fetch(next, {method: "HEAD"}).catch(() => {});
+  }, [now, playable, continuous]);
+
   // ------------------------------------------------------- render
   if (error && !status) return <div className="boot bad">{error}</div>;
   if (!status) return <div className="boot">Opening {ms || "the audiobook"}…</div>;

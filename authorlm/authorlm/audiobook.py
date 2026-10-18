@@ -134,7 +134,9 @@ class Session:
                     "text": sp["text"], "voiceName": sp.get("voiceName", ""),
                     "level": sp.get("level"),
                     "pronunciations": sp.get("pronunciations", []),
-                    "previewUrl": f"/preview/{sec['id']}.mp3{m}" if sec["preview"] else None,
+                    # Every paragraph can be heard: a missing preview
+                    # renders when it is asked for (gen.ensure_preview).
+                    "previewUrl": f"/preview/{stem}/{sec['id']}.mp3{m}",
                     "takeUrl": f"/take/{stem}/{sec['id']}.mp3{m}" if sec["take"] else None,
                 })
             full["stitchedUrl"] = f"/stitched/{stem}.mp3{m}" if full["stitched"] else None
@@ -243,22 +245,27 @@ class Session:
     # The jobs themselves. Each returns the one line the page shows.
 
     def _job_refresh(self, job: dict) -> str:
-        """Export, then preview whatever is new — the free steps. The Doc
-        is not consulted here (ruling 2026-09-26): reconcile in chat
-        writes the pulled tab to disk, and the stale banner sees it."""
+        """Export, then drop the previews nothing references — the free
+        steps. Nothing is rendered here: a changed paragraph has a new id,
+        and its preview renders when it is first played (the lazy listen,
+        2026-10-18: "we could do it lazily if it's fast enough"). The Doc
+        is not consulted (ruling 2026-09-26): reconcile in chat writes the
+        pulled tab to disk, and the stale banner sees it."""
         parts: list[str] = []
         self._set(job, of=2, done=0, message="exporting")
         report = audio.export(self.db, self.manuscript)
         parts.append(f"export: {len(report['written'])} file(s) rewritten")
         if report["warnings"]:
             parts.append(f"{len(report['warnings'])} warning(s)")
-        self._set(job, done=1, message="previewing new paragraphs")
-        pv = gen.preview(self.manuscript, job.get("stem"),
-                         renderer=PREVIEW_RENDERER,
-                         progress=lambda m: self._set(job, message=m))
-        parts.append(f"{len(pv['rendered'])} preview(s) rendered")
-        if pv["errors"]:
-            parts.append(f"{len(pv['errors'])} preview error(s): {pv['errors'][0]}")
+        self._set(job, done=1, message="sweeping stale previews")
+        root = self.root
+        voice, rate = gen.preview_settings(self.manuscript)
+        cleared = gen.check_preview_voice(root, voice, rate)
+        swept = gen.sweep_previews(root, gen.load_book(root))
+        if cleared:
+            parts.append(f"{cleared} preview(s) cleared for the new voice {voice}")
+        if swept:
+            parts.append(f"{swept} stale preview(s) swept")
         self._set(job, done=2)
         if self.account is None:
             self._read_account()
@@ -363,16 +370,18 @@ def manuscripts(db) -> list[str]:
 
 
 def audio_file_for(s: Session, path: str) -> Path | None:
-    """Map a GET path to a file under `_audio/`, or None. `/preview/<id>.mp3`,
+    """Map a GET path to a file under `_audio/`, or None.
+    `/preview/<stem>/<id>.mp3` (rendered now if missing),
     `/take/<stem>/<id>.mp3` (at the book's quality), `/stitched/<stem>.mp3`."""
     root = s.root
     parts = path.strip("/").split("/")
     try:
-        if parts[0] == "preview" and len(parts) == 2 and parts[1].endswith(".mp3"):
-            sid = parts[1][:-4]
+        if parts[0] == "preview" and len(parts) == 3 and parts[2].endswith(".mp3"):
+            stem, sid = parts[1], parts[2][:-4]
             if not _is_id(sid):
                 return None
-            return gen.preview_path(root, sid)
+            return gen.ensure_preview(s.manuscript, stem, sid,
+                                      renderer=PREVIEW_RENDERER)
         book = gen.load_book(root)
         if parts[0] == "take" and len(parts) == 3 and parts[2].endswith(".mp3"):
             stem, sid = parts[1], parts[2][:-4]

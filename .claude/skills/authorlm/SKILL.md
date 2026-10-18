@@ -1472,7 +1472,12 @@ the app cannot double-render; only two deliberate renders can.
 175 wpm × the cast row's speed; respellings substituted inline so the
 table is heard too) into `_audio/preview/<id>.mp3`, four at a time,
 and sweeps previews whose id is gone. Nothing is kept and nothing
-costs.
+costs. The page does not need it: **previews are lazy** (2026-10-18) —
+`/preview/<stem>/<id>.mp3` renders a missing preview on the request
+(~1.5 s for a typical paragraph), the page fetches the next paragraph's
+while one plays, and a change of `[preview]` voice or rate clears every
+preview (`_audio/preview/.voice` records what they were made with). Bulk
+`audio preview` is only for listening offline.
 
 **The page — the author's surface, on the Mac and the phone.** Run
 `authorlm audio serve -m <ms> --no-open` in the background from Bash
@@ -1485,15 +1490,15 @@ the one it opens on; links are `#<manuscript>/<stem>`): a card per paragraph
 ▶ preview and ▶ take, **Generate · cost** or **Retake · cost**, a
 chapter bar with **Generate remaining** (asks once, with the total
 cost) and **Stitch**, a sticky player that walks the chapter card by
-card ("walk on"), and **Refresh**, which exports and previews what
-changed on disk. **The page never touches the Doc** (author's ruling
+card ("walk on"), and **Refresh**, which exports what changed on disk
+and sweeps stale previews (it renders none). **The page never touches the Doc** (author's ruling
 2026-09-26: "gdoc edits are more tricky as is reconciliation. We can
 keep that in chat"): reconcile at session start or `doc pull` in chat
 writes the pulled tab to disk, and the page's **stale banner** ("Changed
 since the export: becker.md, _audio/cast.md", yellow, with its own
 Refresh) picks it up like any local edit — it compares every manuscript
 file, `audiobook.toml`, `cast.md` and `pronunciations.md` against the
-export's time on each poll, and **the server re-exports and previews on
+export's time on each poll, and **the server re-exports and sweeps on
 its own within fifteen seconds** (2026-09-26: "why not just pull the
 data"); `audio status` prints the same as a STALE line. Every tap is a job
 on one queue drained by one worker; the strip under the header shows
