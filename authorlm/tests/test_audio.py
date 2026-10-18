@@ -1366,6 +1366,9 @@ def check_audiobook_page() -> None:
         check("a preview job runs inline in tests and reports",
               job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
         st = s.status("kindness")
+        job = s.enqueue("preview", stem="kindness", force=True)
+        check("a forced preview job re-renders the previews already there",
+              job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
         check("previews show up as urls that name their manuscript",
               st["chapter"]["sections"][0]["previewUrl"]
               == f"/preview/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
@@ -1404,7 +1407,7 @@ def check_audiobook_page() -> None:
         jobs = s.jobs()
         check("jobs lists the recent ones newest last",
               jobs["running"] is None and jobs["queued"] == []
-              and [j["kind"] for j in jobs["recent"]] == ["preview", "generate", "retake", "generate", "refresh"])
+              and [j["kind"] for j in jobs["recent"]] == ["preview", "preview", "generate", "retake", "generate", "refresh"])
         out = audiobook.dispatch("status", {"manuscript": "Scratch", "stem": "kindness"},
                                  workspace=str(ws), inline=True)
         check("dispatch routes to the same session", out["chapter"]["generated"] == 4)

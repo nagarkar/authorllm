@@ -177,6 +177,8 @@ class Session:
         elif kind in ("refresh", "preview"):
             if params.get("stem"):
                 gen.load_chapter(root, book, params["stem"])
+            if kind == "preview":
+                job["force"] = bool(params.get("force"))
         else:
             raise ValueError(f"unknown job kind {kind!r}")
         with self._lock:
