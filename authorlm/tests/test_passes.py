@@ -1663,6 +1663,56 @@ def _the_doc_transport_push(root: Path) -> None:
           "formed at all", not fake3.bodies, str(fake3.bodies[:1]))
 
 
+def _critique_write_refuses_checked_out(root: Path) -> None:
+    """RISK-4 — `critique write` opened with a levelling push that wiped
+    Doc-ahead prose when the essay was checked out. Same gate as
+    `filter push`: refuse, name `doc pull`, touch nothing on the wire."""
+    import authorlm.gdocs as _gd
+
+    print("RISK-4: critique write refuses a checked-out file:")
+
+    ws_name = "critique-gate-ws"
+    db, manuscript, ms, fake = _twin_fixture(root, ws_name)
+    mid = manuscript["id"]
+    _twin_threads(db, mid, [(2, "The wall stands, in my voice.")])
+    # Doc holds ahead prose the local file does not — the wipe case if
+    # write_pending_forms' levelling push ran.
+    ahead = TWIN_ESSAY.replace(
+        "Alpha opens the essay and says a thing.",
+        "Alpha opens the essay, edited only in the Doc.", 1)
+    for tab in fake.tabs:
+        if tab["title"] == "solo.md":
+            tab["body"] = fake._as_body(ahead, tab["id"])
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    raised = None
+    try:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(root / ws_name),
+                          "critique", "write", "solo.md"])
+        except SystemExit as err:
+            raised = str(err)
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
+
+    check("RISK-4 `critique write` refuses a CHECKED-OUT file, naming "
+          "`doc pull` — staging read `old` from local; a levelling push "
+          "would overwrite Doc-side prose",
+          raised is not None and "checked out to Google Docs" in raised
+          and "doc pull solo.md" in raised, raised)
+    check("RISK-4 ...and nothing reached the wire",
+          not fake.bodies, str(fake.bodies[:1]))
+    check("RISK-4 ...and the Doc-ahead prose is still in the tab",
+          "edited only in the Doc" in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md")[:200])
+
+
 NON_CANONICAL_ESSAY = (
     "# The Wall\n\n"
     "* one thing the wall does   \n"
@@ -5936,6 +5986,7 @@ def main_test() -> None:
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)
+        _critique_write_refuses_checked_out(root)
         _the_push_says_what_it_did_to_the_file(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)

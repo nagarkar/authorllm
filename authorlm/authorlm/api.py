@@ -5499,9 +5499,8 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #     gate STAYS on this verb: staging read `old` from local, so
     #     pushing forms onto a tab whose text the author has since edited
     #     in the Doc is the drift case, and the gate names the remedy.
-    #     (`critique write` has no such gate and opens with a `push_doc`
-    #     that would overwrite a Doc-side edit — a live hazard in that
-    #     pass, RISK-4. This design does not inherit it.)
+    #     (`critique write` carries the same gate for the same reason —
+    #     its levelling push would otherwise wipe Doc-side prose.)
     _rel, _text, _capture, _dict = _filter_capture(db, manuscript, rel,
                                                    "filter push")
     # 4b. Something to push. UNTRIAGED PROPOSALS GO TOO — see the
