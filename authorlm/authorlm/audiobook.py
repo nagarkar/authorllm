@@ -27,6 +27,7 @@ import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 from . import api
 from . import audio
@@ -36,7 +37,8 @@ from . import generation as gen
 CLIENT_FACTORY: Callable[[], audio.ElevenLabs] | None = None
 PREVIEW_RENDERER: Callable[[Path, dict, str, int], Path] | None = None
 
-METHODS = ("status", "refresh", "preview", "generate", "retake", "stitch", "jobs")
+METHODS = ("manuscripts", "status", "refresh", "preview", "generate", "retake",
+           "stitch", "jobs")
 _SESSIONS: dict[tuple, "Session"] = {}
 RECENT_JOBS = 20
 
@@ -104,6 +106,9 @@ class Session:
         from the last refresh, the jobs, the account."""
         root = self.root
         book = gen.load_book(root)
+        # Every audio url names its manuscript, so one page can hold any
+        # of them (the server falls back to its -m only when none is named).
+        m = f"?m={quote(self.manuscript['name'])}"
         chapters: list[dict] = []
         for st, _rel in gen.chapter_files(book):
             c = gen.chapter_status(root, book, gen.load_chapter(root, book, st))
@@ -129,10 +134,10 @@ class Session:
                     "text": sp["text"], "voiceName": sp.get("voiceName", ""),
                     "level": sp.get("level"),
                     "pronunciations": sp.get("pronunciations", []),
-                    "previewUrl": f"/preview/{sec['id']}.mp3" if sec["preview"] else None,
-                    "takeUrl": f"/take/{stem}/{sec['id']}.mp3" if sec["take"] else None,
+                    "previewUrl": f"/preview/{sec['id']}.mp3{m}" if sec["preview"] else None,
+                    "takeUrl": f"/take/{stem}/{sec['id']}.mp3{m}" if sec["take"] else None,
                 })
-            full["stitchedUrl"] = f"/stitched/{stem}.mp3" if full["stitched"] else None
+            full["stitchedUrl"] = f"/stitched/{stem}.mp3{m}" if full["stitched"] else None
             full["inRetailSample"] = [sid for sid in book.get("retailSample", [])
                                       if sid in texts]
             out["chapter"] = full
@@ -300,6 +305,13 @@ class Session:
 def session(workspace: str | None, manuscript: str | None, db=None,
             inline: bool = False) -> Session:
     key = (workspace, manuscript or "*")
+    if key not in _SESSIONS and manuscript:
+        # The server's default session is keyed "*" when -m was left out;
+        # the page then names that same manuscript, and it must find the
+        # same session — one worker per manuscript, never two.
+        for (w, _), s in _SESSIONS.items():
+            if w == workspace and s.manuscript["name"] == manuscript:
+                return s
     if key not in _SESSIONS:
         _SESSIONS[key] = Session(workspace, manuscript, db=db, inline=inline)
     return _SESSIONS[key]
@@ -313,6 +325,11 @@ def dispatch(method: str, params: dict[str, Any],
         raise ValueError(f"unknown audiobook method {method!r} (one of "
                          f"{', '.join(METHODS)})")
     s = session(workspace, params.get("manuscript"), db=db, inline=inline)
+    if method == "manuscripts":
+        # A fresh connection: the session's belongs to the thread that
+        # opened it, and the server answers each request on its own thread.
+        return {"current": s.manuscript["name"],
+                "manuscripts": manuscripts(db or api.open_db(workspace))}
     if method == "status":
         return s.status(params.get("stem"))
     if method == "jobs":
@@ -328,6 +345,19 @@ def dispatch(method: str, params: dict[str, Any],
     if method == "retake":
         return s.enqueue("retake", stem=params["stem"], ids=params.get("ids") or [])
     return s.enqueue("stitch", stem=params["stem"])
+
+
+def manuscripts(db) -> list[str]:
+    """The manuscripts the page's dropdown offers: those with an audio
+    export (`audio export` writes it; one without has nothing to play)."""
+    out = []
+    for m in api.list_manuscripts(db):
+        try:
+            if (audio.audio_dir(m) / audio.BOOK_FILENAME).exists():
+                out.append(m["name"])
+        except (audio.AudioError, OSError, KeyError, TypeError):
+            continue
+    return out
 
 
 def audio_file_for(s: Session, path: str) -> Path | None:
@@ -361,5 +391,5 @@ def _is_id(s: str) -> bool:
     return len(s) == 32 and all(c in "0123456789abcdef" for c in s)
 
 
-__all__ = ["Session", "session", "dispatch", "app_html", "audio_file_for",
+__all__ = ["Session", "session", "dispatch", "app_html", "audio_file_for", "manuscripts",
            "METHODS", "CLIENT_FACTORY", "PREVIEW_RENDERER"]

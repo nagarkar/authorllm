@@ -1366,8 +1366,9 @@ def check_audiobook_page() -> None:
         check("a preview job runs inline in tests and reports",
               job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
         st = s.status("kindness")
-        check("previews show up as urls", st["chapter"]["sections"][0]["previewUrl"]
-              == f"/preview/{st['chapter']['sections'][0]['id']}.mp3")
+        check("previews show up as urls that name their manuscript",
+              st["chapter"]["sections"][0]["previewUrl"]
+              == f"/preview/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
         job = s.enqueue("generate", stem="kindness", ids=[ch["sections"][1]["id"]])
         check("a generate job carries its cost and ordinal and renders",
               job["characters"] == ch["sections"][1]["characters"] and job["ordinals"] == [2]
@@ -1407,6 +1408,16 @@ def check_audiobook_page() -> None:
         out = audiobook.dispatch("status", {"manuscript": "Scratch", "stem": "kindness"},
                                  workspace=str(ws), inline=True)
         check("dispatch routes to the same session", out["chapter"]["generated"] == 4)
+        out = audiobook.dispatch("manuscripts", {"manuscript": "Scratch"},
+                                 workspace=str(ws), inline=True)
+        check("the dropdown lists the manuscripts with an audio export",
+              out == {"current": "Scratch", "manuscripts": ["Scratch"]}, str(out))
+        # The server opened without -m (key "*"); the page then names the
+        # manuscript, and must reach the same session, never a second worker.
+        audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))
+        check("a named manuscript finds the session the default opened",
+              audiobook.session(str(ws), "Scratch") is s
+              and (str(ws), "Scratch") not in audiobook._SESSIONS)
         try:
             audiobook.dispatch("dance", {"manuscript": "Scratch"}, workspace=str(ws))
             check("an unknown method is refused", False)
@@ -1438,6 +1449,14 @@ def check_audiobook_page() -> None:
                   and resp.headers["Content-Range"] == f"bytes 8-11/{8 + 32}")
             with urllib.request.urlopen(f"{base}/take/kindness/{ch['sections'][1]['id']}.mp3") as resp:
                 check("a take streams from the book's quality", resp.read() == b"MP3BYTES")
+            with urllib.request.urlopen(f"{base}/preview/{sid}.mp3?m=Scratch") as resp:
+                check("?m= names the manuscript an audio url plays from",
+                      resp.read() == b"PREVIEW-" + sid.encode())
+            try:
+                urllib.request.urlopen(f"{base}/preview/{sid}.mp3?m=Nowhere")
+                check("an unknown ?m= manuscript is a 404", False)
+            except urllib.error.HTTPError as err:
+                check("an unknown ?m= manuscript is a 404", err.code == 404)
             try:
                 urllib.request.urlopen(f"{base}/take/kindness/{'0' * 32}.mp3")
                 check("a missing take is a 404", False)

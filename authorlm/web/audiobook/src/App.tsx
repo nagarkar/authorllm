@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request, workbenchTransport } from "./transport";
+import { request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
@@ -27,13 +27,33 @@ const fmt = (n: number) => n.toLocaleString();
 const when = (iso: string | null | undefined) => iso ? iso.slice(0, 16).replace("T", " ") : "";
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 type PageMode = "chapters" | "pron";
-const parseHash = (): {mode: PageMode; stem: string; term: string} => {
-  const h = decodeURIComponent(location.hash.replace(/^#/, ""));
-  if (h.startsWith("pron")) return {mode: "pron", stem: "", term: h.slice(5)};
-  return {mode: "chapters", stem: h, term: ""};
+// #<manuscript>/<stem> or #<manuscript>/pron:<term>; a bare #<stem> opens
+// on the server's -m manuscript.
+const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
+  let h = decodeURIComponent(location.hash.replace(/^#/, ""));
+  let ms = "";
+  const slash = h.indexOf("/");
+  if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
+  if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
+  return {ms, mode: "chapters", stem: h, term: ""};
 };
 
 export function App() {
+  // The manuscript dropdown: every manuscript with an audio export. Nothing
+  // loads until the choice is known, so no request goes to the wrong book.
+  const [ms, setMs] = useState<string>("");
+  const [manuscripts, setManuscripts] = useState<string[]>([]);
+  useEffect(() => {
+    request<{current: string; manuscripts: string[]}>("manuscripts", {})
+      .then(r => {
+        const asked = parseHash().ms;
+        const pick = asked && r.manuscripts.includes(asked) ? asked : r.current;
+        setManuscripts(r.manuscripts.includes(r.current) ? r.manuscripts : [r.current, ...r.manuscripts]);
+        setManuscript(pick);
+        setMs(pick);
+      })
+      .catch(err => setError((err as Error).message));
+  }, []);
   const [status, setStatus] = useState<Status | null>(null);
   const [stem, setStem] = useState<string>(parseHash().stem);
   const [mode, setMode] = useState<PageMode>(parseHash().mode);
@@ -49,11 +69,14 @@ export function App() {
   // still in flight when the user switched chapters) is stale and dropped, so
   // the view never shows one chapter while actions target another.
   const latestStem = useRef(stem);
+  const latestMs = useRef(ms);
 
   const load = useCallback(async (s: string) => {
+    const m = latestMs.current;
+    if (!m) return;
     try {
       const st = await request<Status>("status", s ? {stem: s} : {});
-      if (s !== latestStem.current) return;
+      if (s !== latestStem.current || m !== latestMs.current) return;
       setStatus(st);
       setError("");
       if (!s && st.book.chapters.length) {
@@ -61,16 +84,30 @@ export function App() {
         const first = st.book.chapters.find(c => c.remaining > 0) || st.book.chapters[0];
         setStem(first.stem);
       }
-    } catch (err) { if (s === latestStem.current) setError((err as Error).message); }
+    } catch (err) { if (s === latestStem.current && m === latestMs.current) setError((err as Error).message); }
   }, []);
 
-  useEffect(() => { latestStem.current = stem; load(stem); }, [stem, load]);
-  useEffect(() => { location.hash = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem; }, [stem, mode, term]);
+  useEffect(() => { latestStem.current = stem; latestMs.current = ms; load(stem); }, [ms, stem, load]);
+  useEffect(() => {
+    if (!ms) return;
+    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem;
+    location.hash = `${encodeURIComponent(ms)}/${rest}`;
+  }, [ms, stem, mode, term]);
+  const switchManuscript = useCallback((name: string) => {
+    audioRef.current?.pause();
+    setNow(null);
+    setStatus(null);
+    setError("");
+    setManuscript(name);
+    latestStem.current = "";
+    setStem("");
+    setMs(name);
+  }, []);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
   useEffect(() => {
     const t = setInterval(() => load(stem), busy ? 2000 : 10000);
     return () => clearInterval(t);
-  }, [stem, busy, load]);
+  }, [ms, stem, busy, load]);
 
   const act = useCallback(async (method: string, params: Record<string, unknown>) => {
     try { await request<Job>(method, params); setError(""); await load(stem); }
@@ -108,7 +145,7 @@ export function App() {
 
   // ------------------------------------------------------- render
   if (error && !status) return <div className="boot bad">{error}</div>;
-  if (!status) return <div className="boot">Opening the audiobook…</div>;
+  if (!status) return <div className="boot">Opening {ms || "the audiobook"}…</div>;
   const {book, doc, account, jobs} = status;
   const stale = status.export;
   const refreshing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "refresh");
@@ -121,6 +158,11 @@ export function App() {
           <h1 className="display">{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
+        {manuscripts.length > 1 && <div className="bar">
+          <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
+            {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </div>}
         <div className="modes">
           <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Chapters</button>
           <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
@@ -147,7 +189,7 @@ export function App() {
       </header>
 
       {error && <div className="status bad">{error}</div>}
-      {mode === "pron" && <Workbench transport={workbenchTransport} initialTerm={term || undefined} />}
+      {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "chapters" && <JobStrip jobs={jobs} />}
 
       {mode === "chapters" && chapter && cur && (
