@@ -566,6 +566,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 Regression (#152): Doc-road escapes the pull left in local files.
 
+## `tests.test_doc_road_verbs`
+
+`authorlm/tests/test_doc_road_verbs.py`
+
+Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message, the pull's TOC-conflict pairs, and `tools/run_tests.sh`.
+
 ## `tests.test_e2e`
 
 `authorlm/tests/test_e2e.py`

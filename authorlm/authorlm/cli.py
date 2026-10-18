@@ -3012,6 +3012,32 @@ def _input_prefilled(prompt: str, initial: str) -> str:
         readline.set_startup_hook(None)
 
 
+def _directive_pairs_from_json(kind: str, file: str, path: str) -> list:
+    """`--from-json PATH`: [{tag, text, footnote?}] → apply's
+    (tag, text, footnote) triples, checked the way --tag/--text are."""
+    import json as _json
+
+    fix = f"authorlm {kind} apply {file} --from-json {path}"
+    try:
+        entries = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        sys.exit(f"error: cannot read {path} as JSON ({err}). Write a list "
+                 f"of {{tag, text, footnote?}}, then {fix}")
+    if not isinstance(entries, list) or not entries:
+        sys.exit(f"error: {path} must hold a non-empty JSON list of "
+                 f"{{tag, text, footnote?}}. {fix}")
+    pairs = []
+    for i, entry in enumerate(entries, 1):
+        if (not isinstance(entry, dict) or entry.get("tag") in (None, "")
+                or not isinstance(entry.get("text"), str)
+                or not entry["text"].strip()):
+            sys.exit(f"error: entry {i} of {path} needs a tag and a "
+                     f"non-empty text. Fix it, then {fix}")
+        pairs.append((str(entry["tag"]), entry["text"],
+                      entry.get("footnote") or None))
+    return pairs
+
+
 def cmd_directive(args):
     """`footnote|explain list|apply|resolve` — the inline directives'
     verbs (docs/footnote-directive-design.md §5/§8,
@@ -3057,7 +3083,17 @@ def cmd_directive(args):
                 _gd.get_docs_service(config, args.workspace, interactive=True))
 
     try:
-        if args.action == "apply":
+        if args.action == "apply" and getattr(args, "from_json", None):
+            if args.tag or args.text or args.footnote:
+                sys.exit(f"error: --from-json replaces --tag/--text/"
+                         f"--footnote; give one or the other. authorlm "
+                         f"{kind} apply {args.file} --from-json "
+                         f"{args.from_json}")
+            pairs = _directive_pairs_from_json(kind, args.file,
+                                               args.from_json)
+            result = dv.apply(db, manuscript, config, kind, args.file,
+                              pairs, services=_services)
+        elif args.action == "apply":
             tags, texts = args.tag or [], args.text or []
             if not tags or len(tags) != len(texts):
                 sys.exit(f"{kind} apply: give one --text for every --tag "
@@ -3111,6 +3147,75 @@ def cmd_directive(args):
         print(f"Forms written to the tab {ui.dim(ui.link(result['url']))} — "
               f"local file untouched. Edit or accept in the Doc, then "
               f"'{kind} resolve {args.file}'.")
+
+
+def cmd_revise(args):
+    """`revise stage|resolve` — thin wrappers over api.stage_revisions
+    and api.resolve_revisions (docs/outside-caller-design.md)."""
+    import json as _json
+
+    from . import gdocs as _gd
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+    revisions = None
+    if args.action == "stage":
+        payload = _stdin_text()
+        if not payload:
+            sys.exit("error: revise stage reads the revisions from stdin. "
+                     f"authorlm revise stage {args.file} --origin "
+                     f"{args.origin} < revisions.json")
+        try:
+            revisions = _json.loads(payload)
+        except ValueError as err:
+            sys.exit(f"error: stdin is not JSON ({err}). authorlm revise "
+                     f"stage {args.file} --origin {args.origin} < "
+                     "revisions.json")
+        if not isinstance(revisions, list):
+            sys.exit("error: stdin must be a JSON list of {old, new, note, "
+                     "anchor_paragraph?}. authorlm revise stage "
+                     f"{args.file} --origin {args.origin} < revisions.json")
+    try:
+        service = _gd.get_service(config, args.workspace, interactive=False)
+        docs_service = _gd.get_docs_service(config, args.workspace,
+                                            interactive=False)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    try:
+        if args.action == "stage":
+            result = api.stage_revisions(db, manuscript, args.file,
+                                         revisions, args.origin, service,
+                                         docs_service, config=config)
+        else:
+            result = api.resolve_revisions(db, manuscript, args.file,
+                                           args.origin, service,
+                                           docs_service, config=config)
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}")
+    if args.action == "stage":
+        print(f"{result['file']}: {len(result['written'])} staged, "
+              f"{len(result['failed'])} failed (origin {result['origin']}).")
+        for revision, reason in result["failed"]:
+            old = (revision.get("old") if isinstance(revision, dict)
+                   else str(revision)) or "(addition)"
+            print(ui.yellow(f"  failed: «{old[:60]}» — {reason}"))
+        for w in result.get("warnings") or []:
+            print(ui.yellow(f"warning: {w}"))
+        if result["written"]:
+            print(f"Forms in the tab {ui.dim(ui.link(result['url'] or ''))}"
+                  f" — the author rules there, then 'revise resolve "
+                  f"{result['file']} --origin {result['origin']}'.")
+        return
+    print(f"{result['file']}: {result['accepted']} accepted, "
+          f"{result['modified']} modified, {result['declined']} declined"
+          + (f"; collected as v{result['version_no']}"
+             if result.get("version_no") else "")
+          + (f" (tab state: {result['state']})"
+             if result.get("state") not in (None, "unchanged") else "")
+          + ".")
+    for w in result.get("warnings") or []:
+        print(ui.yellow(f"warning: {w}"))
 
 
 def cmd_illus(args):
@@ -6605,6 +6710,98 @@ def _print_held(result: dict) -> None:
                  "beside the comment). A question: answer in chat."))
 
 
+def _doc_road_verb(db, manuscript: dict, args) -> None:
+    """`doc diff | merge | resolve-comments` — the read-only three-way
+    view, the three-way merge into a draft, and resolving addressed
+    comments with a receipt."""
+    from . import gdocs
+
+    action = args.action
+    ids = ([args.name] if args.name else []) + list(args.more or [])
+    if action == "resolve-comments" and not ids:
+        sys.exit("error: no comment ids given. authorlm doc "
+                 "resolve-comments <comment-id>... ('doc pull' lists them)")
+    if action in ("diff", "merge") and not args.name:
+        sys.exit(f"error: no file named. authorlm doc {action} <file>")
+    config = _load_config(args)
+    try:
+        service = gdocs.get_service(config, args.workspace,
+                                    interactive=False)
+        docs_service = (gdocs.get_docs_service(config, args.workspace,
+                                               interactive=False)
+                        if action != "resolve-comments" else None)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if action == "resolve-comments":
+        master = gdocs.doc_status(db, manuscript).get("_master_id")
+        if not master:
+            sys.exit("error: no master Google Doc yet. authorlm doc push")
+        failed = [cid for cid in ids
+                  if not gdocs.resolve_comments_with_receipt(
+                      db, service, master, manuscript["id"], [cid])]
+        print(f"Resolved {len(ids) - len(failed)} of {len(ids)} comment(s) "
+              "with a receipt.")
+        if failed:
+            sys.exit(f"error: {len(failed)} comment(s) not resolved. "
+                     f"authorlm doc resolve-comments {' '.join(failed)}")
+        return
+    try:
+        if action == "diff":
+            view = gdocs.doc_three_way(db, manuscript, args.name, service,
+                                       docs_service)
+        else:
+            result = gdocs.doc_merge(db, manuscript, args.name, service,
+                                     docs_service, out=args.out)
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    if action == "merge":
+        n = len(result["conflicts"])
+        print(f"{result['relpath']}: state {result['state']}; merged "
+              f"local/base/doc → {result['out']}")
+        where = (": " + ", ".join(f"line {ln}" for ln in result["conflicts"])
+                 if n else "")
+        print(f"{n} conflict region(s){where}.")
+        print(ui.dim("next: settle each <<<<<<< local / ======= / >>>>>>> doc "
+                     "regions, copy the result over the file, then "
+                     f"'doc push {result['relpath']}'. Nothing was pushed "
+                     "and the manuscript file is untouched."))
+        return
+    rel = view["relpath"]
+    print(f"{rel}: state: {view['state']}")
+    if view["base"] is None:
+        print(ui.yellow(f"base: not found (pushed_hash "
+                        f"{view['base_hash'] or 'none'} matches no saved "
+                        "version); local→Doc instead:"))
+        print(gdocs.unified(view["local"], view["doc"], "local", "doc")
+              or "(no difference)")
+        return
+    print(f"base: pushed_hash {view['base_hash']}")
+    print(ui.bold("base → Doc:"))
+    print(gdocs.unified(view["base"], view["doc"], "base", "doc")
+          or "(Doc unchanged since the push)")
+    print(ui.bold("base → local:"))
+    print(gdocs.unified(view["base"], view["local"], "base", "local")
+          or "(local unchanged since the push)")
+    if view["state"] == "conflict":
+        print(ui.dim(f"next: 'doc merge {rel}' merges both sides against "
+                     "the base into a draft."))
+
+
+def _print_toc_pairs(pairs: dict, limit: int = 10) -> None:
+    """The (file, parent) pairs one side has and the other lacks, at
+    most `limit` per side."""
+    if not pairs.get("doc") and not pairs.get("toc"):
+        print("  Same parents on both sides; only the order differs.")
+        return
+    for side, label in (("doc", "Doc"), ("toc", "toc.toml")):
+        rows = pairs.get(side) or []
+        for name, parent in rows[:limit]:
+            where = f"under {parent}" if parent else "(top level)"
+            print(f"  {label}: {name} {where}")
+        if len(rows) > limit:
+            print(f"  {label}: … +{len(rows) - limit} more")
+
+
 def cmd_doc(args):
     from . import docs
 
@@ -6774,6 +6971,10 @@ def cmd_doc(args):
                 print(ui.dim("  not linked to a Doc yet — 'doc push' links it"))
             if entry.get("pushed_hash"):
                 print(ui.dim(f"  pushed_hash: {entry['pushed_hash']}"))
+        return
+
+    if args.action in ("diff", "merge", "resolve-comments"):
+        _doc_road_verb(db, manuscript, args)
         return
 
     if args.action in ("push", "pull"):
@@ -6950,6 +7151,7 @@ def cmd_doc(args):
                                     f"({result['toc_conflict']}) — reorder "
                                     "one side to match the other, then "
                                     "pull or push."))
+                    _print_toc_pairs(result.get("toc_conflict_pairs") or {})
                 for relpath in result["changed"]:
                     print(f"Pulled {relpath} from its tab (normalized).")
                 for relpath, refs in (result.get("dangling_images")
@@ -6967,8 +7169,10 @@ def cmd_doc(args):
                 for relpath in result["conflicts"]:
                     print(ui.yellow(
                         f"CONFLICT: {relpath} changed both locally and in its "
-                        f"tab — untouched. 'doc pull {relpath} --force' takes "
-                        "the Doc's side."))
+                        f"tab — untouched. 'doc merge {relpath}' merges both "
+                        "against the pushed base into a draft ('doc diff' "
+                        "shows each side); 'doc pull --force' would discard "
+                        "the local edits."))
                 for relpath in result.get("local_ahead", []):
                     print(f"{relpath}: local file is ahead (its tab is "
                           f"unchanged since the last push) — kept local. "
@@ -8592,14 +8796,34 @@ def build_parser() -> argparse.ArgumentParser:
                         "diff v3 v5 · diff v5 sermons")
     p.set_defaults(func=cmd_diff)
 
-    p = sub.add_parser("doc", help="manage chapter files: list, add, retire, revive, "
-                                   "push/pull (Google Docs), create-manuscript, auth")
+    p = sub.add_parser(
+        "doc", help="manage chapter files: list, add, retire, revive, "
+                    "push/pull (Google Docs), diff/merge against the pushed "
+                    "base, resolve-comments, create-manuscript, auth",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  doc push becker.md          push one file's tab\n"
+               "  doc pull                    pull every tab\n"
+               "  doc diff becker.md          base→Doc and base→local diffs "
+               "and the three-way state (writes nothing)\n"
+               "  doc merge becker.md         three-way merge into "
+               "_drafts/becker.merged.md (never pushes)\n"
+               "  doc resolve-comments AAAB AAAC   resolve addressed "
+               "comments with a receipt")
     p.add_argument("action", choices=["list", "add", "retire", "revive",
                                       "show", "push", "pull", "open", "auth",
                                       "create-manuscript", "threads",
-                                      "propose", "decide"])
+                                      "propose", "decide", "diff", "merge",
+                                      "resolve-comments"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
-                                           "(retire/revive/push/pull)")
+                                           "(retire/revive/push/pull/diff/"
+                                           "merge); resolve-comments: the "
+                                           "first comment id")
+    p.add_argument("more", nargs="*", metavar="COMMENT_ID",
+                   help="resolve-comments: further comment ids")
+    p.add_argument("--out", metavar="PATH",
+                   help="merge: write the merge here (default "
+                        "_drafts/<stem>.merged.md under the manuscript)")
     p.add_argument("--title", help="heading for a new document / Doc title "
                                    "(push, create-manuscript)")
     p.add_argument("--open", action="store_true",
@@ -9111,7 +9335,32 @@ def build_parser() -> argparse.ArgumentParser:
                             "the tag named by TAG (a --tag handle) — the "
                             "passage lands with its superscript, the "
                             "definition joins the file's block, same review")
+        p.add_argument("--from-json", metavar="PATH", dest="from_json",
+                       help="apply: read the pairs from a JSON list of "
+                            "{tag, text, footnote?} — the same as repeated "
+                            "--tag/--text (and --footnote); not with them")
         p.set_defaults(func=cmd_directive)
+
+    p = sub.add_parser(
+        "revise",
+        help="outside revisions on the Doc road: stage (JSON on stdin → "
+             "pending forms in the file's tab) and resolve (read the "
+             "author's ruling back and land it)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="examples:\n"
+               "  revise stage becker.md --origin harvest < revs.json\n"
+               "      revs.json: [{\"old\": \"exact text\", \"new\": "
+               "\"replacement\", \"note\": \"why\", "
+               "\"anchor_paragraph\": 3}]\n"
+               "      old \"\" adds a paragraph after anchor_paragraph\n"
+               "  revise resolve becker.md --origin harvest\n"
+               "      lands what the author left or reworded; an emptied "
+               "form is declined")
+    p.add_argument("action", choices=["stage", "resolve"])
+    p.add_argument("file", help="the manuscript file")
+    p.add_argument("--origin", required=True, metavar="NAME",
+                   help="the caller's name; resolve lands only its forms")
+    p.set_defaults(func=cmd_revise)
 
     p = sub.add_parser(
         "illus",

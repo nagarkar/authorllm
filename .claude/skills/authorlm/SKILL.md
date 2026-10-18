@@ -1690,6 +1690,10 @@ run the CLI via Bash:
   1. A change request: register the edit beside the comment with `doc propose <comment-id>` ({"old","new","note"}; the anchor stays). A question: answer in chat.
   2. The author reviews in the margin; the next pull applies the verdict and closes the thread.
   3. `doc push <file>` again: a held paragraph lands once no open comment is anchored in it. While a proposal is still pending in that paragraph, a push that changes it stops with "settle the thread first" (pull the verdict before pushing).
+  **Never rebuild a tab that carries margin comments; a rebuild orphans every anchor (author ruling 2026-10-17).** `doc push` holds back paragraphs that carry comments; address each comment and the author reviews, then push. On "changed both locally and in its tab", run `authorlm doc merge <file>` (three-way against the pushed base; writes `_drafts/<stem>.merged.md`, or `--out PATH`, and prints each conflict region's line) and settle its conflicts; never reach for `doc pull --force` first. After addressing a comment, `authorlm doc resolve-comments <id>...` resolves it with a receipt.
+  A push that stops with "tab structure and export disagree" names the first divergent paragraph; when Google's export joined two paragraphs with a hard line break (an illustration tag directly above a `[^XX]:` definition), it says where to add the blank line in the Doc.
+- diff: `authorlm doc diff <file>` prints base→Doc and base→local unified diffs and the three-way state (unchanged / local_ahead / doc_ahead / conflict). Read-only; run it before any merge or pull on a contested file.
+- outside revisions: `authorlm revise stage <file> --origin NAME < revisions.json` (a JSON list of {old, new, note, anchor_paragraph?}) puts them in the tab as pending forms and prints what was staged and what failed, with reasons; after the author rules in the tab, `authorlm revise resolve <file> --origin NAME` lands them (accepted / modified / declined, plus warnings).
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
   A pull also harvests every open Doc comment (no addressing prefix
@@ -1802,6 +1806,10 @@ caption]` — and that tag is never consumed or replaced. Collect/pull
 output reports new unrendered slots ("new illustrations found"); relay
 that and ASK before rendering — rendering is always an explicit,
 consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
+**When the author asks to see an image or to change one, show the
+current pinned render first and edit its description file; render
+something new only once the change is agreed.** On 2026-10-17 three
+renders were wasted on a misread request.
 **Prompt-critique duty (unprompted, before any render)**: when a pull
 or collect surfaces NEW or CHANGED illustration descriptions, critique
 them on the spot against `authorlm/illustration-craft.md` (repo) — the
@@ -1924,7 +1932,10 @@ where it is requested: read the sentence before the anchor first — the
 footnote supports THAT claim, and the gist says how** (house law,
 ratified 2026-09-03). It carries what the sentence cannot — a source, an
 etymology, a qualification — and never continues the argument (house
-law). An explanation is the author's prose at that position, explaining
+law). **A footnote never qualifies a claim known to be wrong. Correct
+the claim in the text first (stage it with `revise stage`), and the
+footnote carries the source only (house style law, ratified
+2026-10-17).** An explanation is the author's prose at that position, explaining
 what the gist names and nothing more. The proposed citation rule
 (verified sources only, unverified flags) was REJECTED by the author on
 2026-09-03: the anchor claim governs the draft, not the source
@@ -1944,7 +1955,9 @@ Then ONE `apply_footnote` / `apply_explain` per file carrying every
 agreed text as `items: [{tag, text, footnote?}]` (`tag` is the ordinal in the
 file — first open tag is 1 — or an unambiguous gist excerpt); the CLI
 `footnote apply` / `explain apply <file> --tag N --text …` takes several
-pairs at once. **Two roads, chosen by the file's checkout state
+pairs at once; with many, write them to a JSON list of `{tag, text,
+footnote?}` and run `footnote apply <file> --from-json PATH` (same
+semantics; not combined with `--tag`/`--text`). **Two roads, chosen by the file's checkout state
 (ratified 2026-09-03):**
 - **Not checked out** → direct apply. The tag becomes `[^label]` with
   `[^label]: …` appended after the file's last definition (series

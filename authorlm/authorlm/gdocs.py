@@ -1757,23 +1757,187 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     return {"moved": moved}
 
 
+def text_hash(text: str) -> str:
+    """The base hash a mapping's `pushed_hash` records: the first 16 hex
+    digits of the text's sha256."""
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
     """Classify a pull target by the three-way state (agreed base / local /
     tab). 'conflict' only when BOTH sides moved off the base — a tab that
     still matches the base is merely stale ('local_ahead'), never a
     conflict. No recorded base and drift → 'changed' (the Doc wins, the
     historical behavior; local stays in version history)."""
-    import hashlib
-
     if tab_text == local_text:
         return "unchanged"
     if not base_hash:
         return "changed"
-    if hashlib.sha256(local_text.encode()).hexdigest()[:16] == base_hash:
+    if text_hash(local_text) == base_hash:
         return "changed"       # only the tab moved — safe to pull
-    if hashlib.sha256(tab_text.encode()).hexdigest()[:16] == base_hash:
+    if text_hash(tab_text) == base_hash:
         return "local_ahead"   # only local moved — keep local, tab is stale
     return "conflict"
+
+
+def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
+                    master_id: str) -> tuple[set, list[str]]:
+    """The split boundaries and live tab order pull_doc and diff_push
+    use: every live tab title (not only mapped essay files), the
+    manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
+    mapped = [f for f, e in links.items()
+              if not f.startswith("_") and isinstance(e, dict)
+              and e.get("tab_id")]
+    pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
+    tab_props: list[tuple[str, str]] = []
+    tab_doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=True).execute()
+    walk_tabs(tab_doc.get("tabs", []), tab_props, [])
+    known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
+    titles = {t for _, t in tab_props if t}
+    return known | titles, [t for _, t in tab_props if t]
+
+
+def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
+                       bridge: "DocBridge", relpath: str) -> str | None:
+    """`relpath`'s tab as normalized markdown, split out of the whole-Doc
+    export exactly as pull_doc splits it; None when the export has no
+    section for it."""
+    boundaries, order = _tab_boundaries(links, bridge, docs_service,
+                                        master_id)
+    data = service.files().export(
+        fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    whole = unescape_export_math(
+        data.decode("utf-8") if isinstance(data, bytes) else str(data))
+    sections = split_tabbed_export(whole, boundaries, order=order)
+    if relpath not in sections:
+        return None
+    return normalize_markdown(sections[relpath])
+
+
+def find_pushed_base(db: Database, manuscript: dict, relpath: str,
+                     base_hash: str | None,
+                     also: tuple = ()) -> str | None:
+    """The text whose hash is `base_hash`: one of `also` (the current
+    sides — a side that never moved IS the base), else the newest
+    manuscript_versions snapshot of `relpath` that hashes to it, raw or
+    in the bridge's canonical form (normalized, embed-free)."""
+    if not base_hash:
+        return None
+    for text in also:
+        if text is not None and text_hash(text) == base_hash:
+            return text
+    rows = db.all(
+        "SELECT json_extract(files, ?) AS text FROM manuscript_versions "
+        "WHERE manuscript_id = ? ORDER BY version_no DESC",
+        ('$."' + relpath.replace('"', '\\"') + '"', manuscript["id"]))
+    seen: set[str] = set()
+    for row in rows:
+        raw = row["text"]
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        normalized = normalize_markdown(raw)
+        for text in (strip_embed_lines(normalized), normalized,
+                     strip_embed_lines(raw), raw):
+            if text_hash(text) == base_hash:
+                return text
+    return None
+
+
+def doc_three_way(db: Database, manuscript: dict, query: str, service,
+                  docs_service, bridge: "DocBridge | None" = None) -> dict:
+    """Read-only three-way view of one file: the Doc side (its tab, read
+    the way pull_doc reads it), the local side (embed-free), and the last
+    pushed base (the text hashing to the mapping's `pushed_hash`). Writes
+    nothing. Returns {relpath, state (unchanged | local_ahead | doc_ahead
+    | conflict), base_hash, base (None when not found), doc, local}."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    relpath, path = _resolve(bridge, query)
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    master_id = links.get("_master_id")
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    if not (master_id and entry.get("tab_id")):
+        raise LookupError(f"'{relpath}' has no tab in the master Doc. "
+                          f"authorlm doc push {relpath}")
+    tab = fetch_tab_markdown(service, docs_service, master_id, links,
+                             bridge, relpath)
+    if tab is None:
+        raise LookupError(f"the Doc export has no section for '{relpath}' "
+                          "(was its tab renamed?). authorlm doc list")
+    doc, _ = threads_mod.strip_pending(tab)
+    local = strip_embed_lines(path.read_text(encoding="utf-8")
+                              if path.exists() else "")
+    base_hash = entry.get("pushed_hash")
+    state = three_way(doc, local, base_hash)
+    return {"relpath": relpath,
+            "state": "doc_ahead" if state == "changed" else state,
+            "base_hash": base_hash,
+            "base": find_pushed_base(db, manuscript, relpath, base_hash,
+                                     also=(local, doc)),
+            "doc": doc, "local": local}
+
+
+def unified(a: str, b: str, from_name: str, to_name: str) -> str:
+    """A unified diff of two texts, '' when they are equal."""
+    import difflib
+
+    return "\n".join(difflib.unified_diff(
+        a.splitlines(), b.splitlines(), fromfile=from_name,
+        tofile=to_name, lineterm=""))
+
+
+def doc_merge(db: Database, manuscript: dict, query: str, service,
+              docs_service, out=None,
+              bridge: "DocBridge | None" = None) -> dict:
+    """Three-way merge of the local file and its tab against the pushed
+    base (`git merge-file -p`, labels local/base/doc), written to `out`
+    (default `_drafts/<stem>.merged.md` under the manuscript, which
+    observation ignores). Never pushes, never writes the manuscript file.
+    Returns {relpath, state, out, conflicts: [line number of each
+    conflict region's '<<<<<<< local' line]}."""
+    import subprocess
+    import tempfile
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    view = doc_three_way(db, manuscript, query, service, docs_service,
+                         bridge=bridge)
+    relpath = view["relpath"]
+    if view["base"] is None:
+        raise LookupError(
+            f"no pushed base for {relpath}: no saved version hashes to its "
+            f"pushed_hash ({view['base_hash'] or 'none recorded'}), so there "
+            f"is nothing to merge against. Compare the sides and settle by "
+            f"hand: authorlm doc diff {relpath}")
+    with tempfile.TemporaryDirectory(prefix="authorlm-merge-") as tmp:
+        names = {}
+        for side in ("local", "base", "doc"):
+            names[side] = Path(tmp) / side
+            names[side].write_text(view[side], encoding="utf-8")
+        try:
+            run = subprocess.run(
+                ["git", "merge-file", "-p", "-L", "local", "-L", "base",
+                 "-L", "doc", str(names["local"]), str(names["base"]),
+                 str(names["doc"])],
+                capture_output=True, text=True)
+        except FileNotFoundError:
+            raise LookupError("git is not installed and doc merge shells "
+                              "out to 'git merge-file'. xcode-select "
+                              "--install") from None
+    if run.returncode < 0 or run.returncode > 127:
+        raise LookupError(f"git merge-file failed ({run.stderr.strip()}). "
+                          f"authorlm doc diff {relpath}")
+    merged = run.stdout
+    conflicts = [i for i, line in enumerate(merged.splitlines(), 1)
+                 if line.startswith("<<<<<<< local")]
+    target = (Path(out) if out else
+              bridge.root / "_drafts" / f"{Path(relpath).stem}.merged.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(merged, encoding="utf-8")
+    return {"relpath": relpath, "state": view["state"], "out": str(target),
+            "conflicts": conflicts}
 
 
 def tab_marked_markdown(db: Database, manuscript: dict, file: str,
@@ -2303,6 +2467,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report["toc_ahead"] = True
         else:
             report["toc_conflict"] = toc_state
+            doc_set = {tuple(x) for x in doc_struct}
+            local_set = {tuple(x) for x in local_struct}
+            report["toc_conflict_pairs"] = {
+                "doc": [tuple(x) for x in doc_struct
+                        if tuple(x) not in local_set],
+                "toc": [tuple(x) for x in local_struct
+                        if tuple(x) not in doc_set]}
     _save_mapping(db, manuscript, meta)
 
     if with_comments:
@@ -4057,6 +4228,62 @@ def _md_paragraphs(markdown: str) -> list[str]:
     return [p for p in re.split(r"\n\s*\n", markdown) if p.strip()]
 
 
+def _norm_para(text: str) -> str:
+    return re.sub(r"\W+", "", text).lower()
+
+
+def _same_para(a: str, b: str, width: int = 40) -> bool:
+    """Doc paragraph vs export paragraph, markup aside: their normalized
+    texts (word characters only) agree on a common prefix."""
+    na, nb = _norm_para(a), _norm_para(b)
+    k = min(len(na), len(nb), width)
+    return na[:k] == nb[:k] if k else na == nb
+
+
+def first_divergence(doc_texts: list[str], export_paras: list[str]) -> dict:
+    """Where the tab's paragraphs and the export's paragraphs part ways,
+    aligned by normalized text. {index (0-based), doc, export,
+    hard_break_after}: `hard_break_after` is the Doc paragraph the export
+    joined to the next one with a hard line break (Google's export does
+    this to an illustration tag followed directly by a footnote
+    definition, with no empty paragraph between), else None."""
+    doc = [t.strip("\n") for t in doc_texts]
+    exp = [p.strip("\n") for p in export_paras]
+    for i in range(min(len(doc), len(exp))):
+        head, sep, tail = exp[i].partition("\n")
+        if (sep and i + 1 < len(doc) and _same_para(doc[i], head)
+                and _same_para(doc[i + 1], tail)):
+            return {"index": i, "doc": doc[i], "export": exp[i],
+                    "hard_break_after": doc[i]}
+        if not _same_para(doc[i], exp[i]):
+            return {"index": i, "doc": doc[i], "export": exp[i],
+                    "hard_break_after": None}
+    i = min(len(doc), len(exp))
+    return {"index": i, "doc": doc[i] if i < len(doc) else "",
+            "export": exp[i] if i < len(exp) else "",
+            "hard_break_after": None}
+
+
+def divergence_note(doc_texts: list[str], export_paras: list[str],
+                    relpath: str) -> str:
+    """The tail of diff_push's count-disagreement error: the first
+    divergence, both sides clipped to 80 characters, and the fix."""
+    d = first_divergence(doc_texts, export_paras)
+
+    def clip(text: str) -> str:
+        text = text.replace("\n", "\\n")
+        return text if len(text) <= 80 else text[:79] + "…"
+
+    note = (f"; first divergence at paragraph {d['index'] + 1}: "
+            f"Doc «{clip(d['doc'])}» vs export «{clip(d['export'])}»")
+    if d["hard_break_after"] is not None:
+        words = " ".join(d["hard_break_after"].split()[:6])
+        return (note + ". Google's export joined two paragraphs with a hard "
+                f"line break: add a blank line after «{words}» in the Doc, "
+                f"then authorlm doc push {relpath}")
+    return note + " — settle threads and use a rebuild push"
+
+
 def _refuse_table_orphans(service, master_id: str, relpath: str,
                           tables: list[dict]) -> None:
     """Stop a surgical push that would replace a table carrying open
@@ -4246,27 +4473,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     # (it-x7-2, diff_push parity). docs_service is required here (already
     # used unconditionally below for paragraph reads and batchUpdate), so
     # this is not best-effort the way pull_doc/reconcile's is.
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
-    pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
-    tab_props: list[tuple[str, str]] = []
-    tab_doc = docs_service.documents().get(
-        documentId=master_id, includeTabsContent=True).execute()
-    walk_tabs(tab_doc.get("tabs", []), tab_props, [])
-    known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
-    titles = {t for _, t in tab_props if t}
-    boundaries = known | titles
-    tab_order = [t for _, t in tab_props if t]
-
     def tab_markdown() -> str:
-        data = service.files().export(
-            fileId=master_id, mimeType=MARKDOWN_MIME).execute()
-        whole = unescape_export_math(
-        data.decode("utf-8") if isinstance(data, bytes) else str(data))
-        return normalize_markdown(
-            split_tabbed_export(whole, boundaries, order=tab_order)
-            .get(relpath, ""))
+        text = fetch_tab_markdown(service, docs_service, master_id, links,
+                                  bridge, relpath)
+        return text if text is not None else normalize_markdown("")
 
     anchors: list[dict] | None = None
     for attempt in (1, 2):
@@ -4291,8 +4501,9 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         if len(doc_paras) != len(tab_paras):
             raise LookupError(
                 f"diff push: tab structure and export disagree "
-                f"({len(doc_paras)} vs {len(tab_paras)} paragraphs) — "
-                "settle threads and use a rebuild push")
+                f"({len(doc_paras)} vs {len(tab_paras)} paragraphs)"
+                + divergence_note([d["text"] for d in doc_paras],
+                                  tab_paras, relpath))
 
         # Replaces use <<old>>{{new}}; critique insertions are {{new}}
         # alone — both block any overlapping surgical edit, whole push,
