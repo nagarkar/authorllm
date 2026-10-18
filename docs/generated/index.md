@@ -596,6 +596,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 
 Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
+## `tests.test_gdocs_clamp`
+
+`authorlm/tests/test_gdocs_clamp.py`
+
+`gdocs.clamp` is the one truncation used in Doc fault lines, settle receipts, and CLI proposal diffs.
+
 ## `tests.test_generated_docs`
 
 `authorlm/tests/test_generated_docs.py`
@@ -607,6 +613,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 `authorlm/tests/test_interlocutor.py`
 
 Interlocutor tests (docs/interlocutor-design.md).
+
+## `tests.test_lens_protection`
+
+`authorlm/tests/test_lens_protection.py`
+
+`lenses.protected_files` and `_is_card` gate which chapters a lens may touch and how the reading-order block labels them.
 
 ## `tests.test_live_llm`
 
@@ -625,6 +637,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_media_gen_helpers`
+
+`authorlm/tests/test_media_gen_helpers.py`
+
+Pure helpers behind Veo clip generation: duration buckets, day spend, prompt composition, and take staleness.
 
 ## `tests.test_morph_targets`
 
@@ -679,6 +697,18 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_summaries.py`
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_timestamp_seconds`
+
+`authorlm/tests/test_timestamp_seconds.py`
+
+`media.timestamp_seconds` turns a clip's `start:` / `end:` field into seconds for the end-after-start check and still-vs-video gate.
+
+## `tests.test_toc_ancestors`
+
+`authorlm/tests/test_toc_ancestors.py`
+
+`passes.toc_ancestors` walks toc.toml parents nearest-first for the critique/intent scope chain.
 
 ## `tests.test_toc_outside`
 
