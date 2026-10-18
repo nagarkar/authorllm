@@ -355,6 +355,21 @@ class MediaTests(unittest.TestCase):
             "as they were given a choice\"")
         self.assertTrue(any("fragment" in r for r in reasons), reasons)
 
+    def test_audio_field(self):
+        entries = self.listing(
+            "[Montage: m]\n\n[Clip: | use: _assets/temple.mp4 | audio: duck]\n\n"
+            "Prose under the music.\n\n[/Montage]\n\n"
+            "[Collage: c]\n\n[Clip: | use: _assets/temple.mp4]\n\n[/Collage]\n\n"
+            "[Clip: | use: _assets/temple.mp4 | audio: full]\nWords.\n[/Clip]\n")["media"]
+        clips = [e for e in entries if e["kind"] == "clip"]
+        self.assertEqual([c["audio"] for c in clips], ["duck", "full", "full"])
+        self.assertEqual(clips[0]["status"], "ready")
+        self.assertTrue(any("only a Collage allows" in e for e in clips[2]["errors"]))
+        span = self.one("[Clip: | use: _assets/temple.mp4]\nWords.\n[/Clip]\n")
+        self.assertEqual(span["audio"], "mute")
+        bad = self.one("[Clip: | use: _assets/temple.mp4 | audio: loud]\nW.\n[/Clip]\n")
+        self.assertTrue(any("not one of" in e for e in bad["errors"]))
+
     def test_key_names_what_the_clip_shows(self):
         (self.root / "ecce.md").write_text(
             "[Collage: c]\n\n[Clip: source: The Matrix Reloaded moment: Neo "

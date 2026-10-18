@@ -950,10 +950,12 @@ def set_clip_fields(key: str, youtube: str | None = None,
                     start: str | None = None, end: str | None = None,
                     use: str | None = None, text: str | None = None,
                     cast: str | None = None, prior: str | None = None,
-                    look: str | None = None, clear: list[str] | None = None,
+                    look: str | None = None, audio: str | None = None,
+                    clear: list[str] | None = None,
                     manuscript: str | None = None) -> dict:
     """Write fields into a [Clip] tag: e.g. the confirmed `youtube` url
-    and `start`/`end` timestamps (m:ss) the author chose after watching.
+    and `start`/`end` timestamps (m:ss) the author chose after watching,
+    or `audio` (mute | duck | full: what happens to the clip's own sound).
     Given fields are set, `clear` names fields to remove, the rest keep
     their order. Returns the new tag line and the clip's errors from
     list_media. Write only values the author confirmed. A file checked out
@@ -967,7 +969,8 @@ def set_clip_fields(key: str, youtube: str | None = None,
         ms = _manuscript(db, manuscript)
         _clip_guard(db, ms, key)
         given = {"youtube": youtube, "start": start, "end": end, "use": use,
-                 "text": text, "cast": cast, "prior": prior, "look": look}
+                 "text": text, "cast": cast, "prior": prior, "look": look,
+                 "audio": audio}
         updates = {k: v for k, v in given.items() if v is not None}
         for name in clear or []:
             updates[name] = None
