@@ -698,12 +698,6 @@ _No docstring._
 
 Distil beliefs from the author's decisions already on record.
 
-## `tools.drive_docx`
-
-`authorlm/tools/drive_docx.py`
-
-Upload or refresh a DOCX on Google Drive as a Google Doc, using the Doc bridge's own credentials. Usage: python3 tools/drive_docx.py <file.docx> --title "Name" (create) python3 tools/drive_docx.py <file.docx> --update <fileId> (replace content in place) Run from the authorlm package directory (needs .env and config as the CLI does). Non-interactive: the OAuth token must already exist (run 'authorlm doc auth' on the author's word if it does not).
-
 ## `tools.measure_adjudication`
 
 `authorlm/tools/measure_adjudication.py`
