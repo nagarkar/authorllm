@@ -4526,6 +4526,52 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
           f"anchored={fake3.anchored_text()!r}")
 
+    # Atomic rollback must not re-record the local file as the pushed
+    # base: a levelling push that HELD a commented paragraph left the tab
+    # on old text while local kept the author's edit. Hashing local as
+    # the base would make the next pull read doc-ahead and wipe that edit.
+    hold_doc = ("# Sky\n\nAlpha stays.\n\n"
+                "Beta holds.[Footnote: cite Job]\n\nOmega closes.\n")
+    hold_local = hold_doc.replace("Beta holds.", "Beta holds firmly.")
+    db4, ms4, msdir4, _ = _outside_fixture(root, "sky-ws-4", essay=hold_doc)
+    (msdir4 / "solo.md").write_text(hold_local)
+    meta = gdocs._mapping(db4, ms4)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db4, ms4, meta)
+    fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.threads_mod.render_insertion
+
+    def never_reads_back(new):
+        return "never in the tab"
+
+    gdocs.threads_mod.render_insertion = never_reads_back
+    try:
+        rep = dv.apply(db4, ms4, {}, "footnote", "solo.md",
+                       [(1, "Job 38.")],
+                       services=lambda: (fake4, fake4))
+    finally:
+        gdocs.threads_mod.render_insertion = real_insertion
+    links = gdocs._mapping(db4, ms4).get("gdocs", {})
+    local = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+        (msdir4 / "solo.md").read_text(encoding="utf-8")))
+    # pushed_hash is the export's markdown (fetch_tab_markdown), not the
+    # Docs body runs — same side pull/three_way read.
+    tab = gdocs.threads_mod.strip_pending(gdocs.fetch_tab_markdown(
+        fake4, fake4, links["_master_id"], links,
+        gdocs.manuscript_bridge(ms4), "solo.md"))[0]
+    base_hash = (links.get("solo.md") or {}).get("pushed_hash")
+    state = gdocs.three_way(tab, local, base_hash)
+    check("atomic rollback after a held push keeps the tab's base: pull "
+          "still sees local ahead, and the author's held edit stays",
+          rep["landed"] == [] and rep["failed"]
+          and "Beta holds firmly." in local and "Beta holds." in tab
+          and "firmly" not in tab
+          and state == "local_ahead"
+          and (msdir4 / "solo.md").read_text() == hold_local,
+          f"state={state} hash={base_hash}\nlocal={local!r}\ntab={tab!r}\n"
+          f"{rep}")
+
 
 OUTSIDE_ESSAY = (
     "# Topic\n\n"
