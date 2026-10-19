@@ -6818,6 +6818,32 @@ def cmd_doc(args):
               "~/.authorlm/gdocs_token.json.")
         return
     manuscript = _manuscript(db, args)
+    if args.action == "bind":
+        # Adopt an existing master Doc (fresh workspace, cloud session):
+        # records its id so 'doc pull' fills the folder from its tabs.
+        from . import gdocs
+
+        if not args.name:
+            sys.exit("usage: doc bind <doc-id-or-url> [-m <manuscript>] "
+                     "[--force]")
+        try:
+            docs_service = gdocs.get_docs_service(
+                _load_config(args), args.workspace, interactive=False)
+            result = gdocs.bind_master(db, manuscript, args.name,
+                                       docs_service, force=args.force)
+        except (ValueError, LookupError) as err:
+            sys.exit(f"error: {err}")
+        except Exception as err:  # the Docs API: not found, no access
+            sys.exit(f"error: cannot read that Doc: {err}")
+        verb = "Rebound" if result["replaced"] else "Bound"
+        print(f"{verb} {manuscript['name']} to {ui.link(result['url'])}")
+        n = len(result["tabs"])
+        print(f"  {n} .md tab(s) found; 'doc pull -m {manuscript['name']}' "
+              "writes each as a local file.")
+        if result["replaced"]:
+            print(ui.dim(f"  previous Doc {result['replaced']} is no longer "
+                         "linked; its per-file tab ids were dropped."))
+        return
     if args.action == "threads":
         from . import threads as th
 
@@ -8804,6 +8830,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="examples:\n"
                "  doc push becker.md          push one file's tab\n"
                "  doc pull                    pull every tab\n"
+               "  doc bind <doc-id-or-url>    adopt an existing master Doc "
+               "(fresh workspace); then doc pull fills the folder\n"
                "  doc diff becker.md          base→Doc and base→local diffs "
                "and the three-way state (writes nothing)\n"
                "  doc merge becker.md         three-way merge into "
@@ -8812,12 +8840,13 @@ def build_parser() -> argparse.ArgumentParser:
                "comments with a receipt")
     p.add_argument("action", choices=["list", "add", "retire", "revive",
                                       "show", "push", "pull", "open", "auth",
-                                      "create-manuscript", "threads",
+                                      "bind", "create-manuscript", "threads",
                                       "propose", "decide", "diff", "merge",
                                       "resolve-comments"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
                                            "(retire/revive/push/pull/diff/"
-                                           "merge); resolve-comments: the "
+                                           "merge); bind: the Doc id or URL; "
+                                           "resolve-comments: the "
                                            "first comment id")
     p.add_argument("more", nargs="*", metavar="COMMENT_ID",
                    help="resolve-comments: further comment ids")
@@ -8830,7 +8859,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="open the Google Doc in your browser after push")
     p.add_argument("--force", action="store_true",
                    help="pull: take the Doc's version even if the local file "
-                        "changed since the push (local edits stay in history)")
+                        "changed since the push (local edits stay in history); "
+                        "bind: replace a master Doc already recorded")
     p.add_argument("--rebuild", action="store_true",
                    help="push: rebuild the file's tab even though it carries "
                         "comments, accepting that their anchors are "

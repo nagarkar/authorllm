@@ -876,6 +876,69 @@ def tab_url(master_id: str, tab_id: str | None = None) -> str:
     return f"{base}?tab={tab_id}" if tab_id else base
 
 
+_DOC_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def parse_doc_id(text: str) -> str:
+    """A Docs URL or a bare id -> the id. A URL carries it after /d/;
+    anything else must be the id itself (letters, digits, - and _)."""
+    text = (text or "").strip()
+    m = re.search(r"/d/([A-Za-z0-9_-]+)", text)
+    if m:
+        return m.group(1)
+    if _DOC_ID_RE.fullmatch(text):
+        return text
+    raise ValueError(f"not a Google Doc id or URL: {text!r}")
+
+
+def bind_master(db: Database, manuscript: dict, doc_ref: str,
+                docs_service, force: bool = False,
+                bridge: DocBridge | None = None) -> dict:
+    """Adopt an EXISTING master Doc for a manuscript that has none (a fresh
+    workspace, a cloud session): record its id so 'doc pull' can fill the
+    manuscript folder from its tabs instead of 'doc push' creating a new
+    Doc. The Doc must be reachable and must carry a tab named exactly the
+    manuscript's doc_name (the identity of an AuthorLM-managed Doc); the
+    container tab is recorded too. A manuscript already bound to a
+    different Doc keeps it unless `force`. Writes nothing to the Doc."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    master_id = parse_doc_id(doc_ref)
+    meta = _mapping(db, manuscript)
+    entry = meta.setdefault(bridge.meta_key, {})
+    current = entry.get("_master_id")
+    if current and current != master_id and not force:
+        raise LookupError(
+            f"{manuscript['name']} is already bound to "
+            f"{tab_url(current)}; pass --force to replace it")
+    doc = docs_service.documents().get(
+        documentId=master_id, includeTabsContent=False).execute()
+    tab_props: list[tuple[str, str]] = []
+    walk_tabs(doc.get("tabs", []), tab_props, [])
+    titles = [t for _, t in tab_props]
+    container = next((tid for tid, t in tab_props if t == bridge.doc_name),
+                     None)
+    if container is None:
+        raise LookupError(
+            f"the Doc has no tab named '{bridge.doc_name}'; its tabs are: "
+            + (", ".join(titles) or "none")
+            + ". Bind the manuscript whose name matches, or rename the "
+            "Doc's root tab.")
+    if current != master_id:
+        entry["_master_id"] = master_id
+        entry["_doc_version"] = entry.get("_doc_version", 0) + 1
+        if current:
+            # Per-file tab ids belonged to the old Doc; a pull relinks them.
+            for key in [k for k, v in entry.items()
+                        if isinstance(v, dict) and "tab_id" in v]:
+                del entry[key]
+    entry["_container_tab"] = container
+    _save_mapping(db, manuscript, meta)
+    md_tabs = [t for t in titles if t.endswith(".md")]
+    return {"doc_id": master_id, "url": tab_url(master_id),
+            "container_tab": container, "tabs": md_tabs,
+            "replaced": current if current and current != master_id else None}
+
+
 def ensure_master(db: Database, manuscript: dict, meta: dict,
                   drive, docs_service, bridge: DocBridge | None = None) -> str:
     """One master Doc per bridge, one tab per file (tab title = the

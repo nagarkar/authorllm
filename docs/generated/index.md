@@ -560,6 +560,12 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_doc_bind`
+
+`authorlm/tests/test_doc_bind.py`
+
+`doc bind`: adopt an existing master Doc for a manuscript that has none (a fresh workspace, a cloud session), so `doc pull` fills the folder from its tabs instead of `doc push` creating a new Doc.
+
 ## `tests.test_doc_road_escapes`
 
 `authorlm/tests/test_doc_road_escapes.py`
