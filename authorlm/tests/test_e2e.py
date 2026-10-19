@@ -3350,8 +3350,9 @@ def scenario_doc_comments(root: Path) -> None:
     check("located comment carries transition-style location",
           projection[0]["location"] == "one.md#**The Middle**",
           projection[0]["location"])
-    check("ambiguous comment reported unattributed",
-          projection[1]["location"] == "(unattributed)",
+    check("ambiguous comment reported unattributed, saying why",
+          projection[1]["location"]
+          == "(unattributed: quote found in 2 files)",
           projection[1]["location"])
     ingest_comments(db, manuscript, comments, files)
     check("re-ingestion dedupes on comment id",

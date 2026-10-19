@@ -634,6 +634,15 @@ def clamp(text: str, limit: int = 60) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def quote_hits(files: dict[str, str], quoted: str) -> list[str]:
+    """Every file whose text holds the comment's anchor text, matched with
+    normalized whitespace."""
+    needle = _flat(quoted)
+    if not needle:
+        return []
+    return [rel for rel, text in files.items() if needle in _flat(text)]
+
+
 def locate_quote(files: dict[str, str],
                  quoted: str) -> tuple[str | None, str | None]:
     """(relpath, nearest heading) for a comment's anchor text, matched with
@@ -643,9 +652,7 @@ def locate_quote(files: dict[str, str],
     from .revisions import _nearest_heading, _paragraphs
 
     needle = _flat(quoted)
-    if not needle:
-        return None, None
-    hits = [rel for rel, text in files.items() if needle in _flat(text)]
+    hits = quote_hits(files, quoted)
     if len(hits) != 1:
         return None, None
     relpath = hits[0]
@@ -659,12 +666,47 @@ def locate_quote(files: dict[str, str],
     return relpath, _nearest_heading(paragraphs, index)
 
 
+def attribute_quote(quoted: str, *sources: dict[str, str]
+                    ) -> tuple[str | None, str | None, str | None]:
+    """(relpath, nearest heading, why-not) for a comment's anchor text.
+    Drive never says which tab a comment sits in, so the quote is the only
+    handle: each source (relpath → text) is tried in turn — the local
+    files, then the tab texts of the Doc just exported (a tab the local
+    files do not yet carry, e.g. one written or split in the Doc) — and
+    the first UNIQUE match wins. No match anywhere, or several files in
+    every source that matched, stays unattributed; why-not says which."""
+    counts = []
+    for files in sources:
+        if not files:
+            continue
+        relpath, heading = locate_quote(files, quoted)
+        if relpath:
+            return relpath, heading, None
+        counts.append(len(quote_hits(files, quoted)))
+    if not _flat(quoted):
+        return None, None, "no anchor text"
+    many = max(counts, default=0)
+    if many > 1:
+        return None, None, f"quote found in {many} files"
+    return None, None, "quote found in no file"
+
+
+def unattributed_label(why: str | None) -> str:
+    return f"(unattributed: {why})" if why else "(unattributed)"
+
+
 def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
-                    files: dict[str, str]) -> list[dict]:
+                    files: dict[str, str],
+                    tab_texts: list[dict[str, str]] | None = None
+                    ) -> list[dict]:
     """Store open Doc comments as doc_comments rows (dedupe by comment id —
     a re-pull after a failed resolve must not double-ingest). Returns the
     compact projection for the pull report: the anchor quote clamped, the
-    author's comment VERBATIM (clamp the quote, never the comment)."""
+    author's comment VERBATIM (clamp the quote, never the comment).
+
+    A comment is attributed by its quote against the local files, then
+    against `tab_texts` (the exported tabs, settled then marked) — see
+    `attribute_quote`."""
     from .db import ko_fields
 
     seen = {r["comment_id"] for r in db.all(
@@ -673,7 +715,8 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
     out = []
     for c in comments:
         quoted = (c.get("quotedFileContent") or {}).get("value") or ""
-        relpath, heading = locate_quote(files, quoted)
+        relpath, heading, why = attribute_quote(
+            quoted, files, *(tab_texts or []))
         location = f"{relpath}#{heading}" if relpath and heading else relpath
         if c["id"] not in seen:
             row = ko_fields("dc")
@@ -691,7 +734,7 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
             seen.add(c["id"])
         out.append({
             "comment_id": c["id"],
-            "location": location or "(unattributed)",
+            "location": location or unattributed_label(why),
             "quote": clamp(quoted),
             "content": c.get("content", ""),
         })
@@ -2478,20 +2521,43 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
 
     if with_comments:
         harvest_comments(db, manuscript, master_id, service, docs_service,
-                         bridge, report)
+                         bridge, report,
+                         comment_tab_texts(sections, mapped,
+                                           bridge.display_prefix))
     report["threads"] = threads_mod.ledger(db, manuscript["id"])
     return report
 
 
+def comment_tab_texts(sections: dict[str, str], names: list[str],
+                      prefix: str = "") -> list[dict[str, str]]:
+    """The exported tabs as quote-matching sources for `attribute_quote`:
+    settled text first, then marked text, so a comment anchored on a green
+    half still finds its tab. Keys carry the bridge's display prefix, like
+    the local-file source."""
+    settled, marked = {}, {}
+    for name in names:
+        if name not in sections:
+            continue
+        text = normalize_markdown(sections[name])
+        marked[prefix + name] = text
+        settled[prefix + name], _ = threads_mod.strip_pending(text)
+    return [settled, marked]
+
+
 def harvest_comments(db: Database, manuscript: dict, master_id: str,
                      service, docs_service, bridge: DocBridge,
-                     report: dict) -> None:
+                     report: dict,
+                     tab_texts: list[dict[str, str]] | None = None) -> None:
     """Fetch every open Doc comment, ingest the fresh ones, reconcile
     stale rows against ones the author resolved by hand in the Doc, and
     run the verdict machine — the comment half of a pull, shared with
     session-start reconcile (it-d469ecbf3999: the margin is a working
     conversation; a session must not open blind to it). Failures land in
-    report['comments_error'], never raise."""
+    report['comments_error'], never raise.
+
+    `tab_texts` (from `comment_tab_texts`) lets a comment whose quote the
+    local files do not carry be attributed to its tab; an ingested row
+    left unattributed by an earlier pull is retried on every harvest."""
     from .revisions import read_manuscript_files
 
     try:
@@ -2534,7 +2600,28 @@ def harvest_comments(db: Database, manuscript: dict, master_id: str,
                      "manuscript_id = ? AND comment_id = ?",
                      (manuscript["id"], c["id"])) is None]
         report["comments"] = ingest_comments(
-            db, manuscript, fresh, files)
+            db, manuscript, fresh, files, tab_texts)
+        # A row ingested before its quote could be placed (the tab's file
+        # not yet local, say) stays open: try again, or `doc propose` on
+        # it fails with no file to write into.
+        reattributed = []
+        for row in db.all(
+                "SELECT id, comment_id, quoted FROM doc_comments WHERE "
+                "manuscript_id = ? AND state = 'ingested' AND "
+                "(file IS NULL OR file = '')", (manuscript["id"],)):
+            if row["comment_id"] not in open_ids:
+                continue
+            relpath, heading, _ = attribute_quote(
+                row["quoted"] or "", files, *(tab_texts or []))
+            if relpath:
+                db.update("doc_comments", row["id"], {
+                    "file": relpath,
+                    "location": (f"{relpath}#{heading}" if heading
+                                 else relpath)})
+                reattributed.append(
+                    {"comment_id": row["comment_id"], "file": relpath})
+        if reattributed:
+            report["comments_reattributed"] = reattributed
         report["thread_replies"] = []
         for c in open_comments:
             thread = threads_mod.get_thread(
@@ -2754,8 +2841,11 @@ def reconcile(db: Database, manuscript: dict, service,
     # The margin is a working conversation: a session must not open
     # blind to it (it-d469ecbf3999). Same harvest as a pull; failures
     # land in the report, never block the session.
+    bridge = manuscript_bridge(manuscript)
     harvest_comments(db, manuscript, master_id, service, docs_service,
-                     manuscript_bridge(manuscript), report)
+                     bridge, report,
+                     comment_tab_texts(sections, mapped,
+                                       bridge.display_prefix))
     return report
 
 
