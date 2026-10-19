@@ -5250,6 +5250,27 @@ def cmd_export(args):
             print(ui.yellow(problem))
         raise SystemExit(1)
 
+    if (args.as_doc or args.drive_id) and not args.upload:
+        raise SystemExit(ui.yellow("--as-doc and --drive-id go with --upload"))
+    if args.as_doc and args.action not in ("docx", "teleprompter"):
+        raise SystemExit(ui.yellow("--as-doc converts a docx export to a "
+                                   "Google Doc; this export is "
+                                   f"{args.action}"))
+
+    if args.action == "teleprompter":
+        if not args.file:
+            raise SystemExit(ui.yellow(
+                "export teleprompter needs --file <file> — the monologue "
+                "whose on-camera passages to collect"))
+        try:
+            result = ex.export_teleprompter(manuscript, args.file)
+        except (LookupError, ValueError) as err:
+            raise SystemExit(ui.yellow(f"export failed: {err}"))
+        print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")
+        print(ui.dim(f"  plain text: {result['txt']}"))
+        _export_upload(args, db, manuscript, result["docx"])
+        return
+
     try:
         chapters = [c for part in (args.chapters or [])
                     for c in part.split(",") if c.strip()]
@@ -5274,6 +5295,33 @@ def cmd_export(args):
         print(f"Wrote {result[args.action]}.")
     for warning in result["warnings"]:
         print(ui.yellow(f"warning: {warning}"))
+    _export_upload(args, db, manuscript,
+                   result.get(args.action) or result["markdown"])
+
+
+def _export_upload(args, db, manuscript: dict, path: str) -> None:
+    """--upload: the written file to the author's Drive, replaced in
+    place on every later upload of the same output."""
+    if not args.upload:
+        return
+    from . import export as ex
+    from . import gdocs
+
+    try:
+        service = gdocs.get_service(_load_config(args), args.workspace,
+                                    interactive=False)
+    except ValueError as err:
+        raise SystemExit(ui.yellow(
+            f"upload skipped: {err} — 'authorlm doc auth' renews the "
+            "Google token (it opens a consent page); the export itself "
+            "is written"))
+    try:
+        up = ex.upload_export(db, manuscript, Path(path), service,
+                              as_doc=args.as_doc, drive_id=args.drive_id)
+    except ValueError as err:
+        raise SystemExit(ui.yellow(f"upload failed: {err}"))
+    verb = "Uploaded" if up["created"] else "Replaced"
+    print(f"{verb} on Drive: {up['url']}")
 
 
 def _confirm(prompt: str, yes: bool) -> bool:
@@ -9145,11 +9193,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "export",
         help="publishing exports: md/docx/epub/pdf built locally (pandoc) "
-             "with picked illustrations embedded; settings in "
-             "_exports/settings.toml")
+             "with picked illustrations embedded, or a teleprompter docx "
+             "of one file's 'voice: author' clips; --upload puts the "
+             "result on Drive; settings in _exports/settings.toml")
     p.add_argument("action",
                    choices=["show", "set", "check", "md", "docx", "epub",
-                            "pdf"])
+                            "pdf", "teleprompter"])
     p.add_argument("key", nargs="?", help="setting name (set)")
     p.add_argument("value", nargs="?", help="setting value (set)")
     p.add_argument("--variant", choices=["images", "slots", "stripped"],
@@ -9172,6 +9221,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")
+    p.add_argument("--upload", action="store_true",
+                   help="also put the written file on Google Drive (the "
+                        "manuscript's folder); re-uploading the same "
+                        "output replaces it in place — same file, same "
+                        "link")
+    p.add_argument("--as-doc", action="store_true",
+                   help="with --upload, docx/teleprompter only: convert "
+                        "to a Google Doc instead of keeping the .docx")
+    p.add_argument("--drive-id", metavar="ID",
+                   help="with --upload: replace this existing Drive file "
+                        "(one uploaded by hand) and remember it for this "
+                        "output")
     p.add_argument("--profile", choices=["book"], default=None,
                    help="PDF only: 'book' builds a print interior at the "
                         "manuscript's trim size (book class, mirrored "

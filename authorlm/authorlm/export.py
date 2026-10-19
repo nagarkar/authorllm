@@ -902,3 +902,222 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     result["trim"] = f"{trim[0]:g}x{trim[1]:g}" + (" +bleed" if bleed else "")
     warnings.extend(kdp_checks(manuscript, pages))
     return result
+
+
+# ------------------------------------------------ teleprompter
+
+TELEPROMPTER_SUFFIX = ".teleprompter"
+TELEPROMPTER_PT = 32        # body type; teleprompter apps reflow, print does not
+TELEPROMPTER_LABEL_PT = 20
+TELEPROMPTER_LINE = 360     # 240ths of a line: 1.5 spacing
+
+
+def _file_arg(file: str) -> str:
+    file = file.strip().lstrip("./")
+    return file if file.endswith(".md") else file + ".md"
+
+
+def teleprompter_passages(manuscript: dict, file: str) -> list[dict]:
+    """The passages the author reads on camera in one file, in order:
+    every clip marked `voice: author` (docs/video-clips-design.md §5),
+    its text the clip's note (`_clips/notes/<key>.md`, paragraphs kept)
+    or, unkeyed, its inline description. Labels are plain: `Intro` for a
+    passage with nothing spoken before it, `Outro` for one with nothing
+    spoken after, otherwise the Collage's title up to its first comma.
+    Other clip problems (a missing `use:` file) do not matter here: the
+    words are what the author needs."""
+    from . import media
+
+    root = Path(manuscript["path"])
+    file = _file_arg(file)
+    if not (root / file).is_file():
+        raise LookupError(f"{file} is not in the manuscript folder")
+    entries = media.list_media(root, [file])["media"]
+    titles = {e["line"]: e["title"] for e in entries
+              if e["kind"] == "collage"}
+    passages: list[dict] = []
+    for e in entries:
+        if e["kind"] != "clip" or e["fields"].get("voice") != "author":
+            continue
+        text = e["description"]
+        if e["spec_path"] and (root / e["spec_path"]).is_file():
+            text = (root / e["spec_path"]).read_text(encoding="utf-8")
+        paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", text)
+                      if p.strip()]
+        if not e.get("before_sentence"):
+            label = "Intro"
+        elif not e.get("after_sentence"):
+            label = "Outro"
+        else:
+            box = max((i for i in titles if i < e["line"]), default=None)
+            label = (titles[box].split(",")[0].strip() if box is not None
+                     else "") or f"Passage {len(passages) + 1}"
+        passages.append({"label": label, "paragraphs": paragraphs,
+                         "line": e["line"]})
+    return passages
+
+
+def _xml(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def write_teleprompter_docx(passages: list[dict], out_path: Path) -> None:
+    """A bare WordprocessingML package, written by hand so nothing can
+    slip in: large type, 1.5 line spacing, a plain bold label above each
+    passage and a page break between passages. No header, no footer, no
+    page numbers, no notice or watermark — none of those parts exist."""
+    import zipfile
+
+    size, label = TELEPROMPTER_PT * 2, TELEPROMPTER_LABEL_PT * 2
+
+    def para(text: str, style: str, page_break: bool = False) -> str:
+        # Formatting sits on every paragraph and run as well as in the
+        # styles: importers that skip style inheritance (QuickLook, some
+        # teleprompter apps) would otherwise show 12pt type.
+        pt = label if style == "Label" else size
+        ppr = (f'<w:pPr><w:pStyle w:val="{style}"/>'
+               + ("<w:keepNext/>" if style == "Label" else "")
+               + ("<w:pageBreakBefore/>" if page_break else "")
+               + f'<w:spacing w:after="360" w:line="{TELEPROMPTER_LINE}" '
+               'w:lineRule="auto"/></w:pPr>')
+        rpr = ('<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'
+               + ("<w:b/>" if style == "Label" else "")
+               + f'<w:sz w:val="{pt}"/><w:szCs w:val="{pt}"/></w:rPr>')
+        return (f"<w:p>{ppr}<w:r>{rpr}<w:t xml:space=\"preserve\">"
+                f"{_xml(text)}</w:t></w:r></w:p>")
+
+    body = []
+    for n, passage in enumerate(passages):
+        body.append(para(passage["label"], "Label", page_break=n > 0))
+        body.extend(para(p, "Normal") for p in passage["paragraphs"])
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    document = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:document {w}><w:body>{''.join(body)}"
+        '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" '
+        'w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>'
+        "</w:body></w:document>")
+    styles = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:styles {w}><w:docDefaults><w:rPrDefault><w:rPr>"
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'
+        f'<w:sz w:val="{size}"/><w:szCs w:val="{size}"/></w:rPr></w:rPrDefault>'
+        f'<w:pPrDefault><w:pPr><w:spacing w:after="360" '
+        f'w:line="{TELEPROMPTER_LINE}" w:lineRule="auto"/></w:pPr>'
+        "</w:pPrDefault></w:docDefaults>"
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        '<w:name w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Label"><w:name w:val="Label"/>'
+        '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+        '<w:pPr><w:keepNext/></w:pPr>'
+        f'<w:rPr><w:b/><w:sz w:val="{label}"/><w:szCs w:val="{label}"/></w:rPr>'
+        "</w:style></w:styles>")
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        "</Types>")
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        "</Relationships>")
+    doc_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        "</Relationships>")
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document)
+        z.writestr("word/_rels/document.xml.rels", doc_rels)
+        z.writestr("word/styles.xml", styles)
+
+
+def export_teleprompter(manuscript: dict, file: str) -> dict:
+    """`export teleprompter --file F`: the author's on-camera passages of
+    one file as `_exports/<stem>.teleprompter.docx` (what teleprompter
+    apps import) and the same words as `.teleprompter.txt`. Stops with
+    an error when the file marks no clip `voice: author`."""
+    passages = teleprompter_passages(manuscript, file)
+    stem = Path(_file_arg(file)).stem
+    if not passages:
+        raise LookupError(
+            f"{stem}.md has no clip marked 'voice: author' — add "
+            "'| voice: author' to the [Clip:] of each recorded intro or "
+            "outro (a clip in a Collage)")
+    export_dir = Path(manuscript["path"]) / EXPORT_DIR
+    export_dir.mkdir(exist_ok=True)
+    docx_path = export_dir / f"{stem}{TELEPROMPTER_SUFFIX}.docx"
+    write_teleprompter_docx(passages, docx_path)
+    txt_path = docx_path.with_suffix(".txt")
+    txt_path.write_text("\n\n\n".join(
+        "\n\n".join([p["label"], *p["paragraphs"]]) for p in passages) + "\n",
+        encoding="utf-8")
+    return {"docx": str(docx_path), "txt": str(txt_path),
+            "passages": [p["label"] for p in passages], "warnings": []}
+
+
+# ------------------------------------------------ upload to Drive
+
+UPLOADS_KEY = "_uploads"    # metadata.gdocs key: output name → Drive file
+UPLOAD_MIME = {".pdf": "application/pdf", ".epub": "application/epub+zip",
+               ".md": "text/markdown", ".docx": DOCX_MIME,
+               ".txt": "text/plain"}
+
+
+def upload_export(db: Database, manuscript: dict, path: Path, service,
+                  as_doc: bool = False, drive_id: str | None = None) -> dict:
+    """Put one export file on the author's Drive, in the manuscript's
+    folder, and remember its id per output (`metadata.gdocs._uploads`,
+    beside the export Doc's `_export`): the next upload of the same file
+    replaces it in place — same id, same link. A file deleted in Drive is
+    created anew. `as_doc` converts a DOCX to a Google Doc (a separate
+    Drive file from the plain .docx); `drive_id` adopts a file already on
+    Drive (one uploaded by hand) as this output's target."""
+    from googleapiclient.http import MediaFileUpload
+
+    path = Path(path)
+    if as_doc and path.suffix != ".docx":
+        raise ValueError("--as-doc converts a DOCX to a Google Doc; this "
+                         f"export is {path.suffix.lstrip('.')}")
+    mime = UPLOAD_MIME.get(path.suffix, "application/octet-stream")
+    key = path.name + (" (Google Doc)" if as_doc else "")
+    meta = _mapping(db, manuscript)
+    uploads = meta.setdefault("gdocs", {}).setdefault(UPLOADS_KEY, {})
+    entry = uploads.setdefault(key, {})
+    if drive_id:
+        entry["file_id"] = drive_id
+    media = MediaFileUpload(str(path), mimetype=mime, resumable=False)
+    created, info = False, None
+    if entry.get("file_id"):
+        try:
+            info = service.files().update(
+                fileId=entry["file_id"], media_body=media,
+                fields="id,webViewLink").execute()
+        except Exception as err:
+            if not _doc_gone(err):
+                raise
+            entry["file_id"] = None  # deleted in Drive — create below
+    if not entry.get("file_id"):
+        body = {"name": path.stem if as_doc else path.name,
+                "parents": [_ensure_folder(manuscript, meta, service)]}
+        if as_doc:
+            body["mimeType"] = GDOC_MIME
+        info = service.files().create(body=body, media_body=media,
+                                      fields="id,webViewLink").execute()
+        entry["file_id"] = info["id"]
+        created = True
+    entry["as_doc"] = as_doc
+    _save_mapping(db, manuscript, meta)
+    fid = entry["file_id"]
+    url = (f"https://docs.google.com/document/d/{fid}/edit" if as_doc
+           else (info or {}).get("webViewLink")
+           or f"https://drive.google.com/file/d/{fid}/view")
+    return {"file_id": fid, "url": url, "created": created, "name": key}

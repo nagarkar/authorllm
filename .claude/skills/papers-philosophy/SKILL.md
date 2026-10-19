@@ -90,6 +90,6 @@ A drafter alone had missed all of these: a book cited under a title that does no
 
 ## Publish road
 
-A commentary: `revise resolve` (it pushes), then `authorlm export pdf --file <file> -m <Manuscript> --print-ready` for a copy to share; without `--print-ready` the PDF carries the confidential-review notice, footer and watermark. A paper follows the core's stage H with the same export verbs.
+A commentary: `revise resolve` (it pushes), then `authorlm export pdf --file <file> -m <Manuscript> --print-ready --upload` for a copy to share (`--upload` puts it on Drive and replaces it in place on every later export, so the link stays the same); without `--print-ready` the PDF carries the confidential-review notice, footer and watermark. A paper follows the core's stage H with the same export verbs.
 
 When the author asks for the text "here, to read", paste the plain body in chat (no footnotes, markers or preamble); send a file only when asked for a file.

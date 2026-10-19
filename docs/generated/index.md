@@ -584,6 +584,12 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_export_upload`
+
+`authorlm/tests/test_export_upload.py`
+
+`export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
@@ -703,12 +709,6 @@ _No docstring._
 `authorlm/tools/bootstrap_beliefs.py`
 
 Distil beliefs from the author's decisions already on record.
-
-## `tools.drive_docx`
-
-`authorlm/tools/drive_docx.py`
-
-Upload or refresh a DOCX on Google Drive as a Google Doc, using the Doc bridge's own credentials. Usage: python3 tools/drive_docx.py <file.docx> --title "Name" (create) python3 tools/drive_docx.py <file.docx> --update <fileId> (replace content in place) Run from the authorlm package directory (needs .env and config as the CLI does). Non-interactive: the OAuth token must already exist (run 'authorlm doc auth' on the author's word if it does not).
 
 ## `tools.measure_adjudication`
 
