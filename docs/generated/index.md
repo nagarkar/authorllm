@@ -210,7 +210,7 @@ Always-on database performance log.
 
 `authorlm/authorlm/directives.py`
 
-Inline directives: `[Footnote: …]` and `[Explain: …]` — shorthand instructions written in the prose, drafted in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md, docs/explain-directive-design.md).
+Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` — shorthand instructions written in the prose, drafted in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md, docs/explain-directive-design.md, docs/suggestion-directive-design.md).
 
 ## `authorlm.docs`
 

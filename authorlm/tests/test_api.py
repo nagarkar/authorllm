@@ -5997,6 +5997,192 @@ def check_directives() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_suggestions() -> None:
+    """The [Suggestion: …] directive (docs/suggestion-directive-design.md,
+    the author's ruling of 2026-10-19: "a thing to evaluate"): grammar
+    and the target paragraph, the collect report, direct apply as a
+    paragraph REPLACEMENT, decline on apply, refusals, the CLI's
+    --decline and --from-json, and the export strip. No model anywhere."""
+    from authorlm import directives as dv
+    from authorlm import export as mexport
+
+    # --- grammar: the target paragraph ---
+    text = ("# Essay\n\n"
+            "Alpha opens. It runs long.[Suggestion: tighten this] Then on.\n\n"
+            "Beta states the claim without a case.\n\n"
+            "[suggestion: add an example]\n\n"
+            "Gamma closes.[Explain: what closing means]\n")
+    sg = dv.scan_text(text, "suggestion")
+    check("suggestion grammar: inline targets its own paragraph, standalone "
+          "targets the paragraph BEFORE it, keyword case-insensitive",
+          [(t["n"], t["line"], t["gist"], t["standalone"]) for t in sg]
+          == [(1, 3, "tighten this", False), (2, 7, "add an example", True)]
+          and sg[0]["target"].startswith("Alpha opens.")
+          and sg[0]["target"].endswith("Then on.")
+          and sg[1]["target"] == "Beta states the claim without a case."
+          and text[sg[1]["target_start"]:sg[1]["target_end"]] == sg[1]["target"],
+          str(sg))
+    check("a standalone tag with nothing before it has no target",
+          dv.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
+                       "suggestion")[0]["target"] is None)
+    stripped, removed = dv.strip_tags(text)
+    check("exports strip the suggestion tag like any other, inline and "
+          "standalone",
+          "Alpha opens. It runs long. Then on.\n\nBeta states the claim "
+          "without a case.\n\nGamma closes.\n"
+          == stripped.split("# Essay\n\n", 1)[1]
+          and [r["kind"] for r in removed] == ["suggestion", "suggestion",
+                                               "explain"], repr(stripped))
+
+    # --- the pass, end to end ---
+    root = Path(tempfile.mkdtemp(prefix="authorlm-suggestions-"))
+    try:
+        ms_dir = root / "manuscript"
+        ms_dir.mkdir()
+        essay = ("# Wall\n\n"
+                 "Alpha opens. It runs long.[Suggestion: tighten this] "
+                 "Then on.\n\n"
+                 "Beta states the claim without a case.\n\n"
+                 "[Suggestion: add an example]\n\n"
+                 "Gamma hedges every clause.[Suggestion: cut the hedges]\n\n"
+                 "Delta is fine.\n\n"
+                 "[Suggestion: reconsider the claim]\n")
+        (ms_dir / "wall.md").write_text(essay)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(root), "init", "--name", "sugg",
+                      "--path", str(ms_dir)])
+        db = api.open_db(str(root))
+        ms = api.get_manuscript(db)
+        with contextlib.redirect_stdout(io.StringIO()):
+            base = api.collect(db, ms, {})
+        rows = base.get("directives") or []
+        check("collect and get_status REPORT the open suggestion tags "
+              "beside the other directives and draft nothing",
+              [(r["kind"], r["n"], r["gist"]) for r in rows]
+              == [("suggestion", 1, "tighten this"),
+                  ("suggestion", 2, "add an example"),
+                  ("suggestion", 3, "cut the hedges"),
+                  ("suggestion", 4, "reconsider the claim")]
+              and len(api.status(db, ms)["directives"]) == 4
+              and (ms_dir / "wall.md").read_text() == essay, str(rows))
+        v0 = base["version_no"]
+
+        # Direct apply: a REPLACEMENT of the target paragraph, a decline,
+        # and a standalone acceptance, in one command.
+        rep = dv.apply(db, ms, {}, "suggestion", "wall.md", [
+            (1, "Alpha opens, briefly. Then on."),
+            {"tag": "add an example", "text": "Beta states the claim: a "
+                                              "wall that holds is a tomb."},
+            {"tag": 3, "decline": True,
+             "reason": "the hedges carry the argument's modesty"}])
+        out = (ms_dir / "wall.md").read_text()
+        check("the agreed text REPLACES the target paragraph — inline, tag "
+              "and all; standalone, the paragraph before plus the tag line "
+              "— and a decline removes the tag and keeps the paragraph",
+              out == ("# Wall\n\n"
+                      "Alpha opens, briefly. Then on.\n\n"
+                      "Beta states the claim: a wall that holds is a tomb.\n\n"
+                      "Gamma hedges every clause.\n\n"
+                      "Delta is fine.\n\n"
+                      "[Suggestion: reconsider the claim]\n"), repr(out))
+        check("the report names each landing, declines included",
+              rep["mode"] == "applied" and rep["version_no"] == v0 + 1
+              and [(r["n"], r["declined"], r["reason"]) for r in rep["landed"]]
+              == [(1, False, None), (2, False, None),
+                  (3, True, "the hedges carry the argument's modesty")], str(rep))
+        ev = db.all("SELECT * FROM doc_threads WHERE manuscript_id = ? "
+                    "AND origin_type = 'suggestion' ORDER BY created_at",
+                    (ms["id"],))
+        check("evidence rows: origin suggestion, the target paragraph as "
+              "old, the landed paragraph as new; a decline is state "
+              "`declined` with the reason in its metadata",
+              len(ev) == 3
+              and ev[0]["proposed_old"].startswith("Alpha opens. It runs long.")
+              and ev[0]["proposed_new"] == "Alpha opens, briefly. Then on."
+              and ev[0]["state"] == "applied" and ev[0]["note"] == "tighten this"
+              and ev[2]["state"] == "declined" and ev[2]["proposed_new"] == ""
+              and loads(ev[2]["metadata"], {})["reason"]
+              == "the hedges carry the argument's modesty",
+              str([dict(r) for r in ev]))
+        check("one open tag remains, renumbered from 1",
+              [(r["n"], r["gist"]) for r in dv.open_report(ms_dir)]
+              == [(1, "reconsider the claim")])
+
+        # Refusals.
+        for pairs, why in (
+                ([{"tag": 1, "decline": True, "reason": " "}], "the reason is empty"),
+                ([{"tag": 1, "decline": True, "reason": "r", "text": "x"}],
+                 "a decline carries a reason, not a text"),
+                ([(1, "x", "a footnote")], "rides only on an explain apply"),
+                ([(1, "")], "the text is empty")):
+            check(f"apply refuses: {why}",
+                  _raises(lambda: dv.apply(db, ms, {}, "suggestion", "wall.md",
+                                           pairs), why))
+        (ms_dir / "ex.md").write_text("# Ex\n\nA.[Explain: what A is]\n")
+        check("a decline is a suggestion's verb only",
+              _raises(lambda: dv.apply(db, ms, {}, "explain", "ex.md",
+                                       [{"tag": 1, "decline": True,
+                                         "reason": "r"}]),
+                      "only a [Suggestion:] tag is declined"))
+        (ms_dir / "two.md").write_text(
+            "# Two\n\nOne paragraph.[Suggestion: a] More.[Suggestion: b]\n\n"
+            "[Suggestion: top]\n")
+        check("two suggestions on one paragraph are landed one at a time",
+              _raises(lambda: dv.apply(db, ms, {}, "suggestion", "two.md",
+                                       [(1, "x"), (2, "y")]),
+                      "act on the same paragraph"))
+        (ms_dir / "top.md").write_text("[Suggestion: top]\n\nA.\n")
+        check("a standalone tag with nothing before it is refused",
+              _raises(lambda: dv.apply(db, ms, {}, "suggestion", "top.md",
+                                       [(1, "x")]), "nothing precedes"))
+        check("a refusal writes nothing",
+              (ms_dir / "wall.md").read_text() == out)
+
+        # The CLI: --decline and --from-json.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(root), "suggestion", "apply",
+                      "wall.md", "--decline",
+                      "1=the claim is load-bearing for the chapter"])
+        out = (ms_dir / "wall.md").read_text()
+        check("CLI --decline TAG=REASON removes the tag and keeps the "
+              "paragraph",
+              out.endswith("Delta is fine.\n") and "[Suggestion:" not in out
+              and "Declined wall.md:" in buf.getvalue()
+              and "load-bearing" in buf.getvalue(), buf.getvalue())
+        (ms_dir / "wall.md").write_text(essay)
+        plan = root / "plan.json"
+        plan.write_text(json.dumps([
+            {"tag": 1, "text": "Alpha opens, briefly. Then on."},
+            {"tag": "cut the hedges", "decline": True, "reason": "modesty"}]))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(root), "suggestion", "apply",
+                      "wall.md", "--from-json", str(plan)])
+        out = (ms_dir / "wall.md").read_text()
+        check("CLI --from-json takes {tag, text} and {tag, decline, reason} "
+              "entries together",
+              "Alpha opens, briefly. Then on.\n\n" in out
+              and "Gamma hedges every clause.\n\n" in out
+              and out.count("[Suggestion:") == 2, out)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(root), "suggestion", "list"])
+        check("suggestion list names the open tags",
+              "wall.md: 2 open suggestion tags" in buf.getvalue()
+              and "#1 line" in buf.getvalue(), buf.getvalue())
+
+        # Exports: the tag never reaches a reader.
+        (ms_dir / "toc.toml").write_text('[[chapters]]\nfile = "wall.md"\n')
+        out, _order, warnings = mexport.publish_markdown(ms, "stripped")
+        check("every export strips an unresolved suggestion and warns",
+              "[Suggestion:" not in out
+              and any("wall.md: unresolved [Suggestion: add an example]" in w
+                      for w in warnings), str(warnings[:3]))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_critique_resolve_reembeds() -> None:
     """critique resolve must re-insert illustration embeds on write-back.
 
@@ -6663,6 +6849,7 @@ def check_stage_revisions(root: Path, FakeGoogle) -> None:
 
 def main_test() -> None:
     check_directives()
+    check_suggestions()
     check_critique_resolve_reembeds()
     check_client_resolution()
     check_client_stamps()
@@ -13461,6 +13648,7 @@ def main_test() -> None:
             # and the landing verb — drafting is chat, by design.
             "list_footnote_tags", "apply_footnote", "resolve_footnotes",
             "list_explain_tags", "apply_explain", "resolve_explains",
+            "list_suggestion_tags", "apply_suggestion", "resolve_suggestions",
             "import_critique", "critique_status", "list_critique_items",
             "list_critique_decisions",
             "triage_critique", "list_critique_edits", "triage_critique_edits",

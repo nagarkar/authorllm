@@ -1411,6 +1411,7 @@ _SETTLE_REMEDY = {"critique": "critique resolve {file}",
                   "filter": "filter resolve {file}",
                   "footnote": "footnote resolve {file}",
                   "explain": "explain resolve {file}",
+                  "suggestion": "suggestion resolve {file}",
                   "clip": "clip resolve {file}"}
 
 

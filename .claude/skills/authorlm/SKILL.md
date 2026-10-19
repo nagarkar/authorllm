@@ -1995,6 +1995,36 @@ semantics; not combined with `--tag`/`--text`). **Two roads, chosen by the file'
 A declined draft leaves the tag open; nothing is deleted on a "no".
 Exports strip an unresolved tag and warn.
 
+### `[Suggestion: …]` — a thing to EVALUATE (docs/suggestion-directive-design.md)
+The author's ruling (2026-10-19): a suggestion is "a thing to evaluate";
+explain asks for a passage, a suggestion asks for a judgment on prose
+that exists — "improve the verbiage, simplify, or whatever" — written
+as a tag because a Doc comment blocks operations on its paragraph and
+a tag does not. Same grammar; the target is the paragraph that holds
+the tag, or, alone on a line, **the paragraph BEFORE it**. Collect,
+`get_status` and `doc pull` report the open tags (`kind: suggestion`);
+`list_suggestion_tags` on demand. **"Resolve the suggestions in <file>"
+is ONE instruction, end to end:** read each gist against its target
+paragraph, the style law and the concept notes it touches; then, in
+chat, either draft the WHOLE revised paragraph or say the suggestion
+should not be taken and why. The author rules. Then ONE
+`apply_suggestion` per file with every ruling as `items`:
+`{tag, text}` — `text` is the revised paragraph and REPLACES the target,
+tag and all; or `{tag, decline: true, reason}` — the tag goes, the
+paragraph stays, the reason is the evidence (CLI `suggestion apply
+<file> --tag N --text … --decline N='reason'`, or `--from-json` with both
+shapes). No companion footnote: write it into the paragraph or leave a
+`[Footnote:]` tag. The two roads are explain's: not checked out → direct
+replace, evidence row (origin `suggestion`), no episode; checked out →
+one form per item in the tab (inline: `<<paragraph with tag>>{{revised}}`;
+standalone: the paragraph before is wrapped and the tag line stands until
+resolve consumes it; a decline: `<<paragraph with tag>>{{paragraph
+without it}}`, or `<<tag>>{{}}` for a standalone), local pristine, then
+`resolve_suggestions <file>` (CLI `suggestion resolve`) lands the ruling
+— a deleted form keeps the paragraph and its tag open — and pushes
+clean. A second apply while forms are out, and `doc push`, are refused
+naming `suggestion resolve`. Exports strip an unresolved tag and warn.
+
 ## Media for podcasts (`[Clip: …]`, `[Collage: …]`, `[Montage: …]` — design: authorlm/docs/video-clips-design.md)
 
 Podcast-only full-line tags in the chapter file itself, each on its own

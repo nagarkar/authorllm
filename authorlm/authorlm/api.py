@@ -436,7 +436,7 @@ def status(db: Database, manuscript: dict) -> dict:
             "evidence", "knowledge_proposals",
         )
     }
-    # Open [Footnote: …] / [Explain: …] tags ride here (footnote design
+    # Open [Footnote: …] / [Explain: …] / [Suggestion: …] tags ride here (footnote design
     # §8): the author learns about an undrafted request without having
     # to remember to ask.
     from . import directives
@@ -1137,11 +1137,11 @@ def collect(db: Database, manuscript: dict, config: dict,
                     "proposed": summary.get("proposed", 0),
                 }
 
-    # Inline directives — [Footnote: …] and [Explain: …] — are REPORTED
-    # here, beside the illustration slots, and never drafted (footnote
-    # design §2): no LLM runs at collect and nothing is written unasked.
-    # Drafting is chat; `footnote apply` / `explain apply` land the
-    # author's ruling.
+    # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
+    # — are REPORTED here, beside the illustration slots, and never
+    # drafted (footnote design §2): no LLM runs at collect and nothing is
+    # written unasked. Drafting is chat; `footnote apply` / `explain
+    # apply` / `suggestion apply` land the author's ruling.
     try:
         from . import directives
 
