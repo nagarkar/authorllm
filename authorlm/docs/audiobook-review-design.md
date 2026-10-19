@@ -108,9 +108,13 @@ audiobook twin of `authorlm workbench`: a dependency-free
 `http.server` on a loopback port, one compiled single-file React page
 (`web/audiobook/` → `authorlm/audiobook_dist/index.html`), JSON over
 `POST /api/audiobook` dispatched to `audiobook.dispatch(method, params)`.
-Audio files are served by `GET /audio/<stem>/<id>` (take) and
-`GET /preview/<id>` from the manuscript's `_audio/` folder, range
-requests honoured so the phone can seek.
+Audio files are served by `GET /take/<stem>/<id>.mp3`,
+`GET /stitched/<stem>.mp3`, and `GET /preview/<stem>/<id>.mp3` (a missing
+preview is rendered on that GET — the lazy listen) from the manuscript's
+`_audio/` folder, range requests honoured so the phone can seek. Any
+manuscript with an `audio export` can be open: the page names it on every
+request (`params.manuscript`, and `?m=` on the audio URLs); `-m` is only
+the manuscript the page opens on.
 
 **Reaching it from the phone.** The server binds 127.0.0.1 and stays
 there. Tailscale exposes it: `tailscale serve --bg 8792` publishes it as
@@ -128,13 +132,15 @@ nothing.
 
 **The page**, chapter by chapter:
 
-- Header: book title, chapter dropdown (every chapter; the current one
-  selected), `n/N generated`, characters remaining on the account,
-  and the Doc state after the last refresh (`in sync`, `pulled`,
-  `conflict: <file>`).
-- **Refresh from Doc**: enqueues reconcile → export → previews for any
-  new id → the page reloads. Also runs on server start and whenever a
-  chapter is opened whose export is older than its sources.
+- Header: manuscript dropdown (every registered manuscript that already
+  has `audiobook.json`), book title, chapter dropdown (every chapter;
+  the current one selected), `n/N generated`, characters remaining on
+  the account, and the stale-export banner when sources moved.
+- **Refresh**: enqueues export + a sweep of stale preview files (no
+  batch preview render — missing previews render on first play). The
+  page never reconciles Google Docs; pull in chat, then the stale
+  banner sees the files on disk. Also runs whenever sources are newer
+  than the export (fifteen-second watcher).
 - One card per paragraph: ordinal, heading or speech badge, the spoken
   text, cast key and voice name, the pronunciations applied, and the
   reason line when the id moved since a take was made ("changed since
@@ -164,7 +170,7 @@ set`, `dictionary push`, `say`, `workbench`) are unchanged. The
 
 | Verb | Does | Cost |
 |---|---|---|
-| `audio preview <chapter> [-p 12,14-16] [--all]` | Renders Daniel previews for every paragraph that lacks one (keyed by id) into `_audio/preview/<id>.mp3`. `--all` for every chapter. | free |
+| `audio preview <chapter> [-p 12,14-16] [--all] [--force]` | Renders macOS-`say` previews for paragraphs that lack one (keyed by id) into `_audio/preview/<id>.mp3`. `--force` re-renders even when a preview exists; `--all` for every chapter. The review page usually relies on lazy GET instead. | free |
 | `audio generate <chapter> -p 12,14-16 \| --remaining [--dry-run]` | Renders the named paragraphs, or every one without a take. Prints the character count before and after. Never renders an id that has a take. | paid |
 | `audio retake <chapter> -p 12` | Re-renders a paragraph that has a take and replaces it. | paid |
 | `audio stitch <chapter>` | ffmpeg concat with the silence clips, two-pass EBU R128 to −20 LUFS / −3 dBTP, one `<stem>.<quality>.mp3`; records duration and loudness in state. Ported from `stitch.rs`. | free |
@@ -404,11 +410,28 @@ and a card's respelling chips open the word. The standalone
 `authorlm workbench` verb and its page remain but are not the door.
 The page was restyled after gamelm's vocingo card UI the same day.
 
+**2026-10-18 / 2026-10-19.** Three page amendments, all verified in
+`audiobook.py` / `audiobook_server.py` / `generation.py`:
+
+1. **Manuscript dropdown.** `dispatch("manuscripts")` lists every
+   registered manuscript whose `_audio/audiobook.json` exists. The
+   server's `-m` is only the open-on manuscript; switching the
+   dropdown sends `params.manuscript` (and `?m=` on audio URLs) so one
+   `audio serve` process covers every exported book.
+2. **Lazy previews.** Refresh no longer batch-renders missing
+   previews (ruling 2026-10-18: "we could do it lazily if it's fast
+   enough"). It exports and sweeps stale files; `GET
+   /preview/<stem>/<id>.mp3` calls `generation.ensure_preview` when
+   the file is missing.
+3. **Forced preview.** A preview job (page or CLI `audio preview
+   --force`) passes `force=true` so `generation.preview` re-renders
+   even when a file already exists — used when the voice or rate
+   changed but the section id did not.
+
 ## 11. Open questions
 
-- Whether the served page should also host the pronunciation workbench
-  and the Triage App ("authorstation", filed 2026-09-04). This design
-  makes the three pages siblings on the same server pattern; folding
-  them is a separate grilling.
+- ~~Whether the served page should also host the pronunciation
+  workbench~~ — answered 2026-09-26 (folded in; see above). Folding the
+  Triage App ("authorstation", filed 2026-09-04) remains open.
 - The `say` rate mapping (175 × speed) is a first guess; tune once
   after the first whole-chapter listen.
