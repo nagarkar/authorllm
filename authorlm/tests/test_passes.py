@@ -4403,6 +4403,127 @@ def _directives_on_the_doc_road(root: Path) -> None:
                  (mid,))["n"] == 7)
 
 
+SUGGESTION_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha opens the essay.[Suggestion: tighten this] Then on.",
+    "Beta states the claim without a case.",
+    "[Suggestion: add an example]",
+    "Gamma hedges every clause.[Suggestion: cut the hedges] More.",
+    "Delta is fine.",
+    "[Suggestion: reconsider the claim]",
+    "Epsilon is long.",
+    "[Suggestion: split it]",
+]) + "\n"
+
+
+def _suggestions_on_the_doc_road(root: Path) -> None:
+    """[Suggestion: …] on a CHECKED-OUT file (docs/suggestion-directive-
+    design.md §3): the form wraps the TARGET paragraph — inline, tag and
+    all; standalone, the paragraph before it, the tag line left standing
+    until resolve consumes it on acceptance. A decline wraps the tag
+    itself. Local stays pristine; resolve lands the author's ruling."""
+    print("suggestions on the Doc road:")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
+                                             essay=SUGGESTION_ESSAY)
+    mid = manuscript["id"]
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "suggestion", "solo.md", [
+        (1, "Alpha opens. Then on."),
+        {"tag": "add an example", "text": "Beta states the claim: a wall "
+                                          "that holds forever is a tomb."},
+        {"tag": 3, "decline": True, "reason": "the hedges are the point"},
+        {"tag": 4, "decline": True, "reason": "the claim is load-bearing"},
+        (5, "Epsilon is short."),
+    ], services=services)
+    tab = fake.tab_text("solo.md")
+    check("apply on a checked-out file STAGES one form per suggestion: "
+          "inline wraps the paragraph with its tag; standalone wraps the "
+          "paragraph BEFORE the tag and leaves the tag line standing; a "
+          "decline wraps the tag (inline: the paragraph without it; "
+          "standalone: an empty green half)",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<Alpha opens the essay.[Suggestion: tighten this] Then on.>>"
+              "{{Alpha opens. Then on.}}\n" in tab
+          and "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}\n"
+              "[Suggestion: add an example]\n" in tab
+          and "<<Gamma hedges every clause.[Suggestion: cut the hedges] "
+              "More.>>{{Gamma hedges every clause. More.}}\n" in tab
+          and "Delta is fine.\n<<[Suggestion: reconsider the claim]>>{{}}\n"
+              in tab
+          and "<<Epsilon is long.>>{{Epsilon is short.}}\n[Suggestion: split "
+              "it]\n" in tab, tab)
+    check("...the local file is PRISTINE and the report names the declines",
+          (ms / "solo.md").read_text() == SUGGESTION_ESSAY
+          and [(r["n"], r["declined"]) for r in rep["landed"]]
+          == [(1, False), (2, False), (3, True), (4, True), (5, False)],
+          str(rep))
+    check("the staged rows are `written` suggestion threads; the push gate "
+          "and a second apply name 'suggestion resolve'",
+          len(passes.staged_threads(db, mid, "solo.md", states=("written",),
+                                    origin_type="suggestion")) == 5
+          and gdocs.forms_pending(db, mid, "solo.md") == "suggestion"
+          and _refuses(lambda: dv.apply(db, manuscript, {}, "suggestion",
+                                        "solo.md", [(1, "x")],
+                                        services=services),
+                       "suggestion resolve solo.md")
+          and _refuses(lambda: gdocs.push_doc(db, manuscript, "solo.md",
+                                              service=fake,
+                                              docs_service=fake),
+                       "suggestion resolve solo.md"))
+    check("list reports the forms out in the Doc",
+          [t["proposed_new"] for t in dv.pending(db, mid, "suggestion")]
+          [:1] == ["Alpha opens. Then on."])
+
+    # The author: edits one green half, deletes the standalone accept's
+    # form (restoring the paragraph), leaves the rest to stand.
+    fake.edit("tab-2", "{{Alpha opens. Then on.}}",
+              "{{Alpha opens, and opens well. Then on.}}")
+    fake.edit("tab-2",
+              "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}",
+              "Beta states the claim without a case.")
+    res = dv.resolve(db, manuscript, {}, "suggestion", "solo.md",
+                     services=services)
+    local = (ms / "solo.md").read_text()
+    check("resolve lands the edited paragraph; a deleted form is a decline "
+          "that keeps the paragraph AND its tag; an accepted decline removes "
+          "the tag and keeps the paragraph; an accepted standalone "
+          "suggestion lands and its tag line is consumed",
+          "Alpha opens, and opens well. Then on.\n" in local
+          and "Beta states the claim without a case.\n"
+              "[Suggestion: add an example]\n" in local
+          and "Gamma hedges every clause. More.\n" in local
+          and "Delta is fine.\nEpsilon is short.\n" in local
+          and "[Suggestion: split it]" not in local
+          and "[Suggestion: reconsider" not in local
+          and "[Suggestion: cut" not in local
+          and "<<" not in local and "{{" not in local, local)
+    check("the resolve report: four landed (one reworded), one declined",
+          res["accepted"] == 4 and res["declined"] == 1
+          and len(res["diffs"]) == 1
+          and "opens well" in res["diffs"][0]["final"]
+          and res["version_no"] and res["url"], str(res))
+    check("...and pushed the tab clean",
+          "<<" not in fake.tab_text("solo.md")
+          and "Epsilon is short." in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("one tag stays open; the evidence carries the producer's type",
+          [(r["n"], r["gist"]) for r in dv.open_report(ms)]
+          == [(1, "add an example")]
+          and db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id "
+                     "= ? AND evidence_type = 'suggestion_edit'",
+                     (mid,))["n"] == 5
+          and gdocs.forms_pending(db, mid, "solo.md") is None,
+          str(dv.open_report(ms)))
+
+
 SKY_TAG = ("[Illustration: A sky of parted clouds from which no hand "
            "descends ⇢ a-sky-of-parted.md | caption: No hand descends. "
            "*Nothing* falls.]")
@@ -5960,6 +6081,7 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)

@@ -1690,6 +1690,26 @@ asked for them once in one sitting; propose, never rewrite silently.
 `doc push`/`doc pull` are deliberately not MCP tools (their OAuth flow can
 open a browser). When the author asks to edit in / sync with Google Docs,
 run the CLI via Bash:
+- **A push is a manuscript file's publication. `authorlm/manuscripts/`
+  is gitignored, so never offer to commit a manuscript file (author
+  correction 2026-10-18: "this is a manuscript md file, right? It's not
+  committed to git, just written to disk").** Commits are for code,
+  skills and docs only.
+- **Line editing needs no review form (ruled 2026-10-18).** When the
+  author asks for a line edit, polish, or final pass on a file, run the
+  generic `line-editing` skill (global, from nagarkar-skills) with these
+  AuthorLM particulars: (1) `get_style(file)` is the style source and
+  its rendered guide is law; hand the subagent the rendered text only.
+  (2) Terms of art come from the lexicon laws and the file's concept
+  notes (`get_concepts file=`): Nothing, The Dharma, Field of Choice,
+  Existence, Becoming, the Herdsman, the Dead, Man, Nature; never their
+  everyday sense ("counts for nothing", plain "the ground"). (3) Before
+  the pass, `authorlm doc diff <file>` must read unchanged on both
+  sides. (4) Open `[Footnote:]`, `[Explain:]`, `[Suggestion:]` and
+  illustration tags stay untouched. (5) Land the checked file and
+  `authorlm doc push <file>`; then `doc diff` again to confirm the tab
+  took it. Only directive drafts and machine proposals go out as
+  `<<old>>{{new}}` forms.
 - push: `authorlm doc push <file> -m <manuscript>` → prints the Doc URL;
   the file is now *checked out* (warn the author against local edits).
   `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a held paragraph.
@@ -1994,6 +2014,36 @@ semantics; not combined with `--tag`/`--text`). **Two roads, chosen by the file'
   refuses too and names the resolve verb.
 A declined draft leaves the tag open; nothing is deleted on a "no".
 Exports strip an unresolved tag and warn.
+
+### `[Suggestion: …]` — a thing to EVALUATE (docs/suggestion-directive-design.md)
+The author's ruling (2026-10-19): a suggestion is "a thing to evaluate";
+explain asks for a passage, a suggestion asks for a judgment on prose
+that exists — "improve the verbiage, simplify, or whatever" — written
+as a tag because a Doc comment blocks operations on its paragraph and
+a tag does not. Same grammar; the target is the paragraph that holds
+the tag, or, alone on a line, **the paragraph BEFORE it**. Collect,
+`get_status` and `doc pull` report the open tags (`kind: suggestion`);
+`list_suggestion_tags` on demand. **"Resolve the suggestions in <file>"
+is ONE instruction, end to end:** read each gist against its target
+paragraph, the style law and the concept notes it touches; then, in
+chat, either draft the WHOLE revised paragraph or say the suggestion
+should not be taken and why. The author rules. Then ONE
+`apply_suggestion` per file with every ruling as `items`:
+`{tag, text}` — `text` is the revised paragraph and REPLACES the target,
+tag and all; or `{tag, decline: true, reason}` — the tag goes, the
+paragraph stays, the reason is the evidence (CLI `suggestion apply
+<file> --tag N --text … --decline N='reason'`, or `--from-json` with both
+shapes). No companion footnote: write it into the paragraph or leave a
+`[Footnote:]` tag. The two roads are explain's: not checked out → direct
+replace, evidence row (origin `suggestion`), no episode; checked out →
+one form per item in the tab (inline: `<<paragraph with tag>>{{revised}}`;
+standalone: the paragraph before is wrapped and the tag line stands until
+resolve consumes it; a decline: `<<paragraph with tag>>{{paragraph
+without it}}`, or `<<tag>>{{}}` for a standalone), local pristine, then
+`resolve_suggestions <file>` (CLI `suggestion resolve`) lands the ruling
+— a deleted form keeps the paragraph and its tag open — and pushes
+clean. A second apply while forms are out, and `doc push`, are refused
+naming `suggestion resolve`. Exports strip an unresolved tag and warn.
 
 ## Media for podcasts (`[Clip: …]`, `[Collage: …]`, `[Montage: …]` — design: authorlm/docs/video-clips-design.md)
 

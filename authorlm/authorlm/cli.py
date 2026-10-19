@@ -2587,8 +2587,9 @@ def cmd_collect(args):
 
 
 def _print_open_directives(rows: list[dict]) -> None:
-    """The open [Footnote: …] / [Explain: …] tags, per file — collect's
-    report and `footnote list` / `explain list` alike."""
+    """The open [Footnote: …] / [Explain: …] / [Suggestion: …] tags, per
+    file — collect's report and `footnote list` / `explain list` /
+    `suggestion list` alike."""
     by_file: dict[str, list[dict]] = {}
     for row in rows:
         by_file.setdefault(row["file"], []).append(row)
@@ -2605,7 +2606,8 @@ def _print_open_directives(rows: list[dict]) -> None:
                   f"[{t['kind'].title()}: {t['gist']}{label}]")
     if rows:
         print(ui.dim("  Draft in chat; land with 'footnote apply' / "
-                     "'explain apply <file> --tag N --text …'."))
+                     "'explain apply' / 'suggestion apply <file> --tag N "
+                     "--text …' (a suggestion: or --decline N='reason')."))
 
 
 def _print_media_not_ready(rows: list[dict]) -> None:
@@ -3014,22 +3016,35 @@ def _input_prefilled(prompt: str, initial: str) -> str:
 
 def _directive_pairs_from_json(kind: str, file: str, path: str) -> list:
     """`--from-json PATH`: [{tag, text, footnote?}] → apply's
-    (tag, text, footnote) triples, checked the way --tag/--text are."""
+    (tag, text, footnote) triples, checked the way --tag/--text are. A
+    suggestion entry may instead carry {tag, decline: true, reason}."""
     import json as _json
 
     fix = f"authorlm {kind} apply {file} --from-json {path}"
+    shape = ("{tag, text | decline+reason}" if kind == "suggestion"
+             else "{tag, text, footnote?}")
     try:
         entries = _json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as err:
         sys.exit(f"error: cannot read {path} as JSON ({err}). Write a list "
-                 f"of {{tag, text, footnote?}}, then {fix}")
+                 f"of {shape}, then {fix}")
     if not isinstance(entries, list) or not entries:
         sys.exit(f"error: {path} must hold a non-empty JSON list of "
-                 f"{{tag, text, footnote?}}. {fix}")
+                 f"{shape}. {fix}")
     pairs = []
     for i, entry in enumerate(entries, 1):
-        if (not isinstance(entry, dict) or entry.get("tag") in (None, "")
-                or not isinstance(entry.get("text"), str)
+        if not isinstance(entry, dict) or entry.get("tag") in (None, ""):
+            sys.exit(f"error: entry {i} of {path} needs a tag. Fix it, "
+                     f"then {fix}")
+        if kind == "suggestion" and entry.get("decline"):
+            reason = entry.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                sys.exit(f"error: entry {i} of {path} declines without a "
+                         f"reason. Fix it, then {fix}")
+            pairs.append({"tag": str(entry["tag"]), "decline": True,
+                          "reason": reason})
+            continue
+        if (not isinstance(entry.get("text"), str)
                 or not entry["text"].strip()):
             sys.exit(f"error: entry {i} of {path} needs a tag and a "
                      f"non-empty text. Fix it, then {fix}")
@@ -3039,12 +3054,14 @@ def _directive_pairs_from_json(kind: str, file: str, path: str) -> list:
 
 
 def cmd_directive(args):
-    """`footnote|explain list|apply|resolve` — the inline directives'
-    verbs (docs/footnote-directive-design.md §5/§8,
-    docs/explain-directive-design.md). Drafting is chat. `apply` lands
+    """`footnote|explain|suggestion list|apply|resolve` — the inline
+    directives' verbs (docs/footnote-directive-design.md §5/§8,
+    docs/explain-directive-design.md,
+    docs/suggestion-directive-design.md). Drafting is chat. `apply` lands
     the agreed text directly when the file is local, or writes it into
     the Doc tab as <<tag>>{{new}} forms when the file is checked out —
-    local stays pristine — and `resolve` finishes that road."""
+    local stays pristine — and `resolve` finishes that road. A
+    suggestion may be declined on apply (`--decline TAG=REASON`)."""
     from pathlib import Path
 
     from . import directives as dv
@@ -3083,11 +3100,12 @@ def cmd_directive(args):
                 _gd.get_docs_service(config, args.workspace, interactive=True))
 
     try:
+        declines = getattr(args, "decline", None) or []
         if args.action == "apply" and getattr(args, "from_json", None):
-            if args.tag or args.text or args.footnote:
+            if args.tag or args.text or args.footnote or declines:
                 sys.exit(f"error: --from-json replaces --tag/--text/"
-                         f"--footnote; give one or the other. authorlm "
-                         f"{kind} apply {args.file} --from-json "
+                         f"--footnote/--decline; give one or the other. "
+                         f"authorlm {kind} apply {args.file} --from-json "
                          f"{args.from_json}")
             pairs = _directive_pairs_from_json(kind, args.file,
                                                args.from_json)
@@ -3095,9 +3113,24 @@ def cmd_directive(args):
                               pairs, services=_services)
         elif args.action == "apply":
             tags, texts = args.tag or [], args.text or []
-            if not tags or len(tags) != len(texts):
+            if declines and kind != "suggestion":
+                sys.exit(f"{kind} apply: --decline is a suggestion verb — "
+                         f"a declined [{kind.title()}:] draft simply stays "
+                         "open")
+            if len(tags) != len(texts) or not (tags or declines):
                 sys.exit(f"{kind} apply: give one --text for every --tag "
-                         f"({len(tags)} --tag, {len(texts)} --text)")
+                         f"({len(tags)} --tag, {len(texts)} --text)"
+                         + (" or a --decline TAG=REASON"
+                            if kind == "suggestion" else ""))
+            declined = []
+            for spec in declines:
+                handle, sep, reason = spec.partition("=")
+                if not sep or not handle.strip() or not reason.strip():
+                    sys.exit(f"{kind} apply: --decline takes TAG=REASON — "
+                             "the tag's ordinal or a gist excerpt, and why "
+                             "the suggestion was not taken")
+                declined.append({"tag": handle.strip(), "decline": True,
+                                 "reason": reason.strip()})
             notes: dict[str, str] = {}
             for spec in args.footnote or []:
                 handle, sep, note = spec.partition("=")
@@ -3111,7 +3144,7 @@ def cmd_directive(args):
                          f"as --tag: {', '.join(sorted(unknown))}")
             pairs = [(t, x, notes.get(str(t).strip())) for t, x in zip(tags, texts)]
             result = dv.apply(db, manuscript, config, kind, args.file,
-                              pairs, services=_services)
+                              pairs + declined, services=_services)
         else:
             result = dv.resolve(db, manuscript, config, kind, args.file,
                                 services=_services)
@@ -3133,8 +3166,13 @@ def cmd_directive(args):
         head = (f"[^{row['label']}]" if row["label"]
                 else f"[{kind.title()}: {row['gist']}]")
         verb = "Landed" if result["mode"] == "applied" else "Staged"
+        if row.get("declined"):
+            verb = "Declined" if result["mode"] == "applied" else "Staged decline of"
         print(ui.green(f"{verb} {args.file}:{row['line']}  {head}"))
-        print(ui.dim("    " + row["text"].replace("\n", "\n    ")))
+        if row.get("declined"):
+            print(ui.dim("    tag removed, paragraph kept — " + row["reason"]))
+        else:
+            print(ui.dim("    " + row["text"].replace("\n", "\n    ")))
         if row.get("footnote"):
             print(ui.dim(f"    [^{row['label']}]: " + row["footnote"]))
     for gist, why in result["failed"]:
@@ -9335,7 +9373,15 @@ def build_parser() -> argparse.ArgumentParser:
             ("explain",
              "[Explain: gist] tags — inline requests for an explanatory "
              "passage, drafted in chat, landed here in place of the tag",
-             "  explain apply becker.md --tag 1 --text 'A vital lie is …'")):
+             "  explain apply becker.md --tag 1 --text 'A vital lie is …'"),
+            ("suggestion",
+             "[Suggestion: gist] tags — inline requests to EVALUATE the "
+             "enclosing paragraph (alone on a line: the one before) and "
+             "act on it as the gist says; drafted in chat, the agreed "
+             "text REPLACES the paragraph here, or the tag is declined "
+             "with a reason",
+             "  suggestion apply becker.md --tag 1 --text 'The whole "
+             "revised paragraph.' --decline 2='the claim is load-bearing'")):
         p = sub.add_parser(
             kind, help=what,
             formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -9365,10 +9411,17 @@ def build_parser() -> argparse.ArgumentParser:
                             "the tag named by TAG (a --tag handle) — the "
                             "passage lands with its superscript, the "
                             "definition joins the file's block, same review")
+        p.add_argument("--decline", action="append", metavar="TAG=REASON",
+                       help="suggestion apply only: the suggestion was "
+                            "evaluated and not taken — the tag goes, the "
+                            "paragraph stays, the reason is recorded "
+                            "(repeatable; TAG is an ordinal or gist excerpt)")
         p.add_argument("--from-json", metavar="PATH", dest="from_json",
                        help="apply: read the pairs from a JSON list of "
                             "{tag, text, footnote?} — the same as repeated "
-                            "--tag/--text (and --footnote); not with them")
+                            "--tag/--text (and --footnote); not with them. "
+                            "A suggestion entry may be {tag, decline: true, "
+                            "reason}")
         p.set_defaults(func=cmd_directive)
 
     p = sub.add_parser(
