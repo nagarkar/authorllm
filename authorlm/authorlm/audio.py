@@ -283,7 +283,11 @@ def init(manuscript: dict) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     unchanged: list[str] = []
-    for path, content in ((config, DEFAULT_CONFIG_TEXT), (cast, SEED_CAST)):
+    # Every book that renders audio has a dictionary, named after the
+    # manuscript (ruling 2026-10-18); the author never makes one by hand.
+    seed_config = DEFAULT_CONFIG_TEXT.replace(
+        'dictionary = ""', f"dictionary = {json.dumps(manuscript['name'])}", 1)
+    for path, content in ((config, seed_config), (cast, SEED_CAST)):
         if path.exists():
             unchanged.append(str(path))
             continue
@@ -1158,37 +1162,40 @@ def _retail_sample(config: dict, chapters: dict, order: list[dict],
 
 
 def export(db, manuscript: dict, only: list[str] | None = None,
-           resolve_dictionary: bool = True) -> dict:
+           resolve_dictionary: bool = True,
+           client: "ElevenLabs | None" = None) -> dict:
     """Write `audiobook.json` and `chapters/*.json`, each only when its
     content changed. `only` limits which chapter files are (re)written;
     the book file always reflects every chapter. The dictionary is
-    resolved by name when a key is present (design §7); offline, the
-    locator is written without an id and the export says so."""
+    resolved by name when a key is present and CREATED from the table
+    when the account does not have it yet (design §7, ruling
+    2026-10-18); offline, the locator is written without an id and the
+    export says so. `client` replaces the key-built client (tests)."""
     root = Path(manuscript["path"])
     out_dir = root / AUDIO_DIR
     config = load_config(root)
-    dictionary = None
-    name = (config["tts"]["dictionary"] or "").strip()
+    name = dictionary_name(manuscript, config)
+    dictionary = {"name": name, "id": None, "versionId": None}
     warnings: list[str] = []
-    if name:
-        dictionary = {"name": name, "id": None, "versionId": None}
-        key = api_key(required=False) if resolve_dictionary else None
-        if key:
-            try:
-                found = ElevenLabs(key).dictionary_by_name(name)
-            except AudioError as err:
-                warnings.append(f"dictionary '{name}': {err}")
-                found = None
-            if found:
-                dictionary.update(id=found["id"],
-                                  versionId=found["latest_version_id"])
-            else:
-                warnings.append(f"dictionary '{name}' is not on the "
-                                "ElevenLabs account yet — 'audio dictionary "
-                                "push' creates it")
-        else:
-            warnings.append(f"dictionary '{name}': no {KEY_ENV} in the "
-                            "environment — locator written without a version")
+    notes: list[str] = []
+    if client is None and resolve_dictionary:
+        key = api_key(required=False)
+        client = ElevenLabs(key) if key else None
+    if client is not None:
+        try:
+            found = ensure_dictionary(manuscript, client, config)
+        except AudioError as err:
+            warnings.append(f"dictionary '{name}': {err}")
+            found = None
+        if found:
+            dictionary.update(id=found["id"],
+                              versionId=found["latest_version_id"])
+            if found["created"]:
+                notes.append(f"dictionary '{name}' created on ElevenLabs "
+                             f"with {found['rules']} rule(s)")
+    elif resolve_dictionary:
+        warnings.append(f"dictionary '{name}': no {KEY_ENV} in the "
+                        "environment — locator written without a version")
     built = build(manuscript, dictionary=dictionary)
     warnings = built["warnings"] + warnings
     wanted = {_stem(o) for o in only} if only else None
@@ -1217,7 +1224,7 @@ def export(db, manuscript: dict, only: list[str] | None = None,
     return {"written": written, "unchanged": unchanged,
             "chapters": [c["stem"] for c in built["book"]["chapters"]],
             "sections": speech, "characters": chars,
-            "warnings": warnings, "book": str(book_path)}
+            "warnings": warnings, "notes": notes, "book": str(book_path)}
 
 
 # ------------------------------------------------------------- state
@@ -1316,12 +1323,8 @@ def check(db, manuscript: dict) -> dict:
             problems.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:50]}]")
     # Dictionary.
-    dname = (config["tts"]["dictionary"] or "").strip()
-    rules = pronunciation_rules(files.get(pron.FILENAME) or "")
-    if rules and not dname:
-        problems.append(f"{pron.FILENAME} has {len(rules)} rows and "
-                        "tts.dictionary is empty in audiobook.toml")
-    elif dname:
+    dname = dictionary_name(manuscript, config)
+    if dname:
         key = api_key(required=False)
         if not key:
             warnings.append(f"dictionary '{dname}': no {KEY_ENV} — remote "
@@ -1331,7 +1334,7 @@ def check(db, manuscript: dict) -> dict:
                 plan = dictionary_plan(manuscript, ElevenLabs(key))
                 if plan["create"]:
                     problems.append(f"dictionary '{dname}' does not exist on "
-                                    "ElevenLabs — 'audio dictionary push'")
+                                    "ElevenLabs — 'audio export' creates it")
                 elif plan["add"] or plan["change"] or plan["remove"]:
                     problems.append(
                         f"{pron.FILENAME} and dictionary '{dname}' differ: "
@@ -1612,14 +1615,45 @@ def _rule_target(rule: dict) -> str:
     return rule.get("alias") or rule.get("phoneme") or ""
 
 
+def dictionary_name(manuscript: dict, config: dict | None = None) -> str:
+    """The ElevenLabs dictionary this book uses: `[tts].dictionary`, or
+    the manuscript's name when that key is empty. Every book that renders
+    audio has one (ruling 2026-10-18: the author never makes a dictionary
+    by hand; the Pronunciations tab works from the first row)."""
+    if config is None:
+        config = load_config(Path(manuscript["path"]))
+    return (config["tts"]["dictionary"] or "").strip() or \
+        (manuscript.get("name") or "").strip()
+
+
+def ensure_dictionary(manuscript: dict, client: ElevenLabs,
+                      config: dict | None = None) -> dict:
+    """The book's dictionary on ElevenLabs, created from the table when it
+    is not there yet (an empty table makes an empty dictionary — the API
+    allows it, verified 2026-10-18). Export and generation call this, so
+    the first render of any book finds its dictionary in place.
+    Returns {name, id, latest_version_id, created, rules}."""
+    if config is None:
+        config = load_config(Path(manuscript["path"]))
+    name = dictionary_name(manuscript, config)
+    found = client.dictionary_by_name(name)
+    if found:
+        return {"name": name, "id": found["id"],
+                "latest_version_id": found["latest_version_id"],
+                "created": False, "rules": None}
+    rules = sorted(desired_rules(manuscript, config).values(),
+                   key=lambda r: r["string_to_replace"])
+    made = client.create_dictionary(name, rules)
+    return {"name": name, "id": made["id"],
+            "latest_version_id": made["latest_version_id"],
+            "created": True, "rules": len(rules)}
+
+
 def dictionary_plan(manuscript: dict, client: ElevenLabs) -> dict:
     """What a push would do, without doing it (design §7)."""
     root = Path(manuscript["path"])
     config = load_config(root)
-    name = (config["tts"]["dictionary"] or "").strip()
-    if not name:
-        raise AudioError("tts.dictionary is empty in audiobook.toml — name "
-                         "the ElevenLabs dictionary this book uses")
+    name = dictionary_name(manuscript, config)
     wanted = desired_rules(manuscript, config)
     remote = client.dictionary_by_name(name)
     if remote is None:
@@ -1789,13 +1823,9 @@ def render_context(manuscript: dict, client: ElevenLabs, ctx: dict, term: str,
 
 
 def dictionary_locators(manuscript: dict, client: ElevenLabs) -> list[dict]:
-    """The pushed dictionary's locator, by name, or a named refusal."""
-    config = load_config(Path(manuscript["path"]))
-    name = (config["tts"]["dictionary"] or "").strip()
-    found = client.dictionary_by_name(name) if name else None
-    if not found:
-        raise AudioError(f"'{name or '(unnamed)'}' is not on ElevenLabs — "
-                         "'audio dictionary push' first")
+    """The book's dictionary locator, by name; the dictionary is created
+    from the table when the account does not have it yet."""
+    found = ensure_dictionary(manuscript, client)
     return [{"pronunciation_dictionary_id": found["id"],
              "version_id": found["latest_version_id"]}]
 
@@ -1888,8 +1918,7 @@ def _remove_remote_rules(manuscript: dict, term: str,
     dictionary. (removed?, new version id)."""
     if client is None:
         return False, None
-    config = load_config(Path(manuscript["path"]))
-    name = (config["tts"]["dictionary"] or "").strip()
+    name = dictionary_name(manuscript)
     remote = client.dictionary_by_name(name) if name else None
     if not remote:
         return False, None
