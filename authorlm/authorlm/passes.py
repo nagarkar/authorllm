@@ -909,13 +909,19 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
         # inside the braces. Insertions are excluded: their old half is
         # the empty string, which is "present" in any text.
         old = " ".join((t["proposed_old"] or "").split())
-        if norm_final is None or not old or old in norm_final:
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        # The old text counts as standing only OUTSIDE the landed new: a
+        # new that extends its old (a sentence appended or prepended)
+        # carries the old inside it once it lands, and that is the
+        # acceptance, not the old text restored (SMSTTD, 2026-10-18).
+        rest = (norm_final.replace(new, "\0") if new and norm_final
+                else norm_final)
+        if norm_final is None or not old or old in rest:
             db.update("doc_threads", t["id"], {"state": "declined"})
             _edit_evidence(db, manuscript_id, t, "declined",
                            evidence_type=evidence_type)
             continue
-        proposed = t["proposed_new"] or ""
-        new = " ".join(proposed.split())
         if new and new in norm_final:
             db.update("doc_threads", t["id"], {"state": "cleaned"})
             _edit_evidence(db, manuscript_id, t, "resolved",
