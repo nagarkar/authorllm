@@ -7556,6 +7556,35 @@ def main_test() -> None:
         pulled = normalize_markdown(unescape_export_math(exporter(doc_text)))
         check("math round-trips the Doc road byte for byte",
               pulled == canon, repr(pulled))
+        # A pending form that cuts through a math span (a revision that
+        # moved the opening `$`) puts a `$` in each half. Pairing the
+        # export's delimiters on the marked text left the new half's
+        # `\$` escaped, and the resolve landed it (2026-10-18, SMSTTD
+        # recapitulation.md R10). Spans are found per reading now.
+        from authorlm.threads import _collapse
+        exporter2 = lambda s: _re_math.sub(r"([\\_=$<>])", r"\\\1", s)
+        span = "$\\neg N:=\\{\\neg x:x\\in N\\}$"
+        for marked in (
+                "by <<element:$\\neg>>{{element: $\\neg}} N:=\\{\\neg "
+                "x:x\\in N\\}$. Then $a_1$.\n",
+                "by <<element:$\\{a\\} \\cup>>{{element: $\\{a\\} \\cup}} "
+                "\\{b\\}$ and $x$.\n",
+                "by ~~<<element: $x\\{>>~~{{element: $y\\{}} z\\}$ ok.\n"):
+            pulled = normalize_markdown(unescape_export_math(
+                exporter2(marked)))
+            check("a form cutting a math span pulls back byte for byte",
+                  pulled == marked, repr(pulled))
+            for keep in ("old", "new"):
+                check(f"…and its {keep} reading is the TeX it was",
+                      _collapse(pulled, keep)
+                      == _collapse(marked, keep), keep)
+        check("a TeX \\$ inside math round-trips",
+              normalize_markdown(unescape_export_math(
+                  exporter2(importer(escape_math("costs $\\$5$ net\n")))))
+              == "costs $\\$5$ net\n")
+        check("…and the R10 sentence itself",
+              normalize_markdown(unescape_export_math(exporter2(
+                  "element: " + span + ".\n"))) == "element: " + span + ".\n")
         # Unclosed $$ used to fail open into the prose escape strip:
         # push_doc writes normalize_markdown back to disk, so a mid-edit
         # `\\` row break became `\` and `\{` braces vanished — permanent
