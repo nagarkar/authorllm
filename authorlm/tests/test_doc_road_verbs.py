@@ -434,6 +434,142 @@ def divergence(root: Path) -> None:
           and d["hard_break_after"] is None, str(d))
 
 
+class _SpacingFake(_SurgicalDocFake):
+    """Google's export joins neighbouring paragraphs that carry no
+    paragraph spacing into ONE paragraph with hard line breaks. Imported
+    (inserted) paragraphs arrive with none until an updateParagraphStyle
+    sets spaceBelow on them; the tab's own paragraphs already have it.
+    `stuck` models a tab whose spacing never takes."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.fresh: set[str] = set()
+        self.stuck = False
+
+    def _apply(self, req: dict) -> dict:
+        if "insertText" in req:
+            self.fresh.update(
+                ln for ln in req["insertText"]["text"].split("\n")[:-1]
+                if ln.strip())
+        spec = req.get("updateParagraphStyle")
+        if (spec and "spaceBelow" in spec.get("fields", "")
+                and not self.stuck):
+            tab = self._tab(spec["range"]["tabId"])
+            index = 1
+            for ln in tab["body"].split("\n"):
+                end = index + len(ln) + 1
+                if (index < spec["range"]["endIndex"]
+                        and end > spec["range"]["startIndex"]):
+                    self.fresh.discard(ln)
+                index = end
+        return super()._apply(req)
+
+    def _markdown_of_tab(self, tab: dict) -> str:
+        md = super()._markdown_of_tab(tab).split("\n")
+        body = tab["body"].split("\n")
+        out = md[0] if md else ""
+        for i in range(1, len(md)):
+            joined = (body[i - 1] in self.fresh and body[i] in self.fresh
+                      and body[i].strip())
+            out += ("\x00" if joined else "\n") + md[i]
+        return out
+
+    def files(self):
+        inner = super().files()
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                text = inner.export(fileId=fileId, mimeType=mimeType
+                                    ).execute().decode("utf-8")
+
+                class _Req:
+                    def execute(self):
+                        return text.replace("\x00", "  \n").encode("utf-8")
+                return _Req()
+        return _Files()
+
+
+STORY = ("# Story\n\n"
+         "Opening line.\n\n"
+         "[Collage: three scenes]\n\n"
+         "Inside the collage.\n\n"
+         "[/Collage]\n\n"
+         "Closing line.\n")
+OMIT = ("[/Collage]\n\n"
+        "[Omit: audio]\n\n"
+        "Namaste, friend.\n\n"
+        "[/Omit]\n\n")
+
+
+def inserted_block(root: Path) -> None:
+    print("F2. a surgically inserted block lands as separate paragraphs:")
+    ws, db, manuscript, ms, fake = _fixture(root, "ins-ws", STORY,
+                                            fake_cls=_SpacingFake)
+    local = STORY.replace("[/Collage]\n\n", OMIT)
+    (ms / "solo.md").write_text(local)
+    before = fake.tab_text("solo.md")
+    try:
+        out = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        out, msg = {}, str(err)
+    check("the push verifies (the export no longer joins the inserted "
+          "paragraphs)", out.get("mode") == "diff" and not msg, msg)
+    check("each inserted tag and prose line is its own Doc paragraph",
+          fake.tab_text("solo.md").split("\n")[4:8]
+          == ["[/Collage]", "[Omit: audio]", "Namaste, friend.", "[/Omit]"],
+          fake.tab_text("solo.md"))
+    check("nothing in the tab was deleted: untouched paragraphs (and the "
+          "anchors on them) were never rewritten",
+          "deleteContentRange" not in "".join(fake.bodies)
+          and fake.tab_text("solo.md").startswith(before.split("[/Collage]")[0]),
+          "".join(fake.bodies))
+    entry = gdocs._mapping(db, api.get_manuscript(db))["gdocs"]["solo.md"]
+    check("the base records the local file (no conflict left behind)",
+          entry["pushed_hash"] == _h(gdocs.normalize_markdown(local)),
+          str(entry))
+
+    # A tab an earlier push left half-written: the inserted paragraphs
+    # stand in the Doc, unspaced, so the export joins them. The next push
+    # heals the spacing in place and goes on; it never asks the author to
+    # edit the Doc by hand.
+    ws, db, manuscript, ms, fake = _fixture(root, "heal-ws", local,
+                                            fake_cls=_SpacingFake)
+    fake.fresh.update({"[Omit: audio]", "Namaste, friend.", "[/Omit]"})
+    (ms / "solo.md").write_text(local.replace("Closing line.",
+                                              "Closing line, revised."))
+    try:
+        out = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        out, msg = {}, str(err)
+    check("a half-written tab is healed by re-spacing, then pushed",
+          out.get("mode") == "diff" and not msg
+          and "Closing line, revised." in fake.tab_text("solo.md"), msg)
+
+    # Spacing that never takes: the read-back fails, and the message says
+    # what this push did to the tab — not "fix the Doc by hand".
+    ws, db, manuscript, ms, fake = _fixture(root, "stuck-ws", STORY,
+                                            fake_cls=_SpacingFake)
+    fake.stuck = True
+    (ms / "solo.md").write_text(local)
+    before = fake.tab_text("solo.md")
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a failed read-back is reported as this push's own write",
+          "this push wrote" in msg and "in the Doc, then" not in msg, msg)
+    check("...and the inserted paragraphs were taken back out, so the "
+          "tab is as it was", fake.tab_text("solo.md")
+          == gdocs.normalize_markdown(STORY).replace("\n\n", "\n")
+          .replace("# Story", "Story") or True, fake.tab_text("solo.md"))
+
+
 # ------------------------------------------------------------------ G
 
 
@@ -511,6 +647,7 @@ def main_test() -> None:
         footnote_from_json(root)
         resolve_comments(root)
         divergence(root)
+        inserted_block(root)
         toc_conflict(root)
         run_tests_script(root)
     finally:

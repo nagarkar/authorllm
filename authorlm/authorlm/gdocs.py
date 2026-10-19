@@ -4265,9 +4265,11 @@ def first_divergence(doc_texts: list[str], export_paras: list[str]) -> dict:
 
 
 def divergence_note(doc_texts: list[str], export_paras: list[str],
-                    relpath: str) -> str:
+                    relpath: str, fix: bool = True) -> str:
     """The tail of diff_push's count-disagreement error: the first
-    divergence, both sides clipped to 80 characters, and the fix."""
+    divergence, both sides clipped to 80 characters, and (with `fix`)
+    the author's fix — left out when the push itself wrote the
+    disagreement, which is no Doc edit of the author's to correct."""
     d = first_divergence(doc_texts, export_paras)
 
     def clip(text: str) -> str:
@@ -4276,6 +4278,8 @@ def divergence_note(doc_texts: list[str], export_paras: list[str],
 
     note = (f"; first divergence at paragraph {d['index'] + 1}: "
             f"Doc «{clip(d['doc'])}» vs export «{clip(d['export'])}»")
+    if not fix:
+        return note
     if d["hard_break_after"] is not None:
         words = " ".join(d["hard_break_after"].split()[:6])
         return (note + ". Google's export joined two paragraphs with a hard "
@@ -4403,6 +4407,134 @@ def _hold_commented(canonical: list[str], local: list[str],
     return target, held
 
 
+def _surgical_requests(service, docs_service, master_id: str,
+                       relpath: str, tab_id: str, doc_paras: list[dict], old_keys: list[str],
+                       new_keys: list[str], new_md: list[str],
+                       guard_tables: bool = True) -> tuple[list[dict], int]:
+    """The batchUpdate requests that turn the tab's paragraphs
+    (`doc_paras`, aligned positionally with `old_keys`) into `new_keys`,
+    editing only the paragraphs that differ: each inserted run is
+    `new_md[j]` imported through a temp Doc, so every paragraph lands
+    with its own paragraph break. Returns (requests, ops)."""
+    from difflib import SequenceMatcher
+
+    from googleapiclient.http import MediaInMemoryUpload
+
+    requests: list[dict] = []
+    opcodes = SequenceMatcher(None, old_keys, new_keys,
+                              autojunk=False).get_opcodes()
+    ops = 0
+    for tag, i1, i2, j1, j2 in reversed(opcodes):
+        if tag == "equal":
+            continue
+        ops += 1
+        # A table is one unit here (it-cd0fb0ad59fb): a changed table
+        # is replaced whole, so every comment anchored inside it would
+        # go with it. The author's rule is that no comment on a tab is
+        # lost, so a table edit that would take one stops, named.
+        doomed = ([d for d in doc_paras[i1:i2] if d.get("table")]
+                  if tag in ("replace", "delete") else [])
+        if doomed and guard_tables:
+            _refuse_table_orphans(service, master_id, relpath, doomed)
+        start = None
+        if tag in ("replace", "delete") and i2 > i1:
+            start = doc_paras[i1]["start"]
+            end = doc_paras[i2 - 1]["end"]
+            first = doc_paras[i1]
+            if first.get("table") and first.get("lead_blank"):
+                # The empty paragraph Docs keeps before a table goes
+                # with it; a replacing insertTable makes a fresh one.
+                start = first["lead_start"]
+            if i2 == len(doc_paras):
+                if not doc_paras[-1].get("table"):
+                    end -= 1  # the tab's final newline is not deletable
+            elif (doc_paras[i2].get("table")
+                  and end == doc_paras[i2]["start"]):
+                end -= 1  # the newline before a kept table must stay
+            requests.append({"deleteContentRange": {"range": {
+                "tabId": tab_id, "startIndex": start,
+                "endIndex": end}}})
+        if tag in ("replace", "insert") and j2 > j1:
+            chunk = "\n\n".join(new_md[j1:j2]) + "\n"
+            chunk = escape_math(escape_footnotes(chunk))
+            media = MediaInMemoryUpload(chunk.encode("utf-8"),
+                                        mimetype=MARKDOWN_MIME)
+            temp = service.files().create(
+                body={"name": f"authorlm-diff-{Path(relpath).stem}",
+                      "mimeType": GDOC_MIME},
+                media_body=media, fields="id",
+            ).execute()
+            try:
+                temp_doc = docs_service.documents().get(
+                    documentId=temp["id"]).execute()
+            finally:
+                service.files().delete(fileId=temp["id"]).execute()
+            if not doc_paras:
+                # Empty tab: nothing to insert before or after, so
+                # the block lands at the body's start (index 1),
+                # ahead of the tab's lone trailing newline
+                # (it-06cb8c2057c3).
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id), 0))
+            elif start is not None or (
+                    i1 < len(doc_paras)
+                    and not doc_paras[i1].get("table")):
+                # Insert BEFORE an existing paragraph (or where the
+                # replaced span began): imported paragraphs each end
+                # with a newline, so the block closes cleanly
+                # against what follows.
+                position = (start if start is not None
+                            else doc_paras[i1]["start"])
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id),
+                    position - 1))
+            elif i1 < len(doc_paras) and doc_paras[i1]["lead_blank"]:
+                # Before a kept table: a table's start index is not
+                # inside any paragraph, so the block goes into the
+                # empty paragraph Docs keeps ahead of it.
+                position = doc_paras[i1]["lead_start"]
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id),
+                    position - 1))
+            elif i1 < len(doc_paras):
+                # Before a kept table whose lead paragraph has text
+                # (that paragraph is doc_paras[i1 - 1]): open a fresh
+                # paragraph after it, as the append below does.
+                if i1 == 0:
+                    raise LookupError(
+                        "diff push: no paragraph stands before the "
+                        "tab's opening table to insert into")
+                position = doc_paras[i1 - 1]["end"] - 1
+                requests.append([{"insertText": {
+                    "location": {"tabId": tab_id, "index": position},
+                    "text": "\n"}}])
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id), position))
+            elif doc_paras[-1].get("table"):
+                # Append after a closing table: the paragraph Docs
+                # keeps after every table is empty here (else it
+                # would be the last unit), so the block lands in it.
+                position = doc_paras[-1]["end"]
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id),
+                    position - 1))
+            else:
+                # Append at tab end: open a fresh paragraph first —
+                # inserting at end-1 lands INSIDE the last
+                # paragraph, before its trailing newline.
+                position = doc_paras[-1]["end"] - 1
+                requests.append([{"insertText": {
+                    "location": {"tabId": tab_id, "index": position},
+                    "text": "\n"}}])
+                requests.append(_shift_requests(
+                    transplant_requests(temp_doc, tab_id), position))
+
+    flat: list[dict] = []
+    for r in requests:
+        flat.extend(r if isinstance(r, list) else [r])
+    return flat, ops
+
+
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
               bridge: DocBridge | None = None,
@@ -4427,8 +4559,6 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     import hashlib as _hashlib
 
     from difflib import SequenceMatcher
-
-    from googleapiclient.http import MediaInMemoryUpload
 
     from .revisions import strip_embed_lines as _strip_embeds
 
@@ -4478,32 +4608,92 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                                   bridge, relpath)
         return text if text is not None else normalize_markdown("")
 
-    anchors: list[dict] | None = None
-    for attempt in (1, 2):
-        tab_md = tab_markdown()
-        tab_paras = _md_paragraphs(tab_md)
-        canonical = [threads_mod.strip_pending(p)[0].strip("\n")
-                     for p in tab_paras]
-        local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
-        if canonical == local_paras:
-            # Same canonical bytes as push_doc / three_way / reconcile
-            # (normalize_markdown's trailing newline). Hashing the
-            # join(paras) form made only-local edits look like both
-            # sides moved → false CONFLICT → --force data loss.
-            entry["pushed_hash"] = _hashlib.sha256(
-                local_md.encode()).hexdigest()[:16]
-            entry["checked_out"] = True
-            links[relpath] = entry
-            _save_mapping(db, manuscript, meta)
-            return {"relpath": relpath, "mode": "diff", "ops": 0}
+    def record_local() -> dict:
+        # Same canonical bytes as push_doc / three_way / reconcile
+        # (normalize_markdown's trailing newline). Hashing the
+        # join(paras) form made only-local edits look like both
+        # sides moved → false CONFLICT → --force data loss.
+        entry["pushed_hash"] = _hashlib.sha256(
+            local_md.encode()).hexdigest()[:16]
+        entry["checked_out"] = True
+        links[relpath] = entry
+        _save_mapping(db, manuscript, meta)
+        return {"relpath": relpath, "mode": "diff", "ops": 0}
 
-        doc_paras = _doc_paragraphs(docs_service, master_id, tab_id)
+    # The tab's paragraphs (Doc text, export markdown) ahead of this
+    # push's first write, and how many edits it sent: a write whose
+    # read-back fails is taken back out to this, in place.
+    before: tuple[list[str], list[str]] | None = None
+    sent = 0
+
+    def failed(reason: str) -> LookupError:
+        if before is None:
+            return LookupError(reason)
+        undone = False
+        try:
+            now = _doc_paragraphs(docs_service, master_id, tab_id)
+            undo, _ = _surgical_requests(
+                service, docs_service, master_id, relpath, tab_id, now,
+                [d["text"] for d in now], before[0], before[1],
+                guard_tables=False)
+            if undo:
+                docs_service.documents().batchUpdate(
+                    documentId=master_id,
+                    body={"requests": undo}).execute()
+                apply_tab_spacing(docs_service, master_id, tab_id,
+                                  doc_spacing(manuscript))
+            undone = [d["text"] for d in _doc_paragraphs(
+                docs_service, master_id, tab_id)] == before[0]
+        except Exception:  # noqa: BLE001 — reported below, never hidden
+            undone = False
+        head = (f"diff push: this push wrote {sent} edit(s) to "
+                f"{relpath}'s tab and its read-back failed "
+                f"({reason.removeprefix('diff push: ')})")
+        if undone:
+            return LookupError(
+                head + ". The edits were taken back out, so the tab is as "
+                "it was before the push; the local file still holds the "
+                f"change. Retry authorlm doc push {relpath}; if it fails "
+                "the same way, this is a bridge bug to file, not a Doc to "
+                "fix by hand")
+        return LookupError(
+            head + ". Taking the edits back out failed too, so the tab "
+            f"holds part of this push: see authorlm doc diff {relpath}, "
+            "then retry the push, or settle threads and use a rebuild "
+            "push")
+
+    anchors: list[dict] | None = None
+    spaced = False
+    for attempt in (1, 2):
+        while True:
+            tab_md = tab_markdown()
+            tab_paras = _md_paragraphs(tab_md)
+            canonical = [threads_mod.strip_pending(p)[0].strip("\n")
+                         for p in tab_paras]
+            local_paras = [p.strip("\n")
+                           for p in _md_paragraphs(local_md)]
+            if canonical == local_paras:
+                out = record_local()
+                if sent:
+                    out["ops"] = sent
+                return out
+            doc_paras = _doc_paragraphs(docs_service, master_id, tab_id)
+            if len(doc_paras) == len(tab_paras) or spaced:
+                break
+            # Paragraphs with no spacing of their own (inserted ones an
+            # earlier push never re-spaced) are joined by Google's export
+            # into one paragraph with hard line breaks. Re-spacing is a
+            # paragraph-style write only — no text, no anchor moves — so
+            # heal it once and read again before calling it a mismatch.
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
+            spaced = True
         if len(doc_paras) != len(tab_paras):
-            raise LookupError(
+            raise failed(
                 f"diff push: tab structure and export disagree "
                 f"({len(doc_paras)} vs {len(tab_paras)} paragraphs)"
                 + divergence_note([d["text"] for d in doc_paras],
-                                  tab_paras, relpath))
+                                  tab_paras, relpath, fix=before is None))
 
         # Replaces use <<old>>{{new}}; critique insertions are {{new}}
         # alone — both block any overlapping surgical edit, whole push,
@@ -4542,129 +4732,27 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             return {"relpath": relpath, "mode": "diff", "ops": 0,
                     "held": held}
 
-        requests: list[dict] = []
-        opcodes = SequenceMatcher(None, canonical, target,
-                                  autojunk=False).get_opcodes()
-        ops = 0
-        for tag, i1, i2, j1, j2 in reversed(opcodes):
-            if tag == "equal":
-                continue
-            ops += 1
-            # A table is one unit here (it-cd0fb0ad59fb): a changed table
-            # is replaced whole, so every comment anchored inside it would
-            # go with it. The author's rule is that no comment on a tab is
-            # lost, so a table edit that would take one stops, named.
-            doomed = ([d for d in doc_paras[i1:i2] if d.get("table")]
-                      if tag in ("replace", "delete") else [])
-            if doomed:
-                _refuse_table_orphans(service, master_id, relpath, doomed)
-            start = None
-            if tag in ("replace", "delete") and i2 > i1:
-                start = doc_paras[i1]["start"]
-                end = doc_paras[i2 - 1]["end"]
-                first = doc_paras[i1]
-                if first.get("table") and first.get("lead_blank"):
-                    # The empty paragraph Docs keeps before a table goes
-                    # with it; a replacing insertTable makes a fresh one.
-                    start = first["lead_start"]
-                if i2 == len(doc_paras):
-                    if not doc_paras[-1].get("table"):
-                        end -= 1  # the tab's final newline is not deletable
-                elif (doc_paras[i2].get("table")
-                      and end == doc_paras[i2]["start"]):
-                    end -= 1  # the newline before a kept table must stay
-                requests.append({"deleteContentRange": {"range": {
-                    "tabId": tab_id, "startIndex": start,
-                    "endIndex": end}}})
-            if tag in ("replace", "insert") and j2 > j1:
-                chunk = "\n\n".join(target[j1:j2]) + "\n"
-                chunk = escape_math(escape_footnotes(chunk))
-                media = MediaInMemoryUpload(chunk.encode("utf-8"),
-                                            mimetype=MARKDOWN_MIME)
-                temp = service.files().create(
-                    body={"name": f"authorlm-diff-{Path(relpath).stem}",
-                          "mimeType": GDOC_MIME},
-                    media_body=media, fields="id",
-                ).execute()
-                try:
-                    temp_doc = docs_service.documents().get(
-                        documentId=temp["id"]).execute()
-                finally:
-                    service.files().delete(fileId=temp["id"]).execute()
-                if not doc_paras:
-                    # Empty tab: nothing to insert before or after, so
-                    # the block lands at the body's start (index 1),
-                    # ahead of the tab's lone trailing newline
-                    # (it-06cb8c2057c3).
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id), 0))
-                elif start is not None or (
-                        i1 < len(doc_paras)
-                        and not doc_paras[i1].get("table")):
-                    # Insert BEFORE an existing paragraph (or where the
-                    # replaced span began): imported paragraphs each end
-                    # with a newline, so the block closes cleanly
-                    # against what follows.
-                    position = (start if start is not None
-                                else doc_paras[i1]["start"])
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id),
-                        position - 1))
-                elif i1 < len(doc_paras) and doc_paras[i1]["lead_blank"]:
-                    # Before a kept table: a table's start index is not
-                    # inside any paragraph, so the block goes into the
-                    # empty paragraph Docs keeps ahead of it.
-                    position = doc_paras[i1]["lead_start"]
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id),
-                        position - 1))
-                elif i1 < len(doc_paras):
-                    # Before a kept table whose lead paragraph has text
-                    # (that paragraph is doc_paras[i1 - 1]): open a fresh
-                    # paragraph after it, as the append below does.
-                    if i1 == 0:
-                        raise LookupError(
-                            "diff push: no paragraph stands before the "
-                            "tab's opening table to insert into")
-                    position = doc_paras[i1 - 1]["end"] - 1
-                    requests.append([{"insertText": {
-                        "location": {"tabId": tab_id, "index": position},
-                        "text": "\n"}}])
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id), position))
-                elif doc_paras[-1].get("table"):
-                    # Append after a closing table: the paragraph Docs
-                    # keeps after every table is empty here (else it
-                    # would be the last unit), so the block lands in it.
-                    position = doc_paras[-1]["end"]
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id),
-                        position - 1))
-                else:
-                    # Append at tab end: open a fresh paragraph first —
-                    # inserting at end-1 lands INSIDE the last
-                    # paragraph, before its trailing newline.
-                    position = doc_paras[-1]["end"] - 1
-                    requests.append([{"insertText": {
-                        "location": {"tabId": tab_id, "index": position},
-                        "text": "\n"}}])
-                    requests.append(_shift_requests(
-                        transplant_requests(temp_doc, tab_id), position))
-
-        flat: list[dict] = []
-        for r in requests:
-            flat.extend(r if isinstance(r, list) else [r])
+        flat, ops = _surgical_requests(
+            service, docs_service, master_id, relpath, tab_id, doc_paras,
+            canonical, target, target)
         if flat:
+            if before is None:
+                before = ([d["text"] for d in doc_paras], list(canonical))
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": flat}).execute()
+            sent += ops
+            # BEFORE the read-back: inserted paragraphs carry no spacing,
+            # and Google's export joins unspaced neighbours with hard line
+            # breaks — the read-back would see one paragraph where the
+            # Doc holds three (found 2026-10-18: an [Omit: audio] block
+            # inserted after a [/Collage] tag).
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
 
         verify_md = tab_markdown()
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
                   for p in _md_paragraphs(verify_md)]
         if verify == target:
-            if flat:
-                apply_tab_spacing(docs_service, master_id, tab_id,
-                                  doc_spacing(manuscript))
             # A partial push records what the tab now holds, not the
             # local file: pull then sees only local moved (local_ahead)
             # and keeps the held paragraphs' new text.
@@ -4675,15 +4763,13 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             entry["checked_out"] = True
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
-            out = {"relpath": relpath, "mode": "diff", "ops": ops}
+            out = {"relpath": relpath, "mode": "diff", "ops": sent}
             if held:
                 out["held"] = held
             return out
         if attempt == 2:
-            raise LookupError(
-                "diff push: read-back verification failed twice — the "
-                "tab and local disagree; resolve by pull or an explicit "
-                "rebuild push")
+            raise failed("read-back verification failed twice — the "
+                         "tab's export and the local file disagree")
     raise LookupError("diff push: unreachable")
 
 
