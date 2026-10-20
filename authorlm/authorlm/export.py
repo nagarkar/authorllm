@@ -964,10 +964,10 @@ _MEDIA_TAG = re.compile(r"^\[/?(Collage|Montage|Clip)\b", re.IGNORECASE)
 
 
 def _with_body(path: Path, passages: list[dict]) -> list[dict]:
-    """`--whole`: the file read on camera end to end — the narrated prose
-    (regions resolved as for the audio build, tags and headings dropped,
-    paragraphs kept) as `Body` passages between the author's clips, each
-    clip in its place."""
+    """`--whole`: the file read on camera end to end — every word of prose
+    the md export keeps (an `[Omit: audio]` intro or outro included: the
+    author speaks it; tags and headings dropped, paragraphs kept) as
+    `Body` passages, any `voice: author` clip in its place."""
     from . import media
 
     by_line = {p["line"]: p for p in passages}
@@ -975,7 +975,7 @@ def _with_body(path: Path, passages: list[dict]) -> list[dict]:
     for i in range(len(lines)):
         if i + 1 in by_line:
             lines[i] = media._SENTINEL.format(i + 1)
-    resolved = resolve_regions("\n".join(lines), {"audio"}, path.name)
+    resolved = resolve_regions("\n".join(lines), {"md"}, path.name)
     out: list[dict] = []
     body: list[str] = []
     block: list[str] = []

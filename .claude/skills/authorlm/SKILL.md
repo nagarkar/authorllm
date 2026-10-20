@@ -1689,9 +1689,12 @@ the Collage title up to its first comma. A file with no `voice: author`
 clip stops with an error that says where to add `| voice: author`; add
 it to the intro/outro `[Clip:]` only with the author's go-ahead.
 
-`--whole` (2026-10-20) is the whole file read on camera: the narrated
-prose (regions resolved as for the audio build, so an `[Omit: audio]`
-passage stays out) as `Body` passages between the `voice: author` clips.
+`--whole` (2026-10-20) is the whole file read on camera: every word of
+prose the md export keeps, as `Body` — an `[Omit: audio]` intro or outro
+included, since the author speaks it — with any `voice: author` clip in
+its place. The SpiritualHindu monologues keep the intro and outro as
+`[Omit: audio]` prose, not Collage clips (ruled 2026-10-20: one text, the
+author's, edited in the Doc; no clip note to keep in step).
 Use it when the author records the whole monologue himself ("I want the
 whole thing"). Body prose takes no `voice:` field; the field is a Collage
 clip's alone.

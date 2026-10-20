@@ -239,6 +239,16 @@ class ExportTests(unittest.TestCase):
                                   "picture-story.md", "--whole")
         self.assertEqual(code, 0, err)
 
+    def test_teleprompter_whole_reads_an_omit_audio_intro(self):
+        (self.ms / "plain.md").write_text(
+            "# P\n\n[Omit: audio]\n\nNamaste, said on camera.\n\n"
+            "[/Omit]\n\nJust prose.\n", encoding="utf-8")
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(
+            api.get_manuscript(db), "plain.md", whole=True)
+        self.assertEqual(passages[0]["paragraphs"],
+                         ["Namaste, said on camera.", "Just prose."])
+
     def test_teleprompter_needs_a_file_and_an_author_passage(self):
         code, _out, err = self.cli("export", "teleprompter")
         self.assertEqual(code, 1)
