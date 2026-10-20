@@ -1689,13 +1689,33 @@ the Collage title up to its first comma. A file with no `voice: author`
 clip stops with an error that says where to add `| voice: author`; add
 it to the intro/outro `[Clip:]` only with the author's go-ahead.
 
+`--whole` (2026-10-20) is the whole file read on camera: the narrated
+prose (regions resolved as for the audio build, so an `[Omit: audio]`
+passage stays out) as `Body` passages between the `voice: author` clips.
+Use it when the author records the whole monologue himself ("I want the
+whole thing"). Body prose takes no `voice:` field; the field is a Collage
+clip's alone.
+
+**Reconcile with the Doc first, every time.** The author edits in Google
+Docs; a local file checked out to Docs (`doc list` says `[checked out to
+Google Docs]`) is stale until pulled. Before any teleprompter export:
+
+1. `authorlm doc pull <file> -m <manuscript>`.
+2. Check the tag lines (the round trip joins them): split any `] [` into
+   separate lines with a blank line between, strip `⇢ [name](http…)` back
+   to `⇢ name`, and confirm `[/Collage]` / `[/Omit]` closes survived;
+   `authorlm media list <file>` must show the author's clips `ready`.
+3. Then export and upload. Never export from a file you did not just
+   reconcile with its Doc.
+
 Uploading the teleprompter copy ("upload the teleprompter copy", "put the
 teleprompter on Drive", "send it to my phone"): rerun the export with
 `--upload`; there is no separate upload verb and no MCP tool, so it is the
 CLI from Bash:
 
 ```bash
-authorlm export teleprompter --file <file> -m <manuscript> --upload
+authorlm doc pull <file> -m <manuscript>        # reconcile first (above)
+authorlm export teleprompter --file <file> -m <manuscript> [--whole] --upload
 ```
 
 - Default is the plain `.docx`: teleprompter apps import it from Drive as
