@@ -917,7 +917,8 @@ def _file_arg(file: str) -> str:
     return file if file.endswith(".md") else file + ".md"
 
 
-def teleprompter_passages(manuscript: dict, file: str) -> list[dict]:
+def teleprompter_passages(manuscript: dict, file: str,
+                          whole: bool = False) -> list[dict]:
     """The passages the author reads on camera in one file, in order:
     every clip marked `voice: author` (docs/video-clips-design.md §5),
     its text the clip's note (`_clips/notes/<key>.md`, paragraphs kept)
@@ -954,7 +955,56 @@ def teleprompter_passages(manuscript: dict, file: str) -> list[dict]:
                      else "") or f"Passage {len(passages) + 1}"
         passages.append({"label": label, "paragraphs": paragraphs,
                          "line": e["line"]})
+    if whole:
+        return _with_body(root / file, passages)
     return passages
+
+
+_MEDIA_TAG = re.compile(r"^\[/?(Collage|Montage|Clip)\b", re.IGNORECASE)
+
+
+def _with_body(path: Path, passages: list[dict]) -> list[dict]:
+    """`--whole`: the file read on camera end to end — the narrated prose
+    (regions resolved as for the audio build, tags and headings dropped,
+    paragraphs kept) as `Body` passages between the author's clips, each
+    clip in its place."""
+    from . import media
+
+    by_line = {p["line"]: p for p in passages}
+    lines = path.read_text(encoding="utf-8").split("\n")
+    for i in range(len(lines)):
+        if i + 1 in by_line:
+            lines[i] = media._SENTINEL.format(i + 1)
+    resolved = resolve_regions("\n".join(lines), {"audio"}, path.name)
+    out: list[dict] = []
+    body: list[str] = []
+    block: list[str] = []
+
+    def flush_block():
+        text = media._spoken("\n".join(block))
+        if text:
+            body.append(text)
+        block.clear()
+
+    def flush_body():
+        flush_block()
+        if body:
+            out.append({"label": "Body", "paragraphs": body[:], "line": 0})
+        body.clear()
+
+    for ln in resolved.split("\n"):
+        mark = media._SENTINEL_RE.fullmatch(ln.strip())
+        if mark:
+            flush_body()
+            out.append(by_line[int(mark.group(1))])
+        elif _MEDIA_TAG.match(ln.strip()):
+            flush_block()           # a Collage or Montage box, or its close
+        elif ln.strip():
+            block.append(ln)
+        else:
+            flush_block()
+    flush_body()
+    return out
 
 
 def _xml(text: str) -> str:
@@ -1040,12 +1090,13 @@ def write_teleprompter_docx(passages: list[dict], out_path: Path) -> None:
         z.writestr("word/styles.xml", styles)
 
 
-def export_teleprompter(manuscript: dict, file: str) -> dict:
+def export_teleprompter(manuscript: dict, file: str,
+                        whole: bool = False) -> dict:
     """`export teleprompter --file F`: the author's on-camera passages of
     one file as `_exports/<stem>.teleprompter.docx` (what teleprompter
     apps import) and the same words as `.teleprompter.txt`. Stops with
     an error when the file marks no clip `voice: author`."""
-    passages = teleprompter_passages(manuscript, file)
+    passages = teleprompter_passages(manuscript, file, whole=whole)
     stem = Path(_file_arg(file)).stem
     if not passages:
         raise LookupError(
