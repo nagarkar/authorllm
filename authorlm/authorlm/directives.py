@@ -375,6 +375,38 @@ def _checked_out(db, manuscript: dict, file: str) -> bool:
     return isinstance(entry, dict) and bool(entry.get("checked_out"))
 
 
+def _prose_key(text: str) -> str:
+    """Blank-line runs and trailing whitespace do not count: Google's
+    markdown export (and the hermetic Doc fakes) often collapse the
+    gaps a local file keeps, and a levelling gate that treated that as
+    drift would refuse every apply."""
+    return "\n".join(p.strip() for p in re.split(r"\n\s*\n", text or "")
+                     if p.strip())
+
+
+def _refuse_diverged_doc(db, manuscript: dict, kind: str, file: str,
+                         service, docs_service) -> None:
+    """Doc-road apply opens with `write_pending_forms`' levelling
+    `push_doc`, which rebuilds the tab from local. When the tab has
+    moved off local (Doc-ahead prose, or a conflict), that push silently
+    wipes the Doc side — the same RISK-4 hazard `critique write` /
+    `filter push` refuse. Sync first; never a silent overwrite."""
+    from . import gdocs
+
+    try:
+        view = gdocs.doc_three_way(db, manuscript, file, service,
+                                   docs_service)
+    except LookupError:
+        return  # no tab yet — the levelling push creates / fills it
+    if _prose_key(view["doc"]) == _prose_key(view["local"]):
+        return
+    raise ValueError(
+        f"{file}'s Doc tab and local file have diverged — a levelling "
+        f"push would overwrite one side. Sync first: 'doc pull {file}' "
+        f"to take the Doc, or 'doc push {file}' to take local, then "
+        f"retry '{kind} apply'.")
+
+
 def _services(services, file: str, step: str):
     """The Drive/Docs pair, built only when the Doc road is actually
     taken (api._resolve_services' ruling: every state refusal must be
@@ -651,6 +683,7 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
         return len(_paragraphs(before + "x")) if before.strip() else 1
 
     service, docs_service = _services(services, file, "apply")
+    _refuse_diverged_doc(db, manuscript, kind, file, service, docs_service)
     replaces: list[dict] = []
     inserts: list[dict] = []
     for c in chosen:

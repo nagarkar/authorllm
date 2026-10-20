@@ -4276,6 +4276,49 @@ DIRECTIVE_ESSAY = "\n\n".join([
 ]) + "\n"
 
 
+def _directives_refuse_doc_ahead(root: Path) -> None:
+    """RISK-4 for the directive Doc road: `write_pending_forms` opens
+    with a levelling push. When the tab holds Doc-ahead prose the local
+    file does not, that push would wipe it before planting forms. Refuse,
+    name the sync, touch nothing on the wire."""
+    print("directives refuse Doc-ahead prose (levelling wipe):")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _twin_fixture(root, "directive-ahead-ws",
+                                             essay=DIRECTIVE_ESSAY)
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    ahead = DIRECTIVE_ESSAY.replace(
+        "Alpha opens the essay and names the vital lie.",
+        "Alpha opens the essay, edited only in the Doc.", 1)
+    for tab in fake.tabs:
+        if tab["title"] == "solo.md":
+            tab["body"] = fake._as_body(ahead, tab["id"])
+    before = fake.tab_text("solo.md")
+    bodies_before = list(fake.bodies)
+    raised = None
+    try:
+        dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                 [(1, "Ernest Becker, ch. 2.")],
+                 services=lambda: (fake, fake))
+    except ValueError as err:
+        raised = str(err)
+    check("Doc-ahead `footnote apply` refuses before leveling — names "
+          "doc pull / doc push, not a silent wipe",
+          raised is not None and "have diverged" in raised
+          and "doc pull solo.md" in raised
+          and "doc push solo.md" in raised
+          and "footnote apply" in raised, raised)
+    check("...and nothing reached the wire",
+          fake.bodies == bodies_before, str(fake.bodies[len(bodies_before):]))
+    check("...and the Doc-ahead prose is still in the tab",
+          fake.tab_text("solo.md") == before
+          and "edited only in the Doc" in before, fake.tab_text("solo.md"))
+    check("...and the local file is untouched",
+          (ms / "solo.md").read_text() == DIRECTIVE_ESSAY)
+
+
 def _directives_on_the_doc_road(root: Path) -> None:
     """The author's ruling of 2026-09-03: a directive applied to a file
     that is CHECKED OUT goes into the tab as <<tag>>{{new}} forms, local
@@ -6080,6 +6123,7 @@ def main_test() -> None:
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
+        _directives_refuse_doc_ahead(root)
         _directives_on_the_doc_road(root)
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
