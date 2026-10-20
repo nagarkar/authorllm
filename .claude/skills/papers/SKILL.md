@@ -102,6 +102,6 @@ Rules for a cloud session on the CLI road:
 - Push only the tabs this session edited, by name, one `doc push <file>` each. No whole-manuscript push from the cloud.
 - After each push, pull the pushed tab and confirm the round trip; then check that no other tab changed (`doc list -m <Manuscript>` shows nothing checked out that was not before).
 - The workspace dies with the session and the token never touches its disk. Nothing of them is committed.
-- Exports, the rendered-Doc refresh, `doc auth` and `drive_docx.py` stay local.
+- Exports, the rendered-Doc refresh (`export … --upload`) and `doc auth` stay local.
 
 An expired Google token stops a push; `authorlm doc auth` opens a consent page and runs only on the author's word. Every message that deals with a manuscript carries its master Doc link.

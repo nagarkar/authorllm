@@ -120,6 +120,7 @@ secondary sources; verify field names against vendor docs before build.
 | `text:` | exact on-screen words, never paraphrased | quoted string |
 | `use:` | an asset used as is, no generation | path |
 | `youtube:` | quoted video | url |
+| `voice:` | who speaks in the clip (2026-10-19): `author` — the author on camera, a recorded intro or outro; its note is the script `export teleprompter` collects (§6) | `author`; Collage only |
 | `audio:` | the clip's own sound (ruled 2026-10-17): `mute` — silent; `duck` — kept low under the narration (e.g. a good score); `full` — at its own level, Collage only (narration stops) | `mute` \| `duck` \| `full`; default `mute` under the voice (span, Montage), `full` in a Collage |
 
 A value containing `/` or an extension is a path; otherwise it is a key
@@ -156,7 +157,12 @@ and Montage tag line and keeps **every word of prose** (revised
 2026-10-17: a tag never deletes the author's prose; the first ruling
 dropped a whole Collage and, in the Ecce Homo trial, took two book
 paragraphs with it). Podcast-only prose, if ever needed, gets its own
-marking. The Doc tab carries the tags as text, separated from prose by
+marking.
+
+The one export that reads clips rather than dropping them is the
+teleprompter (`export teleprompter --file F`, 2026-10-19): the text of
+every clip marked `voice: author` — what the author says on camera — as a
+large-type DOCX, labelled Intro / Outro by position. The Doc tab carries the tags as text, separated from prose by
 blank lines, as illustration tags are.
 
 ## 7. Materialization: tag, embed line, picks (confirmed 2026-10-16)

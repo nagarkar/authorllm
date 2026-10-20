@@ -35,8 +35,9 @@ Beside what the core lists: an appendix per program and per probe with the listi
 ```bash
 authorlm doc push papers/<paper>.md -m <Manuscript>
 authorlm export pdf --file papers/<paper>.md -m <Manuscript>
-authorlm export docx --file papers/<paper>.md -m <Manuscript>
-python3 tools/drive_docx.py manuscripts/<Manuscript>/_exports/<paper>.docx --update <renderedDocId>
+authorlm export docx --file papers/<paper>.md -m <Manuscript> --upload --as-doc --drive-id <renderedDocId>
 ```
+
+`--drive-id` is needed only on the first upload; later uploads of the same paper remember the rendered Doc and replace it in place.
 
 Then the PDF goes to the author. The rendered Doc ids live in the project's `papersequence` tab.

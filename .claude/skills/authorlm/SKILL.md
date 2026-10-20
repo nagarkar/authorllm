@@ -1665,6 +1665,30 @@ pandoc for a manuscript file: the house path carries the math font, the
 footnote and math normalisation, and the review furniture. Exclusive with
 `--chapters`. (nagarkar/authorllm#192, 2026-10-13.)
 
+**Upload to Drive (2026-10-19).** Any export takes `--upload`: the written
+file goes to the manuscript's Drive folder through the Doc bridge's token
+(non-interactive; an expired token says to run `authorlm doc auth`, which
+runs only on the author's word, and the local file is still written).
+PDF, EPUB and MD go up as-is; DOCX too, unless `--as-doc` converts it to a
+Google Doc (a separate Drive file from the plain .docx). Re-exporting
+replaces the same Drive file in place — same id, same link — remembered per
+output in the manuscript's link store (`gdocs._uploads`). `--drive-id <id>`
+adopts a file already on Drive (one uploaded by hand) as that output's
+target. Print the link the verb prints; never hand-roll Drive uploads.
+For a monologue PDF meant for reading on camera, pass `--print-ready`.
+
+**Teleprompter (2026-10-19).** "Export to teleprompter" means
+`authorlm export teleprompter --file <file> -m <manuscript> [--upload]`: the
+text the author reads on camera — every clip marked `voice: author`, its
+words from its note in `_clips/notes/` — as
+`_exports/<stem>.teleprompter.docx` (32pt Arial, 1.5 spacing, a plain bold
+label per passage, a page break between passages; no header, footer,
+page numbers, notice or watermark) plus the same words as `.txt`. Labels:
+`Intro` (nothing spoken before it), `Outro` (nothing spoken after), else
+the Collage title up to its first comma. A file with no `voice: author`
+clip stops with an error that says where to add `| voice: author`; add
+it to the intro/outro `[Clip:]` only with the author's go-ahead.
+
 `authorlm export pdf --profile book` builds the KDP interior at that trim:
 book class, essays opening recto, mirrored margins with the gutter chosen
 from the page count (two passes when the band moves), running heads (book
@@ -2062,7 +2086,9 @@ Inside a Collage or Montage a `[Clip]` has no close. Fields: `start`/`end`
 `cast`, `prior`, `look`, `text` (exact on-screen words), `use` (as-is
 asset), `youtube`, `audio` (the clip's own sound: `mute`, `duck` under the
 narration — e.g. a good score — or `full`, Collage only; default mute
-under the voice, full in a Collage). A description generates; no description must point
+under the voice, full in a Collage), `voice` (`author`: the author speaks
+on camera in this cutaway — a recorded intro or outro; Collage only; its
+note is the script `export teleprompter` collects). A description generates; no description must point
 (`use:`/`youtube:`). Never put timeline timing in a tag. Every book export
 drops the tag lines and keeps every word of prose.
 
