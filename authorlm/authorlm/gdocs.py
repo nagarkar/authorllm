@@ -14,7 +14,8 @@ local file first) and on pull (canonicalizing Google's export quirks:
 backslash escapes, CRLF, NBSP, bullet markers, blank-line runs).
 
 Scope: https://www.googleapis.com/auth/drive.file — this app only ever
-sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json.
+sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json, or taken from
+AUTHORLM_GDOCS_TOKEN when that file is absent (cloud sessions).
 """
 
 from __future__ import annotations
@@ -365,6 +366,12 @@ def normalize_markdown(text: str) -> str:
 
 # ------------------------------------------------------------------- auth
 
+# The token file's contents, for a session that cannot hold the file (a
+# cloud session: the secret arrives as a variable, and a credential must
+# not be written to disk there). Read only when the file is absent.
+TOKEN_ENV = "AUTHORLM_GDOCS_TOKEN"
+
+
 def get_credentials(config: dict, workspace: str | None = None,
                     interactive: bool = True):
     """Cached-token OAuth (installed-app flow). With interactive=True the
@@ -377,15 +384,27 @@ def get_credentials(config: dict, workspace: str | None = None,
     base = Path(workspace).resolve() if workspace else Path.home()
     token_path = base / ".authorlm" / "gdocs_token.json"
     creds = None
+    from_env = False
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    elif os.environ.get(TOKEN_ENV):
+        # A cloud session: the token arrives as a secret variable and
+        # nothing may write a credential to disk there, so it stays in
+        # memory. Its refresh token renews the access token headlessly.
+        try:
+            creds = Credentials.from_authorized_user_info(
+                json.loads(os.environ[TOKEN_ENV]), SCOPES)
+        except (ValueError, KeyError) as err:
+            raise ValueError(f"{TOKEN_ENV} is not a Google token JSON: {err}")
+        from_env = True
     if creds and creds.expired and creds.refresh_token:
         from google.auth.exceptions import RefreshError
 
         try:
             creds.refresh(Request())
-            token_path.write_text(creds.to_json())
-            os.chmod(token_path, 0o600)
+            if not from_env:
+                token_path.write_text(creds.to_json())
+                os.chmod(token_path, 0o600)
         except RefreshError:
             # Token expired or revoked upstream: fall through to the clean
             # non-interactive error, or to the consent flow under 'doc auth'
@@ -395,7 +414,8 @@ def get_credentials(config: dict, workspace: str | None = None,
         if not interactive:
             raise ValueError(
                 "no valid Google token and interactive consent is disabled — "
-                "run 'authorlm doc auth' first"
+                f"run 'authorlm doc auth' first, or set {TOKEN_ENV} to the "
+                "token file's contents where no browser can open"
             )
         client_secret = config.get("gdocs", {}).get("client_secret")
         if not client_secret or not Path(client_secret).exists():

@@ -90,7 +90,7 @@ What the CLI needs in the cloud, and where each piece comes from:
 
 | piece | source | where it goes |
 |---|---|---|
-| the Google token | the Mac's `~/.authorlm/gdocs_token.json`; its refresh token renews without a browser, and it carries the client id and secret, so no client file is needed | the environment's secret variable `AUTHORLM_GDOCS_TOKEN`; the setup script writes it to `~/.authorlm/gdocs_token.json`, mode 600 |
+| the Google token | the Mac's `~/.authorlm/gdocs_token.json`; its refresh token renews without a browser, and it carries the client id and secret, so no client file is needed | the environment's secret variable `AUTHORLM_GDOCS_TOKEN`, the file's contents as one line. The CLI reads it when the file is absent and keeps it in memory: a cloud session may not write a credential to disk, and the second cloud test (2026-10-19) found the setup script did not either |
 | a workspace | `authorlm setup --workspace ~/authorlm-ws --yes` in the session's first turn | disposable; the Doc is the source of truth |
 | the manuscript | `authorlm init --name <Manuscript> --path ~/authorlm-ws/<Manuscript> --extraction off`, then `authorlm doc bind <masterDocId> -m <Manuscript>`, then `authorlm doc pull -m <Manuscript>`, which adopts every `.md` tab as a local file | the local cache of the tabs, with per-tab state |
 
@@ -101,7 +101,7 @@ Rules for a cloud session on the CLI road:
 - Pull once at the start of the session and once before every push. A tab the author or a local session changed since the pull is a conflict; the pull reports it and the push stops. Resolve it by pulling that tab with `--force` and redoing the edit on the fresh text, never by forcing the push.
 - Push only the tabs this session edited, by name, one `doc push <file>` each. No whole-manuscript push from the cloud.
 - After each push, pull the pushed tab and confirm the round trip; then check that no other tab changed (`doc list -m <Manuscript>` shows nothing checked out that was not before).
-- The workspace and the token die with the session. Nothing of them is committed.
+- The workspace dies with the session and the token never touches its disk. Nothing of them is committed.
 - Exports, the rendered-Doc refresh, `doc auth` and `drive_docx.py` stay local.
 
 An expired Google token stops a push; `authorlm doc auth` opens a consent page and runs only on the author's word. Every message that deals with a manuscript carries its master Doc link.

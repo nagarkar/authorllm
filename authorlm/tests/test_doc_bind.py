@@ -134,12 +134,75 @@ def bind_conflicts(root: Path) -> None:
           "bind" in _run(["--workspace", str(ws), "doc", "--help"])[1])
 
 
+def token_from_environment(root: Path) -> None:
+    """A cloud session holds the token as AUTHORLM_GDOCS_TOKEN, never as a
+    file; get_credentials must use it, refresh in memory and write nothing."""
+    print("D. token from the environment:")
+    import json
+    import os
+    from unittest import mock
+
+    ws = root / "token-ws"
+    ws.mkdir()
+    token = {"token": "stale", "refresh_token": "rt",
+             "client_id": "cid", "client_secret": "cs",
+             "token_uri": "https://oauth2.googleapis.com/token",
+             "scopes": list(gdocs.SCOPES)}
+
+    class _Creds:
+        made_from = None
+
+        def __init__(self, expired=True):
+            self.expired = expired
+            self.valid = not expired
+            self.refresh_token = "rt"
+
+        def refresh(self, request):
+            self.valid, self.expired = True, False
+
+        def to_json(self):
+            return json.dumps({"token": "fresh"})
+
+    def from_info(info, scopes):
+        _Creds.made_from = info
+        return _Creds()
+
+    env = {k: v for k, v in os.environ.items() if k != gdocs.TOKEN_ENV}
+    env[gdocs.TOKEN_ENV] = json.dumps(token)
+    with mock.patch.dict(os.environ, env, clear=True), \
+            mock.patch("google.oauth2.credentials.Credentials"
+                       ".from_authorized_user_info", side_effect=from_info), \
+            mock.patch("google.auth.transport.requests.Request"):
+        creds = gdocs.get_credentials({}, workspace=str(ws), interactive=False)
+    check("credentials come from the variable", _Creds.made_from == token)
+    check("and were refreshed in memory", creds.valid and not creds.expired)
+    check("no token file was written",
+          not (ws / ".authorlm" / "gdocs_token.json").exists())
+    env[gdocs.TOKEN_ENV] = "not json"
+    with mock.patch.dict(os.environ, env, clear=True):
+        try:
+            gdocs.get_credentials({}, workspace=str(ws), interactive=False)
+            check("a malformed variable is a clear error", False)
+        except ValueError as err:
+            check("a malformed variable is a clear error",
+                  gdocs.TOKEN_ENV in str(err), str(err))
+    env.pop(gdocs.TOKEN_ENV)
+    with mock.patch.dict(os.environ, env, clear=True):
+        try:
+            gdocs.get_credentials({}, workspace=str(ws), interactive=False)
+            check("no file and no variable still fails non-interactively", False)
+        except ValueError as err:
+            check("no file and no variable still fails non-interactively",
+                  gdocs.TOKEN_ENV in str(err), str(err))
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-docbind-"))
     try:
         parse_ids()
         bind_empty(root)
         bind_conflicts(root)
+        token_from_environment(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     from test_doc_road_verbs import PASSED
