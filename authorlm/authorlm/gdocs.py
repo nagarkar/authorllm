@@ -3734,11 +3734,18 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
         # the tab is lost or orphaned. Document order (ascending anchor),
         # as `settle_forms_in_tab` wants; a form not in the tab (never
         # written, or already taken out) is simply not found.
+        # record_base=False: the levelling push at the top of this call
+        # already recorded what the tab holds (including any paragraph
+        # held for an open comment). Re-hashing the local file here would
+        # claim local IS the base while the tab still carries held old
+        # text — the next pull would read that as doc-ahead and wipe the
+        # author's local edit.
         outcomes = [{"old": tab_old_of.get(t["id"], t["proposed_old"]),
                      "new": t["proposed_new"], "keep": "old"}
                     for t in reversed(ordered)]
         faults = settle_forms_in_tab(db, manuscript, file, outcomes,
-                                     docs_service, bridge=bridge)
+                                     docs_service, bridge=bridge,
+                                     record_base=False)
         failed += [(t, "taken back out: another form of this file failed, "
                        "and a file's forms land together or not at all")
                    for t in written]
