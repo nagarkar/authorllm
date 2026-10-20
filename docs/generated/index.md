@@ -638,6 +638,18 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
 
+## `tests.test_media_clip_keys`
+
+`authorlm/tests/test_media_clip_keys.py`
+
+Clip key minting rests on three pure helpers in `media.py`.
+
+## `tests.test_media_gen_desc_hash`
+
+`authorlm/tests/test_media_gen_desc_hash.py`
+
+`media_gen.desc_hash` names what shapes a Veo take on disk.
+
 ## `tests.test_morph_targets`
 
 `authorlm/tests/test_morph_targets.py`
@@ -679,6 +691,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 `authorlm/tests/test_pdf2md_text_layer_gate.py`
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
+
+## `tests.test_preview_voice_stamp`
+
+`authorlm/tests/test_preview_voice_stamp.py`
+
+Lazy-preview stamp and orphan sweep (#227).
 
 ## `tests.test_setup_web_build`
 
