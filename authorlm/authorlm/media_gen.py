@@ -319,8 +319,7 @@ def request_body(p: dict) -> dict:
     return {"instances": [instance],
             "parameters": {"aspectRatio": p["aspect_ratio"],
                            "resolution": p["resolution"],
-                           "durationSeconds": str(p["duration"]),
-                           "numberOfVideos": 1,
+                           "durationSeconds": int(p["duration"]),
                            "personGeneration": ("allow_adult" if images
                                                 else "allow_all")}}
 

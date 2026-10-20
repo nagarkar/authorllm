@@ -509,7 +509,10 @@ class MediaTests(unittest.TestCase):
             return b"MP4BYTES"
         job = media_gen.start(self._DB(), ms, key, http=http)
         body = calls[0][2]
-        self.assertEqual(body["parameters"]["durationSeconds"], "4")
+        # The Veo API takes a number here and rejects numberOfVideos
+        # (both seen on the live API, 2026-10-18).
+        self.assertEqual(body["parameters"]["durationSeconds"], 4)
+        self.assertNotIn("numberOfVideos", body["parameters"])
         self.assertEqual(body["parameters"]["personGeneration"], "allow_all")
         self.assertEqual(job["state"], "running")
         self.assertTrue((self.root / "_clips/jobs" /
