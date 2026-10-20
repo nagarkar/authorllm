@@ -1025,7 +1025,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     chapter_voices: dict[str, str] = {}
     for chapter in config.get("chapter", []):
         name = chapter["file"]
-        if name not in order or name in (TITLE_FILE, pron.FILENAME, "manifest.md"):
+        if name not in order or name in (TITLE_FILE, pron.FILENAME):
             raise AudioError(f"{CONFIG_FILENAME}: chapter file {name!r} "
                              "is not a manuscript audio chapter")
         _resolve_voice(cast, chapter["voice"], {},
@@ -1044,7 +1044,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     previous: dict | None = None
     from .api import is_placeholder
     for name in order:
-        if name == TITLE_FILE or name in (pron.FILENAME, "manifest.md"):
+        if name == TITLE_FILE or name == pron.FILENAME:
             continue
         if is_placeholder(files[name]):
             warnings.append(f"{name}: mid-rewrite (a writeup is open) — "
@@ -1309,7 +1309,7 @@ def check(db, manuscript: dict) -> dict:
         pass
     # Unresolved directive tags.
     for name, text in files.items():
-        if not name.endswith(".md") or name in (pron.FILENAME, "manifest.md"):
+        if not name.endswith(".md") or name == pron.FILENAME:
             continue
         _t, unresolved = directives.strip_tags(normalize_markdown(text))
         for tag in unresolved:

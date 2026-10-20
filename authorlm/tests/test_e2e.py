@@ -3456,6 +3456,34 @@ def scenario_doc_comments(root: Path) -> None:
           m.count("█") == 20 + 5 + 0, m)
     check("manifest declares itself write-only",
           "Write-only" in m and "rewritten on every push" in m, m)
+    check("manifest without reader-load rows has no Reader load section",
+          "Reader load" not in m, m)
+    from authorlm import manifest as mf
+    from authorlm import structure
+    load = [{"file": "part1.md", "words": 100, "introduces": 3, "debt": [],
+             "state": "fresh"},
+            {"file": "intro.md", "words": 400, "introduces": 1,
+             "debt": ["Dharma", "karma"], "state": "stale"}]
+    m3 = manifest_text("book", 3, inventory=inv, reader_load=load,
+                       pushed_at="2026-08-04T00:00Z")
+    check("manifest appends the Reader load after the inventory",
+          m3.index("Pushed:") < m3.index("Reader load"), m3)
+    check("reader-load rows show introduces, debt and the !! marker",
+          "intro.md — introduces 1 · debt 2" in m3 and "!! stale" in m3
+          and "part1.md — introduces 3 · debt 0" in m3, m3)
+    check("reader-load lists each essay's debts",
+          "intro.md (!! stale) — Dharma, karma" in m3, m3)
+    check("reader-load names the summaries that are not fresh",
+          "1 of 2 summaries are not fresh" in m3, m3)
+    check("reader-load is plain text, not a markdown table",
+          "|---" not in m3 and "# Reader load" not in m3, m3)
+    check("an empty reader load says how to build summaries",
+          "authorlm summarize rebuild" in manifest_text(
+              "book", 3, inventory=inv, reader_load=[]), "")
+    check("manifest.md is no longer a sidecar file",
+          not structure.is_sidecar("manifest.md")
+          and not hasattr(mf, "refresh") and not hasattr(mf, "FILENAME"),
+          str(structure.SIDECAR_FILES))
 
     from authorlm.gdocs import chapter_stats
     sample = ("# Heading\n\nThe cat sat on the mat. It was warm. "
