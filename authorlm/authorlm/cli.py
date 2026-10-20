@@ -7109,29 +7109,13 @@ def cmd_doc(args):
             sys.exit(f"error: {err}")
         try:
             if args.action == "push":
-                # The reader-load manifest is DERIVED, so it is recomputed
-                # here rather than stored: every push writes the current
-                # book, and a push is the only thing that writes it. It
-                # rides along on a single-file push too — one essay changing
-                # can move the whole curve, and a manifest tab that is only
-                # correct after a full push is a tab nobody can trust.
-                from . import manifest as mf
-
-                try:
-                    _mpath, _mrows = mf.refresh(db, manuscript)
-                    print(ui.dim(
-                        f"Manifest recomputed: {len(_mrows)} units, "
-                        f"{sum(len(r['debt']) for r in _mrows)} unmet "
-                        f"assumptions → {mf.FILENAME}"))
-                except Exception as err:   # never fatal to a push
-                    print(ui.dim(f"Manifest not recomputed: {err}"))
                 # One tab per file in a single master Doc; no file argument
-                # pushes the whole manuscript.
+                # pushes the whole manuscript. The Reader load is not a
+                # target: it is recomputed into the `manifest` tab on every
+                # push, single-file pushes included (gdocs.ensure_master).
                 targets = ([args.name] if args.name
                            else gdocs._reading_order_files(
                                gdocs.manuscript_bridge(manuscript)))
-                if args.name and mf.FILENAME not in targets:
-                    targets.append(mf.FILENAME)
                 normalized_any = False
                 result = None
                 for target in targets:

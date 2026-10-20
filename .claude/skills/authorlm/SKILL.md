@@ -1787,6 +1787,14 @@ run the CLI via Bash:
   tab materializes as a local file (ask the author where it belongs in
   toc.md); a recreated tab is relinked, with any content drift surfaced
   as a conflict for the author to settle — never auto-resolved.
+- the `manifest` tab: every push rewrites it whole and every pull ignores
+  it. It holds the manuscript name, the Doc version, the chapter
+  inventory with word counts and readability codes, and under them the
+  Reader load: for each essay, what it assumes that no earlier essay
+  supplied, with `!!` on rows whose summary is not fresh. It is the one
+  derived tab; there is no `manifest.md` file or tab (merged 2026-10-19;
+  a push deletes an old `manifest.md` tab). When the author asks about
+  reader load, point them to that tab; never edit it.
 - state: `authorlm doc list -m <manuscript>` shows link/checkout status.
 - bind: `authorlm doc bind <doc-id-or-url> -m <manuscript>` adopts an
   EXISTING master Doc for a manuscript that has none (a fresh workspace,

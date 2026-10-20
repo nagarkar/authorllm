@@ -318,7 +318,7 @@ The proposal learning loop, once, for every triage queue.
 
 `authorlm/authorlm/manifest.py`
 
-The reader-load manifest — a DERIVED report, refreshed on every push.
+The Reader load — a DERIVED report, recomputed on every push.
 
 ## `authorlm.mcp_server`
 

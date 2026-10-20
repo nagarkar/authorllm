@@ -8508,6 +8508,11 @@ def main_test() -> None:
         check("manifest tab names the manuscript and doc incarnation",
               "Manuscript: book" in tab_text["manifest"]
               and "Doc version: 1" in tab_text["manifest"])
+        check("manifest tab carries the Reader load under the inventory",
+              "Reader load" in tab_text["manifest"]
+              and tab_text["manifest"].index("Contents at last push")
+              < tab_text["manifest"].index("Reader load"),
+              tab_text["manifest"])
         stub.set_tab("01-choice.md",
                      "# Title\n\nEdited in Docs \\- with escapes.\n")
         pulled = pull_doc(db, manuscript, "01-choice.md", service=stub)
@@ -8517,12 +8522,30 @@ def main_test() -> None:
               == "# Title\n\nEdited in Docs - with escapes.\n"
               and doc_status(db, manuscript)["01-choice.md"]["checked_out"]
               is False)
+        # A Doc from before the merge has a `manifest.md` tab of its own,
+        # linked in the mapping; the next push deletes both.
+        from authorlm.gdocs import _mapping as _m0, _save_mapping as _s0
+
+        stub.state["docs"]["doc-2"].append(
+            {"id": "tab-old-manifest", "title": "manifest.md",
+             "text": "# Reader load\n", "parent": None})
+        _meta0 = _m0(db, manuscript)
+        _meta0["gdocs"]["manifest.md"] = {"tab_id": "tab-old-manifest",
+                                          "checked_out": True}
+        _s0(db, manuscript, _meta0)
+        manuscript = api.get_manuscript(db)
         pushed2 = push_doc(db, manuscript, "01-choice.md",
                            service=stub, docs_service=stub)
         check("second push reuses the master Doc (no new folder or Doc)",
               not pushed2["created"] and pushed2["doc_id"] == "doc-2"
               and stub.state["folders"] == ["doc-1"]
               and list(stub.state["docs"]) == ["doc-2"])
+        manuscript = api.get_manuscript(db)
+        check("push deletes an old manifest.md tab and its mapping entry",
+              "manifest.md" not in [t["title"] for t
+                                    in stub.state["docs"]["doc-2"]]
+              and "manifest.md" not in _m0(db, manuscript)["gdocs"],
+              str([t["title"] for t in stub.state["docs"]["doc-2"]]))
 
         # --- sync_tab_structure: push-direction TOC↔tab orchestration ---
         from authorlm.gdocs import _mapping, _save_mapping, sync_tab_structure

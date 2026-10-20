@@ -835,7 +835,7 @@ def _reading_order_files(bridge: DocBridge) -> list[str]:
 
     THE ONE INVERSION (§15.22, §2.5 row 19). Every other site excludes a
     sidecar; this one includes it, appended LAST, after the essays and
-    before the manifest. The dictionary is edited in the Doc like an
+    before the manifest tab. The dictionary is edited in the Doc like an
     essay — that is the Sponsor's ruling — so it must have a tab, and a
     tab it does not have is a dictionary the author cannot reach from
     the place they actually work."""
@@ -1018,6 +1018,19 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         ).execute()
         for name, r in zip(missing, reply.get("replies", [])):
             existing[name] = r["addDocumentTab"]["tabProperties"]["tabId"]
+    # The Reader load lives in the manifest tab now. A Doc from before
+    # 2026-10-19 still has it as a `manifest.md` tab of its own: delete the
+    # tab and its mapping entry, so it is neither pushed nor pulled again.
+    old_load = existing.pop(OLD_READER_LOAD_TITLE, None)
+    entry.pop(OLD_READER_LOAD_TITLE, None)
+    if old_load:
+        try:
+            docs_service.documents().batchUpdate(
+                documentId=master_id,
+                body={"requests": [{"deleteTab": {"tabId": old_load}}]},
+            ).execute()
+        except Exception:
+            pass  # a stale derived tab is cosmetic, never fatal
     # The blank default tab is noise once real tabs exist.
     stray = [tid for title, tid in existing.items()
              if title not in order and title.startswith("Tab ")]
@@ -1050,12 +1063,21 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         from .revisions import read_manuscript_files as _rmf
         from .structure import matter_map as _matter_map
 
+        reader_load = None
+        if bridge.rich_manifest:
+            from . import manifest as mf
+
+            try:
+                reader_load = mf.compute(db, manuscript)
+            except Exception:
+                pass  # the report is derived — never fatal to the manifest
         _write_manifest(docs_service, master_id, manifest_id,
                         bridge.doc_name, entry.get("_doc_version", 1),
                         inventory=build_manifest_inventory(bridge.root),
                         stats=(build_manifest_stats(bridge.root)
                                if bridge.rich_manifest else None),
-                        matter=_matter_map(_rmf(bridge.root)))
+                        matter=_matter_map(_rmf(bridge.root)),
+                        reader_load=reader_load)
     except Exception:
         pass  # the manifest is metadata — never fatal to a push
 
@@ -1077,6 +1099,8 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
 
 
 MANIFEST_TITLE = "manifest"
+# The Reader load's own tab before it moved into the manifest tab.
+OLD_READER_LOAD_TITLE = "manifest.md"
 
 
 def build_manifest_inventory(root: Path) -> list[tuple[str, int, int]]:
@@ -1137,13 +1161,16 @@ def manifest_text(manuscript_name: str, doc_version: int,
                   inventory: list[tuple[str, int, int]] | None = None,
                   stats: dict[str, dict] | None = None,
                   pushed_at: str | None = None,
-                  matter: dict[str, str] | None = None) -> str:
+                  matter: dict[str, str] | None = None,
+                  reader_load: list[dict] | None = None) -> str:
     """The manifest tab's content: identifies the manuscript regardless of
     what the user renames the Doc to, records which incarnation of the
     master document this is, and inventories every chapter with its word
     count (hierarchy shown by indentation, magnitude by bar). Write-only:
     rewritten on every push, never read back — a Doc-side loss shows up as
-    a tab missing from this list."""
+    a tab missing from this list. The master manuscript bridge passes
+    `reader_load` (manifest.compute's rows), which appends the Reader load
+    report under the inventory."""
     from .db import now_iso
 
     lines = [f"Manuscript: {manuscript_name}",
@@ -1187,6 +1214,10 @@ def manifest_text(manuscript_name: str, doc_version: int,
         lines += ["", f"Pushed: {pushed_at or now_iso()[:16] + 'Z'}",
                   "If a chapter listed above has no matching tab, it was "
                   "deleted after this push."]
+    if reader_load is not None:
+        from .manifest import render_lines
+
+        lines += render_lines(reader_load)
     return "\n".join(lines) + "\n"
 
 
@@ -1208,7 +1239,8 @@ def _write_manifest(docs_service, master_id: str, tab_id: str,
                     manuscript_name: str, doc_version: int,
                     inventory: list[tuple[str, int, int]] | None = None,
                     stats: dict[str, dict] | None = None,
-                    matter: dict[str, str] | None = None) -> None:
+                    matter: dict[str, str] | None = None,
+                    reader_load: list[dict] | None = None) -> None:
     requests: list[dict] = []
     end = _tab_end(docs_service, master_id, tab_id)
     if end > 2:
@@ -1217,7 +1249,8 @@ def _write_manifest(docs_service, master_id: str, tab_id: str,
     requests.append({"insertText": {
         "location": {"tabId": tab_id, "index": 1},
         "text": manifest_text(manuscript_name, doc_version, inventory,
-                              stats, matter=matter)}})
+                              stats, matter=matter,
+                              reader_load=reader_load)}})
     docs_service.documents().batchUpdate(
         documentId=master_id, body={"requests": requests}).execute()
 
@@ -1611,8 +1644,6 @@ def _sidecar_would_be_emptied(relpath: str, incoming: str,
     # Scoped to the DICTIONARY by name, not to sidecars in general: this
     # guard consults the pronunciation parser, and a second sidecar whose
     # rows that parser cannot read would be judged empty on every push.
-    # `manifest.md` needs no guard of its own — it is derived, so the push
-    # that would "empty" it is the push that regenerates it.
     if relpath != pron.FILENAME:
         return False
 
