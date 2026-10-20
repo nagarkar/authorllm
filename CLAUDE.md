@@ -20,6 +20,7 @@ AuthorLM, an editorial collaborator for the owner's philosophy writing: a CLI (`
 
 - Issue tracker: GitHub issues on `nagarkar/authorllm`. See `docs/agents/issue-tracker.md`.
 - Triage labels: defaults. See `docs/agents/triage-labels.md`.
+- Papers and commentaries: `.claude/skills/papers/` (core) with a field skill; read `.claude/skills/papers/house-rules.md` before writing anything for the author, in every session, local or cloud.
 
 ## Repo notes (moved verbatim from AGENTS.md; to be sorted by the metalm migration)
 
