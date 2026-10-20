@@ -2728,6 +2728,19 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
         plan = media_gen.plan(db, manuscript, args.key, args.model)
     except (LookupError, ValueError, RuntimeError) as err:
         sys.exit(str(err))
+    if getattr(args, "json", False):
+        # podlm's shape (docs/video-clips-design.md §1a: every verb once in
+        # api, CLI --json for other envs): the plan, and the job when one
+        # was started. Spends only with --generate, as the text road does.
+        out = {"plan": plan, "job": None}
+        if args.generate and not args.dry_run:
+            try:
+                out["job"] = media_gen.start(db, manuscript, args.key, args.model,
+                                             confirm=args.confirm)
+            except (ValueError, RuntimeError) as err:
+                sys.exit(str(err))
+        print(json.dumps(out, indent=1))
+        return
     if plan["fresh_takes"] and not args.generate:
         for t in plan["fresh_takes"]:
             print(t["path"])
@@ -9392,6 +9405,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm", action="store_true",
                    help="ensure: go ahead past a per-call or per-day cap")
     p.add_argument("--model", help="ensure: a Veo model other than the pin")
+    p.add_argument("--json", action="store_true",
+                   help="ensure: print the plan (and the started job) as JSON, "
+                        "as podlm reads it")
     p.add_argument("--take", help="pick: the take number (NN or iNN)")
     p.add_argument("--supersede", action="store_true",
                    help="spec, file checked out: withdraw this file's clip "
