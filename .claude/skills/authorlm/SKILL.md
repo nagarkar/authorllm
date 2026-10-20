@@ -1689,6 +1689,28 @@ the Collage title up to its first comma. A file with no `voice: author`
 clip stops with an error that says where to add `| voice: author`; add
 it to the intro/outro `[Clip:]` only with the author's go-ahead.
 
+Uploading the teleprompter copy ("upload the teleprompter copy", "put the
+teleprompter on Drive", "send it to my phone"): rerun the export with
+`--upload`; there is no separate upload verb and no MCP tool, so it is the
+CLI from Bash:
+
+```bash
+authorlm export teleprompter --file <file> -m <manuscript> --upload
+```
+
+- Default is the plain `.docx`: teleprompter apps import it from Drive as
+  is. Add `--as-doc` only when the author wants to read or mark it up in
+  Google Docs. The two are separate Drive files; do not switch an output
+  between them without saying so.
+- The first upload creates the file in the manuscript's Drive folder; every
+  later run (after the intro or outro changes) replaces it in place, so the
+  link the author saved keeps working. Never delete and re-upload.
+- A file the author already put on Drive by hand: pass `--drive-id <id>`
+  once (the id from its Drive link), and that file becomes the target.
+- Give the author the link the verb prints (`Uploaded on Drive:` or
+  `Replaced on Drive:`), with the manuscript's Doc link, in the same message.
+- One file per run: two monologues are two commands, two Drive files.
+
 `authorlm export pdf --profile book` builds the KDP interior at that trim:
 book class, essays opening recto, mirrored margins with the gutter chosen
 from the page count (two passes when the band moves), running heads (book
