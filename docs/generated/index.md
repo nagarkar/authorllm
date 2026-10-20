@@ -548,6 +548,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_clip_ensure_json`
+
+`authorlm/tests/test_clip_ensure_json.py`
+
+`clip ensure --json`: the plan/job shape podlm reads (PR #229).
+
 ## `tests.test_continuation`
 
 `authorlm/tests/test_continuation.py`
@@ -637,6 +643,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_media_gen_next_n`
+
+`authorlm/tests/test_media_gen_next_n.py`
+
+`media_gen._next_n`: numbered vs imported take slots.
 
 ## `tests.test_morph_targets`
 
