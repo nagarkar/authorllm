@@ -931,7 +931,7 @@ def bind_master(db: Database, manuscript: dict, doc_ref: str,
             f"{manuscript['name']} is already bound to "
             f"{tab_url(current)}; pass --force to replace it")
     doc = docs_service.documents().get(
-        documentId=master_id, includeTabsContent=False).execute()
+        documentId=master_id, includeTabsContent=True).execute()
     tab_props: list[tuple[str, str]] = []
     walk_tabs(doc.get("tabs", []), tab_props, [])
     titles = [t for _, t in tab_props]
@@ -2439,11 +2439,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             entry["checked_out"] = False
             continue
         if text != current:
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(reembed(text, bridge.root,
                                     capture_embeds(current_raw)),
                             encoding="utf-8")
             report["changed"].append(relpath)
         elif not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
             # An adopted tab with no content still materializes: the file
             # must exist for toc placement and future pushes.
             path.write_text(reembed(text, bridge.root), encoding="utf-8")
