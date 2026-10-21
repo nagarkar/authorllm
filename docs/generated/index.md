@@ -620,11 +620,23 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_label_opt`
+
+`authorlm/tests/test_label_opt.py`
+
+Footnote `| label:` override parsing (`directives._LABEL_OPT`).
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
 
 Live-LLM integration tests with record/replay (RFC §24.5 discipline).
+
+## `tests.test_locate_quote`
+
+`authorlm/tests/test_locate_quote.py`
+
+`gdocs.locate_quote` attributes a Doc margin comment to exactly one local file (and its nearest heading). Missing, empty, or ambiguous anchors stay unattributed — never guessed. A quote that spans paragraphs still resolves via the flattened match, then falls back to the quote's head for the paragraph index.
 
 ## `tests.test_loop`
 
@@ -637,6 +649,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_media_gen_chosen`
+
+`authorlm/tests/test_media_gen_chosen.py`
+
+`media_gen.chosen` / `pick` / `attach` — the take the author (or podlm) selected for a clip.
 
 ## `tests.test_morph_targets`
 
