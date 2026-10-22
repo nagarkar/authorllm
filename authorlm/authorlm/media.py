@@ -662,8 +662,11 @@ def list_media(root: Path, files: list[str] | None = None,
     root = Path(root)
     disk = read_manuscript_files(root)
     paths = iter_manuscript_paths(root)
-    order, unlisted = reading_order(disk)
-    names = [n for n in list(order) + sorted(unlisted)
+    # reading_order already appends unlisted names to `order`; do not
+    # concatenate `unlisted` again or every unlisted file is scanned twice
+    # (duplicate teleprompter passages, `-2` key suffixes on media list).
+    order, _unlisted = reading_order(disk)
+    names = [n for n in order
              if n.endswith(".md") and n != TOC_FILENAME]
     attrs = toc_attrs(disk.get(TOC_FILENAME) or "")
     index, _cast_problems = cast_index(root)
