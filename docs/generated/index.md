@@ -524,6 +524,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._offline_prices`
+
+`authorlm/tests/_offline_prices.py`
+
+Pins llmlm's price cache to an empty one that never reaches the network.
+
 ## `tests.test_adjudication`
 
 `authorlm/tests/test_adjudication.py`
@@ -709,6 +715,12 @@ _No docstring._
 `authorlm/tools/bootstrap_beliefs.py`
 
 Distil beliefs from the author's decisions already on record.
+
+## `tools.convert_llm_cache`
+
+`authorlm/tools/convert_llm_cache.py`
+
+One-off: convert authorlm's record/replay recordings to llmlm's cache format.
 
 ## `tools.measure_adjudication`
 

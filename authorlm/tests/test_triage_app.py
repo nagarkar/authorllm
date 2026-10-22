@@ -58,6 +58,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
 from authorlm import (  # noqa: E402
     api, cli, triage, triage_analysis, triage_rules, triage_server,
