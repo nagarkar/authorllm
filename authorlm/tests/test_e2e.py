@@ -67,6 +67,7 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
 from authorlm import api as _api  # noqa: E402
 from authorlm.cli import main  # noqa: E402
@@ -2230,7 +2231,9 @@ def scenario_write_draft(root: Path) -> None:
         # says the model declined, the other says the ceiling was hit, and
         # the remedies are nothing alike.
         failures = [
-            ("STUB-500: provider error", "failed after 3 attempts"),
+            # llmlm retries only a 429 or 529, so a 500 fails at once and the
+            # message carries the provider's own error
+            ("STUB-500: provider error", "Error code: 500"),
             ("STUB-REFUSED: stop_reason refusal", "refused to answer"),
             ("STUB-TRUNCATED: hit the ceiling", "before finishing"),
             ("STUB-NO-DRAFT: no draft line", "missing DRAFT"),

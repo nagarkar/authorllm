@@ -63,6 +63,7 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
