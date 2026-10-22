@@ -3484,6 +3484,12 @@ def scenario_doc_comments(root: Path) -> None:
           not structure.is_sidecar("manifest.md")
           and not hasattr(mf, "refresh") and not hasattr(mf, "FILENAME"),
           str(structure.SIDECAR_FILES))
+    check("manifest.md remains structural as an obsolete sidecar",
+          structure.is_obsolete("manifest.md")
+          and structure.is_structural("manifest.md")
+          and "manifest.md" not in structure.content_files(
+              {"a.md": "x", "manifest.md": "old", "toc.toml": ""}),
+          str(structure.OBSOLETE_FILES))
 
     from authorlm.gdocs import chapter_stats
     sample = ("# Heading\n\nThe cat sat on the mat. It was warm. "

@@ -198,6 +198,22 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(passages[1]["paragraphs"],
                          ["Thank you for listening. Namaste."])
 
+    def test_teleprompter_unlisted_file_is_not_duplicated(self):
+        # An essay absent from toc.toml used to yield every voice:author
+        # passage twice via list_media's double walk of `unlisted`.
+        (self.ms / "monologue.md").write_text(
+            "# M\n\n[Collage: Intro]\n"
+            "[Clip: hi ⇢ hi.md | use: check Downloads folder | "
+            "audio: full | voice: author]\n[/Collage]\n",
+            encoding="utf-8")
+        (self.ms / "_clips" / "notes" / "hi.md").write_text(
+            "Hello once.\n", encoding="utf-8")
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(api.get_manuscript(db),
+                                                "monologue.md")
+        self.assertEqual(len(passages), 1, passages)
+        self.assertEqual(passages[0]["paragraphs"], ["Hello once."])
+
     def test_teleprompter_cli_writes_a_plain_large_type_docx(self):
         code, out, err = self.cli("export", "teleprompter", "--file",
                                   "picture-story.md")

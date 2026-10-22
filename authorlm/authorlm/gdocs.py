@@ -1021,6 +1021,9 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
     # The Reader load lives in the manifest tab now. A Doc from before
     # 2026-10-19 still has it as a `manifest.md` tab of its own: delete the
     # tab and its mapping entry, so it is neither pushed nor pulled again.
+    # A local `manifest.md` left by the old `manifest.refresh` is the same
+    # retired sidecar on disk — drop it so it cannot re-enter the reading
+    # order as an unlisted essay (structure.is_obsolete) or recreate a tab.
     old_load = existing.pop(OLD_READER_LOAD_TITLE, None)
     entry.pop(OLD_READER_LOAD_TITLE, None)
     if old_load:
@@ -1031,6 +1034,12 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
             ).execute()
         except Exception:
             pass  # a stale derived tab is cosmetic, never fatal
+    ghost = bridge.root / OLD_READER_LOAD_TITLE
+    if ghost.is_file():
+        try:
+            ghost.unlink()
+        except OSError:
+            pass  # a leftover derived file is cosmetic, never fatal
     # The blank default tab is noise once real tabs exist.
     stray = [tid for title, tid in existing.items()
              if title not in order and title.startswith("Tab ")]

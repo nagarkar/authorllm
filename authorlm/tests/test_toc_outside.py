@@ -2,6 +2,7 @@
 
 Papers and side pieces are mirrored to the Doc but never enter the
 reading order, the full-book export, or the TOC <-> tab-order sync.
+Also: a pre-2026-10-19 local `manifest.md` must not re-enter the book.
 Run: python3 tests/test_toc_outside.py
 """
 from __future__ import annotations
@@ -11,12 +12,17 @@ os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-outside/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-outside/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import gdocs, structure
+from test_passes import _SurgicalDocFake  # noqa: E402
+from authorlm import api, gdocs, structure  # noqa: E402
+from authorlm.cli import main as cli_main  # noqa: E402
 
 TOC = '''# Table of contents
 outside = ["papers/", "side.md"]
@@ -29,6 +35,75 @@ file = "b.md"
 parent = "a.md"
 matter = "back"
 '''
+
+
+class ObsoleteManifestTests(unittest.TestCase):
+    """Pre-2026-10-19 local `manifest.md` must not re-enter the book."""
+
+    def test_ghost_manifest_md_stays_out_of_reading_order(self) -> None:
+        files = {"toc.toml": '[[chapter]]\nfile = "a.md"\n',
+                 "a.md": "# A\n",
+                 "manifest.md": "<!-- GENERATED -->\n# Reader load\n",
+                 "pronunciations.md": ""}
+        order, unlisted = structure.reading_order(files)
+        self.assertEqual(order, ["a.md"])
+        self.assertEqual(unlisted, [])
+        self.assertTrue(structure.is_obsolete("manifest.md"))
+        self.assertFalse(structure.is_sidecar("manifest.md"))
+        # Sidecars still get Doc tabs; obsolete files must not.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for name, text in files.items():
+                (root / name).write_text(text, encoding="utf-8")
+            bridge = gdocs.DocBridge("gdocs", root, "book",
+                                     toc_sync=True, rich_manifest=True)
+            self.assertEqual(gdocs._reading_order_files(bridge),
+                             ["a.md", "pronunciations.md"])
+
+    def test_push_deletes_local_ghost_and_old_tab(self) -> None:
+        # Without is_obsolete, ensure_master popped the Doc tab then
+        # KeyError'd on existing["manifest.md"] because the ghost was
+        # still in the reading-order tab list.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ws, ms = root / "ws", root / "ws" / "book"
+            ms.mkdir(parents=True)
+            (ms / "a.md").write_text("# A\n\nProse.\n", encoding="utf-8")
+            (ms / "manifest.md").write_text(
+                "<!-- GENERATED -->\n# Reader load\n", encoding="utf-8")
+            (ms / "toc.toml").write_text(
+                '[[chapter]]\nfile = "a.md"\n', encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(ws), "init", "--name", "book",
+                          "--path", str(ms), "--extraction", "off"])
+            db = api.open_db(str(ws))
+            manuscript = api.get_manuscript(db)
+            fake = _SurgicalDocFake([
+                ("book", ""), ("a.md", "# A\n\nProse.\n"),
+                ("manifest.md", "# Reader load\n")])
+            meta = gdocs._mapping(db, manuscript)
+            entry = meta.setdefault("gdocs", {})
+            entry["_master_id"] = fake.master_id
+            entry["_container_tab"] = next(
+                t["id"] for t in fake.tabs if t["title"] == "book")
+            entry["a.md"] = {
+                "tab_id": next(t["id"] for t in fake.tabs
+                               if t["title"] == "a.md"),
+                "checked_out": True}
+            entry["manifest.md"] = {
+                "tab_id": next(t["id"] for t in fake.tabs
+                               if t["title"] == "manifest.md"),
+                "checked_out": True}
+            gdocs._save_mapping(db, manuscript, meta)
+            manuscript = api.get_manuscript(db)
+            gdocs.push_doc(db, manuscript, "a.md",
+                           service=fake, docs_service=fake)
+            self.assertFalse((ms / "manifest.md").exists())
+            self.assertNotIn("manifest.md",
+                             [t["title"] for t in fake.tabs])
+            self.assertNotIn(
+                "manifest.md",
+                gdocs._mapping(db, api.get_manuscript(db)).get("gdocs", {}))
 
 
 class OutsideTests(unittest.TestCase):

@@ -52,6 +52,14 @@ MATTER_VALUES = ("front", "main", "back")
 # one manuscript, one dictionary.
 SIDECAR_FILES = ("pronunciations.md",)
 
+# Retired sidecars: still structural (never in the book, never scanned),
+# but NOT Doc-mirrored. `manifest.md` was a sidecar until 2026-10-19; the
+# Reader load now lives in the Doc's `manifest` tab. A workspace that
+# still has the old local file must not treat it as an essay — otherwise
+# it enters the reading order, ships inside exports, and `ensure_master`
+# KeyErrors after deleting the obsolete Doc tab of the same name.
+OBSOLETE_FILES = ("manifest.md",)
+
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s", re.M)
 
@@ -85,8 +93,14 @@ def is_sidecar(name: str) -> bool:
     return name in SIDECAR_FILES
 
 
+def is_obsolete(name: str) -> bool:
+    """A retired sidecar filename still present on disk. Structural, but
+    never Doc-mirrored — `_reading_order_files` must not create a tab."""
+    return name in OBSOLETE_FILES
+
+
 def is_structural(name: str) -> bool:
-    return name == TOC_FILENAME or is_sidecar(name)
+    return name == TOC_FILENAME or is_sidecar(name) or is_obsolete(name)
 
 
 def refuse_sidecar(name: str) -> None:

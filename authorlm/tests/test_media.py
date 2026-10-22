@@ -67,6 +67,19 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(clip["status"], "draft")   # under 150 words
         self.assertEqual(clip["line"], 3)
 
+    def test_unlisted_file_is_scanned_once(self):
+        # reading_order already appends unlisted names; concatenating them
+        # again doubled every clip (teleprompter read the script twice).
+        (self.root / "ecce.md").write_text("# Listed\n", encoding="utf-8")
+        (self.root / "aside.md").write_text(
+            "# Aside\n\nBefore.\n\n"
+            "[Clip: key=\"cam\" voice: author]\nSay this once.\n[/Clip]\n\n"
+            "After.\n", encoding="utf-8")
+        clips = [e for e in media.list_media(self.root, ["aside.md"])["media"]
+                 if e["kind"] == "clip"]
+        self.assertEqual(len(clips), 1, clips)
+        self.assertEqual(clips[0]["key"], "keycam-voice-author")
+
     def test_spec_of_150_words_is_ready(self):
         clip = self.one(f"[Clip: {LONG}]\nWords.\n[/Clip]\n")
         self.assertEqual(clip["status"], "ready")
