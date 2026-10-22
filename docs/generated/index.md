@@ -566,6 +566,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 `doc bind`: adopt an existing master Doc for a manuscript that has none (a fresh workspace, a cloud session), so `doc pull` fills the folder from its tabs instead of `doc push` creating a new Doc.
 
+## `tests.test_doc_gone`
+
+`authorlm/tests/test_doc_gone.py`
+
+`export._doc_gone` decides whether a Drive/Docs failure means the remembered file was deleted, so export may recreate it in place.
+
 ## `tests.test_doc_road_escapes`
 
 `authorlm/tests/test_doc_road_escapes.py`
@@ -632,6 +638,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 Proposal learning loop — firewall, screen, distillation, retraction.
 
+## `tests.test_manifest_render_lines`
+
+`authorlm/tests/test_manifest_render_lines.py`
+
+`manifest.render_lines` is the plain-text Reader load that `gdocs.manifest_text` appends under the chapter inventory (#243).
+
 ## `tests.test_media`
 
 `authorlm/tests/test_media.py`
@@ -655,6 +667,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 `authorlm/tests/test_normalize_thematic_break.py`
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
+
+## `tests.test_parse_fields`
+
+`authorlm/tests/test_parse_fields.py`
+
+`media.parse_fields` is the grammar door for every [Clip]/[Collage] field list: description, optional ⇢ note, then `| key: value` pairs.
 
 ## `tests.test_passes`
 
