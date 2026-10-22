@@ -1023,6 +1023,7 @@ def check_manuscript_extraction_switch() -> None:
               str(declined))
 
         # A Doc-mapping write beside the switch must not lose it.
+        from authorlm.extraction import set_manuscript_extraction
         from authorlm.gdocs import _mapping, _save_mapping
 
         meta = _mapping(db, m_kept)
@@ -1044,6 +1045,26 @@ def check_manuscript_extraction_switch() -> None:
               "Doc mapping beside it is kept",
               manuscript_extraction_enabled(db, m_kept)
               and _mapping(db, m_kept)["gdocs"]["_master_id"] == "doc-x")
+
+        # The push/pull shape: hold a mapping snapshot while extraction is
+        # on, flip the switch mid-flight (CLI / MCP), then save the held
+        # snapshot the way `_rewrite_tab` does after network I/O. Without
+        # a bridge-only merge the stale snapshot restores enabled=true.
+        held = _mapping(db, m_kept)
+        held.setdefault("gdocs", {})["pushed_hash"] = "deadbeef"
+        set_manuscript_extraction(db, m_kept, False)
+        check("mid-flight manuscript set --extraction off takes effect "
+              "before the held Doc mapping is saved",
+              not manuscript_extraction_enabled(db, m_kept)
+              and (held.get("extraction") or {}).get("enabled") is True)
+        _save_mapping(db, m_kept, held)
+        check("a long-held Doc-mapping save does not wipe a concurrent "
+              "extraction-off switch (lost-update against push/reconcile)",
+              not manuscript_extraction_enabled(db, m_kept)
+              and _mapping(db, m_kept)["gdocs"].get("pushed_hash")
+              == "deadbeef"
+              and _mapping(db, m_kept)["gdocs"]["_master_id"] == "doc-x",
+              _mapping(db, m_kept))
         _api.update_manuscript_metadata(db, m_book, extraction="off")
         check("the api door takes the same words",
               not manuscript_extraction_enabled(db, m_book))
