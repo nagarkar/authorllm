@@ -715,7 +715,7 @@ class LLMClient:
             # Served from the record/replay cache: it did NOT spend, and
             # "what did the replay cache save me" is the only positive
             # number the ledger's report has.
-            usage.record_replay()
+            usage.record_replay(self.purpose, self.model)
         else:
             self._record_usage(reply.tokens_in, reply.tokens_out,
                                reply.cache_read, reply.cache_write)

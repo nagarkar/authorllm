@@ -4606,16 +4606,26 @@ def _turn(mid: str, **over) -> str:
     return json.dumps(line)
 
 
+def model_usage_board(directory) -> dict:
+    """What the family's usage board (`llmlm.usage`) makes of one ledger
+    folder."""
+    from llmlm import usage as model_usage
+
+    return model_usage.tool_spend(
+        "authorlm", Path(directory), None, "")
+
+
 def check_usage_ledger() -> None:
     """AP: the always-on usage ledger — where the money went.
 
     Sponsor ruling: *"it would be good to track usage so if you ever want
     to take this to commercial stage, we can have that ready-made."*
 
-    The ledger core (T-1…T-10): one aggregate line per invocation keyed by
-    `purpose|model`; an unpriced model records tokens and a NULL cost,
-    never a zero; the vendor-prefix pricing trap, pinned; no litellm at
-    all still records every token; the expensive detail line; the clean
+    The ledger core (T-1…T-10): one llmlm usage line per call, written at
+    the invocation's flush with its verb, run id and client stamp; an
+    unpriced model records tokens and a NULL cost, never a zero; the
+    vendor-prefix pricing trap, pinned; no litellm at all still records
+    every token; the expensive tail (derived from the lines); the clean
     off-switch; never-in-the-way; rotation; replays; the client stamp."""
     import datetime as _dt
 
@@ -4637,7 +4647,7 @@ def check_usage_ledger() -> None:
             "input": 1e-3, "output": 1e-3, "cache_read": 0.0,
             "cache_write": 0.0, "partial": False}
 
-        # --- T-1: the aggregate line. ---
+        # --- T-1: one llmlm line per call. ---
         ws = root / "ws"
         (ws / ".authorlm").mkdir(parents=True)
         clients.configure(workspace=str(ws))
@@ -4647,25 +4657,27 @@ def check_usage_ledger() -> None:
         usage.flush("collect --auto")
         log = usage.log_dir(str(ws)) / usage.FILENAME
         lines = [json.loads(x) for x in log.read_text().splitlines()]
-        aggregate = lines[-1]
         hand = ((1240 * 1e-6) + (610 * 2e-6) + (7 * 1e-7) + (3 * 5e-7))
-        check("one aggregate line per invocation, keyed by "
-              "'<purpose>|<model>' as [n, in, out, cache_read, cache_write, "
-              "est_cost] — purpose is WHICH CONFIG SECTION chose the model, "
-              "which `model` alone cannot say once two sections name one "
-              "string",
-              len(lines) == 1 and aggregate["kind"] == "api"
-              and aggregate["calls"]["llm|zz/sentinel"][:5]
-              == [2, 1200, 600, 0, 0]
-              and aggregate["calls"]["critique.summarizer|zz/sentinel"][:5]
-              == [1, 40, 10, 7, 3], f"{lines}")
-        check("the line is named by command+action, never raw argv, and its "
-              "estimated cost is the hand-computed sum of the injected "
-              "rates over all four counters",
-              aggregate["invocation"] == "collect --auto"
-              and abs(aggregate["est_cost_usd"] - hand) < 1e-6
-              and aggregate["cost_complete"] is True,
-              f"{aggregate} vs {hand}")
+        check("one llmlm usage line per call (validated against its "
+              "schema), the purpose in `stage` — WHICH CONFIG SECTION chose "
+              "the model, which `model` alone cannot say once two sections "
+              "name one string",
+              len(lines) == 3 and all(l["kind"] == "api" for l in lines)
+              and [(l["stage"], l["tokens_in"], l["tokens_out"])
+                   for l in lines]
+              == [("llm", 1000, 500), ("llm", 200, 100),
+                  ("critique.summarizer", 40, 10)]
+              and lines[2]["cache_read"] == 7
+              and lines[2]["cache_write"] == 3
+              and "cache_read" not in lines[0], f"{lines}")
+        check("every line of the invocation carries its verb label "
+              "(command+action, never raw argv) and one shared run id, and "
+              "the estimated costs sum to the hand-computed figure over all "
+              "four counters",
+              {l["invocation"] for l in lines} == {"collect --auto"}
+              and len({l["run"] for l in lines}) == 1
+              and abs(sum(l["cost_usd"] for l in lines) - hand) < 1e-5,
+              f"{lines} vs {hand}")
 
         # --- T-2: null is not zero. ---
         usage.record("llm", "zz/sentinel", 100, 0, 0, 0)
@@ -4674,18 +4686,24 @@ def check_usage_ledger() -> None:
         mixed = json.loads(log.read_text().splitlines()[-1])
         check("a model litellm cannot price records its TOKENS and a NULL "
               "cost — never a guess and never a zero, which is a different "
-              "claim — and the line's cost_complete goes false so the "
-              "reader can name the gap instead of printing a total that "
-              "quietly omits it",
-              mixed["calls"]["llm|zz/unmapped"][:5] == [1, 5000, 900, 0, 0]
-              and mixed["calls"]["llm|zz/unmapped"][5] is None
-              and mixed["cost_complete"] is False
-              and mixed["est_cost_usd"] > 0, f"{mixed}")
+              "claim — so the reader can name the gap instead of printing "
+              "a total that quietly omits it",
+              mixed["model"] == "zz/unmapped" and mixed["tokens_in"] == 5000
+              and mixed["tokens_out"] == 900 and mixed["cost_usd"] is None,
+              f"{mixed}")
         rendered = "\n".join(usage.report(usage.log_dir(str(ws))))
         check("and the report says how many models went unpriced rather "
               "than absorbing them into the total",
               "had no price" in rendered and "zz/unmapped" in rendered
               and "priced total" in rendered, rendered)
+        board = model_usage_board(usage.log_dir(str(ws)))
+        check("the family's usage board (llmlm.usage, the one corpuslm "
+              "serves) reads this ledger: the unpriced call is "
+              "cost_unknown there too, never a dollar",
+              board["total"]["calls"] == 5
+              and board["total"]["cost_unknown"] == 1
+              and board["by_stage"]["critique.summarizer"]["calls"] == 1,
+              f"{board}")
 
         # --- T-3: THE VENDOR-PREFIX TRAP, pinned. ---
         usage._PRICE_CACHE.clear()
@@ -4747,15 +4765,14 @@ def check_usage_ledger() -> None:
             builtins.__import__ = real_import
             usage._PRICE_CACHE.clear()
         offline = json.loads(log.read_text().splitlines()[-1])
-        key = "llm|gemini/gemini-2.5-flash"
         check("with no litellm installed every cost is null and every token "
               "count is intact: pricing is an ENRICHMENT, the ledger is not "
               "conditional on it, and nothing escapes",
-              blind is None
-              and offline["calls"][key][:5] == [1, 77, 88, 0, 0]
-              and offline["calls"][key][5] is None, f"{offline}")
+              blind is None and offline["model"] == "gemini/gemini-2.5-flash"
+              and (offline["tokens_in"], offline["tokens_out"]) == (77, 88)
+              and offline["cost_usd"] is None, f"{offline}")
 
-        # --- T-5: the expensive detail line. ---
+        # --- T-5: the expensive tail. ---
         expensive_ws = root / "expensive-ws"
         (expensive_ws / ".authorlm").mkdir(parents=True)
         clients.configure(workspace=str(expensive_ws))
@@ -4766,19 +4783,16 @@ def check_usage_ledger() -> None:
         expensive_log = usage.log_dir(str(expensive_ws)) / usage.FILENAME
         entries = [json.loads(x) for x in
                    expensive_log.read_text().splitlines()]
-        detail = [e for e in entries if e.get("expensive")]
-        agg = [e for e in entries if not e.get("expensive")][-1]
-        check("a single call over [usage] expensive_usd writes its own "
-              "IMMEDIATE line — the aggregate already counts it, so that "
-              "line is the detail: when, under which chat, and for what",
-              len(detail) == 1 and detail[0]["purpose"] == "writing"
-              and detail[0]["model"] == "zz/dear"
-              and abs(detail[0]["est_cost_usd"] - 1.0) < 1e-9
-              and agg["calls"]["writing|zz/dear"][0] == 1, f"{entries}")
+        check("a single call over [usage] expensive_usd needs no line of "
+              "its own: it is one line like any other, and the reader "
+              "marks it from its cost",
+              len(entries) == 2 and not any(e.get("expensive")
+                                            for e in entries)
+              and entries[0]["stage"] == "writing"
+              and abs(entries[0]["cost_usd"] - 1.0) < 1e-9, f"{entries}")
         report = "\n".join(usage.report(usage.log_dir(str(expensive_ws))))
         check("and the reader counts it in the expensive tail WITHOUT "
-              "adding it to the total a second time (dbperf's slow-line "
-              "discipline)",
+              "adding it to the total a second time",
               "expensive single calls, last 1 of 1" in report
               and "1 invocations, 2 API calls" in report
               and "1.00         2" in report.split("priced total")[0],
@@ -4874,14 +4888,18 @@ def check_usage_ledger() -> None:
         usage.record_replay()
         usage.record_replay()
         usage.flush("replayed")
-        replayed = json.loads(
-            (usage.log_dir(str(replay_ws)) / usage.FILENAME)
-            .read_text().splitlines()[-1])
-        check("a call served from the record/replay cache is counted as a "
-              "replay and contributes no tokens and no cost — 'what did the "
+        replayed = [json.loads(x) for x in
+                    (usage.log_dir(str(replay_ws)) / usage.FILENAME)
+                    .read_text().splitlines()]
+        check("a call served from the record/replay cache is a `cached` "
+              "line that contributes no tokens and no cost — 'what did the "
               "cache save me' is the only positive number in the report",
-              replayed["replays"] == 2 and replayed["calls"] == {}
-              and replayed["est_cost_usd"] == 0.0, f"{replayed}")
+              len(replayed) == 2 and all(
+                  l["cached"] is True and l["tokens_in"] == 0
+                  and l["cost_usd"] == 0.0 for l in replayed)
+              and "2 calls replayed" in "\n".join(
+                  usage.report(usage.log_dir(str(replay_ws)))),
+              f"{replayed}")
 
         # --- T-10: the client stamp. ---
         stamp_ws = root / "stamp-ws"
