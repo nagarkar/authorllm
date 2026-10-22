@@ -144,11 +144,7 @@ def day_base(directory: Path | str) -> float:
         from . import usage
 
         for entry in usage.read_entries(directory):
-            if entry.get("kind") != "api" or entry.get("expensive"):
-                continue
-            if str(entry.get("ts") or "")[:10] != day:
-                continue
-            total += float(entry.get("est_cost_usd") or 0.0)
+            total += usage.api_cost_on(entry, day)
     except Exception:
         total = 0.0
     _DAY_BASE[key] = total
