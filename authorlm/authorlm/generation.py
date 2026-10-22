@@ -140,16 +140,24 @@ def empty_state() -> dict:
 
 def load_state(root: Path, stem: str) -> dict:
     """The chapter's state as it is on disk right now. Unknown keys are
-    kept so a save never drops what the other writer recorded."""
+    kept so a save never drops what the other writer recorded.
+
+    A missing file is an empty state. A file that is there but does not
+    parse to an object raises AudioError: falling back to an empty state
+    would let the next save overwrite every earlier take's record."""
     path = root / STATE_DIR / f"{stem}.json"
     state = empty_state()
     if path.exists():
         try:
             on_disk = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError:
-            on_disk = {}
-        if isinstance(on_disk, dict):
-            state.update(on_disk)
+        except ValueError as e:
+            raise AudioError(f"{path} is unreadable ({e}) — repair or remove "
+                             "it; nothing was written") from None
+        if not isinstance(on_disk, dict):
+            raise AudioError(f"{path} is unreadable (holds a "
+                             f"{type(on_disk).__name__}, not an object) — "
+                             "repair or remove it; nothing was written")
+        state.update(on_disk)
     state.setdefault("sections", {})
     state.setdefault("stitched", {})
     state.setdefault("stitchKeys", {})
@@ -162,7 +170,8 @@ def save_state(root: Path, stem: str, state: dict) -> Path:
     state_dir = root / STATE_DIR
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / f"{stem}.json"
-    tmp = path.with_suffix(".json.tmp")
+    # One temp name per writer, so two writers never share (and tear) it.
+    tmp = state_dir / f".{stem}.{os.getpid()}-{threading.get_ident()}.json.tmp"
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")
     os.replace(tmp, path)
