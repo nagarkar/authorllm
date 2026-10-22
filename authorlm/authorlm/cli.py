@@ -513,6 +513,13 @@ def _reconcile_gdocs(db: Database, manuscript: dict, args) -> None:
             f"— untouched. Reconcile by hand (doc open {relpath} + local "
             f"editor), or 'doc pull {relpath} --force' to take the Doc's side."
         ))
+    for relpath in report.get("sidecar_unparsable", []):
+        print(ui.yellow(
+            f"REFUSED: the tab for {relpath} came back with no table rows "
+            f"at all, and the local file has some — a Docs export that "
+            f"mangled the table would destroy the dictionary. Untouched "
+            f"(session-start reconcile uses the same guard as "
+            f"'doc pull'). Fix the table in the Doc and reopen."))
     if report.get("ignored_tabs"):
         print(ui.dim("Ignoring non-manuscript tab(s): "
                      + ", ".join(report["ignored_tabs"])))
