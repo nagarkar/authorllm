@@ -245,10 +245,41 @@ def approved_text(text: str) -> str:
     return _collapse(text, "new")
 
 
+def own_line_form(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] is the whole of the line(s) it sits on.
+
+    Critique / judgment / footnote-definition insertions are planted as
+    their own line (compose joins with blank lines; the Doc writer puts
+    each definition on its own line after the last paragraph). Inline
+    author prose (`{{title}}`, set notation `{{a, b}}`, TeX grouping)
+    never has that shape — those braces share a line with surrounding
+    words.
+
+    Narrower than blank-line paragraph isolation: two footnote defs
+    stacked with a single newline between them (the Docs export shape)
+    each pass this test and fail a `\n\n`-bounded "alone in paragraph"
+    check. Outside-caller resolve already used this rule; keep it here
+    so every consumer of `pending_forms` agrees."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return (not text[line_start:start].strip()
+            and not text[end:line_end].strip())
+
+
 def pending_forms(text: str) -> list[dict]:
     """Every pending form in a tab, in document order: {kind, old, new,
     start, end}. The resolve verb reads the author's post-edits from the
-    {{new}} halves here."""
+    {{new}} halves here.
+
+    Insertions are own-line forms only. The broad INSERTION regex also
+    matches inline author `{{…}}` that rode to the tab on push; treating
+    those as inserts let `final_text_from_marked` FIFO-steal them, strip
+    the braces from prose, and collapse the real planted insertion to
+    empty (silent manuscript corruption on critique / findings /
+    directive resolve). `strip_pending` already left inline braces alone
+    (#72); this list must agree."""
     found = []
     for m in PENDING.finditer(text):
         found.append({"kind": "replace", "old": _unstrike(m.group("old")),
@@ -257,6 +288,8 @@ def pending_forms(text: str) -> list[dict]:
     consumed = [(f["start"], f["end"]) for f in found]
     for m in INSERTION.finditer(text):
         if any(s <= m.start() < e for s, e in consumed):
+            continue
+        if not own_line_form(text, m.start(), m.end()):
             continue
         found.append({"kind": "insert", "old": "", "new": m.group("new"),
                       "start": m.start(), "end": m.end()})
