@@ -2781,6 +2781,15 @@ def _clip_edit(args, manuscript, media_gen) -> None:
         sys.exit('usage: clip edit <key> --take NN --text "what to change" '
                  "[--generate]")
     p = media_gen.edit_plan(manuscript, args.key, args.take, args.text)
+    if getattr(args, "json", False):
+        # podlm's shape, as `clip ensure --json`: the plan, and the job
+        # when --generate started one.
+        out = {"plan": p, "job": None}
+        if args.generate and not args.dry_run:
+            out["job"] = media_gen.edit_start(manuscript, args.key, args.take,
+                                              args.text, confirm=args.confirm)
+        print(json.dumps(out, indent=1))
+        return
     print(f"{p['key']}: revise {p['take']} with {p['model']} — about "
           f"${p['est_usd']:.2f} (today so far ${p['day_spent_usd']:.2f})")
     print(ui.dim(f"  prompt: {p['prompt']}"))
@@ -9426,16 +9435,17 @@ def build_parser() -> argparse.ArgumentParser:
                                    "together when the file is checked out")
     p.add_argument("--generate", action="store_true",
                    help="ensure: start a generation (billed), even when a "
-                        "fresh take exists")
+                        "fresh take exists; edit: start the revision")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="ensure: show the model, length, cost and the exact "
                         "prompt; spend nothing")
     p.add_argument("--confirm", action="store_true",
                    help="ensure: go ahead past a per-call or per-day cap")
-    p.add_argument("--model", help="ensure: a Veo model other than the pin")
+    p.add_argument("--model", help="ensure: a model other than the pin — a "
+                                   "veo-3.1-* model or gemini-omni-1.1-flash")
     p.add_argument("--json", action="store_true",
-                   help="ensure: print the plan (and the started job) as JSON, "
-                        "as podlm reads it")
+                   help="ensure, edit: print the plan (and the started job) "
+                        "as JSON, as podlm reads it")
     p.add_argument("--take", help="pick, edit: the take number (NN, iNN or eNN)")
     p.add_argument("--supersede", action="store_true",
                    help="spec, file checked out: withdraw this file's clip "

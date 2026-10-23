@@ -2161,7 +2161,7 @@ drops the tag lines and keeps every word of prose.
   it, `doc push` (the Doc-road protocol).
 - Collage and Montage get keys too (`⇢ montage-….md`, the title in the
   spec file); they carry no fields.
-- **Generation (Veo, billed):** `clip ensure <key> --dry-run` / MCP
+- **Generation (Veo or Omni, billed):** `clip ensure <key> --dry-run` / MCP
   `clip_ensure` (a dry run by default) shows the model, length, cost and the
   exact prompt and spends nothing. **Generate only after the author says yes
   to the stated cost:** `clip ensure <key> --generate` (`--confirm` past a
@@ -2169,7 +2169,16 @@ drops the tag lines and keeps every word of prose.
   take (the first take is chosen). The author chooses takes (in podlm's
   gallery or in chat); record it with `clip pick <key> --take NN` /
   `clip_pick`, never on your own. `clip attach` / `clip_attach` brings in a
-  video made elsewhere. Pin and caps: `_clips/settings.toml`.
+  video made elsewhere. Pin and caps: `_clips/settings.toml`. The pin is a
+  `veo-3.1-*` model or `gemini-omni-1.1-flash` (`--model` / `model=` for one
+  call); Omni is 720p only, 3–10 s, the length set by the prompt.
+- **Revising an Omni take (billed):** `clip edit <key> --take NN --text
+  "what to change"` / MCP `clip_edit(key, take, instruction)` — a dry run by
+  default (cost and prompt); `--generate` / `generate=True` only after the
+  author says yes to the stated cost; `--json` for podlm. It continues the
+  take's own Omni interaction and lands as take `eNN` beside the original,
+  which stays chosen until the author picks the revision. Poll with
+  `clip job`. Only takes Omni made can be revised (not Veo or attached ones).
 
 ## Self-improvement tasks (tool defects, not manuscript knowledge)
 When AuthorLM itself misbehaves (e.g. a prerequisite-gap false positive)
