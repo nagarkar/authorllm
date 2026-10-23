@@ -6042,6 +6042,37 @@ def check_suggestions() -> None:
     check("a standalone tag with nothing before it has no target",
           dv.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
                        "suggestion")[0]["target"] is None)
+    # A margin note under prose with an illustration/clip between them:
+    # the nearest prior *prose* is the target; apply must not destroy the
+    # intervening markup (or plant <<Illustration:…>>{{revised}}).
+    intervening = ("# Essay\n\n"
+                   "Prose that should be revised.\n\n"
+                   "[Illustration: kailash]\n\n"
+                   "[Clip: tired man]\nSpoken in the clip.\n[/Clip]\n\n"
+                   "[Suggestion: simplify]\n")
+    intervening_tag = dv.scan_text(intervening, "suggestion")[0]
+    check("a standalone note after intervening markup targets the prior "
+          "prose, not the illustration or clip",
+          intervening_tag["standalone"]
+          and intervening_tag["target"] == "Prose that should be revised."
+          and intervening[intervening_tag["target_start"]:
+                          intervening_tag["target_end"]]
+          == intervening_tag["target"],
+          repr(intervening_tag.get("target")))
+    landed_intervening = dv._land_suggestion(
+        intervening, intervening_tag, "Simplified prose.")
+    check("landing that note replaces only the prose and keeps the "
+          "intervening illustration and clip",
+          landed_intervening == ("# Essay\n\n"
+                                 "Simplified prose.\n\n"
+                                 "[Illustration: kailash]\n\n"
+                                 "[Clip: tired man]\nSpoken in the clip.\n"
+                                 "[/Clip]\n"),
+          repr(landed_intervening))
+    check("a standalone note with only markup before it has no prose "
+          "target",
+          dv.scan_text("[Illustration: x]\n\n[Suggestion: y]\n",
+                       "suggestion")[0]["target"] is None)
     stripped, removed = dv.strip_tags(text)
     check("exports strip the suggestion tag like any other, inline and "
           "standalone",
