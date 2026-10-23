@@ -936,7 +936,7 @@ def _parse_json_reply(reply: str | None):
 
 # --------------------------------------------------------- image generation
 
-DEFAULT_IMAGE_MODEL = "gemini/gemini-2.5-flash-image"
+DEFAULT_IMAGE_MODEL = "gemini/gemini-3.1-flash-lite-image"
 
 
 def resolve_image_setting(config: dict, illus_key: str, llm_key: str,
