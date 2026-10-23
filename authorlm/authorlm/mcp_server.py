@@ -874,7 +874,7 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
     """A generated clip's takes (docs/video-clips-design.md §8c, §8f). By
     default a DRY RUN: the model, length, estimated cost, the exact prompt,
     the gate's reasons, and any fresh takes' paths — nothing spent. With
-    generate=True and dry_run=False it starts a Veo generation (BILLED) and
+    generate=True and dry_run=False it starts a Veo or Omni generation (BILLED) and
     returns the job; poll it with clip_job. Only with the author's yes for
     the stated cost. `confirm` passes a per-call or per-day cap. Paths
     only."""
@@ -892,13 +892,32 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
 
 @mcp.tool()
 def clip_job(job_id: str, manuscript: str | None = None) -> dict:
-    """Check a clip generation job; when Veo is done it downloads the take
+    """Check a clip generation job; when the model is done it downloads the take
     (paths only) and, if the clip has no chosen take yet, chooses it."""
     def run():
         from . import media_gen
 
         db = _db()
         return media_gen.poll(_manuscript(db, manuscript), job_id)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_edit(key: str, take: str, instruction: str, generate: bool = False,
+              confirm: bool = False, manuscript: str | None = None) -> dict:
+    """Revise a take Omni made, by instruction ("warmer light, slower
+    push-in"). By default a DRY RUN: the cost, the prompt and the gate's
+    reasons. With generate=True it starts the revision (BILLED) — only
+    with the author's yes for the stated cost; poll it with clip_job. The
+    revision lands as take eNN beside the original, which is kept."""
+    def run():
+        from . import media_gen
+
+        ms = _manuscript(_db(), manuscript)
+        if not generate:
+            return {"plan": media_gen.edit_plan(ms, key, take, instruction)}
+        return {"job": media_gen.edit_start(ms, key, take, instruction,
+                                            confirm=confirm)}
     return _guard(run)
 
 

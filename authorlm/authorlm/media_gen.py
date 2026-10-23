@@ -16,6 +16,10 @@ until its status leaves `in_progress`, its video inline in `steps[]`. The road i
   is chosen automatically (recorded in `_clips/chosen.json`, the store of
   record) so a caller always gets a path; `pick` moves the choice,
   `attach` brings in an outside file as `iNN`.
+- `edit_plan`/`edit_start` revise an Omni take by instruction: a new
+  interaction continuing the take's (`previous_interaction_id`), landing
+  as take `eNN`. It carries its parent's hashes — it is that spec's
+  picture, revised — and its job records the parent and the instruction.
 
 The deschash fingerprints the spec and the fields that shape the picture;
 the lawhash the effective `clip` law. A take whose hashes differ from the
@@ -52,6 +56,7 @@ MODELS = {
 }
 # Omni's token rates, USD per token, for the cost a finished job reports.
 OMNI_RATES = {"input": 1.50e-6, "text": 9.00e-6, "video": 17.50e-6}
+OMNI_TOKENS_PER_SECOND = 5792   # 720p video, as output and as input
 DEFAULTS = {"model": "veo-3.1-fast-generate-preview", "resolution": "720p",
             "aspect_ratio": "16:9", "max_call_usd": 2.0, "max_day_usd": 10.0}
 DURATIONS = (4, 6, 8)
@@ -61,7 +66,7 @@ OMNI_SECONDS = (3, 10)   # Omni takes any whole length in this range
 def is_omni(model: str) -> bool:
     return model.startswith("gemini-omni")
 TAKE = re.compile(r"^(?P<key>.+)-(?P<desc>[0-9a-f]{8})-(?P<law>[0-9a-f]{4})-"
-                  r"(?P<n>i?\d{2})\.(?P<ext>mp4|mov|m4v|webm)$")
+                  r"(?P<n>[ie]?\d{2})\.(?P<ext>mp4|mov|m4v|webm)$")
 
 
 # ------------------------------------------------------------------ settings
@@ -127,13 +132,14 @@ def takes(root: Path, key: str, want_desc: str | None = None,
             stale.append("stale-law")
         out.append({"name": path.name, "n": m.group("n"),
                     "path": f"{media.CLIPS_DIR}/{path.name}", "stale": stale})
-    return sorted(out, key=lambda t: (t["n"].lstrip("i").zfill(3), t["n"]))
+    return sorted(out, key=lambda t: (t["n"].lstrip("ie").zfill(3), t["n"]))
 
 
-def _next_n(root: Path, key: str, imported: bool = False) -> str:
-    numbers = [int(t["n"].lstrip("i")) for t in takes(root, key)]
+def _next_n(root: Path, key: str, prefix: str = "") -> str:
+    """The next take number; prefix `i` for imported, `e` for edited."""
+    numbers = [int(t["n"].lstrip("ie")) for t in takes(root, key)]
     n = (max(numbers) + 1) if numbers else 1
-    return f"{'i' if imported else ''}{n:02d}"
+    return f"{prefix}{n:02d}"
 
 
 CHOSEN_FILE = "chosen.json"
@@ -188,7 +194,7 @@ def attach(root: Path, key: str, source: Path, desc: str = "0" * 8,
     if ext not in ("mp4", "mov", "m4v", "webm"):
         raise ValueError(f"{source.name} is not a video (mp4, mov, m4v, webm)")
     name = (f"{clip['ref'][:-3]}-{desc}-{law}-"
-            f"{_next_n(root, clip['ref'][:-3], imported=True)}.{ext}")
+            f"{_next_n(root, clip['ref'][:-3], "i")}.{ext}")
     dest = Path(root) / media.CLIPS_DIR / name
     shutil.copyfile(source, dest)
     if not chosen(root, clip["ref"][:-3]):
@@ -519,7 +525,7 @@ def poll(manuscript: dict, job_id: str, http=None) -> dict:
 
 def _save_take(root: Path, job: dict, blob: bytes) -> None:
     name = (f"{job['key']}-{job['desc']}-{job['law']}-"
-            f"{_next_n(root, job['key'])}.mp4")
+            f"{_next_n(root, job['key'], 'e' if job.get('edit_of') else '')}.mp4")
     (root / media.CLIPS_DIR / name).write_bytes(blob)
     if not chosen(root, job["key"]):
         _set_chosen(root, job["key"], name)
@@ -544,4 +550,107 @@ def _poll_omni(root: Path, path: Path, job: dict, op: dict) -> dict:
         job.update(state="failed", error=f"Omni interaction {status}: "
                    + json.dumps(_scrub(op.get("error") or {}))[:400])
     path.write_text(json.dumps(job, indent=1), encoding="utf-8")
+    return job
+
+
+# ------------------------------------------------------------------ edits
+
+EDIT_TAIL = "Keep everything else the same."
+
+
+def _jobs(root: Path) -> list[dict]:
+    directory = Path(root) / media.CLIPS_DIR / JOBS_SUBDIR
+    return [json.loads(p.read_text(encoding="utf-8"))
+            for p in sorted(directory.glob("*.json"))
+            if not p.name.endswith((".request.json", ".response.json"))]
+
+
+def edit_plan(manuscript: dict, key: str, take: str, instruction: str) -> dict:
+    """What revising a take would send and cost, and the gate. Spends
+    nothing. Only a take Omni made can be revised: its interaction is the
+    state Omni edits from (Google keeps stored interactions for a limited
+    time, so an old take's edit can fail at start)."""
+    root = Path(manuscript["path"])
+    clip = media.find_clip(root, key)
+    ckey = clip["ref"][:-3]
+    match = [t for t in takes(root, ckey)
+             if t["n"] == str(take) or t["n"] == str(take).zfill(2)]
+    if not match:
+        raise LookupError(f"{key} has no take {take} — 'media list --key "
+                          f"{key}' shows its takes")
+    parent = match[0]
+    source = next((j for j in _jobs(root) if j.get("take") == parent["path"]),
+                  None)
+    reasons = []
+    if not instruction.strip():
+        reasons.append("an edit needs an instruction")
+    if not source or not source["operation"].startswith("interactions/"):
+        reasons.append(f"take {parent['n']} was not made by Omni — only an "
+                       "Omni take can be revised")
+    cfg = settings(root)
+    duration = int((source or {}).get("duration") or OMNI_SECONDS[1])
+    model = (source or {}).get("model") or "gemini-omni-1.1-flash"
+    # The new video, plus the parent re-read as input video tokens (live
+    # 2026-10-22: a 4 s edit took 23,405 input video tokens).
+    est = round(MODELS.get(model, {}).get("720p", 0.10) * duration
+                + duration * OMNI_TOKENS_PER_SECOND * OMNI_RATES["input"], 2)
+    spent = day_spend(root)
+    needs_confirm = []
+    if est > cfg["max_call_usd"]:
+        needs_confirm.append(f"${est:.2f} is over the per-call cap "
+                             f"${cfg['max_call_usd']:.2f}")
+    if spent + est > cfg["max_day_usd"]:
+        needs_confirm.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
+                             f"per-day cap ${cfg['max_day_usd']:.2f}")
+    m = TAKE.match(parent["name"])
+    return {"key": ckey, "take": parent["path"], "model": model,
+            "previous_interaction_id": (source or {}).get(
+                "operation", "").removeprefix("interactions/"),
+            "prompt": f"{instruction.strip()} {EDIT_TAIL}",
+            "instruction": instruction.strip(), "duration": duration,
+            "resolution": cfg["resolution"],
+            "aspect_ratio": cfg["aspect_ratio"], "est_usd": est,
+            "day_spent_usd": spent, "desc": m.group("desc"),
+            "law": m.group("law"), "reasons": reasons,
+            "needs_confirm": needs_confirm}
+
+
+def edit_body(p: dict) -> dict:
+    return {"model": p["model"], "background": True,
+            "previous_interaction_id": p["previous_interaction_id"],
+            "input": p["prompt"],
+            "response_format": {"type": "video",
+                                "aspect_ratio": p["aspect_ratio"],
+                                "resolution": "720p"}}
+
+
+def edit_start(manuscript: dict, key: str, take: str, instruction: str,
+               confirm: bool = False, http=None) -> dict:
+    """Start revising a take (paid). Same gate and caps as `start`; poll
+    the returned job with `poll`, and the revision lands as take eNN."""
+    p = edit_plan(manuscript, key, take, instruction)
+    if p["reasons"]:
+        raise ValueError(f"take {take} of {key} cannot be revised: "
+                         + "; ".join(p["reasons"]))
+    if p["needs_confirm"] and not confirm:
+        raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
+                         + " — rerun with --confirm")
+    http = http or _http
+    body = edit_body(p)
+    op = http("POST", f"{BASE_URL}/interactions", _key(), body)
+    root = Path(manuscript["path"])
+    jobs = root / media.CLIPS_DIR / JOBS_SUBDIR
+    now = datetime.now()
+    job_id = f"{p['key']}-{now.strftime('%Y%m%d%H%M%S')}"
+    job = {"id": job_id, "key": p["key"], "operation": f"interactions/{op['id']}",
+           "state": "running", "model": p["model"], "duration": p["duration"],
+           "resolution": "720p", "est_usd": p["est_usd"], "desc": p["desc"],
+           "law": p["law"], "started_local": now.strftime("%Y-%m-%d %H:%M:%S"),
+           "started_utc": datetime.now(timezone.utc).isoformat(),
+           "prompt": p["prompt"], "edit_of": p["take"],
+           "instruction": p["instruction"], "take": None, "error": None}
+    (jobs / f"{job_id}.json").write_text(json.dumps(job, indent=1),
+                                         encoding="utf-8")
+    (jobs / f"{job_id}.request.json").write_text(json.dumps(body, indent=1),
+                                                 encoding="utf-8")
     return job

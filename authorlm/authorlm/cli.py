@@ -2700,7 +2700,7 @@ def _print_landed(row: dict) -> None:
 
 
 def _clip_take_verbs(args, db, manuscript, root) -> None:
-    """`clip ensure|job|pick|attach` (docs/video-clips-design.md §8c, §8f).
+    """`clip ensure|job|pick|attach|edit` (docs/video-clips-design.md §8c, §8f).
     Paths only, never bytes."""
     import json
     from pathlib import Path
@@ -2724,6 +2724,9 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
                 sys.exit("usage: clip attach <key> --file VIDEO.mp4")
             out = media_gen.attach(root, args.key, Path(args.spec_file))
             print(f"{out['key']}: attached {out['path']}")
+            return
+        if args.action == "edit":
+            _clip_edit(args, manuscript, media_gen)
             return
         plan = media_gen.plan(db, manuscript, args.key, args.model)
     except (LookupError, ValueError, RuntimeError) as err:
@@ -2771,6 +2774,38 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
           f"'clip job {job['id']}' checks it and downloads the take.")
 
 
+def _clip_edit(args, manuscript, media_gen) -> None:
+    """`clip edit <key> --take NN --text "…"`: revise an Omni take. Shows
+    the cost unless --generate (billed); the revision lands as take eNN."""
+    if not args.take or not args.text:
+        sys.exit('usage: clip edit <key> --take NN --text "what to change" '
+                 "[--generate]")
+    p = media_gen.edit_plan(manuscript, args.key, args.take, args.text)
+    if getattr(args, "json", False):
+        # podlm's shape, as `clip ensure --json`: the plan, and the job
+        # when --generate started one.
+        out = {"plan": p, "job": None}
+        if args.generate and not args.dry_run:
+            out["job"] = media_gen.edit_start(manuscript, args.key, args.take,
+                                              args.text, confirm=args.confirm)
+        print(json.dumps(out, indent=1))
+        return
+    print(f"{p['key']}: revise {p['take']} with {p['model']} — about "
+          f"${p['est_usd']:.2f} (today so far ${p['day_spent_usd']:.2f})")
+    print(ui.dim(f"  prompt: {p['prompt']}"))
+    for reason in p["reasons"]:
+        print(ui.red(f"  {reason}"))
+    for cap in p["needs_confirm"]:
+        print(ui.yellow(f"  {cap} — needs --confirm"))
+    if not args.generate or args.dry_run:
+        print(ui.dim("'--generate' starts the revision (billed)."))
+        return
+    job = media_gen.edit_start(manuscript, args.key, args.take, args.text,
+                               confirm=args.confirm)
+    print(f"Started job {job['id']} (about ${job['est_usd']:.2f}). "
+          f"'clip job {job['id']}' checks it and downloads the take.")
+
+
 def cmd_clip(args):
     """`clip spec <key> --text …|--file F` (or `--batch specs.json`) lands
     a spec — directly when the file is local, as pending forms in the Doc
@@ -2794,7 +2829,7 @@ def cmd_clip(args):
         return (_gd.get_service(config, args.workspace, interactive=True),
                 _gd.get_docs_service(config, args.workspace, interactive=True))
 
-    if args.action in ("ensure", "job", "pick", "attach"):
+    if args.action in ("ensure", "job", "pick", "attach", "edit"):
         _clip_take_verbs(args, db, manuscript, root)
         return
     if args.action == "resolve":
@@ -9388,9 +9423,11 @@ def build_parser() -> argparse.ArgumentParser:
                "  clip job man-at-desk-20261017120000 check, download the take\n"
                "  clip pick man-at-desk --take 02\n"
                "  clip attach man-at-desk --file own.mp4\n"
+               "  clip edit man-at-desk --take 02 --text \"warmer light\" "
+               "--generate   revise an Omni take (billed)\n"
                "Keys: 'media list'. A clip gets its key at collect.")
     p.add_argument("action", choices=["spec", "set", "resolve", "ensure",
-                                      "job", "pick", "attach"])
+                                      "job", "pick", "attach", "edit"])
     p.add_argument("key", nargs="?",
                    help="spec/set: the clip's key (from 'media list'); "
                         "resolve: the file")
@@ -9398,22 +9435,23 @@ def build_parser() -> argparse.ArgumentParser:
                                    "together when the file is checked out")
     p.add_argument("--generate", action="store_true",
                    help="ensure: start a generation (billed), even when a "
-                        "fresh take exists")
+                        "fresh take exists; edit: start the revision")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="ensure: show the model, length, cost and the exact "
                         "prompt; spend nothing")
     p.add_argument("--confirm", action="store_true",
                    help="ensure: go ahead past a per-call or per-day cap")
-    p.add_argument("--model", help="ensure: a Veo model other than the pin")
+    p.add_argument("--model", help="ensure: a model other than the pin — a "
+                                   "veo-3.1-* model or gemini-omni-1.1-flash")
     p.add_argument("--json", action="store_true",
-                   help="ensure: print the plan (and the started job) as JSON, "
-                        "as podlm reads it")
-    p.add_argument("--take", help="pick: the take number (NN or iNN)")
+                   help="ensure, edit: print the plan (and the started job) "
+                        "as JSON, as podlm reads it")
+    p.add_argument("--take", help="pick, edit: the take number (NN, iNN or eNN)")
     p.add_argument("--supersede", action="store_true",
                    help="spec, file checked out: withdraw this file's clip "
                         "forms already in the tab, then stage these")
     p.add_argument("--text", help="spec: the spec text; set: the on-screen "
-                                  "words (text: field)")
+                                  "words (text: field); edit: what to change")
     p.add_argument("--file", dest="spec_file", help="spec: read the spec "
                                                     "from this file")
     for name in ("youtube", "start", "end", "use", "cast", "prior", "look",
