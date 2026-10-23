@@ -594,20 +594,13 @@ def check_model_profiles() -> None:
           and not llm_mod.caching_available("gemini/gemini-2.5-flash",
                                             "litellm")
           and not llm_mod.caching_available("stub-writer", "litellm"), "")
-    try:
-        from litellm.utils import supports_prompt_caching as _spc
-
-        mapped = bool(_spc(model="anthropic/claude-haiku-5"))
-    except Exception:
-        mapped = False
-    check("an anthropic model with NO row keeps exactly the pre-registry "
-          "answer (litellm's own cost map), so the table changed no "
-          "model's caching behavior — only where the verified ones are "
-          "written down",
+    check("an anthropic model with NO row gets no breakpoints (llmlm's "
+          "exact-row rule): the table is the only place a caching answer "
+          "is written down, with no vendor-map probe behind it",
           llm_mod.model_profile("anthropic/claude-haiku-5")
           is llm_mod.UNKNOWN_PROFILE
           and llm_mod.caching_available("anthropic/claude-haiku-5",
-                                        "litellm") == mapped, mapped)
+                                        "litellm") is False, "")
 
     # --- (5) the unknown-model note is quiet and one-shot --------------
     llm_mod._NOTED.clear()
@@ -4624,8 +4617,8 @@ def check_usage_ledger() -> None:
     The ledger core (T-1…T-10): one llmlm usage line per call, written at
     the invocation's flush with its verb, run id and client stamp; an
     unpriced model records tokens and a NULL cost, never a zero; the
-    vendor-prefix pricing trap, pinned; no litellm at all still records
-    every token; the expensive tail (derived from the lines); the clean
+    vendor-prefix pricing trap, pinned; an unreadable price cache still
+    records every token; the expensive tail (derived from the lines); the clean
     off-switch; never-in-the-way; rotation; replays; the client stamp."""
     import datetime as _dt
 
@@ -4635,17 +4628,49 @@ def check_usage_ledger() -> None:
     previous_workspace = clients._STATE["workspace"]
     try:
         usage.reset()
-        usage._PRICE_OVERRIDE.clear()
         usage._PRICE_CACHE.clear()
-        # Tests INJECT rates. litellm's live map changes under us and a
-        # cost assertion pinned to it would be a time bomb.
-        usage._PRICE_OVERRIDE["zz/sentinel"] = {
-            "input": 1e-6, "output": 2e-6, "cache_read": 1e-7,
-            "cache_write": 5e-7, "partial": False}
-        usage._PRICE_OVERRIDE["zz/unmapped"] = None
-        usage._PRICE_OVERRIDE["zz/dear"] = {
-            "input": 1e-3, "output": 1e-3, "cache_read": 0.0,
-            "cache_write": 0.0, "partial": False}
+        # Tests INJECT a price table: an llmlm `Prices` on a temporary
+        # file whose fetch is a tiny litellm-format map. The live map
+        # changes under us and a cost assertion pinned to it would be a
+        # time bomb; a test never reads ~/.llmlm/prices.json or the net.
+        from llmlm import prices as _prices
+
+        fake_map = {
+            "zz/sentinel": {"input_cost_per_token": 1e-6,
+                            "output_cost_per_token": 2e-6,
+                            "cache_read_input_token_cost": 1e-7,
+                            "cache_creation_input_token_cost": 5e-7},
+            "zz/dear": {"input_cost_per_token": 1e-3,
+                        "output_cost_per_token": 1e-3},
+            # The trap (T-3): keyed WITHOUT its vendor prefix, as the
+            # published map keys the shipped config's dearest models.
+            "gpt-5.6-luna": {"input_cost_per_token": 1.25e-6,
+                             "output_cost_per_token": 1e-5},
+            "claude-fable-5": {"input_cost_per_token": 5e-6,
+                               "output_cost_per_token": 2.5e-5},
+            "gpt-image-2": {"input_cost_per_token": 1e-5,
+                            "output_cost_per_token": 4e-5},
+            # The control: keyed WITH its prefix.
+            "gemini/gemini-2.5-flash": {"input_cost_per_token": 3e-7,
+                                        "output_cost_per_token": 2.5e-6},
+        }
+        injected = _prices.Prices(root / "prices.json",
+                                  fetch=lambda: dict(fake_map),
+                                  notify=lambda changed: None,
+                                  overrides=())
+        usage.PRICES = injected
+        check("the injected table is llmlm's, so `price` answers in the "
+              "ledger's unit (dollars per TOKEN) from llmlm's (per "
+              "MILLION), and a rate the map lacks is 0 and flagged partial",
+              usage.price("zz/sentinel")["partial"] is False
+              and all(abs(usage.price("zz/sentinel")[k] - v) < 1e-12
+                      for k, v in {"input": 1e-6, "output": 2e-6,
+                                   "cache_read": 1e-7,
+                                   "cache_write": 5e-7}.items())
+              and usage.price("zz/dear")["cache_read"] == 0.0
+              and usage.price("zz/dear")["partial"] is True
+              and usage.price("zz/unmapped") is None,
+              f"{usage.price('zz/sentinel')} {usage.price('zz/dear')}")
 
         # --- T-1: one llmlm line per call. ---
         ws = root / "ws"
@@ -4684,7 +4709,7 @@ def check_usage_ledger() -> None:
         usage.record("llm", "zz/unmapped", 5000, 900, 0, 0)
         usage.flush("write status")
         mixed = json.loads(log.read_text().splitlines()[-1])
-        check("a model litellm cannot price records its TOKENS and a NULL "
+        check("a model the price cache cannot price records its TOKENS and a NULL "
               "cost — never a guess and never a zero, which is a different "
               "claim — so the reader can name the gap instead of printing "
               "a total that quietly omits it",
@@ -4707,67 +4732,57 @@ def check_usage_ledger() -> None:
 
         # --- T-3: THE VENDOR-PREFIX TRAP, pinned. ---
         usage._PRICE_CACHE.clear()
-        try:
-            import litellm  # noqa: F401
-            have_litellm = True
-        except Exception:
-            have_litellm = False
-        if have_litellm:
-            import litellm
-
-            trapped = ["openai/gpt-5.6-luna", "anthropic/claude-fable-5"]
-            direct = {m: litellm.model_cost.get(m) for m in trapped}
-            resolved = {m: usage.price(m) for m in trapped}
-            check("PRICING GOES THROUGH get_model_info, NOT "
-                  "model_cost[key]: the dict's keys are inconsistent about "
-                  "the vendor prefix and the inconsistency lands exactly on "
-                  "the shipped config's most expensive paths — a direct "
-                  "lookup prices openai/gpt-5.6-luna and "
-                  "anthropic/claude-fable-5 at null, i.e. silently loses "
-                  "the summariser, the critique editor and beat drafting",
-                  all(direct[m] is None for m in trapped)
-                  and all(resolved[m] is not None for m in trapped)
-                  and all(resolved[m]["input"] > 0 for m in trapped),
-                  f"model_cost={direct} get_model_info={resolved}")
-            check("gemini/gemini-2.5-flash is the control: model_cost DOES "
-                  "have it, which is why a naive lookup looks like it works",
-                  litellm.model_cost.get("gemini/gemini-2.5-flash")
-                  is not None
-                  and usage.price("gemini/gemini-2.5-flash") is not None,
-                  "gemini")
-            check("openai/gpt-image-2 is trapped the same way — the third "
-                  "prefix-keyed miss, and the one that renders pictures",
-                  litellm.model_cost.get("openai/gpt-image-2") is None
-                  and usage.price("openai/gpt-image-2") is not None,
-                  "gpt-image-2")
-        else:
-            print("  note: litellm absent — the vendor-prefix regression "
-                  "(T-3) was not exercised.")
+        trapped = ["openai/gpt-5.6-luna", "anthropic/claude-fable-5"]
+        rows = usage.PRICES._load()["models"]
+        direct = {m: rows.get(m) for m in trapped}
+        resolved = {m: usage.price(m) for m in trapped}
+        check("PRICING GOES THROUGH llmlm's lookup (exact key, then the "
+              "bare name after the vendor prefix), NOT the map's row "
+              "under the model string: the map's keys are inconsistent "
+              "about the vendor prefix and the inconsistency lands exactly "
+              "on the shipped config's most expensive paths — a direct "
+              "lookup prices openai/gpt-5.6-luna and "
+              "anthropic/claude-fable-5 at null, i.e. silently loses "
+              "the summariser, the critique editor and beat drafting",
+              all(direct[m] is None for m in trapped)
+              and all(resolved[m] is not None for m in trapped)
+              and resolved["openai/gpt-5.6-luna"]["input"] == 1.25e-6
+              and resolved["anthropic/claude-fable-5"]["output"] == 2.5e-5,
+              f"rows={direct} price={resolved}")
+        check("gemini/gemini-2.5-flash is the control: the map DOES key "
+              "it with its prefix, which is why a naive lookup looks like "
+              "it works",
+              rows.get("gemini/gemini-2.5-flash") is not None
+              and usage.price("gemini/gemini-2.5-flash") is not None,
+              "gemini")
+        check("openai/gpt-image-2 is trapped the same way — the third "
+              "prefix-keyed miss, and the one that renders pictures",
+              rows.get("openai/gpt-image-2") is None
+              and usage.price("openai/gpt-image-2") is not None,
+              "gpt-image-2")
         usage._PRICE_CACHE.clear()
 
-        # --- T-4: no litellm at all. ---
-        import builtins
+        # --- T-4: the price cache cannot be read or fetched. ---
+        def broken_fetch():
+            raise OSError("no network and no cache file")
 
-        real_import = builtins.__import__
-
-        def no_litellm(name, *rest, **kw):
-            if name == "litellm":
-                raise ImportError("no litellm in this environment")
-            return real_import(name, *rest, **kw)
-
-        builtins.__import__ = no_litellm
+        usage.PRICES = _prices.Prices(root / "absent" / "prices.json",
+                                      fetch=broken_fetch,
+                                      notify=lambda changed: None,
+                                      overrides=())
         try:
             usage._PRICE_CACHE.clear()
             blind = usage.price("gemini/gemini-2.5-flash")
             usage.record("llm", "gemini/gemini-2.5-flash", 77, 88, 0, 0)
-            usage.flush("no-litellm")
+            usage.flush("no-prices")
         finally:
-            builtins.__import__ = real_import
+            usage.PRICES = injected
             usage._PRICE_CACHE.clear()
         offline = json.loads(log.read_text().splitlines()[-1])
-        check("with no litellm installed every cost is null and every token "
-              "count is intact: pricing is an ENRICHMENT, the ledger is not "
-              "conditional on it, and nothing escapes",
+        check("with the price cache unreadable and unfetchable every cost "
+              "is null and every token count is intact: pricing is an "
+              "ENRICHMENT, the ledger is not conditional on it, and "
+              "nothing escapes",
               blind is None and offline["model"] == "gemini/gemini-2.5-flash"
               and (offline["tokens_in"], offline["tokens_out"]) == (77, 88)
               and offline["cost_usd"] is None, f"{offline}")
@@ -4946,7 +4961,7 @@ def check_usage_ledger() -> None:
               per_call < 10e-6, f"{per_call * 1e6:.2f} us/call")
     finally:
         usage.reset()
-        usage._PRICE_OVERRIDE.clear()
+        usage.PRICES = None
         usage._PRICE_CACHE.clear()
         clients._STATE["workspace"] = previous_workspace
         shutil.rmtree(root, ignore_errors=True)

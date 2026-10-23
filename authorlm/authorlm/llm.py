@@ -390,27 +390,16 @@ def caching_available(model: str, provider: str) -> bool:
     provider request, which is the only surface where attaching
     breakpoints does anything.
 
-    A model with no row keeps the pre-registry answer exactly — the
-    vendor-prefix gate plus litellm's own cost map — so adding the table
-    changed no model's caching behavior, only where the answer is
-    written down for the ones we have verified."""
+    A model with no row gets no breakpoints (llmlm's exact-row rule): the
+    table is the only place a caching answer is written down, and there is
+    no probe of a vendor map behind it. A vendor that caches server-side
+    still does; this only decides whether authorlm marks blocks."""
     if provider != "litellm":
         return False
     profile = model_profile(model)
     if profile is not UNKNOWN_PROFILE:
         return profile.prompt_cache == "anthropic"
-    if vendor_of(model) != "anthropic":
-        return False
-    try:
-        import litellm
-        from litellm.utils import supports_prompt_caching
-
-        litellm.suppress_debug_info = True
-        return bool(supports_prompt_caching(model=model))
-    except Exception:
-        # An unknown model, or no litellm at all. Not an error: it means
-        # "no caching here", and drafting works without it.
-        return False
+    return False
 
 
 
