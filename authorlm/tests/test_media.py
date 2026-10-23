@@ -586,6 +586,57 @@ class MediaTests(unittest.TestCase):
                  ).read_text(encoding="utf-8")
         self.assertIn("base64 chars", saved)
 
+    def test_omni_edit(self):
+        """A revision continues the take's interaction and lands as eNN with
+        its parent's hashes; a Veo take cannot be revised."""
+        import base64
+
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        video = {"id": "v1_y", "status": "completed", "usage": {},
+                 "steps": [{"type": "model_output", "content": [
+                     {"type": "video",
+                      "data": base64.b64encode(b"V").decode()}]}]}
+        calls = []
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append((method, url, body))
+            if method == "POST":
+                return {"id": "v1_y" if body.get("previous_interaction_id")
+                        else "v1_x", "status": "in_progress"}
+            return video
+        job = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                              http=http)
+        first = media_gen.poll(ms, job["id"], http=http)["take"]
+        with self.assertRaises(ValueError):
+            media_gen.edit_start(ms, key, "01", "  ", http=http)
+        p = media_gen.edit_plan(ms, key, "01", "warmer light")
+        self.assertEqual(p["previous_interaction_id"], "v1_x")
+        self.assertEqual(p["est_usd"], 0.43)      # $0.40 out + $0.03 re-read
+        self.assertTrue(p["prompt"].endswith("Keep everything else the same."))
+        import time; time.sleep(1.1)              # job ids are per second
+        edit = media_gen.edit_start(ms, key, "01", "warmer light", http=http)
+        self.assertEqual(calls[-1][2]["previous_interaction_id"], "v1_x")
+        self.assertEqual(edit["edit_of"], first)
+        done = media_gen.poll(ms, edit["id"], http=http)
+        self.assertTrue(done["take"].endswith("-e02.mp4"))
+        self.assertEqual(done["take"].split("-")[-3:-1],
+                         first.split("-")[-3:-1])     # parent's hashes
+        entry = media.list_media(self.root, None, key)["media"][0]
+        self.assertEqual(entry["chosen"], first)      # an edit is not chosen
+        self.assertEqual(media_gen.pick(self.root, key, "e02")["chosen"],
+                         done["take"])
+        # An edit of the edit continues the edit's interaction.
+        self.assertEqual(media_gen.edit_plan(ms, key, "e02", "x")
+                         ["previous_interaction_id"], "v1_y")
+        # An attached (non-Omni) take cannot be revised.
+        src = self.root / "own.mp4"
+        src.write_bytes(b"OWN")
+        media_gen.attach(self.root, key, src)
+        self.assertTrue(any("not made by Omni" in r for r in
+                            media_gen.edit_plan(ms, key, "i03", "x")["reasons"]))
+
     def test_omni_images_and_resolution(self):
         key = self._generated_clip(words=40)
         ms = {"path": str(self.root), "id": "m"}

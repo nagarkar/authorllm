@@ -13743,7 +13743,7 @@ def main_test() -> None:
             # umbrella listing; read-only, paths never bytes.
             "list_media", "set_clip_spec", "set_clip_fields",
             "resolve_clip_specs", "clip_ensure", "clip_job", "clip_pick",
-            "clip_attach",
+            "clip_attach", "clip_edit",
             # The Triage App and the pronunciation workbench are NOT here:
             # each is a local page served by its CLI verb (`triage-app`,
             # `workbench`). The MCP App road was removed 2026-09-04 — it
