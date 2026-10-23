@@ -2,14 +2,16 @@
 §8b, §8c, §8f, §8j; slice 3).
 
 A generated clip ([Clip] with a generation spec, no `youtube:`/`use:`) is
-made by Veo through the Gemini API, over plain REST as `llm._gemini_image`
-is. The road is the design's:
+made by Veo or Gemini Omni through the Gemini API, over plain REST as
+`llm._gemini_image` is. Veo is a `predictLongRunning` operation; Omni is a
+background interaction (`POST /interactions`, `background: true`), polled
+until its status leaves `in_progress`, its video inline in `steps[]`. The road is the design's:
 
 - `plan` composes everything a generation would send and what it costs,
   and runs the gate. It spends nothing: it IS the dry run.
 - `start` sends the request and records a job in `_clips/jobs/<id>.json`;
   generation takes seconds to minutes, so it never waits.
-- `poll` checks a job and, once Veo is done, downloads the take to
+- `poll` checks a job and, once the model is done, downloads the take to
   `_clips/<key>-<deschash8>-<lawhash4>-NN.mp4`. The first take of a clip
   is chosen automatically (recorded in `_clips/chosen.json`, the store of
   record) so a caller always gets a path; `pick` moves the choice,
@@ -44,10 +46,20 @@ MODELS = {
     "veo-3.1-generate-preview": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
     "veo-3.1-fast-generate-preview": {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
     "veo-3.1-lite-generate-preview": {"720p": 0.05, "1080p": 0.08},
+    # 5,792 video tokens per 720p second at $17.50/1M. Omni's 1080p and 4k
+    # are upscales Google does not price, so they are not offered.
+    "gemini-omni-1.1-flash": {"720p": 0.10},
 }
+# Omni's token rates, USD per token, for the cost a finished job reports.
+OMNI_RATES = {"input": 1.50e-6, "text": 9.00e-6, "video": 17.50e-6}
 DEFAULTS = {"model": "veo-3.1-fast-generate-preview", "resolution": "720p",
             "aspect_ratio": "16:9", "max_call_usd": 2.0, "max_day_usd": 10.0}
 DURATIONS = (4, 6, 8)
+OMNI_SECONDS = (3, 10)   # Omni takes any whole length in this range
+
+
+def is_omni(model: str) -> bool:
+    return model.startswith("gemini-omni")
 TAKE = re.compile(r"^(?P<key>.+)-(?P<desc>[0-9a-f]{8})-(?P<law>[0-9a-f]{4})-"
                   r"(?P<n>i?\d{2})\.(?P<ext>mp4|mov|m4v|webm)$")
 
@@ -199,7 +211,12 @@ def _image_ref(root: Path, value: str, known_cast: dict) -> Path | None:
     return None
 
 
-def _duration(entry: dict, forced_eight: bool) -> int:
+def _duration(entry: dict, forced_eight: bool, omni: bool = False) -> int:
+    if omni:
+        # Omni has no duration field; the prompt's timecode sets the length
+        # (a "[0-4s]" prompt gave exactly 4 s, live 2026-10-22).
+        want = entry.get("estimated_seconds") or 8
+        return max(OMNI_SECONDS[0], min(OMNI_SECONDS[1], int(-(-want // 1))))
     if forced_eight:
         return 8
     want = entry.get("estimated_seconds") or 8
@@ -221,6 +238,25 @@ def compose_prompt(spec: str, law: str, fields: dict) -> str:
     if law:
         parts.append(law)
     return "\n\n".join(parts)
+
+
+def omni_prompt(prompt: str, duration: int, first: bool, last: bool,
+                refs: int) -> str:
+    """Omni's additions to the composed prompt: the timecode that sets the
+    length, which input image is which, and the reference tags."""
+    lines = [f"[0-{duration}s]"]
+    n = 0
+    if first:
+        lines.append(f"Begin on <IMAGE_REF_{n}> as the first frame.")
+        n += 1
+    if last:
+        lines.append(f"End on <IMAGE_REF_{n}> as the last frame.")
+        n += 1
+    if refs:
+        tags = ", ".join(f"<IMAGE_REF_{n + i}>" for i in range(refs))
+        lines.append(f"Keep the people and objects in {tags} as shown.")
+    lines.append("No dialogue.")
+    return "\n".join(lines) + "\n\n" + prompt
 
 
 def day_spend(root: Path, today: str | None = None) -> float:
@@ -269,7 +305,9 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
     if refs and model.startswith("veo-3.1-lite"):
         reasons.append("reference images (cast:) need Veo 3.1 or Fast, not Lite")
     resolution = cfg["resolution"]
-    duration = _duration(entry, bool(refs) or resolution in ("1080p", "4k"))
+    omni = is_omni(model)
+    duration = _duration(entry, bool(refs) or resolution in ("1080p", "4k"),
+                         omni)
     rate = MODELS.get(model, {}).get(resolution)
     if rate is None and model in MODELS:
         reasons.append(f"{model} has no {resolution} output")
@@ -285,10 +323,14 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
     desc = desc_hash(spec, fields)
     lawh = _hash(law, 4)
     fresh = [t for t in takes(root, key, desc, lawh) if not t["stale"]]
+    prompt = compose_prompt(spec, law, fields)
+    if omni:
+        prompt = omni_prompt(prompt, duration, bool(first), bool(last),
+                             len(refs))
     return {"key": key, "file": entry["file"], "model": model,
             "resolution": resolution, "aspect_ratio": cfg["aspect_ratio"],
             "duration": duration, "est_usd": est, "day_spent_usd": spent,
-            "prompt": compose_prompt(spec, law, fields),
+            "prompt": prompt,
             "first_frame": str(first) if first else None,
             "last_frame": str(last) if last else None,
             "references": [str(p) for p in refs],
@@ -324,6 +366,46 @@ def request_body(p: dict) -> dict:
                                                 else "allow_all")}}
 
 
+def omni_body(p: dict) -> dict:
+    """The Interactions API request: text, then the first frame, last frame
+    and references in the order omni_prompt's tags count them."""
+    images = [x for x in (p["first_frame"], p["last_frame"]) if x]
+    images += p["references"]
+    inputs: list = [{"type": "text", "text": p["prompt"]}]
+    for path in images:
+        inline = _inline(path)["inlineData"]
+        inputs.append({"type": "image", "data": inline["data"],
+                       "mime_type": inline["mimeType"]})
+    return {"model": p["model"], "background": True,
+            "input": inputs if images else p["prompt"],
+            "response_format": {"type": "video",
+                                "aspect_ratio": p["aspect_ratio"],
+                                "resolution": p["resolution"]}}
+
+
+def _scrub(value):
+    """A response with its base64 blobs replaced by their length."""
+    if isinstance(value, dict):
+        return {k: (f"<{len(v)} base64 chars>"
+                    if k == "data" and isinstance(v, str) else _scrub(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
+
+
+def omni_usd(usage: dict) -> float:
+    """What a finished Omni interaction cost, from its token counts."""
+    out = {m["modality"]: m["tokens"]
+           for m in usage.get("output_tokens_by_modality", [])}
+    video = out.get("video", 0)
+    text = usage.get("total_output_tokens", 0) - video \
+        + usage.get("total_thought_tokens", 0)
+    return round(usage.get("total_input_tokens", 0) * OMNI_RATES["input"]
+                 + text * OMNI_RATES["text"]
+                 + video * OMNI_RATES["video"], 2)
+
+
 def _http(method: str, url: str, key: str, body: dict | None = None,
           raw: bool = False, timeout: int = 120):
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -334,7 +416,7 @@ def _http(method: str, url: str, key: str, body: dict | None = None,
             payload = response.read()
     except urllib.error.HTTPError as err:
         detail = err.read().decode("utf-8", "replace")[:400]
-        raise RuntimeError(f"Veo {method} {url.split('?')[0]} failed: "
+        raise RuntimeError(f"Gemini API {method} {url.split('?')[0]} failed: "
                            f"{err.code} {detail}") from err
     return payload if raw else json.loads(payload or b"{}")
 
@@ -345,7 +427,7 @@ def _key() -> str:
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise RuntimeError("no GEMINI_API_KEY — set it in authorlm/.env "
-                           "(Veo is billed through the Gemini API)")
+                           "(Veo and Omni are billed through the Gemini API)")
     return key
 
 
@@ -361,8 +443,13 @@ def start(db, manuscript: dict, key: str, model: str | None = None,
         raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
                          + " — rerun with --confirm")
     http = http or _http
-    op = http("POST", f"{BASE_URL}/models/{p['model']}:predictLongRunning",
-              _key(), request_body(p))
+    omni = is_omni(p["model"])
+    if omni:
+        op = http("POST", f"{BASE_URL}/interactions", _key(), omni_body(p))
+        op = {"name": f"interactions/{op['id']}"}
+    else:
+        op = http("POST", f"{BASE_URL}/models/{p['model']}:predictLongRunning",
+                  _key(), request_body(p))
     root = Path(manuscript["path"])
     jobs = root / media.CLIPS_DIR / JOBS_SUBDIR
     jobs.mkdir(parents=True, exist_ok=True)
@@ -379,11 +466,14 @@ def start(db, manuscript: dict, key: str, model: str | None = None,
                                          encoding="utf-8")
     # The request as sent, with image paths in place of their bytes, so a
     # caller (podlm) can see what shaped a take.
-    sent = request_body(p)
-    sent["instances"][0] = {"prompt": p["prompt"],
-                            "first_frame": p["first_frame"],
-                            "last_frame": p["last_frame"],
-                            "references": p["references"]}
+    images = {"prompt": p["prompt"], "first_frame": p["first_frame"],
+              "last_frame": p["last_frame"], "references": p["references"]}
+    if omni:
+        sent = omni_body(p)
+        sent["input"] = images
+    else:
+        sent = request_body(p)
+        sent["instances"][0] = images
     (jobs / f"{job_id}.request.json").write_text(json.dumps(sent, indent=1),
                                                  encoding="utf-8")
     return job
@@ -394,7 +484,7 @@ def job_path(root: Path, job_id: str) -> Path:
 
 
 def poll(manuscript: dict, job_id: str, http=None) -> dict:
-    """Check a job; when Veo is done, download the take, choose it if the
+    """Check a job; when the model is done, download the take, choose it if the
     clip has no chosen take yet, and record its path. Paths only."""
     root = Path(manuscript["path"])
     path = job_path(root, job_id)
@@ -406,7 +496,9 @@ def poll(manuscript: dict, job_id: str, http=None) -> dict:
     http = http or _http
     op = http("GET", f"{BASE_URL}/{job['operation']}", _key())
     (path.parent / f"{job_id}.response.json").write_text(
-        json.dumps(op, indent=1), encoding="utf-8")
+        json.dumps(_scrub(op), indent=1), encoding="utf-8")
+    if job["operation"].startswith("interactions/"):
+        return _poll_omni(root, path, job, op)
     if not op.get("done"):
         return job
     if op.get("error"):
@@ -420,11 +512,36 @@ def poll(manuscript: dict, job_id: str, http=None) -> dict:
                        "are not charged)")
         else:
             blob = http("GET", samples[0]["video"]["uri"], _key(), raw=True)
-            name = (f"{job['key']}-{job['desc']}-{job['law']}-"
-                    f"{_next_n(root, job['key'])}.mp4")
-            (root / media.CLIPS_DIR / name).write_bytes(blob)
-            if not chosen(root, job["key"]):
-                _set_chosen(root, job["key"], name)
-            job.update(state="done", take=f"{media.CLIPS_DIR}/{name}")
+            _save_take(root, job, blob)
+    path.write_text(json.dumps(job, indent=1), encoding="utf-8")
+    return job
+
+
+def _save_take(root: Path, job: dict, blob: bytes) -> None:
+    name = (f"{job['key']}-{job['desc']}-{job['law']}-"
+            f"{_next_n(root, job['key'])}.mp4")
+    (root / media.CLIPS_DIR / name).write_bytes(blob)
+    if not chosen(root, job["key"]):
+        _set_chosen(root, job["key"], name)
+    job.update(state="done", take=f"{media.CLIPS_DIR}/{name}")
+
+
+def _poll_omni(root: Path, path: Path, job: dict, op: dict) -> dict:
+    status = op.get("status")
+    if status == "in_progress":
+        return job
+    if status == "completed":
+        videos = [c for s in op.get("steps", [])
+                  if s.get("type") == "model_output"
+                  for c in s.get("content", []) if c.get("type") == "video"]
+        if videos and videos[0].get("data"):
+            _save_take(root, job, base64.b64decode(videos[0]["data"]))
+            job["usd"] = omni_usd(op.get("usage", {}))
+        else:
+            job.update(state="failed", error="Omni returned no video (it "
+                       "may have been blocked by a safety filter)")
+    else:
+        job.update(state="failed", error=f"Omni interaction {status}: "
+                   + json.dumps(_scrub(op.get("error") or {}))[:400])
     path.write_text(json.dumps(job, indent=1), encoding="utf-8")
     return job

@@ -538,6 +538,70 @@ class MediaTests(unittest.TestCase):
         entry = media.list_media(self.root, None, key)["media"][0]
         self.assertIn("stale-desc", entry["takes"][0]["stale"])
 
+    def test_omni_start_poll(self):
+        """Omni: timecode sets the length, one background interaction,
+        the video inline in steps[] (shapes from the live probe, 2026-10-22)."""
+        import base64
+
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        model = "gemini-omni-1.1-flash"
+        p = media_gen.plan(self._DB(), ms, key, model)
+        self.assertEqual(p["reasons"], [])
+        self.assertEqual(p["duration"], 4)
+        self.assertEqual(p["est_usd"], 0.40)
+        self.assertTrue(p["prompt"].startswith("[0-4s]"))
+        calls = []
+        polls = iter([{"id": "v1_x", "status": "in_progress"},
+                      {"id": "v1_x", "status": "completed",
+                       "usage": {"total_input_tokens": 28,
+                                 "total_output_tokens": 23168,
+                                 "total_thought_tokens": 259,
+                                 "output_tokens_by_modality": [
+                                     {"modality": "video", "tokens": 23168}]},
+                       "steps": [{"type": "user_input"}, {"type": "thought"},
+                                 {"type": "model_output", "content": [
+                                     {"type": "video", "mime_type": "video/mp4",
+                                      "data": base64.b64encode(b"OMNI").decode()}]}]}])
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append((method, url, body))
+            if method == "POST":
+                return {"id": "v1_x", "status": "in_progress"}
+            return next(polls)
+        job = media_gen.start(self._DB(), ms, key, model, http=http)
+        body = calls[0][2]
+        self.assertTrue(calls[0][1].endswith("/interactions"))
+        self.assertTrue(body["background"])
+        self.assertEqual(body["response_format"]["resolution"], "720p")
+        self.assertEqual(job["operation"], "interactions/v1_x")
+        self.assertEqual(media_gen.poll(ms, job["id"], http=http)["state"],
+                         "running")
+        done = media_gen.poll(ms, job["id"], http=http)
+        self.assertEqual(done["state"], "done")
+        self.assertEqual((self.root / done["take"]).read_bytes(), b"OMNI")
+        self.assertEqual(done["usd"], 0.41)
+        saved = (self.root / "_clips/jobs" / f"{job['id']}.response.json"
+                 ).read_text(encoding="utf-8")
+        self.assertIn("base64 chars", saved)
+
+    def test_omni_images_and_resolution(self):
+        key = self._generated_clip(words=40)
+        ms = {"path": str(self.root), "id": "m"}
+        p = media_gen.plan(self._DB(), ms, key, "gemini-omni-1.1-flash")
+        self.assertEqual(p["duration"], 10)            # capped at 10 s
+        p.update(first_frame=None, last_frame=None, references=[])
+        self.assertIsInstance(media_gen.omni_body(p)["input"], str)
+        prompt = media_gen.omni_prompt("X", 5, True, True, 2)
+        self.assertIn("Begin on <IMAGE_REF_0>", prompt)
+        self.assertIn("End on <IMAGE_REF_1>", prompt)
+        self.assertIn("<IMAGE_REF_2>, <IMAGE_REF_3>", prompt)
+        (self.root / "_clips" / "settings.toml").write_text(
+            'resolution = "1080p"\n', encoding="utf-8")
+        p = media_gen.plan(self._DB(), ms, key, "gemini-omni-1.1-flash")
+        self.assertTrue(any("no 1080p" in r for r in p["reasons"]))
+
     # -- exports
 
     def test_strip_for_book(self):
