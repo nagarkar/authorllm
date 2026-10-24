@@ -130,12 +130,59 @@ _EXPORT_INLINE_MATH = re.compile(
     r"(?<![\\$])\\\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\\\$(?![\d$])")
 _MATH_SENTINEL = "\x00M%d\x00"
 _SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
+_ANY_MATH = re.compile(
+    f"(?s:{_DISPLAY_MATH.pattern})|{_INLINE_MATH.pattern}")
+_ANY_EXPORT_MATH = re.compile(
+    f"(?s:{_EXPORT_DISPLAY_MATH.pattern})|(?s:{_DISPLAY_MATH.pattern})"
+    f"|{_EXPORT_INLINE_MATH.pattern}|{_INLINE_MATH.pattern}")
+# Inside math the exporter's escapes are all undone — _ESCAPE's set and
+# the `$` of an escaped delimiter or a TeX `\$`.
+_EXPORT_ESCAPE_IN_MATH = re.compile(r"\\(.)", re.DOTALL)
+_MATH_ESCAPED = set("\\`*_{}[]()#+-.!<>~|=:$")
 
 
 def map_math(text: str, fn) -> str:
     """fn over the inside of every math span, delimiters excluded."""
     text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
     return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
+
+
+# A pending form, as the tab and its export hold it: `<<old>>{{new}}`,
+# the old half struck (`~~`) and its markers escaped (`\<\<`) by the
+# exporter. A form whose halves each carry a `$` — a revision that moves
+# a span's opening delimiter, `<<by element:$\neg>>{{by element: $\neg}}`
+# — leaves the marked text with three delimiters where each reading has
+# two, and pairing them on the marked text pairs the wrong ones: the new
+# half kept its `\$` on pull, the resolve landed it, and the next push
+# and normalize took the span for prose and stripped its `\{` `\}`
+# (2026-10-18, SMSTTD recapitulation.md R10). So math is found on each
+# READING — every form collapsed to its old half, then to its new — and
+# mapped back to the marked text.
+_FORM = re.compile(
+    r"(?:~~)?\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    re.DOTALL)
+
+
+def _math_positions(text: str, pattern: re.Pattern) -> list[list[int]]:
+    """Each math span `pattern` finds, as the positions in `text` it
+    covers. Without forms that is the match itself; with forms, every
+    span of either reading, each mapped back through its reading."""
+    forms = list(_FORM.finditer(text))
+    if not forms:
+        return [list(range(*m.span())) for m in pattern.finditer(text)]
+    spans: list[list[int]] = []
+    for keep in ("old", "new"):
+        idx: list[int] = []
+        pos = 0
+        for f in forms:
+            idx += range(pos, f.start())
+            idx += range(f.start(keep), f.end(keep))
+            pos = f.end()
+        idx += range(pos, len(text))
+        reading = "".join(text[i] for i in idx)
+        spans += [idx[m.start():m.end()] for m in pattern.finditer(reading)
+                  if m.end() > m.start()]
+    return spans
 
 
 def _lift_math(text: str) -> tuple[str, list[str]]:
@@ -149,7 +196,10 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(m.group(0))
         return _MATH_SENTINEL % (len(spans) - 1)
 
-    text = _DISPLAY_MATH.sub(display, text)
+    if _FORM.search(text):
+        text = _lift_marked_math(text, spans)
+    else:
+        text = _DISPLAY_MATH.sub(display, text)
     # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
     # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
     # normalized bytes back to disk, so the damage is permanent. Keep
@@ -162,6 +212,38 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(tail.rstrip("\n"))
         return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
     return _INLINE_MATH.sub(inline, text), spans
+
+
+def _lift_marked_math(text: str, spans: list[str]) -> str:
+    r"""_lift_math for text carrying pending forms: every stretch that is
+    math in either reading goes opaque, so no prose rule reaches a `\{`
+    inside it. A span a form cuts through is lifted piece by piece —
+    the form markers between the pieces stay prose, for the rules that
+    unescape them. Display layout is canonicalized only for a piece
+    that is one whole display span."""
+    runs: list[list[int]] = []
+    for span in _math_positions(text, _ANY_MATH):
+        start = span[0]
+        for prev, at in zip(span, span[1:] + [None]):
+            if at != prev + 1:
+                runs.append([start, prev + 1])
+                start = at
+    ranges: list[list[int]] = []
+    for a, b in sorted(runs):
+        if ranges and a < ranges[-1][1]:
+            ranges[-1][1] = max(ranges[-1][1], b)
+        else:
+            ranges.append([a, b])
+    out, pos = [], 0
+    for a, b in ranges:
+        chunk = text[a:b]
+        m = _DISPLAY_MATH.fullmatch(chunk)
+        if m:
+            chunk = "$$ " + " ".join(m.group(1).split()) + " $$"
+        spans.append(chunk)
+        out.append(text[pos:a] + _MATH_SENTINEL % (len(spans) - 1))
+        pos = b
+    return "".join(out) + text[pos:]
 
 
 def _restore_math(text: str, spans: list[str]) -> str:
@@ -294,12 +376,19 @@ def unescape_export_math(markdown: str) -> str:
     corrupt every equation with an equals sign). Pull-side only:
     normalize_markdown leaves math alone because on a local file every
     backslash is TeX. Escaped delimiters (`\$…\$`, `\$\$…\$\$`) are
-    unescaped first so the spans are found at all (#152)."""
-    markdown = _EXPORT_DISPLAY_MATH.sub(
-        lambda m: "$$" + m.group(1) + "$$", markdown)
-    markdown = _EXPORT_INLINE_MATH.sub(
-        lambda m: "$" + m.group(1) + "$", markdown)
-    return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
+    unescaped with the rest so the spans are found at all (#152), and
+    spans are found per reading of any pending form (see _FORM)."""
+    inside: set[int] = set()
+    for span in _math_positions(markdown, _ANY_EXPORT_MATH):
+        inside.update(span)
+
+    def one(m: re.Match) -> str:
+        at = m.start()
+        if (at in inside and at + 1 in inside
+                and m.group(1) in _MATH_ESCAPED):
+            return m.group(1)
+        return m.group(0)
+    return _EXPORT_ESCAPE_IN_MATH.sub(one, markdown)
 
 
 def escape_footnotes(markdown: str) -> str:
