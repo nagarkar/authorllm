@@ -548,6 +548,12 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_section_ids`
+
+`authorlm/tests/test_audio_section_ids.py`
+
+`audio.section_id` / `silence_id` / `applicable_rules` are the paid audio cache keys.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`
@@ -626,6 +632,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_is_tag_line`
+
+`authorlm/tests/test_is_tag_line.py`
+
+`media.is_tag_line` decides which lines `strip_for_book` drops from PDF/EPUB exports.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
@@ -697,6 +709,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_summaries.py`
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_tab_is_empty`
+
+`authorlm/tests/test_tab_is_empty.py`
+
+`gdocs._tab_is_empty` chooses full rewrite vs surgical Doc push.
 
 ## `tests.test_toc_outside`
 
