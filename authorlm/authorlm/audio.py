@@ -1406,7 +1406,7 @@ def api_key(required: bool = True) -> str | None:
     key = os.environ.get(KEY_ENV, "").strip()
     if not key and required:
         raise AudioError(f"{KEY_ENV} is not set — put it in the checkout's "
-                         ".env (see .env.example)")
+                         ".env (see env.example)")
     return key or None
 
 
