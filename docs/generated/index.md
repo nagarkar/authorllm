@@ -554,6 +554,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_clip_edit_json`
+
+`authorlm/tests/test_clip_edit_json.py`
+
+`clip edit --json`: the plan/job shape podlm reads (PR #257).
+
 ## `tests.test_continuation`
 
 `authorlm/tests/test_continuation.py`
@@ -662,6 +668,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_omni_helpers`
+
+`authorlm/tests/test_omni_helpers.py`
+
+Pure Omni helpers from #255/#257: model gate, duration clamp, billed USD from token usage, and the edit request body.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`
@@ -691,6 +703,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
+
+## `tests.test_sidecar_would_be_emptied`
+
+`authorlm/tests/test_sidecar_would_be_emptied.py`
+
+`gdocs._sidecar_would_be_emptied` refuses a Doc push that would wipe every pronunciation row.
 
 ## `tests.test_summaries`
 
