@@ -6057,6 +6057,57 @@ def check_suggestions() -> None:
     check("a standalone tag with nothing before it has no target",
           dv.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
                        "suggestion")[0]["target"] is None)
+    # The author writes the note on the NEXT line (design §1: "under it"),
+    # often with no blank line. That shares a blank-line unit with the
+    # paragraph above — the target is those lines, never an earlier unit.
+    tight = ("# Essay\n\n"
+             "First real paragraph.\n\n"
+             "Second paragraph that should be edited.\n"
+             "[Suggestion: make this clearer]\n"
+             "Third paragraph that must survive.\n\n"
+             "Fourth.\n")
+    tight_tag = dv.scan_text(tight, "suggestion")[0]
+    check("a note on the next line (no blank) targets the lines above it "
+          "in the same unit, not the previous blank-line paragraph",
+          tight_tag["standalone"]
+          and tight_tag["target"] == "Second paragraph that should be edited."
+          and tight[tight_tag["target_start"]:tight_tag["target_end"]]
+          == tight_tag["target"],
+          repr(tight_tag.get("target")))
+    check("landing that next-line note replaces only its target and keeps "
+          "prose that followed the tag in the same unit",
+          dv._land_suggestion(tight, tight_tag, "REPLACED.")
+          == ("# Essay\n\n"
+              "First real paragraph.\n\n"
+              "REPLACED.\n"
+              "Third paragraph that must survive.\n\n"
+              "Fourth.\n"),
+          repr(dv._land_suggestion(tight, tight_tag, "REPLACED.")))
+    tight_root = Path(tempfile.mkdtemp(prefix="authorlm-sugg-tight-"))
+    try:
+        tight_ms = tight_root / "manuscript"
+        tight_ms.mkdir()
+        (tight_ms / "wall.md").write_text(tight)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(tight_root), "init", "--name",
+                      "sugg-tight", "--path", str(tight_ms)])
+        tight_db = api.open_db(str(tight_root))
+        tight_man = api.get_manuscript(tight_db)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(tight_db, tight_man, {})
+        dv.apply(tight_db, tight_man, {}, "suggestion", "wall.md",
+                 [(1, "REPLACED.")])
+        got = (tight_ms / "wall.md").read_text()
+        check("direct apply of a next-line note does not wipe an earlier "
+              "blank-line paragraph",
+              got == ("# Essay\n\n"
+                      "First real paragraph.\n\n"
+                      "REPLACED.\n"
+                      "Third paragraph that must survive.\n\n"
+                      "Fourth.\n"),
+              repr(got))
+    finally:
+        shutil.rmtree(tight_root, ignore_errors=True)
     stripped, removed = dv.strip_tags(text)
     check("exports strip the suggestion tag like any other, inline and "
           "standalone",

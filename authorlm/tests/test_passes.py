@@ -4426,6 +4426,31 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
     print("suggestions on the Doc road:")
     from authorlm import directives as dv
 
+    # A note on the next line (no blank) shares a blank-line unit with the
+    # prose above; the form must wrap THAT prose, not an earlier unit.
+    tight = ("# The Wall\n\n"
+             "First real paragraph.\n\n"
+             "Second paragraph that should be edited.\n"
+             "[Suggestion: make this clearer]\n"
+             "Third paragraph that must survive.\n\n"
+             "Fourth.\n")
+    tdb, tmanuscript, _tdir, tfake = _twin_fixture(
+        root, "suggestion-tight-ws", essay=tight)
+    tmeta = gdocs._mapping(tdb, tmanuscript)
+    tmeta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(tdb, tmanuscript, tmeta)
+    trep = dv.apply(tdb, tmanuscript, {}, "suggestion", "solo.md",
+                    [(1, "REPLACED.")], services=lambda: (tfake, tfake))
+    ttab = tfake.tab_text("solo.md")
+    check("a next-line note on the Doc road wraps the lines above it, not "
+          "an earlier blank-line paragraph",
+          trep["mode"] == "marked" and not trep["failed"]
+          and "<<Second paragraph that should be edited.>>{{REPLACED.}}\n"
+              "[Suggestion: make this clearer]\n" in ttab
+          and "First real paragraph.\n" in ttab
+          and "Third paragraph that must survive.\n" in ttab
+          and "<<First" not in ttab, ttab)
+
     db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
                                              essay=SUGGESTION_ESSAY)
     mid = manuscript["id"]
