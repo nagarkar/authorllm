@@ -164,7 +164,7 @@ export function App() {
     <div className="page">
       <header>
         <div className="title-row">
-          <h1 className="display">{book.title}</h1>
+          <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
         {manuscripts.length > 1 && <div className="bar">

@@ -5,6 +5,7 @@ body { font-family: Georgia, 'Times New Roman', serif; }
 .wb { padding: 1rem; max-width: 980px; margin-inline: auto; }
 .boot { padding: 1rem; color: var(--dim); font-family: Georgia, serif; }
 h1 { font-size: .95rem; font-weight: normal; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 0 0 .8rem; }
+.brand-icon { width: 1.6em; height: 1.6em; margin-right: .5em; vertical-align: -.45em; }
 .bar { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: .8rem; }
 select, input[type=text] { font: inherit; font-size: .95rem; padding: .35rem .55rem; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
 input.say { min-width: 20rem; }
