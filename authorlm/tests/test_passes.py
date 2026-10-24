@@ -5043,6 +5043,79 @@ def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
               db, manuscript, "no-such.md", "ytlm"), "no document matching"))
 
 
+EXTENDS_ESSAY = (
+    "# Topic\n\n"
+    "The answer is not a place; it is the pursuit.\n\n"
+    "To give a thing a figure is to mark where it is not.\n\n"
+    "Böhme’s account of Nothing, abyss, will.\n\n"
+    "Its consequences may change, but the act remains.\n\n"
+    "Omega closes.\n")
+
+
+def _a_new_half_that_extends_its_old(root: Path) -> None:
+    """A revision whose new text CONTAINS its old (a sentence appended
+    or prepended) leaves the old text standing inside the new once it
+    lands. When the forms come back without their markers (resolved by
+    hand, or anything else that leaves the form unmatched), the verdict
+    is inferred from the prose — and the old text found inside the
+    landed new is no decline (SMSTTD recapitulation.md, 2026-10-18:
+    7 accepted forms recorded `declined`)."""
+    print("outside callers: a new half that extends its old:")
+    db, manuscript, ms, fake = _outside_fixture(root, "extends-ws",
+                                                EXTENDS_ESSAY)
+    revisions = [
+        ("it is the pursuit.",
+         "it is the pursuit. The verdict is given from within."),
+        ("To give a thing a figure is to mark where it is not.",
+         "To give a thing a figure is to mark where it is not. Spinoza "
+         "drew the opposite conclusion."),
+        ("Böhme’s account of Nothing, abyss, will.",
+         "Trans. Ellistone (1651). Böhme’s account of Nothing, abyss, "
+         "will."),
+        ("Its consequences may change, but the act remains.",
+         "Its consequences may change, but the act remains. The balance "
+         "is conserved."),
+    ]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": old, "new": new, "note": f"x-{n}"}
+        for n, (old, new) in enumerate(revisions)], "ytlm", fake, fake)
+    check("the fixture: four replacements out",
+          len(staged["written"]) == 4 and not staged["failed"],
+          str(staged))
+    # The author takes the markers off by hand: the first three keep the
+    # new text (acceptances), the last is put back to its old (a decline).
+    for old, new in revisions[:3]:
+        fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", new)
+    old, new = revisions[3]
+    fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", old)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r["verdict"] for r in res["revisions"]}
+    check("a landed new that contains its old is accepted — appended "
+          "or prepended",
+          [by_note[f"x-{n}"] for n in range(3)] == ["accepted"] * 3,
+          str(res["revisions"]))
+    check("...and the old text put back is still a decline",
+          by_note["x-3"] == "declined"
+          and (res["accepted"], res["modified"], res["declined"])
+          == (3, 0, 1), str(res))
+    text = (ms / "solo.md").read_text()
+    check("the file carries what was ruled",
+          all(new in text for _, new in revisions[:3])
+          and "The balance is conserved." not in text, text)
+    rows = {r["note"]: r["state"] for r in db.all(
+        "SELECT note, state FROM doc_threads WHERE manuscript_id = ?",
+        (manuscript["id"],))}
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (manuscript["id"], api.EXTERNAL_EVIDENCE)))
+    check("the evidence agrees: three resolved, one declined",
+          [rows[f"x-{n}"] for n in range(4)] == ["cleaned"] * 3
+          + ["declined"]
+          and signals == ["declined"] + ["resolved"] * 3,
+          str((rows, signals)))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
@@ -6085,6 +6158,7 @@ def main_test() -> None:
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
+        _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()
