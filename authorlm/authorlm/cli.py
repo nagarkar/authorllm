@@ -431,6 +431,9 @@ def _print_comment_harvest(result: dict) -> None:
     if reconciled:
         print(ui.dim(f"{len(reconciled)} comment(s) resolved in the Doc "
                      "since the last pull — local record caught up."))
+    for r in result.get("comments_reattributed") or []:
+        print(ui.dim(f"Comment {r['comment_id']} placed in {r['file']} "
+                     "(was unattributed) — 'doc propose' can take it now."))
     comments = result.get("comments") or []
     if comments:
         print(ui.bold(f"Comments to address ({len(comments)}):"))

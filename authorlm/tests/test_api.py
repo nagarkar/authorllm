@@ -9010,6 +9010,72 @@ def main_test() -> None:
               and "left open in the Doc" in _harvest_txt,
               _harvest_txt)
 
+        # A comment whose quote only the TAB carries (the pull skipped the
+        # file, or its file is not local yet) is attributed by the tab
+        # text, so `doc propose` has a file to write into. Seen live
+        # 2026-10-18: a recap continuation tab commented before its file
+        # was local stayed "(unattributed)" and propose failed.
+        local_keep = (ms / "01-choice.md").read_text()
+        tab_keep = next(t2["text"] for t2 in stub.state["docs"]["doc-2"]
+                        if t2["title"] == "01-choice.md")
+        (ms / "01-choice.md").write_text(local_keep + "\nA local aside.\n")
+        stub.set_tab("01-choice.md",
+                     tab_keep + "The river keeps its own counsel.\n")
+        stub.add_comment("c-tab", "The river keeps its own counsel.",
+                         "Say whose counsel.")
+        stub.add_comment("c-none", "words in no file at all",
+                         "Where is this?")
+        pulled_t = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        row_t = db.one("SELECT file FROM doc_comments WHERE "
+                       "comment_id = 'c-tab'")
+        by_id = {c["comment_id"]: c for c in pulled_t["comments"]}
+        check("a quote only the tab carries is attributed to the tab's "
+              "file at ingest (the local file was skipped as a conflict)",
+              "01-choice.md" in pulled_t["conflicts"]
+              and "river" not in (ms / "01-choice.md").read_text()
+              and row_t["file"] == "01-choice.md"
+              and by_id["c-tab"]["location"].startswith("01-choice.md"),
+              str((pulled_t["comments"], dict(row_t or {}))))
+        check("a quote found nowhere stays unattributed, and the pull "
+              "report says why",
+              by_id["c-none"]["location"]
+              == "(unattributed: quote found in no file)",
+              str(by_id["c-none"]))
+
+        # A row an earlier pull left unattributed is retried on the next.
+        db.conn.execute("UPDATE doc_comments SET file = NULL, "
+                        "location = NULL WHERE comment_id = 'c-tab'")
+        db.conn.commit()
+        pulled_r = pull_doc(db, manuscript, "01-choice.md", service=stub)
+        row_r = db.one("SELECT file FROM doc_comments WHERE "
+                       "comment_id = 'c-tab'")
+        check("an unattributed open row is re-attributed by a later pull",
+              row_r["file"] == "01-choice.md"
+              and {"comment_id": "c-tab", "file": "01-choice.md"}
+              in pulled_r.get("comments_reattributed", []),
+              str(pulled_r.get("comments_reattributed")))
+
+        from authorlm.gdocs import ingest_comments as _ingest
+        twice = _ingest(db, manuscript, [
+            {"id": "c-twice", "content": "?",
+             "quotedFileContent": {"value": "shared line"}}],
+            {"a.md": "x"}, [{"a.md": "shared line", "b.md": "shared line"}])
+        check("a quote in several tabs is never guessed at",
+              twice[0]["location"]
+              == "(unattributed: quote found in 2 files)"
+              and db.one("SELECT file FROM doc_comments WHERE "
+                         "comment_id = 'c-twice'")["file"] is None,
+              str(twice))
+
+        (ms / "01-choice.md").write_text(local_keep)
+        stub.set_tab("01-choice.md", tab_keep)
+        for cid in ("c-tab", "c-none"):
+            del stub.state["comments"][cid]
+        db.conn.execute("DELETE FROM doc_comments WHERE comment_id IN "
+                        "('c-tab', 'c-none', 'c-twice')")
+        db.conn.commit()
+        pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
+
         # Nested braces truncate at the first }} — refuse BEFORE Doc write.
         # `_mark_replace_requests` is the form-construction gate; without
         # the assert there, propose_change wrote the corrupt span then
