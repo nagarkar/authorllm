@@ -8555,13 +8555,9 @@ def main_test() -> None:
               and doc_status(db, manuscript)["01-choice.md"]["checked_out"]
               is False)
         # A Doc from before the merge has a `manifest.md` tab of its own,
-        # linked in the mapping; a pre-merge workspace may also still have
-        # the old local sidecar. The next push deletes the tab, the
-        # mapping entry, and the local ghost — without KeyError.
+        # linked in the mapping; the next push deletes both.
         from authorlm.gdocs import _mapping as _m0, _save_mapping as _s0
 
-        (ms / "manifest.md").write_text(
-            "<!-- GENERATED -->\n# Reader load\n", encoding="utf-8")
         stub.state["docs"]["doc-2"].append(
             {"id": "tab-old-manifest", "title": "manifest.md",
              "text": "# Reader load\n", "parent": None})
@@ -8582,8 +8578,6 @@ def main_test() -> None:
                                     in stub.state["docs"]["doc-2"]]
               and "manifest.md" not in _m0(db, manuscript)["gdocs"],
               str([t["title"] for t in stub.state["docs"]["doc-2"]]))
-        check("push deletes the local pre-merge manifest.md ghost",
-              not (ms / "manifest.md").exists())
 
         # --- sync_tab_structure: push-direction TOC↔tab orchestration ---
         from authorlm.gdocs import _mapping, _save_mapping, sync_tab_structure

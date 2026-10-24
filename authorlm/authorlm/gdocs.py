@@ -1021,9 +1021,6 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
     # The Reader load lives in the manifest tab now. A Doc from before
     # 2026-10-19 still has it as a `manifest.md` tab of its own: delete the
     # tab and its mapping entry, so it is neither pushed nor pulled again.
-    # A local `manifest.md` left by the old `manifest.refresh` is the same
-    # retired sidecar on disk — drop it so it cannot re-enter the reading
-    # order as an unlisted essay (structure.is_obsolete) or recreate a tab.
     old_load = existing.pop(OLD_READER_LOAD_TITLE, None)
     entry.pop(OLD_READER_LOAD_TITLE, None)
     if old_load:
@@ -1034,12 +1031,6 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
             ).execute()
         except Exception:
             pass  # a stale derived tab is cosmetic, never fatal
-    ghost = bridge.root / OLD_READER_LOAD_TITLE
-    if ghost.is_file():
-        try:
-            ghost.unlink()
-        except OSError:
-            pass  # a leftover derived file is cosmetic, never fatal
     # The blank default tab is noise once real tabs exist.
     stray = [tid for title, tid in existing.items()
              if title not in order and title.startswith("Tab ")]
@@ -1672,11 +1663,9 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
       content drift is the author's call — no push-base survives a relink)
     - unknown id, title duplicating a LIVE mapped tab → ambiguous (a hand-made
       duplicate; relinking would hijack the real tab's mapping)
-    - manifest / obsolete (`manifest.md`) / non-.md titles → ignored
+    - manifest / non-.md titles    → ignored
     """
     from collections import Counter
-
-    from .structure import is_obsolete
 
     known_ids = {e["tab_id"]: f for f, e in links.items()
                  if isinstance(e, dict) and e.get("tab_id")}
@@ -1690,10 +1679,7 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
             if title != known_ids[tid]:
                 out["renamed"].append((known_ids[tid], title))
             continue
-        # The inventory tab, and a retired sidecar's leftover tab
-        # (`manifest.md` after 2026-10-19): never an essay.
-        if (title == MANIFEST_TITLE or is_obsolete(title)
-                or not title.endswith(".md")):
+        if title == MANIFEST_TITLE or not title.endswith(".md"):
             out["ignored"].append(title)
             continue
         entry = links.get(title)
@@ -1756,7 +1742,7 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     (never-pushed local files) are preserved after their previous
     predecessor; per-file attributes (matter) ride through unchanged.
     Returns the new (name, depth) tree."""
-    from .structure import (TOC_FILENAME, is_obsolete, is_outside, is_sidecar,
+    from .structure import (TOC_FILENAME, is_outside, is_sidecar,
                             parents_to_tree, serialize_toc_tree, toc_attrs,
                             toc_outside)
 
@@ -1766,17 +1752,13 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     # §2.5 unravels at once — it enters the reading order, the concept
     # scan mines it, and it ships inside the book. Guarded here as well
     # as at both call sites, because this function writes the file and a
-    # guard on the caller is a guard on the caller. Obsolete names
-    # (`manifest.md`) get the same exclusion: after 2026-10-19 they are
-    # no longer sidecars, and a leftover Doc tab must not become a
-    # chapter on `doc_moved`.
+    # guard on the caller is a guard on the caller.
     toc_path = Path(manuscript["path"]) / TOC_FILENAME
     toc_text = (toc_path.read_text(encoding="utf-8")
                 if toc_path.exists() else "")
     outside = toc_outside(toc_text)
     doc_pairs = [(n, p) for n, p in doc_pairs
-                 if not is_sidecar(n) and not is_obsolete(n)
-                 and not is_outside(n, outside)]
+                 if not is_sidecar(n) and not is_outside(n, outside)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -1799,7 +1781,7 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
     moved since the last sync (local_moved / insync); a doc-side change
     means 'pull first'."""
-    from .structure import (TOC_FILENAME, is_obsolete, is_outside, is_sidecar,
+    from .structure import (TOC_FILENAME, is_outside, is_sidecar,
                             parse_toc_tree, toc_outside, tree_to_parents)
 
     meta = _mapping(db, manuscript)
@@ -1823,15 +1805,15 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     # a sidecar is not in the reading order. Comparing a doc list that
     # holds it against a desired list that cannot would be a PERMANENT
     # `unsynced`, and tab-order sync would stop working the day the
-    # dictionary first appeared. Obsolete names get the same exclusion.
+    # dictionary first appeared.
     outside = toc_outside(toc_path.read_text(encoding="utf-8"))
     doc_pairs = [(n, p if p in linked else None)
                  for n, p in doc_pairs if n in linked and not is_sidecar(n)
-                 and not is_obsolete(n) and not is_outside(n, outside)]
+                 and not is_outside(n, outside)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked and not is_sidecar(n) and not is_obsolete(n)]
+               if n in linked and not is_sidecar(n)]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     state = classify_structure(doc_pairs, desired, base)
@@ -2311,16 +2293,6 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     report: dict = {"changed": [], "unchanged": [], "conflicts": [],
                     "local_ahead": [], "missing": [], "doc_id": master_id}
 
-    # Drop stale mapping for a retired sidecar (`manifest.md` after the
-    # Reader load moved into the `manifest` tab). Left in `links`, a full
-    # pull would rewrite the local file from the leftover Doc tab and —
-    # because is_sidecar no longer names it — hand it to toc sync as a
-    # new chapter.
-    from .structure import is_obsolete
-    for key in [k for k, v in list(links.items())
-                if is_obsolete(k) and isinstance(v, dict)]:
-        del links[key]
-
     # Tab reconciliation (best-effort — a pull must survive without it):
     # the Docs API is the authority on what tabs exist. Unknown *.md tabs
     # the author created by hand are adopted (new essays materialize on
@@ -2569,8 +2541,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # content: only-Doc-moved rewrites toc.toml; only-local-moved defers to
     # the next push; both → conflict, touch nothing.
     if doc_pairs and query is None and bridge.toc_sync:
-        from .structure import (TOC_FILENAME, is_obsolete, is_outside,
-                                is_sidecar, parse_toc_tree, toc_outside,
+        from .structure import (TOC_FILENAME, is_outside, is_sidecar,
+                                parse_toc_tree, toc_outside,
                                 tree_to_parents)
 
         linked = {f for f, e in links.items()
@@ -2581,7 +2553,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # dictionary has a tab and can never be in toc.toml, so leaving
         # it in `doc_struct` would report a permanent conflict — and,
         # worse, a `doc_moved` verdict would hand it to
-        # rewrite_toc_from_doc. Obsolete names (`manifest.md`) likewise.
+        # rewrite_toc_from_doc.
         toc_path = bridge.root / TOC_FILENAME
         # Tabs declared outside the book (papers, side pieces) are
         # mirrored but have no place in the reading order.
@@ -2590,7 +2562,6 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         doc_struct = [(n, p if p in linked else None)
                       for n, p in doc_pairs
                       if n in linked and not is_sidecar(n)
-                      and not is_obsolete(n)
                       and not is_outside(n, outside)]
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
