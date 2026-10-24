@@ -5412,6 +5412,8 @@ def cmd_audio(args):
             print(ui.dim(f"  {len(result['chapters'])} chapter(s), "
                          f"{result['sections']} speech section(s), "
                          f"{result['characters']:,} characters"))
+            for note in result.get("notes", []):
+                print(ui.dim(f"  {note}"))
             for warning in result["warnings"]:
                 print(ui.yellow(f"warning: {warning}"))
             return

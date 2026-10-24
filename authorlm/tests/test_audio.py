@@ -713,6 +713,95 @@ def check_elevenlabs() -> None:
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def check_dictionary_by_default() -> None:
+    """Every book that renders audio has a dictionary (ruling 2026-10-18):
+    an empty `[tts].dictionary` means the manuscript's name, init seeds
+    that name, and export creates the dictionary when the account lacks
+    it, so the first render finds it in place."""
+    book = _book_copy()
+    ws, _out = _workspace(book)
+    manuscript, db = _manuscript(ws)
+    toml = book / "_audio" / "audiobook.toml"
+    try:
+        check("a named dictionary is used as named",
+              audio.dictionary_name(manuscript) == "Scratch pronunciations")
+        toml.write_text(toml.read_text(encoding="utf-8").replace(
+            'dictionary = "Scratch pronunciations"', 'dictionary = ""'),
+            encoding="utf-8")
+        check("an empty [tts].dictionary means the manuscript's name",
+              audio.dictionary_name(manuscript) == "Scratch")
+        # init seeds the name into a fresh config.
+        fresh = Path(tempfile.mkdtemp(prefix="authorlm-audio-init-"))
+        try:
+            seeded = audio.init({"name": "Two Returns", "path": str(fresh)})
+            text = (fresh / "_audio" / "audiobook.toml").read_text(encoding="utf-8")
+            check("init seeds [tts].dictionary with the manuscript's name",
+                  'dictionary = "Two Returns"' in text and len(seeded["written"]) == 2,
+                  text[text.find("[tts]"):text.find("[tts]") + 300])
+            cfg = audio.load_config(fresh)
+            check("the seeded name reads back", cfg["tts"]["dictionary"] == "Two Returns")
+        finally:
+            shutil.rmtree(fresh, ignore_errors=True)
+        # Export creates the dictionary from the table when it is absent.
+        log: list = []
+        wanted = audio.desired_rules(manuscript, audio.load_config(book))
+        client = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": []}, {}),
+            "/add-from-rules": ({"id": "D7", "version_id": "V7"}, {}),
+        }))
+        result = audio.export(db, manuscript, client=client)
+        made = [b for m, u, b in log if u.endswith("/add-from-rules")]
+        book_json = json.loads((book / "_audio" / "audiobook.json").read_text(encoding="utf-8"))
+        check("export creates the missing dictionary from every table rule",
+              len(made) == 1 and made[0]["name"] == "Scratch"
+              and len(made[0]["rules"]) == len(wanted), str(log)[:400])
+        check("the export carries the created dictionary's locator and says so",
+              book_json["pronunciationDictionary"] == {"name": "Scratch", "id": "D7",
+                                                       "versionId": "V7"}
+              and any("created on ElevenLabs" in n for n in result["notes"])
+              and not any("not on the ElevenLabs account" in w for w in result["warnings"]),
+              str(result))
+        log.clear()
+        client2 = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": [
+                {"id": "D7", "name": "Scratch", "latest_version_id": "V8"}]}, {}),
+        }))
+        again = audio.export(db, manuscript, client=client2)
+        check("an existing dictionary is resolved, not created again",
+              not any(u.endswith("/add-from-rules") for _m, u, _b in log)
+              and again["notes"] == [] and json.loads(
+                  (book / "_audio" / "audiobook.json").read_text(encoding="utf-8"))
+              ["pronunciationDictionary"]["versionId"] == "V8", str(log)[:300])
+        # An empty table makes an empty dictionary (the API allows it).
+        (book / audio.pron.FILENAME).unlink()
+        log.clear()
+        client3 = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": []}, {}),
+            "/add-from-rules": ({"id": "D0", "version_id": "V0"}, {}),
+        }))
+        made0 = audio.ensure_dictionary(manuscript, client3)
+        check("a book without a table still gets its (empty) dictionary",
+              made0["created"] and made0["rules"] == 0
+              and log[-1][2] == {"name": "Scratch", "rules": []}, str(log)[-300:])
+        # The locator path creates too, so a first render never refuses.
+        log.clear()
+        locators = audio.dictionary_locators(manuscript, client3)
+        check("dictionary_locators creates the dictionary instead of refusing",
+              locators == [{"pronunciation_dictionary_id": "D0", "version_id": "V0"}])
+        # The workbench reports the effective name.
+        from authorlm import workbench
+        workbench.CLIENT_FACTORY = lambda: client2
+        workbench._SESSIONS.clear()
+        state = workbench.dispatch("state", {"manuscript": "Scratch"}, workspace=str(ws))
+        check("the Pronunciations tab sees the book's dictionary without a key in audiobook.toml",
+              state["dictionary"] == "Scratch", str(state)[:200])
+        workbench.CLIENT_FACTORY = None
+        workbench._SESSIONS.clear()
+    finally:
+        shutil.rmtree(book, ignore_errors=True)
+        shutil.rmtree(ws, ignore_errors=True)
+
+
 def check_say() -> None:
     book = _book_copy()
     ws, _out = _workspace(book)
@@ -1526,6 +1615,7 @@ def main_test() -> None:
     check_fixture_and_hash()
     check_cli_and_refusals()
     check_elevenlabs()
+    check_dictionary_by_default()
     check_say()
     check_workbench()
     check_audiostation_launch()
