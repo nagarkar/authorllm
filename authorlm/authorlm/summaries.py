@@ -637,7 +637,9 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
     # forever and never read as a live summary again.
     fields = {"summary": summary, "source_hash": _hash(text),
               "upstream_hash": upstream_hash, "upstream_stale": 0,
-              "status": "current"}
+              "status": "current", "model": llm.model or "",
+              "sections_hash": sections_hash(
+                  [sec["section_hash"] for sec in sections_of(text)])}
     if existing:
         db.update("essay_summaries", existing["id"], fields)
         row_id = existing["id"]
@@ -773,3 +775,557 @@ def mark_changed(db: Database, manuscript: dict,
             db.update("essay_summaries", have[f]["id"], {"upstream_stale": 1})
             flagged.append(f)
     return flagged
+
+
+# ===================================================================
+# The summary hierarchy (docs/summary-hierarchy-design.md): paragraph
+# records and section summaries beneath the essay row. This part of the
+# module makes NO model call. It owns the units (§0 ruling 1), the kinds
+# (§3.2), the hashes that are each level's identity (§4), freshness
+# derived at read time (§4.4) and the read API consumers use (§7). The
+# builders that fill the tables are §11 steps 2–4.
+# ===================================================================
+
+PARAGRAPH_KINDS = ("heading", "verse", "dialogue", "prose")
+MOVES = ("states", "defines", "argues", "illustrates", "objects", "answers",
+         "transitions", "restates", "promises", "recalls")
+MENTION_ROLES = ("introduces", "defines", "uses", "names")
+REFERENCE_DIRECTIONS = ("back", "forward")
+
+# A paragraph record's shape (§3.2). `EMPTY_RECORD` is what a heading row
+# stores: it exists so a section's paragraph list is complete and
+# `ordinal` is a position in the file (ruling 8), never to be summarized.
+RECORD_LIST_FIELDS = ("mentions", "definitions", "relations", "references",
+                      "depends_on")
+EMPTY_RECORD: dict = {"gist": "", "claim": None, "move": None,
+                      "mentions": [], "definitions": [], "relations": [],
+                      "references": [], "depends_on": []}
+
+# The house's speaker-prefixed line: an optional bold or italic wrapper
+# around a short name, a colon, then speech. ("Socrates: …", "**A:** …").
+# verse-and-cast-design.md §2 reserves the dialogue form for a future play;
+# this is the shape every line of such a paragraph takes.
+_SPEAKER_LINE = re.compile(
+    r"^(?:\*{1,2}|_{1,2})?[A-Z][\w .'’-]{0,40}:(?:\*{1,2}|_{1,2})?(?:\s|$)")
+# "Every line is short" (§3.2) — a stanza in a prose file. Measured against
+# SMSTTD's average 47-word paragraph: a line of verse rarely passes 12
+# words; a prose paragraph of 2+ lines never keeps every line under it
+# (hard-wrapped prose is not the house style; the files are one line per
+# paragraph).
+VERSE_LINE_MAX_WORDS = 12
+_HEADING_LINE = re.compile(r"^#{1,6}[ \t]")
+
+
+def _normalize_paragraph(text: str) -> str:
+    """The text a paragraph hash is taken over: trailing whitespace per
+    line and surrounding blank lines dropped, nothing else. Wording,
+    punctuation, line breaks inside the block (verse) all count."""
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
+def para_hash(text: str) -> str:
+    return _hash(_normalize_paragraph(text))
+
+
+def section_hash(para_hashes: list[str]) -> str:
+    """Identity of a section: its ordered paragraph hashes (§4.2), so a
+    reorder inside the section moves it and a paragraph that moves
+    across sections moves both."""
+    return _hash("\n".join(para_hashes))
+
+
+def sections_hash(section_hashes: list[str]) -> str:
+    """Identity of an essay's section structure (§4.3)."""
+    return _hash("\n".join(section_hashes))
+
+
+def paragraph_kind(text: str, *, verse_file: bool = False) -> str:
+    """Deterministic, no model (§3.2): heading | verse | dialogue | prose.
+    A heading is a block whose first line starts with `#`; dialogue is a
+    block whose every line is speaker-prefixed; verse is any block in a
+    toc `form = "verse"` file, or a multi-line block whose every line is
+    short. Everything else is prose."""
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return "prose"
+    if _HEADING_LINE.match(lines[0]):
+        return "heading"
+    # One speaker-prefixed line is dialogue only when the label is
+    # marked (bold or italic): a lone "Note: …" is prose with a colon.
+    if all(_SPEAKER_LINE.match(ln.strip()) for ln in lines) and (
+            len(lines) > 1 or lines[0].lstrip()[0] in "*_"):
+        return "dialogue"
+    if verse_file:
+        return "verse"
+    if len(lines) > 1 and all(len(ln.split()) <= VERSE_LINE_MAX_WORDS
+                              for ln in lines):
+        return "verse"
+    return "prose"
+
+
+def sections_of(text: str, *, verse_file: bool = False) -> list[dict]:
+    """The file split into its heading-delimited sections (ruling 1; the
+    same cut as `extraction._sections`, a file without headings is one
+    section), each carrying its paragraphs in order:
+
+        {section_ordinal, heading (None for a preamble), section_hash,
+         para_hashes, paragraphs: [{ordinal, section_ordinal, kind,
+         text, para_hash}]}
+
+    `ordinal` is 1-based over the whole file, so it is a position
+    (ruling 8). A paragraph repeated verbatim (a refrain) appears once
+    per occurrence here, under one hash."""
+    from .revisions import _paragraphs
+
+    out: list[dict] = []
+    cur: dict | None = None
+    ordinal = 0
+    for block in _paragraphs(text):
+        ordinal += 1
+        kind = paragraph_kind(block, verse_file=verse_file)
+        if cur is None or kind == "heading":
+            cur = {"section_ordinal": len(out) + 1,
+                   "heading": block.splitlines()[0].strip()
+                   if kind == "heading" else None,
+                   "paragraphs": []}
+            out.append(cur)
+        cur["paragraphs"].append({
+            "ordinal": ordinal, "section_ordinal": cur["section_ordinal"],
+            "kind": kind, "text": block, "para_hash": para_hash(block)})
+    for sec in out:
+        sec["para_hashes"] = [p["para_hash"] for p in sec["paragraphs"]]
+        sec["section_hash"] = section_hash(sec["para_hashes"])
+    return out
+
+
+def paragraphs_of(text: str, *, verse_file: bool = False) -> list[dict]:
+    """Every paragraph of the file in order, as `sections_of` lays them
+    out."""
+    return [p for sec in sections_of(text, verse_file=verse_file)
+            for p in sec["paragraphs"]]
+
+
+def verse_files_of(manuscript: dict) -> set[str]:
+    """The files whose toc entry says `form = "verse"` (verse.py owns
+    the flag); every paragraph in them is verse (§3.2)."""
+    from .revisions import read_manuscript_files
+    from .verse import form_map
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    return {f for f, form in form_map(files).items() if form == "verse"}
+
+
+# ------------------------------------------------------- storage (rows)
+#
+# Writers for the two new tables. No model call happens here: the builder
+# (step 2) produces the record, these store it. Both are idempotent on
+# the row's identity hash and resurrect an `orphaned` row whose text has
+# come back, exactly as `summarize_unit` resurrects a deprecated essay.
+
+def _check_record(record: dict, text: str) -> tuple[dict, dict]:
+    """Guarantee 1 of §7: every span is a verbatim substring of the
+    paragraph (byte equality), every relation is in
+    `extraction.VALID_RELATIONS`, every role, move and direction is a
+    known value. Offending items are DROPPED, not repaired, and counted
+    in the returned report. `definitions[].sentence` is a span too."""
+    from .extraction import VALID_RELATIONS
+
+    dropped = {"span": 0, "relation": 0, "role": 0, "direction": 0}
+    clean: dict = {"gist": str(record.get("gist") or "").strip(),
+                   "claim": record.get("claim") or None,
+                   "move": record.get("move")
+                   if record.get("move") in MOVES else None}
+    def _ok_span(item: dict, key: str) -> bool:
+        span = item.get(key)
+        if isinstance(span, str) and span and span in text:
+            return True
+        dropped["span"] += 1
+        return False
+
+    clean["mentions"] = []
+    for m in record.get("mentions") or []:
+        if not isinstance(m, dict) or not m.get("term"):
+            continue
+        if m.get("role") not in MENTION_ROLES:
+            dropped["role"] += 1
+            continue
+        if _ok_span(m, "span"):
+            clean["mentions"].append({"term": m["term"], "span": m["span"],
+                                      "role": m["role"]})
+    clean["definitions"] = [
+        {"term": d["term"], "sentence": d["sentence"]}
+        for d in record.get("definitions") or []
+        if isinstance(d, dict) and d.get("term") and _ok_span(d, "sentence")]
+    clean["relations"] = []
+    for r in record.get("relations") or []:
+        if not isinstance(r, dict) or not (r.get("from") and r.get("to")):
+            continue
+        if r.get("relation") not in VALID_RELATIONS:
+            dropped["relation"] += 1
+            continue
+        if _ok_span(r, "span"):
+            clean["relations"].append({"from": r["from"],
+                                       "relation": r["relation"],
+                                       "to": r["to"], "span": r["span"]})
+    clean["references"] = []
+    for ref in record.get("references") or []:
+        if not isinstance(ref, dict) or not ref.get("term"):
+            continue
+        if ref.get("direction") not in REFERENCE_DIRECTIONS:
+            dropped["direction"] += 1
+            continue
+        if _ok_span(ref, "span"):
+            clean["references"].append({
+                "term": ref["term"], "direction": ref["direction"],
+                "target": ref.get("target") or None, "span": ref["span"]})
+    clean["depends_on"] = [h for h in record.get("depends_on") or []
+                           if isinstance(h, str)]
+    return clean, dropped
+
+
+def store_paragraph_record(db: Database, manuscript: dict, file: str,
+                           para: dict, record: dict | None, model: str
+                           ) -> tuple[dict, dict]:
+    """Store one paragraph's record (`para` as `sections_of` yields it).
+    A heading stores `EMPTY_RECORD` with `model = ''` and no check
+    (ruling 8). Returns (row, dropped-counts)."""
+    if para["kind"] == "heading" or record is None:
+        clean, dropped = dict(EMPTY_RECORD), {}
+        model = "" if para["kind"] == "heading" else model
+    else:
+        clean, dropped = _check_record(record, para["text"])
+    fields = {"ordinal": para["ordinal"],
+              "section_ordinal": para["section_ordinal"],
+              "kind": para["kind"], "record": json.dumps(clean),
+              "model": model, "status": "current"}
+    existing = db.one(
+        "SELECT id FROM paragraph_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND para_hash = ?",
+        (manuscript["id"], file, para["para_hash"]))
+    if existing:
+        db.update("paragraph_summaries", existing["id"], fields)
+        row_id = existing["id"]
+    else:
+        row = ko_fields("ps")
+        row.update(manuscript_id=manuscript["id"], file=file,
+                   para_hash=para["para_hash"], **fields)
+        db.insert("paragraph_summaries", row)
+        row_id = row["id"]
+    return (dict(db.one("SELECT * FROM paragraph_summaries WHERE id = ?",
+                        (row_id,))), dropped)
+
+
+def store_section_summary(db: Database, manuscript: dict, file: str,
+                          section: dict, summary: str, model: str) -> dict:
+    """Store one section's summary (`section` as `sections_of` yields
+    it)."""
+    fields = {"section_ordinal": section["section_ordinal"],
+              "heading": section["heading"],
+              "para_hashes": json.dumps(section["para_hashes"]),
+              "summary": summary.strip(), "model": model,
+              "status": "current"}
+    existing = db.one(
+        "SELECT id FROM section_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND section_hash = ?",
+        (manuscript["id"], file, section["section_hash"]))
+    if existing:
+        db.update("section_summaries", existing["id"], fields)
+        row_id = existing["id"]
+    else:
+        row = ko_fields("ss")
+        row.update(manuscript_id=manuscript["id"], file=file,
+                   section_hash=section["section_hash"], **fields)
+        db.insert("section_summaries", row)
+        row_id = row["id"]
+    return dict(db.one("SELECT * FROM section_summaries WHERE id = ?",
+                       (row_id,)))
+
+
+def orphan_rows(db: Database, manuscript: dict, file: str, text: str
+                ) -> dict[str, list[dict]]:
+    """The `current` rows of both lower levels whose hash is no longer in
+    the file's text — what a rebuild marks `orphaned` (§4.1). Derived
+    here, never on collect."""
+    live_paras = {p["para_hash"] for p in paragraphs_of(text)}
+    live_secs = {s["section_hash"] for s in sections_of(text)}
+    paras = [dict(r) for r in db.all(
+        "SELECT * FROM paragraph_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND status = 'current'", (manuscript["id"], file))
+        if r["para_hash"] not in live_paras]
+    secs = [dict(r) for r in db.all(
+        "SELECT * FROM section_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND status = 'current'", (manuscript["id"], file))
+        if r["section_hash"] not in live_secs]
+    return {"paragraph": paras, "section": secs}
+
+
+def mark_orphans(db: Database, manuscript: dict, file: str, text: str
+                 ) -> dict[str, int]:
+    """Flip the rows `orphan_rows` finds to `orphaned`. Returns counts."""
+    found = orphan_rows(db, manuscript, file, text)
+    for row in found["paragraph"]:
+        db.update("paragraph_summaries", row["id"], {"status": "orphaned"})
+    for row in found["section"]:
+        db.update("section_summaries", row["id"], {"status": "orphaned"})
+    return {k: len(v) for k, v in found.items()}
+
+
+# ----------------------------------------------------- freshness (read)
+
+def _current_paragraph_rows(db: Database, manuscript_id: str, file: str
+                            ) -> dict[str, dict]:
+    return {r["para_hash"]: dict(r) for r in db.all(
+        "SELECT * FROM paragraph_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND status = 'current'", (manuscript_id, file))}
+
+
+def _current_section_rows(db: Database, manuscript_id: str, file: str
+                          ) -> dict[str, dict]:
+    return {r["section_hash"]: dict(r) for r in db.all(
+        "SELECT * FROM section_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND status = 'current'", (manuscript_id, file))}
+
+
+def level_status(db: Database, manuscript: dict, file: str, text: str,
+                 pinned=NOT_IN_FLIGHT, *, verse_file: bool = False) -> dict:
+    """Freshness of every level for one file, derived from the hashes at
+    read time (§4.4) — nothing here is stored:
+
+        paragraph: {state: fresh|stale|missing, needed, current, missing: [hashes]}
+        section:   {state, needed, current, missing: [section_ordinals]}
+        essay:     {state: as `_state` (fresh|stale|upstream_stale|…),
+                    sections_moved: bool}
+
+    `needed` counts distinct hashes (a refrain is one row); `missing`
+    is `stale` when some rows exist and `missing` when none do.
+    `sections_moved` is the essay row's `sections_hash` disagreeing with
+    the text's — the "my sections changed" signal of §3.4 (False on a
+    pre-hierarchy row, whose stored hash is '')."""
+    secs = sections_of(text, verse_file=verse_file)
+    para_hashes = {p["para_hash"] for s in secs for p in s["paragraphs"]}
+    have_p = _current_paragraph_rows(db, manuscript["id"], file)
+    missing_p = sorted(h for h in para_hashes if h not in have_p)
+    have_s = _current_section_rows(db, manuscript["id"], file)
+    missing_s = [s["section_ordinal"] for s in secs
+                 if s["section_hash"] not in have_s]
+
+    def _state_of(needed: int, missing: int, present: int) -> str:
+        if missing == 0 and needed:
+            return "fresh"
+        return "stale" if present else "missing"
+
+    essay_row = db.one(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file))
+    text_sections_hash = sections_hash([s["section_hash"] for s in secs])
+    moved = bool(essay_row and essay_row["sections_hash"]
+                 and essay_row["sections_hash"] != text_sections_hash)
+    return {
+        "paragraph": {"state": _state_of(len(para_hashes), len(missing_p),
+                                         len(have_p)),
+                      "needed": len(para_hashes),
+                      "current": len(para_hashes) - len(missing_p),
+                      "missing": missing_p},
+        "section": {"state": _state_of(len(secs), len(missing_s),
+                                       len(have_s)),
+                    "needed": len(secs),
+                    "current": len(secs) - len(missing_s),
+                    "missing": missing_s},
+        "essay": {"state": _state(essay_row, text, pinned),
+                  "sections_moved": moved},
+    }
+
+
+def hierarchy_status(db: Database, manuscript: dict) -> list[dict]:
+    """`level_status` for every unit in reading order, over one capture."""
+    texts, _unlisted, flight = _context_units(db, manuscript)
+    verse = verse_files_of(manuscript)
+    return [dict(file=file, **level_status(
+        db, manuscript, file, text, flight.get(file, NOT_IN_FLIGHT),
+        verse_file=file in verse)) for file, text in texts.items()]
+
+
+# --------------------------------------------------------- read API (§7)
+
+def _record_of(row: dict) -> dict:
+    rec = dict(EMPTY_RECORD)
+    rec.update(loads(row["record"], {}))
+    return rec
+
+
+def _terms(records: list[dict]) -> list[str]:
+    """Distinct mention terms in first-seen order, the author's spelling."""
+    seen: list[str] = []
+    for rec in records:
+        for m in rec.get("mentions", []):
+            if m["term"] not in seen:
+                seen.append(m["term"])
+    return seen
+
+
+def _first_mentions(db: Database, manuscript: dict) -> dict[str, str]:
+    """term (lower-cased) → the first file in reading order with an
+    `introduces | defines` mention of it, over current rows. The input to
+    §6.6's INTRODUCES / ASSUMES split."""
+    first: dict[str, str] = {}
+    for rec in paragraph_records(db, manuscript):
+        for m in rec["mentions"]:
+            if m["role"] in ("introduces", "defines"):
+                first.setdefault(m["term"].lower(), rec["file"])
+    return first
+
+
+def derived_lists(db: Database, manuscript: dict, file: str,
+                  records: list[dict] | None = None) -> dict[str, list[str]]:
+    """INTRODUCES, ASSUMES, PROMISES, DEBTS for one essay, from paragraph
+    records (ruling 6, §6.6), as lists. INTRODUCES: terms this essay
+    introduces or defines with no earlier such mention in reading order.
+    ASSUMES: terms it only uses whose first introduction lies elsewhere
+    or nowhere. PROMISES: forward references' terms; DEBTS: backward
+    references' terms. Normalization against the graph is the consumer's
+    step (`manifest._canonical_names`), as §7 guarantee 3 says."""
+    if records is None:
+        records = paragraph_records(db, manuscript, files=[file])
+    first = _first_mentions(db, manuscript)
+    introduces: list[str] = []
+    uses: list[str] = []
+    promises: list[str] = []
+    debts: list[str] = []
+    for rec in records:
+        for m in rec["mentions"]:
+            if m["role"] in ("introduces", "defines"):
+                if first.get(m["term"].lower()) == file \
+                        and m["term"] not in introduces:
+                    introduces.append(m["term"])
+            elif m["role"] == "uses" and m["term"] not in uses:
+                uses.append(m["term"])
+        for ref in rec["references"]:
+            bucket = promises if ref["direction"] == "forward" else debts
+            if ref["term"] not in bucket:
+                bucket.append(ref["term"])
+    intro_lower = {t.lower() for t in introduces}
+    assumes = [t for t in uses if t.lower() not in intro_lower]
+    return {"introduces": introduces, "assumes": assumes,
+            "promises": promises, "debts": debts}
+
+
+def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
+             ) -> dict:
+    """The three levels for one essay, projected for a consumer (§7's
+    table; extraction-redesign.md §4.3). Read-only over `current` rows.
+
+    A level with no rows at all is `None`. A level with rows is returned
+    with its hash per row and `stale: True` when some unit of the text
+    has no row — a paragraph or section without one carries `gist` /
+    `summary` `None` so the consumer can print STALE against it. The
+    essay carries `_state`'s verdict as `state`."""
+    if text is None:
+        texts, _unlisted, _flight = _context_units(db, manuscript)
+        if file not in texts:
+            raise LookupError(f"'{file}' is not a unit of the manuscript")
+        text = texts[file]
+    verse_file = file in verse_files_of(manuscript)
+    secs = sections_of(text, verse_file=verse_file)
+    have_p = _current_paragraph_rows(db, manuscript["id"], file)
+    have_s = _current_section_rows(db, manuscript["id"], file)
+
+    paragraphs = None
+    if have_p:
+        paragraphs = []
+        for sec in secs:
+            for p in sec["paragraphs"]:
+                row = have_p.get(p["para_hash"])
+                rec = _record_of(row) if row else None
+                paragraphs.append({
+                    "n": p["ordinal"], "section": sec["section_ordinal"],
+                    "kind": p["kind"], "source_hash": p["para_hash"],
+                    "gist": rec["gist"] if rec else None,
+                    "terms": _terms([rec]) if rec else [],
+                    "stale": row is None})
+    sections = None
+    if have_s:
+        sections = []
+        for sec in secs:
+            row = have_s.get(sec["section_hash"])
+            recs = [_record_of(have_p[h]) for h in sec["para_hashes"]
+                    if h in have_p]
+            ords = [p["ordinal"] for p in sec["paragraphs"]]
+            sections.append({
+                "n": sec["section_ordinal"], "heading": sec["heading"],
+                "paragraphs": [ords[0], ords[-1]],
+                "source_hash": sec["section_hash"],
+                "summary": row["summary"] if row else None,
+                "terms": _terms(recs), "stale": row is None})
+    essay_row = db.one(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file))
+    essay = None
+    if essay_row:
+        state = _state(essay_row, text)
+        essay = {"summary": essay_row["summary"],
+                 "source_hash": essay_row["source_hash"],
+                 "state": state,
+                 "stale": state not in ("fresh", "upstream_stale")}
+        essay.update(derived_lists(
+            db, manuscript, file,
+            paragraph_records(db, manuscript, files=[file], texts={file: text})))
+    return {"file": file, "essay": essay, "sections": sections,
+            "paragraphs": paragraphs,
+            "paragraph_level_stale": bool(paragraphs) and any(
+                p["stale"] for p in paragraphs),
+            "section_level_stale": bool(sections) and any(
+                s["stale"] for s in sections)}
+
+
+def paragraph_records(db: Database, manuscript: dict,
+                      files: list[str] | None = None,
+                      texts: dict[str, str] | None = None) -> list[dict]:
+    """Every paragraph's full record in reading order, over `current`
+    rows: the §7 object (file, para_hash, ordinal, section_ordinal, kind,
+    gist, claim, move, mentions, definitions, relations, references,
+    depends_on). Order and ordinals come from the TEXT, so a refrain
+    yields its one record once per occurrence and a moved paragraph
+    reports where it is now. A paragraph with no current row is absent
+    (the read API serves rows; `level_status` reports the gap)."""
+    if texts is None:
+        all_texts, _unlisted, _flight = _context_units(db, manuscript)
+        texts = all_texts
+    verse = verse_files_of(manuscript)
+    out: list[dict] = []
+    for file, text in texts.items():
+        if files is not None and file not in files:
+            continue
+        have = _current_paragraph_rows(db, manuscript["id"], file)
+        if not have:
+            continue
+        for p in paragraphs_of(text, verse_file=file in verse):
+            row = have.get(p["para_hash"])
+            if not row:
+                continue
+            rec = {"file": file, "para_hash": p["para_hash"],
+                   "ordinal": p["ordinal"],
+                   "section_ordinal": p["section_ordinal"],
+                   "kind": p["kind"]}
+            rec.update(_record_of(row))
+            out.append(rec)
+    return out
+
+
+def mentions(db: Database, manuscript: dict, term: str | None = None
+             ) -> list[dict]:
+    """Every mention across the book in reading order, flattened for the
+    recurrence query (ruling 7): {term, role, span, file, para_hash,
+    ordinal, section_ordinal}. `term` filters case-insensitively on the
+    author's spelling."""
+    want = term.lower() if term else None
+    out = []
+    for rec in paragraph_records(db, manuscript):
+        for m in rec["mentions"]:
+            if want is not None and m["term"].lower() != want:
+                continue
+            out.append({"term": m["term"], "role": m["role"],
+                        "span": m["span"], "file": rec["file"],
+                        "para_hash": rec["para_hash"],
+                        "ordinal": rec["ordinal"],
+                        "section_ordinal": rec["section_ordinal"]})
+    return out
