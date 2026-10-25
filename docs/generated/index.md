@@ -644,6 +644,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
 
+## `tests.test_mint_name`
+
+`authorlm/tests/test_mint_name.py`
+
+`media.parse_sections` / `brief_terms` / `_mint_name` turn clip tag bodies into stable keys and search terms.
+
 ## `tests.test_morph_targets`
 
 `authorlm/tests/test_morph_targets.py`
@@ -686,11 +692,23 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_same_para`
+
+`authorlm/tests/test_same_para.py`
+
+`gdocs._norm_para` / `_same_para` / `first_divergence` / `divergence_note` align Doc paragraphs with the markdown export for diff-push.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
+
+## `tests.test_split_tabbed_export`
+
+`authorlm/tests/test_split_tabbed_export.py`
+
+`gdocs.split_tabbed_export` cuts a whole-master markdown export into per-tab bodies.
 
 ## `tests.test_summaries`
 
