@@ -662,6 +662,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_paragraph_records`
+
+`authorlm/tests/test_paragraph_records.py`
+
+Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`

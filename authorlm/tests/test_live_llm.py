@@ -306,6 +306,65 @@ def section_beat_draft(ctx: dict) -> None:
     run_stdin(ws, "", "write", "abandon")
 
 
+PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
+
+# One short heading section in the house style (one line per paragraph):
+# a definition, an asserted relation, a backward and a forward reference.
+SAMPLE_RECORDS = """# Distinction
+
+## The Field
+
+We call the space a distinction opens the Field. The Field is not a container; it is the set of further distinctions a first one makes possible.
+
+As the first chapter showed, every Choice draws a distinction. A Choice therefore creates a Field, and each position within that Field is itself a Choice.
+
+A later chapter will show how fields nest; for now it is enough that no Field exists before a Choice.
+"""
+
+
+def section_paragraph_records(ctx: dict) -> None:
+    """summaries.ensure(level="paragraph") on the flash tier (summary-
+    hierarchy design §11.2): one call for one short section, every body
+    paragraph gets a record, the span check passes real spans. Its own
+    workspace, so the extra file never reaches the other sections'
+    recorded payloads."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "records-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    llm = sums.paragraph_llm({
+        "llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+        "summaries": {"paragraph_model": PARAGRAPH_MODEL}})
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llm, echo=lines.append)
+    print(f"   {report['line']}")
+    print(f"   dropped: {report['dropped']}")
+    check("one call for the one section, a record per body paragraph",
+          report["calls"] == 1 and report["records"] == 3
+          and not report["missing"], str(report))
+    recs = [r for r in sums.paragraph_records(db, manuscript)
+            if r["kind"] != "heading"]
+    check("every gist is one dense sentence (at most ~30 words)",
+          all(r["gist"] and len(r["gist"].split()) <= 35 for r in recs),
+          json.dumps([r["gist"] for r in recs]))
+    check("the Field's definition survives the byte check",
+          any(d["term"].lower().endswith("field") for d in recs[0]["definitions"]),
+          json.dumps(recs[0]))
+    check("mentions survive with verbatim spans in every paragraph",
+          all(r["mentions"] for r in recs), json.dumps(recs))
+    check("the backward and forward references are recorded",
+          {ref["direction"] for r in recs for ref in r["references"]}
+          == {"back", "forward"}, json.dumps([r["references"] for r in recs]))
+    check("the cost line names the live or replayed call",
+          len(lines) == 1 and "LLM:" in lines[0], str(lines))
+
+
 # Order matters (the narrative), but 'extraction' is handled separately in
 # main_test() because it owns the one `init` call every other section also
 # needs (manuscript registration) — see main_test()'s bootstrap comment.
@@ -315,6 +374,7 @@ SECTIONS: list[tuple[str, "object"]] = [
     ("none-path", section_none_path),
     ("episode", section_episode),
     ("beat-draft", section_beat_draft),
+    ("paragraph-records", section_paragraph_records),
 ]
 SECTION_NAMES = ["extraction"] + [name for name, _ in SECTIONS]
 
