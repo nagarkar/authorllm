@@ -748,9 +748,21 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
 
     billed = {k: v for k, v in found.items()
               if v.strip().lower().startswith("anthropic/")}
+    # The one deliberate re-arming, ruled 2026-10-25
+    # (docs/extraction-redesign.md §0.2, the author's words: "let's do
+    # claude opus-class but have the system prompt me for what model I
+    # want to use"): the extraction adjudicator's DEFAULT may be an
+    # Anthropic model, because every run that would adjudicate prints the
+    # choices with their cost and asks before the first call. Allowed
+    # only while that question is on — `adjudicator_prompt = "default"`
+    # would make it a silent bill, and this check fails again.
+    extraction = config.get("extraction") or {}
+    if extraction.get("adjudicator_prompt", "ask") == "ask":
+        billed.pop("[extraction] adjudicator_model", None)
     check("no model-bearing key in the shipped config.toml names an "
           "anthropic/ model — the author ruled the billed paths off, and "
-          "re-arming one must be a deliberate edit to THIS check",
+          "re-arming one must be a deliberate edit to THIS check (the "
+          "extraction adjudicator's asked-for default is the one so far)",
           not billed, f"billed keys present: {billed!r}; all: {found!r}")
 
     # The ruling names five keys. Each is either absent (the two the
@@ -1087,8 +1099,10 @@ def check_extraction_prompt_provenance() -> None:
           all(_on_disk(p.location) for p in pr.REGISTRY),
           str([p.location for p in pr.REGISTRY if not _on_disk(p.location)]))
 
-    extraction_loc = pr.by_name("extraction").location
-    adjudication_loc = pr.by_name("adjudication").location
+    # The old path reports its own prompts (the redesign's pipeline owns
+    # extraction.md / adjudication.md; these go with phase 6).
+    extraction_loc = pr.by_name("extraction-legacy").location
+    adjudication_loc = pr.by_name("adjudication-legacy").location
     edges_loc = pr.by_name("extraction-edges").location
     aliases_loc = pr.by_name("extraction-aliases").location
 

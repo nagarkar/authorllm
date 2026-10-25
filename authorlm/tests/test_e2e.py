@@ -106,6 +106,32 @@ def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
     return output
 
 
+def legacy_extract(workspace: Path, *argv: str) -> str:
+    """The OLD extraction path, which `init`, the writeup close and the
+    MCP tool still run until phase 6 of the redesign retires it
+    (docs/extraction-redesign.md §9). The `extract` verb now runs the
+    redesigned pipeline, so the scenarios that exercise the old one drive
+    it in process — `cli._run_extraction`, the function init calls — with
+    the arguments the verb used to take."""
+    import types
+
+    from authorlm import cli as _cli
+    from authorlm.llm import LLMClient
+
+    _pin_config(workspace)
+    files = [a for a in argv if not a.startswith("--")]
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        db = _api.open_db(str(workspace))
+        manuscript = _cli._manuscript(
+            db, types.SimpleNamespace(manuscript=None, command="extract"))
+        _cli._run_extraction(db, manuscript, LLMClient(_cli._load_config(None)),
+                             files=files or None, full="--full" in argv,
+                             edges_only="--edges-only" in argv,
+                             aliases_only="--aliases" in argv)
+    return buffer.getvalue()
+
+
 def check(label: str, condition: bool, context: str = "") -> None:
     global PASSED
     assert condition, f"FAIL: {label}\n{context}"
@@ -838,10 +864,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("confirmed node leaves the triage list",
               "awaiting your confirmation (3)" in out, out)
 
-        out = run(ws, "extract")
+        out = legacy_extract(ws)
         check("incremental re-extraction is a no-op without changes",
               "Nothing new since the last extraction" in out, out)
-        out = run(ws, "extract", "--full")
+        out = legacy_extract(ws, "--full")
         check("full re-extraction is idempotent",
               "Extracted 0 new concept(s)" in out and "full manuscript" in out, out)
 
@@ -896,7 +922,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "Distinction: concept → historical_reference" in feedback, feedback)
         check("confirmed exemplars enter the extraction prompt",
               "Choice (concept)" in feedback, feedback)
-        out = run(ws, "extract", "--full")
+        out = legacy_extract(ws, "--full")
         check("full audit re-creates nothing directly",
               "Extracted 0 new concept(s)" in out, out)
         check("full audit surfaces conflicts as proposals instead",
@@ -910,10 +936,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(ws, "collect")
         check("substantial new material hints at extract",
               "mine them for new concepts with 'extract'" in out, out)
-        out = run(ws, "extract")
+        out = legacy_extract(ws)
         check("incremental extraction targets only the changed file",
               "1 changed file(s)" in out, out)
-        out = run(ws, "extract", "03-new-material.md")
+        out = legacy_extract(ws, "03-new-material.md")
         check("per-file extraction works",
               "1 selected file(s)" in out, out)
 
@@ -922,7 +948,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         config_path.write_text(
             stub_config + "# tiny cap to force truncation\nextraction_max_chars = 50\n"
         )
-        out = run(ws, "extract", "--full")
+        out = legacy_extract(ws, "--full")
         check("configured cap batches sections instead of truncating",
               "truncated" not in out
               and ("hierarchical" in out or "pass(es)" in out), out)
@@ -941,7 +967,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         with open(ms / "01-choice.md", "a") as fh:
             fh.write("\n\nChoice is the field where every act of distinction begins.\n")
         run(ws, "collect")
-        out = run(ws, "extract")
+        out = legacy_extract(ws)
         # The note_update and revival proposals from the --full audit are
         # still open with identical content, so only the edge is new.
         check("open proposals are not duplicated; new conflict adds one",
@@ -985,12 +1011,12 @@ def scenario_llm_and_unregister(root: Path) -> None:
         with open(ms / "01-choice.md", "a") as fh:
             fh.write("\nMore prose entirely without graph vocabulary.\n")
         run(ws, "collect")
-        out = run(ws, "extract")
+        out = legacy_extract(ws)
         check("no proposals without attention hits (churn guard)",
               "against settled knowledge" not in out, out)
 
         # --- edges-only extraction and unconfirming an edge ---
-        out = run(ws, "extract", "--full", "--edges-only")
+        out = legacy_extract(ws, "--full", "--edges-only")
         check("edges-only extracts no concepts",
               "Extracted 0 new concept(s)" in out and "edges only" in out, out)
         # Undo a confirmed edge: back to hypothesis for re-triage.
@@ -1074,7 +1100,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "of shapes. We call it Elective Ground, the resolved name for "
               "Choice. We once called Choice by the name "
               "RetiredAliasCandidate.\n")
-        out = run(ws, "extract", "--aliases")
+        out = legacy_extract(ws, "--aliases")
         check("aliases pass reports its scope", "aliases only" in out, out)
         check("both live-concept naming sentences are refused as folds",
               "refused 2 alias proposal(s) naming an already-live concept"
@@ -1179,7 +1205,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         # A merged-away name is an alias now, not a banned retiree — the
         # extractor re-proposing it must resolve, never suggest revival.
-        run(ws, "extract", "--full")
+        legacy_extract(ws, "--full")
         out = run(ws, "proposal", "list")
         check("no revival proposal for a name living on as an alias",
               "revive retired concept 'Distinction'" not in out, out)
@@ -1203,7 +1229,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         # author declares them (declaration bypasses the bar).
         for name in ("Persistence", "Choice", "Distinction", "Becoming"):
             run(ws2, "concept", "add", name)
-        out = run(ws2, "extract", "--aliases")
+        out = legacy_extract(ws2, "--aliases")
         check("oversized aliases sweep goes hierarchical",
               "hierarchical" in out and "aliases only" in out, out)
         check("the alias guard holds across every pass of the hierarchical "
@@ -1341,7 +1367,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
         # --- hierarchical extraction under a small cap ---
         write(wg / ".authorlm" / "config.toml",
               stub_config + "extraction_max_chars = 60\n")
-        out = run(wg, "extract", "--full")
+        out = legacy_extract(wg, "--full")
         check("oversized full extraction goes hierarchical",
               "hierarchical:" in out and "in reading order" in out, out)
         write(wg / ".authorlm" / "config.toml", stub_config)
@@ -3063,7 +3089,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         write(ms / "03-third.md", CH3 + "\nA paragraph added while the "
                                         "other essay is mid-rewrite.\n")
         run(ws, "collect")
-        out = run(ws, "extract")          # no --full: changed files only
+        out = legacy_extract(ws)          # no --full: changed files only
         incremental = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
                        if "LOAD-BEARING units of thought" in s]
         check("E9 — the INCREMENTAL path (changed sections, no --full) "
@@ -3087,7 +3113,7 @@ def scenario_parallel_writeups(root: Path) -> None:
             f"path has something to batch.\n" for n in range(1, 6))))
         run(ws, "collect")
         mark = len(StubLLMHandler.PAYLOADS)
-        out = run(ws, "extract", "01-choice.md", "03-third.md")
+        out = legacy_extract(ws, "01-choice.md", "03-third.md")
         batched = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
                    if "LOAD-BEARING units of thought" in s]
         check("E9 — the BATCHING path (explicit files over the payload "
@@ -3105,7 +3131,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         run(ws, "collect")
 
         mark = len(StubLLMHandler.PAYLOADS)
-        out = run(ws, "extract", "01-choice.md", "--full")
+        out = legacy_extract(ws, "01-choice.md", "--full")
         check("E9 — extracting the in-flight file specifically mines "
               "NOTHING: it is dropped per file, so the payload is empty "
               "and the pass ends rather than sending a marker to a model",
@@ -3118,7 +3144,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         write(ms / "03-third.md", CH3 + "\nA paragraph added during the "
                                         "rewrite window.\n")
         run(ws, "collect")
-        run(ws, "extract", "--full")
+        legacy_extract(ws, "--full")
         during = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
                   if "LOAD-BEARING units of thought" in s]
         check("E9 — and a FULL extraction during the window mines the "

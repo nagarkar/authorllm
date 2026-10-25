@@ -5,12 +5,19 @@ concepts and relationships, which enter the graph under the standard rules —
 nodes are declared (and realize against the text immediately), while
 relationships are *inferred hypotheses* awaiting the author's confirmation
 in the briefing. Declared knowledge always outranks extracted knowledge.
+
+Two halves while the redesign lands (docs/extraction-redesign.md §9):
+the old single-call path (`extract_concepts`, still run by init, the
+writeup close and the MCP tool until phase 6 retires it), and below the
+banner near the end of the file the redesigned pipeline `authorlm
+extract` runs — `assemble`, the candidate contract, the eight gates.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import adjudication, proposals, prompt_registry
@@ -29,7 +36,9 @@ VALID_RELATIONS = {
 }
 MAX_TEXT_CHARS = 24000
 MAX_CONCEPTS = 40
-EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
+# The old path's prompt. `prompts/extraction.md` is the redesigned
+# pipeline's (SECTION_PROMPT_PATH, below); this one goes with phase 6.
+EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction-legacy.md"
 # Materiality floor (Q/note-materiality): a note_update that says the same
 # thing in different words is not new information — see _note_update_blocked.
 # Measured (proposal-learning-loop design doc), not guessed: 0.72 is the
@@ -37,6 +46,13 @@ EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
 # "real refinement" band the adjudicator already rules on correctly, and is
 # reserved for the unambiguous paraphrase case ratified for this fix.
 NOTE_UPDATE_PARAPHRASE_FLOOR = 0.90
+# Gate 7 of docs/extraction-redesign.md §4.4: the relations the author
+# keeps more than half the time (§2.2). VALID_RELATIONS stays the schema's
+# vocabulary; extraction may PROPOSE only these until `extract calibrate`
+# measures a relation back in (or out) at the 60% line.
+DEFAULT_PROPOSABLE = ("depends_on", "generalizes", "specializes",
+                      "contrasts_with", "illustrates", "permits", "answers",
+                      "foreshadows")
 
 
 def extraction_system() -> str:
@@ -98,9 +114,9 @@ def _prompt_locations(edges_only: bool, aliases_only: bool,
     elif aliases_only:
         names = ["extraction-aliases"]
     else:
-        names = ["extraction"]
+        names = ["extraction-legacy"]
     if adjudicated:
-        names.append("adjudication")
+        names.append("adjudication-legacy")
     return [prompt_registry.by_name(name).location for name in names]
 
 
@@ -597,7 +613,10 @@ def set_manuscript_extraction(db: Database, manuscript: dict,
     row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
                  (manuscript["id"],))
     meta = json.loads((row["metadata"] if row else None) or "{}")
-    meta["extraction"] = {"enabled": bool(enabled)}
+    # Merged, not replaced: `extraction.runs` (the run and calibration
+    # record, §4.8) lives in the same object.
+    meta["extraction"] = {**(meta.get("extraction") or {}),
+                          "enabled": bool(enabled)}
     encoded = json.dumps(meta)
     db.update("manuscripts", manuscript["id"], {"metadata": encoded})
     manuscript["metadata"] = encoded
@@ -1230,3 +1249,657 @@ def extract_concepts(
         "prompt_files": _prompt_locations(edges_only, aliases_only, adjudicated),
         "adjudication_empty": adjudication_empty,
     }
+
+
+# ===================================================================
+# The redesigned pipeline (docs/extraction-redesign.md, ratified
+# 2026-10-25). Everything above this line is the old single-call path,
+# which `init`, the writeup close and the MCP tool still run until phase 6
+# of §9 retires it; `authorlm extract` runs what follows.
+#
+# One payload per SECTION (§4.1), five hashed blocks built
+# deterministically by `assemble` (§4.2): S law, G glossary, P
+# precedents, M summaries, E the section with its paragraph numbers. The
+# model answers in the candidate contract of §4.4 — every candidate
+# carries the verbatim span it was read from — and eight deterministic
+# gates, each a named skip count, stand between the reply and the
+# per-essay adjudicator (extraction_adjudicator.py, §4.5).
+# ===================================================================
+
+# §7, the knobs. `[extraction]` in config.toml overrides these; the four
+# in CALIBRATED are then overridden by the latest `extract calibrate`
+# run recorded on the manuscript (§4.6: thresholds move on measurement).
+KNOB_DEFAULTS: dict = {
+    "confidence_floor": 0.70,
+    "max_concepts_per_essay": 12,
+    "max_links_per_essay": 15,
+    "proposable_relations": list(DEFAULT_PROPOSABLE),
+    "precedent_jaccard": 0.72,      # loop.NEAR_DUPLICATE, unchanged
+    "precedents_nearest": 20,
+    "summaries": "prefer",          # prefer | require | ignore
+    "max_section_chars": 12000,
+    "thinking_budget": 0,
+    "run_cost_ceiling_usd": 20.0,
+    "adjudicator_prompt": "ask",    # ask | default
+}
+CALIBRATED = ("proposable_relations", "confidence_floor",
+              "max_concepts_per_essay", "max_links_per_essay")
+SUMMARY_MODES = ("prefer", "require", "ignore")
+
+
+def knobs(config: dict | None, db: Database | None = None,
+          manuscript: dict | None = None) -> dict:
+    """The effective `[extraction]` settings for one run. Model ids are
+    the owner's configuration, never constants here: `model` (section
+    calls; None means `[llm] model`), `adjudicator_model` (the default
+    answer to the run-time question, ruling §0.2) and
+    `adjudicator_choices` (the models that question offers)."""
+    section = (config or {}).get("extraction") or {}
+    out = dict(KNOB_DEFAULTS)
+    out.update({k: section[k] for k in KNOB_DEFAULTS if k in section})
+    out["model"] = section.get("model") or None
+    out["adjudicator_model"] = section.get("adjudicator_model") or None
+    out["adjudicator_choices"] = list(section.get("adjudicator_choices") or [])
+    if out["summaries"] not in SUMMARY_MODES:
+        raise ValueError(f"[extraction] summaries = '{out['summaries']}' — "
+                         f"one of {', '.join(SUMMARY_MODES)}")
+    out["calibrated_by"] = None
+    if db is not None and manuscript is not None:
+        latest = next((r for r in reversed(runs(db, manuscript))
+                       if r.get("kind") == "calibrate" and r.get("thresholds")),
+                      None)
+        if latest:
+            out.update({k: latest["thresholds"][k] for k in CALIBRATED
+                        if k in latest["thresholds"]})
+            out["calibrated_by"] = latest["id"]
+    return out
+
+
+# --------------------------------------------------- the run record (§4.8)
+
+def _extraction_meta(db: Database, manuscript: dict) -> dict:
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = json.loads((row["metadata"] if row else None) or "{}")
+    return meta.get("extraction") or {}
+
+
+def runs(db: Database, manuscript: dict) -> list[dict]:
+    """`manuscripts.metadata.extraction.runs`, oldest first: one entry per
+    native run (`kind: extract`) and per recorded calibration (`kind:
+    calibrate`, which also carries the thresholds it moved)."""
+    return list(_extraction_meta(db, manuscript).get("runs") or [])
+
+
+def new_run_id(kind: str) -> str:
+    """`extract-…` / `calibrate-…`: the tag a run's rows carry in metadata
+    and in `knowledge_proposals.source` (`extraction/<run>`)."""
+    from .db import new_id
+
+    return new_id(kind)
+
+
+def record_run(db: Database, manuscript: dict, entry: dict) -> None:
+    """Append one run entry, merged into the row's CURRENT metadata (the
+    Doc mapping, the watermark and the switch live beside it; see
+    `_set_extraction_watermark` on why the row is re-read)."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = json.loads((row["metadata"] if row else None) or "{}")
+    section = dict(meta.get("extraction") or {})
+    section["runs"] = [*(section.get("runs") or []), entry]
+    meta["extraction"] = section
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+
+
+# ------------------------------------------------------ the unit (§4.1)
+
+def _plain_heading(line: str | None) -> str | None:
+    if not line:
+        return None
+    return line.lstrip("#").strip().strip("*").strip() or None
+
+
+def extraction_units(text: str, max_chars: int,
+                     verse_file: bool = False) -> list[dict]:
+    """The file's heading sections — `summaries.sections_of`, the cut
+    §4.1 ratified — as extraction units, every paragraph carrying the
+    file-wide `[n]` that `summaries._numbered_paragraphs` prints. A
+    section of nothing but its heading is not a unit. A section longer
+    than `max_chars` splits at paragraph boundaries into parts; a single
+    paragraph longer than the cap stays whole (extraction never
+    truncates).
+
+        {section, sections, part, parts, heading, section_hash,
+         paragraphs: [(n, text)]}"""
+    from .summaries import sections_of
+
+    secs = sections_of(text, verse_file=verse_file)
+    units: list[dict] = []
+    for sec in secs:
+        if all(p["kind"] == "heading" for p in sec["paragraphs"]):
+            continue
+        parts: list[list[tuple[int, str]]] = [[]]
+        size = 0
+        for p in sec["paragraphs"]:
+            if parts[-1] and size + len(p["text"]) > max_chars:
+                parts.append([])
+                size = 0
+            parts[-1].append((p["ordinal"], p["text"]))
+            size += len(p["text"]) + 2
+        for i, part in enumerate(parts, 1):
+            units.append({"section": sec["section_ordinal"],
+                          "sections": len(secs), "part": i,
+                          "parts": len(parts), "heading": sec["heading"],
+                          "section_hash": sec["section_hash"],
+                          "paragraphs": part})
+    return units
+
+
+def unit_key(unit: dict) -> str:
+    """'3', or '3.2' for the second part of a split section — what
+    `--section` accepts beside the heading text."""
+    return (f"{unit['section']}" if unit["parts"] == 1
+            else f"{unit['section']}.{unit['part']}")
+
+
+def select_unit(units: list[dict], section: str | int) -> list[dict]:
+    """The unit(s) `--section` names: a key ('3', '3.2'), or the heading's
+    text (case-blind, markup ignored; exact first, then a unique
+    substring). Every part of a split section answers to its heading."""
+    wanted = str(section).strip()
+    by_key = [u for u in units if unit_key(u) == wanted
+              or (wanted.isdigit() and str(u["section"]) == wanted)]
+    if by_key:
+        return by_key
+    fold = (_plain_heading(wanted) or wanted).lower()
+    exact = [u for u in units
+             if (_plain_heading(u["heading"]) or "").lower() == fold]
+    if exact:
+        return exact
+    loose = [u for u in units
+             if fold in (_plain_heading(u["heading"]) or "").lower()]
+    headings = {u["section"] for u in loose}
+    if len(headings) == 1:
+        return loose
+    listing = "; ".join(f"{unit_key(u)} {_plain_heading(u['heading']) or '(preamble)'}"
+                        for u in units)
+    if not loose:
+        raise LookupError(f"no section matching '{section}' — {listing}")
+    raise LookupError(f"'{section}' matches {len(headings)} sections — "
+                      f"name one: {listing}")
+
+
+# ------------------------------------------------------- the blocks (§4.2)
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((text or "").encode()).hexdigest()
+
+
+def _block(label: str, body: str) -> str:
+    body = (body or "").strip()
+    return f"{label}\n{body or '(none)'}\n"
+
+
+SECTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction.md"
+
+
+def section_system(proposable: list[str] | tuple[str, ...] | None = None
+                   ) -> str:
+    """`prompts/extraction.md`, rendered: the kinds, and the relations this
+    run may propose (the calibrated set, or the §4.4 default)."""
+    relations = sorted(proposable if proposable is not None
+                       else DEFAULT_PROPOSABLE)
+    return (SECTION_PROMPT_PATH.read_text(encoding="utf-8")
+            .replace("<<VALID_KINDS>>", str(sorted(NODE_KINDS)))
+            .replace("<<PROPOSABLE_RELATIONS>>", str(relations)))
+
+
+def _law_block(db: Database, mid: str, rel: str, proposable) -> str:
+    """S: the extraction prompt, then the file's effective style law
+    (`styles.effective_style`) — the lexicon and protected terms are what
+    tell a term of art from an English word."""
+    from .styles import effective_style
+
+    elements = effective_style(db, mid, rel)
+    law = "\n".join(f"- [{e['aspect']}] {e['statement']}" for e in elements)
+    return (section_system(proposable) + "\n"
+            + _block(f"STYLE LAW for {rel} (ratified by the author)",
+                     law or "(no style law on record for this file)"))
+
+
+def glossary_nodes(db: Database, manuscript: dict, rel: str, text: str,
+                   exclude: set[str] | None = None) -> tuple[list[dict], list[dict]]:
+    """(nodes, settled edges) of the graph's slice for this file — the
+    `api.scoped_concepts(file=)` selection, with the FULL notes (the
+    compact projection previews them). `exclude` drops node ids (the
+    replay leaves an essay's own candidates out of its glossary)."""
+    from . import api
+    from .db import loads
+
+    try:
+        sliced = api.scoped_concepts(db, manuscript, file=rel, text=text)
+    except LookupError:
+        return [], []
+    names = {n["name"] for n in sliced.get("nodes", [])}
+    exclude = exclude or set()
+    nodes = [dict(r) for r in db.all(
+        "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired' ORDER BY name", (manuscript["id"],))
+        if r["name"] in names and r["id"] not in exclude]
+    ids = {n["id"] for n in nodes}
+    by_id = {n["id"]: n["name"] for n in nodes}
+    edges = [{"from": by_id[e["from_node"]], "relation": e["relation"],
+              "to": by_id[e["to_node"]], "status": e["status"]}
+             for e in db.all(
+                 "SELECT * FROM concept_edges WHERE manuscript_id = ? "
+                 "AND status NOT IN ('rejected', 'retired', 'inferred')",
+                 (manuscript["id"],))
+             if e["from_node"] in ids and e["to_node"] in ids]
+    for node in nodes:
+        node["_aliases"] = loads(node.get("aliases"), []) or []
+        node["_meta"] = loads(node.get("metadata"), {}) or {}
+    return nodes, edges
+
+
+def _glossary_block(nodes: list[dict], edges: list[dict]) -> str:
+    """G: name, kind, aliases, where introduced, the author's notes; an
+    extracted node the author has not confirmed says so — its notes are a
+    hypothesis, not a ratified definition."""
+    lines = []
+    for node in nodes:
+        also = (f" (also: {', '.join(sorted(node['_aliases']))})"
+                if node["_aliases"] else "")
+        where = (f" [introduced in {node['introduced_in']}]"
+                 if node.get("introduced_in") else "")
+        meta = node["_meta"]
+        pending = (" [unconfirmed]" if meta.get("origin") == "extracted"
+                   and not meta.get("confirmed") else "")
+        notes = (node.get("notes") or "").strip() or "(no notes)"
+        lines.append(f"- {node['name']} ({node['kind']}){also}{where}"
+                     f"{pending} — {notes}")
+    if edges:
+        lines.append("")
+        lines.append("Relations the author has settled between them:")
+        lines.extend(sorted(f"- {e['from']} —{e['relation']}→ {e['to']}"
+                            for e in edges))
+    return _block("G — GLOSSARY (the graph's slice for this essay)",
+                  "\n".join(lines) or "(no concepts recorded for this essay)")
+
+
+_REASON = " — reason: "
+_KIND_SUFFIX = re.compile(r"^(?P<name>.*) \((?P<kind>[a-z_]+)\)$")
+
+
+def rejection_reasons(db: Database, mid: str) -> dict[str, str]:
+    """name (lower-cased) → the author's latest stated reason for
+    rejecting it, from `concept_triage` rows: `metadata.explanation` when
+    present (§4.6), else the ' — reason: ' tail `record_triage` writes."""
+    from .db import loads
+
+    out: dict[str, str] = {}
+    for row in db.all(
+            "SELECT target, metadata FROM evidence WHERE manuscript_id = ? "
+            "AND evidence_type = 'concept_triage' AND signal = 'rejected' "
+            "ORDER BY created_at", (mid,)):
+        head, _, tail = row["target"].partition(_REASON)
+        reason = (loads(row["metadata"], {}) or {}).get("explanation") or tail
+        m = _KIND_SUFFIX.match(head)
+        name = (m.group("name") if m else head).strip()
+        if reason.strip():
+            out[name.lower()] = reason.strip()
+    return out
+
+
+_CAPITALISED = re.compile(r"[A-Z][\w’'-]+(?:[ \t]+[A-Z][\w’'-]+)*")
+
+
+def capitalised_terms(text: str) -> set[str]:
+    return set(_CAPITALISED.findall(text.replace("*", "")))
+
+
+def precedent_rows(db: Database, manuscript: dict, rel: str, text: str,
+                   nearest: int, exclude: set[str] | None = None
+                   ) -> list[dict]:
+    """Block P's rows (§4.2, §4.6 "whole, not windowed"): EVERY retired
+    extracted name of this essay — introduced here, retired from here, or
+    named in its text — then the `nearest` retired names elsewhere by
+    `loop.similarity` to the essay's capitalised terms. Computed per
+    essay, not per section, so the block is one cached prefix across the
+    essay's section calls (§6.2). `exclude` drops node ids."""
+    from .db import loads
+    from .loop import similarity
+
+    reasons = rejection_reasons(db, manuscript["id"])
+    exclude = exclude or set()
+    mine, others = [], []
+    for row in db.all(
+            "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+            "AND status = 'retired' ORDER BY name", (manuscript["id"],)):
+        meta = loads(row["metadata"], {}) or {}
+        if meta.get("origin") != "extracted" or row["id"] in exclude:
+            continue
+        entry = {"id": row["id"], "name": row["name"], "kind": row["kind"],
+                 "reason": reasons.get(row["name"].lower())}
+        retired_from = (meta.get("retired_from") or {}).get("introduced_in")
+        if (rel in (row["introduced_in"], retired_from)
+                or concept_pattern(row["name"]).search(text)):
+            mine.append(entry)
+        else:
+            others.append(entry)
+    terms = capitalised_terms(text)
+    scored = []
+    for entry in others:
+        score = max((similarity(entry["name"], t) for t in terms), default=0.0)
+        if score > 0:
+            scored.append((score, entry["name"].lower(), entry))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    near = [{**e, "nearest": round(s, 2)} for s, _n, e in scored[:nearest]]
+    return mine + near
+
+
+def _precedent_block(rows: list[dict], rel: str) -> str:
+    def line(e: dict) -> str:
+        why = f" — {e['reason']}" if e.get("reason") else ""
+        return f"- rejected: {e['name']} ({e['kind']}){why}"
+
+    mine = [e for e in rows if "nearest" not in e]
+    near = [e for e in rows if "nearest" in e]
+    body = [f"Rejected names of {rel} ({len(mine)}):"]
+    body += [line(e) for e in mine] or ["(none)"]
+    body += ["", f"Nearest rejected names elsewhere ({len(near)}):"]
+    body += [line(e) for e in near] or ["(none)"]
+    return _block("P — PRECEDENTS (the author's rejections; authoritative)",
+                  "\n".join(body))
+
+
+def _summary_block(db: Database, manuscript: dict, rel: str, text: str,
+                   mode: str) -> tuple[str, dict | None]:
+    """M (§4.3): the summary hierarchy's three levels for this essay,
+    from `summaries.for_unit` (PR nagarkar/authorllm#269). A missing level
+    prints as a labelled absence; a level whose hash no longer matches the
+    text prints STALE. Summaries are a candidate source and the
+    adjudicator's one-line context, never grounding."""
+    if mode == "ignore":
+        return (_block("M — SUMMARIES", "SUMMARIES: ignored "
+                       "([extraction] summaries = ignore)"), None)
+    from . import summaries
+
+    unit = summaries.for_unit(db, manuscript, rel, text=text)
+    lines: list[str] = []
+    essay = unit.get("essay")
+    if essay is None:
+        lines.append("SUMMARIES: none for essay")
+    else:
+        stale = (" — STALE: the essay changed since this was written; a "
+                 "candidate source only" if essay.get("stale") else "")
+        lines.append(f"ESSAY (source_hash {essay['source_hash']}){stale}:")
+        lines.append((essay.get("summary") or "").strip())
+        for key in ("introduces", "assumes", "promises"):
+            values = essay.get(key) or []
+            lines.append(f"{key.upper()}: {'; '.join(values) or '(none)'}")
+    lines.append("")
+    sections = unit.get("sections")
+    if sections is None:
+        lines.append("SUMMARIES: none for sections")
+    else:
+        for sec in sections:
+            lo, hi = sec["paragraphs"]
+            stale = (" — STALE: no summary of the current text"
+                     if sec.get("stale") else "")
+            lines.append(f"SECTION {sec['n']}: "
+                         f"{_plain_heading(sec['heading']) or '(preamble)'} "
+                         f"[{lo}]-[{hi}]{stale}")
+            if sec.get("summary"):
+                lines.append(sec["summary"].strip())
+            if sec.get("terms"):
+                lines.append(f"terms: {'; '.join(sec['terms'])}")
+    lines.append("")
+    paragraphs = unit.get("paragraphs")
+    if paragraphs is None:
+        lines.append("SUMMARIES: none for paragraphs")
+    else:
+        lines.append("PARAGRAPH GISTS:")
+        for p in paragraphs:
+            if p.get("kind") == "heading":
+                continue
+            if p.get("stale"):
+                lines.append(f"[{p['n']}] (STALE: no record of the current text)")
+                continue
+            terms = f" (terms: {'; '.join(p['terms'])})" if p.get("terms") else ""
+            lines.append(f"[{p['n']}] {p.get('gist') or ''}{terms}")
+    if mode == "require":
+        missing = [level for level in ("essay", "sections", "paragraphs")
+                   if unit.get(level) is None]
+        stale = [level for level, flag in (
+            ("essay", bool(essay and essay.get("stale"))),
+            ("sections", bool(unit.get("section_level_stale"))),
+            ("paragraphs", bool(unit.get("paragraph_level_stale")))) if flag]
+        if missing or stale:
+            raise ValueError(
+                f"[extraction] summaries = require, and {rel} has "
+                + "; ".join(filter(None, [
+                    f"no {', '.join(missing)} summaries" if missing else "",
+                    f"STALE {', '.join(stale)} summaries" if stale else ""]))
+                + " — build them ('summarize'), or set summaries = prefer.")
+    return (_block("M — SUMMARIES (context only: they may suggest a "
+                   "candidate, never ground one)", "\n".join(lines)), unit)
+
+
+def _section_block(rel: str, title: str, unit: dict) -> str:
+    """E: the section under extraction, headed by its essay and position,
+    each paragraph prefixed `[n]` exactly as `summaries._numbered_paragraphs`
+    numbers the file."""
+    body = "\n\n".join(f"[{n}] {p}" for n, p in unit["paragraphs"])
+    lo, hi = unit["paragraphs"][0][0], unit["paragraphs"][-1][0]
+    part = (f", part {unit['part']} of {unit['parts']}"
+            if unit["parts"] > 1 else "")
+    heading = _plain_heading(unit["heading"]) or "(preamble)"
+    return _block(f"E — THE SECTION — {rel} — “{title}” — section "
+                  f"{unit['section']} of {unit['sections']}{part}: {heading} "
+                  f"— paragraphs [{lo}]-[{hi}] — sha256 {_sha(body)}", body)
+
+
+@dataclass(frozen=True)
+class ExtractionPayload:
+    """The five blocks of one section call, in volatility order: S, G, P
+    and M are identical across the sections of one essay (one cached
+    prefix, §6.2); only E changes. Printable, hashed, and the same whether
+    the configured model or a subagent answers it (principle 6)."""
+    law: str            # S — prompt + the file's style law
+    glossary: str       # G — the graph's slice for this file
+    precedents: str     # P — the author's rejections, whole
+    summaries: str      # M — the summary hierarchy, or its absence
+    section: str        # E — the section, paragraphs numbered [n]
+    file: str
+    title: str
+    unit: dict
+    essay_sha: str
+    summary_unit: dict | None = None
+    precedent_list: tuple = ()
+
+    @property
+    def system(self) -> str:
+        return self.law
+
+    @property
+    def user(self) -> str:
+        return "\n".join((self.glossary, self.precedents, self.summaries,
+                          self.section))
+
+    @property
+    def blocks(self) -> list[tuple[str, str]]:
+        return [("S", self.law), ("G", self.glossary), ("P", self.precedents),
+                ("M", self.summaries), ("E", self.section)]
+
+    @property
+    def hashes(self) -> dict[str, str]:
+        return {name: _sha(text) for name, text in self.blocks}
+
+    @property
+    def paragraphs(self) -> dict[int, str]:
+        return dict(self.unit["paragraphs"])
+
+    @property
+    def label(self) -> str:
+        return f"{self.file} §{unit_key(self.unit)}"
+
+    def render(self, shared: bool = True) -> str:
+        """The printed form: every block with its size and hash, so a
+        reply can be traced to exactly what was seen. `shared=False`
+        prints E alone (the essay's other blocks were printed once)."""
+        out = []
+        for label, text in self.blocks:
+            if not shared and label != "E":
+                continue
+            out.append(f"\n───── block {label} — {len(text):,} chars — "
+                       f"sha256 {_sha(text)}\n")
+            out.append(text.rstrip("\n"))
+        return "\n".join(out) + "\n"
+
+
+def eligible_files(files: dict[str, str]) -> list[str]:
+    """Content files in reading order that extraction may read: not the
+    toc or a sidecar, not empty, not held by an active writeup."""
+    from .structure import is_structural, reading_order
+
+    order, _ = reading_order(files)
+    return [n for n in order if not is_structural(n)
+            and (files.get(n) or "").strip() and not is_in_flight(files[n])]
+
+
+def assemble_essay(db: Database, manuscript: dict, file: str,
+                   section: str | int | None = None, *,
+                   config: dict | None = None,
+                   files: dict[str, str] | None = None,
+                   units: list[dict] | None = None,
+                   knob: dict | None = None) -> list[ExtractionPayload]:
+    """Every section payload of one essay (or the `section` it names, or
+    the given `units`), with S, G, P and M rendered once and shared."""
+    from .lenses import _resolve, _title_of
+    from .structure import refuse_sidecar
+    from .summaries import verse_files_of
+
+    refuse_sidecar(Path(file).name)
+    if files is None:
+        files = read_manuscript_files(Path(manuscript["path"]))
+    rel = _resolve(files, file)
+    text = files[rel]
+    if is_in_flight(text):
+        raise ValueError(f"{rel} is held by an active writeup (its text on "
+                         "disk is the placeholder) — nothing to extract.")
+    knob = knob or knobs(config, db, manuscript)
+    if units is None:
+        units = extraction_units(text, int(knob["max_section_chars"]),
+                                 verse_file=rel in verse_files_of(manuscript))
+        if section is not None:
+            units = select_unit(units, section)
+    if not units:
+        return []
+    mid = manuscript["id"]
+    law = _law_block(db, mid, rel, knob["proposable_relations"])
+    nodes, edges = glossary_nodes(db, manuscript, rel, text)
+    glossary = _glossary_block(nodes, edges)
+    prec = precedent_rows(db, manuscript, rel, text,
+                          int(knob["precedents_nearest"]))
+    precedents = _precedent_block(prec, rel)
+    summaries_text, summary_unit = _summary_block(db, manuscript, rel, text,
+                                                  knob["summaries"])
+    title = _title_of(text) or rel
+    return [ExtractionPayload(
+        law=law, glossary=glossary, precedents=precedents,
+        summaries=summaries_text, section=_section_block(rel, title, unit),
+        file=rel, title=title, unit=unit, essay_sha=_sha(text),
+        summary_unit=summary_unit, precedent_list=tuple(prec))
+        for unit in units]
+
+
+def assemble(db: Database, manuscript: dict, file: str,
+             section: str | int | None = None, *,
+             config: dict | None = None,
+             files: dict[str, str] | None = None) -> ExtractionPayload:
+    """The payload of ONE section call (§4.2), deterministically, from
+    stored state and the manuscript on disk. `section` is a key ('3',
+    '3.2') or the heading's text; it may be omitted only when the file is
+    a single unit."""
+    payloads = assemble_essay(db, manuscript, file, section, config=config,
+                              files=files)
+    if not payloads:
+        raise LookupError(f"{file} has no section with prose to extract")
+    if len(payloads) > 1:
+        listing = "; ".join(
+            f"{unit_key(p.unit)} {_plain_heading(p.unit['heading']) or '(preamble)'}"
+            for p in payloads)
+        raise LookupError(f"{payloads[0].file} has {len(payloads)} units — "
+                          f"name one with --section: {listing}")
+    return payloads[0]
+
+
+def render_essay(payloads: list[ExtractionPayload]) -> str:
+    """`extract <file>` without `--native`: the shared blocks once, then
+    each section's E, every block hashed. No model call is made."""
+    if not payloads:
+        return ""
+    first = payloads[0]
+    head = (f"extract {first.file} — {len(payloads)} section call(s) — no "
+            "model call was made; run again with --native to make the calls.")
+    out = [head, first.render(shared=True)]
+    out += [p.render(shared=False) for p in payloads[1:]]
+    return "\n".join(out)
+
+
+def changed_units(db: Database, manuscript: dict, files: dict[str, str],
+                  max_chars: int) -> dict[str, list[dict]] | None:
+    """The incremental scope: per file, the units whose section is not
+    present (by `section_hash`) in the text at the extraction watermark.
+    None when there is no watermark to diff against (everything is in
+    scope); {} when nothing changed."""
+    from .summaries import sections_of
+
+    changed, _latest, old_files, _new = changed_files_since_extraction(
+        db, manuscript)
+    if changed is None or old_files is None:
+        return None if changed is None else {}
+    out: dict[str, list[dict]] = {}
+    for name in eligible_files(files):
+        if name not in changed:
+            continue
+        old = {s["section_hash"] for s in sections_of(old_files.get(name, ""))}
+        units = [u for u in extraction_units(files[name], max_chars)
+                 if u["section_hash"] not in old]
+        if units:
+            out[name] = units
+    return out
+
+
+# ------------------------------------------------------- the section calls
+
+def extraction_llm(config: dict, knob: dict | None = None) -> LLMClient:
+    """The section-call client: `[llm]`'s transport, `[extraction] model`
+    (falling back to `[llm] model`), purpose `extraction` in the usage
+    ledger."""
+    knob = knob or knobs(config)
+    client = LLMClient(config)
+    if knob.get("model"):
+        client.model = knob["model"]
+    client.purpose = "extraction"
+    return client
+
+
+def call_sections(llm: LLMClient, payloads: list[ExtractionPayload],
+                  knob: dict) -> list[dict | None]:
+    """One call per section payload, the blocks sent as `system` = S and
+    `user` = G P M E (so the shared prefix is identical across an essay's
+    calls). A reply that is not a JSON object is None: the section is
+    unanswered, never read as 'nothing found'."""
+    replies: list[dict | None] = []
+    for payload in payloads:
+        reply = llm.complete_json(payload.system, payload.user,
+                                  thinking_budget=knob.get("thinking_budget"))
+        replies.append(reply if isinstance(reply, dict) else None)
+    return replies
+

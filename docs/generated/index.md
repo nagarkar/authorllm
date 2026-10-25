@@ -524,6 +524,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._extraction_fixture`
+
+`authorlm/tests/_extraction_fixture.py`
+
+The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
+
 ## `tests._offline_prices`
 
 `authorlm/tests/_offline_prices.py`
@@ -595,6 +601,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_export_upload.py`
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_payload`
+
+`authorlm/tests/test_extraction_payload.py`
+
+The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
 ## `tests.test_filter_reply_json`
 
