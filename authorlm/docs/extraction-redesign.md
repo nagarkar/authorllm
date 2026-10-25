@@ -42,6 +42,12 @@ summary" ruling of 2026-09-06, which §4.3 honours), critique-pass-design.md
 7. **Summary dependency.** The pipeline runs without summaries (§4.3,
    labelled absence). Should the first full run wait for the sibling
    session's hierarchy, or run now and re-run when summaries land?
+8. **Retired names that recur.** §4.10 proposes that a retired name is
+   asked about once, with spans, when it clears the recurrence bar in text
+   written after its retirement; adopting lifts the ban, dismissing with a
+   reason closes it for good, and otherwise it is re-asked only when its
+   recurrence has doubled. Agreed, and should the 68 open revivals be
+   migrated under that rule?
 
 ## 1. The pipeline as found, end to end
 
@@ -482,6 +488,16 @@ remainder is logged `screened` and listable with `extract screened <file>`.
   per kind and per relation against the author's verdicts; a relation that
   falls under 60% leaves the proposable set until it recovers. Thresholds
   move on measurement, never by hand-edit of the prompt.
+- **Prompts improve by hand, measured by replay.** The pipeline never
+  edits a prompt. The owner edits `prompts/extraction.md` or
+  `prompts/adjudication.md` (shown by `authorlm prompts show`), then
+  `extract calibrate --replay` prints precision before and after the edit.
+  The skip-count tallies per essay are the prompt's bug reports: a rise in
+  `ungrounded` means the model paraphrases spans, a rise in `common_word`
+  means it names English words as terms. The span and endpoint gates
+  themselves are rules, not thresholds, and calibration never loosens
+  them; what improves is the model's compliance, which those tallies
+  measure.
 - **No belief seeding from extraction** (§0.3). Extraction evidence stays
   in `SYSTEM_EVIDENCE_TYPES` (`db.py:479-480`) with `supports_belief` NULL,
   and proposal-triage dismissals of machine proposals stop seeding
@@ -524,6 +540,25 @@ with the old module.
 - `extract --dry-run` runs everything and writes the would-be rows to a
   report, touching nothing.
 
+### 4.10 Retired names: a warning that yields to insistence
+
+Today a retired name recurring in changed text raises a `revival` proposal
+(`extraction.py:938-955`) from a single mention, on every collect: 68 sit
+open, 26 dismissed, 1 adopted. The ban on silent re-entry stays. The door
+changes:
+
+- The first time a retired name clears the recurrence bar in text written
+  after its retirement, one revival proposal is raised, with the spans.
+  Adopting it revives the node (`concepts.py:178-211`) and clears the ban.
+- Dismissing with a reason sets `metadata.retired_for_good = true`; the
+  name is never asked about again, only logged as `screened`.
+- Dismissing without that mark re-asks only when the name's recurrence
+  count has doubled since the last ask.
+
+Migration of the 68 open revivals under this rule: those below the bar in
+the current text are superseded (§5.3); those above it are re-asked once
+with spans. Owner question §0.8.
+
 ## 5. Migration
 
 Order matters; each step is a verb with a report, and nothing is deleted.
@@ -551,7 +586,7 @@ before any model call.
 | kind | open | action |
 |---|---|---|
 | note_update | 102 | state `superseded` (§0.4); the new run re-raises any that still clear the floor, now with a span |
-| revival | 68 | `superseded`; the new pipeline's revival path re-raises those that recur in text |
+| revival | 68 | §4.10: below the bar `superseded`, above it re-asked once with spans |
 | variant_of_retired | 4 | `superseded` |
 | alias | 3 | kept open: they carry a quoted sentence already |
 | vanished | 33 | kept open: raised by collect, not extraction |
