@@ -1,6 +1,6 @@
 # Extraction redesign — concepts and edges, same schema
 
-Status: DRAFT 2026-10-25, for ratification. No code changed. Nothing in the
+Status: RATIFIED 2026-10-25 (the eight rulings in §0, recorded verbatim in intent). Build not started. No code changed. Nothing in the
 live workspace was written; every number below came from read-only queries
 against `~/.authorlm/authorlm.db` (manuscript SMSTTD, `ms-b33871dc315c`,
 637 collected versions, latest 2026-10-25) and from reading the chapter
@@ -16,38 +16,38 @@ summary" ruling of 2026-09-06, which §4.3 honours), critique-pass-design.md
 §4 (essay summaries as the editor's working memory), domain-vocabulary.md
 (beliefs versus laws; nothing here writes `style_laws`).
 
-## 0. Decisions only the owner can make
+## 0. The owner's rulings (2026-10-25)
 
-1. **Reject reasons.** A concept rejection today needs no reason
-   (`triage.py:702-707` passes `reason` through as optional); 1 of 578
-   rejections carries one. The new precedent store (§4.6) is only as good as
-   those reasons. Should a reject on an extracted concept or edge require a
-   one-line reason, as a critique reject already does (`triage.py:654-659`)?
-2. **Adjudicator model.** The flash model adjudicating its own extraction
-   passed 813 of 1,825 candidates as "new" (45%) where the author's record
-   says one in three survives. §4.5 proposes a stronger model for the one
-   adjudication call per essay, costed in §6.3. Which model, and is the
-   per-run ceiling in the knobs table (§7) acceptable?
-3. **Belief seeding.** Extraction and proposal triage currently seed
-   `editorial_beliefs` (sources `triage-*`: 10 candidates, 7 retired). §4.6
-   proposes that extraction verdicts never seed a belief. Agreed?
-4. **The 102 open `note_update` proposals** (76 concepts). §5.3 proposes
-   marking them `superseded`, a new state value, rather than dismissing them,
-   so the firewall does not treat a machine clean-up as an author verdict.
-   Alternative: dismiss them with the migration as the reason. Which?
-5. **Edge inventory.** Should the 161 inferred edges be re-adjudicated by the
-   new pipeline (§5.2, recommended) or retired wholesale and re-extracted?
-6. **Scope of the first live run.** Whole book (34 units, §6.3) or one essay
-   (hierarchy.md, where the sample in §2.4 came from) first?
-7. **Summary dependency.** The pipeline runs without summaries (§4.3,
-   labelled absence). Should the first full run wait for the sibling
-   session's hierarchy, or run now and re-run when summaries land?
-8. **Retired names that recur.** §4.10 proposes that a retired name is
-   asked about once, with spans, when it clears the recurrence bar in text
-   written after its retirement; adopting lifts the ban, dismissing with a
-   reason closes it for good, and otherwise it is re-asked only when its
-   recurrence has doubled. Agreed, and should the 68 open revivals be
-   migrated under that rule?
+Asked one at a time and answered; the reasoning follows each.
+
+1. **Reject reasons: optional, prompted.** The triage surface asks for a
+   one-line reason on every reject of an extracted concept or edge and
+   lets the author skip it. Not required, unlike a critique reject.
+2. **Adjudicator model: Claude Opus-class, chosen at run time.** The
+   author's words: "let's do claude opus-class but have the system prompt
+   me for what model I want to use. I don't always have api credits so I
+   want the 2.5-pro or flash options, or even open ai." So
+   `[extraction] adjudicator_model` holds a default, and every `--native`
+   run that would adjudicate prints the choices (Opus-class, gemini-2.5-pro,
+   gemini-2.5-flash, an OpenAI model) with the run's estimated cost for
+   each, and asks before the first call. `--adjudicator <model>` answers
+   it non-interactively.
+3. **Belief seeding: stopped.** Extraction verdicts and dismissals of
+   machine proposals never seed `editorial_beliefs`. Only an author's
+   review explanation does. The 10 triage-seeded candidates are left as
+   they are.
+4. **The 102 open `note_update` proposals: `superseded`.** A new state
+   value, not an author verdict; the firewall ignores it, so the new
+   pipeline may re-raise any that still clear the floor, now with a span.
+5. **The 161 inferred edges: re-adjudicated** through the new gates and
+   adjudicator (§5.2). Survivors reach the author with spans; failures
+   retire with the revive path intact.
+6. **First live run: one essay**, hierarchy.md, where the §2.4 sample
+   came from. The author triages it before the book runs.
+7. **Summaries: wait.** The summary hierarchy (PR nagarkar/authorllm#268)
+   is wired into block M first; the first run carries summaries.
+8. **Retired names: §4.10 agreed, revivals migrated.** Below the bar
+   superseded; above it re-asked once with spans.
 
 ## 1. The pipeline as found, end to end
 
@@ -462,8 +462,8 @@ agreement (1.2 if the essay summary's `introduces` names it, capped at 1).
 
 ### 4.5 Adjudication, once per essay, on a stronger model
 
-The screen that exists is kept in shape and moved to a stronger model
-(owner decision §0.2). Input: every surviving candidate of the essay with
+The screen that exists is kept in shape and moved to a stronger model,
+chosen at run time with its cost shown (ruling §0.2). Input: every surviving candidate of the essay with
 its span, score and paragraph gist, block G, the whole precedent set for the
 essay, and the essay summary. Verdicts stay `new | improves | subsumed |
 drop` for concepts and `new | subsumed | drop | retype` for links, with
@@ -479,7 +479,7 @@ remainder is logged `screened` and listable with `extract screened <file>`.
 - **Precedents, whole.** Block P and the adjudicator read every rejection
   for the essay and the nearest 20 overall. The `LIMIT 40/20/30/20/15`
   windows go.
-- **Reasons.** With §0.1 agreed, `concept_triage` and `edge_triage` rows
+- **Reasons.** Prompted, optional (ruling §0.1): when given, `concept_triage` and `edge_triage` rows
   carry `metadata.explanation` verbatim (as `proposals._record_evidence`
   already does at `proposals.py:523-545`), and the precedent line reads
   "rejected: <name> — <reason>".
@@ -557,7 +557,7 @@ changes:
 
 Migration of the 68 open revivals under this rule: those below the bar in
 the current text are superseded (§5.3); those above it are re-asked once
-with spans. Owner question §0.8.
+with spans. Ruling §0.8.
 
 ## 5. Migration
 
@@ -602,9 +602,12 @@ concept and 168 edge verdicts are the calibration set.
    author cost, until §2.5 is met.
 2. `extract --full --dry-run` on a copy of the workspace, report reviewed
    by the owner: counts per essay, the proposable set, the cost.
-3. `extract --full --native` on the live workspace, one essay at a time in
-   reading order, each essay's triage batch offered before the next essay
-   runs (so a bad prompt is caught after one essay, not thirty-four).
+3. Block M wired to the summary hierarchy of PR nagarkar/authorllm#268
+   (ruling §0.7).
+4. `extract hierarchy.md --native` on the live workspace (ruling §0.6);
+   the author triages that one batch.
+5. `extract --full --native`, one essay at a time in reading order, each
+   essay's triage batch offered before the next essay runs.
 
 ### 5.6 Rollback
 
@@ -643,7 +646,8 @@ hashed per block for exactly this reason.
 | replay calibration | one extraction-equivalent | | | | ~$2 |
 
 A whole-book run on flash plus pro is under $3; under $15 with an
-Opus-class adjudicator. Incremental runs after a collect are one or two
+Opus-class adjudicator, which is the ruled default (§0.2); the run-time
+prompt shows these figures for the chosen scope before the first call. Incremental runs after a collect are one or two
 sections. For comparison, the usage ledger shows $2.49 spent on all API
 calls to date.
 
@@ -654,7 +658,8 @@ calls to date.
 | `[extraction] enabled` | config.toml | `false` until §5.5 step 1 passes | existing |
 | `[extraction] unit` | config.toml | `section` | `paragraph` and `essay` accepted for measurement runs |
 | `[extraction] model` | config.toml | `gemini/gemini-2.5-flash` | section calls |
-| `[extraction] adjudicator_model` | config.toml | `gemini/gemini-2.5-pro` | §0.2 |
+| `[extraction] adjudicator_model` | config.toml | an Opus-class Claude model | default only; ruling §0.2 |
+| `[extraction] adjudicator_prompt` | config.toml | `ask` | `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
 | `[extraction] confidence_floor` | config.toml | `0.70` | gate 8; re-measured by `calibrate` |
 | `[extraction] max_concepts_per_essay` | config.toml | `12` | reaches triage; the rest screened |
 | `[extraction] max_links_per_essay` | config.toml | `15` | same |
