@@ -432,12 +432,116 @@ order of today's.
 
 ## 6. Inputs: which consumer gets which level
 
-### 6.0 What each pass consumes today, every input, and whether it is the right one
+### 6.0 The processes: what each is for, when to use which, what it needs, what it lacks
 
-The four passes are assembled deterministically from stored state; this is
-the complete list of blocks each one sends, read from the assemblers. A
-"✓" is a block the pass receives; "–" means it does not. The last column is
-the critical assessment: what the pass's own job needs and whether it has it.
+AuthorLM has five model-driven processes that read the manuscript. They are
+not interchangeable; each exists for a different kind of question, and the
+inputs follow from the question.
+
+**Critique edit pass** (`critique run`, `passes.py`, `prompts/editor.md`).
+*Use it when an outside reader (a critic's document, a referee, the author's
+own notes) has said what is wrong with an essay and the author wants the
+essay revised.* It takes the critique's items and the author's intents, and
+proposes edits to one existing essay as diffs the author accepts or rejects
+one by one. It is the only process that rewrites existing prose at the
+paragraph level under direction.
+- *Needs, for that job:* the law it writes under (style guide, validated
+  beliefs), the work orders (intents), the author's definitions of the
+  concepts the essay uses, the author's verdicts earlier in the same pass,
+  the essay itself paragraph by paragraph, and enough of the rest of the
+  book to avoid re-explaining, pre-empting or contradicting it.
+- *Gets today:* all of that; "the rest of the book" is the before/after
+  essay summaries (the summaries of every essay earlier and later in the
+  reading order).
+- *Lacks:* a map of the essay it is editing. A 185-paragraph essay arrives as
+  a numbered list and the editor must reconstruct the argument before it can
+  tell a redundant paragraph from a load-bearing one. Also, when the essay
+  refers back to an earlier chapter ("as the Metaphysic showed"), it has only
+  that chapter's summary, not the passage pointed at. → SECTION_OUTLINE of
+  the target; REFERENCED_SECTIONS (ruling 4 applied here under ruling 10).
+
+**Beat loop** (`write start/plan/propose/accept`, `writing.py`,
+`prompts/beat-draft.md`). *Use it when an essay is to be written from a
+plan, or rewritten whole from a ratified plan.* It drafts one beat at a
+time, conditioned on the verbatim text accepted so far; the author accepts
+or rejects each beat. It is the only process that produces new prose.
+- *Needs:* style law, beliefs, intents, the ratified plan and brief, the
+  concepts the plan names with their definitions, the pinned original when
+  rewriting, the accepted text so far, the last verdict, and the book frame
+  (what is already established before this essay, what is still to come).
+- *Gets today:* all of that; the book frame is the before/after essay
+  summaries, gated fresh.
+- *Lacks:* little. The within-essay grain is already verbatim, so paragraph
+  records of this essay add nothing. For a rewrite, the pinned original's
+  section summaries would give the planner the original's structure with
+  provenance, where the DIGEST today is a model-written claim list.
+  → SECTION_OUTLINE of the pinned original, rewrites only.
+
+**Filters** (`filter run`, `filtering.py`, `_filters/*.md`,
+`prompts/filter-run.md`). *Use one when a concern is mechanical, author-
+ratified, and inside one essay: pronunciation tags, typography, a protected
+term, repeated phrasing, a transition rule.* A filter walks the essay unit
+by unit (sequential) or sees it whole (global) and emits edits the author
+triages. It never judges the argument; its jurisdiction is one essay and
+one rule.
+- *Needs:* the rule (its own prompt), the beliefs and intents that say which
+  changes matter, the concept slice and protected terms so it does not
+  rename a term of art, the dictionary or cast when the rule is about them,
+  its own prior runs on this file, the unit or the essay.
+- *Gets today:* all of that; the other essays' summaries only when the
+  filter declares `summaries = true`, ungated.
+- *Lacks:* for the few filters whose rule depends on where a unit sits in
+  the argument (repetition, transitions), the essay's own outline. For the
+  rest, nothing. → SECTION_OUTLINE, by front matter, for those filters only.
+  The neighbours' essay summaries are the wrong level for a per-unit pass
+  and stay opt-in.
+
+**Lenses** (`lens run`, `lenses.py`, `_lenses/*.md`). *Use one when the
+question is editorial judgment against a ratified concern, inside a chapter
+or across chapters: is this pitched to the audience, does the through-line
+hold, are cross-references right, do the premises a chapter leans on
+actually get supplied where it says.* A lens reports findings that quote the
+chapter verbatim; it does not edit. It runs on stable inputs only, so a
+finding stays valid until the text it quotes changes.
+- *Needs:* its own prompt and examples, the glossary with where each term
+  was introduced, the audience and scheme profiles, the reading order, and
+  the TEXT of any other chapter the concern needs, hashed.
+- *Gets today:* all of that; other chapters come in whole under `pointers`
+  and `neighbours`.
+- *Lacks:* a way to bring in only the passage of another chapter that a
+  backward reference points at, instead of the whole chapter (metaphysic.md
+  is 13,778 words). → REFERENCED_SECTIONS for consistency lenses (ruling 4).
+  Summaries never enter the payload; they only choose the text.
+
+**Extraction** (`extract`, `extraction.py`, `prompts/extraction.md`).
+*Use it to grow the concept graph: which terms are concepts, how they
+relate, what aliases the text declares.* Its output is proposals the author
+confirms or rejects; it never touches prose.
+- *Needs:* the text at a grain where an asserted relation can be quoted,
+  the known concepts so it links rather than re-extracts, the author's past
+  verdicts.
+- *Gets today:* raw changed heading sections, a list of known names, a
+  capped sample of verdicts. No summary of any level (§2).
+- *Lacks:* paragraph-level raw material with the asserting sentences kept:
+  definitions, relations, references. → PARAGRAPH_RECORDS, SECTION_OUTLINE
+  (§7; the extraction redesign, PR #267, owns the consumer).
+
+**Manifest reader load** (`manifest.py`, derived on every Doc push). *A
+report, not a pass: what does each essay assume that no earlier essay
+supplied.* Gets the prose INTRODUCES and ASSUMES lists today and parses
+them; lacks exact lists. → PARAGRAPH_RECORDS (mentions and references).
+
+Rule of thumb for choosing: **prose exists and an outside reader has
+findings → critique; prose does not exist or is to be rewritten whole →
+beat loop; a mechanical rule inside one essay → filter; a judgment against
+a ratified concern, possibly across chapters → lens; the graph → extraction.**
+
+The block-by-block inventory each assembler sends today, with file and line,
+follows, for anyone checking the claims above.
+
+#### 6.0.1 Block inventory, as assembled today
+
+A "✓" is a block the pass receives; "–" means it does not.
 
 | input | source | critique edit pass (`passes.build_context`, `render_user_message`) | beat loop (`writing.assemble`) | filter (`filtering.assemble`, `_frame_block`) | lens (`lenses.assemble`) |
 |---|---|---|---|---|---|
