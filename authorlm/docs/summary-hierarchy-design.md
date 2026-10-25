@@ -1,14 +1,15 @@
 # Summary hierarchy — paragraph, section and essay summaries, and what each consumer reads
 
-Status: DRAFT for ratification, 2026-10-25. Written from the owner's request of
-the same day ("a first class paragraph summary generation process … we still
-need section summaries … an essay summary which takes all of the section
-summaries … figure out what the correct inputs to filters and lenses ought to
-be … a deep dive is required"). No code changed, no summaries rebuilt, nothing
-written to the live workspace; every count below was read from the live DB
-read-only. A sibling session is redesigning concept and edge extraction
-(`extraction.py`); §7 is the summary side of the interface it will consume, and
-is a proposal until that design names what it wants.
+Status: RATIFIED by the owner 2026-10-25, after a ten-question grill (the
+rulings are §0) and the owner's confirmation that §6.0's reading of the
+processes matches theirs. Build not started; §11 is the plan. Written from
+the owner's request of the same day ("a first class paragraph summary
+generation process … we still need section summaries … an essay summary
+which takes all of the section summaries … figure out what the correct
+inputs to filters and lenses ought to be … a deep dive is required"). No
+code changed by this document; every count was read from the live DB
+read-only. The extraction redesign (`docs/extraction-redesign.md`, PR
+nagarkar/authorllm#267) consumes §7 through `summaries.for_unit`.
 
 Companion designs: critique-pass-design.md §4 (the current `essay_summaries`
 table), autoregressive-writing-design.md §12 (the 2026-08-27 finding that
@@ -17,11 +18,10 @@ filter-pass-design.md §9.1a (the `summaries` front-matter key),
 lens-architecture-design.md §1–2 (lenses never read summaries),
 track-a-two-step-extraction.md (why extraction is noisy).
 
-## 0. Rulings (grilled 2026-10-25) and what is still open
+## 0. Rulings (grilled 2026-10-25)
 
-Nine questions were put to the owner one at a time; the rulings below are
-binding for the build and the rest of the document is written to them. One
-question is still open at the end.
+Ten questions were put to the owner one at a time; the rulings below are
+binding for the build and the rest of the document is written to them.
 
 1. **Section = heading-delimited subunit** (`extraction._sections`, 265 in
    SMSTTD); paragraph = blank-line block; essay = toc unit (36). A file
