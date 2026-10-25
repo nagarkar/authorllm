@@ -698,6 +698,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
 
+## `tests.test_summary_hierarchy`
+
+`authorlm/tests/test_summary_hierarchy.py`
+
+Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
+
 ## `tests.test_toc_outside`
 
 `authorlm/tests/test_toc_outside.py`

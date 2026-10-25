@@ -350,7 +350,53 @@ CREATE TABLE IF NOT EXISTS essay_summaries (
                                   -- from stale counts and the edit pass's
                                   -- prerequisites, both of which are driven
                                   -- off the current toc reading order)
+    sections_hash TEXT NOT NULL DEFAULT '',  -- hash of the ordered section
+                                  -- hashes at build (summary-hierarchy
+                                  -- design §4.3): tells "my sections
+                                  -- changed" from "the text changed under
+                                  -- me"; '' only on a pre-hierarchy row,
+                                  -- replaced by the first full rebuild
+    model TEXT NOT NULL DEFAULT '',  -- which model wrote it (the ledger's key)
     UNIQUE (manuscript_id, file)
+);
+
+-- Summary hierarchy (docs/summary-hierarchy-design.md §4). Three tables,
+-- one fact each (§9): the levels differ in key, in what `status` means
+-- and in which carries `upstream_stale`. Freshness (missing / stale) is
+-- DERIVED at read time from the hashes (summaries.level_status); the only
+-- stored flags are `status` (current | orphaned: the row's text is no
+-- longer in the file, kept for the learning loop, pruned by a verb) and
+-- the essay row's `upstream_stale`.
+
+CREATE TABLE IF NOT EXISTS paragraph_summaries (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,
+    para_hash TEXT NOT NULL,      -- hash of the paragraph's normalized text:
+                                  -- the identity (§4.1); a moved paragraph
+                                  -- keeps its row, an edited one gets a new
+                                  -- row and orphans the old
+    ordinal INTEGER NOT NULL,     -- 1-based position at last build (display)
+    section_ordinal INTEGER NOT NULL,  -- the section it sat in at last build
+    kind TEXT NOT NULL,           -- heading | verse | dialogue | prose
+    record TEXT NOT NULL,         -- the JSON object of §3.2 (empty for a heading)
+    model TEXT NOT NULL,          -- which model wrote it ('' for a heading)
+    status TEXT NOT NULL DEFAULT 'current',  -- current | orphaned
+    UNIQUE (manuscript_id, file, para_hash)
+);
+
+CREATE TABLE IF NOT EXISTS section_summaries (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,
+    section_hash TEXT NOT NULL,   -- hash of the ordered para_hashes (§4.2)
+    section_ordinal INTEGER NOT NULL,  -- position at last build
+    heading TEXT,                 -- the heading line, NULL for a preamble
+    para_hashes TEXT NOT NULL,    -- JSON list, in order (a refrain appears twice)
+    summary TEXT NOT NULL,        -- POINT / MOVES / DEPENDS ON / LEAVES OPEN
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'current',  -- current | orphaned
+    UNIQUE (manuscript_id, file, section_hash)
 );
 
 CREATE TABLE IF NOT EXISTS critique_passes (
@@ -604,6 +650,12 @@ class Database:
                 "ALTER TABLE essay_summaries ADD COLUMN status TEXT "
                 "NOT NULL DEFAULT 'current'"
             )
+        for column in ("sections_hash", "model"):
+            if column not in self._columns("essay_summaries"):
+                self.conn.execute(
+                    f"ALTER TABLE essay_summaries ADD COLUMN {column} TEXT "
+                    "NOT NULL DEFAULT ''"
+                )
         if provenance_added:
             self._backfill_provenance()
         if "comment_id" in self._columns("doc_threads"):
