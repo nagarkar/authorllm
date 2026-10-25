@@ -2505,3 +2505,467 @@ def reviver(db: Database, manuscript: dict, files: dict[str, str],
         return (raise_revival(db, manuscript, candidate, node, due, run_id)
                 if due else None)
     return revive
+
+
+# ------------------------------------- verdicts, ceilings, writes (§4.5, §4.8)
+
+REACHES = ("new", "retype")      # the verdicts that reach the author
+
+
+def decide(passed: list[dict], verdicts: dict, knob: dict) -> None:
+    """Fold the adjudicator's verdicts into the candidates that passed the
+    gates, in place: each gets its final `signal` (the verdict), `gate`
+    "adjudicator" and the adjudicator's `reason`. Three verdicts are
+    narrowed by rule, the reason saying so: `new` for a name already in
+    the graph is `subsumed` (never a second node); `new` for a near-name
+    is `subsumed` with an alias proposal (§4.7); a `retype` to a relation
+    extraction may not propose is `not_proposable`."""
+    proposable = set(knob["proposable_relations"])
+    for c in passed:
+        v = verdicts.get(id(c))
+        if v is None:
+            c.update(signal="drop", gate="adjudicator",
+                     reason="not judged by the adjudicator")
+            continue
+        verdict, reason = v["verdict"], v["reason"]
+        if c["type"] == "concept":
+            if verdict == "new" and c.get("existing"):
+                verdict = "subsumed"
+                reason = (f"already in the graph as '{c['existing']}' — never "
+                          f"a second node ({reason})")
+            elif verdict == "new" and c.get("near"):
+                verdict = "subsumed"
+                c["alias_of"] = c["near"]
+                reason = (f"a near-name of '{c['near']}' (§4.7): an alias "
+                          f"proposal, never a node — {reason}")
+            if verdict in ("improves", "subsumed"):
+                c["target_name"] = (v["existing"] or c.get("existing")
+                                    or c.get("near"))
+            if verdict == "improves":
+                c["improved_notes"] = v["notes"] or c.get("notes") or ""
+        elif verdict == "retype":
+            relation = v["relation"]
+            if relation not in proposable:
+                c.update(signal="not_proposable", gate="adjudicator",
+                         reason=f"retyped to '{relation or '?'}', which "
+                                f"extraction may not propose — {reason}")
+                continue
+            if relation == c["relation"] and not v["reverse"]:
+                verdict = "new"
+            else:
+                c["retyped_from"] = candidate_label(c)
+                c["relation"] = relation
+                if v["reverse"]:
+                    c["from"], c["to"] = c["to"], c["from"]
+                    c["_ends"] = [c["_ends"][1], c["_ends"][0]]
+        c.update(signal=verdict, gate="adjudicator", reason=reason)
+
+
+def apply_ceilings(candidates: list[dict], knob: dict) -> None:
+    """§4.5: at most `max_concepts_per_essay` new concepts and
+    `max_links_per_essay` relations reach triage, ranked by score; the
+    rest are `screened` (listed by `extract screened`). A relation whose
+    new endpoint did not reach triage cannot be written and says why."""
+    max_c = int(knob["max_concepts_per_essay"])
+    max_l = int(knob["max_links_per_essay"])
+    concepts = sorted((c for c in candidates if c["type"] == "concept"
+                       and c.get("signal") == "new"),
+                      key=lambda c: c["score"], reverse=True)
+    for c in concepts[max_c:]:
+        c.update(signal="screened", gate="ceiling",
+                 reason=f"over the essay's ceiling of {max_c} concept(s), "
+                        f"ranked by score")
+    fresh = {c["name"].lower(): c for c in candidates
+             if c["type"] == "concept" and "existing" not in c}
+    links = [c for c in candidates if c["type"] == "link"
+             and c.get("signal") in REACHES]
+    for c in links:
+        for end in c["_ends"]:
+            if not end[0].startswith("new:"):
+                continue
+            endpoint = fresh.get(end[0][4:])
+            fate = endpoint.get("signal") if endpoint else None
+            if fate == "screened":
+                c.update(signal="screened", gate="ceiling",
+                         reason=f"its endpoint '{end[2]}' was screened by "
+                                "the ceiling")
+                break
+            if fate != "new":
+                c.update(signal="unknown_endpoint", gate="adjudicator",
+                         reason=f"its endpoint '{end[2]}' did not reach "
+                                f"triage ({fate})")
+                break
+    links = sorted((c for c in links if c.get("signal") in REACHES),
+                   key=lambda c: c["score"], reverse=True)
+    for c in links[max_l:]:
+        c.update(signal="screened", gate="ceiling",
+                 reason=f"over the essay's ceiling of {max_l} relation(s), "
+                        f"ranked by score")
+
+
+def append_edge_evidence(db: Database, edge_id: str, entry: dict) -> None:
+    """§4.8: `concept_edges.evidence` is the list of grounding spans, one
+    per run that (re-)found the edge, and `support` its length."""
+    from .db import loads
+
+    row = db.one("SELECT evidence FROM concept_edges WHERE id = ?", (edge_id,))
+    evidence = [e for e in (loads(row["evidence"], []) or [])
+                if isinstance(e, dict)] if row else []
+    if any(e.get("run") == entry["run"] for e in evidence):
+        return
+    evidence.append(entry)
+    db.update("concept_edges", edge_id, {"evidence": json.dumps(evidence),
+                                         "support": len(evidence)})
+
+
+def _span_entry(c: dict, run_id: str) -> dict:
+    return {"run": run_id, "file": c["file"], "section": c["section"],
+            "paragraph": next(iter(c["_cited"]), None), "span": c["span"]}
+
+
+def record_candidate(db: Database, mid: str, c: dict, run_id: str,
+                     model: str | None) -> None:
+    """One `extraction_adjudication` row per candidate verdict (§4.8), the
+    reason in metadata. System provenance, `supports_belief` NULL:
+    extraction never seeds a belief (ruling §0.3)."""
+    meta = {"run": run_id, "file": c["file"], "section": c["section"],
+            "unit": c["unit"], "type": c["type"], "gate": c.get("gate"),
+            "reason": c.get("reason"), "score": c.get("score"),
+            "confidence": c.get("confidence"), "why": c.get("why"),
+            "span": c["span"],
+            "adjudicator": model if c.get("gate") in ("adjudicator", "ceiling")
+            else None}
+    if c["type"] == "concept":
+        meta.update(name=c["name"], kind=c["kind"], notes=c.get("notes"),
+                    paragraphs=list(c["_cited"]))
+    else:
+        meta.update(**{"from": c["from"], "relation": c["relation"],
+                       "to": c["to"]},
+                    paragraph=next(iter(c["_cited"]), None))
+    for key in ("node_id", "edge_id", "proposal_id", "existing", "near",
+                "target_name", "retyped_from", "refound"):
+        if c.get(key):
+            meta[key] = c[key]
+    row = ko_fields("ev")
+    row.update(manuscript_id=mid, episode_id=None,
+               evidence_type="extraction_adjudication", signal=c["signal"],
+               target=candidate_label(c)[:200], supports_belief=None,
+               weight="low", metadata=json.dumps(meta))
+    db.insert("evidence", row)
+
+
+def _apply_alias(db: Database, manuscript: dict, c: dict, run_id: str) -> str:
+    """§4.7: the naming-ceremony rule, unchanged, with the sentence checked
+    against the paragraph the candidate cites, not the whole payload."""
+    mid = manuscript["id"]
+    paragraph = next(iter(c["_cited"].values()), None)
+    if paragraph is None or not span_in(c["sentence"], paragraph):
+        return "ungrounded"
+    c_node = get_concept(db, mid, c["canonical"])
+    if not c_node or c_node["status"] == "retired":
+        return "unknown_endpoint"
+    a_node = get_concept(db, mid, c["alias"])
+    if a_node is not None and a_node["id"] == c_node["id"]:
+        return "duplicate"
+    if a_node is not None and a_node["status"] == "retired":
+        _record_alias_retired_refused(db, mid, a_node, c_node, c["sentence"])
+        return "alias_retired_refused"
+    if a_node is not None:
+        _record_alias_fold_refused(db, mid, a_node, c_node, c["sentence"])
+        return "alias_fold_refused"
+    made = proposals.create(
+        db, mid, "alias", c_node["id"],
+        {"alias": c["alias"], "canonical": c_node["name"],
+         "sentence": c["sentence"], "location": c["file"],
+         "paragraph": next(iter(c["_cited"])), "alias_is_new": True},
+        source=f"extraction/{run_id}")
+    return "proposed" if made else "suppressed"
+
+
+def write_essay(db: Database, manuscript: dict, candidates: list[dict], *,
+                run_id: str, model: str | None, files: dict[str, str],
+                judged: bool) -> dict:
+    """The writes of one essay, in §4.8's shapes. New concepts are
+    unconfirmed extracted nodes with `metadata.extraction` = {run, file,
+    section, paragraphs, span, score, adjudicator, reason}; new relations
+    are inferred edges whose `evidence` lists their spans and whose
+    `support` counts them, with `metadata.extraction` = {score,
+    adjudicator, reason}; `improves` is a `note_update` and a near-name an
+    `alias` proposal, source `extraction/<run>`. Every concept and
+    relation candidate leaves its evidence row. With `judged` False (the
+    adjudicator could not be consulted) the candidates that passed the
+    gates are left unwritten and unrecorded, to be asked again."""
+    from .db import loads
+    from .structure import ordered_items
+
+    mid = manuscript["id"]
+    system = db.source("system")
+    ordered = ordered_items(files)
+    out = {"nodes": [], "edges": [], "proposals": 0, "refound": 0,
+           "aliases": {}}
+    for c in candidates:
+        if c["type"] != "concept" or c.get("signal") != "new":
+            continue
+        node = add_concept(db, mid, c["name"], kind=c["kind"],
+                           notes=c.get("notes"), source_id=system)
+        meta = {"origin": "extracted", "confirmed": False,
+                "extraction": {"run": run_id, "file": c["file"],
+                               "section": c["section"],
+                               "paragraphs": list(c["_cited"]),
+                               "span": c["span"], "score": c["score"],
+                               "adjudicator": model, "reason": c["reason"]}}
+        db.update("concept_nodes", node["id"],
+                  {"metadata": json.dumps(meta),
+                   "introduced_in": primary_location(ordered, node)})
+        c["node_id"] = node["id"]
+        out["nodes"].append(c["name"])
+    for c in candidates:
+        if c["type"] != "concept" or c.get("signal") not in ("improves",
+                                                              "subsumed"):
+            continue
+        target = get_concept(db, mid, c.get("target_name") or "")
+        if target is None or target["status"] == "retired":
+            continue
+        if c["signal"] == "subsumed" and c.get("alias_of"):
+            made = proposals.create(
+                db, mid, "alias", target["id"],
+                {"alias": c["name"], "canonical": target["name"],
+                 "sentence": c["span"], "location": c["file"],
+                 "paragraph": next(iter(c["_cited"]), None),
+                 "alias_is_new": True}, source=f"extraction/{run_id}")
+            if made:
+                c["proposal_id"] = made["id"]
+                out["proposals"] += 1
+            continue
+        if c["signal"] != "improves":
+            continue
+        blocked = _note_update_blocked(target["notes"], c["improved_notes"])
+        made = None if blocked else proposals.create(
+            db, mid, "note_update", target["id"],
+            {"name": target["name"], "current_note": target["notes"],
+             "proposed_note": c["improved_notes"],
+             "current_kind": target["kind"], "proposed_kind": target["kind"],
+             "span": c["span"], "file": c["file"],
+             "paragraphs": list(c["_cited"])}, source=f"extraction/{run_id}")
+        if made:
+            c["proposal_id"] = made["id"]
+            out["proposals"] += 1
+        else:
+            c["signal"] = "subsumed"
+            c["reason"] += ("; the materiality floor held it back "
+                            f"({blocked})" if blocked else
+                            "; an equivalent question is already on record")
+    for c in candidates:
+        if c["type"] != "link":
+            continue
+        if c.get("refound"):
+            append_edge_evidence(db, c["refound"], _span_entry(c, run_id))
+            c["edge_id"] = c["refound"]
+            out["refound"] += 1
+            continue
+        if c.get("signal") not in REACHES:
+            continue
+        src = get_concept(db, mid, c["from"])
+        dst = get_concept(db, mid, c["to"])
+        if src is None or dst is None:
+            c.update(signal="unknown_endpoint", gate="adjudicator",
+                     reason="an endpoint is no longer in the graph")
+            continue
+        existing = db.one(
+            "SELECT * FROM concept_edges WHERE manuscript_id = ? AND "
+            "from_node = ? AND to_node = ? AND relation = ?",
+            (mid, src["id"], dst["id"], c["relation"]))
+        if existing is not None and existing["status"] == "rejected":
+            c.update(signal="retired", reason="the author rejected this "
+                     "relation" + (" (after the retype)" if
+                                   c.get("retyped_from") else ""))
+            continue
+        if existing is not None and existing["status"] != "retired":
+            append_edge_evidence(db, existing["id"], _span_entry(c, run_id))
+            c.update(signal="duplicate", edge_id=existing["id"],
+                     refound=existing["id"],
+                     reason=f"re-found {candidate_label(c)} — its evidence "
+                            "gains this span")
+            out["refound"] += 1
+            continue
+        edge = link_concepts(db, mid, src["name"], c["relation"], dst["name"],
+                             status="inferred", source_id=system)
+        if edge["status"] == "retired":
+            db.update("concept_edges", edge["id"], {"status": "inferred"})
+        emeta = loads(edge.get("metadata"), {}) or {}
+        emeta["extraction"] = {"score": c["score"], "adjudicator": model,
+                               "reason": c["reason"]}
+        db.update("concept_edges", edge["id"], {"metadata": json.dumps(emeta)})
+        append_edge_evidence(db, edge["id"], _span_entry(c, run_id))
+        c["edge_id"] = edge["id"]
+        out["edges"].append(candidate_label(c))
+    for c in candidates:
+        if c["type"] == "alias":
+            fate = _apply_alias(db, manuscript, c, run_id)
+            out["aliases"][fate] = out["aliases"].get(fate, 0) + 1
+            if fate == "proposed":
+                out["proposals"] += 1
+            continue
+        if c.get("signal") is None and not judged:
+            continue
+        record_candidate(db, mid, c, run_id, model)
+    out["revivals"] = sum(1 for c in candidates if c.get("signal") == "retired"
+                          and c.get("proposal_id"))
+    out["proposals"] += out["revivals"]
+    return out
+
+
+def run_essay(db: Database, manuscript: dict, payloads: list[ExtractionPayload],
+              *, extract_llm, judge_llm, knob: dict, run_id: str,
+              files: dict[str, str]) -> dict:
+    """One essay, end to end: its section calls, the gates over the whole
+    batch, one adjudicator call, the ceilings, the writes."""
+    from . import extraction_adjudicator as adj
+
+    replies = call_sections(extract_llm, payloads, knob)
+    screening = screen_replies(db, manuscript, payloads, replies, knob,
+                               files=files,
+                               revive=reviver(db, manuscript, files, run_id))
+    passed = list(screening.survivors)
+    verdicts = (adj.adjudicate(judge_llm, payloads[0], passed,
+                               knob["proposable_relations"])
+                if passed else {})
+    judged = verdicts is not None
+    if judged:
+        decide(passed, verdicts, knob)
+        apply_ceilings(screening.candidates, knob)
+    with db.transaction():
+        written = write_essay(db, manuscript, screening.candidates,
+                              run_id=run_id, model=judge_llm.model,
+                              files=files, judged=judged)
+    signals: dict[str, int] = {}
+    for c in screening.candidates:
+        if c["type"] != "alias" and c.get("signal"):
+            signals[c["signal"]] = signals.get(c["signal"], 0) + 1
+    return {"file": payloads[0].file, "sections": len(payloads),
+            "answered": sum(1 for r in replies if r is not None),
+            "candidates": sum(1 for c in screening.candidates
+                              if c["type"] != "alias"),
+            "passed": len(passed), "judged": judged, "skips": screening.skips,
+            "signals": signals, "written": written,
+            "screening": screening}
+
+
+def spent(*clients) -> float | None:
+    """Estimated dollars the clients' live calls have cost so far
+    (`usage.estimate`, llmlm's prices); None when a model is unpriced."""
+    from . import usage
+
+    total = 0.0
+    for client in clients:
+        if not client.input_tokens and not client.output_tokens:
+            continue
+        value = usage.estimate(client.model, client.input_tokens,
+                               client.output_tokens, client.cache_read_tokens,
+                               client.cache_write_tokens)
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def run(db: Database, manuscript: dict, essays: list[tuple[str, list]], *,
+        extract_llm, judge_llm, knob: dict, run_id: str,
+        advance_watermark: bool) -> dict:
+    """A native run over `essays` [(file, payloads)], essay by essay in
+    the order given. Stops before an essay once the estimated spend has
+    passed `[extraction] run_cost_ceiling_usd`. The watermark advances
+    only on an incremental or full run that completed (`advance_watermark`
+    and nothing unanswered, unjudged or stopped). The run is recorded in
+    `manuscripts.metadata.extraction.runs`."""
+    from .db import now_iso
+
+    started = now_iso()
+    files = read_manuscript_files(Path(manuscript["path"]))
+    ceiling = float(knob["run_cost_ceiling_usd"])
+    reports: list[dict] = []
+    stopped = None
+    for i, (_name, payloads) in enumerate(essays):
+        so_far = spent(extract_llm, judge_llm)
+        if so_far is not None and so_far >= ceiling:
+            stopped = (f"stopped before {essays[i][0]}: estimated spend "
+                       f"${so_far:.2f} reached the ceiling ${ceiling:.2f}")
+            break
+        reports.append(run_essay(db, manuscript, payloads,
+                                 extract_llm=extract_llm, judge_llm=judge_llm,
+                                 knob=knob, run_id=run_id, files=files))
+    latest = db.one("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
+                    "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+    realized = scan_realizations(db, manuscript["id"], dict(latest)) \
+        if latest else []
+    incomplete = bool(stopped) or any(
+        r["answered"] < r["sections"] or not r["judged"] for r in reports)
+    if advance_watermark and not incomplete and latest:
+        _set_extraction_watermark(db, manuscript, latest["id"])
+    total = spent(extract_llm, judge_llm)
+    entry = {"id": run_id, "started": started, "kind": "extract",
+             "model": extract_llm.model, "adjudicator": judge_llm.model,
+             "units": sum(r["sections"] for r in reports),
+             "cost": round(total, 4) if total is not None else None,
+             "files": [r["file"] for r in reports],
+             "reached": {
+                 "concepts": sum(len(r["written"]["nodes"]) for r in reports),
+                 "relations": sum(len(r["written"]["edges"]) for r in reports),
+                 "proposals": sum(r["written"]["proposals"] for r in reports)},
+             "incomplete": incomplete}
+    record_run(db, manuscript, entry)
+    return {"run": entry, "essays": reports, "stopped": stopped,
+            "realized": len(realized)}
+
+
+def render_run(report: dict) -> str:
+    entry = report["run"]
+    lines = []
+    for r in report["essays"]:
+        verdicts = ", ".join(f"{k} {v}" for k, v in sorted(r["signals"].items())
+                             if k in ("new", "retype", "improves", "subsumed",
+                                      "drop", "screened"))
+        w = r["written"]
+        lines.append(
+            f"{r['file']}: {r['answered']}/{r['sections']} section call(s) "
+            f"answered; {r['passed']} of {r['candidates']} candidate(s) "
+            f"passed the gates"
+            + ("" if r["judged"] else " — the adjudicator could not be "
+               "consulted: nothing written for them")
+            + (f"; adjudicator: {verdicts}" if verdicts else ""))
+        lines.append(f"  reached triage: {len(w['nodes'])} concept(s), "
+                     f"{len(w['edges'])} relation(s), {w['proposals']} "
+                     f"proposal(s); {w['refound']} existing edge(s) re-found")
+        skips = ", ".join(f"{k} {v}" for k, v in r["skips"].items() if v)
+        if skips:
+            lines.append(f"  gates: {skips}")
+    if report["stopped"]:
+        lines.append(report["stopped"])
+    money = (f"≈ ${entry['cost']:.2f}" if entry["cost"] is not None
+             else "cost unknown (a model is unpriced)")
+    lines.append(f"run {entry['id']}: {entry['units']} section call(s) on "
+                 f"{entry['model']}, adjudicated by {entry['adjudicator']}, "
+                 f"{money}" + (" — INCOMPLETE, the watermark stays"
+                               if entry["incomplete"] else ""))
+    return "\n".join(lines)
+
+
+def screened(db: Database, manuscript: dict, file: str) -> list[dict]:
+    """`extract screened <file>`: the candidates the per-essay ceiling held
+    back, newest run first, best score first (§4.5)."""
+    from .db import loads
+
+    rows = []
+    for r in db.all(
+            "SELECT * FROM evidence WHERE manuscript_id = ? AND evidence_type "
+            "= 'extraction_adjudication' AND signal = 'screened' "
+            "ORDER BY created_at DESC", (manuscript["id"],)):
+        meta = loads(r["metadata"], {}) or {}
+        if meta.get("file") == file:
+            rows.append({"run": meta.get("run"), "label": r["target"],
+                         "score": meta.get("score"), "span": meta.get("span"),
+                         "unit": meta.get("unit"), "reason": meta.get("reason"),
+                         "created_at": r["created_at"]})
+    runs_order = list(dict.fromkeys(r["run"] for r in rows))
+    rows.sort(key=lambda r: (runs_order.index(r["run"]), -(r["score"] or 0)))
+    return rows

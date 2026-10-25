@@ -120,6 +120,12 @@ REGISTRY: list[Prompt] = [
            "aliases, each quoting the verbatim span it was read from "
            "(docs/extraction-redesign.md §4.4); blocks S/G/P/M/E around it",
            file="extraction.md", module="extraction.py:section_system"),
+    Prompt("adjudication", "extract --native; extract calibrate --replay",
+           "per essay: rule every candidate that survived the eight gates "
+           "new | improves | subsumed | drop (concepts) or new | subsumed | "
+           "drop | retype (relations), a reason per verdict (§4.5)",
+           file="adjudication.md",
+           module="extraction_adjudicator.py:adjudicator_system"),
     Prompt("extraction-legacy", "init; collect (auto); writeup close; "
            "MCP extract_concepts — the old path, until the redesign's "
            "phase 6 retires it",

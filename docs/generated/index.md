@@ -230,6 +230,12 @@ Single-file manuscript export — a transient, regenerate-on-demand artifact.
 
 LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
 
+## `authorlm.extraction_adjudicator`
+
+`authorlm/authorlm/extraction_adjudicator.py`
+
+The per-essay adjudicator (docs/extraction-redesign.md §4.5).
+
 ## `authorlm.filtering`
 
 `authorlm/authorlm/filtering.py`
@@ -601,6 +607,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_export_upload.py`
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_adjudicator`
+
+`authorlm/tests/test_extraction_adjudicator.py`
+
+The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
 
 ## `tests.test_extraction_gates`
 

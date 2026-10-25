@@ -6626,21 +6626,120 @@ def _extract_payloads(db: Database, manuscript: dict, args, knob: dict
     return out
 
 
+def _ask_adjudicator(intro: str):
+    """The run-time question of ruling §0.2, on the terminal: the offered
+    models with their estimated cost; a number, Enter for the default, or
+    q to stop before anything is spent."""
+    def ask(rows: list[dict]) -> str | None:
+        print(intro)
+        default = next((i for i, r in enumerate(rows, 1) if r["default"]), 1)
+        while True:
+            answer = input(f"Adjudicator [1-{len(rows)}, Enter = {default}, "
+                           "q = stop]: ").strip().lower()
+            if answer in ("q", "quit", "stop"):
+                return None
+            if not answer:
+                return rows[default - 1]["model"]
+            if answer.isdigit() and 1 <= int(answer) <= len(rows):
+                return rows[int(answer) - 1]["model"]
+            print(f"  one of 1-{len(rows)}, Enter, or q")
+    return ask
+
+
+def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
+                    candidates: int | None = None) -> str | None:
+    """Price the scope and settle the adjudicator before the first call."""
+    from . import extraction_adjudicator as adj
+
+    est = adj.estimate_scope(essays, knob["proposable_relations"], candidates)
+    rows = None
+    if not args.adjudicator and knob.get("adjudicator_prompt") != "default":
+        rows = adj.choice_rows(config, knob, est)
+    intro = adj.render_choices(
+        rows or [], est, llm.model,
+        adj.cost(llm.model, est["extraction_in"], est["extraction_out"])
+        if llm is not None else None) if rows else ""
+    try:
+        return adj.choose(config, knob, est, answer=args.adjudicator,
+                          ask=_ask_adjudicator(intro)
+                          if sys.stdin.isatty() else None)
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+
+
+def _extract_screened(db: Database, manuscript: dict, args) -> None:
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    if len(args.target) != 2:
+        sys.exit("usage: authorlm extract screened <file>")
+    files = read_manuscript_files(Path(manuscript["path"]))
+    try:
+        rel = _resolve(files, args.target[1])
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    rows = ex.screened(db, manuscript, rel)
+    if not rows:
+        print(f"Nothing screened for {rel} — every candidate that passed the "
+              "adjudicator reached triage.")
+        return
+    run = None
+    for row in rows:
+        if row["run"] != run:
+            run = row["run"]
+            print(ui.bold(f"run {run}"))
+        print(f"  {row['score']:.2f}  {row['label']}  [§{row['unit']}]")
+        print(ui.dim(f"        “{row['span']}” — {row['reason']}"))
+
+
+def _extract_runs(db: Database, manuscript: dict) -> None:
+    from . import extraction as ex
+
+    entries = ex.runs(db, manuscript)
+    if not entries:
+        print("No extraction runs recorded for this manuscript.")
+        return
+    for e in entries:
+        money = f"${e['cost']:.2f}" if e.get("cost") is not None else "cost ?"
+        if e.get("kind") == "calibrate":
+            print(f"{e['started'][:16]}  {e['id']}  calibrate  "
+                  f"{e.get('model')}  {e.get('units')} essay(s)  {money}  "
+                  f"thresholds: {json.dumps(e.get('thresholds'))}")
+        else:
+            reached = e.get("reached") or {}
+            print(f"{e['started'][:16]}  {e['id']}  extract  {e.get('model')}"
+                  f" → {e.get('adjudicator')}  {e.get('units')} section(s)  "
+                  f"{money}  reached {reached.get('concepts', 0)}c/"
+                  f"{reached.get('relations', 0)}r/"
+                  f"{reached.get('proposals', 0)}p"
+                  + ("  INCOMPLETE" if e.get("incomplete") else ""))
+
+
 def cmd_extract(args):
     """The redesigned extraction (docs/extraction-redesign.md §4.9). No
     flag: print the assembled payloads, no model call, nothing written
-    (the polarity of `filter run`). `--native`: make the calls."""
+    (the polarity of `filter run`). `--native`: make the calls. The first
+    word may instead be `screened <file>` or `runs`."""
     from . import extraction as ex
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
+    action = args.target[0] if args.target and args.target[0] in (
+        "screened", "runs") else None
+    if action == "screened":
+        _extract_screened(db, manuscript, args)
+        return
+    if action == "runs":
+        _extract_runs(db, manuscript)
+        return
     config = _load_config(args)
     try:
         knob = ex.knobs(config, db, manuscript)
     except ValueError as err:
         sys.exit(f"error: {err}")
-    essays = _extract_payloads(db, manuscript, args, knob)
     if not args.native:
+        essays = _extract_payloads(db, manuscript, args, knob)
         if not essays:
             print("Nothing to extract — no section changed since the last "
                   "extraction. Name a file, or use --full.")
@@ -6656,17 +6755,28 @@ def cmd_extract(args):
     if not llm.enabled:
         sys.exit("error: extraction needs an LLM — [llm] enabled = true in "
                  "config.toml, and the model's key in .env.")
+    version = collect_revision(db, manuscript, session_id=None,
+                               source="extract")
+    if version:
+        print(f"Collected revision v{version['version_no']}.")
+    essays = _extract_payloads(db, manuscript, args, knob)
     if not essays:
         print("Nothing to extract — no section changed since the last "
               "extraction. Name a file, or use --full.")
         return
-    for name, payloads in essays:
-        replies = ex.call_sections(llm, payloads, knob)
-        got = sum(1 for r in replies if r is not None)
-        print(f"{name}: {got}/{len(payloads)} section call(s) answered")
-        print(ex.render_screening(ex.screen_replies(db, manuscript, payloads,
-                                                    replies, knob)))
+    model = _extract_choose(config, knob, essays, llm, args)
+    if model is None:
+        print("Stopped before any call; nothing was spent.")
+        return
+    from . import extraction_adjudicator as adj
+
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm, judge_llm=judge,
+                    knob=knob, run_id=ex.new_run_id("extract"),
+                    advance_watermark=not args.target)
+    print(ex.render_run(report))
     _report_llm(llm)
+    _report_llm(judge)
 
 
 def cmd_guide(args):
@@ -9711,7 +9821,8 @@ def build_parser() -> argparse.ArgumentParser:
              "prints the per-section payloads; --native makes the calls")
     p.add_argument("target", nargs="*",
                    help="manuscript file(s); none = the sections changed "
-                        "since the last extraction")
+                        "since the last extraction. Or: 'screened <file>' "
+                        "(what the per-essay ceiling held back), 'runs'")
     p.add_argument("--section", default=None,
                    help="one section of the file: its number ('3', '3.2' "
                         "for a part) or its heading's text")
@@ -9719,6 +9830,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="every essay in reading order, not just changes")
     p.add_argument("--native", action="store_true",
                    help="make the model calls (needs [extraction] enabled)")
+    p.add_argument("--adjudicator", default=None, metavar="MODEL",
+                   help="the per-essay adjudicator's model for this run — "
+                        "answers the run-time question non-interactively "
+                        "(ruling §0.2)")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("guide", help="generate editorial guidance (or abstain)")
