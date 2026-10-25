@@ -230,6 +230,18 @@ Single-file manuscript export — a transient, regenerate-on-demand artifact.
 
 LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
 
+## `authorlm.extraction_adjudicator`
+
+`authorlm/authorlm/extraction_adjudicator.py`
+
+The per-essay adjudicator (docs/extraction-redesign.md §4.5).
+
+## `authorlm.extraction_calibration`
+
+`authorlm/authorlm/extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on tools/measure_adjudication.py.
+
 ## `authorlm.filtering`
 
 `authorlm/authorlm/filtering.py`
@@ -524,6 +536,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._extraction_fixture`
+
+`authorlm/tests/_extraction_fixture.py`
+
+The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
+
 ## `tests._offline_prices`
 
 `authorlm/tests/_offline_prices.py`
@@ -595,6 +613,30 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_export_upload.py`
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_adjudicator`
+
+`authorlm/tests/test_extraction_adjudicator.py`
+
+The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
+
+## `tests.test_extraction_calibration`
+
+`authorlm/tests/test_extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
+
+## `tests.test_extraction_gates`
+
+`authorlm/tests/test_extraction_gates.py`
+
+The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
+## `tests.test_extraction_payload`
+
+`authorlm/tests/test_extraction_payload.py`
+
+The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
 ## `tests.test_filter_reply_json`
 

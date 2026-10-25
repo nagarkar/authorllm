@@ -245,7 +245,7 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
     if summary.get("adjudication_empty"):
         print(ui.yellow(
             "note: adjudication ran but the model returned nothing usable "
-            "— worth checking authorlm/prompts/adjudication.md"))
+            "— worth checking authorlm/prompts/adjudication-legacy.md"))
     if summary.get("below_bar"):
         print(ui.dim(
             "Below the recurrence bar (single-context phrases, not "
@@ -6582,28 +6582,263 @@ def cmd_profile(args):
         sys.exit(str(err))
 
 
+def _extract_scope(db: Database, manuscript: dict, args, knob: dict
+                   ) -> list[tuple[str, list[dict] | None]]:
+    """(file, units) in reading order for `extract`: the named files
+    (all their units, or `--section`'s), the whole book with `--full`, else
+    the sections changed since the extraction watermark (everything when
+    there is none). `units` None means every unit of the file."""
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    if args.section and len(args.target or []) != 1:
+        sys.exit("error: --section names a section of ONE file: "
+                 "extract <file> --section <n|heading>")
+    if args.target:
+        try:
+            return [(_resolve(files, f), None) for f in args.target]
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+    if args.full:
+        return [(name, None) for name in ex.eligible_files(files)]
+    changed = ex.changed_units(db, manuscript, files,
+                               int(knob["max_section_chars"]))
+    if changed is None:
+        return [(name, None) for name in ex.eligible_files(files)]
+    return list(changed.items())
+
+
+def _extract_payloads(db: Database, manuscript: dict, args, knob: dict
+                      ) -> list[tuple[str, list]]:
+    from . import extraction as ex
+
+    out = []
+    for name, units in _extract_scope(db, manuscript, args, knob):
+        try:
+            payloads = ex.assemble_essay(db, manuscript, name, args.section,
+                                         units=units, knob=knob)
+        except (LookupError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        if payloads:
+            out.append((name, payloads))
+    return out
+
+
+def _ask_adjudicator(intro: str):
+    """The run-time question of ruling §0.2, on the terminal: the offered
+    models with their estimated cost; a number, Enter for the default, or
+    q to stop before anything is spent."""
+    def ask(rows: list[dict]) -> str | None:
+        print(intro)
+        default = next((i for i, r in enumerate(rows, 1) if r["default"]), 1)
+        while True:
+            answer = input(f"Adjudicator [1-{len(rows)}, Enter = {default}, "
+                           "q = stop]: ").strip().lower()
+            if answer in ("q", "quit", "stop"):
+                return None
+            if not answer:
+                return rows[default - 1]["model"]
+            if answer.isdigit() and 1 <= int(answer) <= len(rows):
+                return rows[int(answer) - 1]["model"]
+            print(f"  one of 1-{len(rows)}, Enter, or q")
+    return ask
+
+
+def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
+                    est: dict | None = None) -> str | None:
+    """Price the scope and settle the adjudicator before the first call.
+    `est` is given by the replay, which knows its candidate count."""
+    from . import extraction_adjudicator as adj
+
+    if est is None:
+        est = adj.estimate_scope(essays, knob["proposable_relations"])
+    rows = None
+    if not args.adjudicator and knob.get("adjudicator_prompt") != "default":
+        rows = adj.choice_rows(config, knob, est)
+    model = llm.model if llm is not None else None
+    intro = adj.render_choices(
+        rows, est, model,
+        adj.cost(model, est["extraction_in"], est["extraction_out"])
+        if model else None) if rows else ""
+    try:
+        return adj.choose(config, knob, est, answer=args.adjudicator,
+                          ask=_ask_adjudicator(intro)
+                          if sys.stdin.isatty() else None)
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+
+
+def _extract_screened(db: Database, manuscript: dict, args) -> None:
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    if len(args.target) != 2:
+        sys.exit("usage: authorlm extract screened <file>")
+    files = read_manuscript_files(Path(manuscript["path"]))
+    try:
+        rel = _resolve(files, args.target[1])
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    rows = ex.screened(db, manuscript, rel)
+    if not rows:
+        print(f"Nothing screened for {rel} — every candidate that passed the "
+              "adjudicator reached triage.")
+        return
+    run = None
+    for row in rows:
+        if row["run"] != run:
+            run = row["run"]
+            print(ui.bold(f"run {run}"))
+        print(f"  {row['score']:.2f}  {row['label']}  [§{row['unit']}]")
+        print(ui.dim(f"        “{row['span']}” — {row['reason']}"))
+
+
+def _extract_calibrate(db: Database, manuscript: dict, args,
+                       config: dict) -> None:
+    """`extract calibrate [--replay [file…]] [--gates-only]`
+    (docs/extraction-redesign.md §4.6, §6.1). Not behind the
+    [extraction] switch: calibration is what earns the switch (§5.5)."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+    from . import extraction_calibration as cal
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if args.replay is None:
+        print(cal.describe_current(db, manuscript, knob))
+        return
+    only = None
+    named = [*args.target[1:], *args.replay]
+    if named:
+        files = read_manuscript_files(Path(manuscript["path"]))
+        try:
+            only = [_resolve(files, f) for f in named]
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+    replay = cal.prepare(db, manuscript, knob, only=only)
+    if not replay.groups:
+        print("No historical candidates to replay.")
+        return
+    judge = None
+    if not args.gates_only:
+        model = _extract_choose(config, knob, [], None, args,
+                                est=cal.estimate(replay))
+        if model is None:
+            print("Stopped before any call; nothing was spent.")
+            return
+        judge = adj.adjudicator_llm(config, model)
+        if not judge.enabled:
+            sys.exit("error: the replay's adjudicator needs an LLM — [llm] "
+                     "enabled = true, and the model's key in .env (or "
+                     "--gates-only, which needs none).")
+        cal.adjudicate(replay, judge)
+    section = (config.get("extraction") or {})
+    configured = {k: section.get(k, ex.KNOB_DEFAULTS[k])
+                  for k in ("max_concepts_per_essay", "max_links_per_essay")}
+    report = cal.measure(replay, knob, configured)
+    print(cal.render(report))
+    if report["adjudicated"]:
+        entry = cal.record(db, manuscript, report, ex.new_run_id("calibrate"),
+                           ex.spent(judge))
+        print(f"Recorded as {entry['id']}: the next run reads these "
+              "thresholds.")
+        _report_llm(judge)
+
+
+def _extract_runs(db: Database, manuscript: dict) -> None:
+    from . import extraction as ex
+
+    entries = ex.runs(db, manuscript)
+    if not entries:
+        print("No extraction runs recorded for this manuscript.")
+        return
+    for e in entries:
+        money = f"${e['cost']:.2f}" if e.get("cost") is not None else "cost ?"
+        if e.get("kind") == "calibrate":
+            print(f"{e['started'][:16]}  {e['id']}  calibrate  "
+                  f"{e.get('model')}  {e.get('units')} essay(s)  {money}  "
+                  f"thresholds: {json.dumps(e.get('thresholds'))}")
+        else:
+            reached = e.get("reached") or {}
+            print(f"{e['started'][:16]}  {e['id']}  extract  {e.get('model')}"
+                  f" → {e.get('adjudicator')}  {e.get('units')} section(s)  "
+                  f"{money}  reached {reached.get('concepts', 0)}c/"
+                  f"{reached.get('relations', 0)}r/"
+                  f"{reached.get('proposals', 0)}p"
+                  + ("  INCOMPLETE" if e.get("incomplete") else ""))
+
+
 def cmd_extract(args):
+    """The redesigned extraction (docs/extraction-redesign.md §4.9). No
+    flag: print the assembled payloads, no model call, nothing written
+    (the polarity of `filter run`). `--native`: make the calls. The first
+    word may instead be `screened <file>` or `runs`."""
+    from . import extraction as ex
+
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    from .extraction import (DISABLED_MESSAGE, MANUSCRIPT_DISABLED_MESSAGE,
-                             extraction_enabled,
-                             manuscript_extraction_enabled)
-
-    if not extraction_enabled(_load_config(args)):
-        sys.exit("error: " + DISABLED_MESSAGE)
-    if not manuscript_extraction_enabled(db, manuscript):
-        sys.exit("error: " + MANUSCRIPT_DISABLED_MESSAGE)
-    llm = LLMClient(_load_config(args))
+    action = args.target[0] if args.target and args.target[0] in (
+        "screened", "runs", "calibrate") else None
+    if action == "calibrate":
+        _extract_calibrate(db, manuscript, args, _load_config(args))
+        return
+    if action == "screened":
+        _extract_screened(db, manuscript, args)
+        return
+    if action == "runs":
+        _extract_runs(db, manuscript)
+        return
+    config = _load_config(args)
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if not args.native:
+        essays = _extract_payloads(db, manuscript, args, knob)
+        if not essays:
+            print("Nothing to extract — no section changed since the last "
+                  "extraction. Name a file, or use --full.")
+            return
+        for _name, payloads in essays:
+            print(ex.render_essay(payloads))
+        return
+    if not ex.extraction_enabled(config):
+        sys.exit("error: " + ex.DISABLED_MESSAGE)
+    if not ex.manuscript_extraction_enabled(db, manuscript):
+        sys.exit("error: " + ex.MANUSCRIPT_DISABLED_MESSAGE)
+    llm = ex.extraction_llm(config, knob)
     if not llm.enabled:
-        sys.exit(
-            "error: extraction needs an LLM. Enable one in .authorlm/config.toml, e.g.\n"
-            "  [llm]\n"
-            "  enabled = true\n"
-            '  model = "gemini/gemini-2.5-flash"\n'
-            "(provider 'litellm' is the default; export GEMINI_API_KEY first)."
-        )
-    _run_extraction(db, manuscript, llm, files=args.files or None, full=args.full,
-                    edges_only=args.edges_only, aliases_only=args.aliases)
+        sys.exit("error: extraction needs an LLM — [llm] enabled = true in "
+                 "config.toml, and the model's key in .env.")
+    version = collect_revision(db, manuscript, session_id=None,
+                               source="extract")
+    if version:
+        print(f"Collected revision v{version['version_no']}.")
+    essays = _extract_payloads(db, manuscript, args, knob)
+    if not essays:
+        print("Nothing to extract — no section changed since the last "
+              "extraction. Name a file, or use --full.")
+        return
+    model = _extract_choose(config, knob, essays, llm, args)
+    if model is None:
+        print("Stopped before any call; nothing was spent.")
+        return
+    from . import extraction_adjudicator as adj
+
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm, judge_llm=judge,
+                    knob=knob, run_id=ex.new_run_id("extract"),
+                    advance_watermark=not args.target)
+    print(ex.render_run(report))
+    _report_llm(llm)
+    _report_llm(judge)
 
 
 def cmd_guide(args):
@@ -9642,21 +9877,34 @@ def build_parser() -> argparse.ArgumentParser:
                         "push/pull)")
     p.set_defaults(func=cmd_profile)
 
-    p = sub.add_parser("extract",
-                       help="LLM-extract concepts/links (incremental: only files "
-                            "changed since the last extraction)")
-    p.add_argument("files", nargs="*",
-                   help="restrict extraction to these manuscript files")
+    p = sub.add_parser(
+        "extract",
+        help="concept and edge extraction (docs/extraction-redesign.md): "
+             "prints the per-section payloads; --native makes the calls")
+    p.add_argument("target", nargs="*",
+                   help="manuscript file(s); none = the sections changed "
+                        "since the last extraction. Or: 'screened <file>' "
+                        "(what the per-essay ceiling held back), 'runs', "
+                        "'calibrate [--replay [file…]]'")
+    p.add_argument("--section", default=None,
+                   help="one section of the file: its number ('3', '3.2' "
+                        "for a part) or its heading's text")
     p.add_argument("--full", action="store_true",
-                   help="reprocess the whole manuscript, not just changes")
-    p.add_argument("--edges-only", action="store_true",
-                   help="extract only relationships among existing concepts "
-                        "(no new concepts; does not advance the watermark)")
-    p.add_argument("--aliases", action="store_true",
-                   help="sweep the full text for aliasing statements "
-                        "(naming/defining sentences) and file merge "
-                        "proposals; extracts nothing else and does not "
-                        "advance the watermark")
+                   help="every essay in reading order, not just changes")
+    p.add_argument("--native", action="store_true",
+                   help="make the model calls (needs [extraction] enabled)")
+    p.add_argument("--replay", nargs="*", default=None, metavar="FILE",
+                   help="with 'calibrate': replay the historical candidates "
+                        "(of these essays, or all) through the gates and the "
+                        "adjudicator against the author's verdicts, and "
+                        "move the thresholds")
+    p.add_argument("--gates-only", action="store_true",
+                   help="with 'calibrate --replay': the deterministic half "
+                        "alone — free, records nothing")
+    p.add_argument("--adjudicator", default=None, metavar="MODEL",
+                   help="the per-essay adjudicator's model for this run — "
+                        "answers the run-time question non-interactively "
+                        "(ruling §0.2)")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("guide", help="generate editorial guidance (or abstain)")

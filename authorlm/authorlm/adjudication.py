@@ -47,7 +47,9 @@ from .concepts import concept_pattern
 from .db import Database, ko_fields, loads
 from .loop import similarity
 
-ADJUDICATION_PROMPT_PATH = Path(__file__).parent / "prompts" / "adjudication.md"
+# The old path's prompt; the per-essay adjudicator of the redesign owns
+# `prompts/adjudication.md` (extraction_adjudicator.py). Retired in phase 6.
+ADJUDICATION_PROMPT_PATH = Path(__file__).parent / "prompts" / "adjudication-legacy.md"
 
 # How many neighbours and precedents accompany each candidate. Small on
 # purpose: the payload is candidates + context, not manuscript text, so
