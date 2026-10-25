@@ -602,6 +602,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
 
+## `tests.test_extraction_gates`
+
+`authorlm/tests/test_extraction_gates.py`
+
+The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
 ## `tests.test_extraction_payload`
 
 `authorlm/tests/test_extraction_payload.py`

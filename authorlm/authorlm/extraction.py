@@ -22,12 +22,13 @@ from pathlib import Path
 
 from . import adjudication, proposals, prompt_registry
 from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
-                       link_concepts, node_names, scan_realizations)
+                       link_concepts, mention_pattern, node_names,
+                       scan_realizations)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
 from .loop import similarity as _similarity
-from .revisions import read_manuscript_files
+from .revisions import _paragraphs, read_manuscript_files
 
 VALID_RELATIONS = {
     "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
@@ -1903,3 +1904,604 @@ def call_sections(llm: LLMClient, payloads: list[ExtractionPayload],
         replies.append(reply if isinstance(reply, dict) else None)
     return replies
 
+
+# ------------------------------------------- the candidate contract (§4.4)
+#
+# A reply carries, per candidate, where it was read: `paragraphs` (a
+# concept) or `paragraph` (a link, an alias), the verbatim `span`, a
+# `confidence` and a one-clause `why`. Parsing keeps every candidate
+# that has the fields the gates need; the gates then decide, each failure
+# a named skip count.
+
+# The skip counts, in gate order after the two contract failures. Each is
+# also the `signal` of the candidate's `extraction_adjudication` row.
+SKIPS = ("malformed", "unknown_endpoint", "ungrounded", "common_word",
+         "below_bar", "retired", "duplicate", "not_proposable", "below_floor")
+GATE = {"ungrounded": "1-2", "common_word": "3", "below_bar": "4",
+        "retired": "5", "duplicate": "6", "not_proposable": "7",
+        "below_floor": "8", "unknown_endpoint": "contract",
+        "malformed": "contract"}
+
+
+def _confidence(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ints(value) -> list[int]:
+    """Paragraph numbers as the model may write them: 7, "7", "[7]",
+    [7, 9]."""
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, str):
+        digits = value.strip().strip("[]").strip()
+        return [int(digits)] if digits.isdigit() else []
+    if isinstance(value, list):
+        return [n for item in value for n in _ints(item)]
+    return []
+
+
+def parse_reply(reply: dict | None, payload: ExtractionPayload
+                ) -> tuple[list[dict], int]:
+    """(candidates, malformed) from one section reply. Each candidate is
+    tagged with its file, section and unit, and carries `_cited`: the
+    text of the paragraphs it cites that ARE in the section the call saw
+    (a number outside it cites nothing, and gate 1 says so)."""
+    if not isinstance(reply, dict):
+        return [], 0
+    paragraphs = payload.paragraphs
+    base = {"file": payload.file,
+            "section": _plain_heading(payload.unit["heading"]),
+            "unit": unit_key(payload.unit)}
+    out: list[dict] = []
+    malformed = 0
+
+    def common(item: dict, cited: list[int]) -> dict:
+        return {**base, "span": str(item.get("span") or "").strip(),
+                "confidence": _confidence(item.get("confidence")),
+                "why": str(item.get("why") or "").strip()[:300],
+                "_cited": {n: paragraphs[n] for n in cited if n in paragraphs}}
+
+    for item in reply.get("concepts") or []:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            malformed += 1
+            continue
+        kind = item.get("kind", "concept")
+        if not (isinstance(kind, str) and kind in NODE_KINDS):
+            kind = "concept"
+        cited = _ints(item.get("paragraphs", item.get("paragraph")))
+        notes = str(item.get("notes") or "").strip()[:300] or None
+        out.append({"type": "concept", "name": str(item["name"]).strip()[:80],
+                    "kind": kind, "notes": notes, "paragraphs": cited,
+                    **common(item, cited)})
+    for item in reply.get("links") or []:
+        if not isinstance(item, dict):
+            malformed += 1
+            continue
+        src, relation, dst = link_endpoints(item)
+        if not src or not dst or not relation or src.lower() == dst.lower():
+            malformed += 1
+            continue
+        cited = _ints(item.get("paragraph", item.get("paragraphs")))[:1]
+        out.append({"type": "link", "from": src[:80], "relation": relation,
+                    "to": dst[:80], "paragraph": cited[0] if cited else None,
+                    **common(item, cited)})
+    for item in reply.get("aliases") or []:
+        if not isinstance(item, dict):
+            malformed += 1
+            continue
+        alias = str(item.get("alias") or "").strip()[:80]
+        canonical = str(item.get("canonical") or "").strip()[:80]
+        sentence = " ".join(str(item.get("sentence") or "").split())[:300]
+        if not alias or not canonical or not sentence:
+            malformed += 1
+            continue
+        cited = _ints(item.get("paragraph", item.get("paragraphs")))[:1]
+        out.append({"type": "alias", "alias": alias, "canonical": canonical,
+                    "sentence": sentence,
+                    "paragraph": cited[0] if cited else None,
+                    **common({**item, "span": sentence}, cited)})
+    return out, malformed
+
+
+def candidate_label(c: dict) -> str:
+    if c["type"] == "link":
+        return f"{c['from']} —{c['relation']}→ {c['to']}"
+    if c["type"] == "alias":
+        return f"{c['alias']} = {c['canonical']}"
+    return f"{c['name']} ({c['kind']})"
+
+
+# ------------------------------------------------------- the gates (§4.4)
+
+def _fold(text: str | None) -> str:
+    """Whitespace folded and emphasis markers dropped: the book's headings
+    are bold, and a model quoting `**Rankings**` as `Rankings` has still
+    quoted the text. Nothing else is forgiven — not a word, not a comma."""
+    return " ".join((text or "").replace("*", "").split())
+
+
+def span_in(span: str, paragraph: str) -> bool:
+    """Gate 1: the span occurs verbatim in the paragraph."""
+    folded = _fold(span)
+    return bool(folded) and folded in _fold(paragraph)
+
+
+def names_in(names: list[str], paragraph: str) -> bool:
+    return any(concept_pattern(n).search(paragraph) for n in names if n)
+
+
+def _sentence_initial(text: str, at: int) -> bool:
+    i = at - 1
+    while i >= 0 and text[i] in " \t*_#>\"'“‘([":
+        i -= 1
+    return i < 0 or text[i] in ".!?\n"
+
+
+def is_term_of_art(name: str, files: dict[str, str]) -> bool:
+    """Gate 3: a single capitalised word must occur capitalised somewhere
+    a sentence does NOT start (`mention_pattern`, case kept). A name that
+    is only ever capitalised by its position is an English word, not a
+    term — the "Experience" failure of §2.4 #12. Multi-word and lowercase
+    names pass: `mention_pattern` keeps their tolerant match."""
+    if " " in name.strip() or not name[:1].isupper():
+        return True
+    pattern = mention_pattern(name)
+    return any(not _sentence_initial(text, m.start())
+               for text in files.values() for m in pattern.finditer(text))
+
+
+_DEFINES_AFTER = re.compile(
+    r"^[^.;:]{0,30}?\b(?:is|are|was|were|means|mean|names|denotes|refers "
+    r"to|is called|we call|ye call)\b")
+_DEFINES_BEFORE = re.compile(r"\b(?:call|calls|called|name|names|named)\b"
+                             r"[^.;:]{0,30}$")
+
+
+def grounding_strength(span: str, name: str, paragraph: str = "") -> float:
+    """§4.4's grounding term: 1.0 when the span is a heading or
+    definition-shaped about `name` ("X is …", "we call it X"), 0.7
+    otherwise."""
+    folded = _fold(span)
+    if paragraph.lstrip().startswith("#") or folded.startswith("#"):
+        return 1.0
+    m = concept_pattern(name).search(folded) if name else None
+    if m and (_DEFINES_AFTER.search(folded[m.end():])
+              or _DEFINES_BEFORE.search(folded[:m.start()])):
+        return 1.0
+    return 0.7
+
+
+@dataclass
+class GateContext:
+    """What the gates read, gathered once per essay. A live run builds it
+    from the graph (`gate_context`); the replay builds its own, with the
+    candidates under measurement left out of every list."""
+    files: dict[str, str]              # the text recurrence and gate 3 read
+    known: dict[str, dict]             # lower name or alias → live node
+    retired: dict[str, dict]           # lower name → retired node (banned)
+    edges: dict[tuple[str, str], list[dict]]   # (from id, to id) → live edges
+    rejected: set[tuple[str, str, str]]        # (from id, relation, to id)
+    rejected_names: list[str]          # retired extracted names (score)
+    introduces: set[str]               # the essay summary's INTRODUCES, lower
+    terms: dict[tuple[str, int], set[str]]     # (file, [n]) → summary terms
+
+
+def gate_context(db: Database, manuscript: dict, files: dict[str, str],
+                 summary_units: dict[str, dict | None] | None = None
+                 ) -> GateContext:
+    from .db import loads
+
+    mid = manuscript["id"]
+    live = [dict(r) for r in db.all(
+        "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+        "AND status != 'retired'", (mid,))]
+    known: dict[str, dict] = {}
+    for node in live:                       # aliases first: a name wins
+        for alias in loads(node.get("aliases"), []) or []:
+            known.setdefault(alias.lower(), node)
+    for node in live:
+        known[node["name"].lower()] = node
+    retired: dict[str, dict] = {}
+    rejected_names: list[str] = []
+    for row in db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+                      "AND status = 'retired'", (mid,)):
+        if row["name"].lower() not in known:
+            retired[row["name"].lower()] = dict(row)
+        if (loads(row["metadata"], {}) or {}).get("origin") == "extracted":
+            rejected_names.append(row["name"])
+    edges: dict[tuple[str, str], list[dict]] = {}
+    rejected: set[tuple[str, str, str]] = set()
+    for e in db.all("SELECT * FROM concept_edges WHERE manuscript_id = ? "
+                    "AND status != 'retired'", (mid,)):
+        if e["status"] == "rejected":
+            rejected.add((e["from_node"], e["relation"], e["to_node"]))
+        else:
+            edges.setdefault((e["from_node"], e["to_node"]), []).append(dict(e))
+    introduces: set[str] = set()
+    terms: dict[tuple[str, int], set[str]] = {}
+    for file, unit in (summary_units or {}).items():
+        if not unit:
+            continue
+        essay = unit.get("essay") or {}
+        introduces |= {t.lower() for t in essay.get("introduces") or []}
+        for p in unit.get("paragraphs") or []:
+            terms[(file, p["n"])] = {t.lower() for t in p.get("terms") or []}
+    return GateContext(files=files, known=known, retired=retired, edges=edges,
+                       rejected=rejected, rejected_names=rejected_names,
+                       introduces=introduces, terms=terms)
+
+
+def score(c: dict, ctx: GateContext, knob: dict) -> float:
+    """§4.4: confidence × grounding strength × precedent factor × summary
+    agreement, capped at 1. A replayed candidate has no confidence and
+    scores as if it were 1.0. For a link the precedent factor halves the
+    score when the author has rejected a relation on the same pair."""
+    from .loop import similarity
+
+    confidence = 1.0 if c.get("confidence") is None else c["confidence"]
+    paragraph = next(iter(c["_cited"].values()), "")
+    if c["type"] == "concept":
+        strength = grounding_strength(c["span"], c["name"], paragraph)
+        near = any(similarity(c["name"], r) >= float(knob["precedent_jaccard"])
+                   for r in ctx.rejected_names)
+        agree = 1.2 if c["name"].lower() in ctx.introduces else 1.0
+    else:
+        strength = grounding_strength(c["span"], c["from"], paragraph)
+        a, b = c["_ends"][0][0], c["_ends"][1][0]
+        near = any(r[0] in (a, b) and r[2] in (a, b) for r in ctx.rejected)
+        agree = 1.0
+    return round(min(1.0, confidence * strength * (0.5 if near else 1.0)
+                     * agree), 4)
+
+
+@dataclass
+class Screening:
+    """The gates' verdict on one essay's batch. Every candidate is in
+    `candidates`; one that failed carries `signal` (its skip count),
+    `gate` and `reason`; a survivor carries `score` and no signal."""
+    candidates: list[dict]
+    skips: dict[str, int]
+
+    @property
+    def survivors(self) -> list[dict]:
+        return [c for c in self.candidates
+                if c["type"] != "alias" and c.get("signal") is None]
+
+
+def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
+           revive=None, malformed: int = 0) -> Screening:
+    """Gates 1-8 over one essay's candidates, in order, each failure
+    counted under its name (§4.4). Pure: nothing is written. `revive`,
+    when given, is called with (candidate, retired node) at gate 5 and may
+    raise the one revival proposal §4.10 allows; the replay passes None.
+
+    Concepts are screened first, so a link may end on a concept candidate
+    of the same batch that survived; a link whose endpoint is neither a
+    live concept nor such a survivor fails as `unknown_endpoint`."""
+    import difflib
+
+    from .loop import similarity
+
+    skips = {name: 0 for name in SKIPS}
+    skips["malformed"] = malformed
+    proposable = set(knob["proposable_relations"])
+    floor = float(knob["confidence_floor"])
+    jaccard = float(knob["precedent_jaccard"])
+
+    def fail(c: dict, signal: str, reason: str) -> None:
+        c.update(signal=signal, gate=GATE[signal], reason=reason)
+        skips[signal] += 1
+
+    concepts = [c for c in candidates if c["type"] == "concept"]
+    links = [c for c in candidates if c["type"] == "link"]
+
+    for c in concepts:
+        files = c.get("_files") or ctx.files
+        cited = c["_cited"]
+        if not cited:
+            fail(c, "ungrounded", "cites no paragraph of the section")
+            continue
+        if not any(span_in(c["span"], p) for p in cited.values()):
+            fail(c, "ungrounded", "the span is not in its cited paragraph")
+            continue
+        node = ctx.known.get(c["name"].lower())
+        names = node_names(node) if node else [c["name"]]
+        in_terms = any(c["name"].lower() in ctx.terms.get((c["file"], n), ())
+                       for n in cited)
+        if not (any(names_in(names, p) for p in cited.values()) or in_terms):
+            fail(c, "ungrounded", "the name is not in its cited paragraph")
+            continue
+        if node is not None:
+            # Already in the graph: never a new node — the adjudicator's
+            # improves / subsumed question (§4.5).
+            c.update(existing=node["name"], existing_id=node["id"])
+            c["score"] = score(c, ctx, knob)
+            continue
+        if not is_term_of_art(c["name"], files):
+            fail(c, "common_word", f"'{c['name']}' is capitalised only where "
+                 "a sentence starts — an English word, not a term")
+            continue
+        if c["kind"] in RECURRENCE_GATED_KINDS:
+            admitted, stats = passes_recurrence_bar(files, [c["name"]])
+            if not admitted:
+                fail(c, "below_bar", f"{stats['contexts']} context(s), "
+                     f"{stats['sections']} section(s), {stats['files']} "
+                     "file(s) — the bar is two contexts in two sections")
+                continue
+        retired = ctx.retired.get(c["name"].lower())
+        if retired is not None:
+            reason = "the author retired this name"
+            proposal = revive(c, retired) if revive else None
+            if proposal:
+                c["proposal_id"] = proposal["id"]
+                reason += ("; it recurs in text written since — the one "
+                           "revival proposal §4.10 allows is raised")
+            fail(c, "retired", reason)
+            continue
+        near = difflib.get_close_matches(c["name"].lower(), list(ctx.retired),
+                                         n=1, cutoff=0.8)
+        if near:
+            fail(c, "retired", "a near-miss of the retired name "
+                 f"'{ctx.retired[near[0]]['name']}'")
+            continue
+        # §4.7: a name within the firewall's distance of a live concept is a
+        # subsumption question for the adjudicator, never a new node.
+        best = max(((similarity(c["name"], k), node) for k, node in
+                    ctx.known.items()), key=lambda s: s[0], default=(0.0, None))
+        if best[1] is not None and best[0] >= jaccard:
+            c["near"] = best[1]["name"]
+        c["score"] = score(c, ctx, knob)
+
+    alive = [c for c in concepts if c.get("signal") is None]
+    by_name: dict[str, list[dict]] = {}
+    for c in alive:
+        by_name.setdefault(c["name"].lower(), []).append(c)
+    for group in by_name.values():
+        group.sort(key=lambda c: (c["score"], c.get("confidence") or 0),
+                   reverse=True)
+        for c in group[1:]:
+            fail(c, "duplicate", f"proposed again in §{group[0]['unit']} — "
+                 "folded into the stronger")
+    for c in concepts:
+        if (c.get("signal") is None and c.get("confidence") is not None
+                and c["confidence"] < floor):
+            fail(c, "below_floor", f"confidence {c['confidence']:.2f} under "
+                 f"the floor {floor:.2f}")
+
+    batch = {c["name"].lower(): c for c in concepts
+             if c.get("signal") is None and "existing" not in c}
+    for c in links:
+        ends = []
+        for side in ("from", "to"):
+            node = ctx.known.get(c[side].lower())
+            if node is not None:
+                ends.append((node["id"], node_names(node), node["name"]))
+            elif c[side].lower() in batch:
+                fresh = batch[c[side].lower()]
+                ends.append((f"new:{fresh['name'].lower()}", [fresh["name"]],
+                             fresh["name"]))
+            else:
+                ends.append(None)
+        missing = [c[s] for s, e in zip(("from", "to"), ends) if e is None]
+        if missing:
+            fail(c, "unknown_endpoint", f"'{missing[0]}' is neither a live "
+                 "concept nor a surviving candidate")
+            continue
+        c["_ends"] = ends
+        c["from"], c["to"] = ends[0][2], ends[1][2]
+        paragraph = next(iter(c["_cited"].values()), None)
+        if paragraph is None:
+            fail(c, "ungrounded", "cites no paragraph of the section")
+            continue
+        if not span_in(c["span"], paragraph):
+            fail(c, "ungrounded", "the span is not in its cited paragraph")
+            continue
+        if not (names_in(ends[0][1], paragraph)
+                and names_in(ends[1][1], paragraph)):
+            fail(c, "ungrounded", "the cited paragraph does not name both "
+                 "endpoints")
+            continue
+        if (ends[0][0], c["relation"], ends[1][0]) in ctx.rejected:
+            fail(c, "retired", "the author rejected this relation")
+            continue
+        c["score"] = score(c, ctx, knob)
+
+    def edge_label(e: dict) -> str:
+        names = {c["_ends"][0][0]: c["_ends"][0][2],
+                 c["_ends"][1][0]: c["_ends"][1][2]}
+        return (f"{names.get(e['from_node'], '?')} —{e['relation']}→ "
+                f"{names.get(e['to_node'], '?')}")
+
+    alive_links = [c for c in links if c.get("signal") is None]
+    for c in alive_links:
+        a, b = c["_ends"][0][0], c["_ends"][1][0]
+        same = [e for e in ctx.edges.get((a, b), [])
+                if e["relation"] == c["relation"]]
+        pair = ctx.edges.get((a, b), []) + ctx.edges.get((b, a), [])
+        if same:
+            c["refound"] = same[0]["id"]
+            fail(c, "duplicate", f"re-found {edge_label(same[0])} — its "
+                 "evidence gains this span")
+        elif pair:
+            fail(c, "duplicate", f"folded into {edge_label(pair[0])}, "
+                 "already in the graph")
+    pairs: dict[frozenset, list[dict]] = {}
+    for c in links:
+        if c.get("signal") is None:
+            pairs.setdefault(frozenset((c["_ends"][0][0], c["_ends"][1][0])),
+                             []).append(c)
+    for group in pairs.values():
+        # The stronger one: a relation extraction may propose before one it
+        # may not, then score — so a mirror can never displace the edge the
+        # author would keep (§2.4 #16 against #5).
+        group.sort(key=lambda c: (c["relation"] in proposable, c["score"],
+                                  c.get("confidence") or 0), reverse=True)
+        for c in group[1:]:
+            fail(c, "duplicate", f"folded into {candidate_label(group[0])} "
+                 f"(§{group[0]['unit']})")
+    for c in links:
+        if c.get("signal") is None and c["relation"] not in proposable:
+            fail(c, "not_proposable", f"'{c['relation']}' is not among the "
+                 "relations extraction may propose")
+    for c in links:
+        if (c.get("signal") is None and c.get("confidence") is not None
+                and c["confidence"] < floor):
+            fail(c, "below_floor", f"confidence {c['confidence']:.2f} under "
+                 f"the floor {floor:.2f}")
+    return Screening(candidates=list(candidates), skips=skips)
+
+
+def screen_replies(db: Database, manuscript: dict,
+                   payloads: list[ExtractionPayload],
+                   replies: list[dict | None], knob: dict, *,
+                   files: dict[str, str] | None = None,
+                   revive=None) -> Screening:
+    """One essay's section replies, parsed and screened together — gate 6
+    folds mirrors across the essay's sections, not just within one."""
+    candidates: list[dict] = []
+    malformed = 0
+    for payload, reply in zip(payloads, replies):
+        got, bad = parse_reply(reply, payload)
+        candidates += got
+        malformed += bad
+    if files is None:
+        files = read_manuscript_files(Path(manuscript["path"]))
+    units = {payloads[0].file: payloads[0].summary_unit} if payloads else {}
+    ctx = gate_context(db, manuscript, files, units)
+    return screen(candidates, ctx, knob, revive=revive, malformed=malformed)
+
+
+def render_screening(screening: Screening) -> str:
+    """The gates' tally — the prompt's bug report (§4.6: a rise in
+    `ungrounded` means the model paraphrases spans, in `common_word` that
+    it names English words) — then each candidate and its fate."""
+    survivors = screening.survivors
+    counts = ", ".join(f"{k} {v}" for k, v in screening.skips.items() if v)
+    lines = [f"gates: {len(survivors)} of "
+             f"{sum(1 for c in screening.candidates if c['type'] != 'alias')}"
+             f" candidate(s) passed" + (f"; {counts}" if counts else "")]
+    for c in screening.candidates:
+        if c["type"] == "alias":
+            continue
+        where = f"§{c['unit']}"
+        if c.get("signal"):
+            lines.append(f"  ✗ {candidate_label(c)} [{where}] — gate "
+                         f"{c['gate']} {c['signal']}: {c['reason']}")
+        else:
+            extra = (f" (in the graph as '{c['existing']}')"
+                     if c.get("existing") else
+                     f" (near '{c['near']}')" if c.get("near") else "")
+            lines.append(f"  ✓ {candidate_label(c)} [{where}] score "
+                         f"{c['score']:.2f}{extra}")
+    return "\n".join(lines)
+
+
+# ----------------------------------- retired names that come back (§4.10)
+
+def _norm_paragraph(text: str) -> str:
+    return " ".join(text.split())
+
+
+def retired_at(db: Database, mid: str, node: dict) -> str:
+    """When the author retired `node`: the stamp `retire_concept` writes
+    (`metadata.retired_from.at`), else the latest `concept_triage`
+    rejection of the name, else the node's creation (the text then is
+    the oldest text that could have argued for it)."""
+    from .db import loads
+
+    stamp = ((loads(node.get("metadata"), {}) or {}).get("retired_from")
+             or {}).get("at")
+    if stamp:
+        return stamp
+    row = db.one(
+        "SELECT created_at FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = 'concept_triage' AND signal = 'rejected' AND "
+        "(target = ? OR target LIKE ?) ORDER BY created_at DESC LIMIT 1",
+        (mid, node["name"], f"{node['name']} (%"))
+    return row["created_at"] if row else node["created_at"]
+
+
+def revival_due(db: Database, manuscript: dict, node: dict,
+                files: dict[str, str]) -> dict | None:
+    """§4.10, the door a retired name may come back through, or None.
+
+    The ban stays; it yields only to insistence. The name must clear the
+    recurrence bar in text written AFTER its retirement (paragraphs not in
+    the version current at retirement). Then: never asked → ask, with the
+    spans. Marked `retired_for_good` (a dismissal with a reason) → never.
+    Asked and still open → not again. Dismissed without the mark → only
+    once its recurrence count has doubled since that ask. A `superseded`
+    ask was machine clean-up, not an answer, and does not count."""
+    from .db import loads
+
+    mid = manuscript["id"]
+    meta = loads(node.get("metadata"), {}) or {}
+    if meta.get("retired_for_good"):
+        return None
+    since = retired_at(db, mid, node)
+    base = db.one(
+        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? AND "
+        "created_at <= ? ORDER BY version_no DESC LIMIT 1", (mid, since))
+    old = ({_norm_paragraph(p) for text in loads(base["files"], {}).values()
+            for p in _paragraphs(text)} if base else set())
+    fresh = {name: [p for p in _paragraphs(text)
+                    if _norm_paragraph(p) not in old]
+             for name, text in files.items()}
+    names = node_names(node)
+    admitted, stats = passes_recurrence_bar(
+        {name: "\n\n".join(paras) for name, paras in fresh.items()}, names)
+    if not admitted:
+        return None
+    prior = db.one(
+        "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? AND "
+        "kind = 'revival' AND target = ? AND state != 'superseded' AND "
+        "created_at >= ? ORDER BY created_at DESC LIMIT 1",
+        (mid, node["id"], since))
+    if prior is not None:
+        if prior["state"] != "dismissed":
+            return None
+        then = ((loads(prior["payload"], {}) or {}).get("recurrence")
+                or {}).get("contexts") or 1
+        if stats["contexts"] < 2 * then:
+            return None
+    pats = [concept_pattern(n) for n in names if n]
+    contexts = []
+    for name, paras in fresh.items():
+        for para in paras:
+            if any(p.search(para) for p in pats):
+                sentence = next((s for s in re.split(r"(?<=[.!?])\s+", para)
+                                 if any(p.search(s) for p in pats)), para)
+                contexts.append({"file": name, "span": sentence.strip()[:300]})
+    return {"since": since, "recurrence": stats, "contexts": contexts[:5]}
+
+
+def raise_revival(db: Database, manuscript: dict, candidate: dict,
+                  node: dict, due: dict, run_id: str) -> dict | None:
+    """The one revival proposal `revival_due` allows, with the spans it
+    was found in and the recurrence count the next ask is measured
+    against. Source `extraction/<run>` (§4.8)."""
+    spans = [{"file": candidate["file"], "paragraph": n,
+              "span": candidate["span"]} for n in list(candidate["_cited"])[:1]]
+    return proposals.create(
+        db, manuscript["id"], "revival", node["id"],
+        {"name": node["name"], "kind": candidate["kind"],
+         "notes": candidate.get("notes") or node.get("notes"),
+         "spans": spans + due["contexts"], "recurrence": due["recurrence"]},
+        source=f"extraction/{run_id}", firewall=False)
+
+
+def reviver(db: Database, manuscript: dict, files: dict[str, str],
+            run_id: str):
+    """The `revive` callback a live run hands `screen`."""
+    def revive(candidate: dict, node: dict) -> dict | None:
+        due = revival_due(db, manuscript, node, files)
+        return (raise_revival(db, manuscript, candidate, node, due, run_id)
+                if due else None)
+    return revive

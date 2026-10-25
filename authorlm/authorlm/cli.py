@@ -6664,6 +6664,8 @@ def cmd_extract(args):
         replies = ex.call_sections(llm, payloads, knob)
         got = sum(1 for r in replies if r is not None)
         print(f"{name}: {got}/{len(payloads)} section call(s) answered")
+        print(ex.render_screening(ex.screen_replies(db, manuscript, payloads,
+                                                    replies, knob)))
     _report_llm(llm)
 
 
