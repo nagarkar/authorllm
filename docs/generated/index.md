@@ -236,6 +236,12 @@ LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
 
 The per-essay adjudicator (docs/extraction-redesign.md §4.5).
 
+## `authorlm.extraction_calibration`
+
+`authorlm/authorlm/extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on tools/measure_adjudication.py.
+
 ## `authorlm.filtering`
 
 `authorlm/authorlm/filtering.py`
@@ -613,6 +619,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_extraction_adjudicator.py`
 
 The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
+
+## `tests.test_extraction_calibration`
+
+`authorlm/tests/test_extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
 
 ## `tests.test_extraction_gates`
 

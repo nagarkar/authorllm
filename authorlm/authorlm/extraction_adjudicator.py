@@ -241,11 +241,17 @@ def _money(value: float | None) -> str:
     return "price unknown" if value is None else f"≈ ${value:.2f}"
 
 
-def render_choices(rows: list[dict], est: dict, extraction_model: str,
-                   extraction_cost: float | None) -> str:
-    lines = [f"Adjudicator for this run — {est['essays']} essay(s), "
-             f"{est['sections']} section call(s) on {extraction_model} "
-             f"({_money(extraction_cost)}). Estimated adjudication cost"
+def render_choices(rows: list[dict], est: dict,
+                   extraction_model: str | None = None,
+                   extraction_cost: float | None = None) -> str:
+    if est["sections"]:
+        head = (f"Adjudicator for this run — {est['essays']} essay(s), "
+                f"{est['sections']} section call(s) on {extraction_model} "
+                f"({_money(extraction_cost)}).")
+    else:
+        head = (f"Adjudicator for this replay — {est['essays']} essay(s), "
+                f"{est['candidates']} candidate(s) past the gates.")
+    lines = [head + " Estimated adjudication cost"
              + (f", assuming ~{CANDIDATES_PER_SECTION} candidates per section "
                 "reach it:" if est["assumed"]
                 else f" for {est['candidates']} candidate(s):")]

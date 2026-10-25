@@ -2176,11 +2176,14 @@ class Screening:
 
 
 def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
-           revive=None, malformed: int = 0) -> Screening:
+           revive=None, malformed: int = 0,
+           apply_gate7: bool = True) -> Screening:
     """Gates 1-8 over one essay's candidates, in order, each failure
     counted under its name (§4.4). Pure: nothing is written. `revive`,
     when given, is called with (candidate, retired node) at gate 5 and may
     raise the one revival proposal §4.10 allows; the replay passes None.
+    The replay also passes `apply_gate7=False`: a relation outside the
+    proposable set is then measured rather than held back (§4.6).
 
     Concepts are screened first, so a link may end on a concept candidate
     of the same batch that survived; a link whose endpoint is neither a
@@ -2212,7 +2215,8 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
             fail(c, "ungrounded", "the span is not in its cited paragraph")
             continue
         node = ctx.known.get(c["name"].lower())
-        names = node_names(node) if node else [c["name"]]
+        names = (node_names(node) if node
+                 else [c["name"], *c.get("_aliases", [])])
         in_terms = any(c["name"].lower() in ctx.terms.get((c["file"], n), ())
                        for n in cited)
         if not (any(names_in(names, p) for p in cited.values()) or in_terms):
@@ -2285,7 +2289,8 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
                 ends.append((node["id"], node_names(node), node["name"]))
             elif c[side].lower() in batch:
                 fresh = batch[c[side].lower()]
-                ends.append((f"new:{fresh['name'].lower()}", [fresh["name"]],
+                ends.append((f"new:{fresh['name'].lower()}",
+                             [fresh["name"], *fresh.get("_aliases", [])],
                              fresh["name"]))
             else:
                 ends.append(None)
@@ -2293,6 +2298,10 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
         if missing:
             fail(c, "unknown_endpoint", f"'{missing[0]}' is neither a live "
                  "concept nor a surviving candidate")
+            continue
+        if ends[0][0] == ends[1][0]:
+            fail(c, "malformed", f"'{c['from']}' and '{c['to']}' name the "
+                 "same concept")
             continue
         c["_ends"] = ends
         c["from"], c["to"] = ends[0][2], ends[1][2]
@@ -2347,7 +2356,12 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
             fail(c, "duplicate", f"folded into {candidate_label(group[0])} "
                  f"(§{group[0]['unit']})")
     for c in links:
-        if c.get("signal") is None and c["relation"] not in proposable:
+        if c.get("signal") is not None:
+            continue
+        if c["relation"] not in VALID_RELATIONS:
+            fail(c, "not_proposable", f"'{c['relation']}' is not in the "
+                 "schema's vocabulary")
+        elif apply_gate7 and c["relation"] not in proposable:
             fail(c, "not_proposable", f"'{c['relation']}' is not among the "
                  "relations extraction may propose")
     for c in links:
@@ -2575,8 +2589,12 @@ def apply_ceilings(candidates: list[dict], knob: dict) -> None:
         c.update(signal="screened", gate="ceiling",
                  reason=f"over the essay's ceiling of {max_c} concept(s), "
                         f"ranked by score")
-    fresh = {c["name"].lower(): c for c in candidates
-             if c["type"] == "concept" and "existing" not in c}
+    fresh: dict[str, dict] = {}
+    for c in candidates:            # the survivor of a fold, not its double
+        if c["type"] == "concept" and "existing" not in c:
+            held = fresh.get(c["name"].lower())
+            if held is None or held.get("signal") == "duplicate":
+                fresh[c["name"].lower()] = c
     links = [c for c in candidates if c["type"] == "link"
              and c.get("signal") in REACHES]
     for c in links:

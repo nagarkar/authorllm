@@ -6647,18 +6647,21 @@ def _ask_adjudicator(intro: str):
 
 
 def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
-                    candidates: int | None = None) -> str | None:
-    """Price the scope and settle the adjudicator before the first call."""
+                    est: dict | None = None) -> str | None:
+    """Price the scope and settle the adjudicator before the first call.
+    `est` is given by the replay, which knows its candidate count."""
     from . import extraction_adjudicator as adj
 
-    est = adj.estimate_scope(essays, knob["proposable_relations"], candidates)
+    if est is None:
+        est = adj.estimate_scope(essays, knob["proposable_relations"])
     rows = None
     if not args.adjudicator and knob.get("adjudicator_prompt") != "default":
         rows = adj.choice_rows(config, knob, est)
+    model = llm.model if llm is not None else None
     intro = adj.render_choices(
-        rows or [], est, llm.model,
-        adj.cost(llm.model, est["extraction_in"], est["extraction_out"])
-        if llm is not None else None) if rows else ""
+        rows, est, model,
+        adj.cost(model, est["extraction_in"], est["extraction_out"])
+        if model else None) if rows else ""
     try:
         return adj.choose(config, knob, est, answer=args.adjudicator,
                           ask=_ask_adjudicator(intro)
@@ -6691,6 +6694,62 @@ def _extract_screened(db: Database, manuscript: dict, args) -> None:
             print(ui.bold(f"run {run}"))
         print(f"  {row['score']:.2f}  {row['label']}  [§{row['unit']}]")
         print(ui.dim(f"        “{row['span']}” — {row['reason']}"))
+
+
+def _extract_calibrate(db: Database, manuscript: dict, args,
+                       config: dict) -> None:
+    """`extract calibrate [--replay [file…]] [--gates-only]`
+    (docs/extraction-redesign.md §4.6, §6.1). Not behind the
+    [extraction] switch: calibration is what earns the switch (§5.5)."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+    from . import extraction_calibration as cal
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if args.replay is None:
+        print(cal.describe_current(db, manuscript, knob))
+        return
+    only = None
+    named = [*args.target[1:], *args.replay]
+    if named:
+        files = read_manuscript_files(Path(manuscript["path"]))
+        try:
+            only = [_resolve(files, f) for f in named]
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+    replay = cal.prepare(db, manuscript, knob, only=only)
+    if not replay.groups:
+        print("No historical candidates to replay.")
+        return
+    judge = None
+    if not args.gates_only:
+        model = _extract_choose(config, knob, [], None, args,
+                                est=cal.estimate(replay))
+        if model is None:
+            print("Stopped before any call; nothing was spent.")
+            return
+        judge = adj.adjudicator_llm(config, model)
+        if not judge.enabled:
+            sys.exit("error: the replay's adjudicator needs an LLM — [llm] "
+                     "enabled = true, and the model's key in .env (or "
+                     "--gates-only, which needs none).")
+        cal.adjudicate(replay, judge)
+    section = (config.get("extraction") or {})
+    configured = {k: section.get(k, ex.KNOB_DEFAULTS[k])
+                  for k in ("max_concepts_per_essay", "max_links_per_essay")}
+    report = cal.measure(replay, knob, configured)
+    print(cal.render(report))
+    if report["adjudicated"]:
+        entry = cal.record(db, manuscript, report, ex.new_run_id("calibrate"),
+                           ex.spent(judge))
+        print(f"Recorded as {entry['id']}: the next run reads these "
+              "thresholds.")
+        _report_llm(judge)
 
 
 def _extract_runs(db: Database, manuscript: dict) -> None:
@@ -6726,7 +6785,10 @@ def cmd_extract(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     action = args.target[0] if args.target and args.target[0] in (
-        "screened", "runs") else None
+        "screened", "runs", "calibrate") else None
+    if action == "calibrate":
+        _extract_calibrate(db, manuscript, args, _load_config(args))
+        return
     if action == "screened":
         _extract_screened(db, manuscript, args)
         return
@@ -9822,7 +9884,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target", nargs="*",
                    help="manuscript file(s); none = the sections changed "
                         "since the last extraction. Or: 'screened <file>' "
-                        "(what the per-essay ceiling held back), 'runs'")
+                        "(what the per-essay ceiling held back), 'runs', "
+                        "'calibrate [--replay [file…]]'")
     p.add_argument("--section", default=None,
                    help="one section of the file: its number ('3', '3.2' "
                         "for a part) or its heading's text")
@@ -9830,6 +9893,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="every essay in reading order, not just changes")
     p.add_argument("--native", action="store_true",
                    help="make the model calls (needs [extraction] enabled)")
+    p.add_argument("--replay", nargs="*", default=None, metavar="FILE",
+                   help="with 'calibrate': replay the historical candidates "
+                        "(of these essays, or all) through the gates and the "
+                        "adjudicator against the author's verdicts, and "
+                        "move the thresholds")
+    p.add_argument("--gates-only", action="store_true",
+                   help="with 'calibrate --replay': the deterministic half "
+                        "alone — free, records nothing")
     p.add_argument("--adjudicator", default=None, metavar="MODEL",
                    help="the per-essay adjudicator's model for this run — "
                         "answers the run-time question non-interactively "

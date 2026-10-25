@@ -190,6 +190,14 @@ def check_run(root: Path) -> None:
     db.update("concept_nodes", db.one(
         "SELECT id FROM concept_nodes WHERE name = 'ranking'")["id"],
         {"notes": "The ordering of a population."})
+    from authorlm import proposals
+
+    ranking = db.one("SELECT * FROM concept_nodes WHERE name = 'ranking'")
+    old = proposals.create(db, ms["id"], "note_update", ranking["id"], {
+        "name": "ranking", "current_note": "The ordering of a population.",
+        "proposed_note": VERDICTS["ranking (concept)"]["notes"],
+        "current_kind": "concept", "proposed_kind": "concept"})
+    db.update("knowledge_proposals", old["id"], {"state": "superseded"})
     judge = Judge(VERDICTS)
     report = run(db, ms, judge)
     essay = report["essays"][0]
@@ -279,7 +287,8 @@ def check_run(root: Path) -> None:
               for r in by.values())
           and db.one("SELECT count(*) AS n FROM editorial_beliefs")["n"] == 0)
 
-    note = db.one("SELECT * FROM knowledge_proposals WHERE kind = 'note_update'")
+    note = db.one("SELECT * FROM knowledge_proposals WHERE kind = "
+                  "'note_update' AND state = 'open'")
     payload = loads(note["payload"], {})
     check("`improves` is a note_update through proposals.create, source "
           "extraction/<run>, now with its span",
@@ -288,6 +297,11 @@ def check_run(root: Path) -> None:
                                                   "population by a metric")
           and payload["span"] == "A ranking assigns each member a rank",
           json.dumps(payload))
+    check("a superseded proposal (machine clean-up, §4.8) does not hold the "
+          "same question back: the firewall ignores that state",
+          note["id"] != old["id"]
+          and loads(note["payload"], {})["proposed_note"]
+          == VERDICTS["ranking (concept)"]["notes"])
     alias = db.one("SELECT * FROM knowledge_proposals WHERE kind = 'alias'")
     check("a near-name the adjudicator called new is an alias proposal on "
           "the live concept, never a node (§4.7)",
