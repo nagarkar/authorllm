@@ -30,7 +30,6 @@ from .briefing import build_briefing
 from . import beliefs as bel_mod
 from . import paths as paths_mod
 from .db import Database, ko_fields, loads
-from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions
@@ -178,8 +177,12 @@ def _report_llm(llm: LLMClient) -> None:
 
 def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                     files: list[str] | None = None, full: bool = False,
-                    edges_only: bool = False, aliases_only: bool = False) -> None:
-    """Collect the current text (if new) and bootstrap the Concept Graph."""
+                    adjudicator: str | None = None) -> None:
+    """Collect the current text (if new) and run the redesigned extraction
+    through `api.run_extraction` — the non-interactive front, which stops
+    before any call when the adjudicator is not settled."""
+    from . import extraction as ex
+
     before = db.one(
         "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
         "ORDER BY version_no DESC LIMIT 1",
@@ -190,76 +193,25 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
         detect_transitions(db, manuscript["id"], dict(before) if before else None, version)
         print(f"Collected revision v{version['version_no']}.")
     print("Extracting concepts and relationships with the LLM…")
-    summary = extract_concepts(db, manuscript, llm, files=files, full=full,
-                               edges_only=edges_only, aliases_only=aliases_only)
-    if summary is None:
+    report = api.run_extraction(db, manuscript, llm, files=files, full=full,
+                                adjudicator=adjudicator)
+    if report is None:
         print("Extraction produced nothing (LLM unavailable or empty manuscript); "
               "the graph is unchanged.")
         _report_llm(llm)
         return
-    if summary.get("up_to_date"):
+    if report.get("up_to_date"):
         print("Nothing new since the last extraction — everything is already "
               "processed. Use 'extract --full' to reprocess the whole "
               "manuscript, or name files: extract <file>…")
         return
-    print(ui.dim(f"Scope: {summary['scope']}."))
-    if summary.get("truncated"):
-        print(ui.yellow(
-            "warning: text exceeded the extraction size limit and was "
-            "truncated — run extraction file-by-file to cover everything: "
-            "extract <file>"
-        ))
-    print(
-        f"Extracted {len(summary['nodes'])} new concept(s) and "
-        f"{len(summary['edges'])} inferred relationship(s)"
-        + (f"; skipped {summary['skipped_malformed']} malformed item(s)"
-           if summary.get("skipped_malformed") else "")
-        + (f"; {summary['skipped_unknown_relation']} relationship(s) named an "
-           "unrecognized relation" if summary.get("skipped_unknown_relation") else "")
-        + (f"; {summary['skipped_unknown_endpoint']} relationship(s) named an "
-           "unknown concept" if summary.get("skipped_unknown_endpoint") else "")
-        + (f"; suppressed {summary['suppressed']} previously-rejected concept(s)"
-           if summary.get("suppressed") else "")
-        + (f"; dropped {summary['ungrounded_links']} ungrounded link(s) "
-           "(endpoint not in the mined text)"
-           if summary.get("ungrounded_links") else "")
-        + (f"; {len(summary['below_bar'])} below the recurrence bar"
-           if summary.get("below_bar") else "")
-        + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
-           "naming an already-live concept (would be a merge, not an "
-           "alias — logged, not queued)"
-           if summary.get("alias_folds_refused") else "")
-        + (f"; refused {summary['alias_retired_refused']} alias proposal(s) "
-           "naming a retired concept (would re-enter a banned name — "
-           "logged, not queued)"
-           if summary.get("alias_retired_refused") else "")
-        + (f"; refused {len(summary['materiality_refused'])} note update(s) "
-           "below the materiality floor"
-           if summary.get("materiality_refused") else "")
-        + "."
-    )
-    if summary.get("prompt_files"):
-        print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
-    if summary.get("below_bar"):
-        print(ui.dim(
-            "Below the recurrence bar (single-context phrases, not "
-            "admitted; self-healing on a future mention): "
-            + ", ".join(f"'{n}'" for n in summary["below_bar"])))
-    if summary.get("materiality_refused"):
-        print(ui.dim(
-            "Note updates below the materiality floor (case/whitespace-only "
-            "or >=0.90 similarity — not queued): "
-            + ", ".join(f"'{n}'" for n in summary["materiality_refused"])))
-    if summary.get("proposed"):
-        print(ui.yellow(
-            f"{summary['proposed']} proposal(s) against settled knowledge — "
-            "new material conflicts with earlier judgments. Review: proposal review"
-        ))
-    for node in summary["nodes"]:
-        print(f"  • {node['name']} ({node['kind']})")
-    if summary["edges"]:
-        print("Relationships are hypotheses awaiting your confirmation "
-              "(see 'concept list' / next briefing).")
+    if report.get("stopped") and "run" not in report:
+        print(ui.yellow(report["stopped"]))
+        return
+    print(ex.render_run(report))
+    if report["run"]["reached"]["concepts"] or report["run"]["reached"]["relations"]:
+        print("Concepts and relationships are hypotheses awaiting your "
+              "confirmation (see 'concept triage' / next briefing).")
     _report_llm(llm)
 
 
@@ -294,7 +246,17 @@ def cmd_init(args):
                      "(--extraction off); 'manuscript set --extraction on' "
                      "turns it back on."))
     elif llm.enabled and not args.no_extract:
-        _run_extraction(db, row, llm)
+        from . import extraction as ex
+
+        knob = ex.knobs(_load_config(args), db, row)
+        if args.adjudicator or knob.get("adjudicator_prompt") == "default":
+            _run_extraction(db, row, llm, adjudicator=args.adjudicator)
+        else:
+            # Ruling §0.2: the adjudicator is chosen per run and never
+            # spent unasked; init has no question to ask.
+            print(ui.dim("Concept extraction not run: the adjudicator model "
+                         "is chosen per run. Run 'authorlm extract --native' "
+                         "to be asked (or pass --adjudicator <model>)."))
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
 
 
@@ -8953,6 +8915,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the hardcover edition")
     p.add_argument("--no-extract", action="store_true",
                    help="skip automatic LLM concept extraction")
+    p.add_argument("--adjudicator", default=None, metavar="MODEL",
+                   help="run the first extraction with this adjudicator "
+                        "model (ruling §0.2: without it, or [extraction] "
+                        "adjudicator_prompt = \"default\", init leaves "
+                        "extraction to 'extract --native')")
     p.add_argument("--extraction", default=None, choices=["on", "off"],
                    help="off registers the manuscript with concept "
                         "extraction switched off for good, not just at "

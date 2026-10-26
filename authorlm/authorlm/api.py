@@ -1101,9 +1101,9 @@ def collect(db: Database, manuscript: dict, config: dict,
         pass
 
     # The author never has to remember the analyzers: a collected change
-    # runs incremental extraction (concepts, links, aliasing statements)
-    # when an LLM is configured. Best-effort — analysis failure must never
-    # block observation.
+    # runs incremental extraction (the redesigned pipeline, through
+    # run_extraction) when an LLM is configured and the adjudicator is
+    # settled. Best-effort — analysis failure must never block observation.
     if analyze is None:
         analyze = auto
     if analyze:
@@ -1130,11 +1130,15 @@ def collect(db: Database, manuscript: dict, config: dict,
                     workspace=str(db.path.parent.parent),
                     manuscript=manuscript.get("name"),
                     ok=False, error=f"{type(err).__name__}: {err}")
-            if summary and not summary.get("up_to_date"):
+            if summary.get("stopped"):
+                report["extraction"] = summary["stopped"]
+            elif summary.get("run"):
+                reached = summary["run"]["reached"]
                 report["auto_analysis"] = {
-                    "new_concepts": len(summary.get("nodes", [])),
-                    "new_edges": len(summary.get("edges", [])),
-                    "proposed": summary.get("proposed", 0),
+                    "new_concepts": reached["concepts"],
+                    "new_edges": reached["relations"],
+                    "proposed": reached["proposals"],
+                    "run": summary["run"]["id"],
                 }
 
     # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
@@ -4367,14 +4371,91 @@ def compact_show_concept(result: dict) -> dict:
     return {"node": keep, "edges": [_compact_edge(e) for e in result["edges"]]}
 
 
+def extraction_scope(db: Database, manuscript: dict, knob: dict,
+                     files: list[str] | None = None, full: bool = False
+                     ) -> list[tuple[str, list]]:
+    """The essays a non-interactive run assembles, [(file, payloads)] in
+    reading order: the named files whole, the whole book with `full`,
+    else the sections changed since the extraction watermark (everything
+    when there is none). Mirrors `cli._extract_scope` without its exits:
+    an unknown file is a LookupError for the caller to report."""
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    on_disk = read_manuscript_files(Path(manuscript["path"]))
+    if files:
+        # A named file held by an active writeup (its text on disk is the
+        # placeholder) has nothing to mine: dropped, never sent.
+        scope = [(rel, None) for rel in (_resolve(on_disk, f) for f in files)
+                 if not ex.is_in_flight(on_disk.get(rel, ""))]
+    elif full:
+        scope = [(name, None) for name in ex.eligible_files(on_disk)]
+    else:
+        changed = ex.changed_units(db, manuscript, on_disk,
+                                   int(knob["max_section_chars"]))
+        scope = ([(name, None) for name in ex.eligible_files(on_disk)]
+                 if changed is None else list(changed.items()))
+    out = []
+    for name, units in scope:
+        payloads = ex.assemble_essay(db, manuscript, name, units=units,
+                                     knob=knob)
+        if payloads:
+            out.append((name, payloads))
+    return out
+
+
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
-                   edges_only: bool = False,
-                   aliases_only: bool = False) -> dict | None:
-    from .extraction import extract_concepts
+                   adjudicator: str | None = None) -> dict | None:
+    """The non-interactive front on `extraction.run` (the redesigned
+    pipeline, docs/extraction-redesign.md), for `init`, the writeup close,
+    an analysed collect and the MCP tool. Incremental by default: the
+    sections changed since the watermark; `files` or `full` widen it.
 
-    return extract_concepts(db, manuscript, llm, files=files, full=full,
-                            edges_only=edges_only, aliases_only=aliases_only)
+    The adjudicator is chosen before the first call (ruling §0.2, never
+    spend unasked): `adjudicator` answers it outright, `[extraction]
+    adjudicator_prompt = "default"` takes `adjudicator_model`, and with
+    neither there is no one to ask here, so the run stops before any call
+    and returns {"stopped": …} pointing at `authorlm extract --native`.
+    {"up_to_date": True} when nothing changed. Raises ExtractionDisabled
+    when either switch is off. The report is `extraction.run`'s, made
+    JSON-safe (the per-essay screenings dropped) and printable by
+    `extraction.render_run`."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+
+    config = getattr(llm, "config", None) or {}
+    if not ex.extraction_enabled(config):
+        raise ex.ExtractionDisabled(ex.DISABLED_MESSAGE)
+    if not ex.manuscript_extraction_enabled(db, manuscript):
+        raise ex.ExtractionDisabled(ex.MANUSCRIPT_DISABLED_MESSAGE)
+    knob = ex.knobs(config, db, manuscript)
+    essays = extraction_scope(db, manuscript, knob, files=files, full=full)
+    if not essays:
+        return {"up_to_date": True}
+    est = adj.estimate_scope(essays, knob["proposable_relations"])
+    try:
+        model = adj.choose(config, knob, est, answer=adjudicator, ask=None)
+    except LookupError as err:
+        return {"stopped": f"{err}. Nothing was spent: run `authorlm extract "
+                           "--native` to be asked, or set [extraction] "
+                           "adjudicator_prompt = \"default\".",
+                "essays": [name for name, _ in essays],
+                "sections": est["sections"]}
+    # The caller's client makes the section calls (so its usage line is
+    # the run's), under `[extraction] model` when one is set.
+    if knob.get("model"):
+        llm.model = knob["model"]
+    llm.purpose = "extraction"
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm,
+                    judge_llm=judge, knob=knob,
+                    run_id=ex.new_run_id("extract"),
+                    advance_watermark=not files)
+    report["essays"] = [{k: v for k, v in r.items() if k != "screening"}
+                        for r in report["essays"]]
+    return report
 
 
 # ----------------------------------------------- self-improvement tasks

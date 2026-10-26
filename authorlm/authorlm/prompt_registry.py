@@ -126,17 +126,6 @@ REGISTRY: list[Prompt] = [
            "drop | retype (relations), a reason per verdict (§4.5)",
            file="adjudication.md",
            module="extraction_adjudicator.py:adjudicator_system"),
-    Prompt("extraction-legacy", "init; collect (auto); writeup close; "
-           "MCP extract_concepts — the old path, until the redesign's "
-           "phase 6 retires it",
-           "mine concepts, relations, and aliases from manuscript text",
-           file="extraction-legacy.md", module="extraction.py:extraction_system"),
-    Prompt("extraction-edges", "extract --edges",
-           "relations only, among known concepts",
-           file=None, module="extraction.py:EDGES_ONLY_SYSTEM"),
-    Prompt("extraction-aliases", "extract --aliases",
-           "aliasing statements only",
-           file=None, module="extraction.py:ALIASES_ONLY_SYSTEM"),
     Prompt("episode-analysis", "intent complete; analyze; complete_intent",
            "reconstruct the editorial decisions an episode's edits show",
            file=None, module="analysis.py:ANALYSIS_SYSTEM"),

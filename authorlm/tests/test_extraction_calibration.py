@@ -81,7 +81,7 @@ def passthrough(_label: str) -> dict:
 
 def author(label: str) -> dict:
     """The author's own §2.4 verdicts — a perfect adjudicator, the
-    CEILING of the design, as tools/measure_adjudication.py has it."""
+    CEILING of the design (track-a §4 measured it)."""
     for row in fx.EDGES:
         if f"{row['src']} —{row['rel']}→ {row['dst']}" == label:
             if row["verdict"] == "confirm":

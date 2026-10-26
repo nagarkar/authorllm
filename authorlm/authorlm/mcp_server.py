@@ -1805,19 +1805,21 @@ def close_session(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def extract_concepts(files: list[str] | None = None, full: bool = False,
-                     edges_only: bool = False, aliases_only: bool = False,
+                     adjudicator: str | None = None,
                      manuscript: str | None = None) -> dict:
-    """LLM-mine the manuscript for concepts and relationships (incremental
-    by default: only files changed since the last extraction). New items
-    arrive as hypotheses for the author to triage. aliases_only sweeps the
-    full text for aliasing statements (naming/defining sentences) and files
-    merge proposals; it extracts nothing else."""
+    """Run the redesigned extraction (docs/extraction-redesign.md) over the
+    sections changed since the last run — or `files`, or the whole book
+    with `full`. Candidates reach the author's triage only past the eight
+    gates and the per-essay adjudicator, each with its span and reason.
+    The adjudicator model is chosen per run and never spent unasked:
+    `adjudicator` names it; without it, and without `[extraction]
+    adjudicator_prompt = "default"`, the result is {"stopped": …} and the
+    author runs `authorlm extract --native` to be asked."""
     def run():
         db = _db()
         return api.run_extraction(db, _manuscript(db, manuscript), _llm(),
                                   files=files, full=full,
-                                  edges_only=edges_only,
-                                  aliases_only=aliases_only)
+                                  adjudicator=adjudicator)
     return _guard(run)
 
 
