@@ -661,6 +661,11 @@ def precedent_rows(db: Database, manuscript: dict, rel: str, text: str,
         meta = loads(row["metadata"], {}) or {}
         if meta.get("origin") != "extracted" or row["id"] in exclude:
             continue
+        if (meta.get("retired_from") or {}).get("by_run"):
+            # A migration's retirement is not a precedent of the author's
+            # (2026-10-25): shown here, the adjudicator read `rank` and
+            # `Jati` as "already rejected by the author for this essay".
+            continue
         entry = {"id": row["id"], "name": row["name"], "kind": row["kind"],
                  "reason": reasons.get(row["name"].lower())}
         retired_from = (meta.get("retired_from") or {}).get("introduced_in")
@@ -1196,9 +1201,17 @@ def gate_context(db: Database, manuscript: dict, files: dict[str, str],
     rejected_names: list[str] = []
     for row in db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
                       "AND status = 'retired'", (mid,)):
+        meta = loads(row["metadata"], {}) or {}
+        if (meta.get("retired_from") or {}).get("by_run"):
+            # Retired by a migration run, not by the author (2026-10-25):
+            # the ban is the author's no, and §4.10's door only opens on
+            # text written after the retirement, so a machine retirement
+            # that banned would silence the name for good. The name is an
+            # ordinary candidate again; `add_concept` revives the row.
+            continue
         if row["name"].lower() not in known:
             retired[row["name"].lower()] = dict(row)
-        if (loads(row["metadata"], {}) or {}).get("origin") == "extracted":
+        if meta.get("origin") == "extracted":
             rejected_names.append(row["name"])
     edges: dict[tuple[str, str], list[dict]] = {}
     rejected: set[tuple[str, str, str]] = set()

@@ -199,6 +199,13 @@ def check_concept_gates(root: Path) -> None:
     db, ms = fx.build(root / "concepts")
     fx.add_node(db, ms, "ordering", status="retired", confirmed=False)
     fx.add_node(db, ms, "hierarchies", status="retired", confirmed=False)
+    # Retired by a MIGRATION run, not by the author: not banned (2026-10-25).
+    machine = db.one("SELECT * FROM concept_nodes WHERE name = 'population'")
+    db.update("concept_nodes", machine["id"],
+              {"status": "retired",
+               "metadata": json.dumps({"origin": "extracted", "confirmed": True,
+                                       "retired_from": {"status": "realized",
+                                                        "by_run": "migration-9"}})})
     knob = extraction.knobs({})
     text = fx.FILES["hierarchy.md"]
     first = fx.paragraph_number(text, "Every society sorts")
@@ -224,6 +231,7 @@ def check_concept_gates(root: Path) -> None:
                 kind="historical_reference"),
         concept("trajectories", first, "Every society sorts its members"),
         concept("Ghost", rank, "A rank is a place in the ordering"),
+        concept("population", kinds, "Populations come in kinds"),
     ]
     payloads = extraction.assemble_essay(db, ms, "hierarchy.md", knob=knob)
     s = extraction.screen_replies(db, ms, payloads,
@@ -240,6 +248,15 @@ def check_concept_gates(root: Path) -> None:
           got["ordering"]["signal"] == "retired"
           and got["ordering"]["reason"] == "the author retired this name",
           str(got["ordering"]))
+    prec = extraction.precedent_rows(db, ms, "hierarchy.md", text, 20)
+    check("block P: a name a MIGRATION retired is not a precedent of the "
+          "author's either",
+          "population" not in {r["name"] for r in prec}
+          and "ordering" in {r["name"] for r in prec}, str(prec))
+    check("gate 5: a name a MIGRATION retired is not banned — it is an "
+          "ordinary candidate again (2026-10-25)",
+          got["population"].get("signal") is None
+          and "existing" not in got["population"], str(got["population"]))
     check("gate 5: a lexical near-miss of a retired name is NOT banned "
           "(ruled 2026-10-25): the exact ban and block P cover it",
           got["hierarchy"].get("signal") != "retired",
