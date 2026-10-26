@@ -661,6 +661,11 @@ def precedent_rows(db: Database, manuscript: dict, rel: str, text: str,
         meta = loads(row["metadata"], {}) or {}
         if meta.get("origin") != "extracted" or row["id"] in exclude:
             continue
+        if (meta.get("retired_from") or {}).get("by_run"):
+            # A migration's retirement is not a precedent of the author's
+            # (2026-10-25): shown here, the adjudicator read `rank` and
+            # `Jati` as "already rejected by the author for this essay".
+            continue
         entry = {"id": row["id"], "name": row["name"], "kind": row["kind"],
                  "reason": reasons.get(row["name"].lower())}
         retired_from = (meta.get("retired_from") or {}).get("introduced_in")

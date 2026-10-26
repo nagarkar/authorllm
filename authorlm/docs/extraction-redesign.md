@@ -457,7 +457,8 @@ Deterministic gates, in order, each a named skip count:
    migration run retired (`retired_from.by_run`) is not banned: the ban is
    the author's no, and §4.10's door opens only on text written after the
    retirement, so a machine retirement that banned would silence the name
-   for good (found on the first live run, 2026-10-25: the migration had
+   for good, and it is not a precedent in block P either (found on the
+   first live run, 2026-10-25: the migration had
    retired `hierarchy` and `rank`, and 36 of hierarchy.md's 67 candidates
    then died as unknown endpoints). No lexical near-miss (ruling §0.9):
    the ban tolerates case and plurals, and block P shows the adjudicator

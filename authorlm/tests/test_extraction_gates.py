@@ -248,6 +248,11 @@ def check_concept_gates(root: Path) -> None:
           got["ordering"]["signal"] == "retired"
           and got["ordering"]["reason"] == "the author retired this name",
           str(got["ordering"]))
+    prec = extraction.precedent_rows(db, ms, "hierarchy.md", text, 20)
+    check("block P: a name a MIGRATION retired is not a precedent of the "
+          "author's either",
+          "population" not in {r["name"] for r in prec}
+          and "ordering" in {r["name"] for r in prec}, str(prec))
     check("gate 5: a name a MIGRATION retired is not banned — it is an "
           "ordinary candidate again (2026-10-25)",
           got["population"].get("signal") is None
