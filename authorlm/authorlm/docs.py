@@ -66,6 +66,22 @@ def list_docs(db: Database, manuscript: dict) -> dict:
     return {"active": active, "retired": retired}
 
 
+ABOUT_THE_BOOK_WORDS = ("synopsis", "pitch", "market", "audience",
+                        "perspective", "charter")
+
+
+def about_the_book_hint(name: str) -> str | None:
+    """A one-line hint when NAME looks like a file about the book rather
+    than part of it; such content belongs in a profile, not a tab."""
+    stem = Path(name).stem.lower()
+    for word in ABOUT_THE_BOOK_WORDS:
+        if word in stem:
+            return (f"'{name}' looks like a file about the book ({word}): "
+                    "consider 'authorlm profile set <key>' and a registry "
+                    "entry instead of a chapter tab.")
+    return None
+
+
 def add_doc(manuscript: dict, name: str, title: str | None = None,
             after: str | None = None) -> Path:
     """Scaffold a new essay file and, when the manuscript has a toc.toml,

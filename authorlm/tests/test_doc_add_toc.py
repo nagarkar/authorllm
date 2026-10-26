@@ -41,6 +41,11 @@ class DocAddTocTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_about_the_book_hint(self) -> None:
+        self.assertIn("profile", docs.about_the_book_hint("synopsis.md"))
+        self.assertIn("profile", docs.about_the_book_hint("perspective-sheet"))
+        self.assertIsNone(docs.about_the_book_hint("chapter3.md"))
+
     def test_add_appends_to_toc(self) -> None:
         (self.root / "toc.toml").write_text(TOC)
         docs.add_doc(self.ms, "c")
