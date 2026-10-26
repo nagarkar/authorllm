@@ -7633,6 +7633,12 @@ def cmd_doc(args):
                   + ui.dim("(scaffold only — the writing is yours)"))
         elif args.action == "retire":
             path = docs.retire_doc(manuscript, args.name)
+            from .gdocs import drop_link
+            relpath = str(path.relative_to(Path(manuscript["path"])
+                                           / docs.RETIRED_DIR))
+            if drop_link(db, manuscript, relpath):
+                print(ui.dim(f"Dropped {relpath}'s Doc link — delete its "
+                             "tab in the Doc by hand."))
             print(f"Retired to {docs.RETIRED_DIR}/{path.name} — history stays replayable; "
                   "concepts it introduced remain in the graph (retire those separately if wanted).")
         else:  # revive

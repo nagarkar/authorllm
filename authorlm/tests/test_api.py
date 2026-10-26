@@ -6545,6 +6545,56 @@ def check_filter_prelude_opt_in_frame() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_retired_link(root: Path, FakeGoogle) -> None:
+    """A retired file is no longer mapped: `doc retire` drops its Doc
+    link, and a link left behind by an older retire does not count as
+    mapped either, so a pull after its tab is deleted reports no
+    "no tab found" for it. Own workspace, own FakeGoogle."""
+    from authorlm.gdocs import _mapping, _save_mapping, pull_doc, push_doc
+
+    ws = root / "retired-link-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "01-keep.md").write_text("# Keep\n\nKept prose.\n")
+    (ms / "02-gone.md").write_text("# Gone\n\nRetired prose.\n")
+    (ms / "03-old.md").write_text("# Old\n\nRetired long ago.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "retirebook",
+                  "--path", str(ms), "--no-extract"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    stub = FakeGoogle()
+    for name in ("01-keep.md", "02-gone.md", "03-old.md"):
+        pushed = push_doc(db, manuscript, name, service=stub,
+                          docs_service=stub)
+        manuscript = api.get_manuscript(db)
+    stale = dict(_mapping(db, manuscript)["gdocs"]["03-old.md"])
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "doc", "retire", "02-gone"])
+        cli_main(["--workspace", str(ws), "doc", "retire", "03-old"])
+    manuscript = api.get_manuscript(db)
+    links = _mapping(db, manuscript)["gdocs"]
+    check("doc retire drops the retired file's Doc link",
+          "02-gone.md" not in links and "03-old.md" not in links
+          and "01-keep.md" in links, str(sorted(links)))
+
+    # A link an older retire left behind (the SpiritualHindu state).
+    meta = _mapping(db, manuscript)
+    meta["gdocs"]["03-old.md"] = stale
+    _save_mapping(db, manuscript, meta)
+    manuscript = api.get_manuscript(db)
+    tabs = stub.state["docs"][pushed["doc_id"]]
+    tabs[:] = [t for t in tabs
+               if t["title"] not in ("02-gone.md", "03-old.md")]
+    report = pull_doc(db, manuscript, service=stub, docs_service=stub,
+                      with_comments=False)
+    check("a stale link to a file in _retired/ does not count as mapped: "
+          "no 'no tab found' for it after its tab is deleted",
+          report["missing"] == [] and "01-keep.md" in
+          (report["changed"] + report["unchanged"]), str(report))
+
+
 def check_omit_all(root: Path, FakeGoogle) -> None:
     """`[Omit: all]` (issue #132): one tag that drops a region from every
     export output, present and future, while the Doc TAB — the working
@@ -8875,6 +8925,7 @@ def main_test() -> None:
               and "Original a content" in (t2_ms / "a.md").read_text())
 
         check_omit_all(root, FakeGoogle)
+        check_retired_link(root, FakeGoogle)
         check_read_manuscript(root, FakeGoogle)
         check_stage_revisions(root, FakeGoogle)
 
