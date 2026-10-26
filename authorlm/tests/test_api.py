@@ -493,12 +493,17 @@ def check_model_profiles() -> None:
           == llm_mod.VENDOR_DEFAULT_ONLY
           and llm_mod.model_profile("gemini/gemini-2.5-flash").temperature
           == llm_mod.ANY, "")
+    # gpt-5.6-sol has its own row since llmlm a17daeb (verified live
+    # 2026-10-22: strict json_schema, reasoning_effort, no temperature),
+    # so it is no longer the unverified sibling; terra still is.
+    check("gpt-5.6-sol reads its own verified row, not luna's",
+          llm_mod.model_profile("openai/gpt-5.6-sol").name == "gpt-5.6-sol"
+          and llm_mod.model_profile("openai/gpt-5.6-sol").temperature
+          == llm_mod.VENDOR_DEFAULT_ONLY, "")
     check("a model nobody verified gets the UNKNOWN profile rather than a "
-          "guessed row — gpt-5.6-sol/terra are siblings of luna and are "
-          "NOT assumed to share its contract",
-          llm_mod.model_profile("openai/gpt-5.6-sol")
-          is llm_mod.UNKNOWN_PROFILE
-          and llm_mod.model_profile("openai/gpt-5.6-terra")
+          "guessed row — gpt-5.6-terra is a sibling of luna and sol and is "
+          "NOT assumed to share their contract",
+          llm_mod.model_profile("openai/gpt-5.6-terra")
           is llm_mod.UNKNOWN_PROFILE
           and llm_mod.model_profile("stub-writer")
           is llm_mod.UNKNOWN_PROFILE, "")
