@@ -98,12 +98,6 @@ AuthorLM — a Decision Learning Engine specialization for philosophy writing.
 
 Engine-specific hook adapters.
 
-## `authorlm.adjudication`
-
-`authorlm/authorlm/adjudication.py`
-
-Step two of a two-step extraction: adjudicate the candidates (opt-in).
-
 ## `authorlm.analysis`
 
 `authorlm/authorlm/analysis.py`
@@ -553,12 +547,6 @@ The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
 `authorlm/tests/_offline_prices.py`
 
 Pins llmlm's price cache to an empty one that never reaches the network.
-
-## `tests.test_adjudication`
-
-`authorlm/tests/test_adjudication.py`
-
-Step-two adjudication: opt-in, and inert when off.
 
 ## `tests.test_api`
 

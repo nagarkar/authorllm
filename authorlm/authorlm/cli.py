@@ -225,8 +225,6 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            if summary.get("ungrounded_links") else "")
         + (f"; {len(summary['below_bar'])} below the recurrence bar"
            if summary.get("below_bar") else "")
-        + (f"; adjudication screened out {summary['screened']} candidate(s) "
-           "before triage" if summary.get("screened") else "")
         + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
            "naming an already-live concept (would be a merge, not an "
            "alias — logged, not queued)"
@@ -242,10 +240,6 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
     )
     if summary.get("prompt_files"):
         print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
-    if summary.get("adjudication_empty"):
-        print(ui.yellow(
-            "note: adjudication ran but the model returned nothing usable "
-            "— worth checking authorlm/prompts/adjudication-legacy.md"))
     if summary.get("below_bar"):
         print(ui.dim(
             "Below the recurrence bar (single-context phrases, not "

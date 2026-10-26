@@ -131,12 +131,6 @@ REGISTRY: list[Prompt] = [
            "phase 6 retires it",
            "mine concepts, relations, and aliases from manuscript text",
            file="extraction-legacy.md", module="extraction.py:extraction_system"),
-    Prompt("adjudication-legacy", "the old path above — only when "
-           "[extraction] adjudicate = true",
-           "step two: rule each extraction candidate new | improves | "
-           "subsumed | drop before it can reach the author's triage queue",
-           file="adjudication-legacy.md",
-           module="adjudication.py:adjudication_system"),
     Prompt("extraction-edges", "extract --edges",
            "relations only, among known concepts",
            file=None, module="extraction.py:EDGES_ONLY_SYSTEM"),
