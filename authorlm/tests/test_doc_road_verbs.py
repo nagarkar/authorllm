@@ -416,22 +416,326 @@ def divergence(root: Path) -> None:
         msg = ""
     except LookupError as err:
         msg = str(err)
-    check("the count disagreement still says N vs M",
-          "tab structure and export disagree (4 vs 3 paragraphs)" in msg,
+    check("a hard-break join the Doc's paragraphs explain is read as "
+          "those paragraphs: the push lands, no hand edit asked",
+          msg == "" and "Body para, changed." in fake.tab_text("solo.md"),
           msg)
-    check("...and names the first divergence with both sides",
-          "first divergence at paragraph 2" in msg
-          and "Doc «[Illustration: a lone tracker kneeling]»" in msg
-          and "export «[Illustration: a lone tracker kneeling]" in msg, msg)
-    check("the hard-break join is recognised and the fix said",
-          "add a blank line after «[Illustration: a lone tracker" in msg
-          and "in the Doc" in msg, msg)
 
     d = gdocs.first_divergence(["# One", "Two **bold** here.", "Three."],
                                ["# One", "Two bold here.", "Four."])
     check("alignment ignores markup; a plain divergence carries no fix",
           d["index"] == 2 and d["doc"] == "Three." and d["export"] == "Four."
           and d["hard_break_after"] is None, str(d))
+
+
+LISTED = ("# Solo\n\n"
+          "Boundaries:\n\n"
+          "- first item\n"
+          "- second item\n\n"
+          "[Illustration: a lone tracker kneeling]\n\n"
+          "[^RD1]: Jung, Seven Sermons.\n\n"
+          "Body para.\n")
+
+
+class _ListAndHardBreakFake(_HardBreakFake):
+    """The export joins list items with single newlines (the Doc holds
+    one paragraph per bullet) and, as in _HardBreakFake, glues the
+    illustration tag to the footnote with a hard line break."""
+
+    def files(self):
+        inner = super().files()
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                data = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute()
+                text = data.decode("utf-8").replace(
+                    "- first item\n\n- second item",
+                    "- first item\n- second item")
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+
+def list_and_join(root: Path) -> None:
+    print("F2. a list block and a hard-break join in one tab:")
+    units = gdocs._md_units(LISTED)
+    check("_md_units splits a list block into its items",
+          "- first item" in units and "- second item" in units, str(units))
+    export = ("Boundaries:\n\n- first item\n- second item\n\n"
+              "[Illustration: a lone tracker kneeling]  \n"
+              "[^RD1]: Jung, Seven Sermons.\n\nBody para.\n")
+    doc = ["Boundaries:", "first item", "second item",
+           "[Illustration: a lone tracker kneeling]",
+           "[^RD1]: Jung, Seven Sermons.", "Body para."]
+    got = gdocs._split_hard_breaks(gdocs._md_units(export), doc)
+    check("list items and the hard-break join both align with the "
+          "Doc's paragraphs",
+          len(got) == len(doc) and got[1] == "- first item"
+          and got[3] == "[Illustration: a lone tracker kneeling]",
+          str(got))
+    ws, db, manuscript, ms, fake = _fixture(root, "listjoin-ws", LISTED,
+                                            fake_cls=_ListAndHardBreakFake)
+    (ms / "solo.md").write_text(LISTED.replace("Body para.",
+                                               "Body para, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("the push lands with the list and the join intact",
+          msg == "" and "Body para, changed." in fake.tab_text("solo.md")
+          and "second item" in fake.tab_text("solo.md"), msg)
+
+
+# ------------------------------------------------------------------ I
+
+
+class _UnspacedJoinFake(_SurgicalDocFake):
+    """Google's markdown export joins a paragraph that carries no space
+    below to the next one with a hard line break ("  \\n"); measured
+    live 2026-10-25 on a scratch Doc. Paragraphs a diff push inserts
+    arrive with no spacing until apply_tab_spacing runs, so an export
+    read before that sees fewer paragraphs than the tab holds."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.unspaced: set[str] = set()
+
+    def _lines(self, tab_id):
+        tab = self._tab(tab_id)
+        return set(tab["body"].split("\n")) if tab else set()
+
+    def _apply(self, req):
+        if "insertText" in req:
+            tab_id = req["insertText"]["location"].get("tabId")
+            before = self._lines(tab_id)
+            out = super()._apply(req)
+            self.unspaced |= {l for l in self._lines(tab_id) - before
+                              if l.strip()}
+            return out
+        if "updateParagraphStyle" in req:
+            spec = req["updateParagraphStyle"]
+            below = (spec.get("paragraphStyle", {}).get("spaceBelow")
+                     or {}).get("magnitude")
+            tab = self._tab(spec["range"].get("tabId"))
+            if tab is not None and below:
+                a, b = spec["range"]["startIndex"], spec["range"]["endIndex"]
+                index = 1
+                for seg in tab["body"].splitlines(keepends=True):
+                    if index < b and index + len(seg) > a:
+                        self.unspaced.discard(seg.rstrip("\n"))
+                    index += len(seg)
+            return {}
+        return super()._apply(req)
+
+    def files(self):
+        inner = super().files()
+        outer = self
+
+        class _Req:
+            def __init__(self, data):
+                self._data = data
+
+            def execute(self):
+                return self._data
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                chunks = []
+                for t in outer.tabs:
+                    lines = [l for l in outer._markdown_of_tab(t).split("\n")
+                             if l.strip()]
+                    blocks: list[str] = []
+                    glue = False
+                    for line in lines:
+                        if glue and blocks:
+                            blocks[-1] += "  \n" + line
+                        else:
+                            blocks.append(line)
+                        glue = line in outer.unspaced
+                    chunks.append(f"# **{t['title']}**\n\n"
+                                  + "\n\n".join(blocks)
+                                  + ("\n" if t["body"].strip() else ""))
+                return _Req("\n".join(chunks).encode("utf-8"))
+        return _Files()
+
+
+class _DroppingFake(_SurgicalDocFake):
+    """An export that loses a paragraph outright: no alignment can
+    explain it, so the push must stop before it writes anything."""
+
+    def files(self):
+        inner = super().files()
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                text = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute().decode()
+                text = text.replace("Beta two.\n\n", "")
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+
+class _DropsAfterWriteFake(_SurgicalDocFake):
+    """An export that loses a paragraph only once the push has written:
+    the read-back fails after text has landed in the tab."""
+
+    def files(self):
+        inner = super().files()
+        outer = self
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                text = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute().decode()
+                if _text_writes(outer):
+                    text = text.replace("Alpha one.\n\n", "")
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+
+def _text_writes(fake) -> list[str]:
+    return [b for b in fake.bodies
+            if "insertText" in b or "deleteContentRange" in b]
+
+
+def spacing_join(root: Path) -> None:
+    print("I. diff push survives Google's join of unspaced paragraphs:")
+    new = BASE.replace("Beta two.", "Beta changed.\n\nBeta added.")
+    ws, db, manuscript, ms, fake = _fixture(root, "join-ws", BASE,
+                                            fake_cls=_UnspacedJoinFake)
+    (ms / "solo.md").write_text(new)
+    try:
+        out = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        out, msg = {}, str(err)
+    check("the push that inserts paragraphs lands (it read the export "
+          "only after the spacing was applied)",
+          msg == "" and out.get("ops", 0) >= 1, msg)
+    check("the tab holds the local paragraphs",
+          "Alpha one.\nBeta changed.\nBeta added.\nGamma three.\n"
+          in fake.tab_text("solo.md")
+          and "Beta two." not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("every written paragraph carries spacing, so the tab "
+          "round-trips through the export", not fake.unspaced,
+          str(fake.unspaced))
+    try:
+        again = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        again, msg = {}, str(err)
+    check("the next diff push is a clean no-op",
+          msg == "" and again.get("ops") == 0, msg or str(again))
+
+    # A tab left unspaced by an earlier push: the export joins two of its
+    # paragraphs. The push reads the join as those paragraphs and lands.
+    ws, db, manuscript, ms, fake = _fixture(root, "join2-ws", BASE,
+                                            fake_cls=_UnspacedJoinFake)
+    fake.unspaced.add("Alpha one.")
+    (ms / "solo.md").write_text(BASE.replace("Gamma three.",
+                                             "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a tab whose export already joins two paragraphs still pushes",
+          msg == "" and "Gamma, changed." in fake.tab_text("solo.md")
+          and "Alpha one.\nBeta two.\n" in fake.tab_text("solo.md"), msg)
+
+    # Validation precedes every text write: a disagreement no alignment
+    # explains stops the push with the tab untouched.
+    ws, db, manuscript, ms, fake = _fixture(root, "drop-ws", BASE,
+                                            fake_cls=_DroppingFake)
+    before = fake.tab_text("solo.md")
+    (ms / "solo.md").write_text(BASE.replace("Gamma three.",
+                                             "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("an unexplained disagreement stops the push",
+          "tab structure and export disagree" in msg, msg)
+    check("...having written no text to the tab",
+          not _text_writes(fake) and fake.tab_text("solo.md") == before,
+          str(_text_writes(fake)))
+    check("...and the message does not send the author to hand-edit "
+          "the Doc", "in the Doc" not in msg and "Nothing was written"
+          in msg, msg)
+
+    # A disagreement found AFTER this push wrote is not "nothing was
+    # written": the message says the push wrote and where to look.
+    ws, db, manuscript, ms, fake = _fixture(root, "drop-after-ws", BASE,
+                                            fake_cls=_DropsAfterWriteFake)
+    (ms / "solo.md").write_text(BASE.replace("Gamma three.",
+                                             "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a disagreement after a write stops the push",
+          bool(_text_writes(fake)) and "disagree" in msg, msg)
+    check("...and says this push wrote to the tab, never 'Nothing was "
+          "written'", "Nothing was written" not in msg
+          and "this push wrote" in msg.lower()
+          and "authorlm doc diff solo.md" in msg, msg)
+
+    # The settle step (forms whose verdict is in the record but still
+    # stand in the tab) is a text write too: it waits for validation.
+    from authorlm.db import ko_fields
+    ws, db, manuscript, ms, fake = _fixture(root, "drop-settle-ws", BASE,
+                                            fake_cls=_DroppingFake)
+    fake.edit("tab-2", "Alpha one.", "<<Alpha one.>>{{Alpha new.}}")
+    thread = ko_fields("dt")
+    thread.update(
+        manuscript_id=manuscript["id"], origin_type="filter",
+        origin_id="fr-test:solo.md:1", file="solo.md", anchor_quote=None,
+        proposed_old="Alpha one.", proposed_new="Alpha new.", note="test",
+        state="cleaned", our_reply_ids="[]", last_author_reply_id=None,
+        scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace"}))
+    db.insert("doc_threads", thread)
+    before = fake.tab_text("solo.md")
+    (ms / "solo.md").write_text(BASE.replace("Alpha one.", "Alpha new.")
+                                .replace("Gamma three.", "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a disagreement stops the push before the settle step",
+          "tab structure and export disagree" in msg, msg)
+    check("...the settled form still stands; no text was written",
+          not _text_writes(fake) and fake.tab_text("solo.md") == before,
+          str(_text_writes(fake)))
 
 
 # ------------------------------------------------------------------ G
@@ -474,6 +778,92 @@ def toc_conflict(root: Path) -> None:
           and "toc.toml: b.md under a.md" in out, out)
 
 
+class _TabTreeStub:
+    """Just enough of the Docs API for sync_tab_structure: one container
+    tab whose children are the titles given, in order; index moves among
+    those children are applied and recorded."""
+
+    def __init__(self, titles: list[str]):
+        self.children = list(titles)
+        self.moves: list[dict] = []
+        stub = self
+
+        class _Req:
+            def __init__(self, fn):
+                self.fn = fn
+
+            def execute(self):
+                return self.fn()
+
+        class _Documents:
+            def get(self, documentId=None, includeTabsContent=None):
+                return _Req(lambda: {"tabs": [{
+                    "tabProperties": {"tabId": "tab-c", "title": "book"},
+                    "childTabs": [{"tabProperties": {
+                        "tabId": f"tab-{t}", "title": t,
+                        "parentTabId": "tab-c"}}
+                        for t in stub.children]}]})
+
+            def batchUpdate(self, documentId=None, body=None):
+                def run():
+                    for r in body["requests"]:
+                        props = r["updateDocumentTabProperties"][
+                            "tabProperties"]
+                        stub.moves.append(props)
+                        title = props["tabId"][len("tab-"):]
+                        stub.children.remove(title)
+                        stub.children.insert(props["index"], title)
+                    return {}
+                return _Req(run)
+        self._docs = _Documents()
+
+    def documents(self):
+        return self._docs
+
+
+def toc_doc_only_tabs(root: Path) -> None:
+    print("G2. tabs toc.toml does not list leave tab-order sync alone:")
+    ws = root / "toc2-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "toc.toml").write_text(
+        '[[chapter]]\nfile = "a.md"\n\n[[chapter]]\nfile = "new.md"\n'
+        '\n[[chapter]]\nfile = "z.md"\n')
+    for name in ("a.md", "new.md", "z.md", "extra.md"):
+        (ms / name).write_text(f"# {name}\n\nBody.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-c"
+    for name in ("a.md", "new.md", "z.md", "extra.md", "gone.md"):
+        links[name] = {"tab_id": f"tab-{name}", "checked_out": True}
+    # The base predates new.md; a push appended new.md's tab after z.md;
+    # extra.md and gone.md have tabs but no toc.toml entry.
+    links["_tab_structure"] = [["a.md", None], ["z.md", None]]
+    gdocs._save_mapping(db, manuscript, meta)
+    stub = _TabTreeStub(["a.md", "z.md", "new.md", "extra.md", "gone.md"])
+    got = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("no conflict: the push moves new.md to its toc.toml place",
+          got.get("moved", 0) >= 1 and "skipped" not in got
+          and stub.children[:3] == ["a.md", "new.md", "z.md"],
+          f"{got} {stub.children}")
+    again = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("the next push finds the order in sync",
+          again.get("insync") is True, str(again))
+    stub.children = ["z.md", "a.md", "new.md", "extra.md", "gone.md"]
+    (ms / "toc.toml").write_text(
+        '[[chapter]]\nfile = "new.md"\n\n[[chapter]]\nfile = "a.md"\n'
+        '\n[[chapter]]\nfile = "z.md"\n')
+    both = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("a real two-sided reorder is still a conflict",
+          "also changed (conflict)" in both.get("skipped", ""), str(both))
+
+
 # ------------------------------------------------------------------ H
 
 
@@ -511,7 +901,10 @@ def main_test() -> None:
         footnote_from_json(root)
         resolve_comments(root)
         divergence(root)
+        list_and_join(root)
+        spacing_join(root)
         toc_conflict(root)
+        toc_doc_only_tabs(root)
         run_tests_script(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)

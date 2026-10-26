@@ -1,6 +1,6 @@
 # Extraction redesign — concepts and edges, same schema
 
-Status: RATIFIED 2026-10-25 (the eight rulings in §0, recorded verbatim in intent). Build not started. No code changed. Nothing in the
+Status: RATIFIED 2026-10-25 (the eight rulings in §0, recorded verbatim in intent). BUILT phases 1-5 of §9 (PR nagarkar/authorllm#271 and the phase-5 PR); phase 6 partly, phase 7 done — see the §9 notes. No code changed. Nothing in the
 live workspace was written; every number below came from read-only queries
 against `~/.authorlm/authorlm.db` (manuscript SMSTTD, `ms-b33871dc315c`,
 637 collected versions, latest 2026-10-25) and from reading the chapter
@@ -698,10 +698,25 @@ calls to date.
    tests on hierarchy.md fixtures for #1-#20 of §2.4.
 3. The per-essay adjudicator with reasons; per-candidate evidence rows.
 4. `extract calibrate --replay`; §2.5 as the pass mark.
-5. Migration verbs: backup, `migrate extraction` (§5.2-5.3), and its
-   inverse.
+5. Migration verbs: `extract backup`, `extract migrate [--dry-run]`
+   (§5.2-5.3), and `extract migrate --undo <run>`. BUILT 2026-10-25
+   (`extraction_migration.py`); rehearsed gates-only on a copy of the live
+   workspace: 118 pending concepts (110 kept, 8 out), 161 inferred edges
+   (60 kept, 101 out: 47 ungrounded, 43 not proposable, 8 duplicates, 3
+   unknown endpoint), 210 proposals (102 note_update and 4
+   variant_of_retired superseded, 45 revivals superseded and 23 re-asked
+   with spans, 3 alias and 33 vanished kept). The adjudicated run is what
+   cuts the 110 further.
 6. Retire `adjudication.py`, `triage_feedback`, the inventory line, and the
    two redundant `triage_rules`; `docs/track-a-two-step-extraction.md`
-   marked superseded by this document.
+   marked superseded by this document. PARTLY BUILT 2026-10-25:
+   `adjudication.py`, its prompt, test and `[extraction] adjudicate` knob
+   are gone, the two rules are gone, track-a is marked superseded.
+   `triage_feedback` and the KNOWN CONCEPTS line still live inside the old
+   `extract_concepts`, which `init`, the writeup close and the MCP
+   `extract_concepts` tool still call; retiring it means re-pointing those
+   three callers at `extraction.run` and porting the eighteen end-to-end
+   scenario sites and six `test_api` checks that drive the old contract
+   through the test stub. That is its own change.
 7. Skill update: `.claude/skills/authorlm/SKILL.md` on the new verbs and
-   on what a triage batch now shows (span, score, reason).
+   on what a triage batch now shows (span, score, reason). DONE 2026-10-25.

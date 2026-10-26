@@ -98,12 +98,6 @@ AuthorLM — a Decision Learning Engine specialization for philosophy writing.
 
 Engine-specific hook adapters.
 
-## `authorlm.adjudication`
-
-`authorlm/authorlm/adjudication.py`
-
-Step two of a two-step extraction: adjudicate the candidates (opt-in).
-
 ## `authorlm.analysis`
 
 `authorlm/authorlm/analysis.py`
@@ -229,6 +223,24 @@ Single-file manuscript export — a transient, regenerate-on-demand artifact.
 `authorlm/authorlm/extraction.py`
 
 LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
+
+## `authorlm.extraction_adjudicator`
+
+`authorlm/authorlm/extraction_adjudicator.py`
+
+The per-essay adjudicator (docs/extraction-redesign.md §4.5).
+
+## `authorlm.extraction_calibration`
+
+`authorlm/authorlm/extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on tools/measure_adjudication.py.
+
+## `authorlm.extraction_migration`
+
+`authorlm/authorlm/extraction_migration.py`
+
+Migration of the old pipeline's pending rows (docs/extraction-redesign.md §5, phase 5 of §9).
 
 ## `authorlm.filtering`
 
@@ -524,17 +536,17 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._extraction_fixture`
+
+`authorlm/tests/_extraction_fixture.py`
+
+The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
+
 ## `tests._offline_prices`
 
 `authorlm/tests/_offline_prices.py`
 
 Pins llmlm's price cache to an empty one that never reaches the network.
-
-## `tests.test_adjudication`
-
-`authorlm/tests/test_adjudication.py`
-
-Step-two adjudication: opt-in, and inert when off.
 
 ## `tests.test_api`
 
@@ -566,6 +578,12 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_doc_add_toc`
+
+`authorlm/tests/test_doc_add_toc.py`
+
+`doc add` registers the new file in toc.toml when the manuscript has one, so a Doc push of it never leaves toc.toml and the Doc's tab order disagreeing. Run: python3 tests/test_doc_add_toc.py
+
 ## `tests.test_doc_bind`
 
 `authorlm/tests/test_doc_bind.py`
@@ -595,6 +613,36 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_export_upload.py`
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_adjudicator`
+
+`authorlm/tests/test_extraction_adjudicator.py`
+
+The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
+
+## `tests.test_extraction_calibration`
+
+`authorlm/tests/test_extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
+
+## `tests.test_extraction_gates`
+
+`authorlm/tests/test_extraction_gates.py`
+
+The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
+## `tests.test_extraction_migration`
+
+`authorlm/tests/test_extraction_migration.py`
+
+The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migrate (plan, apply, dry-run), undo as a round trip.
+
+## `tests.test_extraction_payload`
+
+`authorlm/tests/test_extraction_payload.py`
+
+The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
 ## `tests.test_filter_reply_json`
 

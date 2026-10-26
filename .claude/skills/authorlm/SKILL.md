@@ -625,14 +625,21 @@ rapid CLI loop remains useful in a terminal:
   safe alias merges, retirements, and edge rejections; inspect the report, then
   add `--apply` only when the author asks to execute it. `--nodes` / `--edges`
   restrict the lane. These are system decisions, not author feedback.
-An extraction run (`authorlm extract` / `extract_concepts`) reports which
-prompt file(s) shaped it (`Prompts:` line / `prompt_files` — includes
-`adjudication.md` whenever the second pass ran, even when it ran and
-returned nothing usable, reported separately as an empty-adjudication
-note) and splits what it skipped into three counts, not one: malformed
-model output, an unknown relation (outside `VALID_RELATIONS` — the
-extractor's own policy, not a failure), and an unknown endpoint (named a
-concept not yet in the graph). Read these as three different signals.
+Extraction is the redesigned pipeline of `docs/extraction-redesign.md`
+(ratified 2026-10-25). `authorlm extract <file> [--section H]` PRINTS the
+per-section payload (blocks S law, G glossary, P precedents, M summaries,
+E the numbered section) and makes no call; `--native` makes the calls,
+asks which adjudicator model to use with the run's estimated cost (ruling
+§0.2; `--adjudicator <model>` answers it), and writes only what passed
+the eight gates and the per-essay adjudicator. Every candidate that
+reaches triage carries its verbatim span, its paragraph, a score and the
+adjudicator's reason; what the ceiling held back is listed by `extract
+screened <file>`, runs by `extract runs`. `extract calibrate --replay`
+replays the author's recorded verdicts and moves the thresholds on
+measurement. Before the first live run: `extract backup`, then `extract
+migrate --dry-run` (report, nothing written), then `extract migrate`
+(§5; `--undo migration-1` reverses it). Read a triage batch's span and
+reason before the name: they are why the row is there.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.
@@ -2264,3 +2271,8 @@ do all three in the same turn:
   paraphrase away their reasoning.
 - All tools take an optional `manuscript` parameter — resolve ambiguity via
   `list_manuscripts` once, then pass it explicitly.
+
+## Merging
+
+- Standing authorization (owner, 2026-10-25): this repo has one owner, so the agent merges its own PR once the pre-commit hooks and the test suite pass. It still waits for the owner's word on a PR that changes a rule marked `(owner)` or a metalm guideline, and on one whose first run spends money or migrates live data.
+- Revisit trigger: when this repo gets a second contributor, a second user, or runs as a shared service, stop merging on this authorization and ask the owner to update this section.

@@ -66,7 +66,15 @@ def list_docs(db: Database, manuscript: dict) -> dict:
     return {"active": active, "retired": retired}
 
 
-def add_doc(manuscript: dict, name: str, title: str | None = None) -> Path:
+def add_doc(manuscript: dict, name: str, title: str | None = None,
+            after: str | None = None) -> Path:
+    """Scaffold a new essay file and, when the manuscript has a toc.toml,
+    register it there: after `after` (a listed file, or 'start' for the
+    head), else at the end. Without the toc entry the next Doc push adds
+    a tab that toc.toml does not list, and the pull reads that as a TOC
+    order conflict. An `after` that names no listed file writes nothing."""
+    from .structure import TOC_FILENAME, _toc_chapters, insert_toc_entry
+
     root = Path(manuscript["path"])
     filename = doc_filename(name)
     target = root / filename
@@ -76,8 +84,22 @@ def add_doc(manuscript: dict, name: str, title: str | None = None) -> Path:
         raise FileExistsError(
             f"{filename} exists in {RETIRED_DIR}/ — revive it instead: doc revive {filename}"
         )
+    toc_path = root / TOC_FILENAME
+    new_toc = None
+    if toc_path.exists():
+        toc_text = toc_path.read_text(encoding="utf-8")
+        if after is None:
+            listed = [c["file"] for c in _toc_chapters(toc_text)
+                      if c.get("file")]
+            after = listed[-1] if listed else None
+        outcome = insert_toc_entry(toc_text, filename, after)
+        if outcome is None:
+            raise LookupError(f"--after {after}: not a file in {TOC_FILENAME}")
+        new_toc = outcome[0]
     heading = title or target.stem.replace("-", " ").replace("_", " ").strip()
     target.write_text(f"# {heading}\n\n", encoding="utf-8")
+    if new_toc is not None:
+        toc_path.write_text(new_toc, encoding="utf-8")
     return target
 
 

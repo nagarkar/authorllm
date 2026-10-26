@@ -174,8 +174,11 @@ CREATE TABLE IF NOT EXISTS concept_edges (
     relation TEXT NOT NULL,       -- depends_on | motivates | contrasts_with | elaborates | generalizes | specializes | answers | foreshadows | illustrates | permits | creates | distinguishes | defines | leads_to | refutes | co_occurs
     to_node TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'declared',-- declared | inferred | realized
-    support INTEGER NOT NULL DEFAULT 0,     -- observations supporting an inferred edge
-    evidence TEXT NOT NULL DEFAULT '[]',
+    support INTEGER NOT NULL DEFAULT 0,     -- len(evidence): the extraction runs that grounded it
+    evidence TEXT NOT NULL DEFAULT '[]',    -- JSON list of grounding spans, one per run that
+                                  -- (re-)found the edge: [{{run, file, section, paragraph,
+                                  -- span}}] (docs/extraction-redesign.md §4.8); metadata
+                                  -- adds extraction: {{score, adjudicator, reason}}
     source_id TEXT
 );
 
@@ -220,8 +223,13 @@ CREATE TABLE IF NOT EXISTS knowledge_proposals (
     target TEXT NOT NULL,         -- id of the resolved object the proposal is against
     payload TEXT NOT NULL,        -- JSON: current vs proposed
     content_hash TEXT NOT NULL,   -- dedupe: a dismissed proposal never returns verbatim
-    source TEXT NOT NULL DEFAULT 'extraction',
-    state TEXT NOT NULL DEFAULT 'open'      -- open | adopted | dismissed
+    source TEXT NOT NULL DEFAULT 'extraction',  -- 'extraction/<run>' from the redesigned
+                                  -- pipeline, so one run's proposals list together
+    state TEXT NOT NULL DEFAULT 'open'      -- open | adopted | dismissed | demoted |
+                                  -- superseded (machine clean-up, not an author
+                                  -- verdict: neither the identical-content check
+                                  -- nor the firewall reads it, so a superseded
+                                  -- question may be raised again; §4.8)
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
