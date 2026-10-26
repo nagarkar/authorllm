@@ -883,7 +883,7 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None, episode=None) -> dict:
+            episode=None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -1100,47 +1100,11 @@ def collect(db: Database, manuscript: dict, config: dict,
     except Exception:  # observation must never die on a structural read
         pass
 
-    # The author never has to remember the analyzers: a collected change
-    # runs incremental extraction (the redesigned pipeline, through
-    # run_extraction) when an LLM is configured and the adjudicator is
-    # settled. Best-effort — analysis failure must never block observation.
-    if analyze is None:
-        analyze = auto
-    if analyze:
-        from .extraction import (extraction_enabled,
-                                 manuscript_extraction_enabled)
-
-        llm = LLMClient(config)
-        if not extraction_enabled(config):
-            report["extraction"] = "off"
-        elif not manuscript_extraction_enabled(db, manuscript):
-            # The manuscript's own switch: same report, same silence —
-            # the scans above still ran, and find nothing to do on a
-            # manuscript that has no concepts.
-            report["extraction"] = "off"
-        elif llm.enabled:
-            try:
-                summary = run_extraction(db, manuscript, llm) or {}
-            except Exception as err:
-                summary = {}
-                from . import tracelog
-
-                tracelog.record(
-                    "extraction", surface="api",
-                    workspace=str(db.path.parent.parent),
-                    manuscript=manuscript.get("name"),
-                    ok=False, error=f"{type(err).__name__}: {err}")
-            if summary.get("stopped"):
-                report["extraction"] = summary["stopped"]
-            elif summary.get("run"):
-                reached = summary["run"]["reached"]
-                report["auto_analysis"] = {
-                    "new_concepts": reached["concepts"],
-                    "new_edges": reached["relations"],
-                    "proposed": reached["proposals"],
-                    "run": summary["run"]["id"],
-                }
-
+    # No LLM runs at collect. Concept extraction is LAZY (ruling
+    # 2026-10-25, docs/extraction-redesign.md §0.9): the graph is mined
+    # when someone asks for a fresh one — `authorlm extract --native` or
+    # the MCP tool — never as a side effect of observing an edit. The
+    # extract hint above is all a collect says about it.
     # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
     # — are REPORTED here, beside the illustration slots, and never
     # drafted (footnote design §2): no LLM runs at collect and nothing is
@@ -3277,24 +3241,8 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     report = collect(db, manuscript, config, source="write-complete",
                      episode=_writeup_episode(db, manuscript, writeup,
                                               session))
-    extraction = None
-    llm = LLMClient(config)
-    from .extraction import extraction_allowed
-
-    if not extraction_allowed(db, manuscript, config):
-        extraction = {"off": True}
-    elif llm.enabled:
-        try:
-            extraction = run_extraction(db, manuscript, llm)
-        except Exception as err:
-            extraction = None
-            from . import tracelog
-
-            tracelog.record(
-                "extraction", surface="api",
-                workspace=str(db.path.parent.parent),
-                manuscript=manuscript.get("name"),
-                ok=False, error=f"{type(err).__name__}: {err}")
+    # No extraction here either: the concept graph is mined on request
+    # (ruling §0.9), and the report's summary_hint says what to rebuild.
     plan = loads(writeup["plan"], [])
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
@@ -3309,7 +3257,7 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "toc_stanza": toc_stanza, "toc_placement": placement,
             "marker_present": marker_survives,
             "summary_hint": writeup["file"],
-            "collect": report, "extraction": extraction}
+            "collect": report}
 
 
 def write_abandon(db: Database, manuscript: dict, config: dict,
@@ -4132,8 +4080,6 @@ def compact_collect(report: dict) -> dict:
                    "after": len(report["gaps_after"])}
     out["gaps_resolved"] = [_compact_gap(g) for g in report["gaps_resolved"]]
     out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
-    if "auto_analysis" in report:
-        out["auto_analysis"] = report["auto_analysis"]
     if "illustrations" in report:
         out["illustrations"] = report["illustrations"]
     if "directives" in report:
@@ -4409,9 +4355,11 @@ def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
                    adjudicator: str | None = None) -> dict | None:
     """The non-interactive front on `extraction.run` (the redesigned
-    pipeline, docs/extraction-redesign.md), for `init`, the writeup close,
-    an analysed collect and the MCP tool. Incremental by default: the
-    sections changed since the watermark; `files` or `full` widen it.
+    pipeline, docs/extraction-redesign.md) — the MCP tool's road, and the
+    one a script takes. Extraction is lazy (ruling §0.9): nothing calls
+    this as a side effect; the author, or the chat on their word, asks for
+    a fresh graph. Incremental by default: the sections changed since the
+    watermark; `files` or `full` widen it.
 
     The adjudicator is chosen before the first call (ruling §0.2, never
     spend unasked): `adjudicator` answers it outright, `[extraction]

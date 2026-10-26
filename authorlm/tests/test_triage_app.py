@@ -687,7 +687,7 @@ class TriageAppTest(unittest.TestCase):
         self.assertTrue(dirty["manuscript_version"]["local_dirty"])
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in dirty["rows"]))
-        api.collect(db, manuscript, {}, analyze=False)
+        api.collect(db, manuscript, {})
         stale = triage.snapshot(db, manuscript, "concepts")
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in stale["rows"]))

@@ -107,26 +107,14 @@ def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
 
 
 def native_extract(workspace: Path, *files: str, full: bool = False) -> str:
-    """The redesigned extraction, driven the way init and the writeup
-    close drive it: `cli._run_extraction` → `api.run_extraction` →
-    `extraction.run`, the stub server answering the section calls and
-    the adjudicator call (the workspace's config settles the adjudicator,
-    STUB_EXTRACTION). No files = the sections changed since the
-    watermark; `full` = every essay."""
-    import types
-
-    from authorlm import cli as _cli
-    from authorlm.llm import LLMClient
-
-    _pin_config(workspace)
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        db = _api.open_db(str(workspace))
-        manuscript = _cli._manuscript(
-            db, types.SimpleNamespace(manuscript=None, command="extract"))
-        _cli._run_extraction(db, manuscript, LLMClient(_cli._load_config(None)),
-                             files=list(files) or None, full=full)
-    return buffer.getvalue()
+    """`authorlm extract --native`, the one road to a fresh Concept Graph
+    (ruling §0.9: extraction is lazy — init, collect and the writeup close
+    never extract). The stub server answers the section calls and the
+    adjudicator call; the workspace's config settles the adjudicator
+    (STUB_EXTRACTION), so no question is asked. No files = the sections
+    changed since the watermark; `full` = every essay."""
+    return run(workspace, "extract", "--native", *files,
+               *(["--full"] if full else []))
 
 
 def check(label: str, condition: bool, context: str = "") -> None:
@@ -895,22 +883,23 @@ def scenario_llm_and_unregister(root: Path) -> None:
             'model = "stub"\n'
         )
         stub_config = stub_llm + STUB_EXTRACTION
-        # Ruling §0.2 first: with the adjudicator unsettled, init asks
-        # nothing and spends nothing — it points at `extract --native`.
-        write(ws / ".authorlm" / "config.toml", stub_llm)
+        write(ws / ".authorlm" / "config.toml", stub_config)
         before_calls = StubLLMHandler.REQUESTS
         out = run(ws, "init", "--name", "book", "--path", str(ms))
-        check("init with the adjudicator unsettled runs no extraction and "
-              "says where the question is asked",
-              "extract --native" in out and "Collected revision" not in out
+        check("init never extracts (ruling §0.9: lazy) and says where the "
+              "graph is mined",
+              "mined on request" in out and "Collected revision" not in out
               and StubLLMHandler.REQUESTS == before_calls, out)
-        run(ws, "unregister", "book")
-        write(ws / ".authorlm" / "config.toml", stub_config)
+        out = run(ws, "concept", "list")
+        check("the graph is empty until someone asks for it",
+              "Concept Graph is empty" in out, out)
 
-        out = run(ws, "init", "--name", "book", "--path", str(ms))
-        check("init auto-collects before extraction", "Collected revision v1" in out, out)
-        check("init runs the redesigned extraction, essay by essay, and "
-              "names the run",
+        # Someone asks for it: the first run, unattended (the shipped
+        # adjudicator, no question).
+        out = native_extract(ws)
+        check("the first run collects before extracting",
+              "Collected revision v1" in out, out)
+        check("the redesigned extraction runs essay by essay and names the run",
               "01-choice.md: 1/1 section call(s) answered" in out
               and "02-fields.md: 1/1 section call(s) answered" in out
               and "run extract-" in out and "adjudicated by stub" in out, out)
@@ -945,7 +934,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         out = native_extract(ws)
         check("incremental re-extraction is a no-op without changes",
-              "Nothing new since the last extraction" in out, out)
+              "Nothing to extract" in out, out)
         out = native_extract(ws, full=True)
         check("full re-extraction creates nothing: every name is already the "
               "graph's (subsumed), every relation re-found, and the open "
@@ -1292,11 +1281,13 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("no revival proposal for a name living on as an alias",
               "revive retired concept 'Distinction'" not in out, out)
 
-        # --- collect --auto (the watcher's path) runs the analyzers itself ---
+        # --- collect --auto (the watcher's path) observes and never extracts ---
         write(ms / "04-auto.md", "# Auto\n\nBecoming continues apace.\n")
+        before_calls = StubLLMHandler.REQUESTS
         out = run(ws, "collect", "--auto")
-        check("auto collect runs incremental analysis",
-              "Auto-analysis:" in out, out)
+        check("auto collect makes no model call: the graph is mined on request",
+              StubLLMHandler.REQUESTS == before_calls
+              and "Auto-analysis" not in out, out)
 
         run(ws, "session", "end")
 
@@ -1306,9 +1297,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
         out = run(ws, "status", expect_exit=True)
         check("no manuscript remains after unregister", "no manuscript" in out, out)
 
-        out = run(ws, "init", "--name", "book", "--path", str(ms), "--no-extract")
-        check("re-init after unregister works, --no-extract skips LLM",
-              "Registered manuscript" in out and "Extract" not in out, out)
+        out = run(ws, "init", "--name", "book", "--path", str(ms))
+        check("re-init after unregister works, and init never extracts",
+              "Registered manuscript" in out and "Collected revision" not in out
+              and "mined on request" in out, out)
         out = run(ws, "concept", "list")
         check("clean slate after unregister", "Concept Graph is empty" in out, out)
 
@@ -1321,7 +1313,7 @@ def scenario_llm_and_unregister(root: Path) -> None:
               '[[chapter]]\nfile = "z-first.md"\n\n'
               '[[chapter]]\nfile = "a-second.md"\n# Contents\n')
         write(wg / ".authorlm" / "config.toml", stub_config)
-        run(wg, "init", "--name", "book", "--path", str(mg), "--no-extract")
+        run(wg, "init", "--name", "book", "--path", str(mg))
         run(wg, "concept", "add", "Alpha")
         run(wg, "concept", "add", "Beta")
         run(wg, "concept", "add", "Contents")  # appears only in toc.toml
@@ -3159,7 +3151,8 @@ def scenario_parallel_writeups(root: Path) -> None:
               "of them the marker",
               len(named) > 1 and not any(_api.MARKER in u for u in named)
               and any("trajectories" in u for u in named)
-              and "01-choice.md:" not in out,
+              and "01-choice.md: held by an active writeup" in out
+              and "01-choice.md: " + "1/1" not in out,
               next((u[:400] for u in named if _api.MARKER in u),
                    f"{len(named)} payload(s)\n{out}"))
         write(ms / "03-third.md", CH3)
@@ -3168,10 +3161,11 @@ def scenario_parallel_writeups(root: Path) -> None:
         mark = len(StubLLMHandler.PAYLOADS)
         out = native_extract(ws, "01-choice.md")
         check("E9 — extracting the in-flight file specifically mines "
-              "NOTHING: it is dropped per file, so the scope is empty "
-              "and the run ends rather than sending a marker to a model",
+              "NOTHING: it is dropped per file, said, and the run ends "
+              "rather than sending a marker to a model",
               len(StubLLMHandler.PAYLOADS) == mark
-              and "Nothing new" in out, out)
+              and "held by an active writeup" in out
+              and "Nothing to extract" in out, out)
 
         mark = len(StubLLMHandler.PAYLOADS)
         write(ms / "03-third.md", CH3 + "\nA paragraph added during the "
@@ -4696,6 +4690,10 @@ def _ws_workspace(root: Path, server, name: str = "ws") -> tuple:
           f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
           "model = \"stub\"\n" + STUB_EXTRACTION)
     run(ws, "init", "--name", "book", "--path", str(ms))
+    # The baseline snapshot, outside any session: init no longer collects
+    # (it no longer extracts), and the WS checks read episodes against
+    # the writeups' own acts, not against the first sight of the book.
+    run(ws, "collect")
     run(ws, "style", "guide", "House")
     for filename in WS_FILES:
         run(ws, "style", "attach", filename, "House")
@@ -5483,7 +5481,7 @@ def scenario_testbench(root: Path) -> None:
               "one place the bench spends money",
               "built 3" in out and "LLM: 3 live call(s)" in out, out)
         check("exactly three model calls: one summary per essay, and no "
-              "concept extraction (init runs --no-extract)",
+              "concept extraction (init never extracts)",
               StubLLMHandler.REQUESTS - before == 3,
               f"{StubLLMHandler.REQUESTS - before} calls")
 
@@ -5708,7 +5706,7 @@ def scenario_testbench(root: Path) -> None:
         _pin_config(ws)
         # WITH NO DICTIONARY AT ALL, first, and that ordering is the
         # point. The first cut of this check asserted only "the protected
-        # set is non-empty" against a bench registered `--no-extract`,
+        # set is non-empty" against a bench whose graph was never mined,
         # whose graph is empty by design — so it could never pass on its
         # own. It passed here only because the test wrote a
         # pronunciations.md moments earlier and list 3 (the dictionary's

@@ -753,17 +753,25 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
 
     billed = {k: v for k, v in found.items()
               if v.strip().lower().startswith("anthropic/")}
-    # The one deliberate re-arming, ruled 2026-10-25
-    # (docs/extraction-redesign.md §0.2, the author's words: "let's do
-    # claude opus-class but have the system prompt me for what model I
-    # want to use"): the extraction adjudicator's DEFAULT may be an
-    # Anthropic model, because every run that would adjudicate prints the
-    # choices with their cost and asks before the first call. Allowed
-    # only while that question is on — `adjudicator_prompt = "default"`
-    # would make it a silent bill, and this check fails again.
+    # The one deliberate re-arming: the extraction adjudicator's default.
+    # Ruled 2026-10-25 first as a run-time question (docs/extraction-
+    # redesign.md §0.2: "let's do claude opus-class but have the system
+    # prompt me for what model I want to use"), then the same day as an
+    # UNATTENDED default (the author's words: "I want to extract lazily,
+    # and unattended", choosing anthropic/claude-opus-5 over the Gemini
+    # options with their costs in front of them). So this ONE key may name
+    # an Anthropic model with `adjudicator_prompt = "default"`; it is the
+    # only silent Anthropic bill the shipped config carries, and it is
+    # bounded by `[extraction] run_cost_ceiling_usd` per run and by the
+    # `enabled` switch above it.
     extraction = config.get("extraction") or {}
-    if extraction.get("adjudicator_prompt", "ask") == "ask":
+    if extraction.get("adjudicator_prompt", "ask") in ("ask", "default"):
         billed.pop("[extraction] adjudicator_model", None)
+    check("the unattended adjudicator is the deliberate exception, and it "
+          "is named in full here",
+          extraction.get("adjudicator_model") == "anthropic/claude-opus-5"
+          and extraction.get("adjudicator_prompt") == "default",
+          str(extraction))
     check("no model-bearing key in the shipped config.toml names an "
           "anthropic/ model — the author ruled the billed paths off, and "
           "re-arming one must be a deliberate edit to THIS check (the "
@@ -814,25 +822,18 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
           and "write draft" in raw, raw[:400])
 
 
-def check_extraction_failure_traced() -> None:
-    """OPS-2: a raising run_extraction must leave a trace, not just a
-    silently-empty result.
-
-    `collect(..., analyze=True)` and `write_complete` both swallow
-    run_extraction's exceptions with a bare `except Exception:` — by
-    design, extraction failure must never block observation — but before
-    this fix nothing recorded that it happened: `collect`/`write_complete`
-    returned the same shape as a genuinely empty extraction pass, so a
-    silently-broken LLM pipeline was indistinguishable from a quiet day.
-    This does not change control flow (still swallowed, still returns
-    `{}`/`None`) — it only asserts a `trace.jsonl` record now exists."""
+def check_extraction_switch() -> None:
+    """`[extraction] enabled` is a plain kill switch on the one road that
+    extracts, `api.run_extraction`: off means no LLM extraction, said by
+    name, while the deterministic graph upkeep keeps running. Nothing
+    else extracts — a collect and a writeup close make no extraction call
+    at all (ruling §0.9: lazy)."""
     import io
-    import json as _tjson
 
     from authorlm import api as _api
-    from authorlm import tracelog
+    from authorlm.extraction import ExtractionDisabled, extraction_enabled
 
-    root = Path(tempfile.mkdtemp(prefix="authorlm-ops2-"))
+    root = Path(tempfile.mkdtemp(prefix="authorlm-switch-"))
     try:
         ws = root / "ws"
         ms = ws / "manuscript"
@@ -844,37 +845,11 @@ def check_extraction_failure_traced() -> None:
         db = _api.open_db(str(ws))
         manuscript = _api.get_manuscript(db)
         config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
-        trace_path = tracelog.log_dir(str(ws)) / "trace.jsonl"
-
-        def boom(*a, **kw):
-            raise RuntimeError("stub extraction failure")
-
-        # --- [extraction] enabled = false: the switch (author ruling
-        # 2026-09-25). Off means no LLM extraction anywhere, said plainly,
-        # while the deterministic graph upkeep keeps running.
-        from authorlm.extraction import ExtractionDisabled, extraction_enabled
 
         check("extraction is on by default and off by the switch",
               extraction_enabled({}) and extraction_enabled({"extraction": {}})
               and not extraction_enabled({"extraction": {"enabled": False}}))
         off_cfg = {**config, "extraction": {"enabled": False}}
-        never = {"n": 0}
-
-        def must_not_run(*a, **kw):
-            never["n"] += 1
-            raise RuntimeError("extraction ran while switched off")
-
-        prev_run_extraction = _api.run_extraction
-        _api.run_extraction = must_not_run
-        try:
-            (ms / "01-draft.md").write_text("# Draft\n\nSwitched-off text.\n")
-            off_report = _api.collect(db, manuscript, off_cfg, analyze=True)
-        finally:
-            _api.run_extraction = prev_run_extraction
-        check("an analysed collect skips extraction when the switch is off, "
-              "and says so",
-              never["n"] == 0 and off_report.get("extraction") == "off",
-              str(off_report.get("extraction")))
 
         class _OffLLM:
             config = off_cfg
@@ -889,58 +864,34 @@ def check_extraction_failure_traced() -> None:
               declined is not None and "[extraction] enabled = false" in declined
               and "concept add" in declined, str(declined))
 
-        # --- collect(..., analyze=True): api.py's first swallow site ---
-        prev_run_extraction = _api.run_extraction
-        _api.run_extraction = boom
+        never = {"n": 0}
+
+        def must_not_run(*a, **kw):
+            never["n"] += 1
+            raise RuntimeError("extraction ran as a side effect")
+
+        prev = _api.run_extraction
+        _api.run_extraction = must_not_run
         try:
             (ms / "01-draft.md").write_text("# Draft\n\nChanged text.\n")
-            report = _api.collect(db, manuscript, config, analyze=True)
-        finally:
-            _api.run_extraction = prev_run_extraction
-        check("collect() with a raising run_extraction still returns "
-              "(swallow behaviour unchanged)",
-              "auto_analysis" not in report, report)
-        entries = [_tjson.loads(line)
-                  for line in trace_path.read_text().splitlines()]
-        collect_entry = entries[-1]
-        check("collect()'s swallowed extraction failure is traced",
-              collect_entry["verb"] == "extraction"
-              and collect_entry["surface"] == "api"
-              and collect_entry["manuscript"] == "book"
-              and collect_entry["ok"] is False
-              and "stub extraction failure" in collect_entry["error"],
-              collect_entry)
-
-        # --- write_complete: api.py's second swallow site ---
-        _api.define_style_guide(db, manuscript, "house")
-        _api.attach_style(db, manuscript, "01-draft.md", "house")
-        declared = _api.declare_intent(db, manuscript, "Finish the draft")
-        intent_id = declared["intent"]["id"]
-        _api.write_start(db, manuscript, config, "01-draft.md", intent_id[:8])
-        # `write start` leaves the mid-rewrite placeholder, and completing
-        # on a placeholder-only file is refused (design §14.3). This test
-        # is about the extraction-failure swallow, so stand in for the
-        # accepted beat that would normally have replaced it.
-        (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
-
-        _api.run_extraction = boom
-        try:
+            report = _api.collect(db, manuscript, config)
+            auto = _api.collect(db, manuscript, config, auto=True)
+            _api.define_style_guide(db, manuscript, "house")
+            _api.attach_style(db, manuscript, "01-draft.md", "house")
+            declared = _api.declare_intent(db, manuscript, "Finish the draft")
+            _api.write_start(db, manuscript, config, "01-draft.md",
+                             declared["intent"]["id"][:8])
+            (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
             result = _api.write_complete(db, manuscript, config)
         finally:
-            _api.run_extraction = prev_run_extraction
-        check("write_complete() with a raising run_extraction still "
-              "returns (swallow behaviour unchanged)",
-              result["extraction"] is None, result)
-        entries = [_tjson.loads(line)
-                  for line in trace_path.read_text().splitlines()]
-        complete_entry = entries[-1]
-        check("write_complete()'s swallowed extraction failure is traced",
-              complete_entry["verb"] == "extraction"
-              and complete_entry["surface"] == "api"
-              and complete_entry["manuscript"] == "book"
-              and complete_entry["ok"] is False
-              and "stub extraction failure" in complete_entry["error"],
-              complete_entry)
+            _api.run_extraction = prev
+        check("a collect (plain or --auto) and a writeup close make NO "
+              "extraction call, with the switch on and an LLM configured: "
+              "the graph is mined on request only",
+              never["n"] == 0 and "extraction" not in report
+              and "auto_analysis" not in report and "extraction" not in result
+              and auto.get("version_no") is None,
+              str((never, sorted(report), sorted(result))))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -984,33 +935,6 @@ def check_manuscript_extraction_switch() -> None:
               and "extraction" not in json.loads(m_book["metadata"] or "{}"))
 
         config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
-        calls: list[str] = []
-
-        def counting(db_, manuscript_, llm_, **kw):
-            calls.append(manuscript_["name"])
-            return {"up_to_date": True}
-
-        prev = _api.run_extraction
-        _api.run_extraction = counting
-        try:
-            (kept / "01-draft.md").write_text("# Kept\n\nChanged once.\n")
-            (book / "01-draft.md").write_text("# Book\n\nChanged once.\n")
-            r_kept = _api.collect(db, m_kept, config, analyze=True)
-            r_kept_auto = None
-            (kept / "01-draft.md").write_text("# Kept\n\nChanged twice.\n")
-            r_kept_auto = _api.collect(db, m_kept, config, auto=True)
-            after_kept = list(calls)
-            r_book = _api.collect(db, m_book, config, analyze=True)
-        finally:
-            _api.run_extraction = prev
-        check("collect with analyze/auto set makes NO extraction call on "
-              "the switched-off manuscript, with the global switch on, "
-              "and reports it",
-              after_kept == [] and r_kept.get("extraction") == "off"
-              and r_kept_auto.get("extraction") == "off"
-              and r_kept.get("version_no"), str((after_kept, r_kept)))
-        check("a second manuscript in the same workspace still extracts",
-              calls == ["book"] and "extraction" not in r_book, str(calls))
 
         class _OnLLM:
             enabled = True
@@ -2782,7 +2706,7 @@ def check_scope_evidence_batched_lookup() -> None:
             (ms / name).write_text(f"# {name}\n\nText.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         api.ensure_session(db, manuscript)
@@ -2887,7 +2811,7 @@ def check_scope_evidence() -> None:
             (ms / name).write_text(f"# {name}\n\nText.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         api.ensure_session(db, manuscript)
@@ -5927,7 +5851,7 @@ def check_workspace_guard() -> None:
         check("...and creates nothing (logs may appear; the database file is the tell)",
               not api.db_path(ws).exists())
         _, code = run("--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract")
+                      "--path", str(ms))
         check("-w init creates the database", code is None and api.db_path(ws).exists(), f"{code}")
 
         # 3. no pointer, no database, no terminal: refuse and name setup.
@@ -5954,7 +5878,7 @@ def check_workspace_guard() -> None:
               isinstance(code, str) and "mount" in code and "AUTHORLM_WORKSPACE" in code, f"{code}")
         check("an empty directory at the pointer does not pass as a database",
               not api.db_path(ws).exists())
-        _, code = run("init", "--name", "again", "--path", str(ms), "--no-extract")
+        _, code = run("init", "--name", "again", "--path", str(ms))
         check("even init refuses under a stale pointer", isinstance(code, str) and "mount" in code, f"{code}")
         check("...and still creates nothing", not api.db_path(ws).exists())
         shutil.rmtree(ws)  # the stand-in mount point (plus any logs the refusals wrote)
@@ -6005,7 +5929,7 @@ def check_filter_prelude_opt_in_frame() -> None:
             "Readers who already know the literature.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         run = {"id": "fr-prelude", "file": "02-middle.md",
@@ -6064,7 +5988,7 @@ def check_retired_link(root: Path, FakeGoogle) -> None:
     (ms / "03-old.md").write_text("# Old\n\nRetired long ago.\n")
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws), "init", "--name", "retirebook",
-                  "--path", str(ms), "--no-extract"])
+                  "--path", str(ms)])
     db = api.open_db(str(ws))
     manuscript = api.get_manuscript(db)
     stub = FakeGoogle()
@@ -6147,7 +6071,7 @@ def check_omit_all(root: Path, FakeGoogle) -> None:
     (ms / "02-ledger.md").write_text(ledger)
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws), "init", "--name", "omitbook",
-                  "--path", str(ms), "--no-extract"])
+                  "--path", str(ms)])
     db = api.open_db(str(ws))
     manuscript = api.get_manuscript(db)
 
@@ -6240,7 +6164,7 @@ def check_read_manuscript(root: Path, FakeGoogle) -> None:
         "# B\n\nOriginal b content.\n\nSecond paragraph of b.\n")
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws), "init", "--name", "readbook",
-                  "--path", str(ms), "--no-extract"])
+                  "--path", str(ms)])
     db = api.open_db(str(ws))
     manuscript = api.get_manuscript(db)
 
@@ -6508,7 +6432,7 @@ def main_test() -> None:
     check_drafting_cache_warning()
     check_drafting_cache_layer()
     check_model_profiles()
-    check_extraction_failure_traced()
+    check_extraction_switch()
     check_manuscript_extraction_switch()
     check_prompt_registry_locations()
     check_backup_and_restore()
@@ -8420,7 +8344,7 @@ def main_test() -> None:
             "# B\n\nOriginal b content, never individually pushed.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(t2_root), "init", "--name", "t2book",
-                      "--path", str(t2_ms), "--no-extract"])
+                      "--path", str(t2_ms)])
         t2_db = api.open_db(str(t2_root))
         t2_manuscript = api.get_manuscript(t2_db)
         t2_stub = FakeGoogle()
@@ -12964,11 +12888,10 @@ def main_test() -> None:
         (virgin_ms / "start.md").write_text("# Start\n\nFresh prose.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(virgin_ws), "init",
-                      "--name", "virgin", "--path", str(virgin_ms),
-                      "--no-extract"])
+                      "--name", "virgin", "--path", str(virgin_ms)])
         virgin_db = api.open_db(str(virgin_ws))
         virgin_m = api.get_manuscript(virgin_db)
-        check("init --no-extract leaves a virgin manuscript (no baseline)",
+        check("init leaves a virgin manuscript (no baseline)",
               virgin_db.one(
                   "SELECT id FROM manuscript_versions "
                   "WHERE manuscript_id = ? LIMIT 1",
@@ -13013,8 +12936,7 @@ def main_test() -> None:
         (style_root / "98-child.md").write_text("# Child\n\nMore prose.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(style_ws), "init",
-                      "--name", "styled", "--path", str(style_root),
-                      "--no-extract"])
+                      "--name", "styled", "--path", str(style_root)])
         sdb = api.open_db(str(style_ws))
         sm = api.get_manuscript(sdb)
         bare = api.style_show(sdb, sm, "97-styled.md")

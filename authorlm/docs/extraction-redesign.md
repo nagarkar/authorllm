@@ -60,6 +60,19 @@ Asked one at a time and answered; the reasoning follows each.
     now. `extract migrate` retires them on the same terms as a failed
     pending row (tagged, one evidence row, `--undo` revives). Author-
     declared concepts are never touched.
+11. **Extraction is lazy, and unattended** (ruled later the same day; the
+    author's words: "I want to extract lazily, and unattended … even
+    concept extraction should be lazy. If a fresh concept tree is
+    required, someone should run the concept extraction"). Nothing mines
+    the graph as a side effect: `init`, `collect` and `write complete`
+    never extract. `authorlm extract --native` and the MCP tool
+    `extract_concepts` are the only roads, taken when a fresh graph is
+    wanted, and a run so asked for has no question left to answer:
+    `adjudicator_prompt = "default"` with the opus-class adjudicator is the
+    shipped setting (the asked-for choice of ruling 2 stays available as
+    `adjudicator_prompt = "ask"` and `--adjudicator`). This retires the
+    2026-09-25 ruling that switched extraction off pending the redo:
+    `[extraction] enabled` is a plain kill switch again, on.
 
 ## 1. The pipeline as found, end to end
 
@@ -697,7 +710,7 @@ calls to date.
 | `[extraction] unit` | config.toml | `section` | `paragraph` and `essay` accepted for measurement runs |
 | `[extraction] model` | config.toml | `gemini/gemini-2.5-flash` | section calls |
 | `[extraction] adjudicator_model` | config.toml | an Opus-class Claude model | default only; ruling §0.2 |
-| `[extraction] adjudicator_prompt` | config.toml | `ask` | `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
+| `[extraction] adjudicator_prompt` | config.toml | `default` (shipped; `ask` in code) | ruling 9: unattended, the opus-class default taken without a question; `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
 | `[extraction] confidence_floor` | config.toml | `0.70` | gate 8; re-measured by `calibrate` |
 | `[extraction] max_concepts_per_essay` | config.toml | `12` | reaches triage; the rest screened |
 | `[extraction] max_links_per_essay` | config.toml | `15` | same |
@@ -754,14 +767,11 @@ calls to date.
    KNOWN CONCEPTS inventory line, the `--edges-only` / `--aliases` modes
    and `prompts/extraction-legacy.md` are deleted, with their three
    registry entries and `tools/measure_adjudication.py` (its numbers stand
-   in track-a §4). Its three callers now run this pipeline through
-   `api.run_extraction`, the non-interactive front on `extraction.run`:
-   `init` (only when the adjudicator is settled — `[extraction]
-   adjudicator_prompt = "default"` or `init --adjudicator <model>` —
-   else a one-line pointer to `extract --native`), the writeup close and
-   an analysed `collect` (which report `{"stopped": …}` instead of
-   spending unasked, ruling §0.2), and the MCP tool `extract_concepts`,
-   which gained an `adjudicator` argument that answers the question. A
+   in track-a §4). `api.run_extraction` is the non-interactive front on
+   `extraction.run`, the MCP tool `extract_concepts` its one caller (with
+   an `adjudicator` argument); under ruling 9 `init`, `collect` and
+   `write complete` no longer extract at all, and `init --no-extract` is
+   gone with the behaviour it switched off. A
    section reply with a null where the contract wants a list counts as
    unanswered (the watermark stays), and `render_run` reports each alias
    candidate's fate. The eighteen end-to-end sites drive `extraction.run`
