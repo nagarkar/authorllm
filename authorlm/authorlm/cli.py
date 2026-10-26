@@ -7667,6 +7667,9 @@ def cmd_doc(args):
                                 after=getattr(args, "doc_after", None))
             print(f"Created {path.relative_to(manuscript['path'])} "
                   + ui.dim("(scaffold only — the writing is yours)"))
+            hint = docs.about_the_book_hint(args.name)
+            if hint:
+                print(ui.yellow(hint))
         elif args.action == "retire":
             path = docs.retire_doc(manuscript, args.name)
             from .gdocs import drop_link

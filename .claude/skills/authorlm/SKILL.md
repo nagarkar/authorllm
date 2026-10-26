@@ -589,6 +589,20 @@ Profile registry (key → standing rule):
   reader-load filter and the pitch lens name `audience` in their front
   matter so the payload carries it.
 
+- `synopsis` — consult for agent or publisher submissions and any
+  request for the book in brief.
+- `series-<series>` — a show manuscript's series charter (goal, topics
+  and coverage, terms, ingredients): consult before any episode work for
+  that series (podlm reads it).
+
+**About the book, not part of it — propose a profile.** Before adding a
+file that is about the book rather than part of it (a synopsis, pitch,
+market or audience notes, positioning, a style or perspective sheet, a
+series charter), propose a profile (or a style element, for voice rules)
+and register it (Registering a new aspect, next), instead of a chapter tab (`doc add`) or an
+`outside` entry in toc.toml. `doc add` prints a one-line hint when the
+name looks like such a file.
+
 **Registering a new aspect** (do all three, in order, when the author
 names one): (1) agree on the key and the standing rule in conversation;
 (2) store the content — `authorlm profile set <key>`; (3) add the key
@@ -1833,6 +1847,12 @@ run the CLI via Bash:
   a push deletes an old `manifest.md` tab). When the author asks about
   reader load, point them to that tab; never edit it.
 - state: `authorlm doc list -m <manuscript>` shows link/checkout status.
+- add: `authorlm doc add <name>` scaffolds a chapter file and registers
+  it in toc.toml. Only for files that are PART of the book: a synopsis,
+  pitch, market or audience notes, positioning, a style or perspective
+  sheet, or a series charter is about the book, so propose a profile (or
+  a style element for voice rules) and register it (see Profiles)
+  instead of a tab or an `outside` entry.
 - bind: `authorlm doc bind <doc-id-or-url> -m <manuscript>` adopts an
   EXISTING master Doc for a manuscript that has none (a fresh workspace,
   a cloud session): it records the id and the container tab, writes
