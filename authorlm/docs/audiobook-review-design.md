@@ -422,6 +422,17 @@ audio strips, a list read item by item) is not editable here and says
 so. The Doc stays out of it (ruling of 2026-09-26): the edit is a local
 edit, and reconcile in chat sees it like any other.
 
+**2026-10-26, later. Push from the page.** "Rename 'exported' to
+'pushed' and on the right of that text, put a 'push' button to push to
+the google doc; this should naturally update the last pushed date." The
+line under the chapter dropdown now reads "pushed <when> · Doc:
+<state>" with a ⇧ Push chip beside it; the chip queues a `push` job
+that runs `gdocs.push_doc` for the open chapter's files (never opening
+a consent browser: `doc auth` stays the one doorway), and `push_doc`
+stamps `pushed_at` on the tab's entry, which the line reads back. This
+narrows the 2026-09-26 ruling: the page still never *pulls* or
+reconciles — that stays in chat — but it may push what is on disk.
+
 ## 11. Open questions
 
 - Whether the served page should also host the pronunciation workbench

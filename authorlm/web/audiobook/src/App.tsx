@@ -166,6 +166,7 @@ export function App() {
   const {book, doc, account, jobs} = status;
   const stale = status.export;
   const refreshing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "refresh");
+  const pushing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "push");
   const cur = book.chapters.find(c => c.stem === stem);
 
   return (
@@ -195,7 +196,9 @@ export function App() {
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
         </div>}
         <div className="doc">
-          exported {when(stale.exported) || when(book.exportedAt) || "?"} · Doc: {doc.state}
+          <span>pushed {when(doc.at) || "never"} · Doc: {doc.state}</span>
+          {mode === "chapters" && stem && <button className="chip" onClick={() => act("push", {stem})} disabled={pushing}
+            title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>}
         </div>
         {stale.stale && (
           <div className="stale" role="status">

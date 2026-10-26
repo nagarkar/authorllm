@@ -25,7 +25,7 @@ import os
 import re
 from pathlib import Path
 
-from .db import Database, loads
+from .db import Database, loads, now_iso
 from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
@@ -1646,6 +1646,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
             "tab_id")
         result.update(doc_id=master, url=tab_url(master, tab),
                       created=False, locally_normalized=False)
+        _stamp_pushed(db, manuscript, bridge, relpath)
         return result
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
@@ -1674,6 +1675,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry["checked_out"] = True
     # Snapshot what was pushed: pull uses it to detect two-sided edits.
     entry["pushed_hash"] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    entry["pushed_at"] = now_iso()
     _save_mapping(db, manuscript, meta)
     return {
         "relpath": relpath,
@@ -1682,6 +1684,28 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
+                  relpath: str) -> None:
+    """Record when the author's push last landed this tab (`pushed_at`,
+    read by the audiobook page's "pushed <when>" line, 2026-10-26). Only
+    `push_doc` stamps it: reconcile and the critique/filter writers move
+    `pushed_hash` without being a push the author asked for."""
+    meta = _mapping(db, manuscript)
+    entry = meta.get(bridge.meta_key, {}).get(relpath)
+    if isinstance(entry, dict):
+        entry["pushed_at"] = now_iso()
+        _save_mapping(db, manuscript, meta)
+
+
+def pushed_at(db: Database, manuscript: dict, relpaths: list[str]) -> str | None:
+    """The newest `pushed_at` among `relpaths`, or None when none of them
+    has been pushed by `push_doc` since the stamp exists."""
+    status = doc_status(db, manuscript)
+    stamps = [e.get("pushed_at") for r in relpaths
+              if isinstance((e := status.get(r)), dict) and e.get("pushed_at")]
+    return max(stamps) if stamps else None
 
 
 def _sidecar_would_be_emptied(relpath: str, incoming: str,

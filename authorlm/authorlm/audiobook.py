@@ -41,7 +41,7 @@ CLIENT_FACTORY: Callable[[], audio.ElevenLabs] | None = None
 PREVIEW_RENDERER: Callable[[Path, dict, str, int], Path] | None = None
 
 METHODS = ("manuscripts", "status", "refresh", "preview", "generate", "retake",
-           "stitch", "jobs", "source", "edit")
+           "stitch", "jobs", "source", "edit", "push")
 _SESSIONS: dict[tuple, "Session"] = {}
 RECENT_JOBS = 20
 
@@ -73,6 +73,9 @@ class Session:
         # reconciliation stays in chat); a pull lands on disk and the
         # stale banner picks it up like any local edit.
         self.doc: dict = {"state": "reconciled in chat", "detail": "", "at": None}
+        # The Push button (author's ask 2026-10-26): the open chapter's
+        # files go to their tabs of the master Doc, and the line under the
+        # dropdown reads "pushed <when>" from the stamp push_doc leaves.
         self.account: dict | None = None
         if not inline:
             threading.Thread(target=self._drain, daemon=True,
@@ -123,7 +126,7 @@ class Session:
             "book": {"title": book.get("title", ""), "quality": book["quality"],
                      "exportedAt": book.get("generatedAt"), "chapters": chapters,
                      "manuscript": self.manuscript["name"]},
-            "chapter": None, "doc": self.doc, "account": self.account,
+            "chapter": None, "doc": self._doc_state(stem), "account": self.account,
             "export": gen.export_staleness(self.manuscript),
             "jobs": self.jobs(),
         }
@@ -195,6 +198,30 @@ class Session:
         return {"file": found["file"], "line": found["line"], "changed": True,
                 "job": self.enqueue("refresh", stem=stem)}
 
+    def _thread_db(self):
+        """A connection for the calling thread: `self.db` belongs to the
+        thread that opened the session, and SQLite refuses it elsewhere
+        (the server answers each request on its own thread, the worker
+        on another). The jobs before the Doc line never read the
+        database; the Doc line and the push do."""
+        return api.open_db(self.workspace)
+
+    def _doc_state(self, stem: str | None) -> dict:
+        """The Doc line: when the open chapter's files were last pushed
+        (`gdocs.pushed_at`), the manuscript's newest push when no chapter
+        is open, and the state the session reports."""
+        from . import gdocs
+        try:
+            db = self._thread_db()
+            if stem:
+                _chapter, names = self._chapter_files(stem)
+            else:
+                names = list(gdocs.doc_status(db, self.manuscript))
+            at = gdocs.pushed_at(db, self.manuscript, names)
+        except (audio.AudioError, OSError, KeyError, LookupError):
+            at = None
+        return {**self.doc, "at": at}
+
     def jobs(self) -> dict:
         with self._lock:
             recent = [dict(j) for j in self._jobs[-RECENT_JOBS:]]
@@ -224,7 +251,7 @@ class Session:
             job.update(characters=plan["characters"], ids=plan["ids"],
                        of=len(plan["ids"]),
                        ordinals=[gen.ordinal_of(chapter, i) for i in plan["ids"]])
-        elif kind == "stitch":
+        elif kind in ("stitch", "push"):
             gen.load_chapter(root, book, params["stem"])
         elif kind in ("refresh", "preview"):
             if params.get("stem"):
@@ -361,6 +388,40 @@ class Session:
         return f"stitched {result['segments']} segments → {result['rel']}{mins}"
 
 
+    def _job_push(self, job: dict) -> str:
+        """`authorlm doc push <chapter file>` from the page: each file of
+        the chapter to its tab, never opening a consent browser ('doc
+        auth' is the one doorway). The stamp push_doc leaves is what the
+        "pushed <when>" line shows next."""
+        from . import gdocs, paths
+        import tomllib
+
+        _chapter, names = self._chapter_files(job["stem"])
+        paths.load_env()
+        config: dict = {}
+        toml_path = paths.config_path()
+        if toml_path.exists():
+            config = tomllib.loads(toml_path.read_text())
+        service = gdocs.get_service(config, self.workspace, interactive=False)
+        docs_service = gdocs.get_docs_service(config, self.workspace,
+                                              interactive=False)
+        self._set(job, of=len(names), done=0)
+        db = self._thread_db()
+        urls: list[str] = []
+        held = 0
+        for i, name in enumerate(names):
+            self._set(job, message=f"pushing {name}")
+            result = gdocs.push_doc(db, self.manuscript, name,
+                                    service=service, docs_service=docs_service)
+            urls.append(result["url"])
+            held += len(result.get("held") or [])
+            self._set(job, done=i + 1)
+        self.doc = {**self.doc, "state": "pushed from the page",
+                    "detail": urls[-1] if urls else ""}
+        return (f"pushed {', '.join(names)} to the Doc"
+                + (f" · {held} paragraph(s) held under open comments" if held else ""))
+
+
 def session(workspace: str | None, manuscript: str | None, db=None,
             inline: bool = False) -> Session:
     key = (workspace, manuscript or "*")
@@ -407,6 +468,8 @@ def dispatch(method: str, params: dict[str, Any],
                          ids=params.get("ids"), remaining=bool(params.get("remaining")))
     if method == "retake":
         return s.enqueue("retake", stem=params["stem"], ids=params.get("ids") or [])
+    if method == "push":
+        return s.enqueue("push", stem=params["stem"])
     return s.enqueue("stitch", stem=params["stem"])
 
 

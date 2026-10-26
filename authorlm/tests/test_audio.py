@@ -1486,6 +1486,34 @@ def check_audiobook_page() -> None:
             check("an empty save is refused", False)
         except audio.AudioError as err:
             check("an empty save is refused by name", "empty" in str(err), str(err))
+        # The Push button (2026-10-26): the chapter's file goes to its
+        # tab through gdocs.push_doc, and the Doc line shows the stamp.
+        from authorlm import gdocs
+        st = s.status("kindness")
+        check("the Doc line reads 'never pushed' before any push", st["doc"]["at"] is None, str(st["doc"]))
+        pushed: list = []
+        real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        gdocs.push_doc = fake_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push job sends the chapter's file to its tab with the services",
+              pushed == [("kindness.md", "drive", "docs")] and job["state"] == "done"
+              and job["message"] == "pushed kindness.md to the Doc · 1 paragraph(s) held under open comments", str(job))
+        st = s.status("kindness")
+        check("the Doc line shows the push's stamp and state",
+              st["doc"]["at"] == "2026-10-26T12:00:00Z" and st["doc"]["state"] == "pushed from the page"
+              and st["doc"]["detail"].endswith("tab=t1"), str(st["doc"]))
+        check("another chapter has its own stamp", s.status("sermons")["doc"]["at"] is None)
         # The server opened without -m (key "*"); the page then names the
         # manuscript, and must reach the same session, never a second worker.
         audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))

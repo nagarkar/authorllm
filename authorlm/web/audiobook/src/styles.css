@@ -28,7 +28,8 @@ select{flex:1 1 8rem;min-width:0;min-height:44px;font:inherit;font-weight:700;fo
 .chip.on,.chip[aria-pressed="true"]{background:var(--band-ink);color:var(--band)}
 footer .chip{border-color:var(--line);color:var(--ink)}
 footer .chip.on{background:var(--band);border-color:var(--band);color:#fff}
-.doc{margin-top:6px;font-size:13px;opacity:.9}
+.doc{margin-top:6px;font-size:13px;opacity:.9;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.doc .chip{min-height:30px;padding:4px 10px}
 .doc b.bad{color:var(--yellow)}
 
 /* jobs */
