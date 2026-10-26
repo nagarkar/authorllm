@@ -106,29 +106,26 @@ def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
     return output
 
 
-def legacy_extract(workspace: Path, *argv: str) -> str:
-    """The OLD extraction path, which `init`, the writeup close and the
-    MCP tool still run until phase 6 of the redesign retires it
-    (docs/extraction-redesign.md §9). The `extract` verb now runs the
-    redesigned pipeline, so the scenarios that exercise the old one drive
-    it in process — `cli._run_extraction`, the function init calls — with
-    the arguments the verb used to take."""
+def native_extract(workspace: Path, *files: str, full: bool = False) -> str:
+    """The redesigned extraction, driven the way init and the writeup
+    close drive it: `cli._run_extraction` → `api.run_extraction` →
+    `extraction.run`, the stub server answering the section calls and
+    the adjudicator call (the workspace's config settles the adjudicator,
+    STUB_EXTRACTION). No files = the sections changed since the
+    watermark; `full` = every essay."""
     import types
 
     from authorlm import cli as _cli
     from authorlm.llm import LLMClient
 
     _pin_config(workspace)
-    files = [a for a in argv if not a.startswith("--")]
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         db = _api.open_db(str(workspace))
         manuscript = _cli._manuscript(
             db, types.SimpleNamespace(manuscript=None, command="extract"))
         _cli._run_extraction(db, manuscript, LLMClient(_cli._load_config(None)),
-                             files=files or None, full="--full" in argv,
-                             edges_only="--edges-only" in argv,
-                             aliases_only="--aliases" in argv)
+                             files=list(files) or None, full=full)
     return buffer.getvalue()
 
 
@@ -144,31 +141,152 @@ def write(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+# The chapters capitalise their terms of art where a sentence does NOT
+# start: gate 3 of the redesigned extraction (docs/extraction-redesign.md
+# §4.4) reads a name capitalised only by its position as an English word.
 CH1 = """# Chapter 1 — Choice
 
-Every act of thought begins with a choice. Choice is the operation by which
+Every act of thought begins with a Choice. Choice is the operation by which
 anything comes to be for us.
 
-To choose is to distinguish. Distinction is the visible form choice takes.
+To choose is to make a Distinction. Distinction is the visible form Choice
+takes.
 """
 
 CH2 = """# Chapter 2 — Fields
 
-Each distinction creates a space of further possible distinctions: a field.
+Each Distinction creates a space of further possible distinctions: a Field.
 
-A field is generative, not a container. Each position within a field is a
-distinction that opens further fields, linking choice to structure.
+A Field is generative, not a container. Each position within a Field is a
+Distinction that opens further fields, linking Choice to structure.
 """
 
 CH3 = """# Chapter 3 — Trajectories
 
-A field opens possibilities; a trajectory is the path actually taken through
-them. Where choice and distinction are instantaneous and the field is
-structural, only the trajectory unfolds in time.
+A Field opens possibilities; a Trajectory is the path actually taken through
+them. Where Choice and Distinction are instantaneous and the Field is
+structural, only the Trajectory unfolds in time.
 
-A trajectory is an ordered series of distinctions, each made from within the
+A Trajectory is an ordered series of distinctions, each made from within the
 situation the previous choices created. It is the minimal unit of becoming.
 """
+
+# What the stub extractor "reads" in any section it is shown: a concept
+# wherever its name occurs (the stub quotes the sentence it found it in as
+# the span, and cites that paragraph's number), a relation wherever both
+# ends share a paragraph. 'Becoming' is only ever lowercase in the
+# chapters (gate 3, common_word); 'Trajectory' lives in one section (gate
+# 4, below the recurrence bar); 'Ghost' is in no text (unknown endpoint);
+# 'creates' is in the schema but not among the relations extraction may
+# propose (gate 7).
+STUB_CONCEPTS = [("Choice", "concept", "the primitive act"),
+                 ("Distinction", "concept", ""),
+                 ("Field", "concept", "space of moves"),
+                 ("Becoming", "weird-kind", "coerced"),
+                 ("Trajectory", "concept", "the path taken")]
+STUB_LINKS = [("Distinction", "depends_on", "Choice"),
+              ("Field", "depends_on", "Distinction"),
+              ("Field", "creates", "Choice"),
+              ("Ghost", "permits", "Choice")]
+# The adjudicator stub rules `new` on everything, except that a concept
+# already in the graph gets `improves` with these notes (Choice) or
+# `subsumed` (the rest) — the two verdicts a re-run can produce.
+STUB_IMPROVED = {"Choice": "the primitive act by which anything comes to be"}
+# Naming sentences the stub reports as aliases when it sees them.
+STUB_ALIASES = [
+    ("Distinction", "Choice",
+     "What ye call Distinction is the choice of qualities parted."),
+    ("Persistence", "Becoming",
+     "What ye call Persistence is the becoming of shapes."),
+    # Q/alias-guide-flip: a genuine naming ceremony — the bestowed name
+    # is not yet its own concept anywhere in this test.
+    ("Elective Ground", "Choice",
+     "We call it Elective Ground, the resolved name for Choice."),
+    # Q/alias-retired-guard: the bestowed name is a RETIRED concept.
+    ("RetiredAliasCandidate", "Choice",
+     "We once called Choice by the name RetiredAliasCandidate."),
+]
+# `[extraction]` for a stub workspace: the adjudicator settled in config,
+# so init, the writeup close and an analysed collect run without a
+# question to ask (ruling §0.2).
+STUB_EXTRACTION = ('[extraction]\nadjudicator_prompt = "default"\n'
+                   'adjudicator_model = "stub"\n')
+
+
+def _stub_section_reply(user: str) -> str:
+    """The stub extractor's answer to one section call (the candidate
+    contract of docs/extraction-redesign.md §4.4): everything in
+    STUB_CONCEPTS / STUB_LINKS / STUB_ALIASES that the numbered paragraphs
+    of block E actually contain, each quoting a real span."""
+    import re as _re
+
+    from authorlm.concepts import concept_pattern
+
+    body = user.split("E — THE SECTION", 1)[1]
+    paragraphs = [(int(m.group(1)), m.group(2).strip()) for m in _re.finditer(
+        r"^\[(\d+)\] (.*?)(?=\n\n\[\d+\] |\Z)", body, _re.M | _re.S)
+        if not m.group(2).lstrip().startswith("#")]      # prose, not headings
+
+    def sentence_with(name: str, paragraph: str) -> str | None:
+        for sentence in _re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split())):
+            if concept_pattern(name).search(sentence):
+                return sentence
+        return None
+
+    reply: dict = {"concepts": [], "links": [], "aliases": []}
+    for name, kind, notes in STUB_CONCEPTS:
+        for n, text in paragraphs:
+            span = sentence_with(name, text)
+            if span:
+                reply["concepts"].append(
+                    {"name": name, "kind": kind, "notes": notes,
+                     "paragraphs": [n], "span": span, "confidence": 0.9,
+                     "why": "the stub read it here"})
+                break
+    for src, rel, dst in STUB_LINKS:
+        for n, text in paragraphs:
+            span = sentence_with(src, text) if src != "Ghost" else None
+            if (span and sentence_with(dst, text)) or (
+                    src == "Ghost" and sentence_with(dst, text)):
+                reply["links"].append(
+                    {"from": src, "relation": rel, "to": dst, "paragraph": n,
+                     "span": span or sentence_with(dst, text),
+                     "confidence": 0.85, "why": "both named here"})
+                break
+    for alias, canonical, sentence in STUB_ALIASES:
+        for n, text in paragraphs:
+            if " ".join(sentence.split()) in " ".join(text.split()):
+                reply["aliases"].append({"alias": alias, "canonical": canonical,
+                                         "sentence": sentence, "paragraph": n})
+                break
+    return json.dumps(reply)
+
+
+def _stub_adjudicator_reply(user: str) -> str:
+    """The stub adjudicator: `new` for every candidate it is shown, except
+    a concept already in the graph (`improves` for one in STUB_IMPROVED,
+    `subsumed` otherwise), each with a reason."""
+    import re as _re
+
+    verdicts = []
+    for block in _re.split(r"\n(?=\[[cl]\d+\] )", user.split("CANDIDATES (", 1)[1]):
+        m = _re.match(r"\[([cl]\d+)\] (CONCEPT|RELATION) (.*?) —", block)
+        if not m:
+            continue
+        cid, what, label = m.groups()
+        if what == "CONCEPT" and "in the graph as:" in block:
+            name = label.rsplit(" (", 1)[0]
+            if name in STUB_IMPROVED:
+                verdicts.append({"id": cid, "verdict": "improves",
+                                 "notes": STUB_IMPROVED[name],
+                                 "reason": "the span adds what the act is"})
+            else:
+                verdicts.append({"id": cid, "verdict": "subsumed",
+                                 "reason": "already the graph's"})
+        else:
+            verdicts.append({"id": cid, "verdict": "new",
+                             "reason": "the stub keeps what it is shown"})
+    return json.dumps({"verdicts": verdicts})
 
 
 def scenario_editorial_loop(root: Path) -> None:
@@ -486,17 +604,6 @@ def scenario_editorial_loop(root: Path) -> None:
           "—depends_on→" in out and "(declared" in out, out)
     check("rejected edge left the graph view", out.count("foreshadows") == 0, out)
 
-    # Edge triage decisions feed the next extraction prompt.
-    from authorlm.db import Database as _EDB
-    from authorlm.extraction import triage_feedback as _tf
-    _edb = _EDB(ws / ".authorlm" / "authorlm.db")
-    _emid = _edb.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
-    feedback = _tf(_edb, _emid)
-    check("edge rejections enter the extraction prompt",
-          "Relationships REJECTED" in feedback, feedback)
-    check("relation corrections enter the extraction prompt",
-          "⇒" in feedback and "depends_on" in feedback, feedback)
-
     out = run(ws, "intent", "declare", "A dead-end objective")
     dead_id = out.split("[")[1].split("]")[0]
     out = run(ws, "intent", "retire", dead_id, "--outcome", "changed direction")
@@ -705,48 +812,10 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
             else:
                 finish = "stop"
             content = _stub_draft_reply(user)
-        elif "sole task is to find aliasing statements" in system:
-            content = json.dumps({
-                "aliases": [
-                    {"alias": "Distinction", "canonical": "Choice",
-                     "sentence": "What ye call Distinction is the choice "
-                                 "of qualities parted."},
-                    {"alias": "Persistence", "canonical": "Becoming",
-                     "sentence": "What ye call Persistence is the becoming "
-                                 "of shapes."},
-                    {"alias": "Field", "canonical": "Ghost",
-                     "sentence": "A sentence naming an unknown concept."},
-                    # Q/alias-guide-flip: a genuine naming ceremony — the
-                    # bestowed name is not yet its own concept anywhere in
-                    # this test — the positive case the flipped ALIAS GUIDE
-                    # exists to admit.
-                    {"alias": "Elective Ground", "canonical": "Choice",
-                     "sentence": "We call it Elective Ground, the resolved "
-                                 "name for Choice."},
-                    # Q/alias-retired-guard: the bestowed name is a RETIRED
-                    # concept — a side door around the retired-name ban.
-                    {"alias": "RetiredAliasCandidate", "canonical": "Choice",
-                     "sentence": "We once called Choice by the name "
-                                 "RetiredAliasCandidate."},
-                ],
-            })
-        elif ("LOAD-BEARING units of thought" in system
-                or "ONLY relationships among the known concepts" in system):
-            content = json.dumps({
-                "concepts": [
-                    {"name": "Choice", "kind": "concept", "notes": "primitive act"},
-                    {"name": "Distinction", "kind": "concept", "notes": ""},
-                    {"name": "Field", "kind": "concept", "notes": "space of moves"},
-                    {"name": "Becoming", "kind": "weird-kind", "notes": "coerced"},
-                    {"name": "Basilides", "kind": "historical_reference", "notes": ""},
-                ],
-                "links": [
-                    {"from": "Choice", "relation": "distinguishes", "to": "Distinction"},
-                    {"from": "Distinction", "relation": "creates", "to": "Field"},
-                    {"from": "Field", "relation": "not-a-relation", "to": "Choice"},
-                    {"from": "Ghost", "relation": "permits", "to": "Choice"},
-                ],
-            })
+        elif "You are the EXTRACTOR for ONE SECTION" in system:
+            content = _stub_section_reply(user)
+        elif "You are the ADJUDICATOR for ONE ESSAY" in system:
+            content = _stub_adjudicator_reply(user)
         elif "editorial analyst reconstructing" in system:
             content = json.dumps({
                 "decisions": [
@@ -813,10 +882,11 @@ def scenario_llm_and_unregister(root: Path) -> None:
         ms = ws / "manuscript"
         write(ms / "01-choice.md", CH1)
         write(ms / "02-fields.md", CH2)
-        # CH3 gives 'Field' cross-file recurrence; 'Becoming' stays a
-        # single lowercase mention — below the ratified recurrence bar.
+        # CH3 gives 'Field' cross-file recurrence; 'Trajectory' lives in
+        # one section (below the ratified recurrence bar) and 'becoming'
+        # is never capitalised mid-sentence (gate 3).
         write(ms / "03-trajectories.md", CH3)
-        stub_config = (
+        stub_llm = (
             "# AuthorLM test configuration (TOML — native comments)\n"
             "[llm]\n"
             "enabled = true\n"
@@ -824,52 +894,67 @@ def scenario_llm_and_unregister(root: Path) -> None:
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             'model = "stub"\n'
         )
+        stub_config = stub_llm + STUB_EXTRACTION
+        # Ruling §0.2 first: with the adjudicator unsettled, init asks
+        # nothing and spends nothing — it points at `extract --native`.
+        write(ws / ".authorlm" / "config.toml", stub_llm)
+        before_calls = StubLLMHandler.REQUESTS
+        out = run(ws, "init", "--name", "book", "--path", str(ms))
+        check("init with the adjudicator unsettled runs no extraction and "
+              "says where the question is asked",
+              "extract --native" in out and "Collected revision" not in out
+              and StubLLMHandler.REQUESTS == before_calls, out)
+        run(ws, "unregister", "book")
         write(ws / ".authorlm" / "config.toml", stub_config)
 
         out = run(ws, "init", "--name", "book", "--path", str(ms))
         check("init auto-collects before extraction", "Collected revision v1" in out, out)
-        check("init extracts concepts", "Extracted 4 new concept(s)" in out, out)
-        check("the recurrence bar drops the single-context candidate",
-              "1 below the recurrence bar" in out and "'Becoming'" in out, out)
-        check("valid links kept; unknown relation and unknown concept dropped "
-              "— honestly labeled, not lumped into 'malformed'",
-              "2 inferred relationship(s)" in out
-              and "1 relationship(s) named an unrecognized relation" in out
-              and "1 relationship(s) named an unknown concept" in out
-              and "malformed" not in out, out)
+        check("init runs the redesigned extraction, essay by essay, and "
+              "names the run",
+              "01-choice.md: 1/1 section call(s) answered" in out
+              and "02-fields.md: 1/1 section call(s) answered" in out
+              and "run extract-" in out and "adjudicated by stub" in out, out)
+        check("the grounded concepts and relations reach triage: Choice and "
+              "Distinction from the first essay, Field from the second — "
+              "where Choice, now the graph's, draws the adjudicator's one "
+              "`improves`, a note_update proposal rather than a write",
+              "reached triage: 2 concept(s), 1 relation(s), 0 proposal(s)" in out
+              and "reached triage: 1 concept(s), 1 relation(s), 1 proposal(s)"
+              in out and "improves 1" in out, out)
+        check("the gates drop the rest by name: the lowercase word, the "
+              "single-section name, the unknown endpoint, the relation "
+              "extraction may not propose",
+              "common_word 1" in out and "below_bar 1" in out
+              and "unknown_endpoint" in out and "not_proposable 1" in out, out)
         check("step reports live calls and token usage",
-              "LLM: 1 live call(s) (120 in / 45 out tokens)" in out, out)
+              "LLM: 3 live call(s)" in out and "in /" in out, out)
 
         out = run(ws, "concept", "list")
         check("extracted concept realized against text",
               "Choice (concept, realized" in out, out)
-        check("below-bar concept was never admitted",
-              "Becoming" not in out, out)
-        check("exempt-kind unmentioned concept stays a declared hypothesis",
-              "Basilides (historical_reference, declared" in out, out)
-        check("historical_reference kind preserved",
-              "Basilides (historical_reference" in out, out)
+        check("gated-out concepts were never admitted",
+              "Becoming" not in out and "Trajectory" not in out, out)
         check("extracted nodes marked unconfirmed",
               "Choice (concept, realized, unconfirmed" in out, out)
         check("extracted links are inferred hypotheses",
-              "Choice —distinguishes→ Distinction (inferred" in out, out)
+              "Distinction —depends_on→ Choice (inferred" in out, out)
 
         out = run(ws, "briefing")
         check("briefing lists extracted concepts for triage",
-              "Extracted concepts awaiting your confirmation (4)" in out, out)
-        out = run(ws, "concept", "confirm", "Basilides", "--kind", "question")
-        check("confirm retypes and confirms a node",
-              "Confirmed concept 'Basilides' (question)" in out, out)
-        out = run(ws, "briefing")
-        check("confirmed node leaves the triage list",
-              "awaiting your confirmation (3)" in out, out)
+              "Extracted concepts awaiting your confirmation (3)" in out, out)
 
-        out = legacy_extract(ws)
+        out = native_extract(ws)
         check("incremental re-extraction is a no-op without changes",
               "Nothing new since the last extraction" in out, out)
-        out = legacy_extract(ws, "--full")
-        check("full re-extraction is idempotent",
-              "Extracted 0 new concept(s)" in out and "full manuscript" in out, out)
+        out = native_extract(ws, full=True)
+        check("full re-extraction creates nothing: every name is already the "
+              "graph's (subsumed), every relation re-found, and the open "
+              "note question is not asked twice",
+              "reached triage: 0 concept(s), 0 relation(s), 0 proposal(s)" in out
+              and "reached triage: 1 concept" not in out
+              and "reached triage: 2 concept" not in out
+              and "1 proposal(s)" not in out and "subsumed" in out
+              and "existing edge(s) re-found" in out, out)
 
         # --- triage: one-keystroke decisions over unconfirmed nodes ---
         import subprocess
@@ -910,72 +995,73 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("nothing left to triage after bulk confirm",
               "Extracted concepts awaiting your confirmation" not in out, out)
 
-        # --- the learning loop: triage feedback reaches the next extraction ---
+        # --- the learning loop: the author's verdicts reach the next run
+        # as block P (precedents) and gate 5 (the retired-name ban) ---
         from authorlm.db import Database as _DB
-        from authorlm.extraction import triage_feedback
         _db = _DB(ws / ".authorlm" / "authorlm.db")
         _mid = _db.one("SELECT id FROM manuscripts WHERE name = 'book'")["id"]
-        feedback = triage_feedback(_db, _mid)
-        check("rejections enter the extraction prompt",
-              "REJECTED" in feedback and "Field" in feedback, feedback)
-        check("retype precedents enter the extraction prompt",
-              "Distinction: concept → historical_reference" in feedback, feedback)
-        check("confirmed exemplars enter the extraction prompt",
-              "Choice (concept)" in feedback, feedback)
-        out = legacy_extract(ws, "--full")
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = native_extract(ws, full=True)
+        sections = [u for s_, u in StubLLMHandler.PAYLOADS[mark:]
+                    if "You are the EXTRACTOR for ONE SECTION" in s_]
+        check("the retirement enters the next run as a precedent: block P "
+              "of the essay that introduced the name lists it",
+              sections and all("P — PRECEDENTS" in u for u in sections)
+              and any("rejected: Field" in u for u in sections),
+              sections[1][:1500] if len(sections) > 1 else out)
         check("full audit re-creates nothing directly",
-              "Extracted 0 new concept(s)" in out, out)
-        check("full audit surfaces conflicts as proposals instead",
-              "2 proposal(s) against settled knowledge" in out, out)
+              "reached triage: 0 concept(s), 0 relation(s)" in out
+              and "reached triage: 1 concept" not in out, out)
+        check("the retired name is held at gate 5, not re-admitted",
+              "retired 1" in out, out)
+        check("the open note question is not asked twice: the repeated "
+              "`improves` folds into subsumed, no second proposal",
+              "improves" not in out and "1 proposal(s)" not in out, out)
         out = run(ws, "concept", "list", "--all")
         check("retired concept stays retired after re-extraction",
               "Field (concept, retired" in out, out)
 
+        # New material that insists on the retired name, in two sections:
+        # the one door a retired name may come back through (§4.10).
         write(ms / "03-new-material.md",
-              "# New\n\n" + "\n\n".join(f"Paragraph {i} of fresh prose." for i in range(6)))
+              "# New\n\n" + "\n\n".join(
+                  f"Paragraph {i} of fresh prose." for i in range(4))
+              + "\n\nHere the Field returns, named again.\n\n"
+              "## More\n\nAnd the Field once more, in a second section.\n")
         out = run(ws, "collect")
         check("substantial new material hints at extract",
               "mine them for new concepts with 'extract'" in out, out)
-        out = legacy_extract(ws)
+        out = native_extract(ws)
         check("incremental extraction targets only the changed file",
-              "1 changed file(s)" in out, out)
-        out = legacy_extract(ws, "03-new-material.md")
-        check("per-file extraction works",
-              "1 selected file(s)" in out, out)
+              "03-new-material.md: 2/2 section call(s)" in out
+              and "01-choice.md:" not in out, out)
+        check("a retired name recurring in text written since is asked "
+              "about ONCE: a revival proposal, through gate 5",
+              "retired 2" in out and "1 proposal(s)" in out, out)
+        out = native_extract(ws, "03-new-material.md")
+        check("per-file extraction works, and the open revival is not asked "
+              "again",
+              "03-new-material.md: 2/2 section call(s)" in out
+              and "0 proposal(s)" in out, out)
 
-        # A configurable size cap: shrink it and expect a truncation warning.
+        # A configurable section cap: a long section splits into parts.
         config_path = ws / ".authorlm" / "config.toml"
-        config_path.write_text(
-            stub_config + "# tiny cap to force truncation\nextraction_max_chars = 50\n"
-        )
-        out = legacy_extract(ws, "--full")
-        check("configured cap batches sections instead of truncating",
-              "truncated" not in out
-              and ("hierarchical" in out or "pass(es)" in out), out)
-
+        config_path.write_text(stub_config + "max_section_chars = 120\n")
+        mark = len(StubLLMHandler.PAYLOADS)
+        out = native_extract(ws, full=True)
+        parts = [u for s_, u in StubLLMHandler.PAYLOADS[mark:]
+                 if "You are the EXTRACTOR for ONE SECTION" in s_
+                 and ", part " in u.split("E — THE SECTION", 1)[1][:200]]
+        check("a configured cap splits a section into parts instead of "
+              "truncating",
+              "01-choice.md: 3/3 section call(s)" in out and len(parts) >= 3
+              and "truncated" not in out, out)
         config_path.write_text(stub_config)
 
-        # --- proposals against settled knowledge (diff-gated) ---
-        edge_id = None
-        for line in run(ws, "concept", "list").splitlines():
-            if "—distinguishes→" in line:
-                edge_id = line.split("[")[1].split("]")[0]
-        run(ws, "concept", "reject-edge", edge_id)
-
-        # Edit text that names Choice, Field, and Distinction — only these
-        # may generate proposals.
-        with open(ms / "01-choice.md", "a") as fh:
-            fh.write("\n\nChoice is the field where every act of distinction begins.\n")
-        run(ws, "collect")
-        out = legacy_extract(ws)
-        # The note_update and revival proposals from the --full audit are
-        # still open with identical content, so only the edge is new.
-        check("open proposals are not duplicated; new conflict adds one",
-              "1 proposal(s) against settled knowledge" in out, out)
-
+        # --- proposals against settled knowledge ---
         out = run(ws, "briefing")
         check("briefing lists open proposals",
-              "Proposals against settled knowledge (3)" in out, out)
+              "Proposals against settled knowledge (2)" in out, out)
 
         proposal_ids = {}
         for line in run(ws, "proposal", "list").splitlines():
@@ -983,14 +1069,15 @@ def scenario_llm_and_unregister(root: Path) -> None:
                 pid = line.split("[")[1].split("]")[0]
                 kind = line.split("(")[1].split(")")[0]
                 proposal_ids[kind] = pid
-        check("all three proposal kinds present",
-              set(proposal_ids) == {"note_update", "revival", "edge_reproposal"},
+        check("both proposal kinds present",
+              set(proposal_ids) == {"note_update", "revival"},
               str(proposal_ids))
 
         out = run(ws, "proposal", "accept", proposal_ids["note_update"])
         check("adopting a note update applies it", "Updated 'Choice'" in out, out)
         out = run(ws, "concept", "show", "Choice")
-        check("adopted definition replaced the old note", "primitive act" in out, out)
+        check("adopted definition replaced the old note",
+              STUB_IMPROVED["Choice"] in out, out)
 
         out = run(ws, "proposal", "dismiss", proposal_ids["revival"],
                   "--why", "Field stays retired; the term is incidental here")
@@ -999,36 +1086,34 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("dismissed revival left concept retired",
               "Field (concept, retired" in out, out)
 
-        out = run(ws, "proposal", "accept", proposal_ids["edge_reproposal"])
-        check("adopting an edge re-proposal declares it",
-              "Relationship restored" in out, out)
-        out = run(ws, "concept", "list")
-        check("edge back as declared",
-              "Choice —distinguishes→ Distinction (declared" in out, out)
-
-        # Churn guard: an edit that names no settled concept generates
-        # nothing, and dismissed proposals never return verbatim.
-        with open(ms / "01-choice.md", "a") as fh:
-            fh.write("\nMore prose entirely without graph vocabulary.\n")
-        run(ws, "collect")
-        out = legacy_extract(ws)
-        check("no proposals without attention hits (churn guard)",
-              "against settled knowledge" not in out, out)
-
-        # --- edges-only extraction and unconfirming an edge ---
-        out = legacy_extract(ws, "--full", "--edges-only")
-        check("edges-only extracts no concepts",
-              "Extracted 0 new concept(s)" in out and "edges only" in out, out)
-        # Undo a confirmed edge: back to hypothesis for re-triage.
+        # --- an edge confirmed, unconfirmed, then rejected: the author's
+        # rejection holds against the next run (gate 5) ---
         edge_id = None
         for line in run(ws, "concept", "list").splitlines():
-            if "—distinguishes→" in line and "(declared" in line:
+            if "—depends_on→" in line and "(inferred" in line:
                 edge_id = line.split("[")[1].split("]")[0]
+        out = run(ws, "concept", "confirm", edge_id, "depends_on")
+        check("inferred edge confirmed to declared relation", "Confirmed:" in out, out)
         out = run(ws, "concept", "unconfirm", edge_id)
         check("unconfirm returns edge to hypothesis", "Back to hypothesis" in out, out)
         out = run(ws, "concept", "list")
         check("unconfirmed edge is inferred again",
-              "—distinguishes→ Distinction (inferred" in out, out)
+              "—depends_on→ Choice (inferred" in out, out)
+        run(ws, "concept", "reject-edge", edge_id)
+
+        # Edit text that names Choice and Distinction: the extractor reads
+        # the relation again, and the rejection holds.
+        with open(ms / "01-choice.md", "a") as fh:
+            fh.write("\n\nChoice is the field where every act of Distinction begins.\n")
+        run(ws, "collect")
+        out = native_extract(ws)
+        check("a rejected relation proposed again is held by gate 5, never "
+              "re-asked", "retired" in out
+              and "reached triage: 0 concept(s), 0 relation(s), 0 proposal(s)"
+              in out, out)
+        out = run(ws, "concept", "list")
+        check("the rejected edge stays out of the graph view",
+              "—depends_on→ Choice" not in out, out)
 
         run(ws, "session", "start")
         # The author declares Becoming — declaration bypasses the
@@ -1091,7 +1176,8 @@ def scenario_llm_and_unregister(root: Path) -> None:
         # Q/alias-guard) or it names a RETIRED concept (a side door around
         # the retired-name ban, Q/alias-retired-guard). Only a truly new
         # name ('Elective Ground', never a concept anywhere in this test)
-        # produces a proposal. ---
+        # produces a proposal. The stub reports the four naming sentences
+        # of STUB_ALIASES when the section shows them. ---
         run(ws, "concept", "add", "RetiredAliasCandidate")
         run(ws, "concept", "retire", "RetiredAliasCandidate")
         write(ms / "03-names.md",
@@ -1100,17 +1186,14 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "of shapes. We call it Elective Ground, the resolved name for "
               "Choice. We once called Choice by the name "
               "RetiredAliasCandidate.\n")
-        out = legacy_extract(ws, "--aliases")
-        check("aliases pass reports its scope", "aliases only" in out, out)
-        check("both live-concept naming sentences are refused as folds",
-              "refused 2 alias proposal(s) naming an already-live concept"
-              in out, out)
-        check("the retired-name naming sentence is refused separately",
-              "refused 1 alias proposal(s) naming a retired concept" in out,
-              out)
+        run(ws, "collect")
+        out = native_extract(ws, "03-names.md")
+        check("the run reports every alias candidate's fate",
+              "aliases: alias_fold_refused 2, alias_retired_refused 1, "
+              "proposed 1" in out, out)
         check("the genuinely new naming ceremony PRODUCES a proposal — "
               "the guide flip did not leave the feature dead",
-              "1 proposal(s) against settled knowledge" in out, out)
+              "1 proposal(s)" in out, out)
         out = run(ws, "proposal", "list")
         check("no live-concept-fold or retired-name alias proposal "
               "reaches the queue",
@@ -1121,9 +1204,8 @@ def scenario_llm_and_unregister(root: Path) -> None:
               "'Elective Ground' with 'Choice'" in out, out)
 
         # Refused is not silently dropped: the extractor's read is recorded
-        # as system-provenance evidence, exactly like what adjudication.py
-        # screens out — auditable without becoming queue. The two refusal
-        # reasons stay separable by signal.
+        # as system-provenance evidence — auditable without becoming queue.
+        # The two refusal reasons stay separable by signal.
         alias_guard_evidence = _db.all(
             "SELECT * FROM evidence WHERE manuscript_id = ? "
             "AND evidence_type = 'extraction_adjudication' "
@@ -1205,38 +1287,10 @@ def scenario_llm_and_unregister(root: Path) -> None:
 
         # A merged-away name is an alias now, not a banned retiree — the
         # extractor re-proposing it must resolve, never suggest revival.
-        legacy_extract(ws, "--full")
+        native_extract(ws, full=True)
         out = run(ws, "proposal", "list")
         check("no revival proposal for a name living on as an alias",
               "revive retired concept 'Distinction'" not in out, out)
-
-        # An oversized aliases sweep must fall back to file-by-file passes —
-        # a full sweep is full, never a silently truncated prefix — and the
-        # alias guard must hold across every pass of that hierarchical sweep,
-        # not just a single payload.
-        ws2 = root / "e2"
-        ms2 = ws2 / "manuscript"
-        write(ms2 / "01-choice.md",
-              "# A\n\nWhat ye call Distinction is the choice of qualities "
-              "parted.\n")
-        write(ms2 / "02-shapes.md",
-              "# B\n\nWhat ye call Persistence is the becoming of shapes.\n")
-        write(ws2 / ".authorlm" / "config.toml",
-              stub_config + "extraction_max_chars = 130\n")
-        run(ws2, "init", "--name", "book2", "--path", str(ms2))
-        # This tiny two-file world leaves the stub's concepts below the
-        # recurrence bar; the aliasing test needs them live, so the
-        # author declares them (declaration bypasses the bar).
-        for name in ("Persistence", "Choice", "Distinction", "Becoming"):
-            run(ws2, "concept", "add", name)
-        out = legacy_extract(ws2, "--aliases")
-        check("oversized aliases sweep goes hierarchical",
-              "hierarchical" in out and "aliases only" in out, out)
-        check("the alias guard holds across every pass of the hierarchical "
-              "sweep — both folds refused, none queued",
-              "refused 2 alias proposal(s) naming an already-live concept"
-              in out
-              and "proposal(s) against settled knowledge" not in out, out)
 
         # --- collect --auto (the watcher's path) runs the analyzers itself ---
         write(ms / "04-auto.md", "# Auto\n\nBecoming continues apace.\n")
@@ -1364,14 +1418,6 @@ def scenario_llm_and_unregister(root: Path) -> None:
         check("the prerequisite is listed ahead of its dependent",
               epsilon_at < zeta_at, out)
 
-        # --- hierarchical extraction under a small cap ---
-        write(wg / ".authorlm" / "config.toml",
-              stub_config + "extraction_max_chars = 60\n")
-        out = legacy_extract(wg, "--full")
-        check("oversized full extraction goes hierarchical",
-              "hierarchical:" in out and "in reading order" in out, out)
-        write(wg / ".authorlm" / "config.toml", stub_config)
-
         out = run(ws, "unregister", "-m", "book")
         check("unregister accepts -m instead of positional",
               "Unregistered 'book'" in out, out)
@@ -1432,7 +1478,7 @@ def scenario_write_loop(root: Path) -> None:
         write(ws / ".authorlm" / "config.toml",
               "[llm]\nenabled = true\nprovider = \"openai\"\n"
               f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-              "model = \"stub\"\n")
+              "model = \"stub\"\n" + STUB_EXTRACTION)
         run(ws, "init", "--name", "book", "--path", str(ms))
         run(ws, "session", "start")
         out = run(ws, "intent", "declare", "Rewrite the essay on Choice")
@@ -1884,7 +1930,8 @@ time, which bought emphasis at the cost of saying one thing twice."""
 
 DRAFT_CONFIG_HEAD = (
     "[llm]\nenabled = true\nprovider = \"openai\"\n"
-    "base_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"stub\"\n")
+    "base_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"stub\"\n"
+    + STUB_EXTRACTION)
 
 
 def _draft_config(ws: Path, port: int, writing: str = "") -> None:
@@ -2373,7 +2420,7 @@ def scenario_write_new_and_digest(root: Path) -> None:
         write(ws / ".authorlm" / "config.toml",
               "[llm]\nenabled = true\nprovider = \"openai\"\n"
               f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-              "model = \"stub\"\n")
+              "model = \"stub\"\n" + STUB_EXTRACTION)
         run(ws, "init", "--name", "book", "--path", str(ms))
         run(ws, "session", "start")
         out = run(ws, "intent", "declare", "Write the essay on attention")
@@ -2989,7 +3036,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         write(ws / ".authorlm" / "config.toml",
               "[llm]\nenabled = true\nprovider = \"openai\"\n"
               f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-              "model = \"stub\"\n")
+              "model = \"stub\"\n" + STUB_EXTRACTION)
         run(ws, "init", "--name", "book", "--path", str(ms))
         payload_mark = len(StubLLMHandler.PAYLOADS)
         run(ws, "session", "start")
@@ -3073,84 +3120,70 @@ def scenario_parallel_writeups(root: Path) -> None:
               and being["introduced_in"] is None, str(dict(being)))
 
         # E9, the half that matters: an extraction that ACTUALLY RUNS
-        # while the file is mid-rewrite. The payloads this module builds
-        # are `=== <name> ===` labelled concatenations, so a whole-payload
-        # `is_placeholder` check can never fire — the guard has to be per
-        # FILE or it is dead code that reads like a guard.
-        #
-        # There are THREE per-file guards, on three routes into
-        # `_section_payloads`, and each one has to be exercised on its own
-        # route: a guard nothing reaches is how F1 happened in the first
-        # place. This one is the INCREMENTAL route, which never touches
-        # `_manuscript_text` at all — it builds its units from the changed
-        # SECTIONS of each file, and a truncation is a changed file whose
-        # "sections" are the placeholder's own paragraphs.
+        # while the file is mid-rewrite. The redesigned pipeline builds
+        # one payload per SECTION of one FILE, and a file whose text on
+        # disk is the placeholder is dropped before any unit of it is
+        # assembled (`eligible_files`; a named file, in the scope). Each
+        # route in — the incremental scope, named files, --full — is
+        # exercised on its own: a guard nothing reaches is how F1 happened
+        # in the first place.
+        EXTRACTOR = "You are the EXTRACTOR for ONE SECTION"
         mark = len(StubLLMHandler.PAYLOADS)
         write(ms / "03-third.md", CH3 + "\nA paragraph added while the "
                                         "other essay is mid-rewrite.\n")
         run(ws, "collect")
-        out = legacy_extract(ws)          # no --full: changed files only
-        incremental = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
-                       if "LOAD-BEARING units of thought" in s]
-        check("E9 — the INCREMENTAL path (changed sections, no --full) "
+        out = native_extract(ws)          # no --full: changed sections only
+        incremental = [u for s_, u in StubLLMHandler.PAYLOADS[mark:]
+                       if EXTRACTOR in s_]
+        check("E9 — the INCREMENTAL route (changed sections, no --full) "
               "drops the in-flight file and still mines the essay that "
-              "really changed. Its units never pass through "
-              "_manuscript_text, so guard 1 cannot cover it",
+              "really changed",
               incremental and not any(_api.MARKER in u for u in incremental)
               and any("mid-rewrite" in u for u in incremental),
               next((u[:400] for u in incremental if _api.MARKER in u),
                    f"{len(incremental)} payload(s)\n{out}"))
 
-        # And the BATCHING route: explicit files whose combined text
-        # exceeds one payload, which builds its units straight off disk.
-        write(ws / ".authorlm" / "config.toml",
-              "[llm]\nenabled = true\nprovider = \"openai\"\n"
-              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-              "model = \"stub\"\nextraction_max_chars = 300\n")
+        # Named files, several sections: the in-flight one is dropped and
+        # the other is sent section by section, none of them the marker.
         write(ms / "03-third.md", CH3 + "\n" + ("\n".join(
             f"## Section {n}\n\nA paragraph of real prose about "
-            f"trajectories, numbered {n}, long enough that the batching "
-            f"path has something to batch.\n" for n in range(1, 6))))
+            f"trajectories, numbered {n}, long enough that the section "
+            f"path has something to split.\n" for n in range(1, 6))))
         run(ws, "collect")
         mark = len(StubLLMHandler.PAYLOADS)
-        out = legacy_extract(ws, "01-choice.md", "03-third.md")
-        batched = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
-                   if "LOAD-BEARING units of thought" in s]
-        check("E9 — the BATCHING path (explicit files over the payload "
-              "cap) drops it too, and still batches the essay that has "
-              "real text: more than one payload, none of them the marker",
-              len(batched) > 1 and not any(_api.MARKER in u for u in batched)
-              and any("trajectories" in u for u in batched),
-              next((u[:400] for u in batched if _api.MARKER in u),
-                   f"{len(batched)} payload(s)\n{out}"))
-        write(ws / ".authorlm" / "config.toml",
-              "[llm]\nenabled = true\nprovider = \"openai\"\n"
-              f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-              "model = \"stub\"\n")
+        out = native_extract(ws, "01-choice.md", "03-third.md")
+        named = [u for s_, u in StubLLMHandler.PAYLOADS[mark:]
+                 if EXTRACTOR in s_]
+        check("E9 — NAMED files drop the in-flight one too, and still send "
+              "the essay that has real text, one call per section, none "
+              "of them the marker",
+              len(named) > 1 and not any(_api.MARKER in u for u in named)
+              and any("trajectories" in u for u in named)
+              and "01-choice.md:" not in out,
+              next((u[:400] for u in named if _api.MARKER in u),
+                   f"{len(named)} payload(s)\n{out}"))
         write(ms / "03-third.md", CH3)
         run(ws, "collect")
 
         mark = len(StubLLMHandler.PAYLOADS)
-        out = legacy_extract(ws, "01-choice.md", "--full")
+        out = native_extract(ws, "01-choice.md")
         check("E9 — extracting the in-flight file specifically mines "
-              "NOTHING: it is dropped per file, so the payload is empty "
-              "and the pass ends rather than sending a marker to a model",
-              not [u for s, u in StubLLMHandler.PAYLOADS[mark:]
-                   if _api.MARKER in u],
-              next((u[:400] for s, u in StubLLMHandler.PAYLOADS[mark:]
-                    if _api.MARKER in u), out))
+              "NOTHING: it is dropped per file, so the scope is empty "
+              "and the run ends rather than sending a marker to a model",
+              len(StubLLMHandler.PAYLOADS) == mark
+              and "Nothing new" in out, out)
 
         mark = len(StubLLMHandler.PAYLOADS)
         write(ms / "03-third.md", CH3 + "\nA paragraph added during the "
                                         "rewrite window.\n")
         run(ws, "collect")
-        legacy_extract(ws, "--full")
-        during = [u for s, u in StubLLMHandler.PAYLOADS[mark:]
-                  if "LOAD-BEARING units of thought" in s]
+        native_extract(ws, full=True)
+        during = [u for s_, u in StubLLMHandler.PAYLOADS[mark:]
+                  if EXTRACTOR in s_]
         check("E9 — and a FULL extraction during the window mines the "
               "other essays and skips only the one in flight",
               during and not any(_api.MARKER in u for u in during)
-              and any("trajectory" in u for u in during),
+              and any("trajector" in u.lower() for u in during),
               next((u[:400] for u in during if _api.MARKER in u),
                    f"{len(during)} payload(s)"))
         write(ms / "03-third.md", CH3)
@@ -3275,8 +3308,8 @@ def scenario_parallel_writeups(root: Path) -> None:
               "the pre-rewrite text: a mid-rewrite essay is not shipped, "
               "and a marker never reaches a reader",
               _api.MARKER not in exported
-              and "Every act of thought begins with a choice" not in exported
-              and "a trajectory is the path actually taken" in exported,
+              and "Every act of thought begins with a Choice" not in exported
+              and "a Trajectory is the path actually taken" in exported,
               exported[:400])
 
         # ---- E4: the placeholder lifecycle, asserted as a PROPERTY at
@@ -3312,9 +3345,7 @@ def scenario_parallel_writeups(root: Path) -> None:
         def _mined(since: int) -> list[str]:
             return [user for system, user
                     in StubLLMHandler.PAYLOADS[since:]
-                    if "LOAD-BEARING units of thought" in system
-                    or "ONLY relationships among the known concepts" in system
-                    or "sole task is to find aliasing statements" in system]
+                    if "You are the EXTRACTOR for ONE SECTION" in system]
 
         mined = _mined(payload_mark)
         check("E9 — and no EXTRACTION payload in this scenario was ever "
@@ -4663,7 +4694,7 @@ def _ws_workspace(root: Path, server, name: str = "ws") -> tuple:
     write(ws / ".authorlm" / "config.toml",
           "[llm]\nenabled = true\nprovider = \"openai\"\n"
           f"base_url = \"http://127.0.0.1:{server.server_port}/v1\"\n"
-          "model = \"stub\"\n")
+          "model = \"stub\"\n" + STUB_EXTRACTION)
     run(ws, "init", "--name", "book", "--path", str(ms))
     run(ws, "style", "guide", "House")
     for filename in WS_FILES:

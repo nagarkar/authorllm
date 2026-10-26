@@ -709,14 +709,33 @@ calls to date.
    cuts the 110 further.
 6. Retire `adjudication.py`, `triage_feedback`, the inventory line, and the
    two redundant `triage_rules`; `docs/track-a-two-step-extraction.md`
-   marked superseded by this document. PARTLY BUILT 2026-10-25:
-   `adjudication.py`, its prompt, test and `[extraction] adjudicate` knob
-   are gone, the two rules are gone, track-a is marked superseded.
-   `triage_feedback` and the KNOWN CONCEPTS line still live inside the old
-   `extract_concepts`, which `init`, the writeup close and the MCP
-   `extract_concepts` tool still call; retiring it means re-pointing those
-   three callers at `extraction.run` and porting the eighteen end-to-end
-   scenario sites and six `test_api` checks that drive the old contract
-   through the test stub. That is its own change.
+   marked superseded by this document. BUILT 2026-10-25, in two steps.
+   First `adjudication.py`, its prompt, test and `[extraction] adjudicate`
+   knob, the two rules, and track-a marked superseded. Then the old
+   single-call path itself: `extract_concepts`, `triage_feedback`, the
+   KNOWN CONCEPTS inventory line, the `--edges-only` / `--aliases` modes
+   and `prompts/extraction-legacy.md` are deleted, with their three
+   registry entries and `tools/measure_adjudication.py` (its numbers stand
+   in track-a §4). Its three callers now run this pipeline through
+   `api.run_extraction`, the non-interactive front on `extraction.run`:
+   `init` (only when the adjudicator is settled — `[extraction]
+   adjudicator_prompt = "default"` or `init --adjudicator <model>` —
+   else a one-line pointer to `extract --native`), the writeup close and
+   an analysed `collect` (which report `{"stopped": …}` instead of
+   spending unasked, ruling §0.2), and the MCP tool `extract_concepts`,
+   which gained an `adjudicator` argument that answers the question. A
+   section reply with a null where the contract wants a list counts as
+   unanswered (the watermark stays), and `render_run` reports each alias
+   candidate's fate. The eighteen end-to-end sites drive `extraction.run`
+   through the test stub, which now answers the §4.4 contract; of the six
+   `test_api` checks, the alias rulings (§4.7) and the materiality floor
+   were ported onto `extraction.run`, the prompt-provenance and
+   skip-bucket checks were dropped (the registry check stays; the gates'
+   named skip counts are `test_extraction_gates`), and the inline
+   watermark / alias-hit / null-reply blocks became `api.run_extraction`
+   checks. Dropped with the old contract, not replaced: `edge_reproposal`
+   proposals from extraction (a rejected relation is now held at gate 5),
+   the whole-text aliases sweep, and the hierarchical-pass fallback
+   (sections split into parts instead).
 7. Skill update: `.claude/skills/authorlm/SKILL.md` on the new verbs and
    on what a triage batch now shows (span, score, reason). DONE 2026-10-25.

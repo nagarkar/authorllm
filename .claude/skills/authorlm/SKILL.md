@@ -626,7 +626,8 @@ rapid CLI loop remains useful in a terminal:
   add `--apply` only when the author asks to execute it. `--nodes` / `--edges`
   restrict the lane. These are system decisions, not author feedback.
 Extraction is the redesigned pipeline of `docs/extraction-redesign.md`
-(ratified 2026-10-25). `authorlm extract <file> [--section H]` PRINTS the
+(ratified 2026-10-25; the old single-call path is gone, 2026-10-25).
+`authorlm extract <file> [--section H]` PRINTS the
 per-section payload (blocks S law, G glossary, P precedents, M summaries,
 E the numbered section) and makes no call; `--native` makes the calls,
 asks which adjudicator model to use with the run's estimated cost (ruling
@@ -639,7 +640,14 @@ replays the author's recorded verdicts and moves the thresholds on
 measurement. Before the first live run: `extract backup`, then `extract
 migrate --dry-run` (report, nothing written), then `extract migrate`
 (§5; `--undo migration-1` reverses it). Read a triage batch's span and
-reason before the name: they are why the row is there.
+reason before the name: they are why the row is there. The same pipeline
+runs behind `init`, `write complete`, an analysed `collect` and the MCP
+tool `extract_concepts`, through `api.run_extraction`, which never spends
+unasked: with `[extraction] adjudicator_prompt = "ask"` (the default)
+those return `{"stopped": …}` pointing at `extract --native`, unless the
+MCP call names `adjudicator=<model>` (or `init --adjudicator`). When the
+author wants the chat to run extraction, ask which adjudicator model
+and pass it; otherwise send them to `authorlm extract --native`.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.

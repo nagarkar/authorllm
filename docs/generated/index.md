@@ -234,7 +234,7 @@ The per-essay adjudicator (docs/extraction-redesign.md §4.5).
 
 `authorlm/authorlm/extraction_calibration.py`
 
-`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on tools/measure_adjudication.py.
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on the retired tools/measure_adjudication.py (track-a §4, now superseded).
 
 ## `authorlm.extraction_migration`
 
@@ -781,12 +781,6 @@ Distil beliefs from the author's decisions already on record.
 `authorlm/tools/convert_llm_cache.py`
 
 One-off: convert authorlm's record/replay recordings to llmlm's cache format.
-
-## `tools.measure_adjudication`
-
-`authorlm/tools/measure_adjudication.py`
-
-Measure the triage burden with and without step-two adjudication.
 
 ## `tools.pdf2md`
 

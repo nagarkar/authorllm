@@ -1,8 +1,8 @@
 """`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1):
 the historical candidates replayed through the gates and the adjudicator,
 measured against the author's own verdicts, and the three thresholds of
-§4.6 moved on the measurement. Zero author cost; modelled on
-tools/measure_adjudication.py.
+§4.6 moved on the measurement. Zero author cost; modelled on the
+retired tools/measure_adjudication.py (track-a §4, now superseded).
 
 WHAT IS REPLAYED
   * Candidates: every machine-extracted concept (`concept_nodes` with
@@ -10,8 +10,8 @@ WHAT IS REPLAYED
     proposed or the author settled — an edge from the system source, or
     one inferred, rejected, declared or triaged — as the old extractor
     proposed it: for a retyped edge, the relation before the retype. A
-    declared edge counts as a kept candidate, as §2.2 and
-    tools/measure_adjudication.py count it: edges settled before the
+    declared edge counts as a kept candidate, as §2.2 counts it: edges
+    settled before the
     sources registry were backfilled to the author, so provenance cannot
     tell a hand-declared edge from a confirmed extracted one.
   * Labels: the latest `concept_triage` / `edge_triage` row (confirmed
