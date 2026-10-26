@@ -240,9 +240,9 @@ def check_concept_gates(root: Path) -> None:
           got["ordering"]["signal"] == "retired"
           and got["ordering"]["reason"] == "the author retired this name",
           str(got["ordering"]))
-    check("gate 5: so is a near-miss of a retired name (difflib 0.8)",
-          got["hierarchy"]["signal"] == "retired"
-          and "hierarchies" in got["hierarchy"]["reason"],
+    check("gate 5: a lexical near-miss of a retired name is NOT banned "
+          "(ruled 2026-10-25): the exact ban and block P cover it",
+          got["hierarchy"].get("signal") != "retired",
           str(got["hierarchy"]))
     check("a name already in the graph is an improves/subsumed question, "
           "never a new node: it skips gates 3-5 and carries the node",

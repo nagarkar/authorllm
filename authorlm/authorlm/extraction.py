@@ -1272,8 +1272,6 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
     Concepts are screened first, so a link may end on a concept candidate
     of the same batch that survived; a link whose endpoint is neither a
     live concept nor such a survivor fails as `unknown_endpoint`."""
-    import difflib
-
     from .loop import similarity
 
     skips = {name: 0 for name in SKIPS}
@@ -1333,12 +1331,13 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
                            "revival proposal §4.10 allows is raised")
             fail(c, "retired", reason)
             continue
-        near = difflib.get_close_matches(c["name"].lower(), list(ctx.retired),
-                                         n=1, cutoff=0.8)
-        if near:
-            fail(c, "retired", "a near-miss of the retired name "
-                 f"'{ctx.retired[near[0]]['name']}'")
-            continue
+        # No lexical near-miss of a retired name here (ruled 2026-10-25):
+        # the exact ban already tolerates case and plurals, and the
+        # adjudicator is shown the nearest retired names with the author's
+        # reasons in block P, which is the same check done by something
+        # that can tell "Change" from "challenge". On the author's record
+        # the edit-distance rule at 0.8 blocked nine confirmed concepts
+        # and no rejected one.
         # §4.7: a name within the firewall's distance of a live concept is a
         # subsumption question for the adjudicator, never a new node.
         best = max(((similarity(c["name"], k), node) for k, node in
