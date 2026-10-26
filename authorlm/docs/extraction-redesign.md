@@ -48,6 +48,18 @@ Asked one at a time and answered; the reasoning follows each.
    is wired into block M first; the first run carries summaries.
 8. **Retired names: §4.10 agreed, revivals migrated.** Below the bar
    superseded; above it re-asked once with spans.
+9. **No lexical near-miss of a retired name** (ruled 2026-10-25 after the
+   replay). The difflib rule at 0.8 blocked nine concepts the author had
+   confirmed ("Change" against "challenge", "Metaphysic" against
+   "Metaphysics", "Spiritual" against "Ritual") and no rejected one. The
+   exact ban stays; the adjudicator's block P is the semantic version.
+10. **Confirmed extracted concepts absent from the text are retired by the
+    migration** (ruled 2026-10-25). The replay found 53 confirmed nodes
+    whose name and aliases occur nowhere in the book, nearly all
+    paraphrases the old extractor coined; gate 1 would never admit them
+    now. `extract migrate` retires them on the same terms as a failed
+    pending row (tagged, one evidence row, `--undo` revives). Author-
+    declared concepts are never touched.
 
 ## 1. The pipeline as found, end to end
 
@@ -161,7 +173,7 @@ tolerant, case-blind), used for realization, grounding, `introduced_in`,
 recurrence, located quotes and `endpoint_in_text`; Jaccard `similarity`
 (`loop.py:102-110`) with `NEAR_DUPLICATE = 0.72` (`loop.py:122`) for the
 proposal firewall (`proposals.py:124-153`) and adjudication retrieval; the
-recurrence bar; the retired-name ban; difflib near-miss at 0.8; the 0.90
+recurrence bar; the retired-name ban; difflib near-miss at 0.8 (dropped, §0.9); the 0.90
 paraphrase floor; `triage_rules`. Of these, `concept_pattern` is the one
 that manufactures false signal: on the sample below, "Experience" and
 "Discernment" co-occur in 74 paragraphs because both are ordinary English
@@ -441,7 +453,10 @@ Deterministic gates, in order, each a named skip count:
    (the "Experience" failure, #12). Else `common_word`.
 4. **Recurrence bar**, unchanged (`hygiene.py:204-213`) for
    `concept | metaphor | example`.
-5. **Retired-name ban**, unchanged, plus the difflib near-miss.
+5. **Retired-name ban**, unchanged. No lexical near-miss (ruling §0.9):
+   the ban tolerates case and plurals, and block P shows the adjudicator
+   the nearest retired names with reasons, which is the same check done
+   semantically.
 6. **Mirror and duplicate edges.** A link whose reverse exists among the
    batch or the settled edges, or that duplicates a settled edge, is folded
    into the stronger one (`duplicate`): #16 and #17 never reach the author.
@@ -580,6 +595,16 @@ the author in one triage batch per essay. Failures are retired with
 an `extraction_adjudication` row with `signal = migrated_out` and the gate
 that failed. On the sample, that is 5 edges out by gate 2 and 3 by gate 6
 before any model call.
+
+### 5.2a Confirmed concepts the text no longer carries
+
+Ruling §0.10. `extraction_migration.absent_confirmed`: a confirmed
+extracted concept whose name and every alias match nowhere in the eligible
+files is retired in the same run, `retired_from.by_run` set, one
+`extraction_adjudication` row `signal = migrated_out`, `gate = absent`.
+Measured on a copy of the live workspace 2026-10-25: 47 rows (the replay's
+53 less six still carried by an alias or a file outside the chapters).
+`--undo` revives them with the rest.
 
 ### 5.3 The 210 open proposals
 

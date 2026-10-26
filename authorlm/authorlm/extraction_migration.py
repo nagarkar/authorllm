@@ -81,6 +81,7 @@ class Plan:
     model: str | None = None
     judged: bool = False
     failed: list[str] = field(default_factory=list)   # essays whose call failed
+    absent: list[dict] = field(default_factory=list)  # confirmed nodes gone from the text
 
     @property
     def concepts(self) -> list[dict]:
@@ -175,6 +176,30 @@ def _proposal_plan(db: Database, manuscript: dict, files: dict[str, str]
     return out
 
 
+def absent_confirmed(db: Database, manuscript: dict,
+                     files: dict[str, str]) -> list[dict]:
+    """Confirmed extracted concepts whose name and every alias occur
+    nowhere in the current text (ruled 2026-10-25: on the author's record
+    these are the paraphrases the old extractor coined, "Question about
+    God's good graces", "Written word as iron bond"; the design's gate 1
+    would never admit them now, and they are retired on the same terms as
+    a pending row that fails it). Author-declared concepts are not
+    touched: declaration is ratification."""
+    from .concepts import concept_pattern, node_names
+
+    out = []
+    for row in db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
+                      "AND status != 'retired'", (manuscript["id"],)):
+        meta = loads(row["metadata"], {}) or {}
+        if meta.get("origin") != "extracted" or not meta.get("confirmed"):
+            continue
+        pats = [concept_pattern(n) for n in node_names(row) if n]
+        if any(p.search(text) for p in pats for text in files.values()):
+            continue
+        out.append(dict(row))
+    return out
+
+
 def plan(db: Database, manuscript: dict, knob: dict, *, judge_llm=None,
          run_id: str = DEFAULT_RUN) -> Plan:
     """Screen and (with a judge) adjudicate the pending rows against the
@@ -190,8 +215,12 @@ def plan(db: Database, manuscript: dict, knob: dict, *, judge_llm=None,
     candidates = relocate(hist, versions, ctx.known) if versions.rows else []
     _leave_out(ctx, candidates)
     screen(candidates, ctx, knob)
+    from .extraction import eligible_files
+
+    content = {n: files[n] for n in eligible_files(files)}
     out = Plan(run_id=run_id, candidates=candidates,
-               proposals=_proposal_plan(db, manuscript, files))
+               proposals=_proposal_plan(db, manuscript, files),
+               absent=absent_confirmed(db, manuscript, content))
     passed = [c for c in candidates if c["type"] != "alias"
               and c.get("signal") is None]
     if judge_llm is None or not passed:
@@ -261,7 +290,7 @@ def apply(db: Database, manuscript: dict, p: Plan) -> dict:
                                                             "retyped": 0},
               "proposals": {"superseded": 0, "re-asked": 0, "kept": 0,
                             "raised": 0},
-              "note_updates": 0, "failed": list(p.failed)}
+              "note_updates": 0, "absent": 0, "failed": list(p.failed)}
     with db.transaction():
         for c in p.concepts:
             node = db.one("SELECT * FROM concept_nodes WHERE id = ?",
@@ -360,6 +389,23 @@ def apply(db: Database, manuscript: dict, p: Plan) -> dict:
                 _migrated_out(c)
                 report["links"]["out"] += 1
             record_candidate(db, mid, c, p.run_id, p.model)
+        for node in p.absent:
+            row = db.one("SELECT * FROM concept_nodes WHERE id = ?",
+                         (node["id"],))
+            if row is None or row["status"] == "retired":
+                continue
+            retire_concept(db, mid, dict(row))
+            _tag_retired(db, "concept_nodes", row["id"], p.run_id)
+            c = {"type": "concept", "name": row["name"], "kind": row["kind"],
+                 "notes": row["notes"], "file": row["introduced_in"] or "?",
+                 "section": None, "unit": "?", "span": "", "_cited": {},
+                 "confidence": None, "why": "confirmed, absent",
+                 "signal": "migrated_out", "gate": "absent",
+                 "reason": "absent: a confirmed extracted concept whose name "
+                           "and aliases no longer occur in the text",
+                 "node_id": row["id"]}
+            record_candidate(db, mid, c, p.run_id, None)
+            report["absent"] += 1
         for item in p.proposals:
             row = item["row"]
             if item["action"] == "keep":
@@ -392,7 +438,7 @@ def apply(db: Database, manuscript: dict, p: Plan) -> dict:
             "units": len(p.candidates), "cost": None,
             "report": {k: v for k, v in report.items()
                        if k in ("concepts", "links", "proposals",
-                                "note_updates")},
+                                "note_updates", "absent")},
             "incomplete": bool(p.failed)})
     return report
 
@@ -491,6 +537,11 @@ def render_plan(p: Plan) -> str:
             lines.append(f"  {fate:40s} {candidate_label(c)}{score}  [{where}]")
             if c.get("reason"):
                 lines.append(f"      {c['reason']}")
+    lines.append(f"\nABSENT CONFIRMED CONCEPTS: {len(p.absent)} retired — "
+                 "name and aliases occur nowhere in the text")
+    for node in p.absent:
+        lines.append(f"  {node['name']} ({node['kind']})  "
+                     f"[{node['introduced_in'] or '?'}]")
     counts: dict[tuple[str, str], int] = {}
     for item in p.proposals:
         key = (item["kind"], item["action"])
@@ -511,7 +562,8 @@ def render_report(report: dict) -> str:
                else " (gates only)")
             + f": concepts kept {c['kept']}, out {c['out']}; relations kept "
             f"{l['kept']} ({l['retyped']} retyped), out {l['out']}; "
-            f"note updates raised {report['note_updates']}; proposals "
+            f"note updates raised {report['note_updates']}; absent confirmed "
+            f"concepts retired {report['absent']}; proposals "
             f"superseded {pr['superseded']}, re-asked {pr['re-asked']} "
             f"({pr['raised']} raised), kept {pr['kept']}."
             + (" Adjudicator failed for: " + ", ".join(report["failed"])
