@@ -3529,8 +3529,9 @@ def scenario_doc_comments(root: Path) -> None:
           and "part1.md — introduces 3 · debt 0" in m3, m3)
     check("reader-load lists each essay's debts",
           "intro.md (!! stale) — Dharma, karma" in m3, m3)
-    check("reader-load names the summaries that are not fresh",
-          "1 of 2 summaries are not fresh" in m3, m3)
+    check("reader-load names the essays whose paragraph records are "
+          "missing or stale",
+          "1 of 2 essays have missing or stale paragraph records" in m3, m3)
     check("reader-load is plain text, not a markdown table",
           "|---" not in m3 and "# Reader load" not in m3, m3)
     check("an empty reader load says how to build summaries",

@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401
 
+from authorlm.context import Input  # noqa: E402
 from authorlm import api, manifest, summaries as sums  # noqa: E402
 from test_paragraph_records import FakeLLM as FakeParagraphLLM  # noqa: E402
 from test_section_summaries import FakeSectionLLM  # noqa: E402
@@ -158,9 +159,10 @@ def main_test() -> None:
         check("a model label left out is rendered 'none' and reported",
               "FLOW: none" in block and missing == ["FLOW", "MOTIFS", "DOES NOT"],
               str((block, missing)))
-        check("manifest._field reads the rendered lists as before",
-              manifest._field("INTRODUCES: Field, the Field\nASSUMES: Choice",
-                              "ASSUMES", {}) == ["Choice"])
+        check("the reader load no longer parses the rendered lists: it "
+              "declares paragraph records (step 5, ruling 10)",
+              not hasattr(manifest, "_field")
+              and manifest.INPUTS == (Input.PARAGRAPH_RECORDS,))
 
         print("ensure(level=essay) builds all three levels, lowest first:")
         para, sec, ess = RecordingParagraphLLM(), FakeSectionLLM(), FakeEssayLLM()

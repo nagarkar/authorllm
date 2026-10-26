@@ -176,6 +176,12 @@ Bash tab-completion, generated from the live argument parser.
 
 The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
 
+## `authorlm.context`
+
+`authorlm/authorlm/context.py`
+
+Declared inputs — what a pass asks for, and the one place that supplies it (summary-hierarchy-design.md ruling 10, §6.7).
+
 ## `authorlm.critic`
 
 `authorlm/authorlm/critic.py`
@@ -571,6 +577,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 `authorlm/tests/test_audio_voice_config.py`
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
+
+## `tests.test_context`
+
+`authorlm/tests/test_context.py`
+
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `context.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
 
 ## `tests.test_continuation`
 
