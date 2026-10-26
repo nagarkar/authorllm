@@ -453,7 +453,13 @@ Deterministic gates, in order, each a named skip count:
    (the "Experience" failure, #12). Else `common_word`.
 4. **Recurrence bar**, unchanged (`hygiene.py:204-213`) for
    `concept | metaphor | example`.
-5. **Retired-name ban**, unchanged. No lexical near-miss (ruling §0.9):
+5. **Retired-name ban**, unchanged, for names the author retired. A name a
+   migration run retired (`retired_from.by_run`) is not banned: the ban is
+   the author's no, and §4.10's door opens only on text written after the
+   retirement, so a machine retirement that banned would silence the name
+   for good (found on the first live run, 2026-10-25: the migration had
+   retired `hierarchy` and `rank`, and 36 of hierarchy.md's 67 candidates
+   then died as unknown endpoints). No lexical near-miss (ruling §0.9):
    the ban tolerates case and plurals, and block P shows the adjudicator
    the nearest retired names with reasons, which is the same check done
    semantically.
@@ -653,7 +659,13 @@ verdicts with zero author cost. The new gates and adjudicator are measured
 the same way, and §2.5 is the pass mark. The one honest limit: historical
 candidates have no spans, so gate 1 is replayed by re-locating each name in
 the text of the version it was extracted from (`manuscript_versions.files`
-holds every version, `extraction.py:359-366`).
+holds every version, `extraction.py:359-366`). Of every paragraph that
+carries the name, the row is judged on the one whose sentence grounds it
+most strongly (`grounding_strength`: a definition-shaped sentence or a
+heading before a passing mention), first in reading order among equals;
+the first mention alone sent `hierarchy` to be judged on "hierarchy of
+processes enveloped within each process" in another essay (2026-10-25).
+The migration (§5.2) relocates the same way, against the current text.
 
 ### 6.2 Prompt-cache economics
 

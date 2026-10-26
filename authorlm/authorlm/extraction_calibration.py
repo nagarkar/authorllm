@@ -270,6 +270,22 @@ class _Versions:
         return self._layout[vid]
 
 
+def _best(hits: list[tuple], name: str, span_of) -> tuple | None:
+    """The passage to judge a relocated row on: of every paragraph that
+    carries the name, the one whose sentence grounds it most strongly
+    (`grounding_strength`: a definition-shaped sentence or heading before
+    a passing mention), the first in reading order among equals. The
+    first mention alone sent "hierarchy" to be judged on "hierarchy of
+    processes enveloped within each process" in another essay, and the
+    adjudicator rightly dropped THAT span (2026-10-25)."""
+    from .extraction import grounding_strength
+
+    if not hits:
+        return None
+    return max(hits, key=lambda hit: grounding_strength(span_of(hit[2]), name,
+                                                        hit[2]))
+
+
 def _sentence(paragraph: str, *name_sets) -> str:
     sentences = _SENTENCE.split(paragraph)
     for names in name_sets:
@@ -309,9 +325,9 @@ def relocate(hist: dict, versions: _Versions,
                     "_files": versions.files(vid)}
             if kind == "concept":
                 names = node_names(h["node"])
-                hit = next(((f, n, p, head, so) for f, paras in layout
-                            for n, p, head, so in paras
-                            if _names_in(names, p)), None)
+                hits = [(f, n, p, head, so) for f, paras in layout
+                        for n, p, head, so in paras if _names_in(names, p)]
+                hit = _best(hits, h["name"], lambda p: _sentence(p, [names]))
                 cand = {**base, "name": h["name"], "kind": h["kind"],
                         "notes": h["notes"], "_aliases": names[1:]}
                 if hit is None:
@@ -325,9 +341,11 @@ def relocate(hist: dict, versions: _Versions,
                                 _cited={n: p})
             else:
                 a, b = names_of(h["from_node"]), names_of(h["to_node"])
-                both = next(((f, n, p, head, so) for f, paras in layout
-                             for n, p, head, so in paras
-                             if _names_in(a, p) and _names_in(b, p)), None)
+                boths = [(f, n, p, head, so) for f, paras in layout
+                         for n, p, head, so in paras
+                         if _names_in(a, p) and _names_in(b, p)]
+                both = _best(boths, h["from"],
+                             lambda p: _sentence(p, [a, b], [a], [b]))
                 one = both or next(((f, n, p, head, so) for f, paras in layout
                                     for n, p, head, so in paras
                                     if _names_in(a, p) or _names_in(b, p)),
