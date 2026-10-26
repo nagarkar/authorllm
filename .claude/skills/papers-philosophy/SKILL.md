@@ -46,7 +46,7 @@ Three duties, in this order of weight:
 
 Report format: Verdict (accept / minor / major, plus the single most valuable change), a table of citation and fidelity checks, numbered objections with the quoted text, numbered repairs. 1,200 to 2,500 words in round 1; 800 to 1,500 after.
 
-**Round 2 and later** add to the brief the referee's own previous report and the author's rulings, verbatim and binding: a referee may say a ruling was carried out badly, never that it was wrong. The report then carries a ledger of its previous items (MET / PARTLY / NOT / WITHDRAWN under a ruling), the new problems the revision introduced (new citations included), one remaining strongest objection, and few repairs: later rounds are for convergence, not a second rewrite.
+Every brief quotes the commentary rule from the adjudication section below (no restating the primary text) so repairs arrive right the first time. **Round 2 and later** add to the brief the referee's own previous report and the author's rulings, verbatim and binding: a referee may say a ruling was carried out badly, never that it was wrong. The report then carries a ledger of its previous items (MET / PARTLY / NOT / WITHDRAWN under a ruling), the new problems the revision introduced (new citations included), one remaining strongest objection, and few repairs: later rounds are for convergence, not a second rewrite.
 
 ## The parent's adjudication
 
@@ -57,6 +57,8 @@ The referees advise; the session decides what reaches the author, and checks bef
 - **Re-verify** any citation a referee was unsure of, or that two referees read differently. If neither can verify it, it stays out (the first run: a Jung quotation in the text that no one could find in the cited book was replaced with what the book does say; a claimed link between two modern authors, from the author's dictation, was left out and the author was told).
 - **Leave survive-tagged objections out** of the forms, and list them for the author in one line each.
 - **A known-wrong claim is fixed in the text**, never qualified in a footnote; footnotes carry sources, etymologies and comparisons only.
+- **A commentary adds a perspective; it never restates the primary text.** A referee's "the sermon says X, the commentary says Y" is a reason to make Y compatible with X, never to replace Y with X's words; a coverage gap is filled with the commentary's own reading of the missed move, in the commentary's register; a quotation of the primary text appears only where the commentary is about those words. Fidelity means compatibility, not echo. Screen every form for primary-text paraphrase before the author sees the round, and rewrite or drop those. Mechanical repairs (citations, house punctuation, banned words) are unaffected. (Occasion, 2026-10-25: a round "coverage"-repaired a recap by pasting the sermon's own lines back in, and the author sent it back.)
+- **Content rulings about what a book cites or says are style laws, not skill text.** When the author rules on a source or a stance for a manuscript (for example SMSTTD's "no Marx", law se-32281), it goes into that manuscript's style guide with `authorlm style add` on the author's word, where `style show <file>` composes it for every session; check the effective guide before citing.
 
 ## Repairs on the Doc road (commentary)
 

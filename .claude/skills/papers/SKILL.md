@@ -105,3 +105,17 @@ Rules for a cloud session on the CLI road:
 - Exports, the rendered-Doc refresh (`export … --upload`) and `doc auth` stay local.
 
 An expired Google token stops a push; `authorlm doc auth` opens a consent page and runs only on the author's word. Every message that deals with a manuscript carries its master Doc link.
+
+## 7. Rounds, projects and close-out
+
+Three words, kept apart because the close-out happens only at one of them.
+
+- **A round** is one referee pass on one text: the brief, the reports, the adjudication, the forms staged under one origin (`referees-r<N>`), the author's rulings on every form, and the resolve that pushes them. A round ends when the tab holds no form of its origin. A round never closes anything out.
+- **A project** is one text's review (a recap, a paper, a chapter): as many rounds as it takes until the author passes the last gate (F for a commentary, H for a paper).
+- **Close-out** is a separate step after the last round, on the author's word.
+
+While a project is open, its rulings live in the rulings record named in section 5, where the author can read them all at once. That record binds no one by itself. At close-out, the session reads it with the author and, for each entry:
+
+1. **A standing rule** (anything that should bind future writing: a vocabulary, a stance, a source never cited, a kind of repair never made) is proposed as a style law with its scope named (this essay, this part, the whole book) and its wording shown in chat; `authorlm style add` runs on the author's yes, one law at a time. An unratified rule never becomes a law.
+2. **A reason behind one decision** stays with that decision, in the form's thread note.
+3. **An open question** goes to the author; it is settled, or carried to the next project by name.
