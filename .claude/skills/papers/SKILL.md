@@ -71,7 +71,7 @@ Tab names, `<project>_<what><number or stem>.md`, the qualifier omitted for what
 | `<project>_paper0.md` | the paper (for a commentary, the chapter's own tab) | permanent |
 | `<project>_papersequence.md` | the set of papers, order, what each claims and leaves to the next; the Doc ids | until the last paper closes |
 | `<project>_claims_premises0.md` | claims and premises not yet in the text, with the changelog | until empty, then deleted |
-| `<project>_rulings.md` | rulings, working positions and open questions not yet carried by a text | until each is carried, then deleted |
+| `<project>_rulings.md` (or, for a commentary, `<manuscript>/_drafts/<project>-rulings.md`) | the scratch record of rulings, working positions and open questions, in the author's words | grows while the project is open; frozen at close-out (section 7), never deleted |
 | `<project>_referee0.md` | every referee round for the text, each headed by round and referee, with its ledger and response | permanent beside the text |
 
 The text carries everything in the end: its premises list every posit, its appendices carry what the field skill says they carry, its amendments section carries what it asks of the book, and its boundaries carry what it leaves open. From the text alone the claims, premises and outline can be reconstructed. Only what is not yet used lives outside it, in its own tab, temporarily.
@@ -79,6 +79,34 @@ The text carries everything in the end: its premises list every posit, its appen
 The `.md` in the names is the Doc bridge's convention, which names a tab after the file it mirrors; a local session has those files in the manuscript folder, a cloud session has none and needs none. The names are kept the same in both so that the bridge, when it runs locally, finds its tabs.
 
 In a session, claims, premises and open questions are managed in context. They are flushed to their tab at every gate, at every ruling, and at the end of the session, not only at the end: context is lost at compaction, and a flush at a gate costs one push.
+
+## 7. Rounds, projects and close-out
+
+Three words, kept apart because the close-out happens only at one of them.
+
+- **A round** is one referee pass on one text: the brief, the reports, the adjudication, the forms staged under one origin (`referees-r<N>`), the author's rulings on every form, and the resolve that pushes them. A round ends when the tab holds no form of its origin. A round never closes anything out.
+- **A project** is one text's review (a recap, a paper, a chapter): as many rounds as it takes until the author passes the last gate (F for a commentary, H for a paper).
+- **Close-out** is a separate sitting after the last round, and it begins only on the author's explicit word ("close out the Sermon Four recap"). It is never done inside a round, never proposed before the last gate is passed, and asked for at most once, after that gate. The author's reason (2026-10-25): rules pushed into the database too early thrash, and a database is harder to inspect than one file that shows everything at once.
+
+While a project is open, its rulings live in the scratch file named in section 5, where the author can read them all at once and change them freely. That file is scratch: nothing reads it but the sessions working the project, and a rule that lives only there binds no one.
+
+At close-out, the session reads the scratch file with the author and, for each entry:
+
+1. **A standing rule** (anything that should bind future writing: a vocabulary, a stance, a kind of repair that is never made) is proposed as a style law with its scope named (this essay, this part, the whole book) and its wording shown in chat; `add_style_law` runs on the author's yes, one law at a time.
+2. **A reason behind one decision** stays with that decision: it is already in the form's thread note, or is added there now.
+3. **An open question** goes to the author; it is settled, or carried to the next project by name.
+
+Then the file gets one closing line, "Closed out <date>: laws <ids>; open: <items>", and is not written again. It stays where it is, in `_drafts` for a commentary or its tab for a paper, as the readable record; "archive" means only that. The chapter's Omit block (below) keeps pointing at it.
+
+**Working prose is linked from the chapter.** Referee reports, maps, redesigns and the rulings record are easily lost in a folder. Every chapter that has been through a project carries, at the head of its file, a region the exports and the audio skip and the Doc tab shows:
+
+```
+[Omit: all]
+Working documents: referee reports `_drafts/recap-four-referee-*.md`; rulings `_drafts/recap-four-rulings.md` (closed out 2026-10-25); map `_drafts/becker-map.md`.
+[/Omit]
+```
+
+The block is permanent. Close-out does not remove it; it adds the close-out date to the rulings entry. It is the one place a reader of the chapter, in the file or in the Doc, can find what lies behind it.
 
 ## 6. Local and cloud
 
@@ -105,3 +133,7 @@ Rules for a cloud session on the CLI road:
 - Exports, the rendered-Doc refresh (`export … --upload`) and `doc auth` stay local.
 
 An expired Google token stops a push; `authorlm doc auth` opens a consent page and runs only on the author's word. Every message that deals with a manuscript carries its master Doc link.
+
+## Rulings
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file, or the full URL of its Doc tab, on the ruling's id, for example `[R2](/Users/nagarkar/workspace/repos/<repo>/<path>/rulings.md)`. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).

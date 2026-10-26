@@ -21,7 +21,7 @@ A commentary is judged against two sources at once: the primary text it comments
 | core stage | in philosophy |
 |---|---|
 | **C3. Field outline** | the argument's steps in order, each with the premise it rests on, and the positions it engages (by thinker and text), before any prose |
-| **D. Field preparation** | citation verification: every work cited exists with the stated title, date, venue, edition, translator and section, and says what it is cited for. Each is VERIFIED, WRONG (with the correct detail and a source) or UNVERIFIABLE. An UNVERIFIABLE claim stays out of the text, or goes to the author as a question; it is never cited on trust. |
+| **D. Field preparation** | citation verification: every work cited exists with the stated title, date, venue, edition, translator and section, and says what it is cited for. Each is VERIFIED, WRONG (with the correct detail and a source) or UNVERIFIABLE. An UNVERIFIABLE claim stays out of the text, or goes to the author as a question; it is never cited on trust. The author does not want Marx cited or used as a comparison in this book (2026-10-25); for "a product of man that comes to own him" reach for Jung's persona, Fromm's idolatry, Sartre's bad faith or Becker's hero-systems. |
 | **E. Body** | one argument at a time; the strongest objection to it is stated at full force before the author's gate |
 
 ## Referees in use
@@ -46,7 +46,7 @@ Three duties, in this order of weight:
 
 Report format: Verdict (accept / minor / major, plus the single most valuable change), a table of citation and fidelity checks, numbered objections with the quoted text, numbered repairs. 1,200 to 2,500 words in round 1; 800 to 1,500 after.
 
-**Round 2 and later** add to the brief the referee's own previous report and the author's rulings, verbatim and binding: a referee may say a ruling was carried out badly, never that it was wrong. The report then carries a ledger of its previous items (MET / PARTLY / NOT / WITHDRAWN under a ruling), the new problems the revision introduced (new citations included), one remaining strongest objection, and few repairs: later rounds are for convergence, not a second rewrite.
+Every brief quotes the commentary rule from the adjudication section below (no restating the primary text) so repairs arrive right the first time. **Round 2 and later** add to the brief the referee's own previous report and the author's rulings, verbatim and binding: a referee may say a ruling was carried out badly, never that it was wrong. The report then carries a ledger of its previous items (MET / PARTLY / NOT / WITHDRAWN under a ruling), the new problems the revision introduced (new citations included), one remaining strongest objection, and few repairs: later rounds are for convergence, not a second rewrite.
 
 ## The parent's adjudication
 
@@ -57,6 +57,8 @@ The referees advise; the session decides what reaches the author, and checks bef
 - **Re-verify** any citation a referee was unsure of, or that two referees read differently. If neither can verify it, it stays out (the first run: a Jung quotation in the text that no one could find in the cited book was replaced with what the book does say; a claimed link between two modern authors, from the author's dictation, was left out and the author was told).
 - **Leave survive-tagged objections out** of the forms, and list them for the author in one line each.
 - **A known-wrong claim is fixed in the text**, never qualified in a footnote; footnotes carry sources, etymologies and comparisons only.
+- **A commentary adds a perspective; it never restates the primary text.** The author's rule (2026-10-25, after a round that "coverage"-repaired a recap by pasting the sermon's own lines and images back in): "you're repeating the same language from the sermons. This is not appropriate. You should be placing a new perspective." So a referee's "the sermon says X, the recap says Y" is a reason to make Y compatible with X, never to replace Y with X's words; a coverage gap is filled with the commentary's own reading of the missed move, in the commentary's register; a quotation of the primary text appears only where the commentary is about those words. Fidelity means compatibility, not echo. Screen every form for primary-text paraphrase before the author sees the round, and rewrite or drop those. Mechanical repairs (citations, house punctuation, banned words) are unaffected.
+- **Imagery** of the commentary's own (a throne, a costume, a stopped clock) is welcome where it is clear and idiomatic, and must not beg the question (author, 2026-10-25).
 
 ## Repairs on the Doc road (commentary)
 
@@ -93,3 +95,7 @@ A drafter alone had missed all of these: a book cited under a title that does no
 A commentary: `revise resolve` (it pushes), then `authorlm export pdf --file <file> -m <Manuscript> --print-ready --upload` for a copy to share (`--upload` puts it on Drive and replaces it in place on every later export, so the link stays the same); without `--print-ready` the PDF carries the confidential-review notice, footer and watermark. A paper follows the core's stage H with the same export verbs.
 
 When the author asks for the text "here, to read", paste the plain body in chat (no footnotes, markers or preamble); send a file only when asked for a file.
+
+## Rulings: the link standard
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file (for a recap, `<manuscript>/_drafts/<project>-rulings.md`, the scratch record of the core's section 7, frozen at close-out), or the full URL of its Doc tab, on the ruling's id. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).

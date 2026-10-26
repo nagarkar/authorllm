@@ -2264,3 +2264,8 @@ do all three in the same turn:
   paraphrase away their reasoning.
 - All tools take an optional `manuscript` parameter — resolve ambiguity via
   `list_manuscripts` once, then pass it explicitly.
+
+## Rulings
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file, or the full URL of its Doc tab, on the ruling's id, for example `[R2](/Users/nagarkar/workspace/repos/<repo>/<path>/rulings.md)`. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).
+- In AuthorLM a project's rulings live in `<manuscript>/_drafts/<project>-rulings.md` (for example `recap-five-rulings.md`, `recap-one-rulings.md`, `papers-conflicts.md`) or in the Doc's `<project>_rulings.md` tab; link whichever holds the ruling.

@@ -1315,7 +1315,11 @@ def split_tabbed_export(text: str, known_files,
     idx = 0
     for line in text.splitlines():
         match = pattern.match(line)
-        name = match.group(1).strip() if match else None
+        # The export escapes underscores in a tab title
+        # ("phil/claims\\_premises1.md"); unescape so the title
+        # matches the tab tree, else every later tab reads as missing.
+        name = (match.group(1).strip().replace("\\_", "_")
+                if match else None)
         boundary = False
         if name is not None:
             if idx < len(positioned) and name == positioned[idx]:
@@ -4343,6 +4347,24 @@ def _md_paragraphs(markdown: str) -> list[str]:
     return [p for p in re.split(r"\n\s*\n", markdown) if p.strip()]
 
 
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def _md_units(markdown: str) -> list[str]:
+    """`_md_paragraphs`, with a list block split into its items: the Doc
+    holds one paragraph per bullet while the export joins consecutive
+    items with single newlines, so the two sides would otherwise disagree
+    on the paragraph count (Paper 1's Boundaries list, 2026-10-21)."""
+    out: list[str] = []
+    for block in _md_paragraphs(markdown):
+        lines = block.split("\n")
+        if len(lines) > 1 and all(_LIST_ITEM.match(l) for l in lines):
+            out.extend(lines)
+        else:
+            out.append(block)
+    return out
+
+
 def _norm_para(text: str) -> str:
     return re.sub(r"\W+", "", text).lower()
 
@@ -4596,10 +4618,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     anchors: list[dict] | None = None
     for attempt in (1, 2):
         tab_md = tab_markdown()
-        tab_paras = _md_paragraphs(tab_md)
+        tab_paras = _md_units(tab_md)
         canonical = [threads_mod.strip_pending(p)[0].strip("\n")
                      for p in tab_paras]
-        local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
+        local_paras = [p.strip("\n") for p in _md_units(local_md)]
         if canonical == local_paras:
             # Same canonical bytes as push_doc / three_way / reconcile
             # (normalize_markdown's trailing newline). Hashing the
@@ -4775,7 +4797,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
 
         verify_md = tab_markdown()
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
-                  for p in _md_paragraphs(verify_md)]
+                  for p in _md_units(verify_md)]
         if verify == target:
             if flat:
                 apply_tab_spacing(docs_service, master_id, tab_id,
