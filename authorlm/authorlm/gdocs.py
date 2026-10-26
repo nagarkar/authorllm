@@ -4343,6 +4343,40 @@ def _md_paragraphs(markdown: str) -> list[str]:
     return [p for p in re.split(r"\n\s*\n", markdown) if p.strip()]
 
 
+def _split_hard_breaks(export_paras: list[str],
+                       doc_texts: list[str]) -> list[str]:
+    """The export's paragraphs, with each hard-break join undone where
+    the tab says it is a join. Google's export glues a paragraph that
+    carries no space below onto the next one with a hard line break
+    (measured 2026-10-25; also the illustration-tag-then-footnote case),
+    which normalize_markdown may have turned into a backslash break or a
+    bare newline, so the export can hold fewer paragraphs than the tab.
+    A unit is split at its newlines only when every line matches the
+    next Doc paragraph in turn; a real soft break inside one Doc
+    paragraph keeps its unit whole, because its second line is not the
+    next paragraph. A break marker is dropped from a piece only when the
+    Doc paragraph does not itself end in that backslash."""
+    out: list[str] = []
+    j = 0
+    for para in export_paras:
+        lines = para.strip("\n").split("\n")
+        if (len(lines) > 1 and j + len(lines) <= len(doc_texts)
+                and all(_same_para(doc_texts[j + k].strip("\n"), line)
+                        for k, line in enumerate(lines))):
+            for k, line in enumerate(lines):
+                piece = line.rstrip(" ")
+                doc = doc_texts[j + k].rstrip("\n").rstrip()
+                if (k < len(lines) - 1 and piece.endswith("\\")
+                        and not doc.endswith("\\")):
+                    piece = piece[:-1].rstrip(" ")
+                out.append(piece)
+            j += len(lines)
+        else:
+            out.append(para)
+            j += 1
+    return out
+
+
 def _norm_para(text: str) -> str:
     return re.sub(r"\W+", "", text).lower()
 
@@ -4394,9 +4428,13 @@ def divergence_note(doc_texts: list[str], export_paras: list[str],
     if d["hard_break_after"] is not None:
         words = " ".join(d["hard_break_after"].split()[:6])
         return (note + ". Google's export joined two paragraphs with a hard "
-                f"line break: add a blank line after «{words}» in the Doc, "
-                f"then authorlm doc push {relpath}")
-    return note + " — settle threads and use a rebuild push"
+                f"line break after «{words}» that the tab's paragraphs do "
+                "not explain, even after authorlm re-applied the tab's "
+                "paragraph spacing. Nothing was written. Settle any "
+                f"margin threads, then authorlm doc push {relpath} "
+                "--rebuild")
+    return (note + ". Nothing was written. Settle any margin threads, "
+            f"then authorlm doc push {relpath} --rebuild")
 
 
 def _refuse_table_orphans(service, master_id: str, relpath: str,
@@ -4593,10 +4631,28 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                                   bridge, relpath)
         return text if text is not None else normalize_markdown("")
 
+    def read_tab() -> tuple[str, list[dict], list[str]]:
+        """The tab's export and its Doc paragraphs, aligned: hard-break
+        joins the Doc's own paragraphs explain are split back apart."""
+        md = tab_markdown()
+        paras = _doc_paragraphs(docs_service, master_id, tab_id)
+        return md, paras, _split_hard_breaks(
+            _md_paragraphs(md), [d["text"] for d in paras])
+
     anchors: list[dict] | None = None
+    healed = False
     for attempt in (1, 2):
-        tab_md = tab_markdown()
-        tab_paras = _md_paragraphs(tab_md)
+        tab_md, doc_paras, tab_paras = read_tab()
+        if len(doc_paras) != len(tab_paras) and not healed:
+            # A tab left without paragraph spacing (an earlier push that
+            # failed before spacing was applied, or a hand edit) exports
+            # joined paragraphs no alignment can always undo. Spacing is
+            # style only, the standard every content write imposes; apply
+            # it and read again before judging the tab.
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
+            healed = True
+            tab_md, doc_paras, tab_paras = read_tab()
         canonical = [threads_mod.strip_pending(p)[0].strip("\n")
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_paragraphs(local_md)]
@@ -4612,7 +4668,6 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             _save_mapping(db, manuscript, meta)
             return {"relpath": relpath, "mode": "diff", "ops": 0}
 
-        doc_paras = _doc_paragraphs(docs_service, master_id, tab_id)
         if len(doc_paras) != len(tab_paras):
             raise LookupError(
                 f"diff push: tab structure and export disagree "
@@ -4772,14 +4827,18 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         if flat:
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": flat}).execute()
+            # Spacing BEFORE the read-back: inserted paragraphs carry none,
+            # and Google's export joins unspaced paragraphs with hard line
+            # breaks, so a read-back taken first saw fewer paragraphs than
+            # the tab held and failed every push that inserted one
+            # (2026-10-25, read-again.md).
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
 
-        verify_md = tab_markdown()
+        verify_md, _verify_doc, verify_paras = read_tab()
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
-                  for p in _md_paragraphs(verify_md)]
+                  for p in verify_paras]
         if verify == target:
-            if flat:
-                apply_tab_spacing(docs_service, master_id, tab_id,
-                                  doc_spacing(manuscript))
             # A partial push records what the tab now holds, not the
             # local file: pull then sees only local moved (local_ahead)
             # and keeps the held paragraphs' new text.
