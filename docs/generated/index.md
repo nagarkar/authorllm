@@ -680,6 +680,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
 
+## `tests.test_grounding_strength`
+
+`authorlm/tests/test_grounding_strength.py`
+
+`extraction.grounding_strength` and `extraction_calibration._best` choose which paragraph a relocated candidate is judged on.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
@@ -757,6 +763,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_section_summaries.py`
 
 Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
+
+## `tests.test_separate_tag_lines`
+
+`authorlm/tests/test_separate_tag_lines.py`
+
+`gdocs.separate_tag_lines` blanks between consecutive `[…]` tag lines in the bytes handed to a markdown import.
 
 ## `tests.test_setup_web_build`
 
