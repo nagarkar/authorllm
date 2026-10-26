@@ -283,7 +283,7 @@ def main_test() -> None:
 
         print("guards:")
         try:
-            sums.ensure(db, manuscript, fake, level="section")
+            sums.ensure(db, manuscript, fake, level="essay")
             ok = False
         except ValueError as err:
             ok = "no builder yet" in str(err)

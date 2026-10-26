@@ -6021,6 +6021,31 @@ def check_retired_link(root: Path, FakeGoogle) -> None:
           "no 'no tab found' for it after its tab is deleted",
           report["missing"] == [] and "01-keep.md" in
           (report["changed"] + report["unchanged"]), str(report))
+    links = _mapping(db, api.get_manuscript(db))["gdocs"]
+    check("pull prunes the stale link once its tab is gone and its file "
+          "is retired", "03-old.md" not in links
+          and report.get("pruned") == ["03-old.md"], str(report))
+
+    # A link whose file no longer exists anywhere, and a live file whose
+    # tab the author deleted (maybe by mistake: push recreates it).
+    (ms / "04-vanish.md").write_text("# Vanish\n\nSoon gone.\n")
+    (ms / "05-live.md").write_text("# Live\n\nStill here.\n")
+    manuscript = api.get_manuscript(db)
+    for name in ("04-vanish.md", "05-live.md"):
+        push_doc(db, manuscript, name, service=stub, docs_service=stub)
+        manuscript = api.get_manuscript(db)
+    (ms / "04-vanish.md").unlink()
+    tabs[:] = [t for t in tabs
+               if t["title"] not in ("04-vanish.md", "05-live.md")]
+    report = pull_doc(db, manuscript, service=stub, docs_service=stub,
+                      with_comments=False)
+    links = _mapping(db, api.get_manuscript(db))["gdocs"]
+    check("pull prunes a link whose tab and file are both gone",
+          "04-vanish.md" not in links
+          and "04-vanish.md" in report.get("pruned", []), str(report))
+    check("a live file whose tab vanished keeps its link and its warning",
+          "05-live.md" in links and report["missing"] == ["05-live.md"],
+          str(report))
 
 
 def check_omit_all(root: Path, FakeGoogle) -> None:
@@ -9532,7 +9557,7 @@ def main_test() -> None:
             check("review filter inserts the legal notice ahead of the title",
                   filtered.returncode == 0
                   and filtered.stdout.index(
-                      "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT")
+                      "CONFIDENTIAL REVIEW DRAFT")
                   < filtered.stdout.index("The Book")
                   and "Author House LLC" in filtered.stdout,
                   filtered.stderr or filtered.stdout[:1000])

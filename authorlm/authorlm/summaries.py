@@ -1347,7 +1347,21 @@ DEFAULT_PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
 # Extraction's cap (§3.5): a longer section splits at paragraph
 # boundaries into several calls.
 MAX_SECTION_CHARS = 24000
-LEVELS = ("paragraph",)
+# Built levels, lowest first: `ensure` for a level rebuilds every level
+# below it first (§4.5). Step 4 adds "essay".
+LEVELS = ("paragraph", "section")
+
+SECTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "section-summary.md"
+# Today's n/10 – n/7.5 formula re-floored for the smaller unit (§3.3).
+MIN_SECTION_WORDS = 30
+MAX_SECTION_WORDS = 250
+# The four labels of a section summary, in order (§3.3).
+SECTION_LABELS = ("POINT", "MOVES", "DEPENDS ON", "LEAVES OPEN")
+# A section that is only its heading (a chapter title straight into its
+# first "##") has no body to summarize: stored without a call, like a
+# heading row (ruling 8).
+HEADING_ONLY_SUMMARY = ("POINT: A heading with no body text.\nMOVES: none\n"
+                        "DEPENDS ON: none\nLEAVES OPEN: none")
 
 
 def paragraph_prompt() -> str:
@@ -1494,19 +1508,268 @@ def _build_file(db: Database, manuscript: dict, file: str, text: str,
                 earlier[p["ordinal"]] = p["para_hash"]
 
 
-def ensure(db: Database, manuscript: dict, llm: LLMClient,
-           level: str = "paragraph", files: list[str] | None = None,
-           echo=print) -> dict:
-    """Bring `level` up to date for `files` (every unit when None) and
-    return the build report (§4.5, ruling 3): only rows the text has and
-    the table lacks are built, over ONE capture. When anything was built,
-    `echo` gets one line with the client's cost line (ruling 9); nothing
-    is gated and nothing is asked.
+# ------------------------------------------------------ section pass (§3.3)
 
-    Report: {level, files, calls, records, headings, resurrected,
-    missing: [(file, ordinal)] the model returned no record for (still
-    dirty, retried by the next ensure), dropped: {span, relation, role,
-    direction, depends_on} items discarded by the §7 checks, line}."""
+def section_prompt() -> str:
+    return SECTION_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def section_llm(config: dict) -> LLMClient:
+    """The client for section summaries: Luna, `[critique]
+    summarizer_model` (ruling 5), unless `[summaries] section_model`
+    names another. Ledger purpose `summaries.section`."""
+    llm = LLMClient(config)
+    llm.purpose = "summaries.section"
+    llm.model = ((config.get("summaries", {}) or {}).get("section_model")
+                 or (config.get("critique", {}) or {}).get("summarizer_model")
+                 or DEFAULT_SUMMARIZER_MODEL)
+    llm.temperature = resolve_temperature(config, "summaries")
+    return llm
+
+
+def clients(config: dict) -> dict[str, LLMClient]:
+    """One client per built level, for `ensure(llm=…)`: each level's
+    spend is its own ledger line and its own cost line."""
+    return {"paragraph": paragraph_llm(config), "section": section_llm(config)}
+
+
+def section_target_length(text: str) -> tuple[int, int]:
+    """(low, high) words for a section summary: n/10 to n/7.5 of the
+    section's words, floored at 30, capped at 250 (§3.3)."""
+    n = len(text.split())
+    low = max(MIN_SECTION_WORDS, round(n / 10))
+    high = min(MAX_SECTION_WORDS, max(low + 10, round(n / 7.5)))
+    low = min(low, high - 10)
+    return low, high
+
+
+def _label_block(summary: str, label: str) -> str:
+    """The text under one label of a summary block, up to the next
+    label; '' when the label is absent."""
+    others = "|".join(re.escape(x) for x in SECTION_LABELS if x != label)
+    m = re.search(rf"^{re.escape(label)}:[ \t]*(.*?)(?=^(?:{others}):|\Z)",
+                  summary, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def point_of(summary: str) -> str:
+    """The POINT line of a stored section summary (what later sections
+    of the same essay are conditioned on, §3.3)."""
+    return " ".join(_label_block(summary, "POINT").split())
+
+
+_ORDINAL_RE = re.compile(r"\[(\d+)\]")
+
+
+def moves_coverage(summary: str, ordinals: list[int]) -> dict:
+    """Set equality between the paragraphs MOVES cites and the section's
+    body paragraphs (§3.3, ruling 8): each non-empty line of the MOVES
+    block is one move and the `[n]` numbers on it are its paragraphs.
+    No range is read: "[4]-[6]" cites 4 and 6, and 5 is missing.
+
+    {complete, missing: [n] cited by no move, duplicated: [n] cited by
+    more than one move, unknown: [n] cited but not in the section}."""
+    moves = [ln for ln in _label_block(summary, "MOVES").splitlines()
+             if ln.strip()]
+    counts: dict[int, int] = {}
+    for move in moves:
+        for n in {int(x) for x in _ORDINAL_RE.findall(move)}:
+            counts[n] = counts.get(n, 0) + 1
+    wanted = set(ordinals)
+    missing = sorted(wanted - set(counts))
+    duplicated = sorted(n for n, c in counts.items() if c > 1 and n in wanted)
+    unknown = sorted(set(counts) - wanted)
+    return {"complete": not (missing or duplicated or unknown),
+            "missing": missing, "duplicated": duplicated, "unknown": unknown}
+
+
+def _section_user(db: Database, manuscript: dict, file: str, section: dict,
+                  records: dict[str, dict], prior_points: list[tuple[str, str]]
+                  ) -> str:
+    body = [p for p in section["paragraphs"] if p["kind"] != "heading"]
+    text = "\n\n".join(p["text"] for p in section["paragraphs"])
+    low, high = section_target_length(text)
+    earlier = ("\n".join(f"{h or '(preamble)'}: {pt}" for h, pt in prior_points)
+               or "(this is the first section)")
+    skeleton = "\n".join(
+        f"[{p['ordinal']}] {records[p['para_hash']].get('gist') or '(no gist)'}"
+        for p in body)
+    numbered = "\n\n".join(f"[{p['ordinal']}] {p['text']}"
+                            for p in section["paragraphs"])
+    return (f"FILE: {file}\nSECTION: {section['heading'] or '(preamble)'}\n\n"
+            f"EARLIER SECTIONS (their POINT lines, in order):\n{earlier}"
+            "\n\nCONCEPTS (author's ratified definitions):\n"
+            + _concept_slice(db, manuscript, file)
+            + f"\n\nTARGET LENGTH: {low}-{high} words "
+              f"(scaled to this section's {len(text.split())} words)."
+            + f"\n\nSKELETON:\n{skeleton}"
+            + f"\n\nCOVER THESE: {', '.join(str(p['ordinal']) for p in body)}"
+            + f"\n\nTHE SECTION:\n\n{numbered}")
+
+
+def _build_sections(db: Database, manuscript: dict, file: str, text: str,
+                    llm: LLMClient, report: dict, *, verse_file: bool) -> None:
+    """Fill the section rows one file's text lacks (§3.5 order: in file
+    order, each call conditioned on the POINT lines of the sections
+    before it). A heading-only section is stored without a call. A
+    section whose paragraph records are not all current is skipped and
+    reported (the paragraph level is retried by the next ensure);
+    coverage misses are reported, never repaired."""
+    mark_orphans(db, manuscript, file, text)
+    have = _current_section_rows(db, manuscript["id"], file)
+    orphaned = {r["section_hash"]: dict(r) for r in db.all(
+        "SELECT * FROM section_summaries WHERE manuscript_id = ? "
+        "AND file = ? AND status = 'orphaned'", (manuscript["id"], file))}
+    records = {h: _record_of(r) for h, r in
+               _current_paragraph_rows(db, manuscript["id"], file).items()}
+    points: list[tuple[str | None, str]] = []
+    for sec in sections_of(text, verse_file=verse_file):
+        row = have.get(sec["section_hash"])
+        if row is None and sec["section_hash"] in orphaned:
+            # Its text came back (an edit undone): no call (§4.1).
+            row = orphaned[sec["section_hash"]]
+            db.update("section_summaries", row["id"],
+                      {"status": "current",
+                       "section_ordinal": sec["section_ordinal"]})
+            report["resurrected"] += 1
+        elif row is not None and row["section_ordinal"] != sec["section_ordinal"]:
+            db.update("section_summaries", row["id"],
+                      {"section_ordinal": sec["section_ordinal"]})
+        if row is not None:
+            points.append((sec["heading"], point_of(row["summary"])))
+            continue
+        body = [p for p in sec["paragraphs"] if p["kind"] != "heading"]
+        if not body:
+            row = store_section_summary(db, manuscript, file, sec,
+                                        HEADING_ONLY_SUMMARY, "")
+            report["headings_only"] += 1
+            points.append((sec["heading"], point_of(row["summary"])))
+            continue
+        if any(p["para_hash"] not in records for p in body):
+            report["skipped"].append((file, sec["section_ordinal"]))
+            continue
+        if not llm.enabled:
+            raise RuntimeError(
+                f"section summaries for {file} need the LLM, which is "
+                "disabled ([llm] enabled)")
+        summary = llm.complete(
+            section_prompt(),
+            _section_user(db, manuscript, file, sec, records, points))
+        report["calls"] += 1
+        if not summary or not summary.strip():
+            report["skipped"].append((file, sec["section_ordinal"]))
+            continue
+        row = store_section_summary(db, manuscript, file, sec,
+                                    summary, llm.model or "")
+        report["sections"] += 1
+        cov = moves_coverage(row["summary"], [p["ordinal"] for p in body])
+        if not cov["complete"]:
+            report["misses"].append((file, sec["section_ordinal"], cov))
+        points.append((sec["heading"], point_of(row["summary"])))
+
+
+def _section_line(report: dict) -> str:
+    line = (f"summaries: section level rebuilt — {report['sections']} "
+            f"section(s) in {report['calls']} call(s) over "
+            f"{len(report['files'])} file(s)")
+    if report["headings_only"]:
+        line += f", {report['headings_only']} heading-only"
+    if report["resurrected"]:
+        line += f", {report['resurrected']} restored"
+    if report["misses"]:
+        line += (f"; {len(report['misses'])} section(s) with a coverage "
+                 "miss: " + ", ".join(
+                     f"{f} §{n} (" + ", ".join(
+                         f"{k} {v}" for k, v in cov.items()
+                         if k != "complete" and v) + ")"
+                     for f, n, cov in report["misses"]))
+    if report["skipped"]:
+        line += f"; {len(report['skipped'])} section(s) skipped"
+    return line
+
+
+def _paragraph_line(report: dict) -> str:
+    dropped = sum(report["dropped"].values())
+    line = (f"summaries: paragraph level rebuilt — {report['records']} "
+            f"record(s) in {report['calls']} call(s) over "
+            f"{len(report['files'])} file(s)")
+    if report["headings"]:
+        line += f", {report['headings']} heading(s)"
+    if report["resurrected"]:
+        line += f", {report['resurrected']} restored"
+    if dropped:
+        line += f"; {dropped} item(s) dropped by the span/vocabulary check"
+    if report["missing"]:
+        line += f"; {len(report['missing'])} paragraph(s) got no record"
+    return line
+
+
+_LEVEL_BUILDERS = {
+    "paragraph": (_build_file, _paragraph_line,
+                  lambda: {"calls": 0, "records": 0, "headings": 0,
+                           "resurrected": 0, "missing": [], "dropped": {}}),
+    "section": (_build_sections, _section_line,
+                lambda: {"calls": 0, "sections": 0, "headings_only": 0,
+                         "resurrected": 0, "misses": [], "skipped": []}),
+}
+
+
+def _client_for(llm, level: str) -> LLMClient:
+    if isinstance(llm, dict):
+        if level not in llm:
+            raise LookupError(f"no LLM client given for the {level} level")
+        return llm[level]
+    return llm
+
+
+def _ensure_level(db: Database, manuscript: dict, llm: LLMClient, level: str,
+                  texts: dict[str, str], flight: dict, files, echo) -> dict:
+    build, line_of, fresh = _LEVEL_BUILDERS[level]
+    verse = verse_files_of(manuscript)
+    report = {"level": level, "files": [], **fresh(), "line": None}
+    for file, text in texts.items():
+        if files is not None and file not in files:
+            continue
+        if flight.get(file, NOT_IN_FLIGHT) is None:
+            continue        # a writeup created it: no text to record yet
+        before = json.dumps({k: v for k, v in report.items() if k != "files"},
+                            default=str)
+        build(db, manuscript, file, text, llm, report, verse_file=file in verse)
+        if json.dumps({k: v for k, v in report.items() if k != "files"},
+                      default=str) != before:
+            report["files"].append(file)
+    if report["files"]:
+        stats = llm.stats_line()
+        report["line"] = line_of(report) + (f" — {stats}" if stats else "")
+        echo(report["line"])
+    return report
+
+
+def ensure(db: Database, manuscript: dict, llm, level: str = "paragraph",
+           files: list[str] | None = None, echo=print) -> dict:
+    """Bring `level` up to date for `files` (every unit when None) and
+    return its build report (§4.5, ruling 3): every level below it is
+    brought up to date first, in `LEVELS` order, and only rows the text
+    has and the table lacks are built, over ONE capture. Each level that
+    built anything gives `echo` one line with its client's cost line
+    (ruling 9); nothing is gated and nothing is asked.
+
+    `llm` is one client for every level, or a dict {level: client} (see
+    `clients`) so each level runs on its own model and prints its own
+    cost line.
+
+    Paragraph report: {level, files, calls, records, headings,
+    resurrected, missing: [(file, ordinal)] the model returned no record
+    for (still dirty, retried by the next ensure), dropped: {span,
+    relation, role, direction, depends_on} items discarded by the §7
+    checks, line}.
+
+    Section report: {level, files, calls, sections, headings_only,
+    resurrected (orphaned rows whose text came back, no call), misses: [(file, section_ordinal, coverage)] whose MOVES do not place
+    every body paragraph exactly once (stored all the same), skipped:
+    [(file, section_ordinal)] not built because a paragraph record is
+    missing or the model answered nothing, line, paragraph: the lower
+    level's report}."""
     if level not in LEVELS:
         raise ValueError(f"summary level {level!r} has no builder yet "
                          f"(built: {', '.join(LEVELS)})")
@@ -1514,34 +1777,11 @@ def ensure(db: Database, manuscript: dict, llm: LLMClient,
     unknown = sorted(set(files or ()) - set(texts))
     if unknown:
         raise LookupError(f"not a unit of the manuscript: {', '.join(unknown)}")
-    verse = verse_files_of(manuscript)
-    report = {"level": level, "files": [], "calls": 0, "records": 0,
-              "headings": 0, "resurrected": 0, "missing": [],
-              "dropped": {}, "line": None}
-    for file, text in texts.items():
-        if files is not None and file not in files:
-            continue
-        if flight.get(file, NOT_IN_FLIGHT) is None:
-            continue        # a writeup created it: no text to record yet
-        before = (report["calls"], report["headings"], report["resurrected"])
-        _build_file(db, manuscript, file, text, llm, report,
-                    verse_file=file in verse)
-        if (report["calls"], report["headings"], report["resurrected"]) != before:
-            report["files"].append(file)
-    if report["files"]:
-        dropped = sum(report["dropped"].values())
-        line = (f"summaries: paragraph level rebuilt — {report['records']} "
-                f"record(s) in {report['calls']} call(s) over "
-                f"{len(report['files'])} file(s)")
-        if report["headings"]:
-            line += f", {report['headings']} heading(s)"
-        if report["resurrected"]:
-            line += f", {report['resurrected']} restored"
-        if dropped:
-            line += f"; {dropped} item(s) dropped by the span/vocabulary check"
-        if report["missing"]:
-            line += f"; {len(report['missing'])} paragraph(s) got no record"
-        stats = llm.stats_line()
-        report["line"] = line + (f" — {stats}" if stats else "")
-        echo(report["line"])
+    lower = None
+    for lv in LEVELS[:LEVELS.index(level) + 1]:
+        report = _ensure_level(db, manuscript, _client_for(llm, lv), lv,
+                               texts, flight, files, echo)
+        if lower is not None:
+            report[lower["level"]] = lower
+        lower = report
     return report

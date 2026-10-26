@@ -7521,6 +7521,9 @@ def cmd_doc(args):
                         f"({', '.join(sorted(set(refs)))}) — stripped. "
                         "Images belong in _illustrations/ via "
                         "[Illustration: …] tags."))
+                for relpath in result.get("pruned", []):
+                    print(f"Dropped the Doc link for {relpath}: its tab is "
+                          "gone and the file is retired or deleted.")
                 for relpath in result["missing"]:
                     print(ui.yellow(f"warning: no tab found for {relpath} — "
                                     "was its tab renamed? Tab titles must "
@@ -7612,6 +7615,9 @@ def cmd_doc(args):
                                 after=getattr(args, "doc_after", None))
             print(f"Created {path.relative_to(manuscript['path'])} "
                   + ui.dim("(scaffold only — the writing is yours)"))
+            hint = docs.about_the_book_hint(args.name)
+            if hint:
+                print(ui.yellow(hint))
         elif args.action == "retire":
             path = docs.retire_doc(manuscript, args.name)
             from .gdocs import drop_link

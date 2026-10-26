@@ -90,6 +90,63 @@ def strip_voice_lines(text: str) -> str:
                      if not VOICE_LINE.match(line))
 
 
+# The full-line signature tag: `[Signature: _assets/signature.png]`.
+# Plain text on every road like [Voice:] and [Illustration:] — it stays
+# in the file and on the Doc tabs — and expanded for the reader outputs
+# alone (resolve_signatures): the image, the author's name, the export
+# date. The audio-clean build drops it; nothing is read aloud.
+SIGNATURE_LINE = re.compile(
+    r"^\[Signature:\s*(?P<uri>[^\]]*)\]\s*$", re.IGNORECASE)
+SIGNATURE_WIDTH = "40%"
+
+
+def signature_path(uri: str, root: Path) -> Path:
+    """The image a signature uri names: absolute, `~/`, or relative to
+    the manuscript root. Empty or missing is a fault — a signature that
+    silently vanished would read as an unsigned copy."""
+    uri = uri.strip()
+    if not uri:
+        raise RuntimeError("[Signature:] names no image — give it a path "
+                           "(absolute, ~/, or relative to the manuscript)")
+    path = Path(uri).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    if not path.is_file():
+        raise RuntimeError(f"[Signature: {uri}] — no such image at {path}")
+    return path
+
+
+def resolve_signatures(text: str, root: Path, author: str,
+                       outputs: frozenset[str] | set[str],
+                       when: date | None = None) -> str:
+    """Expand every `[Signature: uri]` line for one build: the image at
+    about two inches (SIGNATURE_WIDTH of the text width, left-aligned,
+    empty alt so pandoc makes no figure and no caption), then the
+    author's name, then the export date (`25 October 2026`). An audio
+    build drops the line. The image is checked here, never later: a
+    missing file raises naming the uri."""
+    out: list[str] = []
+    stamp = (when or date.today()).strftime("%-d %B %Y")
+    for line in text.split("\n"):
+        m = SIGNATURE_LINE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        if "audio" in outputs:
+            continue
+        path = signature_path(m.group("uri"), root)
+        if not author:
+            raise RuntimeError(
+                "[Signature:] needs the author's name — set it with "
+                "'authorlm manuscript set --author'")
+        uri = m.group("uri").strip()
+        src = uri if (not Path(uri).is_absolute()
+                      and not uri.startswith("~")) else str(path)
+        out.extend(["", f"![]({src}){{width={SIGNATURE_WIDTH}}}", "",
+                    author, "", stamp, ""])
+    return "\n".join(out)
+
+
 def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
     """The output names a build answers to: its format, plus `audio`
     when the build IS the audio-clean markdown (`fmt=md` with
@@ -469,6 +526,8 @@ def publish_markdown(manuscript: dict, variant: str,
     matter = matter_map(files)
     level = continuation_level(manuscript)
     outputs = publish_outputs(fmt, variant)
+    author = (manuscript.get("author") or "").strip() or (
+        manuscript.get("copyright_owner") or "").strip()
     warnings: list[str] = []
     parts: list[str] = []
     tokens = footnote_prefixes(order)
@@ -486,6 +545,7 @@ def publish_markdown(manuscript: dict, variant: str,
         # §6): the tag lines go, every word of prose stays.
         text, _media_tags = strip_for_book(text, name)
         text = strip_voice_lines(text)
+        text = resolve_signatures(text, root, author, outputs)
         # An unresolved [Footnote: …] or [Explain: …] tag never reaches
         # a reader: a shorthand instruction inside a sentence reads as
         # damage, and a reviewer cannot act on it (footnote-directive
