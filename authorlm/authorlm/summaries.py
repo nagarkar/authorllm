@@ -752,6 +752,15 @@ _SPEAKER_LINE = re.compile(
 # paragraph).
 VERSE_LINE_MAX_WORDS = 12
 _HEADING_LINE = re.compile(r"^#{1,6}[ \t]")
+# A paragraph that is nothing but one bracketed tag line ("[Omit: all]",
+# an audiobook directive): no prose to index, so it gets an empty record
+# with no model call, as a heading does (ruling 8). The flash tier returns
+# no record for such a line however often it is asked (live, 2026-10-25).
+_TAG_ONLY = re.compile(r"^\[[^\[\]\n]+\]$")
+
+
+def tag_only(text: str) -> bool:
+    return bool(_TAG_ONLY.match(text.strip()))
 
 
 def _normalize_paragraph(text: str) -> str:
@@ -1411,9 +1420,9 @@ def _build_file(db: Database, manuscript: dict, file: str, text: str,
                           {"status": "current", "ordinal": p["ordinal"],
                            "section_ordinal": p["section_ordinal"]})
                 report["resurrected"] += 1
-            elif p["kind"] == "heading":
+            elif p["kind"] == "heading" or tag_only(p["text"]):
                 store_paragraph_record(db, manuscript, file, p, None, "")
-                report["headings"] += 1
+                report["headings" if p["kind"] == "heading" else "tags"] += 1
             else:
                 body.append(p)
                 continue
@@ -1665,6 +1674,8 @@ def _paragraph_line(report: dict) -> str:
             f"{len(report['files'])} file(s)")
     if report["headings"]:
         line += f", {report['headings']} heading(s)"
+    if report["tags"]:
+        line += f", {report['tags']} tag-only line(s)"
     if report["resurrected"]:
         line += f", {report['resurrected']} restored"
     if dropped:
@@ -1799,7 +1810,7 @@ def _essay_line(report: dict) -> str:
 
 _LEVEL_BUILDERS = {
     "paragraph": (_build_file, _paragraph_line,
-                  lambda: {"calls": 0, "records": 0, "headings": 0,
+                  lambda: {"calls": 0, "records": 0, "headings": 0, "tags": 0,
                            "resurrected": 0, "missing": [], "dropped": {}}),
     "section": (_build_sections, _section_line,
                 lambda: {"calls": 0, "sections": 0, "headings_only": 0,

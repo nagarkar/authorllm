@@ -2025,9 +2025,10 @@ def cmd_summarize(args):
         return
     # rebuild [file] [--level …] [--all]: the deliberate pass of
     # summary-hierarchy design §4.5 / §8. Each level that built anything
-    # prints its own line with its cost (ruling 9). A named file is
-    # rebuilt whatever its state (the confirmation-gate shape), its lower
-    # levels lazily first.
+    # prints its own line with its cost (ruling 9). A named file's ESSAY
+    # row is rebuilt whatever its state (the confirmation-gate shape), its
+    # lower levels lazily first; with --level the named file is simply
+    # the scope and only --all forces.
     level = args.level or "essay"
     if level not in sums.LEVELS:
         sys.exit(f"error: --level must be one of {', '.join(sums.LEVELS)}.")
@@ -2042,7 +2043,7 @@ def cmd_summarize(args):
         report = sums.rebuild(
             db, manuscript, llms, level=level,
             files=[args.file] if args.file else None,
-            force=args.all or bool(args.file),
+            force=args.all or (bool(args.file) and level == "essay"),
             echo=lambda line: print(ui.dim(line)),
             progress=lambda f: print(ui.dim(f"  {level} level: {f}…")))
     except LookupError as err:

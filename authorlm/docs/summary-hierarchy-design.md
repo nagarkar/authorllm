@@ -417,6 +417,47 @@ $0.10 / $0.40.
 | essay summaries | 36 | ~45 K section summaries + ~560 K cumulative priors (as today) ≈ 600 K | ~41 K | **~$0.17** | n/a (keep the ratified model) |
 | whole hierarchy | 566 | ~1.2 M | ~176 K | **~$0.45** | ~$0.28 with the cheap tier on the lower two |
 
+**Measured (step 4, the first full live rebuild, 2026-10-25, `summarize
+rebuild --all` from the worktree, DB version 657, 37 toc units, 1,935
+paragraphs, 266 sections; sequential, 67 minutes wall clock):**
+
+| level | calls | input tokens | output tokens | cost | model | estimate above |
+|---|---|---|---|---|---|---|
+| paragraph records | 273 | 418 K | 409 K | **$0.72** | `gemini/gemini-3.1-flash-lite` | ~$0.06 |
+| section summaries | 266 | 1,001 K | 244 K | **$0.49** | `openai/gpt-5.6-luna` | ~$0.12 |
+| essay summaries | 33 | 474 K | 28 K | **$0.13** | `openai/gpt-5.6-luna` | ~$0.17 |
+| whole hierarchy | 572 | 1.89 M | 681 K | **$1.34** | | ~$0.45 |
+
+Where the estimate was wrong, and why: the paragraph records' OUTPUT is
+4.5× the estimate (409 K against ~90 K) — a record with verbatim spans for
+every mention, definition, relation and reference is much richer than a
+gist, and flash-lite's output price ($0.40 / M) makes that the biggest
+line; the section calls' INPUT is 3× the estimate (1.0 M against 345 K),
+the text plus skeleton plus concept slice plus prompt per call being
+~3.8 K tokens, not ~1.3 K; the essay level came in under the estimate
+(the section summaries are a smaller block than the old numbered text).
+Two more passes were needed because flash-lite returned unparseable JSON
+on 4 of 273 calls (43 paragraphs without a record, 7 sections and 4 essays
+skipped): a plain `summarize rebuild` retried exactly the gaps (10
+paragraph calls, 6 section calls, $0.04) but, being the deliberate pass,
+also cascaded every essay after the first refilled one (33 essay calls,
+$0.13); a third pass after the tag-only rule (below) did the same ($0.13).
+The lazy `ensure` path would have cost the three essay calls alone. Two
+findings from the pass are design notes for the lower levels: a paragraph
+that is only an audiobook tag line (`[Omit: all]`) never gets a record
+from the flash tier and now gets an empty one with no call, like a heading
+(ruling 8 extended, code in `_build_file`); and one LaTeX-heavy section of
+mixing.md (§20, display math with backslashes) breaks flash-lite's JSON on
+every attempt, so that essay stays `stale` until the paragraph pass
+escapes or retries differently (open; ruling 5's Luna fallback is the
+obvious candidate). Section summaries overshoot their length target:
+median summary/text ratio 0.27 against the n/10–n/7.5 target, every one
+of the 272 body sections above its range — the labels and one-line-per-
+move MOVES are a fixed cost the formula does not see; tightening the
+prompt or re-flooring is step 5's call. The essay blocks total 15,541
+words over 37 rows (12,643 before, 35 rows): the four derived lists add
+words the old prose lists did not.
+
 For comparison today's full rebuild is ~$0.16 (§1.4). An incremental rebuild
 after editing one section late in the book is three calls, ~25 K input and
 ~2 K output tokens, **about one cent**. The paragraph level is, as the owner
@@ -900,7 +941,10 @@ cheap and keeps the before-summaries fresh by construction).
 3. Section pass: `prompts/section-summary.md`, skeleton equality check.
 4. Essay pass: the new FLOW-first prompt, INTRODUCES / ASSUMES derivation,
    `sections_hash`; `rebuild` with levels; a full live rebuild of SMSTTD
-   recorded with its measured cost beside the estimates of §5.
+   recorded with its measured cost beside the estimates of §5. DONE
+   2026-10-25 (PR after #283): `ensure(level="essay")`, `summarize rebuild
+   [file] --level --all`, `show --section/--paragraph/--json`, `outline`;
+   the live rebuild's numbers are in §5.
 5. Consumers: manifest first (pure gain), then the edit pass OUTLINE block,
    then `outline = true` for filters, then the drafting context's FLOW line.
 6. Verbs: CLI actions, MCP read verbs, collect's auto trigger.
