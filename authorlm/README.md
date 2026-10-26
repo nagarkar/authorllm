@@ -6,14 +6,14 @@ RFC (v2.1) on the Common Core Decision Learning Engine architecture.
 
 AuthorLM does not write for you. It observes your revisions, tracks your
 ideas in a Concept Graph, proposes suggestions that explain themselves, and
-learns editorial policies from how you review those suggestions. When it has
+learns editorial beliefs from how you review those suggestions. When it has
 no evidence, it abstains.
 
 ## Requirements
 
 - **Python 3.11+**. The core is pure standard library (SQLite, difflib)
   and works fully without an LLM or network.
-- **LLM features** (concept extraction, policy distillation, bridge
+- **LLM features** (concept extraction, belief distillation, bridge
   drafting): `pip install litellm` plus an API key for your chosen model
   (see Configuration).
 - **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
@@ -46,6 +46,7 @@ pip install -e .              # gives you the `authorlm` command
 pip install -e ".[llm,mcp]"   # …with the LLM and MCP extras in one step
 pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
 pip install -e ".[all]"       # everything above
+pip install -e ".[dev]"       # pre-commit + metalm-gendocs (docs/generated/)
 ```
 
 Installing builds the web pages (the Triage App, the audiobook page, and the
@@ -183,7 +184,7 @@ to any command, before or after the subcommand:
 `--workspace`.
 
 Next time you run `session start`, the briefing reports what AuthorLM
-learned: policies strengthened or weakened, newly realized concepts,
+learned: beliefs strengthened or weakened, newly realized concepts,
 inferred relationships awaiting your confirmation, contradictions, and
 outstanding questions.
 
@@ -195,19 +196,21 @@ outstanding questions.
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
 | `setup [--workspace DIR] [--yes]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
-| `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
-| `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; never mines the Concept Graph (extraction is lazy — run `extract --native` when you want a fresh one). `--extraction off` disables extraction for the manuscript until `manuscript set --extraction on` |
+| `manuscript show/set` | Inspect or update publication identity and print settings (`--author`, `--copyright-owner`, ISBN-13 fields, `--trim-size`, `--bleed`, `--extraction on\|off`); the CLI and MCP tools share this record |
+| `export show/set/check/md/docx/epub/pdf` | Publishing exports into `_exports/` (pandoc for docx/epub/pdf); PDF defaults to a confidential review copy (`.review.pdf`); `--print-ready` → `.print.pdf`; `--profile book` → print interior at the manuscript trim size (needs `manuscript set --trim-size`); `--chapters` builds a part; `--file PATH` builds exactly one manuscript or draft file by stem — see [Publishing exports](#publishing-exports-_exports) |
 | `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
 | `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
-| `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
-| `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` |
+| `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once (explicit `text`/`headings`/`credits` voices); compile `audiobook.json` and `chapters/*.json` for audiostation (only what changed is rewritten; section ids hash text, voice and pronunciations); readiness report — see [Audiobook voices](#audiobook-voices-_audio) |
+| `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` (Voice ID + TTS params) |
 | `audio dictionary push` | `pronunciations.md` → the ElevenLabs dictionary named in `audiobook.toml`, append-only with replacement, after showing the plan |
 | `audio say <term> [--say S,S] [--cast K] [--dictionary] [--settle]` | The fast pronunciation loop from the terminal: the word's own sentence, in the voice that says it, with each respelling substituted inline as the alias rule would (no push); plays the clips; `--settle` writes the row |
+| `audio preview/generate/retake/stitch/status` | Free macOS-`say` previews (`--force` re-renders); paid ElevenLabs takes; stitch + loudness; the board (`--find WORDS`). Design: `docs/audiobook-review-design.md` |
+| `audio serve [--port N] [--no-open]` | Local audiobook review page (`web/audiobook/` → `audiobook_dist/`); phone via `tailscale serve`. See [Audiobook review page](#audiobook-review-page) |
 | `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box, Regenerate and listen per voice (the respelling, the voice's default with no rule, or via the pushed dictionary), Save to `pronunciations.md`, Remove a row (and its one remote rule) when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` |
 | `audiostation [--dry-run]` | Open the audiostation studio on the manuscript's `_audio/` folder: a built `.app` bundle if there is one, else the dev server (`AUDIOSTATION_APP` overrides) |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
-| `extract [file…] [--full] [--edges-only]` | LLM-extract concepts and relationships — incremental by default (only files changed since last extraction); `--edges-only` re-mines relationships among existing concepts without touching the concept inventory |
+| `extract [file…] [--section H] [--full] [--native]` | Redesigned concept/edge extraction (`docs/extraction-redesign.md`): without `--native` prints per-section payloads only; `--native` makes the calls (needs `[extraction] enabled`). Default scope = sections changed since the watermark; name files or pass `--full` to widen. Lazy — `init` / `collect` / `write complete` never mine. Also: `screened <file>`, `calibrate [--replay]`, `backup`, `migrate [--dry-run\|--undo ID]`, `runs` |
 | `session start` / `session end` | Authoring session; opens with the learning briefing, closes with learning velocity |
 | `briefing` | Re-print the learning briefing any time |
 | `intent declare/complete/list` | Declared intents — authoritative observations that drive guidance |
@@ -220,7 +223,7 @@ outstanding questions.
 | `concept retire <name>… / --all-kind K` | Retire one or more concepts; `--all-kind` sweeps unconfirmed extracted ones |
 | `concept confirm <edge> <relation>` | Promote an inferred relationship to declared |
 | `concept unconfirm <name-or-edge>` | Undo a confirmation — back to hypothesis, re-enters triage |
-| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired policies gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
+| `proposal list/review/accept/dismiss` | Conflicts between new material and settled knowledge: reframed definitions, retired concepts recurring, rejected edges argued again, retired beliefs gathering support. Diff-gated — only text you actually changed can generate one; dismissed proposals never return verbatim |
 | `concept reject-edge <edge>` | Reject an inferred relationship (kept for history) |
 | `concept retire <name>` | Remove a concept (and its edges) from view and reasoning; kept for history, revived by `concept add` |
 | `concept list --all` | Include retired/rejected items in the listing |
@@ -229,16 +232,136 @@ outstanding questions.
 | `plan` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents |
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
 | `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
+| `doc diff/merge <file>`, `doc resolve-comments <id>…` | Three-way Doc road when local and the tab both moved: `diff` prints base→Doc and base→local (writes nothing); `merge` runs `git merge-file` into `_drafts/<stem>.merged.md` (never touches the manuscript file or pushes); settle conflict markers, copy over the file, then `doc push`. `resolve-comments` closes addressed Drive comments with a receipt reply (never deletes) |
 | `doc create-manuscript` | Combine every chapter (reading order per `toc.toml`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `revise stage/resolve <file> --origin NAME` | Outside revisions on the Doc road: `stage` reads JSON on stdin (`[{old, new, note, anchor_paragraph}]`) into pending tab forms; `resolve` lands what the author left or reworded (emptied form = declined). `old ""` inserts after `anchor_paragraph` |
+| `footnote` / `explain` `list/apply/resolve` | Inline `[Footnote:…]` / `[Explain:…]` directives (`docs/footnote-directive-design.md`, `docs/explain-directive-design.md`): `apply` lands chat-drafted text (`--tag`/`--text`, or `--from-json` of `{tag, text, footnote?}`); `resolve` reads Doc-tab forms when checked out |
+| `media list [file] [--key K] [--json]` | Read-only inventory of Clip / Collage / Montage / Illustration tags (`docs/video-clips-design.md`) |
+| `clip spec/set/resolve/ensure/job/pick/attach` | Land a clip's generation or YouTube spec, write confirmed fields into the tag, Veo generate/poll/pick, or attach an external mp4 — see [Podcast media](#podcast-media-clips) |
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
-| `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
+| `lens add/list/run/register/review/push/resolve` | Author-ratified lenses (`_lenses/*.md` prompts): `run` prints a payload for a chat/subagent by default (`--native` bills the configured model); `register` is the door for external findings (JSON on stdin); `push`/`resolve` stage and land Doc-tab forms; `review <n>` records verdicts as evidence |
+| `morph run/push/resolve/review` | Paragraph-defect pass (claim-before-evidence, discontinuity, specificity, concept-invalidation; `docs/morph-design.md`): same Doc-tab push/resolve pattern as lenses |
+| `filter add/list/run/record/apply/push/resolve/…` | Unit-by-unit edit pass (`_filters/*.md`; `docs/filter-pass-design.md`): `run` prints a payload (no model call; `--native` needs a `[filtering]` config that ships absent); `resolve` is the local road; `push` then `resolve` is the Doc road |
+| `critique import/triage/run/write/resolve/…` | External critique → proposed intents/style laws → essay edit pass (`docs/critique-pass-design.md`) |
+| `summarize status/show/rebuild/outline` | Summary hierarchy (`docs/summary-hierarchy-design.md`): paragraph records → section summaries → essay summaries composed from sections. `rebuild [file] [--level paragraph\|section\|essay] [--all]` is the deliberate pass (default level `essay`, only dirty rows unless `--all`); consumers call `ensure` lazily on use. `show <file> [--section N\|--paragraph N] [--json]`; `outline <file>` is the one-screen FLOW + POINT map |
 | `interlocutor add/list/show/draft/run/import` | A tradition reads the whole book (`_interlocutors/*.md`, TOML front matter + prose; design `docs/interlocutor-design.md`): `run` scans for the ratified terms and writes a payload for a clean-context subagent (no model call); `import` verifies the report against the manuscript, lands it in `_critiques/`, and imports its improvements as proposed intents with critic provenance |
 | `guide` | Generate explained suggestions, or abstain |
-| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate policies |
-| `policy list` / `policy answer <id> "..."` | Inspect learned policies; answer their outstanding questions |
+| `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; an `--explain` becomes high-weight evidence and may seed a candidate *belief* only when the belief distiller runs (needs an LLM) |
+| `belief list/show/answer/retire/demote/merge/convert` | Curate machine-inferred editorial beliefs (`editorial_beliefs` — never authored directly). `convert` is the only door into ratified `style_laws` (needs `--aspect` and `--guide` or `--file`). Ontology: `docs/domain-vocabulary.md` |
+| `style guides/guide/attach/add/show/retire/move` | Author-declared style law: compose guides, attach a file to a guide, add or retire elements; `style show <file>` prints the effective guide |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
+
+## Publishing exports (`_exports`)
+
+Local publishing writes under `<manuscript>/_exports/`. Names are
+deliberate so modes do not silently overwrite each other
+(`export.export_published` / `export_manuscript` / `selection_slug`):
+
+| Artifact | Typical path |
+| :--- | :--- |
+| Whole-book markdown (publish or `doc create-manuscript`) | `_exports/<Title>.md` |
+| Review PDF (default `export pdf`) | `_exports/<Title>.review.pdf` |
+| Print-ready PDF (`--print-ready`) | `_exports/<Title>.print.pdf` |
+| Book-profile PDF (`--profile book`) | `_exports/<Title> - book.print.pdf` (needs trim size) |
+| Chapter selection (`--chapters a,b`) | `_exports/<Title> - <slug>.…` (`slug` = stems joined, or a truncated head + digest when long) |
+
+Constraints:
+
+- `doc create-manuscript` and `export md` both target `_exports/<Title>.md`
+  for the whole book — re-running either replaces that file.
+- Review and print PDFs never share a path; `--profile book` also suffixes
+  ` - book` so it cannot clobber the review copy.
+- `--chapters book.md` is a *part* build (that chapter and TOC
+  descendants), not the book profile. The book profile is `--profile book`.
+- `--file PATH` and `--chapters` are exclusive. `--file` builds exactly
+  one path (a TOC chapter, an out-of-TOC manuscript file, or a draft under
+  the root such as `_drafts/excerpt.md`); the artifact is named by the
+  file's stem, not the whole-book title.
+- `[Omit: all] … [/Omit]` drops a region from every publishing output
+  (`pdf`/`docx`/`epub`/`md`/`doc`/`audio`); Doc *tabs* still carry the
+  region. Author-facing rules: `docs/math-and-physics-guidelines.md` §5.
+
+## Audiobook voices (`_audio`)
+
+AuthorLM produces the audio manifest; audiostation generates speech.
+Voice defaults live in manuscript config — not in `toc.toml`.
+
+```bash
+authorlm audio init -m <manuscript>     # seeds missing audiobook.toml / cast.md
+authorlm audio cast set narrator --voice-id <id> …
+authorlm audio export -m <manuscript>
+authorlm audio check -m <manuscript>
+```
+
+| Surface | Role |
+| :--- | :--- |
+| `_audio/audiobook.toml` | Book roles and text rules. `audio init` copies packaged `authorlm/audiobook-defaults.toml` once (`text`/`headings`/`credits`.voice = `"narrator"`). Optional per-file text override: `[[chapter]]` with `file` + `voice`. |
+| `_audio/cast.md` | Cast table: key → Voice ID, model, stability, similarity, speed. Written by `audio cast set` (or by hand). |
+| `toc.toml` | Reading order and hierarchy only. A legacy `voice =` on a chapter **refuses** export — move it to `audiobook.toml` `[[chapter]]`. |
+| Prose `[Voice: key]` | Rare per-paragraph exceptions; the tag names a cast key, never a Voice ID. |
+
+Constraints (verified in `audio.build` / `load_config`):
+
+- `text.voice`, `headings.voice`, and `credits.voice` are required; missing
+  roles or unknown cast keys fail by name.
+- `[[chapter]]` overrides do not inherit to children; a file without one
+  uses `[text].voice`.
+- Unused chapter declarations, duplicate files, and roles without a Voice
+  ID are refused.
+- Design reference: `docs/audiobook-pipeline-design.md` §3 and §5.
+
+## Audiobook review page
+
+`authorlm audio serve -m <manuscript> [--port 8792]` serves the compiled
+page from `authorlm/audiobook_dist/` on loopback. The phone reaches it
+with `tailscale serve --bg <port>` — AuthorLM never leaves 127.0.0.1.
+Design: `docs/audiobook-review-design.md`.
+
+```bash
+authorlm audio export -m <manuscript>   # writes audiobook.json (dropdown gate)
+authorlm audio serve -m <manuscript>
+# optional: pre-render or force-refresh previews from the CLI
+authorlm audio preview becker           # missing ids only
+authorlm audio preview becker --force   # re-render even when a preview exists
+```
+
+| Behaviour | Detail |
+| :--- | :--- |
+| Manuscript dropdown | Lists every registered manuscript that already has an `audio export` (`audiobook.json`). `-m` is only the one the page opens on; each API call and audio URL names the active manuscript (`params.manuscript`, `?m=`). |
+| Lazy previews | Refresh exports and sweeps stale preview files — it does **not** batch-render. A missing preview is rendered on first `GET /preview/<stem>/<id>.mp3` (`generation.ensure_preview`). |
+| Forced preview | The page (or `audio preview --force` / API `preview` with `force: true`) re-renders even when a file already exists. |
+| Jobs | One worker queue per manuscript session: `refresh`, `preview`, `generate`, `retake`, `stitch`. The page never reconciles Google Docs — pull in chat, then let the stale banner see the files. |
+
+## Podcast media (clips)
+
+AuthorLM is an **asset service** for podcast video tags; podlm owns the
+timeline. Full rulings: `docs/video-clips-design.md`.
+
+```bash
+authorlm media list [file] [--key K] [--json]
+authorlm clip set <key> --youtube URL --start 2:43 --end 2:50 [--audio mute|duck|full]
+authorlm clip spec <key> --file spec.md          # or --text '…'; Doc-tab forms when checked out
+authorlm clip resolve <file>                     # land staged forms from the tab
+authorlm clip ensure <key> --dry-run             # model, length, cost, prompt
+authorlm clip ensure <key> --generate            # start a Veo take (billed)
+authorlm clip job <job-id>                       # poll / download
+authorlm clip pick <key> --take 02
+authorlm clip attach <key> --file own.mp4
+```
+
+Constraints (verified in `media.py` / `media_gen.py` / CLI):
+
+- A clip key is minted at `collect` from what the clip *shows*, not its
+  first label; `media list` is how you look keys up.
+- Span `[Clip:…]…[/Clip]`, cutaway `[Collage:…]`, and under-voice
+  `[Montage:…]` are separate shapes; Collage/Montage rules differ (see
+  the design doc).
+- `audio:` on a clip is `mute`, `duck` (under narration), or `full`
+  (Collage cutaways). Generation aims at narration length; podlm trims.
+- YouTube briefs (`youtube`/`start`/`end`) are distinct from generation
+  specs; both land through `clip set` / `clip spec`.
 
 ## Triage App analyzer profiles
 
@@ -297,18 +420,76 @@ the verdict, closes the thread with a receipt, and mirrors the result
 locally. Pushes on thread-bearing tabs are surgical paragraph diffs
 (read-back proven), so anchors survive. Every terminal verdict lands as
 evidence; explained verdicts (`doc decide … --reason`) can seed scoped
-candidate policies through a decline-by-default distiller.
+candidate beliefs through a decline-by-default distiller.
 Design: docs/margin-threads-design.md.
+
+## Summary hierarchy
+
+Three derived levels live in the database (never in the manuscript or Doc):
+paragraph records (gist + definitions/relations/references for agents),
+section summaries, and essay summaries composed from section summaries
+(`docs/summary-hierarchy-design.md`). Collect only invalidates hashes;
+rebuild happens on use via `summaries.ensure` (cost printed, no gate), or
+deliberately with `summarize rebuild`. Passes declare what they need as
+`context.Input` members; `context.supply` is the one assembler
+(`context.py`, design ruling 10). First consumers on `supply`: critique
+edit pass and manifest. Deep design owns the label contract and measured
+rebuild costs.
+
+## Concept extraction (lazy)
+
+Nothing mines the Concept Graph as a side effect. Operator roads:
+
+```bash
+authorlm extract hierarchy.md          # print payloads; no model call
+authorlm extract --native              # changed sections since watermark
+authorlm extract --full --native       # whole book, reading order
+authorlm extract screened hierarchy.md # what the per-essay ceiling held back
+authorlm extract calibrate --replay    # gates + adjudicator vs triage verdicts
+authorlm extract backup                # WAL-safe snapshot before migrate
+authorlm extract migrate --dry-run     # plan retirements of pre-redesign rows
+```
+
+Switches: `[extraction] enabled` (global kill) and
+`manuscript set --extraction on|off`. Unattended adjudicator default is
+`adjudicator_prompt = "default"` (opus-class); override with `--adjudicator`
+or set `ask`. Design: `docs/extraction-redesign.md`.
+
+## Outside callers (library API)
+
+A tool that is not one of AuthorLM's own passes (for example ytlm) keeps a
+corpus document through five Python entry points — no run row, no finding,
+no model call on this road. Full contract: `docs/outside-caller-design.md`.
+
+| Entry point | Role |
+| :--- | :--- |
+| `api.register_manuscript(..., extraction=False)` / `manuscript set --extraction off` | Machine-kept manuscript; concept extraction stays off |
+| `[Omit: all]` in a file | Drop a region from every publishing output |
+| `gdocs.read_manuscript` | Read every tab as it stands; write nothing |
+| `api.stage_revisions` | Stage `<<old>>{{new}}` forms for one caller `origin` |
+| `api.resolve_revisions` | Land the author's rulings; collect a version |
+
+Callers also own `api.caller_metadata` / `set_caller_metadata`,
+`outstanding_revisions`, and `withdraw_revisions` (no direct SQL). A tab
+takes one batch at a time; the next `stage_revisions` waits until
+`resolve_revisions` (or withdraw).
 
 ## How learning works
 
-- **Accepting / modifying** a suggestion strengthens the policies it relied
-  on; **rejecting** weakens them. Confidence is Laplace-smoothed support.
-- An **explained** rejection or modification seeds a *candidate policy* from
-  your explanation — you contribute evidence, never edit policy directly.
-- Candidate policies resurface as reminders (once per session); repeated
-  cross-session support (≥3, confidence ≥0.7) **validates** them; sustained
-  contradiction retires them. Promotion is deliberately conservative.
+- **Accepting / modifying** a suggestion strengthens the *beliefs* it
+  relied on; **rejecting** weakens them. Confidence is Laplace-smoothed
+  support. Beliefs live in `editorial_beliefs` and are machine-inferred —
+  you never author a row there directly (`docs/domain-vocabulary.md`).
+- An **explained** rejection or modification is high-weight evidence. It
+  seeds a candidate belief **only through the distiller** (LLM rewrite /
+  match / decline). With no LLM, or when the distiller declines, the
+  explanation stays review evidence and no belief is created — raw words
+  are never stored as a rule (author ruling 2026-10-05).
+- Candidate beliefs resurface as reminders (once per session); repeated
+  cross-session support (≥3, confidence ≥0.7) **validates** them;
+  sustained contradiction retires them. A validated belief may *act*
+  (screen proposals) but is still unratified; `belief convert` is the
+  only door into `style_laws` (author-declared, binding, no confidence).
 - Concepts you declare become **realized** when they appear in the text;
   repeated co-occurrence of concepts creates **inferred** edges that await
   your confirmation in the briefing.
@@ -339,7 +520,7 @@ structural, not prose: its ordered `[[chapter]]` tables define the
 authoritative reading order used by prerequisite checks, definition
 precedence (a concept's primary location is its first reading-order
 appearance; if that text is deleted, the location re-points and you're
-told), plan placement, and hierarchical extraction:
+told), plan placement, and extraction's section order:
 
 ```toml
 [[chapter]]
@@ -358,9 +539,10 @@ Files not listed fall to the end in alphabetical order and are flagged in
 the briefing. Without a parseable `toc.toml`, the whole reading order is
 alphabetical. A `toc.md` is not read as a TOC.
 Concepts whose text vanishes entirely become proposals: adopt retires
-them, dismiss keeps them as declared placeholders. Full extractions larger
-than `extraction_max_chars` run hierarchically — one bounded pass per file
-in reading order, each carrying the inventory of concepts found so far.
+them, dismiss keeps them as declared placeholders. Extraction walks
+heading-delimited sections (a file without headings is one section); a
+section longer than `extraction_max_chars` splits into parts at paragraph
+boundaries rather than truncating.
 
 **Session-start Docs reconciliation.** When a session or shell starts and
 linked Google Docs exist, AuthorLM three-way compares each file (agreed
@@ -376,12 +558,9 @@ or `session start` closes it retroactively at its last activity time and
 runs episode analysis — you never need to remember `session end`.
 
 Optional LLM settings: `"timeout_seconds"` (default 120) and
-`"extraction_max_chars"` (default 24000) — the cap on manuscript text sent
-per extraction call, balancing cost against coverage (concept selection
-also degrades on very long inputs). Incremental extraction usually keeps
-payloads far below the cap; a scope that exceeds it runs as several bounded
-passes instead of being truncated. Only `extract --edges-only` still sends
-one payload cut at the cap.
+`"extraction_max_chars"` (default 24000) — the cap on one section's text in
+an extraction payload (parts split at paragraph boundaries when a section
+is longer). Incremental runs usually stay well under the cap.
 
 Any LiteLLM model string works (`gpt-4o-mini`, `claude-sonnet-5`,
 `ollama/llama3`, …) with the matching key exported. Alternatively, point at
@@ -399,25 +578,20 @@ api_key_env = "AUTHORLM_LLM_KEY"
 
 What the LLM unlocks:
 
-- **Concept extraction** — at `init` (or via `extract`), concepts and
-  relationships are bootstrapped from the manuscript. Extraction targets
-  *load-bearing units of thought* (RFC §21.3) and types nodes by kind —
-  people and works cited in passing become `historical_reference`, not
-  concepts, and never drive prerequisite suggestions. Extracted nodes and
-  relationships are **hypotheses awaiting your confirmation**: they appear
-  in the briefing and in `concept list` as "unconfirmed" until you
-  `concept confirm <name>` (optionally retyping with `--kind`) or
-  `concept retire <name>` them — your declared knowledge always outranks
-  extraction. Use `concept triage` to sweep a large batch with one
-  keystroke per node. **Extraction learns from your triage**: every
-  decision is recorded as evidence, and the next extraction prompt carries
-  your rejections ("never extract these"), your retype precedents, your
-  confirmed exemplars, your rejected relationships, and your relation
-  corrections (original ⇒ corrected). Relations have strict definitions in
-  the prompt; a link is proposed only when the text asserts it, and
-  unknown relations are dropped rather than coerced. Retired concepts are
-  also hard-blocked — the model can propose them again, but they will
-  never re-enter the graph.
+- **Concept extraction** — lazy and on request only (`extract --native` or
+  the MCP `extract_concepts` tool). `init`, `collect`, and `write complete`
+  never mine the graph. Default scope is sections changed since the
+  watermark; pass files or `--full` to widen. Without `--native`,
+  `extract` prints the assembled per-section payloads (no model call).
+  Needs `[extraction] enabled` and the per-manuscript switch on
+  (`manuscript set --extraction on`). Pipeline: assemble → candidate
+  contract → deterministic gates → per-essay adjudicator → write
+  (`docs/extraction-redesign.md`). Extracted nodes and relationships are
+  **hypotheses awaiting your confirmation** — triage with `concept triage`
+  / `concept confirm` / `concept retire`; declared knowledge always
+  outranks extraction. Calibration (`extract calibrate --replay`) and
+  migration (`extract backup` / `migrate`) are the operator roads for
+  threshold tuning and retiring stale pre-redesign rows.
 - **Episodic precedents in guidance** — when suggesting a concept
   introduction, guidance retrieves how you handled the concept's
   already-realized *graph neighbors*: the analyzed decision sequences of
@@ -431,14 +605,15 @@ What the LLM unlocks:
   actually wrote — the declared intent and the observed transitions — and
   infers the editorial decisions they show ("opened with a lived example
   before the formal definition"). Generalizable patterns become candidate
-  policies (source `episode-analysis`) that strengthen across independent
-  episodes, so the system learns your editorial judgment from your
-  *writing*, not just from your reactions to its suggestions. Inferred
-  decisions are stored on the episode; everything is a hypothesis and
-  visible in the briefing — nothing validates without accumulation.
-- **Policy distillation** — your review explanations are distilled into
-  short normative policy statements (the verbatim explanation is preserved
+  beliefs (source `episode-analysis`, already distilled) that strengthen
+  across independent episodes, so the system learns your editorial judgment
+  from your *writing*, not just from your reactions to its suggestions.
+  Inferred decisions are stored on the episode; everything is a hypothesis
+  and visible in the briefing — nothing validates without accumulation.
+- **Belief distillation** — your review explanations are distilled into
+  short normative belief statements (the verbatim explanation is preserved
   as evidence); the LLM may also decline to generalize a one-off remark.
+  With the LLM disabled or unreachable, nothing is seeded.
 - **Bridge drafting** — the top bridge suggestion includes a drafted
   paragraph to consider.
 
@@ -453,10 +628,12 @@ and the test suites report totals the same way.
 ## Testing
 
 ```bash
-python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
-python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
-python3 tests/test_loop.py      # proposal learning loop, hermetic (scripted LLM)
-python3 tests/test_live_llm.py  # real LLM path, with record/replay
+cd authorlm
+for f in tests/test_*.py; do
+  [ "$f" = tests/test_live_llm.py ] || python3 "$f" || break
+done                                  # hermetic suite (skip live)
+python3 tests/test_live_llm.py        # real LLM path, with record/replay
+python3 tests/test_generated_docs.py  # docs/generated/ matches the code
 ```
 
 **API suite**: exercises `authorlm.api` (the logic layer beneath every
@@ -481,6 +658,14 @@ them**: a clean checkout then makes zero billed calls. A full run that
 passes deletes recordings nothing asked for. With no key anywhere, a
 section that needs a missing recording reports one SKIP (`ReplayMiss`),
 never a failure.
+
+**Generated docs (metalm):** `docs/generated/` is regenerated from package
+docstrings and tests — do not hand-edit it. Install the `dev` extra
+(`pip install -e ".[dev]"` in `authorlm/`), then from the **repo root**
+run `metalm-gendocs` and commit any change. The `metalm-gendocs`
+pre-commit hook and `.github/workflows/docs.yml` also regenerate it;
+`tests/test_generated_docs.py` fails when the tree is stale. Grandfathered
+gaps vs full metalm: `docs/design/exceptions.md`.
 
 ## Logging & traces
 
@@ -638,13 +823,12 @@ the tables reads like the history of the book (RFC §18.7). See
 
 ## Known MVP limitations
 
-- Without an LLM, seeded candidate policies use your explanation verbatim
-  as the policy statement (with an LLM they are distilled).
+- Without an LLM, explained reviews stay evidence only — no candidate
+  belief is seeded from the raw explanation (the distiller is required).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
-- `extract --edges-only` sends a single payload capped at
-  `extraction_max_chars` (default 24k characters) and truncates anything
-  beyond it; other extractions split oversized scopes into multiple
-  bounded passes rather than truncating.
+- A single paragraph longer than `extraction_max_chars` (default 24k) is
+  still one extraction unit — split happens only at paragraph boundaries
+  inside an oversized section.
 - Inferred intents, replay, and cross-manuscript long-term memory are
   schema-ready but deferred (RFC growth stages 7–8).

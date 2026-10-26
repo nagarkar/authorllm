@@ -1,12 +1,17 @@
 # Extraction redesign — concepts and edges, same schema
 
-Status: RATIFIED 2026-10-25 (the eight rulings in §0, recorded verbatim in intent). BUILT phases 1-5 of §9 (PR nagarkar/authorllm#271 and the phase-5 PR); phase 6 partly, phase 7 done — see the §9 notes. No code changed. Nothing in the
-live workspace was written; every number below came from read-only queries
-against `~/.authorlm/authorlm.db` (manuscript SMSTTD, `ms-b33871dc315c`,
-637 collected versions, latest 2026-10-25) and from reading the chapter
-files. The owner's verdict that started this, verbatim: "our concept and
-edge extraction doesn't work very well. It is deterministic, and the number
-of false signals are very high and it's causing major problems. We need to
+Status: RATIFIED 2026-10-25 (the eight rulings in §0, plus rulings 9–11
+recorded later the same day). BUILT §9 phases 1–7: redesigned pipeline,
+migration verbs, old `extract_concepts` path retired, extraction lazy and
+unattended (ruling 11 — `init` / `collect` / `write complete` never mine;
+only `authorlm extract --native` and MCP `extract_concepts`). Operator
+surface: `authorlm/README.md` (Concept extraction). §1 describes the
+pipeline *as found* before the redesign; §4 onward is the target that
+shipped. Historical counts came from read-only queries against
+`~/.authorlm/authorlm.db` (manuscript SMSTTD, `ms-b33871dc315c`). The
+owner's verdict that started this, verbatim: "our concept and edge
+extraction doesn't work very well. It is deterministic, and the number of
+false signals are very high and it's causing major problems. We need to
 retire and redo all of concept and edge extraction processing although the
 schema itself is fine."
 
@@ -83,15 +88,18 @@ retires them is deterministic string work. The noise comes from both halves.
 
 ### 1.1 Triggers
 
-- `authorlm extract` (`cli.py:180-193`): collects a revision, then
-  `extract_concepts`.
-- Closing a writeup (`api.py:3191`, `api.py:3278-3284`): a collect, then
-  `run_extraction` (`api.py:4370-4377`) when `extraction_allowed` is true.
-- MCP `extract_concepts` (`mcp_server.py:1807`).
-- Two switches: `[extraction] enabled` (`extraction.py:558-564`,
-  `config.toml:124`, **off since the owner's ruling of 2026-09-25**) and the
-  per-manuscript switch in `manuscripts.metadata` (`extraction.py:573-589`).
-  `[extraction] adjudicate = true` (`config.toml:139`).
+*(Historical — how extraction fired before ruling 11 / §9 phase 6. As
+built: only `authorlm extract --native` and MCP `extract_concepts`; see
+ruling 11 and §9 item 6.)*
+
+- `authorlm extract` (`cli.py`): collected a revision, then
+  `extract_concepts` (retired).
+- Closing a writeup: a collect, then `run_extraction` when
+  `extraction_allowed` was true (no longer called as a side effect).
+- MCP `extract_concepts` (`mcp_server.py`) — still the non-interactive road,
+  now on `api.run_extraction` → `extraction.run`.
+- Two switches: `[extraction] enabled` (global kill; on again after the
+  redo) and the per-manuscript switch in `manuscripts.metadata`.
 
 ### 1.2 What is read
 

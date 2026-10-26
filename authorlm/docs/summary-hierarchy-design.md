@@ -2,14 +2,17 @@
 
 Status: RATIFIED by the owner 2026-10-25, after a ten-question grill (the
 rulings are §0) and the owner's confirmation that §6.0's reading of the
-processes matches theirs. Build not started; §11 is the plan. Written from
-the owner's request of the same day ("a first class paragraph summary
-generation process … we still need section summaries … an essay summary
-which takes all of the section summaries … figure out what the correct
-inputs to filters and lenses ought to be … a deep dive is required"). No
-code changed by this document; every count was read from the live DB
-read-only. The extraction redesign (`docs/extraction-redesign.md`, PR
-nagarkar/authorllm#267) consumes §7 through `summaries.for_unit`.
+processes matches theirs. Build in progress per §11: steps 1–4 done
+(paragraph / section / essay passes, `summarize` verbs, measured full
+rebuild); step 5 first slice done 2026-10-26 (`context.Input` + `supply`;
+critique edit pass and manifest are the first consumers — filters, lenses,
+and the beat loop not yet moved onto `supply`). Operator surface:
+`authorlm/README.md` (Summary hierarchy). Written from the owner's request
+of the same day ("a first class paragraph summary generation process …
+we still need section summaries … an essay summary which takes all of the
+section summaries … figure out what the correct inputs to filters and
+lenses ought to be … a deep dive is required"). The extraction redesign
+(`docs/extraction-redesign.md`) consumes §7 through `summaries.for_unit`.
 
 Companion designs: critique-pass-design.md §4 (the current `essay_summaries`
 table), autoregressive-writing-design.md §12 (the 2026-08-27 finding that
