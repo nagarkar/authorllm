@@ -1272,6 +1272,43 @@ def check_generation() -> None:
         st = gen.status(manuscript, "kindness")["chapters"][0]
         check("status counts previews and names them per paragraph",
               st["previewed"] == 4 and st["sections"][0]["preview"] == f"preview/{ids[0]}.mp3")
+        # stitch --preview: the free stand-in narration of one chapter.
+        if gen.find_tool("ffmpeg"):
+            said_ids: list[str] = []
+
+            def mp3_stub(r: Path, sp: dict, v: str, rt: int) -> Path:
+                said_ids.append(sp["id"])
+                out = gen.preview_path(r, sp["id"])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                _mp3(out, 0.5)
+                return out
+            gen.preview_path(root, ids[0]).unlink()
+            for sid in ids[1:]:
+                _mp3(gen.preview_path(root, sid), 0.5)
+            ps = gen.stitch_preview(manuscript, "kindness", renderer=mp3_stub)
+            out = root / "preview" / "chapters" / "kindness.mp3"
+            sidecar = json.loads((root / "preview" / "chapters" /
+                                  "kindness.sections.json").read_text())
+            silences = sum(s["durationMs"] for s in chapter["sections"]
+                           if s.get("type") != "speech") / 1000.0
+            check("stitch --preview renders only the missing preview, then stitches "
+                  "every section in order",
+                  said_ids == [ids[0]] and ps["rendered"] == 1
+                  and Path(ps["path"]).resolve() == out.resolve() and out.stat().st_size > 0
+                  and ps["sections"] == len(ids), str(ps))
+            check("the stitched preview lasts the clips plus the silences",
+                  abs(ps["duration_s"] - (0.5 * len(ids) + silences)) < 0.15, str(ps))
+            spans = sidecar["sections"]
+            check("the sidecar names each speech section with its line, text and span",
+                  [s["id"] for s in spans] == ids
+                  and all(set(s) >= {"id", "line", "text", "start_s", "end_s"} for s in spans)
+                  and spans[0]["line"] == gen.speech_of(chapter)[0]["source"]["line"]
+                  and all(abs((s["end_s"] - s["start_s"]) - 0.5) < 0.05 for s in spans)
+                  and all(a["end_s"] <= b["start_s"] for a, b in zip(spans, spans[1:])),
+                  str(spans)[:400])
+            again_ps = gen.stitch_preview(manuscript, "kindness", renderer=mp3_stub)
+            check("a second stitch --preview renders nothing", again_ps["rendered"] == 0
+                  and said_ids == [ids[0]])
         if sys.platform == "darwin" and gen.find_tool("ffmpeg"):
             real = gen.render_preview(root, {"id": "c" * 32, "text": "A short test.",
                                              "speed": 1.0, "pronunciations": []},
