@@ -642,12 +642,13 @@ migrate --dry-run` (report, nothing written), then `extract migrate`
 (§5; `--undo migration-1` reverses it). Read a triage batch's span and
 reason before the name: they are why the row is there. The same pipeline
 runs behind `init`, `write complete`, an analysed `collect` and the MCP
-tool `extract_concepts`, through `api.run_extraction`, which never spends
-unasked: with `[extraction] adjudicator_prompt = "ask"` (the default)
-those return `{"stopped": …}` pointing at `extract --native`, unless the
-MCP call names `adjudicator=<model>` (or `init --adjudicator`). When the
-author wants the chat to run extraction, ask which adjudicator model
-and pass it; otherwise send them to `authorlm extract --native`.
+tool `extract_concepts`, through `api.run_extraction`. The author ruled
+extraction UNATTENDED on 2026-10-25 ("extract lazily, and unattended"):
+the shipped config has `adjudicator_prompt = "default"` with the
+opus-class adjudicator, so those run the changed sections as they come,
+no question asked. With `adjudicator_prompt = "ask"` they instead return
+`{"stopped": …}` pointing at `extract --native`, unless the MCP call
+names `adjudicator=<model>` (or `init --adjudicator`).
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.

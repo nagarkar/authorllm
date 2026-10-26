@@ -140,15 +140,20 @@ enabled = false
 # schema-shaped and spans are copied, not reasoned.
 model = "gemini/gemini-2.5-flash"
 thinking_budget = 0
-# The per-essay adjudicator, chosen AT RUN TIME (ruling §0.2, the author's
-# words: "have the system prompt me for what model I want to use. I don't
-# always have api credits"). Every --native run that adjudicates prints
-# these choices with the run's estimated cost for each (prices from
-# llmlm's cache, never a constant) and asks before the first call;
-# `--adjudicator <model>` answers it non-interactively. `adjudicator_model`
-# is the default answer; adjudicator_prompt = "default" skips the question.
+# The per-essay adjudicator. Ruling §0.2 (the author's words: "have the
+# system prompt me for what model I want to use. I don't always have api
+# credits") made the model a run-time question; on 2026-10-25 the author
+# ruled extraction UNATTENDED — "extract lazily, and unattended" — so
+# adjudicator_prompt = "default" takes `adjudicator_model` without asking,
+# and init, `write complete`, analysed collects and the MCP tool run the
+# changed sections as they come, with no question to answer. The choices
+# below are still what `extract --native --adjudicator <model>` and
+# adjudicator_prompt = "ask" offer, each with the run's estimated cost
+# (prices from llmlm's cache, never a constant). The opus-class default
+# bills Anthropic unasked: tests/test_api.py's shipped-config check was
+# re-armed for exactly this key, deliberately.
 adjudicator_model = "anthropic/claude-opus-5"
-adjudicator_prompt = "ask"
+adjudicator_prompt = "default"
 adjudicator_choices = ["anthropic/claude-opus-5", "gemini/gemini-2.5-pro",
                        "gemini/gemini-2.5-flash", "openai/gpt-5.6-sol"]
 # Gate 8 and the per-essay ceilings on what reaches triage (ranked by

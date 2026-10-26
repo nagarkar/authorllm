@@ -659,7 +659,7 @@ calls to date.
 | `[extraction] unit` | config.toml | `section` | `paragraph` and `essay` accepted for measurement runs |
 | `[extraction] model` | config.toml | `gemini/gemini-2.5-flash` | section calls |
 | `[extraction] adjudicator_model` | config.toml | an Opus-class Claude model | default only; ruling §0.2 |
-| `[extraction] adjudicator_prompt` | config.toml | `ask` | `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
+| `[extraction] adjudicator_prompt` | config.toml | `default` (shipped; `ask` in code) | ruled unattended 2026-10-25 ("extract lazily, and unattended"), the opus-class default taken without a question; `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
 | `[extraction] confidence_floor` | config.toml | `0.70` | gate 8; re-measured by `calibrate` |
 | `[extraction] max_concepts_per_essay` | config.toml | `12` | reaches triage; the rest screened |
 | `[extraction] max_links_per_essay` | config.toml | `15` | same |

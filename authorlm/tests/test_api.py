@@ -753,17 +753,25 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
 
     billed = {k: v for k, v in found.items()
               if v.strip().lower().startswith("anthropic/")}
-    # The one deliberate re-arming, ruled 2026-10-25
-    # (docs/extraction-redesign.md §0.2, the author's words: "let's do
-    # claude opus-class but have the system prompt me for what model I
-    # want to use"): the extraction adjudicator's DEFAULT may be an
-    # Anthropic model, because every run that would adjudicate prints the
-    # choices with their cost and asks before the first call. Allowed
-    # only while that question is on — `adjudicator_prompt = "default"`
-    # would make it a silent bill, and this check fails again.
+    # The one deliberate re-arming: the extraction adjudicator's default.
+    # Ruled 2026-10-25 first as a run-time question (docs/extraction-
+    # redesign.md §0.2: "let's do claude opus-class but have the system
+    # prompt me for what model I want to use"), then the same day as an
+    # UNATTENDED default (the author's words: "I want to extract lazily,
+    # and unattended", choosing anthropic/claude-opus-5 over the Gemini
+    # options with their costs in front of them). So this ONE key may name
+    # an Anthropic model with `adjudicator_prompt = "default"`; it is the
+    # only silent Anthropic bill the shipped config carries, and it is
+    # bounded by `[extraction] run_cost_ceiling_usd` per run and by the
+    # `enabled` switch above it.
     extraction = config.get("extraction") or {}
-    if extraction.get("adjudicator_prompt", "ask") == "ask":
+    if extraction.get("adjudicator_prompt", "ask") in ("ask", "default"):
         billed.pop("[extraction] adjudicator_model", None)
+    check("the unattended adjudicator is the deliberate exception, and it "
+          "is named in full here",
+          extraction.get("adjudicator_model") == "anthropic/claude-opus-5"
+          and extraction.get("adjudicator_prompt") == "default",
+          str(extraction))
     check("no model-bearing key in the shipped config.toml names an "
           "anthropic/ model — the author ruled the billed paths off, and "
           "re-arming one must be a deliberate edit to THIS check (the "
