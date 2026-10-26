@@ -30,6 +30,7 @@ footer .chip{border-color:var(--line);color:var(--ink)}
 footer .chip.on{background:var(--band);border-color:var(--band);color:#fff}
 .doc{margin-top:6px;font-size:13px;opacity:.9;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .doc .chip{min-height:30px;padding:4px 10px}
+.doc-actions{display:flex;gap:6px;flex:0 0 auto}
 .doc b.bad{color:var(--yellow)}
 
 /* jobs */

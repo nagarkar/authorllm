@@ -3385,6 +3385,9 @@ def scenario_doc_comments(root: Path) -> None:
     check("ambiguous quote stays unattributed", rel is None, f"{rel}")
     rel, heading = locate_quote(files, "no such text anywhere")
     check("missing quote stays unattributed", rel is None, f"{rel}")
+    rel, _h = locate_quote({"r.md": "# **R**\n\nIt comes from *religare*. To tie back.\n"},
+                           "It comes from religare. To tie back.")
+    check("a quote of rendered italics finds its markdown", rel == "r.md", f"{rel}")
 
     long_comment = "Please rework this — " + "with care, " * 30
     comments = [
@@ -3416,6 +3419,11 @@ def scenario_doc_comments(root: Path) -> None:
     ingest_comments(db, manuscript, comments, files)
     check("re-ingestion dedupes on comment id",
           db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
+    files["two.md"] = "# **Essay Two**\n\nGamma paragraph, now on its own.\n"
+    ingest_comments(db, manuscript, comments, files)
+    check("an unattributed comment is placed by a later pull, not duplicated",
+          db.one("SELECT file FROM doc_comments WHERE comment_id='c2'")["file"] == "one.md"
+          and db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
 
     # --- tab reconciliation: adopt / re-adopt / rename / ambiguity --------
     from authorlm.gdocs import MANIFEST_TITLE, classify_tabs

@@ -7438,7 +7438,8 @@ def cmd_doc(args):
                                             title=args.title, service=service,
                                             docs_service=docs_service,
                                             rebuild=(args.rebuild
-                                                     and target == args.name))
+                                                     and target == args.name),
+                                            guard=True)
                     normalized_any = normalized_any or result["locally_normalized"]
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")

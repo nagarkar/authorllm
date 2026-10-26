@@ -664,6 +664,14 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _flat_prose(text: str) -> str:
+    """`_flat` with the emphasis markers gone: a Doc comment quotes the
+    rendered text (*religare* comes back as religare), so the anchor is
+    matched on the words alone (2026-10-26, a comment on read-again.md
+    that went unattributed for one pair of asterisks)."""
+    return _flat(re.sub(r"[*_]", "", text))
+
+
 def clamp(text: str, limit: int = 60) -> str:
     flat = _flat(text)
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
@@ -677,19 +685,19 @@ def locate_quote(files: dict[str, str],
     guessed."""
     from .revisions import _nearest_heading, _paragraphs
 
-    needle = _flat(quoted)
+    needle = _flat_prose(quoted)
     if not needle:
         return None, None
-    hits = [rel for rel, text in files.items() if needle in _flat(text)]
+    hits = [rel for rel, text in files.items() if needle in _flat_prose(text)]
     if len(hits) != 1:
         return None, None
     relpath = hits[0]
     paragraphs = _paragraphs(files[relpath])
     # A quote can span paragraphs; fall back to its head for the index.
     index = next(
-        (i for i, p in enumerate(paragraphs) if needle in _flat(p)),
+        (i for i, p in enumerate(paragraphs) if needle in _flat_prose(p)),
         next((i for i, p in enumerate(paragraphs)
-              if needle[:40] in _flat(p)), len(paragraphs) - 1),
+              if needle[:40] in _flat_prose(p)), len(paragraphs) - 1),
     )
     return relpath, _nearest_heading(paragraphs, index)
 
@@ -705,11 +713,23 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
     seen = {r["comment_id"] for r in db.all(
         "SELECT comment_id FROM doc_comments WHERE manuscript_id = ?",
         (manuscript["id"],))}
+    unplaced = {r["comment_id"] for r in db.all(
+        "SELECT comment_id FROM doc_comments WHERE manuscript_id = ? "
+        "AND (file IS NULL OR file = '') AND state = 'ingested'",
+        (manuscript["id"],))}
     out = []
     for c in comments:
         quoted = (c.get("quotedFileContent") or {}).get("value") or ""
         relpath, heading = locate_quote(files, quoted)
         location = f"{relpath}#{heading}" if relpath and heading else relpath
+        if c["id"] in unplaced and relpath:
+            # Attributed on a later pull (the file changed, or the matcher
+            # improved): the row is placed, never duplicated.
+            row_id = db.one(
+                "SELECT id FROM doc_comments WHERE manuscript_id = ? "
+                "AND comment_id = ?", (manuscript["id"], c["id"]))["id"]
+            db.update("doc_comments", row_id,
+                      {"file": relpath, "location": location})
         if c["id"] not in seen:
             row = ko_fields("dc")
             row.update(
@@ -1588,10 +1608,19 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"('filter unmark {relpath}') first.")
 
 
+class DocChanged(LookupError):
+    """The tab's text moved since the last push: a push would overwrite
+    the Doc's side (author's ask 2026-10-26: "did not push; doc has
+    changed. pull first")."""
+
+
+DOC_CHANGED = "did not push; doc has changed. pull first"
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None,
-             rebuild: bool = False) -> dict:
+             rebuild: bool = False, guard: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
     → transplant into the tab → temp deleted. Marks the file checked out.
@@ -1601,6 +1630,9 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    if guard:
+        _refuse_doc_changed(db, manuscript, bridge, relpath, service,
+                            docs_service)
     # The pause: <<old>>{{new}} / {{insert}} forms the author may have
     # post-edited live either in the Doc (critique) or on disk (filter).
     # open_threads only sees author_comment rows, so without this gate a
@@ -1684,6 +1716,26 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
+                        relpath: str, service, docs_service) -> None:
+    """`guard=True` (the author's `doc push`, and the audiobook page's
+    Push): read the tab and refuse when its text moved since the last
+    push, on its own or on both sides. A push overwrites the tab with the
+    local file, so it would otherwise drop those Doc edits silently. A
+    file with no tab yet, or never pushed, has nothing to lose. Internal
+    callers that push right after settling forms in the tab leave the
+    guard off: their tab differs from the base by design."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    if not (links.get("_master_id") and entry.get("tab_id")
+            and entry.get("pushed_hash")):
+        return
+    view = doc_three_way(db, manuscript, relpath, service, docs_service,
+                         bridge=bridge)
+    if view["state"] in ("doc_ahead", "conflict"):
+        raise DocChanged(f"{relpath}: {DOC_CHANGED}")
 
 
 def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
@@ -2751,12 +2803,16 @@ def harvest_comments(db: Database, manuscript: dict, master_id: str,
         # auto-resolved. New comments are ingested and surfaced to
         # chat for proposal drafting; replies on threads we own are
         # the verdict machine's input (step 2).
+        # Fresh, or ingested earlier without a file: the second kind is
+        # offered again so a later pull can place it (ingest_comments
+        # updates the row, never duplicates it).
         fresh = [c for c in open_comments
                  if threads_mod.get_thread(
                      db, manuscript["id"], c["id"]) is None
                  and db.one(
                      "SELECT id FROM doc_comments WHERE "
-                     "manuscript_id = ? AND comment_id = ?",
+                     "manuscript_id = ? AND comment_id = ? "
+                     "AND file IS NOT NULL AND file != ''",
                      (manuscript["id"], c["id"])) is None]
         report["comments"] = ingest_comments(
             db, manuscript, fresh, files)

@@ -167,6 +167,8 @@ export function App() {
   const stale = status.export;
   const refreshing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "refresh");
   const pushing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "push");
+  const pulling = [jobs.running, ...jobs.queued].some(j => j && j.kind === "pull");
+  const docBusy = pushing || pulling;
   const cur = book.chapters.find(c => c.stem === stem);
 
   return (
@@ -196,9 +198,15 @@ export function App() {
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
         </div>}
         <div className="doc">
-          <span>pushed {when(doc.at) || "never"} · Doc: {doc.state}</span>
-          {mode === "chapters" && stem && <button className="chip" onClick={() => act("push", {stem})} disabled={pushing}
-            title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>}
+          <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
+            {doc.at ? `pushed ${when(doc.at)}` : "no push recorded yet"}{doc.state ? ` · ${doc.state}` : ""}
+          </span>
+          {mode === "chapters" && stem && <span className="doc-actions">
+            <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy}
+              title="Bring this chapter's tab down from the Google Doc">{pulling ? "pulling…" : "⇩ Pull"}</button>
+            <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy}
+              title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>
+          </span>}
         </div>
         {stale.stale && (
           <div className="stale" role="status">

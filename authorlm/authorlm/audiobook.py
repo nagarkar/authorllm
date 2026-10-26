@@ -41,7 +41,7 @@ CLIENT_FACTORY: Callable[[], audio.ElevenLabs] | None = None
 PREVIEW_RENDERER: Callable[[Path, dict, str, int], Path] | None = None
 
 METHODS = ("manuscripts", "status", "refresh", "preview", "generate", "retake",
-           "stitch", "jobs", "source", "edit", "push")
+           "stitch", "jobs", "source", "edit", "push", "pull")
 _SESSIONS: dict[tuple, "Session"] = {}
 RECENT_JOBS = 20
 
@@ -72,7 +72,9 @@ class Session:
         # The page never touches the Doc (author's ruling 2026-09-26:
         # reconciliation stays in chat); a pull lands on disk and the
         # stale banner picks it up like any local edit.
-        self.doc: dict = {"state": "reconciled in chat", "detail": "", "at": None}
+        # The last Push or Pull from this page, said in words ("" until
+        # one runs); `at` is the tab's pushed_at stamp, read per poll.
+        self.doc: dict = {"state": "", "detail": "", "at": None}
         # The Push button (author's ask 2026-10-26): the open chapter's
         # files go to their tabs of the master Doc, and the line under the
         # dropdown reads "pushed <when>" from the stamp push_doc leaves.
@@ -251,7 +253,7 @@ class Session:
             job.update(characters=plan["characters"], ids=plan["ids"],
                        of=len(plan["ids"]),
                        ordinals=[gen.ordinal_of(chapter, i) for i in plan["ids"]])
-        elif kind in ("stitch", "push"):
+        elif kind in ("stitch", "push", "pull"):
             gen.load_chapter(root, book, params["stem"])
         elif kind in ("refresh", "preview"):
             if params.get("stem"):
@@ -313,7 +315,10 @@ class Session:
             result = getattr(self, f"_job_{job['kind']}")(job)
             self._set(job, state="done", message=result, finishedAt=gen.now_stamp())
         except Exception as err:  # noqa: BLE001 — a job reports, the worker lives
-            self._set(job, state="failed", message=f"{type(err).__name__}: {err}",
+            from .gdocs import DocChanged
+            message = (str(err) if isinstance(err, DocChanged)
+                       else f"{type(err).__name__}: {err}")
+            self._set(job, state="failed", message=message,
                       finishedAt=gen.now_stamp())
             traceback.print_exc()
         finally:
@@ -393,26 +398,22 @@ class Session:
         the chapter to its tab, never opening a consent browser ('doc
         auth' is the one doorway). The stamp push_doc leaves is what the
         "pushed <when>" line shows next."""
-        from . import gdocs, paths
-        import tomllib
+        from . import gdocs
 
         _chapter, names = self._chapter_files(job["stem"])
-        paths.load_env()
-        config: dict = {}
-        toml_path = paths.config_path()
-        if toml_path.exists():
-            config = tomllib.loads(toml_path.read_text())
-        service = gdocs.get_service(config, self.workspace, interactive=False)
-        docs_service = gdocs.get_docs_service(config, self.workspace,
-                                              interactive=False)
+        _config, service, docs_service = self._doc_services()
         self._set(job, of=len(names), done=0)
         db = self._thread_db()
         urls: list[str] = []
         held = 0
         for i, name in enumerate(names):
             self._set(job, message=f"pushing {name}")
+            # Guarded: a tab edited since the last push is never
+            # overwritten from the page; the job fails with "did not
+            # push; doc has changed. pull first" and Pull is beside it.
             result = gdocs.push_doc(db, self.manuscript, name,
-                                    service=service, docs_service=docs_service)
+                                    service=service, docs_service=docs_service,
+                                    guard=True)
             urls.append(result["url"])
             held += len(result.get("held") or [])
             self._set(job, done=i + 1)
@@ -420,6 +421,53 @@ class Session:
                     "detail": urls[-1] if urls else ""}
         return (f"pushed {', '.join(names)} to the Doc"
                 + (f" · {held} paragraph(s) held under open comments" if held else ""))
+
+    def _doc_services(self) -> tuple[dict, Any, Any]:
+        """The config and the two Google services, never opening a
+        consent browser ('doc auth' in the terminal is the one doorway)."""
+        from . import gdocs, paths
+        import tomllib
+
+        paths.load_env()
+        config: dict = {}
+        toml_path = paths.config_path()
+        if toml_path.exists():
+            config = tomllib.loads(toml_path.read_text())
+        return (config,
+                gdocs.get_service(config, self.workspace, interactive=False),
+                gdocs.get_docs_service(config, self.workspace, interactive=False))
+
+    def _job_pull(self, job: dict) -> str:
+        """`authorlm doc pull <chapter file>` from the page (2026-10-26):
+        the chapter's tabs come down to disk, are collected, and the
+        export is refreshed so the cards show the Doc's text. A file
+        changed on both sides is left alone and named, as the CLI does."""
+        from . import api, gdocs
+
+        _chapter, names = self._chapter_files(job["stem"])
+        config, service, docs_service = self._doc_services()
+        self._set(job, of=len(names) + 1, done=0)
+        db = self._thread_db()
+        pulled: list[str] = []
+        conflicts: list[str] = []
+        for i, name in enumerate(names):
+            self._set(job, message=f"pulling {name}")
+            report = gdocs.pull_doc(db, self.manuscript, name, service=service,
+                                    docs_service=docs_service)
+            pulled += [r for r in report.get("changed", []) if r not in pulled]
+            conflicts += report.get("conflicts", [])
+            self._set(job, done=i + 1)
+        if pulled:
+            api.collect(db, self.manuscript, config, source="audiobook-pull")
+        self._set(job, message="exporting")
+        audio.export(db, self.manuscript)
+        self._set(job, done=len(names) + 1)
+        self.doc = {**self.doc, "state": "pulled from the page", "detail": ""}
+        parts = [f"pulled {', '.join(pulled)}" if pulled
+                 else "the Doc matches the files"]
+        if conflicts:
+            parts.append(f"changed on both sides, left alone: {', '.join(conflicts)}")
+        return " · ".join(parts)
 
 
 def session(workspace: str | None, manuscript: str | None, db=None,
@@ -470,6 +518,8 @@ def dispatch(method: str, params: dict[str, Any],
         return s.enqueue("retake", stem=params["stem"], ids=params.get("ids") or [])
     if method == "push":
         return s.enqueue("push", stem=params["stem"])
+    if method == "pull":
+        return s.enqueue("pull", stem=params["stem"])
     return s.enqueue("stitch", stem=params["stem"])
 
 

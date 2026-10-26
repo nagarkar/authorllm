@@ -1354,7 +1354,7 @@ def check_audiobook_page() -> None:
         st = s.status()
         check("status lists every chapter with counts and opens none",
               [c["stem"] for c in st["book"]["chapters"]][:2] == ["_opening-credits", "sermons"]
-              and st["chapter"] is None and st["doc"]["state"] == "reconciled in chat"
+              and st["chapter"] is None and st["doc"]["state"] == ""
               and st["export"]["stale"] is False, str(st)[:300])
         st = s.status("kindness")
         ch = st["chapter"]
@@ -1501,6 +1501,13 @@ def check_audiobook_page() -> None:
             meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
             gdocs._save_mapping(db, manuscript, meta)
             return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            assert kw.get("guard") is True, "the page pushes guarded"
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
         gdocs.push_doc = fake_push
         try:
             job = s.enqueue("push", stem="kindness")
@@ -1514,6 +1521,57 @@ def check_audiobook_page() -> None:
               st["doc"]["at"] == "2026-10-26T12:00:00Z" and st["doc"]["state"] == "pushed from the page"
               and st["doc"]["detail"].endswith("tab=t1"), str(st["doc"]))
         check("another chapter has its own stamp", s.status("sermons")["doc"]["at"] is None)
+        # The guard itself, at push_doc: it reads the three-way state and
+        # refuses doc_ahead and conflict; local_ahead and unchanged pass.
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta.setdefault("gdocs", {})["_master_id"] = "m1"
+        meta["gdocs"]["kindness.md"] = {"tab_id": "t1", "pushed_hash": "abc"}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        real_three = gdocs.doc_three_way
+        verdicts = {}
+        try:
+            for state in ("doc_ahead", "conflict", "local_ahead", "unchanged"):
+                gdocs.doc_three_way = lambda *a, _st=state, **k: {"state": _st}
+                try:
+                    gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                              gdocs.manuscript_bridge(s.manuscript),
+                                              "kindness.md", None, None)
+                    verdicts[state] = "passes"
+                except gdocs.DocChanged:
+                    verdicts[state] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        check("the guard refuses a moved tab and passes a local-only change",
+              verdicts == {"doc_ahead": "refused", "conflict": "refused",
+                           "local_ahead": "passes", "unchanged": "passes"}, str(verdicts))
+        # The guard: a tab edited since the last push is never overwritten.
+        def changed_push(db, manuscript, query, **kw):
+            raise gdocs.DocChanged(f"{query}: {gdocs.DOC_CHANGED}")
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        gdocs.push_doc = changed_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push over a changed tab fails with the plain status",
+              job["state"] == "failed"
+              and job["message"] == "kindness.md: did not push; doc has changed. pull first", str(job))
+        pulled: list = []
+        real_pull = gdocs.pull_doc
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_pull(db, manuscript, query=None, **kw):
+            pulled.append(query)
+            return {"changed": [], "unchanged": [query], "conflicts": []}
+        gdocs.pull_doc = fake_pull
+        try:
+            job = s.enqueue("pull", stem="kindness")
+        finally:
+            gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real_pull, real[1], real[2]
+        check("a pull job brings down only the chapter's own tab",
+              pulled == ["kindness.md"] and job["state"] == "done"
+              and job["message"] == "the Doc matches the files", str(job))
         # The server opened without -m (key "*"); the page then names the
         # manuscript, and must reach the same session, never a second worker.
         audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))
