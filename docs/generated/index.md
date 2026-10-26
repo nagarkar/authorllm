@@ -242,6 +242,12 @@ The per-essay adjudicator (docs/extraction-redesign.md §4.5).
 
 `extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on tools/measure_adjudication.py.
 
+## `authorlm.extraction_migration`
+
+`authorlm/authorlm/extraction_migration.py`
+
+Migration of the old pipeline's pending rows (docs/extraction-redesign.md §5, phase 5 of §9).
+
 ## `authorlm.filtering`
 
 `authorlm/authorlm/filtering.py`
@@ -631,6 +637,12 @@ The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4
 `authorlm/tests/test_extraction_gates.py`
 
 The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
+## `tests.test_extraction_migration`
+
+`authorlm/tests/test_extraction_migration.py`
+
+The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migrate (plan, apply, dry-run), undo as a round trip.
 
 ## `tests.test_extraction_payload`
 

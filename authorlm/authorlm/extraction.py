@@ -2443,7 +2443,9 @@ def retired_at(db: Database, mid: str, node: dict) -> str:
 
 
 def revival_due(db: Database, manuscript: dict, node: dict,
-                files: dict[str, str]) -> dict | None:
+                files: dict[str, str], *,
+                ignore_proposals: set[str] | frozenset[str] = frozenset()
+                ) -> dict | None:
     """§4.10, the door a retired name may come back through, or None.
 
     The ban stays; it yields only to insistence. The name must clear the
@@ -2473,11 +2475,11 @@ def revival_due(db: Database, manuscript: dict, node: dict,
         {name: "\n\n".join(paras) for name, paras in fresh.items()}, names)
     if not admitted:
         return None
-    prior = db.one(
+    prior = next((r for r in db.all(
         "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? AND "
         "kind = 'revival' AND target = ? AND state != 'superseded' AND "
-        "created_at >= ? ORDER BY created_at DESC LIMIT 1",
-        (mid, node["id"], since))
+        "created_at >= ? ORDER BY created_at DESC",
+        (mid, node["id"], since)) if r["id"] not in ignore_proposals), None)
     if prior is not None:
         if prior["state"] != "dismissed":
             return None
