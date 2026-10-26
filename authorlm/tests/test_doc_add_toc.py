@@ -58,6 +58,62 @@ class DocAddTocTests(unittest.TestCase):
         docs.add_doc(self.ms, "z", after="start")
         self.assertEqual(order(self.root), ["z.md", "a.md", "c.md", "b.md"])
 
+    def test_add_after_parent_skips_its_descendants(self) -> None:
+        """A sibling after a chapter with children must follow the whole
+        subtree. Wedging between the parent and its first child keeps the
+        children's written parent= lines but tree_to_parents reparents
+        them under the new file (Doc tab sync then steals the children)."""
+        nested = '''# Table of contents
+
+[[chapter]]
+file = "ch1.md"
+
+[[chapter]]
+file = "ch3.md"
+
+[[chapter]]
+file = "ch3-a.md"
+parent = "ch3.md"
+
+[[chapter]]
+file = "ch3-a-i.md"
+parent = "ch3-a.md"
+
+[[chapter]]
+file = "ch3-b.md"
+parent = "ch3.md"
+
+[[chapter]]
+file = "ch4.md"
+'''
+        (self.root / "toc.toml").write_text(nested)
+        docs.add_doc(self.ms, "epilogue", after="ch3.md")
+        text = (self.root / "toc.toml").read_text()
+        self.assertEqual(
+            order(self.root),
+            ["ch1.md", "ch3.md", "ch3-a.md", "ch3-a-i.md", "ch3-b.md",
+             "epilogue.md", "ch4.md"])
+        parents = dict(structure.tree_to_parents(
+            structure.parse_toc_tree(text)))
+        self.assertEqual(parents["ch3-a.md"], "ch3.md")
+        self.assertEqual(parents["ch3-a-i.md"], "ch3-a.md")
+        self.assertEqual(parents["ch3-b.md"], "ch3.md")
+        self.assertIsNone(parents["epilogue.md"])
+        # After a mid-subtree child: land after that child's own
+        # descendants, still under the same parent, before the next
+        # sibling of the anchor.
+        docs.add_doc(self.ms, "ch3-a-ii", after="ch3-a.md")
+        text = (self.root / "toc.toml").read_text()
+        self.assertEqual(
+            order(self.root),
+            ["ch1.md", "ch3.md", "ch3-a.md", "ch3-a-i.md", "ch3-a-ii.md",
+             "ch3-b.md", "epilogue.md", "ch4.md"])
+        parents = dict(structure.tree_to_parents(
+            structure.parse_toc_tree(text)))
+        self.assertEqual(parents["ch3-a-ii.md"], "ch3.md")
+        self.assertEqual(parents["ch3-a-i.md"], "ch3-a.md")
+        self.assertEqual(parents["ch3-b.md"], "ch3.md")
+
     def test_unknown_anchor_writes_nothing(self) -> None:
         (self.root / "toc.toml").write_text(TOC)
         with self.assertRaises(LookupError):
