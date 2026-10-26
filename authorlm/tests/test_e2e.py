@@ -69,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api as _api  # noqa: E402
 from authorlm.cli import main  # noqa: E402
 
@@ -816,12 +817,12 @@ class StubLLMHandler(http.server.BaseHTTPRequestHandler):
                 ],
                 "outcome": "Becoming developed through the sailing metaphor.",
             })
-        elif "editor's working memory" in system:
-            # The essay summarizer (authorlm/prompts/summarizer.md). Cites
-            # paragraph [1] only, so the drafting context's coverage
+        elif _summary_stubs.reply(system, user) is not None:
+            # The three summary prompts (paragraph records, section
+            # summary, essay summary). The essay stub cites section [1]
+            # only and writes no FLOW, so the drafting context's coverage
             # reporting has something real to be loud about.
-            unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: [1] the stub's canned summary of {unit}."
+            content = _summary_stubs.reply(system, user)
         elif "distill" in system.lower():
             # Stands in for semantic matching: if an equivalent belief is
             # already on the menu the stub MATCHes it (exercising the
@@ -1557,12 +1558,13 @@ def scenario_write_loop(root: Path) -> None:
               and "BEFORE" in out and "AFTER" in out
               and "[01-choice.md]" in out, out)
         check("the printed context carries the real stored summary and its "
-              "freshness state, and reports incomplete paragraph coverage "
+              "freshness state, and reports incomplete section coverage "
               "LOUDLY (design §12.4 item 4's default: informational, never "
-              "blocking — the stub summary cites only ¶1 of three)",
+              "blocking — the stub summary writes no FLOW line)",
               "[01-choice.md] (fresh)" in out
               and "the stub's canned summary of 01-choice.md" in out
-              and "coverage INCOMPLETE: ¶2, ¶3 uncited" in out, out)
+              and "coverage INCOMPLETE: FLOW names no clause for "
+                  "'# Chapter 1 — Choice'" in out, out)
         out = run_stdin(ws, "", "write", "status")
         check("write status — the resume entry point — reprints it, "
               "recomputed from the summaries as they stand now",
@@ -5480,9 +5482,11 @@ def scenario_testbench(root: Path) -> None:
         check("--setup builds the summaries and prints the cost line — the "
               "one place the bench spends money",
               "built 3" in out and "LLM: 3 live call(s)" in out, out)
-        check("exactly three model calls: one summary per essay, and no "
-              "concept extraction (init never extracts)",
-              StubLLMHandler.REQUESTS - before == 3,
+        check("exactly nine model calls: per essay one paragraph-records "
+              "call, one section call and one essay call (the summary "
+              "hierarchy, lowest level first), and no concept extraction "
+              "(init never extracts)",
+              StubLLMHandler.REQUESTS - before == 9,
               f"{StubLLMHandler.REQUESTS - before} calls")
 
         # --- idempotence --------------------------------------------------
@@ -5666,13 +5670,14 @@ def scenario_testbench(root: Path) -> None:
         check("and it removes the filter artifact it created — the "
               "author's own _filters/ is never touched",
               not (msdir / "_filters" / "tb-dupes.md").exists())
-        check("the ONLY model call in the whole filter check is the "
-              "settle's summary rebuild — the filter path itself makes "
-              "none, which is the design's claim stated exactly rather "
-              "than loosely. On the author's own bench the keys are "
-              "scrubbed, so that one call fails and the resolve warns "
-              "soft: zero live spend there, one stub call here",
-              StubLLMHandler.REQUESTS - before == 1,
+        check("the ONLY model calls in the whole filter check are the "
+              "settle's summary rebuild of the edited essay — its paragraph "
+              "records, its section summary, its essay summary — the filter "
+              "path itself makes none, which is the design's claim stated "
+              "exactly rather than loosely. On the author's own bench the "
+              "keys are scrubbed, so that rebuild fails and the resolve "
+              "warns soft: zero live spend there, three stub calls here",
+              StubLLMHandler.REQUESTS - before == 3,
               f"{StubLLMHandler.REQUESTS - before} calls")
         check("--list-checks names it",
               "filter " in bench("--list-checks"), "")
@@ -5698,8 +5703,8 @@ def scenario_testbench(root: Path) -> None:
               (msdir / tb.TARGET).read_bytes() == original
               and "restored the essay byte for byte" in negative, negative)
         check("the discriminating run spends no more than that one "
-              "rebuild either",
-              StubLLMHandler.REQUESTS - before <= 1,
+              "rebuild (its three level calls) either",
+              StubLLMHandler.REQUESTS - before <= 3,
               f"{StubLLMHandler.REQUESTS - before} calls")
 
         # --- the pronunciations check (§15.22) ---------------------------
@@ -6243,9 +6248,10 @@ def scenario_filter(root: Path) -> None:
               in settled_text
               and "Moreover the wall stands" in settled_text,
               settled_text[:300])
-        check("the resolve's ONE model call is the summary rebuild, and it "
-              "is the only call the whole chat-mode path makes",
-              StubLLMHandler.REQUESTS == calls_before + 1,
+        check("the resolve's only model calls are the summary rebuild of "
+              "the edited essay (paragraph records, section, essay: three "
+              "levels), and nothing else on the whole chat-mode path",
+              StubLLMHandler.REQUESTS == calls_before + 3,
               f"{calls_before} -> {StubLLMHandler.REQUESTS}")
         episodes_after = {r["id"]: r["transition_ids"] for r in db.all(
             "SELECT id, transition_ids FROM editorial_episodes WHERE "

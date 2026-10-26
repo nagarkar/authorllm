@@ -1507,12 +1507,13 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="critique-resolve",
                     episode=api.NO_EPISODE)
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            new_row = sums.rebuild_one(db, manuscript, file, llm)
+            new_row = sums.rebuild_one(db, manuscript, file, llms,
+                                       echo=lambda line: print(ui.dim(line)))
             print(ui.dim("summary rebuilt; downstream marked upstream_stale"))
-            _print_coverage_note(file, new_row.get("paragraph_coverage"))
+            _print_coverage_note(file, new_row.get("coverage"))
         except Exception as err:  # noqa: BLE001
             print(ui.yellow(f"summary rebuild failed ({err}) — run "
                             f"'summarize rebuild {file}'"))
@@ -1757,18 +1758,134 @@ def _critique_triage(db: Database, manuscript: dict, args) -> None:
 
 
 def _print_coverage_note(file: str, cov: dict | None) -> None:
-    """Report (never silently) when a rebuilt summary's MOVES didn't cite
-    every paragraph number, or cited one that doesn't exist — verified
-    coverage, not just requested."""
+    """Report (never silently) when a rebuilt essay summary's MOVES did
+    not cite every section with a body, cited one the essay lacks, or
+    its FLOW skipped a heading — the structural check of summary-
+    hierarchy design §3.4, verified, not just requested."""
     if not cov or cov["complete"]:
         return
     parts = []
-    if cov["missing"]:
-        parts.append(f"missing paragraph(s) {cov['missing']}")
-    if cov["out_of_range"]:
-        parts.append(f"cited out-of-range paragraph(s) {cov['out_of_range']}")
-    print(ui.yellow(f"  {file}: paragraph coverage incomplete — "
+    if cov.get("missing"):
+        parts.append(f"section(s) {cov['missing']} not cited in MOVES")
+    if cov.get("unknown"):
+        parts.append(f"cited section(s) {cov['unknown']} the essay lacks")
+    if cov.get("flow_missing"):
+        parts.append("FLOW skips " + ", ".join(
+            f"'{h}'" for h in cov["flow_missing"]))
+    print(ui.yellow(f"  {file}: section coverage incomplete — "
                     + "; ".join(parts)))
+
+
+def _summarize_unit_text(db, manuscript: dict, file: str) -> str:
+    from . import summaries as sums
+
+    texts, _unlisted, _flight = sums.capture(db, manuscript)
+    if file not in texts:
+        sys.exit(f"error: '{file}' is not a unit of the manuscript.")
+    return texts[file]
+
+
+def _summarize_show(args, db, manuscript: dict) -> None:
+    """`summarize show <file> [--section N] [--paragraph N] [--json]`
+    (summary-hierarchy design §8): the essay block; one section's block
+    with its paragraph gists; one paragraph's record."""
+    from . import summaries as sums
+
+    text = _summarize_unit_text(db, manuscript, args.file)
+    verse = args.file in sums.verse_files_of(manuscript)
+    secs = sums.sections_of(text, verse_file=verse)
+    if args.paragraph is not None:
+        para = next((p for s in secs for p in s["paragraphs"]
+                     if p["ordinal"] == args.paragraph), None)
+        if para is None:
+            sys.exit(f"error: {args.file} has no paragraph {args.paragraph} "
+                     f"(it has {sum(len(s['paragraphs']) for s in secs)}).")
+        row = sums._current_paragraph_rows(db, manuscript["id"], args.file
+                                           ).get(para["para_hash"])
+        rec = {"file": args.file, "ordinal": para["ordinal"],
+               "section_ordinal": para["section_ordinal"],
+               "kind": para["kind"], "para_hash": para["para_hash"],
+               "text": para["text"],
+               "record": sums._record_of(row) if row else None,
+               "model": row["model"] if row else None}
+        if args.json:
+            print(json.dumps(rec, indent=2, ensure_ascii=False))
+            return
+        print(ui.bold(f"{args.file} ¶{para['ordinal']}")
+              + ui.dim(f"  ({para['kind']}, §{para['section_ordinal']})"))
+        print(ui.dim(para["text"]))
+        if rec["record"] is None:
+            print(ui.yellow("  no current record — run 'summarize rebuild "
+                            f"{args.file} --level paragraph'."))
+            return
+        print(json.dumps(rec["record"], indent=2, ensure_ascii=False))
+        return
+    if args.section is not None:
+        sec = next((s for s in secs if s["section_ordinal"] == args.section),
+                   None)
+        if sec is None:
+            sys.exit(f"error: {args.file} has no section {args.section} "
+                     f"(it has {len(secs)}).")
+        row = sums._current_section_rows(db, manuscript["id"], args.file
+                                         ).get(sec["section_hash"])
+        records = sums._current_paragraph_rows(db, manuscript["id"], args.file)
+        gists = [{"ordinal": p["ordinal"], "kind": p["kind"],
+                  "gist": (sums._record_of(records[p["para_hash"]])["gist"]
+                           if p["para_hash"] in records else None)}
+                 for p in sec["paragraphs"] if p["kind"] != "heading"]
+        out = {"file": args.file, "section_ordinal": sec["section_ordinal"],
+               "heading": sec["heading"], "section_hash": sec["section_hash"],
+               "summary": row["summary"] if row else None,
+               "model": row["model"] if row else None, "paragraphs": gists}
+        if args.json:
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+            return
+        print(ui.bold(f"{args.file} §{sec['section_ordinal']} "
+                      f"{sec['heading'] or '(preamble)'}"))
+        if row is None:
+            print(ui.yellow("  no current summary — run 'summarize rebuild "
+                            f"{args.file} --level section'."))
+        else:
+            print(row["summary"])
+        print(ui.dim("paragraphs:"))
+        for g in gists:
+            print(f"  [{g['ordinal']}] " + (g["gist"] or ui.yellow("(no record)")))
+        return
+    row = db.one("SELECT * FROM essay_summaries WHERE manuscript_id = ? "
+                 "AND file = ?", (manuscript["id"], args.file))
+    if args.json:
+        unit = sums.for_unit(db, manuscript, args.file, text=text)
+        print(json.dumps(unit, indent=2, ensure_ascii=False, default=str))
+        return
+    if not row:
+        sys.exit(f"no summary for {args.file} — run 'summarize rebuild'.")
+    state = sums.level_status(db, manuscript, args.file, text,
+                              verse_file=verse)["essay"]["state"]
+    print(ui.bold(args.file) + ui.dim(f"  ({state}; {row['created_at'][:19]}Z"
+                                      f"{', ' + row['model'] if row['model'] else ''})"))
+    print(row["summary"])
+
+
+def _summarize_outline(args, db, manuscript: dict) -> None:
+    """`summarize outline <file>`: the FLOW paragraph and each section's
+    POINT, the one-screen map (§8)."""
+    from . import summaries as sums
+
+    text = _summarize_unit_text(db, manuscript, args.file)
+    verse = args.file in sums.verse_files_of(manuscript)
+    row = db.one("SELECT summary FROM essay_summaries WHERE manuscript_id = ? "
+                 "AND file = ?", (manuscript["id"], args.file))
+    rows = sums._current_section_rows(db, manuscript["id"], args.file)
+    print(ui.bold(args.file))
+    flow = sums.flow_of(row["summary"]) if row else ""
+    print(ui.cyan("FLOW: ") + (flow or ui.yellow(
+        "(no essay summary — run 'summarize rebuild')")))
+    for sec in sums.sections_of(text, verse_file=verse):
+        srow = rows.get(sec["section_hash"])
+        point = (sums.point_of(srow["summary"]) if srow
+                 else ui.yellow("(no section summary)"))
+        print(f"  [{sec['section_ordinal']}] "
+              f"{ui.bold(sec['heading'] or '(preamble)')} — {point}")
 
 
 def cmd_summarize(args):
@@ -1777,6 +1894,22 @@ def cmd_summarize(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     if args.action == "status":
+        if args.level:
+            if args.level not in sums.LEVELS:
+                sys.exit(f"error: --level must be one of "
+                         f"{', '.join(sums.LEVELS)}.")
+            for r in sums.hierarchy_status(db, manuscript):
+                st = r[args.level]
+                color = {"fresh": ui.green, "stale": ui.yellow,
+                         "upstream_stale": ui.dim, "missing": ui.yellow,
+                         "deprecated": ui.yellow, "rewriting": ui.cyan,
+                         "unwritten": ui.cyan}.get(st["state"], ui.yellow)
+                counts = (f"  {st['current']}/{st['needed']} row(s)"
+                          if "needed" in st else
+                          ("  sections moved" if st.get("sections_moved")
+                           else ""))
+                print(f"  {r['file']:<22} {color(st['state'])}{ui.dim(counts)}")
+            return
         rows = sums.status(db, manuscript)
         counts: dict[str, int] = {}
         for r in rows:
@@ -1791,43 +1924,60 @@ def cmd_summarize(args):
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
         return
-    if args.action == "show":
+    if args.action in ("show", "outline"):
         if not args.file:
-            sys.exit("usage: summarize show <file>")
-        row = db.one("SELECT * FROM essay_summaries WHERE manuscript_id = ? "
-                     "AND file = ?", (manuscript["id"], args.file))
-        if not row:
-            sys.exit(f"no summary for {args.file} — run 'summarize rebuild'.")
-        print(ui.bold(args.file) + ui.dim(f"  ({row['created_at'][:19]}Z)"))
-        print(row["summary"])
+            sys.exit(f"usage: summarize {args.action} <file>")
+        (_summarize_show if args.action == "show" else _summarize_outline)(
+            args, db, manuscript)
         return
-    # rebuild
-    llm = sums.summarizer_llm(_load_config(args))
-    if not llm.enabled:
+    # rebuild [file] [--level …] [--all]: the deliberate pass of
+    # summary-hierarchy design §4.5 / §8. Each level that built anything
+    # prints its own line with its cost (ruling 9). A named file's ESSAY
+    # row is rebuilt whatever its state (the confirmation-gate shape), its
+    # lower levels lazily first; with --level the named file is simply
+    # the scope and only --all forces.
+    level = args.level or "essay"
+    if level not in sums.LEVELS:
+        sys.exit(f"error: --level must be one of {', '.join(sums.LEVELS)}.")
+    llms = sums.clients(_load_config(args))
+    if not llms[level].enabled:
         sys.exit("error: the LLM is disabled ([llm] enabled = false) — "
                  "summaries need it.")
-    print(ui.dim(f"summarizer model: {llm.model}"))
-    if args.file:
-        row = sums.rebuild_one(db, manuscript, args.file, llm)
-        print(ui.green(f"rebuilt {args.file}") + ui.dim(
-            f" ({len(row['summary'].split())} words); downstream summaries "
-            "marked upstream_stale"))
-        _print_coverage_note(args.file, row.get("paragraph_coverage"))
+    print(ui.dim("models: " + ", ".join(
+        f"{lv} {c.model}" for lv, c in llms.items()
+        if lv in sums.LEVELS[:sums.LEVELS.index(level) + 1])))
+    try:
+        report = sums.rebuild(
+            db, manuscript, llms, level=level,
+            files=[args.file] if args.file else None,
+            force=args.all or (bool(args.file) and level == "essay"),
+            echo=lambda line: print(ui.dim(line)),
+            progress=lambda f: print(ui.dim(f"  {level} level: {f}…")))
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    if level == "essay":
+        if args.file and args.file in report["built"]:
+            row = db.one("SELECT summary FROM essay_summaries WHERE "
+                         "manuscript_id = ? AND file = ?",
+                         (manuscript["id"], args.file))
+            print(ui.green(f"rebuilt {args.file}") + ui.dim(
+                f" ({len(row['summary'].split())} words); downstream "
+                "summaries marked upstream_stale"))
+        else:
+            print(ui.green(f"built {len(report['built'])}") + ui.dim(
+                " essay summar" + ("y" if len(report["built"]) == 1 else "ies")))
+        for f, cov in report["misses"]:
+            _print_coverage_note(f, cov)
+        for f, why in report["skipped"]:
+            print(ui.yellow(f"  skipped {f} — {why}"))
     else:
-        result = sums.rebuild(
-            db, manuscript, llm, only_missing_or_stale=not args.all,
-            progress=lambda f: print(ui.dim(f"  summarizing {f}…")))
-        print(ui.green(f"built {len(result['built'])}") + ui.dim(
-            f", reused {len(result['reused'])} fresh"))
-        for f in result.get("skipped_inflight", []):
+        print(ui.green(f"{level} level up to date over "
+                       f"{len(report['files'])} file(s) touched"))
+    for f, pinned in sums.inflight_sources(db, manuscript).items():
+        if pinned is None and (not args.file or f == args.file):
             print(ui.cyan(
                 f"  skipped {f} — a writeup is writing it for the first "
                 "time, so there is no pre-rewrite text to summarize"))
-        for f, cov in result.get("incomplete_coverage", {}).items():
-            _print_coverage_note(f, cov)
-    line = llm.stats_line()
-    if line:
-        print(ui.dim(line))
 
 
 def cmd_prompts(args):
@@ -9019,17 +9169,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "summarize",
-        help="essay summaries — the editor's working memory of the whole "
-             "book, built autoregressively in reading order "
-             "(docs/critique-pass-design.md §4)")
-    p.add_argument("action", choices=["status", "show", "rebuild"])
+        help="the summary hierarchy — paragraph records, section summaries "
+             "and the essay summaries that are the editor's working memory "
+             "of the whole book (docs/summary-hierarchy-design.md)")
+    p.add_argument("action", choices=["status", "show", "rebuild", "outline"])
     p.add_argument("file", nargs="?",
-                   help="show: the unit; rebuild: one unit only (against "
-                        "current prior summaries; downstream marked stale)")
+                   help="show/outline: the unit; rebuild: one unit only "
+                        "(against current prior summaries; downstream "
+                        "marked stale)")
+    p.add_argument("--level", choices=["paragraph", "section", "essay"],
+                   help="status: that level's row counts per unit; rebuild: "
+                        "bring this level up to date, lower levels first "
+                        "(default essay)")
     p.add_argument("--all", action="store_true",
-                   help="rebuild: every unit from scratch (default reuses "
-                        "fresh summaries and rebuilds from the first "
-                        "missing/stale one onward)")
+                   help="rebuild: every row of the level from scratch "
+                        "(default rebuilds only missing, stale and "
+                        "upstream-stale rows)")
+    p.add_argument("--section", type=int, metavar="N",
+                   help="show: section N's summary and its paragraph gists")
+    p.add_argument("--paragraph", type=int, metavar="N",
+                   help="show: paragraph N's record")
+    p.add_argument("--json", action="store_true",
+                   help="show: machine-readable output")
     p.set_defaults(func=cmd_summarize)
 
     p = sub.add_parser(

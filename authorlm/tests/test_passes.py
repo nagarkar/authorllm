@@ -65,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -4045,9 +4046,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        stub = _summary_stubs.reply(system, user)
         if "THE UNIT: " in user:
             unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: summary of {unit}."
+            content = f"MOVES: [1] summary of {unit}."
+        elif stub is not None:
+            content = stub
         elif "Essay editor" in system:
             Stub.editor_calls.append(user)
             content = json.dumps(Stub.editor_replies.pop(0))

@@ -281,13 +281,28 @@ def main_test() -> None:
         check("a section over the cap takes more than one call",
               rep["calls"] == 2 and rep["records"] == 3, str(rep))
 
+        print("a tag-only paragraph gets an empty record with no call:")
+        (ms / "tagged.md").write_text("# Tagged\n\n[Omit: all]\n\nA real line.\n")
+        tagged = FakeLLM()
+        rep = sums.ensure(db, manuscript, tagged, files=["tagged.md"],
+                          echo=lambda _l: None)
+        check("one call for the one prose paragraph; the tag line is stored "
+              "empty and counted",
+              rep["calls"] == 1 and rep["records"] == 1 and rep["tags"] == 1
+              and not rep["missing"]
+              and "RECORD THESE: 3" in tagged.calls[0]
+              and "1 tag-only line(s)" in rep["line"], str(rep))
+        check("tag_only is one bracketed line, nothing else",
+              sums.tag_only(" [Omit: all] ") and not sums.tag_only("[a] b")
+              and not sums.tag_only("[a]\n[b]"))
+
         print("guards:")
         try:
-            sums.ensure(db, manuscript, fake, level="essay")
+            sums.ensure(db, manuscript, fake, level="book")
             ok = False
         except ValueError as err:
-            ok = "no builder yet" in str(err)
-        check("an unbuilt level is named, not silently skipped", ok)
+            ok = "book" in str(err) and "essay" in str(err)
+        check("an unknown level is named, not silently skipped", ok)
         try:
             sums.ensure(db, manuscript, fake, files=["nope.md"])
             ok = False

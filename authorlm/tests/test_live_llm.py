@@ -425,6 +425,67 @@ def section_section_summary(ctx: dict) -> None:
           str(lines))
 
 
+def section_essay_summary(ctx: dict) -> None:
+    """summaries.ensure(level="essay") on Luna (summary-hierarchy design
+    §3.4, §11.4): the paragraph and section levels replay their
+    recordings, then one essay call composes FLOW, MOVES, MOTIFS, DOES NOT
+    from the section summary alone, and code renders the derived four
+    labels from the records. Same fixture and workspace layout as the two
+    sections before it, so their payloads hash the same."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "essays-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    config = {"llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+              "summaries": {"paragraph_model": PARAGRAPH_MODEL},
+              "critique": {"summarizer_model": SECTION_MODEL}}
+    llms = sums.clients(config)
+    check("the essay client is Luna, purpose critique.summarizer",
+          llms["essay"].model == SECTION_MODEL
+          and llms["essay"].purpose == "critique.summarizer")
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llms, level="essay",
+                         echo=lines.append)
+    for line in lines:
+        print(f"   {line}")
+    check("one call per level, the essay built, nothing skipped",
+          report["section"]["paragraph"]["calls"] == 1
+          and report["section"]["calls"] == 1 and report["calls"] == 1
+          and report["built"] == ["distinction.md"] and not report["skipped"],
+          str(report))
+    row = sums.all_summaries(db, manuscript["id"])["distinction.md"]
+    summary = row["summary"]
+    print(f"   {summary}")
+    check("the eight labels, in stored order",
+          [summary.index(lb + ":") for lb in sums.ESSAY_LABELS]
+          == sorted(summary.index(lb + ":") for lb in sums.ESSAY_LABELS),
+          summary)
+    check("the model wrote every one of its four labels",
+          not report["labels_missing"], str(report["labels_missing"]))
+    check("FLOW names both headings and MOVES cites the body section: no "
+          "coverage miss", not report["misses"], str(report["misses"]))
+    check("INTRODUCES is derived from the records: the Field is defined here",
+          any(t.lower().endswith("field") for t in
+              sums._label_block(summary, "INTRODUCES", sums.ESSAY_LABELS)
+              .split(", ")), summary)
+    check("PROMISES and DEBTS come from the references",
+          sums._label_block(summary, "PROMISES", sums.ESSAY_LABELS) != "none"
+          and sums._label_block(summary, "DEBTS", sums.ESSAY_LABELS) != "none",
+          summary)
+    low, high = sums.target_length(SAMPLE_RECORDS)
+    n = len(summary.split())
+    check(f"length within twice the {low}-{high} target (eight labels are "
+          "a fixed cost on a 100-word essay)", n <= 2 * high + 20, f"{n} words")
+    check("three cost lines, one per level", len(lines) == 3
+          and "essay level" in lines[2], str(lines))
+
+
 # Order matters (the narrative), but 'extraction' is handled separately in
 # main_test() because it owns the one `init` call every other section also
 # needs (manuscript registration) — see main_test()'s bootstrap comment.
@@ -436,6 +497,7 @@ SECTIONS: list[tuple[str, "object"]] = [
     ("beat-draft", section_beat_draft),
     ("paragraph-records", section_paragraph_records),
     ("section-summary", section_section_summary),
+    ("essay-summary", section_essay_summary),
 ]
 SECTION_NAMES = ["extraction"] + [name for name, _ in SECTIONS]
 

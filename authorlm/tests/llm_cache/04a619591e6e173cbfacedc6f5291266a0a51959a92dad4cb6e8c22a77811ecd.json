@@ -1,0 +1,22 @@
+{
+ "model": "gemini/gemini-2.5-flash",
+ "temperature": 0.2,
+ "messages": [
+  {
+   "role": "system",
+   "content": "# Section summarizer — one section of one essay\n\nYou are compressing one heading-delimited section of a book-length\nphilosophical manuscript into what an editor and other AI agents must hold\nabout it while working on the rest of the essay and the book: what it\nestablishes, by which moves, what it leans on, what it leaves for later.\nYour summary is not for readers.\n\nYou receive:\n- FILE and SECTION: where the section sits; SECTION is its heading line, or\n  \"(preamble)\" for text before the first heading.\n- EARLIER SECTIONS: the POINT line of every earlier section of the same\n  essay, in order (empty for the first). Condition on them: DEPENDS ON names\n  the ones this section presupposes.\n- CONCEPTS: the concepts this essay is recorded as introducing or using,\n  with the author's ratified definitions. Use the author's names for things;\n  never paraphrase a term of art into ordinary language.\n- TARGET LENGTH: a word-count range computed for this section. Write inside\n  it; never substitute a fixed count of your own.\n- SKELETON: one line per paragraph, \"[n] gist\", written earlier by a\n  paragraph-level pass. It is an index, not an authority: where it and THE\n  SECTION disagree, THE SECTION is right.\n- COVER THESE: the paragraph numbers MOVES must place.\n- THE SECTION: the section's full text, each paragraph prefixed with its\n  number in brackets, e.g. \"[12] ...\". The numbers are positions in the\n  whole file, so they need not start at 1.\n\nEvery sentence must earn its place; no praise, no evaluation, no\nthroat-clearing. Terse and dense. Cover, in this order, labeled exactly like\nthis, each label at the start of its own line:\n\nPOINT: What the section establishes, in one or two sentences. The claim\nitself, in the author's terms, not a description of the section.\n\nMOVES: The section's moves in order, ONE MOVE PER LINE. Each line opens with\nthe numbers of the paragraphs that carry the move, each in its own brackets\n(\"[4] [5]\", never a range like \"[4]-[6]\"), then says what the move does and\nhow it is carried (definition, example, dialogue, parable, appeal to earlier\nmaterial). Every number in COVER THESE appears in exactly one move: none may\nvanish, none may be cited twice. A paragraph doing no independent work (a\ntransition, an aside, a refrain, a verse line) is folded into the move it\nbelongs to rather than earning a move of its own.\n\nDEPENDS ON: The earlier sections of this essay the section presupposes, each\nnamed by its heading, with a few words on what is taken from it. \"none\" if\nit stands alone.\n\nLEAVES OPEN: What the section defers to a later section or essay (a promise\nit makes, a question it raises and does not answer, a term it uses before\nfixing it). \"none\" if nothing.\n\nRules:\n- Use the author's vocabulary verbatim for every term of art.\n- Never soften, correct, or evaluate the argument. Record it.\n- Never invent a dependence or a deferral the text does not make.\n- Plain text only. No markdown headers, no bullets — the four labels above,\n  each on its own line, followed by prose; MOVES as one line per move.\n"
+  },
+  {
+   "role": "user",
+   "content": "FILE: 01-choice.md\nSECTION: # Chapter 1 — Choice\n\nEARLIER SECTIONS (their POINT lines, in order):\n(this is the first section)\n\nCONCEPTS (author's ratified definitions):\n(none recorded)\n\nTARGET LENGTH: 30-40 words (scaled to this section's 51 words).\n\nSKELETON:\n[2] Choice is the primary condition of thought, manifesting as the act of distinguishing between entities, which simultaneously generates a visible form.\n\nCOVER THESE: 2\n\nTHE SECTION:\n\n[1] # Chapter 1 — Choice\n\n[2] Every act of thought begins with a choice. Before there is a world, before\nthere is a self, there is the primitive act of choosing: this rather than\nthat. To choose is to distinguish, and the distinction so drawn is the\nvisible form the choice takes."
+  }
+ ],
+ "reply": "POINT: Choice is the primitive act of thought, an act of distinguishing, which generates a visible form.\n\nMOVES:\n[2] Defines choice as the primitive act of thought, an act of distinguishing that yields a visible form.\n\nDEPENDS ON: none\n\nLEAVES OPEN: none",
+ "tokens_in": 958,
+ "tokens_out": 1886,
+ "cache_read": 0,
+ "cache_write": 0,
+ "finish_reason": "stop",
+ "cost_usd": 0.005002400000000001,
+ "requested_at": "2026-10-26T06:24:39Z"
+}
