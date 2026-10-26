@@ -665,6 +665,35 @@ def spacing_join(root: Path) -> None:
           "the Doc", "in the Doc" not in msg and "Nothing was written"
           in msg, msg)
 
+    # The settle step (forms whose verdict is in the record but still
+    # stand in the tab) is a text write too: it waits for validation.
+    from authorlm.db import ko_fields
+    ws, db, manuscript, ms, fake = _fixture(root, "drop-settle-ws", BASE,
+                                            fake_cls=_DroppingFake)
+    fake.edit("tab-2", "Alpha one.", "<<Alpha one.>>{{Alpha new.}}")
+    thread = ko_fields("dt")
+    thread.update(
+        manuscript_id=manuscript["id"], origin_type="filter",
+        origin_id="fr-test:solo.md:1", file="solo.md", anchor_quote=None,
+        proposed_old="Alpha one.", proposed_new="Alpha new.", note="test",
+        state="cleaned", our_reply_ids="[]", last_author_reply_id=None,
+        scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace"}))
+    db.insert("doc_threads", thread)
+    before = fake.tab_text("solo.md")
+    (ms / "solo.md").write_text(BASE.replace("Alpha one.", "Alpha new.")
+                                .replace("Gamma three.", "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a disagreement stops the push before the settle step",
+          "tab structure and export disagree" in msg, msg)
+    check("...the settled form still stands; no text was written",
+          not _text_writes(fake) and fake.tab_text("solo.md") == before,
+          str(_text_writes(fake)))
+
 
 # ------------------------------------------------------------------ G
 
@@ -704,6 +733,92 @@ def toc_conflict(root: Path) -> None:
     check("it lists the Doc's differing pair and toc.toml's",
           "Doc: b.md (top level)" in out
           and "toc.toml: b.md under a.md" in out, out)
+
+
+class _TabTreeStub:
+    """Just enough of the Docs API for sync_tab_structure: one container
+    tab whose children are the titles given, in order; index moves among
+    those children are applied and recorded."""
+
+    def __init__(self, titles: list[str]):
+        self.children = list(titles)
+        self.moves: list[dict] = []
+        stub = self
+
+        class _Req:
+            def __init__(self, fn):
+                self.fn = fn
+
+            def execute(self):
+                return self.fn()
+
+        class _Documents:
+            def get(self, documentId=None, includeTabsContent=None):
+                return _Req(lambda: {"tabs": [{
+                    "tabProperties": {"tabId": "tab-c", "title": "book"},
+                    "childTabs": [{"tabProperties": {
+                        "tabId": f"tab-{t}", "title": t,
+                        "parentTabId": "tab-c"}}
+                        for t in stub.children]}]})
+
+            def batchUpdate(self, documentId=None, body=None):
+                def run():
+                    for r in body["requests"]:
+                        props = r["updateDocumentTabProperties"][
+                            "tabProperties"]
+                        stub.moves.append(props)
+                        title = props["tabId"][len("tab-"):]
+                        stub.children.remove(title)
+                        stub.children.insert(props["index"], title)
+                    return {}
+                return _Req(run)
+        self._docs = _Documents()
+
+    def documents(self):
+        return self._docs
+
+
+def toc_doc_only_tabs(root: Path) -> None:
+    print("G2. tabs toc.toml does not list leave tab-order sync alone:")
+    ws = root / "toc2-ws"
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "toc.toml").write_text(
+        '[[chapter]]\nfile = "a.md"\n\n[[chapter]]\nfile = "new.md"\n'
+        '\n[[chapter]]\nfile = "z.md"\n')
+    for name in ("a.md", "new.md", "z.md", "extra.md"):
+        (ms / name).write_text(f"# {name}\n\nBody.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-c"
+    for name in ("a.md", "new.md", "z.md", "extra.md", "gone.md"):
+        links[name] = {"tab_id": f"tab-{name}", "checked_out": True}
+    # The base predates new.md; a push appended new.md's tab after z.md;
+    # extra.md and gone.md have tabs but no toc.toml entry.
+    links["_tab_structure"] = [["a.md", None], ["z.md", None]]
+    gdocs._save_mapping(db, manuscript, meta)
+    stub = _TabTreeStub(["a.md", "z.md", "new.md", "extra.md", "gone.md"])
+    got = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("no conflict: the push moves new.md to its toc.toml place",
+          got.get("moved", 0) >= 1 and "skipped" not in got
+          and stub.children[:3] == ["a.md", "new.md", "z.md"],
+          f"{got} {stub.children}")
+    again = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("the next push finds the order in sync",
+          again.get("insync") is True, str(again))
+    stub.children = ["z.md", "a.md", "new.md", "extra.md", "gone.md"]
+    (ms / "toc.toml").write_text(
+        '[[chapter]]\nfile = "new.md"\n\n[[chapter]]\nfile = "a.md"\n'
+        '\n[[chapter]]\nfile = "z.md"\n')
+    both = gdocs.sync_tab_structure(db, manuscript, stub)
+    check("a real two-sided reorder is still a conflict",
+          "also changed (conflict)" in both.get("skipped", ""), str(both))
 
 
 # ------------------------------------------------------------------ H
@@ -746,6 +861,7 @@ def main_test() -> None:
         list_and_join(root)
         spacing_join(root)
         toc_conflict(root)
+        toc_doc_only_tabs(root)
         run_tests_script(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)

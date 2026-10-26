@@ -1780,6 +1780,37 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     return new_tree
 
 
+def _toc_listed_view(doc_pairs: list, desired: list,
+                     base: list | None) -> tuple[list, list | None]:
+    """The push side's view of the tab tree: only the tabs toc.toml
+    lists. A tab toc.toml does not list (a file pushed before it had an
+    entry, or one retired locally whose tab remains) has no place a push
+    could move it to; it is the pull's to adopt. Counting it made every
+    push report a two-sided conflict, because no push could ever bring
+    the Doc and toc.toml into agreement (SpiritualHindu, 2026-10-25).
+    A file new since the base whose tab a push appended is no author
+    move either: it joins the base at the Doc's position, so the push
+    then moves it to its toc.toml place.
+
+    Applies only when every unlisted tab trails the listed ones, so the
+    sibling indexes a move uses are unchanged; otherwise the full tree
+    is compared, as before."""
+    listed = {n for n, _ in desired}
+    positions = [i for i, (n, _) in enumerate(doc_pairs) if n in listed]
+    unlisted = [i for i, (n, _) in enumerate(doc_pairs) if n not in listed]
+    if unlisted and positions and min(unlisted) < max(positions):
+        return doc_pairs, base
+    view = [(n, p if p in listed else None)
+            for n, p in doc_pairs if n in listed]
+    if base is None:
+        return view, None
+    in_base = {n for n, _ in base}
+    base_view = ([(n, p if p in listed else None)
+                  for n, p in base if n in listed]
+                 + [x for x in view if x[0] not in in_base])
+    return view, base_view
+
+
 def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     """Push direction of the TOC↔tab sync: reposition/re-parent the master
     Doc's tabs to match toc.toml. Applies only when the Doc side hasn't
@@ -1820,6 +1851,7 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
                if n in linked and not is_sidecar(n)]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
+    doc_pairs, base = _toc_listed_view(doc_pairs, desired, base)
     state = classify_structure(doc_pairs, desired, base)
     if state == "insync":
         links["_tab_structure"] = [list(x) for x in doc_pairs]
@@ -4625,22 +4657,6 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     local_md = _strip_embeds(normalize_markdown(
         (bridge.root / relpath).read_text(encoding="utf-8")))
 
-    # Forms whose verdict is already in the record (cleaned/declined) but
-    # which still stand in the tab are not pending threads: take them out
-    # in place first, so the paragraph diff below neither stops on their
-    # markers nor miscounts the tab's paragraphs (it-459f2c04ef77). The
-    # base is left for this push to record.
-    settled = settled_form_outcomes(db, mid, relpath)
-    news = form_news(db, mid, relpath)
-    if settled or news:
-        faults = settle_forms_in_tab(
-            db, manuscript, relpath, settled, docs_service, bridge=bridge,
-            record_base=False, remnants=news)
-        if faults:
-            raise LookupError(
-                f"diff push: settled forms could not be taken out of "
-                f"{relpath}'s tab in place ({'; '.join(faults)})")
-
     # Same boundary set and positional order pull_doc/reconcile use — every
     # live tab title, not just mapped essay files, is a split boundary; a
     # tab that follows this one in the export but isn't recognized would
@@ -4661,20 +4677,54 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         return md, paras, _split_hard_breaks(
             _md_units(md), [d["text"] for d in paras])
 
-    anchors: list[dict] | None = None
-    healed = False
-    for attempt in (1, 2):
-        tab_md, doc_paras, tab_paras = read_tab()
-        if len(doc_paras) != len(tab_paras) and not healed:
+    def read_tab_healed(healed: bool) -> tuple[str, list[dict], list[str],
+                                               bool]:
+        """`read_tab`, after re-applying spacing once when the Doc's
+        paragraphs and the export's disagree in number. Spacing is style
+        only, the standard every content write imposes."""
+        md, paras, units = read_tab()
+        if len(paras) != len(units) and not healed:
             # A tab left without paragraph spacing (an earlier push that
             # failed before spacing was applied, or a hand edit) exports
-            # joined paragraphs no alignment can always undo. Spacing is
-            # style only, the standard every content write imposes; apply
-            # it and read again before judging the tab.
+            # joined paragraphs no alignment can always undo.
             apply_tab_spacing(docs_service, master_id, tab_id,
                               doc_spacing(manuscript))
             healed = True
-            tab_md, doc_paras, tab_paras = read_tab()
+            md, paras, units = read_tab()
+        return md, paras, units, healed
+
+    def disagreement(paras: list[dict], units: list[str]) -> LookupError:
+        return LookupError(
+            f"diff push: tab structure and export disagree "
+            f"({len(paras)} vs {len(units)} paragraphs)"
+            + divergence_note([d["text"] for d in paras], units, relpath))
+
+    healed = False
+
+    # Forms whose verdict is already in the record (cleaned/declined) but
+    # which still stand in the tab are not pending threads: take them out
+    # in place first, so the paragraph diff below neither stops on their
+    # markers nor miscounts the tab's paragraphs (it-459f2c04ef77). The
+    # base is left for this push to record.
+    settled = settled_form_outcomes(db, mid, relpath)
+    news = form_news(db, mid, relpath)
+    if settled or news:
+        # Validation precedes every text write, this one included: a tab
+        # whose structure the export does not explain is left untouched.
+        _md0, paras0, units0, healed = read_tab_healed(healed)
+        if len(paras0) != len(units0):
+            raise disagreement(paras0, units0)
+        faults = settle_forms_in_tab(
+            db, manuscript, relpath, settled, docs_service, bridge=bridge,
+            record_base=False, remnants=news)
+        if faults:
+            raise LookupError(
+                f"diff push: settled forms could not be taken out of "
+                f"{relpath}'s tab in place ({'; '.join(faults)})")
+
+    anchors: list[dict] | None = None
+    for attempt in (1, 2):
+        tab_md, doc_paras, tab_paras, healed = read_tab_healed(healed)
         canonical = [threads_mod.strip_pending(p)[0].strip("\n")
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_units(local_md)]
@@ -4691,11 +4741,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             return {"relpath": relpath, "mode": "diff", "ops": 0}
 
         if len(doc_paras) != len(tab_paras):
-            raise LookupError(
-                f"diff push: tab structure and export disagree "
-                f"({len(doc_paras)} vs {len(tab_paras)} paragraphs)"
-                + divergence_note([d["text"] for d in doc_paras],
-                                  tab_paras, relpath))
+            raise disagreement(doc_paras, tab_paras)
 
         # Replaces use <<old>>{{new}}; critique insertions are {{new}}
         # alone — both block any overlapping surgical edit, whole push,
