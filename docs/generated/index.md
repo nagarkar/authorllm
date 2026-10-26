@@ -752,6 +752,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
 
+## `tests.test_signature_tag`
+
+`authorlm/tests/test_signature_tag.py`
+
+The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
