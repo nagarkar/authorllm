@@ -5688,7 +5688,17 @@ def cmd_audio(args):
         if args.action == "stitch":
             from . import generation
             if not rest:
-                raise SystemExit("usage: audio stitch <chapter>")
+                raise SystemExit("usage: audio stitch <chapter> [--preview [--json]]")
+            if args.preview:
+                result = generation.stitch_preview(
+                    manuscript, rest[0],
+                    progress=None if args.json else (lambda m: print(ui.dim(f"  {m}"))))
+                if args.json:
+                    import json as _json
+                    print(_json.dumps(result))
+                else:
+                    print(result["path"])
+                return
             result = generation.stitch(manuscript, rest[0],
                                        progress=lambda m: print(ui.dim(f"  {m}")))
             dur = result["durationSecs"]
@@ -9701,6 +9711,8 @@ def build_parser() -> argparse.ArgumentParser:
                "has a take (paid)\n"
                "  audio stitch becker                one file, ffmpeg, "
                "loudness-normalised (free)\n"
+               "  audio stitch becker --preview [--json]   the free stand-in "
+               "narration from say previews\n"
                "  audio preview becker | --all       the free listen: macOS "
                "say, respellings substituted, one mp3 per paragraph\n"
                "  audio serve [--port 8792] [--no-open]   the review page on "
@@ -9723,6 +9735,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="serve: do not open the browser")
     p.add_argument("--force", action="store_true",
                    help="preview: re-render even where a preview exists")
+    p.add_argument("--preview", action="store_true",
+                   help="stitch: join the chapter's free macOS say previews "
+                        "(rendering any missing) into _audio/preview/chapters/"
+                        "<stem>.mp3 with a <stem>.sections.json timing sidecar")
+    p.add_argument("--json", action="store_true",
+                   help="stitch --preview: print {path, duration_s, sections, rendered}")
     p.add_argument("--remaining", action="store_true",
                    help="generate: every paragraph of the chapter without a take")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",

@@ -1515,6 +1515,18 @@ while one plays, and a change of `[preview]` voice or rate clears every
 preview (`_audio/preview/.voice` records what they were made with). Bulk
 `audio preview` is only for listening offline.
 
+**The free stand-in narration** (owner, 2026-10-26, for podlm monologue
+prototypes). `authorlm audio stitch <stem> --preview [--json] -m <ms>`
+renders the chapter's missing previews (the rule above; macOS `say`
+only, never ElevenLabs, so it spends nothing), then joins them in
+manifest order with each silence section's duration into
+`_audio/preview/chapters/<stem>.mp3` (44.1 kHz mono, 128 kbps,
+single-pass loudnorm). Beside it, `<stem>.sections.json` gives each
+speech section's `id`, source `line`, `text`, `start_s` and `end_s` in
+the stitched file, counted in samples. Prints the path; `--json` prints
+`{path, duration_s, sections, rendered}`. Run `audio export` first so
+the manifest matches the text.
+
 **The page — the author's surface, on the Mac and the phone.** Run
 `authorlm audio serve -m <ms> --no-open` in the background from Bash
 (fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
