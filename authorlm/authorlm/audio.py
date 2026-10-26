@@ -28,6 +28,9 @@ uses for one optional lookup (the dictionary version by name) and the
 audition / dictionary verbs use deliberately.
 
 Decisions:
+- Mac say previews and export do not require an ElevenLabs Voice ID;
+  paid synthesis does. Explicit cast roles remain required. Enforced by
+  tests/test_audio_preview_without_paid_voice.py. (owner)
 - Export resolves explicitly configured per-paragraph voices from the manuscript's
   `_audio/audiobook.toml` and cast into the shared manifest; both consumers
   use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in
@@ -681,13 +684,19 @@ def _resolve_voice(cast: dict[str, dict], key: str, overrides: dict,
             f"{where}: cast key '{key}' is not a row in {AUDIO_DIR}/"
             f"{CAST_FILENAME} (rows: {', '.join(sorted(cast)) or 'none'})")
     row = cast[key]
-    if not row["voice_id"]:
-        raise AudioError(f"{where}: cast '{key}' has no Voice ID yet — "
-                         "audition one and `audio cast set` it")
     voice = dict(row)
     voice.update(overrides)
     voice["key"] = key
     return voice
+
+
+def require_paid_voice(voice_id: str, cast_key: str) -> None:
+    """Validate the paid provider's prerequisite without blocking free previews."""
+    if not voice_id.strip():
+        raise AudioError(
+            f"cast '{cast_key}' has no ElevenLabs Voice ID for paid synthesis; "
+            f"select one with 'audio cast set {cast_key} --voice-id ID', "
+            "then run 'audio export'. Mac say previews need no ElevenLabs voice.")
 
 
 def chapter_sections(name: str, source: str, config: dict,
@@ -1479,6 +1488,7 @@ class ElevenLabs:
         """One render. The neighbour request ids are request stitching
         (pipeline §8): at most three each, honoured for two hours, not
         on v3 — the caller decides what to send."""
+        require_paid_voice(voice["voice_id"], voice.get("key", "selected voice"))
         body: dict = {"text": text, "model_id": voice["model"],
                       "voice_settings": {"stability": voice["stability"],
                                          "similarity_boost": voice["similarity"],

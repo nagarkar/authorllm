@@ -313,6 +313,7 @@ def build_request(book: dict, chapter: dict, state: dict, section_id: str,
     speech = next((s for s in speech_of(chapter) if s["id"] == section_id), None)
     if speech is None:
         raise AudioError(f"section {section_id} is not speech in {chapter.get('stem')}")
+    audio.require_paid_voice(speech["voiceId"], speech["cast"])
     now = now or datetime.now(timezone.utc)
     prev, nxt = neighbours(chapter, section_id)
     stitchable = not speech["model"].startswith("eleven_v3")
@@ -408,6 +409,10 @@ def generate(manuscript: dict, stem: str, spec: str | None = None,
     book = load_book(root)
     chapter = load_chapter(root, book, stem)
     p = plan(root, book, chapter, spec, remaining, retake)
+    selected_ids = set(p["ids"])
+    for speech in speech_of(chapter):
+        if speech["id"] in selected_ids:
+            audio.require_paid_voice(speech["voiceId"], speech["cast"])
     result = {"stem": stem, "quality": p["quality"], "characters": p["characters"],
               "planned": [{"id": sid, "ordinal": ordinal_of(chapter, sid),
                            "characters": len(next(s["text"] for s in speech_of(chapter)
