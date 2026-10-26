@@ -1531,7 +1531,9 @@ def check_audiobook_page() -> None:
         verdicts = {}
         try:
             for state in ("doc_ahead", "conflict", "local_ahead", "unchanged"):
-                gdocs.doc_three_way = lambda *a, _st=state, **k: {"state": _st}
+                gdocs.doc_three_way = lambda *a, _st=state, **k: {
+                    "state": _st, "base": "a\n\nb\n", "local": "a\n\nb local\n",
+                    "doc": "a doc\n\nb\n"}
                 try:
                     gdocs._refuse_doc_changed(s.db, s.manuscript,
                                               gdocs.manuscript_bridge(s.manuscript),
@@ -1541,6 +1543,21 @@ def check_audiobook_page() -> None:
                     verdicts[state] = "refused"
         finally:
             gdocs.doc_three_way = real_three
+        gdocs.doc_three_way = lambda *a, **k: {
+            "state": "conflict", "base": "a\n\nb\n\nc\n",
+            "doc": "a doc\n\nb\n\nc\n", "local": "a doc\n\nb\n\nc local\n"}
+        try:
+            gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                      gdocs.manuscript_bridge(s.manuscript),
+                                      "kindness.md", None, None)
+            verdicts["merged"] = "passes"
+        except gdocs.DocChanged:
+            verdicts["merged"] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        merged_ok = verdicts.pop("merged")
+        check("a file the Doc's edits were merged into is let through",
+              merged_ok == "passes", merged_ok)
         check("the guard refuses a moved tab and passes a local-only change",
               verdicts == {"doc_ahead": "refused", "conflict": "refused",
                            "local_ahead": "passes", "unchanged": "passes"}, str(verdicts))

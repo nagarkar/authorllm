@@ -1795,8 +1795,17 @@ def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
         return
     view = doc_three_way(db, manuscript, relpath, service, docs_service,
                          bridge=bridge)
-    if view["state"] in ("doc_ahead", "conflict"):
-        raise DocChanged(f"{relpath}: {DOC_CHANGED}")
+    if view["state"] not in ("doc_ahead", "conflict"):
+        return
+    # A file the Doc's edits were already merged into (`doc merge`, then
+    # the draft copied over the file) pushes: merging the Doc into it
+    # again changes nothing, so nothing of the Doc's would be lost.
+    if view["base"] is not None:
+        merged, conflicts = merge3(view["local"], view["base"], view["doc"],
+                                   relpath)
+        if not conflicts and merged == view["local"]:
+            return
+    raise DocChanged(f"{relpath}: {DOC_CHANGED}")
 
 
 def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
@@ -2222,33 +2231,19 @@ def unified(a: str, b: str, from_name: str, to_name: str) -> str:
         tofile=to_name, lineterm=""))
 
 
-def doc_merge(db: Database, manuscript: dict, query: str, service,
-              docs_service, out=None,
-              bridge: "DocBridge | None" = None) -> dict:
-    """Three-way merge of the local file and its tab against the pushed
-    base (`git merge-file -p`, labels local/base/doc), written to `out`
-    (default `_drafts/<stem>.merged.md` under the manuscript, which
-    observation ignores). Never pushes, never writes the manuscript file.
-    Returns {relpath, state, out, conflicts: [line number of each
-    conflict region's '<<<<<<< local' line]}."""
+def merge3(local: str, base: str, doc: str,
+           relpath: str = "") -> tuple[str, list[int]]:
+    """`git merge-file -p` of local and doc against base (labels
+    local/base/doc): the merged text and the line of each conflict
+    region's '<<<<<<< local' marker."""
     import subprocess
     import tempfile
 
-    bridge = bridge or manuscript_bridge(manuscript)
-    view = doc_three_way(db, manuscript, query, service, docs_service,
-                         bridge=bridge)
-    relpath = view["relpath"]
-    if view["base"] is None:
-        raise LookupError(
-            f"no pushed base for {relpath}: no saved version hashes to its "
-            f"pushed_hash ({view['base_hash'] or 'none recorded'}), so there "
-            f"is nothing to merge against. Compare the sides and settle by "
-            f"hand: authorlm doc diff {relpath}")
     with tempfile.TemporaryDirectory(prefix="authorlm-merge-") as tmp:
         names = {}
-        for side in ("local", "base", "doc"):
+        for side, text in (("local", local), ("base", base), ("doc", doc)):
             names[side] = Path(tmp) / side
-            names[side].write_text(view[side], encoding="utf-8")
+            names[side].write_text(text, encoding="utf-8")
         try:
             run = subprocess.run(
                 ["git", "merge-file", "-p", "-L", "local", "-L", "base",
@@ -2263,8 +2258,31 @@ def doc_merge(db: Database, manuscript: dict, query: str, service,
         raise LookupError(f"git merge-file failed ({run.stderr.strip()}). "
                           f"authorlm doc diff {relpath}")
     merged = run.stdout
-    conflicts = [i for i, line in enumerate(merged.splitlines(), 1)
-                 if line.startswith("<<<<<<< local")]
+    return merged, [i for i, line in enumerate(merged.splitlines(), 1)
+                    if line.startswith("<<<<<<< local")]
+
+
+def doc_merge(db: Database, manuscript: dict, query: str, service,
+              docs_service, out=None,
+              bridge: "DocBridge | None" = None) -> dict:
+    """Three-way merge of the local file and its tab against the pushed
+    base (`git merge-file -p`, labels local/base/doc), written to `out`
+    (default `_drafts/<stem>.merged.md` under the manuscript, which
+    observation ignores). Never pushes, never writes the manuscript file.
+    Returns {relpath, state, out, conflicts: [line number of each
+    conflict region's '<<<<<<< local' line]}."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    view = doc_three_way(db, manuscript, query, service, docs_service,
+                         bridge=bridge)
+    relpath = view["relpath"]
+    if view["base"] is None:
+        raise LookupError(
+            f"no pushed base for {relpath}: no saved version hashes to its "
+            f"pushed_hash ({view['base_hash'] or 'none recorded'}), so there "
+            f"is nothing to merge against. Compare the sides and settle by "
+            f"hand: authorlm doc diff {relpath}")
+    merged, conflicts = merge3(view["local"], view["base"], view["doc"],
+                               relpath)
     target = (Path(out) if out else
               bridge.root / "_drafts" / f"{Path(relpath).stem}.merged.md")
     target.parent.mkdir(parents=True, exist_ok=True)
