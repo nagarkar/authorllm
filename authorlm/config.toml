@@ -112,6 +112,9 @@ temperature = "vendor-default"
 # summarizer_model (Luna), the ruling's fallback if a recorded trial finds
 # flash too thin. Ledger purpose `summaries.paragraph`.
 paragraph_model = "gemini/gemini-3.1-flash-lite"
+# Section summaries (§3.3, ruling 5) run on [critique] summarizer_model
+# (Luna); `section_model = "…"` here would override it. Ledger purpose
+# `summaries.section`.
 # The model takes no temperature parameter (its MODEL_PROFILES row).
 temperature = "vendor-default"
 

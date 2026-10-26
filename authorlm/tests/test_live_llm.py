@@ -365,6 +365,66 @@ def section_paragraph_records(ctx: dict) -> None:
           len(lines) == 1 and "LLM:" in lines[0], str(lines))
 
 
+SECTION_MODEL = "openai/gpt-5.6-luna"
+
+
+def section_section_summary(ctx: dict) -> None:
+    """summaries.ensure(level="section") on Luna (summary-hierarchy
+    design §11.3): the paragraph level replays its recording, then one
+    section call writes the four labels and places every body paragraph
+    in exactly one move. Same fixture and workspace layout as the
+    paragraph section, so that level's payload hashes the same."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "sections-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    config = {"llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+              "summaries": {"paragraph_model": PARAGRAPH_MODEL},
+              "critique": {"summarizer_model": SECTION_MODEL}}
+    llms = sums.clients(config)
+    check("the section client is Luna, purpose summaries.section",
+          llms["section"].model == SECTION_MODEL
+          and llms["section"].purpose == "summaries.section")
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llms, level="section",
+                         echo=lines.append)
+    for line in lines:
+        print(f"   {line}")
+    check("one paragraph call (replayed) and one section call",
+          report["paragraph"]["calls"] == 1 and report["calls"] == 1
+          and report["sections"] == 1 and not report["skipped"], str(report))
+    unit = sums.for_unit(db, manuscript, "distinction.md")
+    body = [s for s in unit["sections"] if s["heading"] == "## The Field"][0]
+    summary = body["summary"]
+    print(f"   {summary}")
+    check("the four labels, in order",
+          [summary.index(lb + ":") for lb in sums.SECTION_LABELS]
+          == sorted(summary.index(lb + ":") for lb in sums.SECTION_LABELS),
+          summary)
+    check("MOVES places every body paragraph exactly once (no miss reported)",
+          not report["misses"], str(report["misses"]))
+    low, high = sums.section_target_length(
+        "\n\n".join(p["text"] for p in sums.sections_of(SAMPLE_RECORDS)[1]
+                    ["paragraphs"]))
+    # On a ~100-word section the four labels and one line per move are a
+    # fixed cost the n/7.5 formula does not see; the check is that the
+    # model did not balloon, not that it hit a 30-40 window.
+    n = len(summary.split())
+    check(f"length within twice the {low}-{high} target", n <= 2 * high,
+          f"{n} words")
+    check("POINT is in the author's terms",
+          "Field" in sums.point_of(summary), sums.point_of(summary))
+    check("two cost lines, one per level", len(lines) == 2
+          and "paragraph level" in lines[0] and "section level" in lines[1],
+          str(lines))
+
+
 # Order matters (the narrative), but 'extraction' is handled separately in
 # main_test() because it owns the one `init` call every other section also
 # needs (manuscript registration) — see main_test()'s bootstrap comment.
@@ -375,6 +435,7 @@ SECTIONS: list[tuple[str, "object"]] = [
     ("episode", section_episode),
     ("beat-draft", section_beat_draft),
     ("paragraph-records", section_paragraph_records),
+    ("section-summary", section_section_summary),
 ]
 SECTION_NAMES = ["extraction"] + [name for name, _ in SECTIONS]
 
