@@ -341,7 +341,13 @@ class TriageAppTest(unittest.TestCase):
                             "concept", "add", "Legacy", option, "definition",
                         ])
 
-    def test_deterministic_plan_is_pure_and_uses_system_provenance(self):
+    def test_deterministic_plan_reads_absence_as_below_the_bar(self):
+        """`concept_unmentioned` and `edge_unmentioned_endpoint` are gone
+        (docs/extraction-redesign.md §9 phase 6): the redesigned
+        extraction grounds every candidate in a span (gate 1), and a
+        pending name with zero contexts is simply below the recurrence bar.
+        The edge on it has no rule of its own any more; it falls with the
+        concept, as collateral."""
         db, manuscript, choice, field, _ = self.fixture()
         self.settle_fixture_concepts(db, choice, field)
         ghost = self.add_pending_concept(db, manuscript, "Spectral Machinery")
@@ -350,30 +356,30 @@ class TriageAppTest(unittest.TestCase):
 
         plan = triage_rules.plan(db, manuscript, files)
 
+        self.assertNotIn("concept_unmentioned", triage_rules.RULES)
+        self.assertNotIn("edge_unmentioned_endpoint", triage_rules.RULES)
         self.assertEqual(
-            {item["rule"] for item in plan["decisions"]},
-            {"concept_unmentioned", "edge_unmentioned_endpoint"})
-        self.assertNotEqual(db.one(
-            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
-        )["status"], "retired")
+            [(item["rule"], item["object_id"]) for item in plan["decisions"]],
+            [("concept_below_recurrence_bar", ghost["id"])])
+        self.assertIn("0 context(s)", plan["decisions"][0]["reason"])
         self.assertEqual(db.one(
             "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
         )["status"], "inferred")
 
         result = triage.apply_deterministic(db, manuscript, plan["decisions"])
 
-        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["count"], 1)
         self.assertEqual(db.one(
             "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
         )["status"], "retired")
         self.assertEqual(db.one(
             "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
-        )["status"], "rejected")
+        )["status"], "retired")
         evidence = db.all(
             "SELECT e.evidence_type, s.kind FROM evidence e "
             "JOIN sources s ON s.id = e.source_id ORDER BY e.created_at")
         self.assertEqual([(row["evidence_type"], row["kind"]) for row in evidence],
-                         [("deterministic_triage", "system")] * 2)
+                         [("deterministic_triage", "system")])
         self.assertNotIn("Spectral Machinery", triage_feedback(db, manuscript["id"]))
 
     def test_recommendation_transport_stages_without_applying(self):

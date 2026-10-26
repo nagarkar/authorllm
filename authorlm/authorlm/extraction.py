@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import adjudication, proposals, prompt_registry
+from . import proposals, prompt_registry
 from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, mention_pattern, node_names,
                        scan_realizations)
@@ -96,28 +96,16 @@ EDGES_ONLY_SYSTEM = (
 )
 
 
-def _prompt_locations(edges_only: bool, aliases_only: bool,
-                      adjudicated: bool) -> list[str]:
-    """`Prompt.location` (prompt_registry.py) of every prompt THIS pass
-    actually invoked — deterministic: reflects what ran, not what the
-    flags merely permit. `adjudicated` is True whenever the adjudication
-    CALL was made (opted in, and not an aliases-only pass) — including a
-    call that came back with nothing usable (model failure, malformed
-    reply, zero candidates). It is deliberately NOT gated on getting
-    verdicts back: the Sponsor asked to see the prompt "every time it
-    runs", not every time it succeeds — see `adjudication_empty` for the
-    distinct "ran but empty" signal. Always derived from the registry —
-    never a hardcoded filename — so a renamed/moved prompt is picked up
-    automatically, and the single source of truth keeps the CLI and MCP
-    surfaces (both of which just forward this list) from drifting apart."""
+def _prompt_locations(edges_only: bool, aliases_only: bool) -> list[str]:
+    """`Prompt.location` (prompt_registry.py) of the prompt THIS pass
+    invoked — derived from the registry, never a hardcoded filename, so
+    the CLI and MCP surfaces (both forward this list) cannot drift."""
     if edges_only:
         names = ["extraction-edges"]
     elif aliases_only:
         names = ["extraction-aliases"]
     else:
         names = ["extraction-legacy"]
-    if adjudicated:
-        names.append("adjudication-legacy")
     return [prompt_registry.by_name(name).location for name in names]
 
 
@@ -141,7 +129,7 @@ def _record_alias_fold_refused(db: Database, manuscript_id: str, a_node: dict,
 
     The read is not discarded, though: the extractor believing two live
     concepts share a name IS information, so it is logged the same way
-    `adjudication.py` logs what it screens out — system provenance
+    the per-essay adjudicator logs what it screens out — system provenance
     (`extraction_adjudication` is in SYSTEM_EVIDENCE_TYPES), auditable, but
     never queue."""
     row = ko_fields("ev")
@@ -687,7 +675,6 @@ def extract_concepts(
             "alias_retired_refused": 0,
             "truncated": False,
             "scope": scope_label, "prompt_files": [],
-            "adjudication_empty": False,
         }
         failed = False
         for payload in payloads:
@@ -711,8 +698,6 @@ def extract_concepts(
                         "alias_retired_refused"):
                 aggregate[key] += sub.get(key, 0)
             _merge_prompts(aggregate, sub)
-            aggregate["adjudication_empty"] = (
-                aggregate["adjudication_empty"] or sub.get("adjudication_empty", False))
         if commit_watermark and not failed and not aliases_only:
             _set_extraction_watermark(db, manuscript, latest_id)
         if failed:
@@ -796,7 +781,6 @@ def extract_concepts(
             "proposed": 0, "screened": 0, "alias_folds_refused": 0,
             "alias_retired_refused": 0,
             "truncated": False, "prompt_files": [],
-            "adjudication_empty": False,
         }
         failed = False
         for name in selected:
@@ -826,8 +810,6 @@ def extract_concepts(
                 aggregate[key] += sub.get(key, 0)
             aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
             _merge_prompts(aggregate, sub)
-            aggregate["adjudication_empty"] = (
-                aggregate["adjudication_empty"] or sub.get("adjudication_empty", False))
         aggregate["scope"] = (
             f"hierarchical: {len(selected)} file(s) in reading order, "
             f"one pass each (cap {max_chars} chars)"
@@ -885,30 +867,7 @@ def extract_concepts(
         # section eligible for retry.
         return None
 
-    # Step two, opt-in ([extraction] adjudicate): the candidates above are a
-    # first pass, not a verdict. Adjudication asks — once, for the whole
-    # batch — whether each one is a new concept, an improvement to an
-    # existing definition, already subsumed, or not a concept at all. Only
-    # survivors continue below, so every gate that follows still applies.
-    # With the flag off, `enabled` is False and nothing here runs.
     screened = improved = 0
-    # `adjudicated` marks that the CALL was made — not that it came back
-    # with anything usable. The Sponsor's own words: "as long as the
-    # adjudicator prompts are visible every time it runs, I'll be able to
-    # figure out if there is something wrong with the prompt" — "every
-    # time it runs", not "every time it succeeds". A run that adjudicated
-    # and got nothing back (model failure, malformed reply, zero
-    # candidates) is exactly the run they most need surfaced, so
-    # `adjudication.md` must still appear in `prompt_files` for it — see
-    # `adjudication_empty` below for the distinct "ran but empty" signal.
-    adjudicated = adjudication.enabled(llm) and not aliases_only
-    adjudication_empty = False
-    if adjudicated:
-        result, verdicts = adjudication.adjudicate(db, mid, llm, result, text)
-        if verdicts:
-            screened, improved = verdicts["screened"], verdicts["improves"]
-        else:
-            adjudication_empty = True
 
     # A retired concept stays retired: extraction may never resurrect what
     # the author rejected, even if the model proposes it again. But a
@@ -1247,8 +1206,7 @@ def extract_concepts(
         "screened": screened,
         "scope": scope,
         "truncated": truncated,
-        "prompt_files": _prompt_locations(edges_only, aliases_only, adjudicated),
-        "adjudication_empty": adjudication_empty,
+        "prompt_files": _prompt_locations(edges_only, aliases_only),
     }
 
 
@@ -2443,7 +2401,9 @@ def retired_at(db: Database, mid: str, node: dict) -> str:
 
 
 def revival_due(db: Database, manuscript: dict, node: dict,
-                files: dict[str, str]) -> dict | None:
+                files: dict[str, str], *,
+                ignore_proposals: set[str] | frozenset[str] = frozenset()
+                ) -> dict | None:
     """§4.10, the door a retired name may come back through, or None.
 
     The ban stays; it yields only to insistence. The name must clear the
@@ -2473,11 +2433,11 @@ def revival_due(db: Database, manuscript: dict, node: dict,
         {name: "\n\n".join(paras) for name, paras in fresh.items()}, names)
     if not admitted:
         return None
-    prior = db.one(
+    prior = next((r for r in db.all(
         "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? AND "
         "kind = 'revival' AND target = ? AND state != 'superseded' AND "
-        "created_at >= ? ORDER BY created_at DESC LIMIT 1",
-        (mid, node["id"], since))
+        "created_at >= ? ORDER BY created_at DESC",
+        (mid, node["id"], since)) if r["id"] not in ignore_proposals), None)
     if prior is not None:
         if prior["state"] != "dismissed":
             return None

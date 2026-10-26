@@ -1104,10 +1104,10 @@ def check_extraction_prompt_provenance() -> None:
           all(_on_disk(p.location) for p in pr.REGISTRY),
           str([p.location for p in pr.REGISTRY if not _on_disk(p.location)]))
 
-    # The old path reports its own prompts (the redesign's pipeline owns
-    # extraction.md / adjudication.md; these go with phase 6).
+    # The old path reports its own prompt (the redesign's pipeline owns
+    # extraction.md / adjudication.md; extraction-legacy goes when the old
+    # `extract_concepts` is retired).
     extraction_loc = pr.by_name("extraction-legacy").location
-    adjudication_loc = pr.by_name("adjudication-legacy").location
     edges_loc = pr.by_name("extraction-edges").location
     aliases_loc = pr.by_name("extraction-aliases").location
 
@@ -1146,34 +1146,7 @@ def check_extraction_prompt_provenance() -> None:
             def stats_line(self):
                 return None
 
-        class AdjudicatingLLM:
-            """Opts into adjudication and answers both LLM calls the pass
-            makes: extraction (plain payload) then adjudication (payload
-            starts with 'CANDIDATE ...', per adjudication._render_candidates)."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def __init__(self, concept_name: str):
-                self.config = {"extraction": {"adjudicate": True}}
-                self.concept_name = concept_name
-                self.calls = 0
-
-            def complete_json(self, system, user, thinking_budget=None):
-                self.calls += 1
-                if user.startswith("CANDIDATE"):
-                    return {"concepts": [
-                        {"name": self.concept_name, "verdict": "new"}],
-                            "links": []}
-                return {"concepts": [
-                    {"name": self.concept_name, "kind": "concept",
-                     "notes": "a definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        # --- (a)+(b): adjudication OFF — only extraction.md is reported,
-        # via the CLI surface (_run_extraction's printed output). ---
+        # --- the CLI surface (_run_extraction's printed output). ---
         (ms / "01-cli-off.md").write_text(two_context_paragraphs("CliOffConcept"))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1182,9 +1155,6 @@ def check_extraction_prompt_provenance() -> None:
         cli_off_out = buf.getvalue()
         check("CLI reports the extraction prompt file after a plain pass",
               f"Prompts: {extraction_loc}" in cli_off_out, cli_off_out)
-        check("CLI does NOT report adjudication.md when adjudication "
-              "never ran",
-              adjudication_loc not in cli_off_out, cli_off_out)
 
         # --- same scenario via MCP: adjudication OFF. ---
         (ms / "02-mcp-off.md").write_text(two_context_paragraphs("McpOffConcept"))
@@ -1203,112 +1173,6 @@ def check_extraction_prompt_provenance() -> None:
               mcp_off["ok"] is True
               and mcp_off["result"]["prompt_files"] == [extraction_loc],
               str(mcp_off))
-
-        # --- (b): adjudication ON, via CLI — both files listed. ---
-        (ms / "03-cli-on.md").write_text(two_context_paragraphs("CliOnConcept"))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(db, manuscript, AdjudicatingLLM("CliOnConcept"),
-                                       files=["03-cli-on.md"])
-        cli_on_out = buf.getvalue()
-        check("CLI reports BOTH extraction.md and adjudication.md when "
-              "adjudication actually ran",
-              f"Prompts: " in cli_on_out
-              and extraction_loc in cli_on_out
-              and adjudication_loc in cli_on_out,
-              cli_on_out)
-
-        # --- same scenario via MCP: adjudication ON — identical set. ---
-        (ms / "04-mcp-on.md").write_text(two_context_paragraphs("McpOnConcept"))
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_server._llm = lambda: AdjudicatingLLM("McpOnConcept")
-            mcp_on = mcp_server.extract_concepts(
-                files=["04-mcp-on.md"], manuscript="book")
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-            mcp_server._llm = prev_llm
-        check("MCP reports the same prompt set as the CLI when "
-              "adjudication ran (deterministic: reflects the actual run)",
-              mcp_on["ok"] is True
-              and set(mcp_on["result"]["prompt_files"])
-              == {extraction_loc, adjudication_loc},
-              str(mcp_on))
-
-        # --- CORRECTION (it-b6fd1a7e5ea0 follow-up): adjudication that
-        # RAN but came back with nothing usable (malformed reply here;
-        # zero candidates or a model failure hit the same `verdicts is
-        # None` path inside adjudication.adjudicate()) must still report
-        # adjudication.md. The Sponsor's own trade: "as long as the
-        # adjudicator prompts are visible every time it runs, I'll be
-        # able to figure out if there is something wrong with the
-        # prompt" — every time it RUNS, not every time it succeeds. ---
-        class AdjudicatingButEmptyLLM:
-            """Opts into adjudication; the adjudication call itself
-            returns a non-dict reply, so adjudication.adjudicate() comes
-            back with verdicts=None — exercising the 'ran but empty'
-            path, distinct from 'never ran'."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def __init__(self, concept_name: str):
-                self.config = {"extraction": {"adjudicate": True}}
-                self.concept_name = concept_name
-
-            def complete_json(self, system, user, thinking_budget=None):
-                if user.startswith("CANDIDATE"):
-                    return "not a dict"  # malformed adjudication reply
-                return {"concepts": [
-                    {"name": self.concept_name, "kind": "concept",
-                     "notes": "a definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        (ms / "07-empty.md").write_text(two_context_paragraphs("EmptyAdjConcept"))
-        empty_result = extraction.extract_concepts(
-            db, manuscript, AdjudicatingButEmptyLLM("EmptyAdjConcept"),
-            files=["07-empty.md"])
-        check("adjudication.md is reported even when the adjudication "
-              "call ran but returned nothing usable",
-              empty_result is not None
-              and adjudication_loc in empty_result["prompt_files"],
-              str(empty_result))
-        check("a run where adjudication ran but yielded nothing is "
-              "distinctly flagged (adjudication_empty), not silently "
-              "indistinguishable from a clean pass",
-              empty_result.get("adjudication_empty") is True,
-              str(empty_result))
-
-        (ms / "08-flag-off.md").write_text(two_context_paragraphs("FlagOffConcept"))
-        flag_off_result = extraction.extract_concepts(
-            db, manuscript, ExtractOnlyLLM("FlagOffConcept"),
-            files=["08-flag-off.md"])
-        check("adjudication_empty stays False when adjudication never "
-              "ran at all (flag off) — 'never ran' and 'ran but empty' "
-              "must stay distinguishable",
-              flag_off_result is not None
-              and flag_off_result.get("adjudication_empty") is False
-              and adjudication_loc not in flag_off_result["prompt_files"],
-              str(flag_off_result))
-
-        # --- same 'ran but empty' scenario via the CLI surface: the
-        # prompt still appears on the Prompts line, plus a distinct note. ---
-        (ms / "09-cli-empty.md").write_text(two_context_paragraphs("CliEmptyConcept"))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(
-                db, manuscript, AdjudicatingButEmptyLLM("CliEmptyConcept"),
-                files=["09-cli-empty.md"])
-        cli_empty_out = buf.getvalue()
-        check("CLI still lists adjudication.md when the call ran but "
-              "returned nothing usable",
-              adjudication_loc in cli_empty_out, cli_empty_out)
-        check("CLI surfaces a distinct note for 'ran but empty', so it "
-              "reads differently from a clean adjudicated pass",
-              "adjudication ran but the model returned nothing usable"
-              in cli_empty_out, cli_empty_out)
 
         # --- edges-only and aliases-only runs report THEIR prompt, not
         # the base 'extraction' one — the flags change which prompt the

@@ -225,8 +225,6 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
            if summary.get("ungrounded_links") else "")
         + (f"; {len(summary['below_bar'])} below the recurrence bar"
            if summary.get("below_bar") else "")
-        + (f"; adjudication screened out {summary['screened']} candidate(s) "
-           "before triage" if summary.get("screened") else "")
         + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
            "naming an already-live concept (would be a merge, not an "
            "alias — logged, not queued)"
@@ -242,10 +240,6 @@ def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
     )
     if summary.get("prompt_files"):
         print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
-    if summary.get("adjudication_empty"):
-        print(ui.yellow(
-            "note: adjudication ran but the model returned nothing usable "
-            "— worth checking authorlm/prompts/adjudication-legacy.md"))
     if summary.get("below_bar"):
         print(ui.dim(
             "Below the recurrence bar (single-context phrases, not "
@@ -6752,6 +6746,71 @@ def _extract_calibrate(db: Database, manuscript: dict, args,
         _report_llm(judge)
 
 
+def _extract_backup(db: Database) -> None:
+    """`extract backup` (docs/extraction-redesign.md §5.1): the WAL-safe
+    copy the migration is rolled back to."""
+    from . import extraction_migration as mig
+
+    path = mig.backup(db)
+    print(f"Backup written: {path}")
+
+
+def _extract_migrate(db: Database, manuscript: dict, args,
+                     config: dict) -> None:
+    """`extract migrate [--dry-run] [--gates-only] [--adjudicator M]
+    [--run ID] [--undo ID]` (docs/extraction-redesign.md §5.2-5.3, §5.6).
+    Not behind the [extraction] switch: the migration is what prepares
+    the graph for it."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+    from . import extraction_migration as mig
+
+    run_id = args.run or mig.DEFAULT_RUN
+    if args.undo:
+        report = mig.undo(db, manuscript, args.undo)
+        print(mig.render_undo(report))
+        return
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    prior = [r for r in ex.runs(db, manuscript)
+             if r.get("kind") == "migrate" and r.get("id") == run_id]
+    if prior and not args.dry_run:
+        sys.exit(f"error: migration run '{run_id}' is already recorded on "
+                 f"this manuscript — undo it first (extract migrate --undo "
+                 f"{run_id}) or name another with --run.")
+    judge = None
+    if not args.gates_only:
+        gated = mig.plan(db, manuscript, knob, run_id=run_id)
+        model = _extract_choose(config, knob, [], None, args,
+                                est=mig.estimate(gated, knob))
+        if model is None:
+            print("Stopped before any call; nothing was spent.")
+            return
+        judge = adj.adjudicator_llm(config, model)
+        if not judge.enabled:
+            sys.exit("error: the migration's adjudicator needs an LLM — "
+                     "[llm] enabled = true, and the model's key in .env (or "
+                     "--gates-only, which needs none).")
+    p = mig.plan(db, manuscript, knob, judge_llm=judge, run_id=run_id)
+    text = mig.render_plan(p)
+    if args.dry_run:
+        out = db.path.parent / f"extraction-migration-{run_id}-dry-run.txt"
+        out.write_text(text + "\n", encoding="utf-8")
+        print(text)
+        print(f"\nDry run: nothing written to the database. Report: {out}")
+        if judge is not None:
+            _report_llm(judge)
+        return
+    report = mig.apply(db, manuscript, p)
+    print(text)
+    print()
+    print(mig.render_report(report))
+    if judge is not None:
+        _report_llm(judge)
+
+
 def _extract_runs(db: Database, manuscript: dict) -> None:
     from . import extraction as ex
 
@@ -6761,7 +6820,12 @@ def _extract_runs(db: Database, manuscript: dict) -> None:
         return
     for e in entries:
         money = f"${e['cost']:.2f}" if e.get("cost") is not None else "cost ?"
-        if e.get("kind") == "calibrate":
+        if e.get("kind") in ("migrate", "migrate-undo"):
+            print(f"{e['started'][:16]}  {e['id']}  {e['kind']}  "
+                  f"{e.get('adjudicator') or 'gates only'}  "
+                  f"{json.dumps(e.get('report'))}"
+                  + ("  INCOMPLETE" if e.get("incomplete") else ""))
+        elif e.get("kind") == "calibrate":
             print(f"{e['started'][:16]}  {e['id']}  calibrate  "
                   f"{e.get('model')}  {e.get('units')} essay(s)  {money}  "
                   f"thresholds: {json.dumps(e.get('thresholds'))}")
@@ -6785,9 +6849,15 @@ def cmd_extract(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     action = args.target[0] if args.target and args.target[0] in (
-        "screened", "runs", "calibrate") else None
+        "screened", "runs", "calibrate", "backup", "migrate") else None
     if action == "calibrate":
         _extract_calibrate(db, manuscript, args, _load_config(args))
+        return
+    if action == "backup":
+        _extract_backup(db)
+        return
+    if action == "migrate":
+        _extract_migrate(db, manuscript, args, _load_config(args))
         return
     if action == "screened":
         _extract_screened(db, manuscript, args)
@@ -9895,7 +9965,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="manuscript file(s); none = the sections changed "
                         "since the last extraction. Or: 'screened <file>' "
                         "(what the per-essay ceiling held back), 'runs', "
-                        "'calibrate [--replay [file…]]'")
+                        "'calibrate [--replay [file…]]', 'backup', "
+                        "'migrate [--dry-run] [--undo ID]'")
     p.add_argument("--section", default=None,
                    help="one section of the file: its number ('3', '3.2' "
                         "for a part) or its heading's text")
@@ -9915,6 +9986,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the per-essay adjudicator's model for this run — "
                         "answers the run-time question non-interactively "
                         "(ruling §0.2)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with 'migrate': plan and report, write nothing")
+    p.add_argument("--run", default=None, metavar="ID",
+                   help="with 'migrate': the run id its rows are tagged "
+                        "with (default migration-1)")
+    p.add_argument("--undo", default=None, metavar="ID",
+                   help="with 'migrate': reverse the migration run ID")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("guide", help="generate editorial guidance (or abstain)")

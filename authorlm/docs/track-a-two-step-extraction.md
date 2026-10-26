@@ -1,5 +1,11 @@
 # Track A — Two-step extraction: cut the author's triage burden
 
+> **Superseded 2026-10-25** by `extraction-redesign.md` (ratified; phases 1-5
+> built). The opt-in adjudication pass this document describes
+> (`adjudication.py`, `[extraction] adjudicate`) was retired in phase 6; its
+> successor is the per-essay adjudicator of §4.5 there. Kept as the record of
+> the measurements in §1 and §4.
+
 Branch `design/track-a`. Opt-in behind `[extraction] adjudicate`, **default off**.
 The Sponsor's governing principle throughout: *the point is not to create more work
 for the author.*
