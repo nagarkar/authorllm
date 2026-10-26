@@ -30,7 +30,6 @@ from .briefing import build_briefing
 from . import beliefs as bel_mod
 from . import paths as paths_mod
 from .db import Database, ko_fields, loads
-from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions
@@ -176,93 +175,6 @@ def _report_llm(llm: LLMClient) -> None:
         print(ui.dim(line))
 
 
-def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
-                    files: list[str] | None = None, full: bool = False,
-                    edges_only: bool = False, aliases_only: bool = False) -> None:
-    """Collect the current text (if new) and bootstrap the Concept Graph."""
-    before = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
-    version = collect_revision(db, manuscript, session_id=None, source="extract")
-    if version:
-        detect_transitions(db, manuscript["id"], dict(before) if before else None, version)
-        print(f"Collected revision v{version['version_no']}.")
-    print("Extracting concepts and relationships with the LLM…")
-    summary = extract_concepts(db, manuscript, llm, files=files, full=full,
-                               edges_only=edges_only, aliases_only=aliases_only)
-    if summary is None:
-        print("Extraction produced nothing (LLM unavailable or empty manuscript); "
-              "the graph is unchanged.")
-        _report_llm(llm)
-        return
-    if summary.get("up_to_date"):
-        print("Nothing new since the last extraction — everything is already "
-              "processed. Use 'extract --full' to reprocess the whole "
-              "manuscript, or name files: extract <file>…")
-        return
-    print(ui.dim(f"Scope: {summary['scope']}."))
-    if summary.get("truncated"):
-        print(ui.yellow(
-            "warning: text exceeded the extraction size limit and was "
-            "truncated — run extraction file-by-file to cover everything: "
-            "extract <file>"
-        ))
-    print(
-        f"Extracted {len(summary['nodes'])} new concept(s) and "
-        f"{len(summary['edges'])} inferred relationship(s)"
-        + (f"; skipped {summary['skipped_malformed']} malformed item(s)"
-           if summary.get("skipped_malformed") else "")
-        + (f"; {summary['skipped_unknown_relation']} relationship(s) named an "
-           "unrecognized relation" if summary.get("skipped_unknown_relation") else "")
-        + (f"; {summary['skipped_unknown_endpoint']} relationship(s) named an "
-           "unknown concept" if summary.get("skipped_unknown_endpoint") else "")
-        + (f"; suppressed {summary['suppressed']} previously-rejected concept(s)"
-           if summary.get("suppressed") else "")
-        + (f"; dropped {summary['ungrounded_links']} ungrounded link(s) "
-           "(endpoint not in the mined text)"
-           if summary.get("ungrounded_links") else "")
-        + (f"; {len(summary['below_bar'])} below the recurrence bar"
-           if summary.get("below_bar") else "")
-        + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
-           "naming an already-live concept (would be a merge, not an "
-           "alias — logged, not queued)"
-           if summary.get("alias_folds_refused") else "")
-        + (f"; refused {summary['alias_retired_refused']} alias proposal(s) "
-           "naming a retired concept (would re-enter a banned name — "
-           "logged, not queued)"
-           if summary.get("alias_retired_refused") else "")
-        + (f"; refused {len(summary['materiality_refused'])} note update(s) "
-           "below the materiality floor"
-           if summary.get("materiality_refused") else "")
-        + "."
-    )
-    if summary.get("prompt_files"):
-        print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
-    if summary.get("below_bar"):
-        print(ui.dim(
-            "Below the recurrence bar (single-context phrases, not "
-            "admitted; self-healing on a future mention): "
-            + ", ".join(f"'{n}'" for n in summary["below_bar"])))
-    if summary.get("materiality_refused"):
-        print(ui.dim(
-            "Note updates below the materiality floor (case/whitespace-only "
-            "or >=0.90 similarity — not queued): "
-            + ", ".join(f"'{n}'" for n in summary["materiality_refused"])))
-    if summary.get("proposed"):
-        print(ui.yellow(
-            f"{summary['proposed']} proposal(s) against settled knowledge — "
-            "new material conflicts with earlier judgments. Review: proposal review"
-        ))
-    for node in summary["nodes"]:
-        print(f"  • {node['name']} ({node['kind']})")
-    if summary["edges"]:
-        print("Relationships are hypotheses awaiting your confirmation "
-              "(see 'concept list' / next briefing).")
-    _report_llm(llm)
-
-
 def cmd_init(args):
     db = _open_db(args)
     path = Path(args.path).resolve()
@@ -283,18 +195,13 @@ def cmd_init(args):
           + (f" {pin['image_size']}" if pin["image_size"] else "")
           + f" → {_illus.ILLUS_DIR}/{_illus.PIN_FILE} (stamped from "
           "config.toml [illustrations]; owned by the manuscript from now on)")
-    from .extraction import extraction_enabled
-
-    llm = LLMClient(_load_config(args))
-    if not extraction_enabled(_load_config(args)):
-        print(ui.dim("Concept extraction is off ([extraction] enabled = "
-                     "false); the graph grows by 'concept add' only."))
-    elif args.extraction == "off":
+    if args.extraction == "off":
         print(ui.dim("Concept extraction is off for this manuscript "
                      "(--extraction off); 'manuscript set --extraction on' "
                      "turns it back on."))
-    elif llm.enabled and not args.no_extract:
-        _run_extraction(db, row, llm)
+    else:
+        print(ui.dim("The Concept Graph is mined on request: 'authorlm "
+                     "extract --native' when you want a fresh one."))
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
 
 
@@ -3162,12 +3069,7 @@ def _print_collect_report(report):
                          f"{what}."))
     if report.get("media"):
         _print_media_not_ready(report["media"])
-    if report.get("auto_analysis"):
-        aa = report["auto_analysis"]
-        print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
-                     f"{aa['new_edges']} new relationship(s), "
-                     f"{aa['proposed']} proposal(s)."))
-    elif report["extract_hint"]:
+    if report["extract_hint"]:
         print(ui.dim(f"{report['new_paragraphs']} new/rewritten paragraph(s) — mine them "
                      "for new concepts with 'extract'."))
     gaps_before, gaps_after = report["gaps_before"], report["gaps_after"]
@@ -5845,7 +5747,7 @@ def cmd_audiostation(args):
 # parser builder, and the test that asserts the note is present listed
 # five of these by hand — so a new LLM verb was unchecked by
 # construction.
-LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
+LLM_VERBS = {"extract", "intent", "guide", "review",
              "analyze", "lens", "sweep", "illus", "summarize", "doc",
              "belief", "critique", "triage-app", "workbench",
              # `filter run --native` is the filter pass's one call, and
@@ -6757,9 +6659,17 @@ def _extract_scope(db: Database, manuscript: dict, args, knob: dict
 def _extract_payloads(db: Database, manuscript: dict, args, knob: dict
                       ) -> list[tuple[str, list]]:
     from . import extraction as ex
+    from .revisions import read_manuscript_files
 
     out = []
     for name, units in _extract_scope(db, manuscript, args, knob):
+        if ex.is_in_flight(read_manuscript_files(
+                Path(manuscript["path"])).get(name, "")):
+            # Named while held by an active writeup: nothing to mine, and
+            # never a marker sent to a model. Dropped, said, the rest runs.
+            print(ui.dim(f"{name}: held by an active writeup (its text on "
+                         "disk is the placeholder) — skipped."))
+            continue
         try:
             payloads = ex.assemble_essay(db, manuscript, name, args.section,
                                          units=units, knob=knob)
@@ -7855,6 +7765,9 @@ def cmd_doc(args):
                                 after=getattr(args, "doc_after", None))
             print(f"Created {path.relative_to(manuscript['path'])} "
                   + ui.dim("(scaffold only — the writing is yours)"))
+            hint = docs.about_the_book_hint(args.name)
+            if hint:
+                print(ui.yellow(hint))
         elif args.action == "retire":
             path = docs.retire_doc(manuscript, args.name)
             from .gdocs import drop_link
@@ -9101,8 +9014,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the paperback edition")
     p.add_argument("--hardcover-isbn", default="",
                    help="ISBN-13 assigned to the hardcover edition")
-    p.add_argument("--no-extract", action="store_true",
-                   help="skip automatic LLM concept extraction")
     p.add_argument("--extraction", default=None, choices=["on", "off"],
                    help="off registers the manuscript with concept "
                         "extraction switched off for good, not just at "

@@ -1,8 +1,8 @@
 """`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1):
 the historical candidates replayed through the gates and the adjudicator,
 measured against the author's own verdicts, and the three thresholds of
-§4.6 moved on the measurement. Zero author cost; modelled on
-tools/measure_adjudication.py.
+§4.6 moved on the measurement. Zero author cost; modelled on the
+retired tools/measure_adjudication.py (track-a §4, now superseded).
 
 WHAT IS REPLAYED
   * Candidates: every machine-extracted concept (`concept_nodes` with
@@ -10,8 +10,8 @@ WHAT IS REPLAYED
     proposed or the author settled — an edge from the system source, or
     one inferred, rejected, declared or triaged — as the old extractor
     proposed it: for a retyped edge, the relation before the retype. A
-    declared edge counts as a kept candidate, as §2.2 and
-    tools/measure_adjudication.py count it: edges settled before the
+    declared edge counts as a kept candidate, as §2.2 counts it: edges
+    settled before the
     sources registry were backfilled to the author, so provenance cannot
     tell a hand-declared edge from a confirmed extracted one.
   * Labels: the latest `concept_triage` / `edge_triage` row (confirmed
@@ -270,6 +270,22 @@ class _Versions:
         return self._layout[vid]
 
 
+def _best(hits: list[tuple], name: str, span_of) -> tuple | None:
+    """The passage to judge a relocated row on: of every paragraph that
+    carries the name, the one whose sentence grounds it most strongly
+    (`grounding_strength`: a definition-shaped sentence or heading before
+    a passing mention), the first in reading order among equals. The
+    first mention alone sent "hierarchy" to be judged on "hierarchy of
+    processes enveloped within each process" in another essay, and the
+    adjudicator rightly dropped THAT span (2026-10-25)."""
+    from .extraction import grounding_strength
+
+    if not hits:
+        return None
+    return max(hits, key=lambda hit: grounding_strength(span_of(hit[2]), name,
+                                                        hit[2]))
+
+
 def _sentence(paragraph: str, *name_sets) -> str:
     sentences = _SENTENCE.split(paragraph)
     for names in name_sets:
@@ -309,9 +325,9 @@ def relocate(hist: dict, versions: _Versions,
                     "_files": versions.files(vid)}
             if kind == "concept":
                 names = node_names(h["node"])
-                hit = next(((f, n, p, head, so) for f, paras in layout
-                            for n, p, head, so in paras
-                            if _names_in(names, p)), None)
+                hits = [(f, n, p, head, so) for f, paras in layout
+                        for n, p, head, so in paras if _names_in(names, p)]
+                hit = _best(hits, h["name"], lambda p: _sentence(p, [names]))
                 cand = {**base, "name": h["name"], "kind": h["kind"],
                         "notes": h["notes"], "_aliases": names[1:]}
                 if hit is None:
@@ -325,9 +341,11 @@ def relocate(hist: dict, versions: _Versions,
                                 _cited={n: p})
             else:
                 a, b = names_of(h["from_node"]), names_of(h["to_node"])
-                both = next(((f, n, p, head, so) for f, paras in layout
-                             for n, p, head, so in paras
-                             if _names_in(a, p) and _names_in(b, p)), None)
+                boths = [(f, n, p, head, so) for f, paras in layout
+                         for n, p, head, so in paras
+                         if _names_in(a, p) and _names_in(b, p)]
+                both = _best(boths, h["from"],
+                             lambda p: _sentence(p, [a, b], [a], [b]))
                 one = both or next(((f, n, p, head, so) for f, paras in layout
                                     for n, p, head, so in paras
                                     if _names_in(a, p) or _names_in(b, p)),

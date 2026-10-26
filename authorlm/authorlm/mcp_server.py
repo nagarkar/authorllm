@@ -686,17 +686,17 @@ def _critique_by_prefix(db, mid: str, prefix: str):
 @mcp.tool()
 def collect_revision(manuscript: str | None = None,
                      verbose: bool = False) -> dict:
-    """Snapshot the manuscript now: detects transitions, realizes concepts,
-    runs incremental extraction (concepts, links, aliasing statements) when
-    an LLM is configured, and reports the prerequisite-gap delta. Call
-    after the author says they saved/finished edits. Compact by default
-    (gap counts + resolved/new deltas); verbose=True returns the full
-    gaps_before/gaps_after rows."""
+    """Snapshot the manuscript now: detects transitions, realizes concepts
+    and reports the prerequisite-gap delta. No model call: the Concept
+    Graph is mined on request (extract_concepts), never as a side effect
+    of a collect. Call after the author says they saved/finished edits.
+    Compact by default (gap counts + resolved/new deltas); verbose=True
+    returns the full gaps_before/gaps_after rows."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         api.ensure_session(db, ms)
-        report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
+        report = api.collect(db, ms, api.load_config(_WORKSPACE))
         return report if verbose else api.compact_collect(report)
     return _guard(run)
 
@@ -1805,19 +1805,23 @@ def close_session(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def extract_concepts(files: list[str] | None = None, full: bool = False,
-                     edges_only: bool = False, aliases_only: bool = False,
+                     adjudicator: str | None = None,
                      manuscript: str | None = None) -> dict:
-    """LLM-mine the manuscript for concepts and relationships (incremental
-    by default: only files changed since the last extraction). New items
-    arrive as hypotheses for the author to triage. aliases_only sweeps the
-    full text for aliasing statements (naming/defining sentences) and files
-    merge proposals; it extracts nothing else."""
+    """Mine the Concept Graph afresh (docs/extraction-redesign.md) over
+    the sections changed since the last run — or `files`, or the whole
+    book with `full`. Extraction is LAZY: this is the chat's one road to
+    it, taken when the author wants a fresh graph; collect, init and the
+    writeup close never extract. Candidates reach the author's triage only
+    past the eight gates and the per-essay adjudicator, each with its span
+    and reason. The adjudicator is the shipped default unless `adjudicator`
+    names another; with `[extraction] adjudicator_prompt = "ask"` and no
+    name, the result is {"stopped": …} and the author runs `authorlm
+    extract --native` to be asked."""
     def run():
         db = _db()
         return api.run_extraction(db, _manuscript(db, manuscript), _llm(),
                                   files=files, full=full,
-                                  edges_only=edges_only,
-                                  aliases_only=aliases_only)
+                                  adjudicator=adjudicator)
     return _guard(run)
 
 

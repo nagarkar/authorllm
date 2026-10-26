@@ -103,6 +103,10 @@ def fixture(root: Path, *, workspace: bool = False):
         meta["confirmed"] = False
         db.update("concept_nodes", row["id"], {"metadata": json.dumps(meta)})
     ghost = fx.add_node(db, ms, "Ghost Term", confirmed=False)
+    # A CONFIRMED extracted concept the text no longer carries (ruled
+    # 2026-10-25: retired by the migration, tagged, undoable).
+    fx.add_node(db, ms, "Question about the old order", confirmed=True,
+                introduced_in="hierarchy.md")
     for n in (4, 5, 16, 1):
         inferred(db, ms, n)
     link_concepts(db, mid, "Ghost Term", "depends_on", "population",
@@ -203,6 +207,13 @@ def check_plan_and_apply(root: Path) -> None:
           "makes due is re-asked",
           actions[("revival", "Caste")] == "supersede"
           and actions[("revival", "Race")] == "re-ask", str(actions))
+    check("every confirmed extracted concept absent from the text is planned "
+          "for retirement (the fixture's two paraphrase names too); one "
+          "with text is not",
+          sorted(n["name"] for n in p.absent)
+          == ["Deception born to perish", "Question about the old order",
+              "Sustaining deception"],
+          str([n["name"] for n in p.absent]))
     check("plan writes nothing", snapshot(db) == before)
     text = mig.render_plan(p)
     check("the report names every candidate with its fate",
@@ -216,7 +227,18 @@ def check_plan_and_apply(root: Path) -> None:
           and report["proposals"]["superseded"] == 4
           and report["proposals"]["re-asked"] == 1
           and report["proposals"]["raised"] == 1
-          and report["proposals"]["kept"] == 2, json.dumps(report))
+          and report["proposals"]["kept"] == 2
+          and report["absent"] == 3, json.dumps(report))
+    gone = node(db, "Question about the old order")
+    check("the absent confirmed concept is retired, tagged by the run, with "
+          "an evidence row naming the gate",
+          gone["status"] == "retired"
+          and loads(gone["metadata"], {})["retired_from"]["by_run"] == "migration-1"
+          and any(r["target"].startswith("Question about the old order")
+                  and loads(r["metadata"], {}).get("gate") == "absent"
+                  for r in db.all("SELECT * FROM evidence WHERE evidence_type "
+                                  "= 'extraction_adjudication'")),
+          json.dumps(loads(gone["metadata"], {})))
     ghost = node(db, "Ghost Term")
     gmeta = loads(ghost["metadata"], {})
     check("the ghost is retired with retired_from tagged by the run",
@@ -246,7 +268,7 @@ def check_plan_and_apply(root: Path) -> None:
         if (loads(r["metadata"], {}) or {}).get("run") == "migration-1"]
     signals = sorted(r["signal"] for r in rows)
     check("one evidence row per candidate, migrated_out naming the gate",
-          signals == ["migrated_out"] * 4 + ["new"] * 3
+          signals == ["migrated_out"] * 7 + ["new"] * 3
           and all((loads(r["metadata"], {}) or {}).get("gate")
                   for r in rows if r["signal"] == "migrated_out"),
           str([(r["signal"], r["target"], loads(r["metadata"], {}).get("gate"))
@@ -298,7 +320,7 @@ def check_plan_and_apply(root: Path) -> None:
               "SELECT metadata FROM evidence WHERE evidence_type = "
               "'extraction_adjudication'")
               if (loads(r["metadata"], {}) or {}).get("run") == "migration-1"])
-          == 7)
+          == 10)
     check("the undo is recorded too",
           extraction.runs(db, ms)[-1]["kind"] == "migrate-undo")
 
@@ -341,6 +363,8 @@ def check_adjudicated(root: Path) -> None:
           and edge(db, "rank", "specializes", "ranking") is None)
     check("undo revives the dropped concept",
           node(db, "ideological population")["status"] != "retired")
+    check("undo revives the absent confirmed concept too",
+          node(db, "Question about the old order")["status"] != "retired")
 
 
 def check_cli(root: Path) -> None:

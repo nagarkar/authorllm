@@ -65,7 +65,6 @@ from authorlm import (  # noqa: E402
     triage_transport,
 )
 from authorlm.db import Database, ko_fields  # noqa: E402
-from authorlm.extraction import triage_feedback  # noqa: E402
 
 
 def manuscript_fixture(root: Path):
@@ -380,7 +379,6 @@ class TriageAppTest(unittest.TestCase):
             "JOIN sources s ON s.id = e.source_id ORDER BY e.created_at")
         self.assertEqual([(row["evidence_type"], row["kind"]) for row in evidence],
                          [("deterministic_triage", "system")])
-        self.assertNotIn("Spectral Machinery", triage_feedback(db, manuscript["id"]))
 
     def test_recommendation_transport_stages_without_applying(self):
         db, manuscript, choice, field, _ = self.fixture()
@@ -689,7 +687,7 @@ class TriageAppTest(unittest.TestCase):
         self.assertTrue(dirty["manuscript_version"]["local_dirty"])
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in dirty["rows"]))
-        api.collect(db, manuscript, {}, analyze=False)
+        api.collect(db, manuscript, {})
         stale = triage.snapshot(db, manuscript, "concepts")
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in stale["rows"]))

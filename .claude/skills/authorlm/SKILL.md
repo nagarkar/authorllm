@@ -506,7 +506,8 @@ not re-ask at each beat.
    accounting tally and the episode analysis in a sentence or two.
    `close_session` is OFFERED, not required.
    `authorlm write complete` closes the writeup
-   and runs the deferred extraction pass; intent completion stays separate
+   (no extraction: the graph is mined on request, below); intent
+   completion stays separate
    (`complete_intent`, which runs episode analysis). `write abandon`
    restores the file from the pinned source — or DELETES it, if this
    writeup created it. Resume any time from `authorlm write status`.
@@ -589,6 +590,20 @@ Profile registry (key → standing rule):
   reader-load filter and the pitch lens name `audience` in their front
   matter so the payload carries it.
 
+- `synopsis` — consult for agent or publisher submissions and any
+  request for the book in brief.
+- `series-<series>` — a show manuscript's series charter (goal, topics
+  and coverage, terms, ingredients): consult before any episode work for
+  that series (podlm reads it).
+
+**About the book, not part of it — propose a profile.** Before adding a
+file that is about the book rather than part of it (a synopsis, pitch,
+market or audience notes, positioning, a style or perspective sheet, a
+series charter), propose a profile (or a style element, for voice rules)
+and register it (Registering a new aspect, next), instead of a chapter tab (`doc add`) or an
+`outside` entry in toc.toml. `doc add` prints a one-line hint when the
+name looks like such a file.
+
 **Registering a new aspect** (do all three, in order, when the author
 names one): (1) agree on the key and the standing rule in conversation;
 (2) store the content — `authorlm profile set <key>`; (3) add the key
@@ -626,7 +641,8 @@ rapid CLI loop remains useful in a terminal:
   add `--apply` only when the author asks to execute it. `--nodes` / `--edges`
   restrict the lane. These are system decisions, not author feedback.
 Extraction is the redesigned pipeline of `docs/extraction-redesign.md`
-(ratified 2026-10-25). `authorlm extract <file> [--section H]` PRINTS the
+(ratified 2026-10-25; the old single-call path is gone, 2026-10-25).
+`authorlm extract <file> [--section H]` PRINTS the
 per-section payload (blocks S law, G glossary, P precedents, M summaries,
 E the numbered section) and makes no call; `--native` makes the calls,
 asks which adjudicator model to use with the run's estimated cost (ruling
@@ -639,7 +655,15 @@ replays the author's recorded verdicts and moves the thresholds on
 measurement. Before the first live run: `extract backup`, then `extract
 migrate --dry-run` (report, nothing written), then `extract migrate`
 (§5; `--undo migration-1` reverses it). Read a triage batch's span and
-reason before the name: they are why the row is there.
+reason before the name: they are why the row is there. The same pipeline
+runs behind `init`, `write complete`, an analysed `collect` and the MCP
+tool `extract_concepts`, through `api.run_extraction`. **Extraction is
+lazy and unattended** (ruling §0.9, 2026-10-25): `init`, `collect` and
+`write complete` never extract; when the author wants a fresh Concept
+Graph — "mine the new chapters", "refresh the concepts" — call
+`extract_concepts` (or send them to `authorlm extract --native`), which
+runs the changed sections with the shipped opus-class adjudicator and no
+question. Do not run it unasked, and do not suggest it after every edit.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.
@@ -1830,6 +1854,12 @@ run the CLI via Bash:
   a push deletes an old `manifest.md` tab). When the author asks about
   reader load, point them to that tab; never edit it.
 - state: `authorlm doc list -m <manuscript>` shows link/checkout status.
+- add: `authorlm doc add <name>` scaffolds a chapter file and registers
+  it in toc.toml. Only for files that are PART of the book: a synopsis,
+  pitch, market or audience notes, positioning, a style or perspective
+  sheet, or a series charter is about the book, so propose a profile (or
+  a style element for voice rules) and register it (see Profiles)
+  instead of a tab or an `outside` entry.
 - bind: `authorlm doc bind <doc-id-or-url> -m <manuscript>` adopts an
   EXISTING master Doc for a manuscript that has none (a fresh workspace,
   a cloud session): it records the id and the container tab, writes

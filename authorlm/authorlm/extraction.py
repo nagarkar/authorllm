@@ -6,11 +6,14 @@ nodes are declared (and realize against the text immediately), while
 relationships are *inferred hypotheses* awaiting the author's confirmation
 in the briefing. Declared knowledge always outranks extracted knowledge.
 
-Two halves while the redesign lands (docs/extraction-redesign.md §9):
-the old single-call path (`extract_concepts`, still run by init, the
-writeup close and the MCP tool until phase 6 retires it), and below the
-banner near the end of the file the redesigned pipeline `authorlm
-extract` runs — `assemble`, the candidate contract, the eight gates.
+The redesigned pipeline of docs/extraction-redesign.md (ratified
+2026-10-25): `assemble` builds one hashed payload per section, the model
+answers in the candidate contract, eight deterministic gates screen the
+reply, a per-essay adjudicator (extraction_adjudicator.py) rules on what
+survives, and `run` writes §4.8's shapes. `authorlm extract` drives it
+interactively; `api.run_extraction` is the non-interactive front for
+init, the writeup close, an analysed collect and the MCP tool. The old
+single-call path was retired 2026-10-25 (§9 phase 6).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import proposals, prompt_registry
+from . import proposals
 from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, mention_pattern, node_names,
                        scan_realizations)
@@ -35,11 +38,6 @@ VALID_RELATIONS = {
     "specializes", "answers", "foreshadows", "illustrates", "permits",
     "creates", "distinguishes", "defines", "leads_to", "refutes",
 }
-MAX_TEXT_CHARS = 24000
-MAX_CONCEPTS = 40
-# The old path's prompt. `prompts/extraction.md` is the redesigned
-# pipeline's (SECTION_PROMPT_PATH, below); this one goes with phase 6.
-EXTRACTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "extraction-legacy.md"
 # Materiality floor (Q/note-materiality): a note_update that says the same
 # thing in different words is not new information — see _note_update_blocked.
 # Measured (proposal-learning-loop design doc), not guessed: 0.72 is the
@@ -54,67 +52,6 @@ NOTE_UPDATE_PARAPHRASE_FLOOR = 0.90
 DEFAULT_PROPOSABLE = ("depends_on", "generalizes", "specializes",
                       "contrasts_with", "illustrates", "permits", "answers",
                       "foreshadows")
-
-
-def extraction_system() -> str:
-    return (EXTRACTION_PROMPT_PATH.read_text(encoding="utf-8")
-            .replace("<<VALID_KINDS>>", str(sorted(NODE_KINDS)))
-            .replace("<<MAX_CONCEPTS>>", str(MAX_CONCEPTS)))
-
-
-def _prompt_section(prompt: str, heading: str,
-                    next_heading: str | None = None) -> str:
-    section = prompt.split(f"\n{heading}:\n", 1)[1]
-    if next_heading:
-        section = section.split(f"\n\n{next_heading}:\n", 1)[0]
-    return section.strip() + " "
-
-
-EXTRACTION_SYSTEM = extraction_system()
-RELATION_GUIDE = _prompt_section(EXTRACTION_SYSTEM, "RELATION GUIDE",
-                                 "ALIAS GUIDE")
-ALIAS_GUIDE = _prompt_section(EXTRACTION_SYSTEM, "ALIAS GUIDE")
-
-ALIASES_ONLY_SYSTEM = (
-    "You are an editorial assistant analyzing a philosophy manuscript. The "
-    "concept inventory is already established and is listed as KNOWN "
-    "CONCEPTS at the top of the text — do NOT extract concepts or "
-    "relationships. Your sole task is to find aliasing statements. "
-    + ALIAS_GUIDE +
-    'Return JSON of the shape {"aliases": [{"alias": str, "canonical": str, '
-    '"sentence": str}]} using known concept names verbatim.'
-)
-
-EDGES_ONLY_SYSTEM = (
-    "You are an editorial assistant analyzing a philosophy manuscript. "
-    "The concept inventory is already established and is listed as KNOWN "
-    "CONCEPTS at the top of the text — do NOT extract, rename, or redefine "
-    "concepts. Extract ONLY relationships among the known concepts. "
-    'Return JSON of the shape {"concepts": [], '
-    '"links": [{"from": str, "relation": str, "to": str}]} using known '
-    "concept names verbatim. " + RELATION_GUIDE
-)
-
-
-def _prompt_locations(edges_only: bool, aliases_only: bool) -> list[str]:
-    """`Prompt.location` (prompt_registry.py) of the prompt THIS pass
-    invoked — derived from the registry, never a hardcoded filename, so
-    the CLI and MCP surfaces (both forward this list) cannot drift."""
-    if edges_only:
-        names = ["extraction-edges"]
-    elif aliases_only:
-        names = ["extraction-aliases"]
-    else:
-        names = ["extraction-legacy"]
-    return [prompt_registry.by_name(name).location for name in names]
-
-
-def _merge_prompts(aggregate: dict, sub: dict) -> None:
-    """Union sub-pass prompt locations into an aggregate, order preserved,
-    no duplicates — so a multi-pass run reports each prompt file once."""
-    for location in sub.get("prompt_files", []):
-        if location not in aggregate["prompt_files"]:
-            aggregate["prompt_files"].append(location)
 
 
 def _record_alias_fold_refused(db: Database, manuscript_id: str, a_node: dict,
@@ -154,8 +91,8 @@ def _record_alias_retired_refused(db: Database, manuscript_id: str, a_node: dict
                                   c_node: dict, sentence: str) -> None:
     """Guard (Q/alias-retired-guard): the extractor read a naming sentence
     as bestowing `a_node`'s name on `c_node` — but `a_node` names a RETIRED
-    concept. Retired names are banned from re-entering the graph (see the
-    `banned` set in `extract_concepts`'s concept loop); letting one back in
+    concept. Retired names are banned from re-entering the graph (gate 5,
+    `GateContext.retired`); letting one back in
     through the alias door would be exactly the side door that ban exists
     to close, even though the sentence names `c_node`, not the retired
     concept's own old identity, as canonical.
@@ -210,139 +147,15 @@ def record_triage(db: Database, manuscript_id: str, node: dict, signal: str,
     db.insert("evidence", row)
 
 
-def triage_feedback(db: Database, manuscript_id: str) -> str:
-    """Author feedback from prior triage, injected into the extraction
-    prompt so the next extraction learns from it. Empty string if there is
-    nothing to teach."""
-    rejected = [
-        n["name"] for n in db.all(
-            "SELECT n.name FROM concept_nodes n WHERE n.manuscript_id = ? "
-            "AND n.status = 'retired' AND NOT EXISTS ("
-            "SELECT 1 FROM evidence e WHERE e.manuscript_id = n.manuscript_id "
-            "AND e.evidence_type = 'deterministic_triage' "
-            "AND json_extract(e.metadata, '$.triage_type') = 'concepts' "
-            "AND json_extract(e.metadata, '$.object_id') = n.id) "
-            "ORDER BY n.created_at DESC LIMIT 40",
-            (manuscript_id,),
-        )
-    ]
-    retypes = [
-        r["target"] for r in db.all(
-            "SELECT target FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'concept_triage' AND signal = 'retyped' "
-            "ORDER BY created_at DESC LIMIT 20",
-            (manuscript_id,),
-        )
-    ]
-    confirmed = []
-    for node in db.all(
-        "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired' "
-        "ORDER BY created_at DESC LIMIT 60",
-        (manuscript_id,),
-    ):
-        meta = json.loads(node["metadata"] or "{}")
-        if meta.get("origin") == "extracted" and meta.get("confirmed"):
-            confirmed.append(f"{node['name']} ({node['kind']})")
-    confirmed = confirmed[:30]
-
-    rejected_edges = [
-        r["target"] for r in db.all(
-            "SELECT target FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'edge_triage' AND signal = 'rejected' "
-            "ORDER BY created_at DESC LIMIT 20",
-            (manuscript_id,),
-        )
-    ]
-    relation_corrections = [
-        r["target"] for r in db.all(
-            "SELECT target FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'edge_triage' AND signal = 'retyped' "
-            "ORDER BY created_at DESC LIMIT 15",
-            (manuscript_id,),
-        )
-    ]
-
-    from . import loop
-
-    learned = "".join(
-        loop.generator_feedback(db, manuscript_id, spec)
-        for spec in loop.REGISTRY.values()
-        if spec.table == "knowledge_proposals")
-    if not (rejected or retypes or confirmed or rejected_edges
-            or relation_corrections):
-        return learned
-    sections = ["\n\nAuthor feedback from previous extractions (authoritative):"]
-    if rejected:
-        sections.append(
-            "- REJECTED as not load-bearing — never extract these, or terms of "
-            "similar peripherality: " + "; ".join(rejected)
-        )
-    if retypes:
-        sections.append(
-            "- Reclassified by the author — follow these precedents when "
-            "assigning kinds: " + "; ".join(retypes)
-        )
-    if confirmed:
-        sections.append(
-            "- Confirmed as good extractions — exemplars of the right "
-            "granularity: " + "; ".join(confirmed)
-        )
-    if rejected_edges:
-        sections.append(
-            "- Relationships REJECTED by the author — never propose these "
-            "again, and avoid similarly unsupported links: "
-            + "; ".join(rejected_edges)
-        )
-    if relation_corrections:
-        sections.append(
-            "- Relation corrections by the author (original ⇒ corrected) — "
-            "follow these precedents when choosing relations: "
-            + "; ".join(relation_corrections)
-        )
-    # The lists above are fixed recency windows (LIMIT 40/20/30/20/15) and
-    # silently forget: 538 author decisions on record, 75 reaching the
-    # model. `learned` is the compacted, non-forgetting half — a handful of
-    # beliefs distilled from the same verdicts, which is why it is appended
-    # rather than competing for room inside those caps.
-    return "\n".join(sections) + learned
-
-
 def is_in_flight(text: str) -> bool:
     """This file holds only the mid-rewrite placeholder, so it is not
     prose and must not be mined.
 
-    PER FILE, never per payload. Every payload this module builds is a
-    concatenation of `=== <name> ===` labelled chunks, so a whole-string
-    `is_placeholder` test against an assembled payload can NEVER match —
-    it would be dead code that reads like a guard. The check belongs
-    where a single file's text is still a single file's text: inside
-    `_manuscript_text`'s loop, and on each unit before `_section_payloads`
-    assembles it."""
+    PER FILE, never per payload: `eligible_files` drops such a file before
+    any unit of it is assembled, so no block E can carry the marker."""
     from .api import is_placeholder
 
     return is_placeholder(text)
-
-
-def _manuscript_text(
-    manuscript: dict, only: set[str] | None = None, max_chars: int = MAX_TEXT_CHARS
-) -> tuple[str, bool]:
-    """Concatenated manuscript text (optionally restricted to given relative
-    paths) and whether it had to be truncated."""
-    from .structure import ordered_items
-
-    files = read_manuscript_files(Path(manuscript["path"]))
-    parts = []
-    for name, content in ordered_items(files):
-        if only is not None and name not in only:
-            continue
-        if is_in_flight(content):
-            continue
-        parts.append(f"=== {name} ===\n{content}")
-    text = "\n\n".join(parts)
-    truncated = len(text) > max_chars
-    if truncated:
-        text = text[:max_chars] + "\n[truncated]"
-    return text, truncated
 
 
 def changed_files_since_extraction(db: Database, manuscript: dict):
@@ -370,108 +183,6 @@ def changed_files_since_extraction(db: Database, manuscript: dict):
     new_files = json.loads(latest["files"])
     changed = {name for name, text in new_files.items() if old_files.get(name) != text}
     return changed, latest["id"], old_files, new_files
-
-
-def _changed_paragraph_text(old_files: dict, new_files: dict, target: set[str]) -> str:
-    """The paragraphs that are actually new or rewritten in the changed
-    files — the attention scope for proposals against settled knowledge."""
-    from .structure import is_structural
-
-    parts = []
-    for name in sorted(target):
-        if is_structural(name):
-            continue  # TOC edits are structure, not prose — no attention
-        old_paragraphs = set(re.split(r"\n\s*\n", old_files.get(name, "")))
-        for paragraph in re.split(r"\n\s*\n", new_files.get(name, "")):
-            if paragraph.strip() and paragraph not in old_paragraphs:
-                parts.append(paragraph)
-    return "\n\n".join(parts)
-
-
-_SECTION_HEAD = re.compile(r"^#{1,6}[ \t]")
-
-
-def _sections(text: str) -> list[str]:
-    """Heading-delimited sections (preamble first). The section is the
-    extraction unit (ratified 2026-08-10): each carries its heading line,
-    so every payload stays self-locating."""
-    out: list[list[str]] = []
-    cur: list[str] = []
-    for line in text.split("\n"):
-        if _SECTION_HEAD.match(line) and cur:
-            out.append(cur)
-            cur = [line]
-        else:
-            cur.append(line)
-    if cur:
-        out.append(cur)
-    return [s for s in ("\n".join(c).strip() for c in out) if s]
-
-
-def _changed_sections(old_text: str, new_text: str) -> list[str]:
-    """Sections of new_text not present verbatim in old_text — one edited
-    paragraph sends its section, not its 11,000-word file. Moved-but-
-    unchanged sections are excluded (verbatim membership, order-blind)."""
-    old = set(_sections(old_text))
-    return [s for s in _sections(new_text) if s not in old]
-
-
-def _section_payloads(units: list[tuple[str, str]], cap: int) -> list[str]:
-    """'=== name ===' labelled chunks batched into payloads ≤ cap chars.
-    An oversized chunk splits at section boundaries first, then hard-
-    splits as a last resort — extraction never truncates."""
-    pieces: list[tuple[str, str]] = []
-    for name, chunk in units:
-        if len(chunk) <= cap:
-            pieces.append((name, chunk))
-            continue
-        cur = ""
-        for section in _sections(chunk):
-            candidate = f"{cur}\n\n{section}" if cur else section
-            if cur and len(candidate) > cap:
-                pieces.append((name, cur))
-                cur = section
-            else:
-                cur = candidate
-            while len(cur) > cap:
-                pieces.append((name, cur[:cap]))
-                cur = cur[cap:]
-        if cur:
-            pieces.append((name, cur))
-    payloads: list[list[str]] = []
-    size = 0
-    for name, chunk in pieces:
-        part = f"=== {name} ===\n{chunk}"
-        if payloads and size + len(part) + 2 <= cap:
-            payloads[-1].append(part)
-            size += len(part) + 2
-        else:
-            payloads.append([part])
-            size = len(part)
-    return ["\n\n".join(p) for p in payloads]
-
-
-def _inventory_names(db: Database, mid: str, limit: int) -> list[str]:
-    return [
-        row["name"] for row in db.all(
-            "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-            "AND status != 'retired' ORDER BY name LIMIT ?",
-            (mid, limit),
-        )
-    ]
-
-
-def _fit_inventory(names: list[str], max_chars: int, body_len: int) -> str:
-    """'; '-joined `names`, dropping from the end until the KNOWN CONCEPTS
-    prefix — attached ahead of a payload of `body_len` chars — counts
-    against `max_chars` instead of riding free on top of it (TrackA/2:
-    measured pushing payloads up to 26,865 chars against a 24,000 cap). The
-    manuscript text is what extraction must never truncate, so when the two
-    don't both fit, the inventory is what gives way, never the text."""
-    budget = max_chars - body_len - len("KNOWN CONCEPTS: \n\n")
-    while names and len("; ".join(names)) > max(0, budget):
-        names = names[:-1]
-    return "; ".join(names)
 
 
 def _normalize(text: str | None) -> str:
@@ -619,602 +330,10 @@ def extraction_allowed(db: Database, manuscript: dict,
             and manuscript_extraction_enabled(db, manuscript))
 
 
-def extract_concepts(
-    db: Database, manuscript: dict, llm: LLMClient,
-    files: list[str] | None = None, full: bool = False,
-    edges_only: bool = False, aliases_only: bool = False,
-    _inventory: bool = False, _text_override: str | None = None,
-) -> dict | None:
-    """Ask the LLM for concepts/links and merge them into the graph.
-
-    Incremental by default: only files added or changed since the last
-    extraction are sent (the whole manuscript on the first run, when `full`
-    is set, or when explicit `files` are given). Returns a summary dict —
-    {"up_to_date": True} when there is nothing new — or None if the LLM is
-    unavailable or returned nothing usable.
-    """
-    if not extraction_enabled(getattr(llm, "config", None)):
-        raise ExtractionDisabled(DISABLED_MESSAGE)
-    if not manuscript_extraction_enabled(db, manuscript):
-        raise ExtractionDisabled(MANUSCRIPT_DISABLED_MESSAGE)
-    mid = manuscript["id"]
-    if aliases_only and not files:
-        # An aliases pass is a deliberate audit of the whole text — naming
-        # sentences live in already-mined prose, not just fresh paragraphs.
-        full = True
-    changed, latest_id, old_files, new_files = changed_files_since_extraction(db, manuscript)
-    target: set[str] | None = None
-    scope = "full manuscript"
-    incremental = False
-    if files:
-        target = set(files)
-        scope = f"{len(target)} selected file(s)"
-    elif not full and changed is not None:
-        if not changed:
-            return {"up_to_date": True}
-        target = changed
-        scope = f"{len(changed)} changed file(s)"
-        incremental = True
-
-    max_chars = getattr(llm, "extraction_max_chars", MAX_TEXT_CHARS)
-
-    def _passes(payloads: list[str], scope_label: str,
-                commit_watermark: bool = True) -> dict:
-        """One extraction pass per payload, inventory carried, results
-        aggregated — the no-truncation guarantee for oversized scopes.
-        Watermark advances only after EVERY pass succeeds: a mid-batch
-        LLM None must not mark the version extracted (silent permanent
-        skip of the remaining payloads on the next run)."""
-        aggregate: dict = {
-            "nodes": [], "edges": [], "realized": [], "skipped": 0,
-            "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
-            "skipped_unknown_relation": 0,
-            "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "materiality_refused": [],
-            "proposed": 0, "screened": 0, "alias_folds_refused": 0,
-            "alias_retired_refused": 0,
-            "truncated": False,
-            "scope": scope_label, "prompt_files": [],
-        }
-        failed = False
-        for payload in payloads:
-            sub = extract_concepts(db, manuscript, llm,
-                                   files=sorted(target or []),
-                                   aliases_only=aliases_only,
-                                   _inventory=True,
-                                   _text_override=payload)
-            if sub is None:
-                failed = True
-                continue
-            if sub.get("up_to_date"):
-                continue
-            for key in ("nodes", "edges", "realized", "below_bar",
-                        "materiality_refused"):
-                aggregate[key].extend(sub.get(key, []))
-            for key in ("skipped", "skipped_malformed",
-                        "skipped_unknown_endpoint", "skipped_unknown_relation",
-                        "suppressed", "ungrounded_links",
-                        "proposed", "screened", "alias_folds_refused",
-                        "alias_retired_refused"):
-                aggregate[key] += sub.get(key, 0)
-            _merge_prompts(aggregate, sub)
-        if commit_watermark and not failed and not aliases_only:
-            _set_extraction_watermark(db, manuscript, latest_id)
-        if failed:
-            aggregate["incomplete"] = True
-        return aggregate
-
-    if _text_override is not None:
-        text, truncated = _text_override, False
-    elif incremental and old_files is not None and not edges_only:
-        # Ratified 2026-08-10: the extraction unit is the SECTION under
-        # its heading. One edited paragraph in an 11,000-word chapter
-        # sends its section, not the file — the known-concept inventory
-        # in the prompt supplies the linking context the rest of the
-        # file would have provided.
-        from .structure import is_structural, reading_order
-
-        order, _ = reading_order(new_files)
-        units = []
-        for name in order:
-            if name not in target or is_structural(name):
-                continue
-            if is_in_flight(new_files.get(name, "")):
-                # A truncation IS a changed section, and its "sections"
-                # are the placeholder's own paragraphs — which would sail
-                # past any whole-payload check.
-                continue
-            delta = _changed_sections(old_files.get(name, ""),
-                                      new_files.get(name, ""))
-            if delta:
-                units.append((name, "\n\n".join(delta)))
-        if not units:
-            return {"up_to_date": True}
-        payloads = _section_payloads(units, max_chars)
-        scope = (f"{len(units)} changed file(s), changed sections only"
-                 + (f", {len(payloads)} pass(es)"
-                    if len(payloads) > 1 else ""))
-        if len(payloads) > 1:
-            return _passes(payloads, scope,
-                           commit_watermark=not _inventory)
-        text, truncated = payloads[0], False
-    else:
-        text, truncated = _manuscript_text(manuscript, target,
-                                           max_chars=max_chars)
-    # An in-flight file has already been dropped PER FILE, above and
-    # below — so a payload that was nothing but a placeholder is now
-    # simply empty here, and this unchanged check ends the pass.
-    if not text.strip():
-        return None
-
-    if truncated and files and not edges_only:
-        # Explicit files whose combined text exceeds one payload (e.g. a
-        # deliberate re-mine of metaphysic.md): batch their sections into
-        # multiple passes rather than truncating the back half away.
-        disk = read_manuscript_files(Path(manuscript["path"]))
-        units = [(n, disk[n]) for n in sorted(target or [])
-                 if n in disk and not is_in_flight(disk[n])]
-        payloads = _section_payloads(units, max_chars)
-        if len(payloads) > 1:
-            return _passes(
-                payloads,
-                f"{len(units)} file(s), sections in "
-                f"{len(payloads)} pass(es) (cap {max_chars} chars)",
-                commit_watermark=not _inventory)
-
-    if truncated and not edges_only and not files:
-        # Hierarchical extraction: the scope exceeds one payload, so run one
-        # bounded pass per file in reading order. Each pass carries the
-        # inventory of concepts known so far, so later chapters can link to
-        # (without re-extracting) what earlier chapters established.
-        from .structure import reading_order
-
-        disk = read_manuscript_files(Path(manuscript["path"]))
-        order, _ = reading_order(disk)
-        selected = [n for n in order if target is None or n in target]
-        aggregate: dict = {
-            "nodes": [], "edges": [], "realized": [], "skipped": 0,
-            "skipped_malformed": 0, "skipped_unknown_endpoint": 0,
-            "skipped_unknown_relation": 0,
-            "suppressed": 0, "ungrounded_links": 0, "below_bar": [],
-            "materiality_refused": [],
-            "proposed": 0, "screened": 0, "alias_folds_refused": 0,
-            "alias_retired_refused": 0,
-            "truncated": False, "prompt_files": [],
-        }
-        failed = False
-        for name in selected:
-            if (not (disk.get(name) or "").strip()
-                    or is_in_flight(disk.get(name) or "")):
-                # empty chapter (or one held by an active writeup) —
-                # nothing to mine, not a failure
-                continue
-            sub = extract_concepts(db, manuscript, llm, files=[name],
-                                   aliases_only=aliases_only, _inventory=True)
-            if sub is None or sub.get("incomplete"):
-                # LLM miss (or nested multi-pass miss) — do not advance the
-                # watermark: the gap must remain retryable on the next extract.
-                failed = True
-                if sub is None:
-                    continue
-            if sub.get("up_to_date"):
-                continue
-            for key in ("nodes", "edges", "realized", "below_bar",
-                        "materiality_refused"):
-                aggregate[key].extend(sub.get(key, []))
-            for key in ("skipped", "skipped_malformed",
-                        "skipped_unknown_endpoint", "skipped_unknown_relation",
-                        "suppressed", "ungrounded_links",
-                        "proposed", "screened", "alias_folds_refused",
-                        "alias_retired_refused"):
-                aggregate[key] += sub.get(key, 0)
-            aggregate["truncated"] = aggregate["truncated"] or sub.get("truncated", False)
-            _merge_prompts(aggregate, sub)
-        aggregate["scope"] = (
-            f"hierarchical: {len(selected)} file(s) in reading order, "
-            f"one pass each (cap {max_chars} chars)"
-            + (", aliases only" if aliases_only else "")
-        )
-        if not failed and not aliases_only:
-            _set_extraction_watermark(db, manuscript, latest_id)
-        if failed:
-            aggregate["incomplete"] = True
-        return aggregate
-
-    # Attention scope for proposals against settled knowledge: on an
-    # incremental run, only the paragraphs the author actually changed can
-    # generate a proposal — LLM paraphrase churn on untouched concepts never
-    # reaches the review queue. On --full / per-file runs (a deliberate
-    # audit), the whole input is in scope.
-    if incremental and old_files is not None:
-        attention = _changed_paragraph_text(old_files, new_files, target)
-    else:
-        attention = text
-
-    def in_attention(*names: str) -> bool:
-        return any(concept_pattern(n).search(attention) for n in names if n)
-    if edges_only or aliases_only:
-        scope += ", edges only" if edges_only else ", aliases only"
-        inventory = _fit_inventory(_inventory_names(db, mid, 120),
-                                   max_chars, len(text))
-        system = (EDGES_ONLY_SYSTEM if edges_only else ALIASES_ONLY_SYSTEM) \
-            + triage_feedback(db, mid)
-        text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
-    else:
-        system = extraction_system() + triage_feedback(db, mid)
-        if _inventory:
-            inventory = _fit_inventory(_inventory_names(db, mid, 200),
-                                       max_chars, len(text))
-            if inventory:
-                system += (
-                    " Concepts listed under KNOWN CONCEPTS are already in the "
-                    "graph — do not re-extract them, but you MAY link to them."
-                )
-                text = f"KNOWN CONCEPTS: {inventory}\n\n{text}"
-    # Extraction is schema-driven pattern work: thinking disabled
-    # (it-0ae002ed7321 — thinking tokens were 80% of a 4-minute pass).
-    result = llm.complete_json(system, text, thinking_budget=0)
-    if not isinstance(result, dict):
-        return None
-    if not (edges_only or aliases_only) and not isinstance(result.get("concepts"), list):
-        # A null (or otherwise non-list) 'concepts' payload is exactly as
-        # malformed as a non-dict result above. Coercing it to [] here would
-        # make a bad-shaped reply look like a clean "no concepts found" pass:
-        # `_set_extraction_watermark` would then advance and the section
-        # would never be re-mined. Returning None instead reuses the same
-        # "incomplete" signal the caller already checks (`sub is None` /
-        # `sub.get("incomplete")`) to hold the watermark back and keep the
-        # section eligible for retry.
-        return None
-
-    screened = improved = 0
-
-    # A retired concept stays retired: extraction may never resurrect what
-    # the author rejected, even if the model proposes it again. But a
-    # retired name living on as a live concept's alias is not banned —
-    # mentions of it resolve to the live concept, never to a revival.
-    banned = {
-        row["name"].lower() for row in db.all(
-            "SELECT name FROM concept_nodes WHERE manuscript_id = ? AND status = 'retired'",
-            (mid,),
-        )
-    }
-    banned -= {
-        alias.lower()
-        for row in db.all(
-            "SELECT aliases FROM concept_nodes WHERE manuscript_id = ? "
-            "AND status != 'retired' AND aliases != '[]'", (mid,),
-        )
-        for alias in json.loads(row["aliases"] or "[]")
-    }
-    new_nodes, new_edges, skipped, suppressed = [], [], 0, 0
-    # `skipped` stays the total (back-compat / at-a-glance count);
-    # these three are WHY, so the author can tell a model problem
-    # (malformed payload) from the extractor's own deliberate
-    # policy (unknown relation/endpoint) — see it-b6fd1a7e5ea0.
-    skipped_malformed = skipped_unknown_endpoint = skipped_unknown_relation = 0
-    proposed = improved  # adjudicated 'improves' verdicts are note_updates
-    ungrounded_links = 0
-    below_bar: list[str] = []
-    materiality_refused: list[str] = []
-    alias_folds_refused = 0
-    alias_retired_refused = 0
-    disk_files: dict[str, str] | None = None
-
-    for item in [] if edges_only or aliases_only else result.get("concepts", []):
-        if not isinstance(item, dict) or not str(item.get("name", "")).strip():
-            skipped += 1
-            skipped_malformed += 1
-            continue
-        name = str(item["name"]).strip()[:80]
-        kind = item.get("kind", "concept")
-        # `kind` may come back model-shaped-but-malformed (a list, a dict) —
-        # `in` against the NODE_KINDS frozenset raises TypeError on an
-        # unhashable value instead of just failing the membership test.
-        if not (isinstance(kind, str) and kind in NODE_KINDS):
-            kind = "concept"
-        notes = (str(item["notes"]).strip()[:300] or None) if item.get("notes") else None
-        if name.lower() in banned:
-            # The ban is a write-guard, not a resolved-forever verdict: when a
-            # retired concept recurs in text the author actually changed,
-            # surface a revival proposal instead of silently suppressing.
-            if in_attention(name):
-                retired_node = db.one(
-                    "SELECT id FROM concept_nodes WHERE manuscript_id = ? "
-                    "AND lower(name) = lower(?) AND status = 'retired'",
-                    (mid, name),
-                )
-                if retired_node and proposals.create(
-                    db, mid, "revival", retired_node["id"],
-                    {"name": name, "kind": kind, "notes": notes},
-                ):
-                    proposed += 1
-                    continue
-            suppressed += 1
-            continue
-        # Alias-aware: a hit on an alias is a hit on the concept it belongs
-        # to, not a new concept — a name-only lookup here would send an
-        # alias hit down the `before is None` branch below, discarding the
-        # existing concept's metadata (including a confirmed 'True').
-        before = get_concept(db, mid, name)
-        if before is None and banned:
-            # A near-miss of a retired name is called out interactively, not
-            # silently admitted as a "new" concept (nor silently banned).
-            import difflib as _difflib
-
-            near = _difflib.get_close_matches(name.lower(), list(banned), n=1, cutoff=0.8)
-            if near:
-                retired_node = db.one(
-                    "SELECT id, name FROM concept_nodes WHERE manuscript_id = ? "
-                    "AND lower(name) = lower(?) AND status = 'retired'",
-                    (mid, near[0]),
-                )
-                if retired_node and proposals.create(
-                    db, mid, "variant_of_retired", retired_node["id"],
-                    {"proposed_name": name, "kind": kind, "notes": notes,
-                     "retired_name": retired_node["name"]},
-                ):
-                    proposed += 1
-                continue
-        if before is None and kind in RECURRENCE_GATED_KINDS:
-            # The recurrence bar (ratified 2026-08-08, gate-as-law): the
-            # model cannot count recurrence — an incremental payload only
-            # shows changed text — so the system counts, against the whole
-            # current manuscript. Below-bar candidates drop, self-healing:
-            # the next mention arrives in changed text and re-proposes.
-            # Never fed to triage_feedback — the bar rejected them, not
-            # the author.
-            if disk_files is None:
-                disk_files = read_manuscript_files(Path(manuscript["path"]))
-            admitted, _stats = passes_recurrence_bar(disk_files, [name])
-            if not admitted:
-                below_bar.append(name)
-                continue
-        # Existing knowledge is machine-unwritable (see the note_update branch
-        # below): `add_concept` applies `notes` unconditionally when the
-        # concept already exists, so an existing concept's notes must never
-        # be passed through — only a brand-new concept may be seeded with
-        # extracted notes.
-        node = add_concept(db, mid, name, kind=kind,
-                           notes=notes if before is None else None,
-                           source_id=db.source("system"))
-        if before is None:
-            # Machine-extracted nodes are hypotheses awaiting the author's
-            # confirmation, exactly like inferred edges (§21.7).
-            # Where it was introduced is NOT the file that was mined: it is
-            # the first reading-order mention across the whole manuscript,
-            # stamped now (ruled 2026-09-07) so no window exists in which
-            # a term is attributed to an essay that merely repeats it.
-            if disk_files is None:
-                disk_files = read_manuscript_files(Path(manuscript["path"]))
-            from .structure import ordered_items as _ordered
-            primary = primary_location(_ordered(disk_files), node)
-            db.update(
-                "concept_nodes", node["id"],
-                {"metadata": json.dumps({"origin": "extracted", "confirmed": False}),
-                 "introduced_in": primary},
-            )
-            node = {**dict(node), "introduced_in": primary}
-            new_nodes.append(node)
-        elif (
-            notes
-            and _normalize(notes) != _normalize(before["notes"])
-            and in_attention(name)
-        ):
-            # Existing knowledge is machine-unwritable, but a materially
-            # different definition arising from changed text is surfaced for
-            # the author instead of silently discarded — UNLESS it does not
-            # clear the materiality floor (Q/note-materiality): a
-            # case/whitespace-only edit or a near-paraphrase (>=0.90
-            # similarity) is not new information, and queuing it just spends
-            # the author's attention on a restatement.
-            reason = _note_update_blocked(before["notes"], notes)
-            if reason is None:
-                if proposals.create(
-                    db, mid, "note_update", before["id"],
-                    {
-                        "name": before["name"],
-                        "current_note": before["notes"],
-                        "proposed_note": notes,
-                        "current_kind": before["kind"],
-                        "proposed_kind": kind,
-                    },
-                ):
-                    proposed += 1
-            else:
-                materiality_refused.append(f"{before['name']} ({reason})")
-        if len(new_nodes) >= MAX_CONCEPTS:
-            break
-
-    known_nodes = {
-        row["name"].lower(): row
-        for row in db.all(
-            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
-            (mid,),
-        )
-    }
-    known = set(known_nodes)
-
-    def endpoint_in_text(name: str) -> bool:
-        # Hygiene gate (design: sweep framework): a link is proposed only
-        # when the text asserts it, so both endpoints (or their aliases)
-        # must be mentioned in the payload the model actually saw — an
-        # incremental run's KNOWN CONCEPTS inventory is linkable, but not
-        # out of thin air.
-        node = known_nodes.get(name.lower())
-        names = node_names(node) if node else [name]
-        return any(concept_pattern(nm).search(text) for nm in names if nm)
-    for item in [] if aliases_only else (result.get("links") or []):
-        if not isinstance(item, dict):
-            skipped += 1
-            skipped_malformed += 1
-            continue
-        src, relation, dst = link_endpoints(item)
-        # Only link concepts that exist; unknown relations become 'elaborates'.
-        if not src or not dst or src.lower() == dst.lower():
-            skipped += 1
-            skipped_malformed += 1
-            continue
-        if src.lower() not in known or dst.lower() not in known:
-            # Not malformed — the model named a real endpoint that simply
-            # isn't (yet) a known concept in this graph.
-            skipped += 1
-            skipped_unknown_endpoint += 1
-            continue
-        if relation not in VALID_RELATIONS:
-            # Honesty over volume: an unknown relation is dropped, not
-            # coerced into 'elaborates' — coercion manufactures wrong
-            # edges. Not malformed either — a deliberate policy call.
-            skipped += 1
-            skipped_unknown_relation += 1
-            continue
-        if not (endpoint_in_text(src) and endpoint_in_text(dst)):
-            ungrounded_links += 1
-            continue
-        before = db.one(
-            "SELECT id FROM concept_edges WHERE manuscript_id = ? AND relation = ? "
-            "AND from_node = (SELECT id FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?)) "
-            "AND to_node = (SELECT id FROM concept_nodes WHERE manuscript_id = ? AND lower(name) = lower(?))",
-            (mid, relation, mid, src, mid, dst),
-        )
-        edge = link_concepts(db, mid, src, relation, dst, status="inferred",
-                             source_id=db.source("system"))
-        if before is None:
-            new_edges.append(edge)
-        elif edge["status"] == "rejected" and in_attention(src, dst):
-            # A rejected relationship argued again by changed text becomes a
-            # reconsideration proposal, never a silent resurrection.
-            if proposals.create(
-                db, mid, "edge_reproposal", edge["id"],
-                {"from_name": src, "relation": relation, "to_name": dst},
-            ):
-                proposed += 1
-
-    # Aliasing statements become proposals only for the naming-ceremony
-    # case the ALIAS GUIDE now requires (Q/alias-guide-flip, prompts/
-    # extraction.md): the canonical must already be a known (live) concept,
-    # and the alias must be a name that is NOT yet its own known concept —
-    # a genuinely new label bestowed on something already established
-    # ("we call it The Chid"). Two ways a candidate can fail that and still
-    # be kept separable in the evidence: `alias_name` may already resolve
-    # to its own LIVE concept (Q/alias-guard — adopting would MERGE two
-    # established concepts, not alias one, heavier than a naming sentence
-    # can license), or it may name a RETIRED concept (Q/alias-retired-
-    # guard — retired names are banned from re-entering the graph, and an
-    # alias would be a side door around that ban). Both are refused and
-    # recorded, never silently dropped.
-    flat_text = " ".join(text.split()).lower()
-    for item in result.get("aliases", []) if isinstance(result.get("aliases"), list) else []:
-        if not isinstance(item, dict):
-            skipped += 1
-            skipped_malformed += 1
-            continue
-        alias_name = str(item.get("alias", "")).strip()[:80]
-        canonical_name = str(item.get("canonical", "")).strip()[:80]
-        sentence = " ".join(str(item.get("sentence", "")).split())[:300]
-        if not alias_name or not canonical_name or not sentence:
-            skipped += 1
-            skipped_malformed += 1
-            continue
-        # The canonical must already be a known, live concept — nothing to
-        # alias against otherwise.
-        c_node = get_concept(db, mid, canonical_name)
-        if not c_node or c_node["status"] == "retired":
-            suppressed += 1
-            continue
-        a_node = get_concept(db, mid, alias_name)
-        if a_node is not None and a_node["id"] == c_node["id"]:
-            # Already resolves to the same concept (e.g. already a
-            # registered alias of it) — nothing to propose.
-            suppressed += 1
-            continue
-        if sentence.lower() not in flat_text:
-            suppressed += 1  # the model must quote the text, not paraphrase it
-            continue
-        if not in_attention(alias_name, canonical_name):
-            suppressed += 1
-            continue
-        if a_node is not None and a_node["status"] == "retired":
-            # Guard (Q/alias-retired-guard): `alias_name` names a RETIRED
-            # concept. Retired names are banned from re-entering the graph
-            # (see the `banned` set above); letting one back in as an
-            # "alias" would be a side door around that ban. Refused,
-            # recorded with a signal distinct from the live-concept fold,
-            # never queued.
-            _record_alias_retired_refused(db, mid, a_node, c_node, sentence)
-            alias_retired_refused += 1
-            continue
-        if a_node is not None:
-            # Guard (Q/alias-guard): `alias_name` already stands as its own
-            # live concept — adopting this proposal would fold it into
-            # `c_node`, a MERGE, a heavier decision than a naming sentence
-            # can license on its own. Refused, recorded, never queued.
-            _record_alias_fold_refused(db, mid, a_node, c_node, sentence)
-            alias_folds_refused += 1
-            continue
-        # a_node is None: `alias_name` is genuinely new — the naming
-        # ceremony the ALIAS GUIDE now requires. This is the one case that
-        # actually produces a proposal.
-        location = next(
-            (fname for fname, ftext in (new_files or {}).items()
-             if sentence.lower() in " ".join(ftext.split()).lower()),
-            None,
-        )
-        if proposals.create(
-            db, mid, "alias", c_node["id"],
-            {"alias": alias_name, "canonical": c_node["name"],
-             "sentence": sentence, "location": location,
-             "alias_is_new": True},
-        ):
-            proposed += 1
-
-    # Realize extracted concepts against the latest collected version.
-    latest = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
-    realized = []
-    if latest:
-        realized = scan_realizations(db, mid, dict(latest))
-
-    # Advance the extraction watermark so the next run diffs from here.
-    # An edges-only pass leaves it alone: the text has not been mined for
-    # concepts, so a later incremental run must still see these files.
-    # Inventory sub-passes leave it alone too: the aggregator commits
-    # once after every pass succeeds (a mid-batch LLM miss must not
-    # mark the version extracted).
-    if (latest_id and not edges_only and not aliases_only
-            and not _inventory):
-        _set_extraction_watermark(db, manuscript, latest_id)
-
-    return {
-        "nodes": new_nodes,
-        "edges": new_edges,
-        "realized": realized,
-        "skipped": skipped,
-        "skipped_malformed": skipped_malformed,
-        "skipped_unknown_endpoint": skipped_unknown_endpoint,
-        "skipped_unknown_relation": skipped_unknown_relation,
-        "suppressed": suppressed,
-        "ungrounded_links": ungrounded_links,
-        "below_bar": below_bar,
-        "materiality_refused": materiality_refused,
-        "alias_folds_refused": alias_folds_refused,
-        "alias_retired_refused": alias_retired_refused,
-        "proposed": proposed,
-        "screened": screened,
-        "scope": scope,
-        "truncated": truncated,
-        "prompt_files": _prompt_locations(edges_only, aliases_only),
-    }
-
-
 # ===================================================================
 # The redesigned pipeline (docs/extraction-redesign.md, ratified
-# 2026-10-25). Everything above this line is the old single-call path,
-# which `init`, the writeup close and the MCP tool still run until phase 6
-# of §9 retires it; `authorlm extract` runs what follows.
+# 2026-10-25). Above this line: the switches, the watermark, the triage
+# and alias-refusal recorders and the helpers the pipeline shares.
 #
 # One payload per SECTION (§4.1), five hashed blocks built
 # deterministically by `assemble` (§4.2): S law, G glossary, P
@@ -1542,6 +661,11 @@ def precedent_rows(db: Database, manuscript: dict, rel: str, text: str,
         meta = loads(row["metadata"], {}) or {}
         if meta.get("origin") != "extracted" or row["id"] in exclude:
             continue
+        if (meta.get("retired_from") or {}).get("by_run"):
+            # A migration's retirement is not a precedent of the author's
+            # (2026-10-25): shown here, the adjudicator read `rank` and
+            # `Jati` as "already rejected by the author for this essay".
+            continue
         entry = {"id": row["id"], "name": row["name"], "kind": row["kind"],
                  "reason": reasons.get(row["name"].lower())}
         retired_from = (meta.get("retired_from") or {}).get("introduced_in")
@@ -1853,13 +977,20 @@ def call_sections(llm: LLMClient, payloads: list[ExtractionPayload],
                   knob: dict) -> list[dict | None]:
     """One call per section payload, the blocks sent as `system` = S and
     `user` = G P M E (so the shared prefix is identical across an essay's
-    calls). A reply that is not a JSON object is None: the section is
-    unanswered, never read as 'nothing found'."""
+    calls). A reply that is not a JSON object, or whose `concepts` or
+    `links` is present but not a list (a null where the contract wants a
+    list), is None: the section is unanswered, never read as 'nothing
+    found', and the watermark stays."""
     replies: list[dict | None] = []
     for payload in payloads:
         reply = llm.complete_json(payload.system, payload.user,
                                   thinking_budget=knob.get("thinking_budget"))
-        replies.append(reply if isinstance(reply, dict) else None)
+        if isinstance(reply, dict) and all(
+                isinstance(reply.get(key, []), list)
+                for key in ("concepts", "links", "aliases")):
+            replies.append(reply)
+        else:
+            replies.append(None)
     return replies
 
 
@@ -2070,9 +1201,17 @@ def gate_context(db: Database, manuscript: dict, files: dict[str, str],
     rejected_names: list[str] = []
     for row in db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ? "
                       "AND status = 'retired'", (mid,)):
+        meta = loads(row["metadata"], {}) or {}
+        if (meta.get("retired_from") or {}).get("by_run"):
+            # Retired by a migration run, not by the author (2026-10-25):
+            # the ban is the author's no, and §4.10's door only opens on
+            # text written after the retirement, so a machine retirement
+            # that banned would silence the name for good. The name is an
+            # ordinary candidate again; `add_concept` revives the row.
+            continue
         if row["name"].lower() not in known:
             retired[row["name"].lower()] = dict(row)
-        if (loads(row["metadata"], {}) or {}).get("origin") == "extracted":
+        if meta.get("origin") == "extracted":
             rejected_names.append(row["name"])
     edges: dict[tuple[str, str], list[dict]] = {}
     rejected: set[tuple[str, str, str]] = set()
@@ -2146,8 +1285,6 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
     Concepts are screened first, so a link may end on a concept candidate
     of the same batch that survived; a link whose endpoint is neither a
     live concept nor such a survivor fails as `unknown_endpoint`."""
-    import difflib
-
     from .loop import similarity
 
     skips = {name: 0 for name in SKIPS}
@@ -2207,12 +1344,13 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
                            "revival proposal §4.10 allows is raised")
             fail(c, "retired", reason)
             continue
-        near = difflib.get_close_matches(c["name"].lower(), list(ctx.retired),
-                                         n=1, cutoff=0.8)
-        if near:
-            fail(c, "retired", "a near-miss of the retired name "
-                 f"'{ctx.retired[near[0]]['name']}'")
-            continue
+        # No lexical near-miss of a retired name here (ruled 2026-10-25):
+        # the exact ban already tolerates case and plurals, and the
+        # adjudicator is shown the nearest retired names with the author's
+        # reasons in block P, which is the same check done by something
+        # that can tell "Change" from "challenge". On the author's record
+        # the edit-distance rule at 0.8 blocked nine confirmed concepts
+        # and no rejected one.
         # §4.7: a name within the firewall's distance of a live concept is a
         # subsumption question for the adjudicator, never a new node.
         best = max(((similarity(c["name"], k), node) for k, node in
@@ -2917,6 +2055,9 @@ def render_run(report: dict) -> str:
         skips = ", ".join(f"{k} {v}" for k, v in r["skips"].items() if v)
         if skips:
             lines.append(f"  gates: {skips}")
+        aliases = ", ".join(f"{k} {v}" for k, v in sorted(w["aliases"].items()))
+        if aliases:
+            lines.append(f"  aliases: {aliases}")
     if report["stopped"]:
         lines.append(report["stopped"])
     money = (f"≈ ${entry['cost']:.2f}" if entry["cost"] is not None

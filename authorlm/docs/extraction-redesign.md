@@ -48,6 +48,31 @@ Asked one at a time and answered; the reasoning follows each.
    is wired into block M first; the first run carries summaries.
 8. **Retired names: §4.10 agreed, revivals migrated.** Below the bar
    superseded; above it re-asked once with spans.
+9. **No lexical near-miss of a retired name** (ruled 2026-10-25 after the
+   replay). The difflib rule at 0.8 blocked nine concepts the author had
+   confirmed ("Change" against "challenge", "Metaphysic" against
+   "Metaphysics", "Spiritual" against "Ritual") and no rejected one. The
+   exact ban stays; the adjudicator's block P is the semantic version.
+10. **Confirmed extracted concepts absent from the text are retired by the
+    migration** (ruled 2026-10-25). The replay found 53 confirmed nodes
+    whose name and aliases occur nowhere in the book, nearly all
+    paraphrases the old extractor coined; gate 1 would never admit them
+    now. `extract migrate` retires them on the same terms as a failed
+    pending row (tagged, one evidence row, `--undo` revives). Author-
+    declared concepts are never touched.
+11. **Extraction is lazy, and unattended** (ruled later the same day; the
+    author's words: "I want to extract lazily, and unattended … even
+    concept extraction should be lazy. If a fresh concept tree is
+    required, someone should run the concept extraction"). Nothing mines
+    the graph as a side effect: `init`, `collect` and `write complete`
+    never extract. `authorlm extract --native` and the MCP tool
+    `extract_concepts` are the only roads, taken when a fresh graph is
+    wanted, and a run so asked for has no question left to answer:
+    `adjudicator_prompt = "default"` with the opus-class adjudicator is the
+    shipped setting (the asked-for choice of ruling 2 stays available as
+    `adjudicator_prompt = "ask"` and `--adjudicator`). This retires the
+    2026-09-25 ruling that switched extraction off pending the redo:
+    `[extraction] enabled` is a plain kill switch again, on.
 
 ## 1. The pipeline as found, end to end
 
@@ -161,7 +186,7 @@ tolerant, case-blind), used for realization, grounding, `introduced_in`,
 recurrence, located quotes and `endpoint_in_text`; Jaccard `similarity`
 (`loop.py:102-110`) with `NEAR_DUPLICATE = 0.72` (`loop.py:122`) for the
 proposal firewall (`proposals.py:124-153`) and adjudication retrieval; the
-recurrence bar; the retired-name ban; difflib near-miss at 0.8; the 0.90
+recurrence bar; the retired-name ban; difflib near-miss at 0.8 (dropped, §0.9); the 0.90
 paraphrase floor; `triage_rules`. Of these, `concept_pattern` is the one
 that manufactures false signal: on the sample below, "Experience" and
 "Discernment" co-occur in 74 paragraphs because both are ordinary English
@@ -441,7 +466,17 @@ Deterministic gates, in order, each a named skip count:
    (the "Experience" failure, #12). Else `common_word`.
 4. **Recurrence bar**, unchanged (`hygiene.py:204-213`) for
    `concept | metaphor | example`.
-5. **Retired-name ban**, unchanged, plus the difflib near-miss.
+5. **Retired-name ban**, unchanged, for names the author retired. A name a
+   migration run retired (`retired_from.by_run`) is not banned: the ban is
+   the author's no, and §4.10's door opens only on text written after the
+   retirement, so a machine retirement that banned would silence the name
+   for good, and it is not a precedent in block P either (found on the
+   first live run, 2026-10-25: the migration had
+   retired `hierarchy` and `rank`, and 36 of hierarchy.md's 67 candidates
+   then died as unknown endpoints). No lexical near-miss (ruling §0.9):
+   the ban tolerates case and plurals, and block P shows the adjudicator
+   the nearest retired names with reasons, which is the same check done
+   semantically.
 6. **Mirror and duplicate edges.** A link whose reverse exists among the
    batch or the settled edges, or that duplicates a settled edge, is folded
    into the stronger one (`duplicate`): #16 and #17 never reach the author.
@@ -581,6 +616,16 @@ an `extraction_adjudication` row with `signal = migrated_out` and the gate
 that failed. On the sample, that is 5 edges out by gate 2 and 3 by gate 6
 before any model call.
 
+### 5.2a Confirmed concepts the text no longer carries
+
+Ruling §0.10. `extraction_migration.absent_confirmed`: a confirmed
+extracted concept whose name and every alias match nowhere in the eligible
+files is retired in the same run, `retired_from.by_run` set, one
+`extraction_adjudication` row `signal = migrated_out`, `gate = absent`.
+Measured on a copy of the live workspace 2026-10-25: 47 rows (the replay's
+53 less six still carried by an alias or a file outside the chapters).
+`--undo` revives them with the rest.
+
 ### 5.3 The 210 open proposals
 
 | kind | open | action |
@@ -628,7 +673,13 @@ verdicts with zero author cost. The new gates and adjudicator are measured
 the same way, and §2.5 is the pass mark. The one honest limit: historical
 candidates have no spans, so gate 1 is replayed by re-locating each name in
 the text of the version it was extracted from (`manuscript_versions.files`
-holds every version, `extraction.py:359-366`).
+holds every version, `extraction.py:359-366`). Of every paragraph that
+carries the name, the row is judged on the one whose sentence grounds it
+most strongly (`grounding_strength`: a definition-shaped sentence or a
+heading before a passing mention), first in reading order among equals;
+the first mention alone sent `hierarchy` to be judged on "hierarchy of
+processes enveloped within each process" in another essay (2026-10-25).
+The migration (§5.2) relocates the same way, against the current text.
 
 ### 6.2 Prompt-cache economics
 
@@ -659,7 +710,7 @@ calls to date.
 | `[extraction] unit` | config.toml | `section` | `paragraph` and `essay` accepted for measurement runs |
 | `[extraction] model` | config.toml | `gemini/gemini-2.5-flash` | section calls |
 | `[extraction] adjudicator_model` | config.toml | an Opus-class Claude model | default only; ruling §0.2 |
-| `[extraction] adjudicator_prompt` | config.toml | `ask` | `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
+| `[extraction] adjudicator_prompt` | config.toml | `default` (shipped; `ask` in code) | ruling 9: unattended, the opus-class default taken without a question; `ask` lists Opus-class, gemini-2.5-pro, gemini-2.5-flash and an OpenAI model with each one's estimated cost before the first call; `default` skips the prompt; `--adjudicator <model>` overrides |
 | `[extraction] confidence_floor` | config.toml | `0.70` | gate 8; re-measured by `calibrate` |
 | `[extraction] max_concepts_per_essay` | config.toml | `12` | reaches triage; the rest screened |
 | `[extraction] max_links_per_essay` | config.toml | `15` | same |
@@ -709,14 +760,30 @@ calls to date.
    cuts the 110 further.
 6. Retire `adjudication.py`, `triage_feedback`, the inventory line, and the
    two redundant `triage_rules`; `docs/track-a-two-step-extraction.md`
-   marked superseded by this document. PARTLY BUILT 2026-10-25:
-   `adjudication.py`, its prompt, test and `[extraction] adjudicate` knob
-   are gone, the two rules are gone, track-a is marked superseded.
-   `triage_feedback` and the KNOWN CONCEPTS line still live inside the old
-   `extract_concepts`, which `init`, the writeup close and the MCP
-   `extract_concepts` tool still call; retiring it means re-pointing those
-   three callers at `extraction.run` and porting the eighteen end-to-end
-   scenario sites and six `test_api` checks that drive the old contract
-   through the test stub. That is its own change.
+   marked superseded by this document. BUILT 2026-10-25, in two steps.
+   First `adjudication.py`, its prompt, test and `[extraction] adjudicate`
+   knob, the two rules, and track-a marked superseded. Then the old
+   single-call path itself: `extract_concepts`, `triage_feedback`, the
+   KNOWN CONCEPTS inventory line, the `--edges-only` / `--aliases` modes
+   and `prompts/extraction-legacy.md` are deleted, with their three
+   registry entries and `tools/measure_adjudication.py` (its numbers stand
+   in track-a §4). `api.run_extraction` is the non-interactive front on
+   `extraction.run`, the MCP tool `extract_concepts` its one caller (with
+   an `adjudicator` argument); under ruling 9 `init`, `collect` and
+   `write complete` no longer extract at all, and `init --no-extract` is
+   gone with the behaviour it switched off. A
+   section reply with a null where the contract wants a list counts as
+   unanswered (the watermark stays), and `render_run` reports each alias
+   candidate's fate. The eighteen end-to-end sites drive `extraction.run`
+   through the test stub, which now answers the §4.4 contract; of the six
+   `test_api` checks, the alias rulings (§4.7) and the materiality floor
+   were ported onto `extraction.run`, the prompt-provenance and
+   skip-bucket checks were dropped (the registry check stays; the gates'
+   named skip counts are `test_extraction_gates`), and the inline
+   watermark / alias-hit / null-reply blocks became `api.run_extraction`
+   checks. Dropped with the old contract, not replaced: `edge_reproposal`
+   proposals from extraction (a rejected relation is now held at gate 5),
+   the whole-text aliases sweep, and the hierarchical-pass fallback
+   (sections split into parts instead).
 7. Skill update: `.claude/skills/authorlm/SKILL.md` on the new verbs and
    on what a triage batch now shows (span, score, reason). DONE 2026-10-25.
