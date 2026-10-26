@@ -1350,6 +1350,37 @@ def _save_mapping(db: Database, manuscript: dict, meta: dict) -> None:
     db.update("manuscripts", manuscript["id"], {"metadata": json.dumps(meta)})
 
 
+def mapped_files(links: dict, root: Path | None = None) -> list[str]:
+    """The essay files that have a tab: every link with a tab_id, less
+    any whose file was retired (gone from the manuscript, present in
+    _retired/). A retired file's tab is no longer the bridge's business,
+    so a link an older `doc retire` left behind never yields a "no tab
+    found" warning or a split boundary of its own."""
+    from .docs import RETIRED_DIR
+
+    def retired(f: str) -> bool:
+        return (root is not None and not (root / f).exists()
+                and (root / RETIRED_DIR / Path(f).name).exists())
+
+    return [f for f, e in links.items()
+            if not f.startswith("_") and isinstance(e, dict)
+            and e.get("tab_id") and not retired(f)]
+
+
+def drop_link(db: Database, manuscript: dict, relpath: str,
+              meta_key: str = "gdocs") -> bool:
+    """Forget `relpath`'s Doc link (`doc retire` calls this). The tab
+    itself is left in the Doc for the author to delete. True when a
+    link was dropped."""
+    meta = _mapping(db, manuscript)
+    links = meta.get(meta_key, {})
+    if relpath not in links:
+        return False
+    del links[relpath]
+    _save_mapping(db, manuscript, meta)
+    return True
+
+
 def doc_status(db: Database, manuscript: dict) -> dict:
     """relpath → {doc_id, checked_out, …} for every linked file."""
     return _mapping(db, manuscript).get("gdocs", {})
@@ -1938,9 +1969,7 @@ def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
     """The split boundaries and live tab order pull_doc and diff_push
     use: every live tab title (not only mapped essay files), the
     manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
+    mapped = mapped_files(links, bridge.root)
     pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
     tab_props: list[tuple[str, str]] = []
     tab_doc = docs_service.documents().get(
@@ -2138,9 +2167,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
+    mapped = mapped_files(links, bridge.root)
     pmapped = prompt_links(links) if bridge.meta_key == "gdocs" else {}
     boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
                   | set(pmapped) | {t for _, t in tab_props if t})
@@ -2210,9 +2237,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
     bridge = bridge or manuscript_bridge(manuscript)
     links = _mapping(db, manuscript).get(bridge.meta_key, {})
     master_id = links.get("_master_id")
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
+    mapped = mapped_files(links, bridge.root)
     from .structure import TOC_FILENAME
 
     local = sorted(n for n in iter_manuscript_paths(bridge.root)
@@ -2395,9 +2420,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
+    mapped = mapped_files(links, bridge.root)
     # Every tab title is a split boundary — a tab that isn't a boundary
     # would have its lines swallowed into whichever tab precedes it in the
     # export (the manifest always is one, even without the tab listing).
@@ -2740,9 +2763,7 @@ def reconcile(db: Database, manuscript: dict, service,
         return report
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
-    mapped = [f for f, e in links.items()
-              if not f.startswith("_") and isinstance(e, dict)
-              and e.get("tab_id")]
+    mapped = mapped_files(links, Path(manuscript["path"]))
     pmapped = prompt_links(links)
     # Every tab title is a split boundary, mapped or not — the same rule
     # pull_doc follows. A hand-made tab that is NOT a boundary has its
