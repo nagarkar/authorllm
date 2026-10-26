@@ -114,6 +114,14 @@ export function App() {
     catch (err) { setError((err as Error).message); }
   }, [stem, load]);
 
+  // An edited paragraph returns under a new id (the id hashes the text), so
+  // the one playing, if it was edited, is gone: stop there rather than
+  // jump to the top of the chapter.
+  const onEdited = useCallback(async (id: string) => {
+    setNow(cur => cur && cur.id === id ? null : cur);
+    await load(stem);
+  }, [stem, load]);
+
   // ------------------------------------------------------- playback
   const chapter = status?.chapter || null;
   const playable = useMemo(() => (chapter?.sections || []).filter(s => now ? (now.source === "preview" ? s.previewUrl : s.takeUrl) : false), [chapter, now]);
@@ -222,7 +230,7 @@ export function App() {
         <Card key={sec.id} sec={sec} stem={stem}
           retail={chapter.inRetailSample.includes(sec.id)}
           playing={now?.id === sec.id ? now.source : null}
-          onPlay={play} onWord={openWord}
+          onPlay={play} onWord={openWord} onEdited={onEdited}
           onGenerate={() => act("generate", {stem, ids: [sec.id]})}
           onRetake={() => setConfirm({
             label: `Re-render ¶ ${sec.ordinal} — ${fmt(sec.characters)} characters? The current take is replaced.`,
@@ -281,11 +289,40 @@ function ChapterBar({chapter, onGenerateAll, onStitch}: {chapter: Chapter; onGen
   );
 }
 
-function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
+interface SourceBlock { file: string; line: number; markdown: string; }
+
+function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate, onRetake}: {
   sec: Section; stem: string; retail: boolean; playing: Source | null;
-  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onGenerate: () => void; onRetake: () => void;
+  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onEdited: (id: string) => Promise<void>;
+  onGenerate: () => void; onRetake: () => void;
 }) {
   const badge = sec.kind === "heading" ? `H${sec.level ?? ""}` : "¶";
+  // Editing on the spot (2026-10-26): the box holds the paragraph's markdown
+  // as it is in the file; Save writes it back and the server re-exports, so
+  // the card comes back under a new id with nothing rendered.
+  const [edit, setEdit] = useState<null | {where: string; text: string}>(null);
+  const [saving, setSaving] = useState<"" | "opening" | "saving">("");
+  const [editError, setEditError] = useState("");
+  const openEdit = async () => {
+    setSaving("opening"); setEditError("");
+    try {
+      const src = await request<SourceBlock>("source", {stem, id: sec.id});
+      setEdit({where: `${src.file}:${src.line}`, text: src.markdown});
+    } catch (err) { setEditError((err as Error).message); }
+    setSaving("");
+  };
+  const save = async () => {
+    if (!edit) return;
+    setSaving("saving"); setEditError("");
+    try {
+      const r = await request<{changed: boolean}>("edit", {stem, id: sec.id, markdown: edit.text});
+      setEdit(null);
+      setSaving("");
+      // The card remounts under the paragraph's new id once the refresh
+      // lands; there is nothing to say on this one.
+      if (r.changed) await onEdited(sec.id);
+    } catch (err) { setEditError((err as Error).message); setSaving(""); }
+  };
   return (
     <article id={`card-${sec.id}`} className={`card${playing ? " playing" : ""}${sec.take ? " done" : ""}`}>
       <div className="card-head">
@@ -298,12 +335,24 @@ function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
           {sec.take ? "rendered" : sec.preview ? "preview" : "no preview"}
         </span>
       </div>
-      <p className="text">{sec.text}</p>
+      {edit
+        ? <div className="edit">
+            <textarea className="markdown" value={edit.text} rows={Math.max(3, edit.text.split("\n").length + 1)}
+              onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
+            <div className="edit-row">
+              <span className="where">{edit.where}</span>
+              <button className="btn plain" onClick={() => { setEdit(null); setEditError(""); }} disabled={saving === "saving"}>Cancel</button>
+              <button className="btn gen" onClick={save} disabled={saving === "saving"}>{saving === "saving" ? "Saving…" : "Save"}</button>
+            </div>
+          </div>
+        : <p className="text" onDoubleClick={openEdit} title="Double-tap to edit">{sec.text}</p>}
+      {editError && <div className="moved bad-note">{editError}</div>}
       {sec.pronunciations.length > 0 && <div className="alias">
         {sec.pronunciations.map(p => <button key={p.term} className="word" onClick={() => onWord(p.term)} title="Open in the pronunciation workbench">{p.term} → {p.say}</button>)}
       </div>}
       {sec.moved && <div className="moved">changed since {when(sec.moved.since) || "its take"}: {sec.moved.detail.join(", ")}</div>}
       <div className="actions seg">
+        {!edit && <button className="btn plain" onClick={openEdit} disabled={saving === "opening"}>{saving === "opening" ? "…" : "✎ Edit"}</button>}
         {sec.previewUrl && <button className={`btn preview${playing === "preview" ? " on" : ""}`} onClick={() => onPlay("preview", sec)}>{playing === "preview" ? "◼" : "▶"} Preview</button>}
         {sec.takeUrl && <button className={`btn take${playing === "take" ? " on" : ""}`} onClick={() => onPlay("take", sec)}>{playing === "take" ? "◼" : "▶"} Take</button>}
         {sec.take

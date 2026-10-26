@@ -1435,6 +1435,57 @@ def check_audiobook_page() -> None:
                                  workspace=str(ws), inline=True)
         check("the dropdown lists the manuscripts with an audio export",
               out == {"current": "Scratch", "manuscripts": ["Scratch"]}, str(out))
+        # Editing a card on the page: the raw block comes back, the save
+        # rewrites only that block, and the paragraph returns under a new
+        # id with nothing rendered (2026-10-26).
+        ear = ch["sections"][2]
+        src = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                            "id": ear["id"]}, workspace=str(ws), inline=True)
+        check("source returns the raw markdown block and its place",
+              src == {"file": "kindness.md", "line": 9,
+                      "markdown": "[Only: audio]\nThis paragraph is for the ear only.\n[/Only]"}, str(src))
+        head = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                             "id": ch["sections"][0]["id"]},
+                                  workspace=str(ws), inline=True)
+        check("a heading's source keeps its markdown",
+              head["markdown"] == "# **Kindness that Kills**" and head["line"] == 1, str(head))
+        before = (book / "kindness.md").read_text(encoding="utf-8")
+        same = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                           "id": ear["id"], "markdown": src["markdown"] + "\n"},
+                                  workspace=str(ws), inline=True)
+        check("saving unchanged text writes nothing and runs no job",
+              same["changed"] is False and same["job"] is None
+              and (book / "kindness.md").read_text(encoding="utf-8") == before, str(same))
+        out = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                          "id": ear["id"],
+                                          "markdown": "[Only: audio]\nThis paragraph is for the *ear* alone.\n[/Only]"},
+                                 workspace=str(ws), inline=True)
+        after = (book / "kindness.md").read_text(encoding="utf-8")
+        check("edit rewrites only that block and refreshes",
+              out["changed"] is True and out["job"]["kind"] == "refresh"
+              and out["job"]["state"] == "done"
+              and after == before.replace("This paragraph is for the ear only.",
+                                          "This paragraph is for the *ear* alone."), str(out))
+        st = s.status("kindness")
+        new_ear = st["chapter"]["sections"][2]
+        check("the edited paragraph returns under a new id with nothing rendered",
+              new_ear["id"] != ear["id"] and new_ear["text"] == "This paragraph is for the ear alone."
+              and new_ear["take"] is None and new_ear["preview"] is None
+              and st["chapter"]["generated"] == 3, str(new_ear))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": ear["id"], "markdown": "late"},
+                               workspace=str(ws), inline=True)
+            check("a save against the old id is refused", False)
+        except LookupError as err:
+            check("a save against the old id is refused by name", "no paragraph" in str(err), str(err))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": new_ear["id"], "markdown": "  \n"},
+                               workspace=str(ws), inline=True)
+            check("an empty save is refused", False)
+        except audio.AudioError as err:
+            check("an empty save is refused by name", "empty" in str(err), str(err))
         # The server opened without -m (key "*"); the page then names the
         # manuscript, and must reach the same session, never a second worker.
         audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))

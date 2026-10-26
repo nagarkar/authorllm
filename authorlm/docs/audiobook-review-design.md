@@ -404,6 +404,24 @@ and a card's respelling chips open the word. The standalone
 `authorlm workbench` verb and its page remain but are not the door.
 The page was restyled after gamelm's vocingo card UI the same day.
 
+**2026-10-26. Editing on the page.** The author's ask: "I want the
+text boxes that show up with paragraphs to be editable on the spot, and
+that change should be reflected in the .md file. This allows me to fix
+problems while I'm listening to the audio. Once the content is updated,
+it should be marked stale so when I try to replay the audio, it
+regenerates the audio." This amends §3's "Text is never edited here":
+a card's ✎ Edit (or a double-tap on the text) opens the paragraph's
+markdown as it is in the file (`source`: the block is found by what it
+says, since the export's line numbers count the pre-passed text), and
+Save (`edit`) rewrites that block alone and queues a refresh. Stale
+needs no mark of its own: the id hashes the text, so the paragraph
+returns under a new id with no preview and no take — its preview
+renders on the next play (the lazy listen), its take waits for a tap.
+A paragraph no single block of the file says whole (an inline tag the
+audio strips, a list read item by item) is not editable here and says
+so. The Doc stays out of it (ruling of 2026-09-26): the edit is a local
+edit, and reconcile in chat sees it like any other.
+
 ## 11. Open questions
 
 - Whether the served page should also host the pronunciation workbench

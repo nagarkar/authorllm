@@ -16,7 +16,10 @@ in chat (author's ruling 2026-09-26) and lands on disk, where the stale
 banner sees it like any local edit.
 Two taps on the same paragraph become two jobs, and the second finds
 the take present and does nothing (generation.py's guard 2). The page
-polls `status` and paints progress. Nothing here spends until a
+polls `status` and paints progress. A card's text can be edited on the
+page (`source` / `edit`, 2026-10-26): the markdown block is rewritten in
+the manuscript file and a refresh follows, so the paragraph returns
+under a new id with nothing rendered — stale by construction. Nothing here spends until a
 generate or retake job runs, and each one is the author's tap.
 """
 
@@ -38,7 +41,7 @@ CLIENT_FACTORY: Callable[[], audio.ElevenLabs] | None = None
 PREVIEW_RENDERER: Callable[[Path, dict, str, int], Path] | None = None
 
 METHODS = ("manuscripts", "status", "refresh", "preview", "generate", "retake",
-           "stitch", "jobs")
+           "stitch", "jobs", "source", "edit")
 _SESSIONS: dict[tuple, "Session"] = {}
 RECENT_JOBS = 20
 
@@ -144,6 +147,53 @@ class Session:
                                       if sid in texts]
             out["chapter"] = full
         return out
+
+    # ------------------------------------------------- editing a card
+
+    def _chapter_files(self, stem: str) -> tuple[dict, list[str]]:
+        chapter = gen.load_chapter(self.root, gen.load_book(self.root), stem)
+        return chapter, [chapter["file"], *chapter.get("continuations", [])]
+
+    def source(self, stem: str, section_id: str) -> dict:
+        """The raw markdown behind one card, for the edit box: `{file,
+        line, markdown}`. Refuses by name when no block of the chapter's
+        files says the section whole (then the file is the place to edit)."""
+        chapter, names = self._chapter_files(stem)
+        speech = next((s for s in gen.speech_of(chapter) if s["id"] == section_id), None)
+        if speech is None:
+            raise LookupError(f"no paragraph {section_id} in {stem}")
+        root = Path(self.manuscript["path"])
+        found = audio.locate_block(root, names, audio.load_config(root),
+                                   speech["text"], speech.get("kind", "paragraph"))
+        if found is None:
+            raise LookupError(f"¶ {gen.ordinal_of(chapter, section_id)} of {stem} is "
+                              "not one block of the file (a tag the audio strips, "
+                              "or a list read item by item) — edit it in the file")
+        return {k: found[k] for k in ("file", "line", "markdown")}
+
+    def edit(self, stem: str, section_id: str, markdown: str) -> dict:
+        """Write the edited markdown over the paragraph in its file, then
+        refresh. The id hashes the text, so the edited paragraph comes back
+        under a new id with no preview and no take: its preview renders
+        on the next play, and its take waits for a Generate tap. The
+        paragraph is relocated now, not when the box opened: a save after
+        the file moved underneath is refused, never written blind."""
+        chapter, names = self._chapter_files(stem)
+        speech = next((s for s in gen.speech_of(chapter) if s["id"] == section_id), None)
+        if speech is None:
+            raise LookupError(f"no paragraph {section_id} in {stem}")
+        root = Path(self.manuscript["path"])
+        found = audio.locate_block(root, names, audio.load_config(root),
+                                   speech["text"], speech.get("kind", "paragraph"))
+        if found is None:
+            raise LookupError(f"¶ {gen.ordinal_of(chapter, section_id)} of {stem} "
+                              "has changed on disk — reload and edit again")
+        if markdown.replace("\r\n", "\n").strip("\n") == found["markdown"]:
+            return {"file": found["file"], "line": found["line"], "changed": False,
+                    "job": None}
+        audio.replace_block(root, found, markdown)
+        return {"file": found["file"], "line": found["line"], "changed": True,
+                "job": self.enqueue("refresh", stem=stem)}
 
     def jobs(self) -> dict:
         with self._lock:
@@ -343,6 +393,10 @@ def dispatch(method: str, params: dict[str, Any],
         return s.status(params.get("stem"))
     if method == "jobs":
         return s.jobs()
+    if method == "source":
+        return s.source(params["stem"], params["id"])
+    if method == "edit":
+        return s.edit(params["stem"], params["id"], str(params.get("markdown") or ""))
     if method == "refresh":
         return s.enqueue("refresh", stem=params.get("stem"))
     if method == "preview":

@@ -65,6 +65,11 @@ audio{width:100%;margin-top:10px;border-radius:999px}
 .text{margin:8px 0 0;font-size:17px}
 .alias{margin-top:6px;font-size:13px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-weight:500}
 .moved{margin-top:8px;padding:6px 10px;border-radius:8px;background:var(--warn-soft);color:var(--warn);font-size:13px}
+.moved.bad-note{background:var(--bad-soft);color:var(--bad)}
+.edit{margin-top:8px}
+.edit textarea.markdown{width:100%;resize:vertical;font:inherit;font-weight:500;font-size:16px;line-height:1.45;padding:9px 10px;border-radius:8px;border:1.5px solid var(--band);background:var(--ground);color:var(--ink)}
+.edit-row{display:flex;gap:8px;align-items:center;margin-top:6px}
+.edit-row .where{flex:1 1 auto;font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* the buttons */
 .btn{font:inherit;font-weight:700;font-size:15px;min-height:48px;padding:10px 14px;border-radius:10px;border:2px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
