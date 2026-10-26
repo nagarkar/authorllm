@@ -334,6 +334,18 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
       if (r.changed) await onEdited(sec.id);
     } catch (err) { setEditError((err as Error).message); setSaving(""); }
   };
+  const cancel = () => { setEdit(null); setEditError(""); };
+  // The overlay (2026-10-26, the author: the card "is jumping around quite
+  // a bit if I'm also playing some audio"): the box is fixed over the page,
+  // so the player can walk on and scroll beneath it. Closing it saves, as
+  // the in-place box did; Cancel is the one way out that writes nothing.
+  // Escape closes (and saves); a save that fails keeps the box open.
+  useEffect(() => {
+    if (!edit) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); void save(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   return (
     <article id={`card-${sec.id}`} className={`card${playing ? " playing" : ""}${sec.take ? " done" : ""}`}>
       <div className="card-head">
@@ -346,18 +358,25 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
           {sec.take ? "rendered" : sec.preview ? "preview" : "no preview"}
         </span>
       </div>
-      {edit
-        ? <div className="edit">
-            <textarea className="markdown" value={edit.text} rows={Math.max(3, edit.text.split("\n").length + 1)}
-              onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
-            <div className="edit-row">
-              <span className="where">{edit.where}</span>
-              <button className="btn plain" onClick={() => { setEdit(null); setEditError(""); }} disabled={saving === "saving"}>Cancel</button>
-              <button className="btn gen" onClick={save} disabled={saving === "saving"}>{saving === "saving" ? "Saving…" : "Save"}</button>
-            </div>
+      <p className="text" onDoubleClick={openEdit} title="Double-tap to edit">{sec.text}</p>
+      {editError && !edit && <div className="moved bad-note">{editError}</div>}
+      {edit && <div className="overlay" onClick={e => { if (e.target === e.currentTarget) void save(); }}>
+        <div className="overlay-box" role="dialog" aria-modal="true" aria-label={`Edit ¶ ${sec.ordinal}`}>
+          <div className="overlay-head">
+            <span className="display">Edit ¶ {sec.ordinal}</span>
+            <span className="where">{edit.where}</span>
+            <button className="close" onClick={() => void save()} disabled={saving === "saving"} aria-label="Save and close">✕</button>
           </div>
-        : <p className="text" onDoubleClick={openEdit} title="Double-tap to edit">{sec.text}</p>}
-      {editError && <div className="moved bad-note">{editError}</div>}
+          <textarea className="markdown" value={edit.text}
+            onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
+          {editError && <div className="moved bad-note">{editError}</div>}
+          <div className="edit-row">
+            <span className="hint">Closing saves. Esc or ✕ too.</span>
+            <button className="btn plain" onClick={cancel} disabled={saving === "saving"}>Cancel</button>
+            <button className="btn gen" onClick={() => void save()} disabled={saving === "saving"}>{saving === "saving" ? "Saving…" : "Save & close"}</button>
+          </div>
+        </div>
+      </div>}
       {sec.pronunciations.length > 0 && <div className="alias">
         {sec.pronunciations.map(p => <button key={p.term} className="word" onClick={() => onWord(p.term)} title="Open in the pronunciation workbench">{p.term} → {p.say}</button>)}
       </div>}

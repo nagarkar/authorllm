@@ -422,6 +422,15 @@ audio strips, a list read item by item) is not editable here and says
 so. The Doc stays out of it (ruling of 2026-09-26): the edit is a local
 edit, and reconcile in chat sees it like any other.
 
+**2026-10-26, later. The edit is an overlay.** "When I edit a
+particular paragraph in the web UI, it's jumping around quite a bit if
+I'm also playing some audio." The edit box is a fixed overlay over the
+page, so the player walks on and scrolls beneath it; the player sits
+above the dimmed backdrop and stays usable. Closing it (✕, Esc, a tap on
+the backdrop, Save & close) saves exactly as the in-place box did;
+Cancel is the one way out that writes nothing, and a save that fails
+keeps the box open with the error.
+
 **2026-10-26, later. Push from the page.** "Rename 'exported' to
 'pushed' and on the right of that text, put a 'push' button to push to
 the google doc; this should naturally update the last pushed date." The

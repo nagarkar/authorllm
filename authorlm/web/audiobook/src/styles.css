@@ -68,10 +68,16 @@ audio{width:100%;margin-top:10px;border-radius:999px}
 .alias{margin-top:6px;font-size:13px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-weight:500}
 .moved{margin-top:8px;padding:6px 10px;border-radius:8px;background:var(--warn-soft);color:var(--warn);font-size:13px}
 .moved.bad-note{background:var(--bad-soft);color:var(--bad)}
-.edit{margin-top:8px}
-.edit textarea.markdown{width:100%;resize:vertical;font:inherit;font-weight:500;font-size:16px;line-height:1.45;padding:9px 10px;border-radius:8px;border:1.5px solid var(--band);background:var(--ground);color:var(--ink)}
-.edit-row{display:flex;gap:8px;align-items:center;margin-top:6px}
-.edit-row .where{flex:1 1 auto;font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the edit overlay: fixed, so the page and player move beneath it */
+.overlay{position:fixed;inset:0;z-index:20;background:rgba(20,10,30,.55);display:flex;align-items:flex-start;justify-content:center;padding:max(16px,env(safe-area-inset-top)) 12px 16px}
+.overlay-box{width:min(760px,100%);max-height:calc(100dvh - 150px);display:flex;flex-direction:column;background:var(--panel);border-radius:14px;border:1px solid var(--line);box-shadow:0 18px 50px rgba(0,0,0,.35);padding:12px 14px 14px}
+.overlay-head{display:flex;align-items:baseline;gap:10px}
+.overlay-head .display{font-size:18px;color:var(--ink)}
+.overlay-head .close{margin-left:auto;font:inherit;font-size:18px;min-width:40px;min-height:40px;border:0;border-radius:10px;background:var(--chip);color:var(--ink);cursor:pointer}
+.overlay-box textarea.markdown{flex:1 1 auto;min-height:40dvh;margin-top:10px;width:100%;resize:vertical;font:inherit;font-weight:500;font-size:17px;line-height:1.5;padding:10px 12px;border-radius:10px;border:1.5px solid var(--band);background:var(--ground);color:var(--ink)}
+.edit-row{display:flex;gap:8px;align-items:center;margin-top:10px}
+.where{font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edit-row .hint{flex:1 1 auto;font-size:12px;color:var(--muted)}
 
 /* the buttons */
 .btn{font:inherit;font-weight:700;font-size:15px;min-height:48px;padding:10px 14px;border-radius:10px;border:2px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
@@ -86,7 +92,7 @@ audio{width:100%;margin-top:10px;border-radius:999px}
 .btn:focus-visible,select:focus-visible,.chip:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
 /* the player */
-footer.player{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--panel);border-top:2px solid var(--band);padding:8px 12px calc(10px + env(safe-area-inset-bottom));box-shadow:0 -6px 20px rgba(0,0,0,.15)}
+footer.player{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--panel);border-top:2px solid var(--band);padding:8px 12px calc(10px + env(safe-area-inset-bottom));box-shadow:0 -6px 20px rgba(0,0,0,.15)}
 footer.player.on{background:var(--chip)}
 .player-row{display:flex;gap:8px;align-items:center;margin-bottom:4px;max-width:640px;margin-inline:auto}
 .player-row .now{flex:1;color:var(--band);font-size:18px}
