@@ -7611,6 +7611,9 @@ def cmd_doc(args):
                         f"({', '.join(sorted(set(refs)))}) — stripped. "
                         "Images belong in _illustrations/ via "
                         "[Illustration: …] tags."))
+                for relpath in result.get("pruned", []):
+                    print(f"Dropped the Doc link for {relpath}: its tab is "
+                          "gone and the file is retired or deleted.")
                 for relpath in result["missing"]:
                     print(ui.yellow(f"warning: no tab found for {relpath} — "
                                     "was its tab renamed? Tab titles must "
