@@ -1196,7 +1196,11 @@ def _critique_run(db: Database, manuscript: dict, args) -> None:
     p = _critique_pass_row(db, manuscript)
     config = _load_config(args)
     try:
-        ctx = passes.build_context(db, manuscript, file, p, force=args.force)
+        # The summaries the pass reads are rebuilt on use (ruling 3), each
+        # level on its own model, each printing its cost line (ruling 9).
+        from . import summaries as sums
+        ctx = passes.build_context(db, manuscript, file, p, force=args.force,
+                                   llm=sums.clients(config))
     except (RuntimeError, LookupError) as err:
         sys.exit(f"error: {err}")
     if ctx["forced"]:

@@ -1158,8 +1158,8 @@ def derived_lists(db: Database, manuscript: dict, file: str,
             "promises": promises, "debts": debts}
 
 
-def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
-             ) -> dict:
+def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None,
+             texts: dict[str, str] | None = None) -> dict:
     """The three levels for one essay, projected for a consumer (§7's
     table; extraction-redesign.md §4.3). Read-only over `current` rows.
 
@@ -1167,12 +1167,18 @@ def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
     with its hash per row and `stale: True` when some unit of the text
     has no row — a paragraph or section without one carries `gist` /
     `summary` `None` so the consumer can print STALE against it. The
-    essay carries `_state`'s verdict as `state`."""
-    if text is None:
-        texts, _unlisted, _flight = _context_units(db, manuscript)
-        if file not in texts:
-            raise LookupError(f"'{file}' is not a unit of the manuscript")
-        text = texts[file]
+    essay carries `_state`'s verdict as `state`.
+
+    `texts` is the caller's snapshot of the whole book (the derived lists
+    read every unit's records); omitted, one is taken here. `text` is this
+    unit's own text, which defaults to `texts[file]`."""
+    if text is None or texts is None:
+        if texts is None:
+            texts, _unlisted, _flight = _context_units(db, manuscript)
+        if text is None:
+            if file not in texts:
+                raise LookupError(f"'{file}' is not a unit of the manuscript")
+            text = texts[file]
     verse_file = file in verse_files_of(manuscript)
     secs = sections_of(text, verse_file=verse_file)
     have_p = _current_paragraph_rows(db, manuscript["id"], file)
@@ -1217,7 +1223,8 @@ def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
                  "stale": state not in ("fresh", "upstream_stale")}
         essay.update(derived_lists(
             db, manuscript, file,
-            paragraph_records(db, manuscript, files=[file], texts={file: text})))
+            paragraph_records(db, manuscript, files=[file], texts={file: text}),
+            texts=texts))
     return {"file": file, "essay": essay, "sections": sections,
             "paragraphs": paragraphs,
             "paragraph_level_stale": bool(paragraphs) and any(
@@ -1260,15 +1267,16 @@ def paragraph_records(db: Database, manuscript: dict,
     return out
 
 
-def mentions(db: Database, manuscript: dict, term: str | None = None
-             ) -> list[dict]:
+def mentions(db: Database, manuscript: dict, term: str | None = None,
+             texts: dict[str, str] | None = None) -> list[dict]:
     """Every mention across the book in reading order, flattened for the
     recurrence query (ruling 7): {term, role, span, file, para_hash,
     ordinal, section_ordinal}. `term` filters case-insensitively on the
-    author's spelling."""
+    author's spelling. `texts` is the caller's snapshot; omitted, one is
+    taken here."""
     want = term.lower() if term else None
     out = []
-    for rec in paragraph_records(db, manuscript):
+    for rec in paragraph_records(db, manuscript, texts=texts):
         for m in rec["mentions"]:
             if want is not None and m["term"].lower() != want:
                 continue
