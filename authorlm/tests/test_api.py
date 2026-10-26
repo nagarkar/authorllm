@@ -10002,7 +10002,7 @@ def main_test() -> None:
             check("review filter inserts the legal notice ahead of the title",
                   filtered.returncode == 0
                   and filtered.stdout.index(
-                      "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT")
+                      "CONFIDENTIAL REVIEW DRAFT")
                   < filtered.stdout.index("The Book")
                   and "Author House LLC" in filtered.stdout,
                   filtered.stderr or filtered.stdout[:1000])
