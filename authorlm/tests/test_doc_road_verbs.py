@@ -593,6 +593,31 @@ class _DroppingFake(_SurgicalDocFake):
         return _Files()
 
 
+class _DropsAfterWriteFake(_SurgicalDocFake):
+    """An export that loses a paragraph only once the push has written:
+    the read-back fails after text has landed in the tab."""
+
+    def files(self):
+        inner = super().files()
+        outer = self
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                text = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute().decode()
+                if _text_writes(outer):
+                    text = text.replace("Alpha one.\n\n", "")
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+
 def _text_writes(fake) -> list[str]:
     return [b for b in fake.bodies
             if "insertText" in b or "deleteContentRange" in b]
@@ -664,6 +689,24 @@ def spacing_join(root: Path) -> None:
     check("...and the message does not send the author to hand-edit "
           "the Doc", "in the Doc" not in msg and "Nothing was written"
           in msg, msg)
+
+    # A disagreement found AFTER this push wrote is not "nothing was
+    # written": the message says the push wrote and where to look.
+    ws, db, manuscript, ms, fake = _fixture(root, "drop-after-ws", BASE,
+                                            fake_cls=_DropsAfterWriteFake)
+    (ms / "solo.md").write_text(BASE.replace("Gamma three.",
+                                             "Gamma, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("a disagreement after a write stops the push",
+          bool(_text_writes(fake)) and "disagree" in msg, msg)
+    check("...and says this push wrote to the tab, never 'Nothing was "
+          "written'", "Nothing was written" not in msg
+          and "this push wrote" in msg.lower()
+          and "authorlm doc diff solo.md" in msg, msg)
 
     # The settle step (forms whose verdict is in the record but still
     # stand in the tab) is a text write too: it waits for validation.

@@ -4468,9 +4468,11 @@ def first_divergence(doc_texts: list[str], export_paras: list[str]) -> dict:
 
 
 def divergence_note(doc_texts: list[str], export_paras: list[str],
-                    relpath: str) -> str:
+                    relpath: str, fix: bool = True) -> str:
     """The tail of diff_push's count-disagreement error: the first
-    divergence, both sides clipped to 80 characters, and the fix."""
+    divergence, both sides clipped to 80 characters, and (with `fix`)
+    the fix — left out when the push itself already wrote, since
+    "nothing was written" would then be false."""
     d = first_divergence(doc_texts, export_paras)
 
     def clip(text: str) -> str:
@@ -4479,6 +4481,8 @@ def divergence_note(doc_texts: list[str], export_paras: list[str],
 
     note = (f"; first divergence at paragraph {d['index'] + 1}: "
             f"Doc «{clip(d['doc'])}» vs export «{clip(d['export'])}»")
+    if not fix:
+        return note
     if d["hard_break_after"] is not None:
         words = " ".join(d["hard_break_after"].split()[:6])
         return (note + ". Google's export joined two paragraphs with a hard "
@@ -4693,11 +4697,26 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             md, paras, units = read_tab()
         return md, paras, units, healed
 
+    # Edits this push has already sent: a disagreement found after a
+    # write is not "nothing was written" (ported from PR #236).
+    sent = 0
+
     def disagreement(paras: list[dict], units: list[str]) -> LookupError:
+        head = (f"diff push: tab structure and export disagree "
+                f"({len(paras)} vs {len(units)} paragraphs)")
+        if sent:
+            note = divergence_note([d["text"] for d in paras], units,
+                                   relpath, fix=False)
+            return LookupError(
+                head + note + f". This push wrote {sent} edit(s) to "
+                f"{relpath}'s tab before its read-back failed, so the tab "
+                f"may hold part of it: see authorlm doc diff {relpath}, "
+                "then settle any margin threads and retry, or use a "
+                "rebuild push. This is a bridge bug to file, not a Doc "
+                "to fix by hand")
         return LookupError(
-            f"diff push: tab structure and export disagree "
-            f"({len(paras)} vs {len(units)} paragraphs)"
-            + divergence_note([d["text"] for d in paras], units, relpath))
+            head + divergence_note([d["text"] for d in paras], units,
+                                   relpath))
 
     healed = False
 
@@ -4895,6 +4914,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         if flat:
             docs_service.documents().batchUpdate(
                 documentId=master_id, body={"requests": flat}).execute()
+            sent += ops
             # Spacing BEFORE the read-back: inserted paragraphs carry none,
             # and Google's export joins unspaced paragraphs with hard line
             # breaks, so a read-back taken first saw fewer paragraphs than
