@@ -7628,7 +7628,8 @@ def cmd_doc(args):
         sys.exit(f"usage: doc {args.action} <name>")
     try:
         if args.action == "add":
-            path = docs.add_doc(manuscript, args.name, title=args.title)
+            path = docs.add_doc(manuscript, args.name, title=args.title,
+                                after=getattr(args, "doc_after", None))
             print(f"Created {path.relative_to(manuscript['path'])} "
                   + ui.dim("(scaffold only — the writing is yours)"))
         elif args.action == "retire":
@@ -9214,6 +9215,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "_drafts/<stem>.merged.md under the manuscript)")
     p.add_argument("--title", help="heading for a new document / Doc title "
                                    "(push, create-manuscript)")
+    p.add_argument("--after", dest="doc_after", metavar="FILE",
+                   help="add: the toc.toml file the new one follows, or "
+                        "'start' (default: the end of toc.toml)")
     p.add_argument("--open", action="store_true",
                    help="open the Google Doc in your browser after push")
     p.add_argument("--force", action="store_true",

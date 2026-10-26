@@ -584,6 +584,12 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_doc_add_toc`
+
+`authorlm/tests/test_doc_add_toc.py`
+
+`doc add` registers the new file in toc.toml when the manuscript has one, so a Doc push of it never leaves toc.toml and the Doc's tab order disagreeing. Run: python3 tests/test_doc_add_toc.py
+
 ## `tests.test_doc_bind`
 
 `authorlm/tests/test_doc_bind.py`
