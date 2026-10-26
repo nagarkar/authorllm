@@ -702,6 +702,30 @@ def locate_quote(files: dict[str, str],
     return relpath, _nearest_heading(paragraphs, index)
 
 
+def still_open_comments(db: Database, manuscript: dict,
+                        open_comments: list[dict], fresh: list[dict],
+                        files: dict[str, str]) -> list[dict]:
+    """The open comments a pull has shown before and that carry no margin
+    thread, projected like `ingest_comments`; the location says
+    "(anchor text gone)" when the quote is in no file."""
+    from . import threads as threads_mod
+
+    fresh_ids = {c["id"] for c in fresh}
+    out = []
+    for c in open_comments:
+        if c["id"] in fresh_ids or threads_mod.get_thread(
+                db, manuscript["id"], c["id"]) is not None:
+            continue
+        quoted = (c.get("quotedFileContent") or {}).get("value") or ""
+        rel, heading = locate_quote(files, quoted)
+        out.append({
+            "comment_id": c["id"],
+            "location": (f"{rel}#{heading}" if rel and heading else rel)
+                        or "(anchor text gone)",
+            "quote": clamp(quoted), "content": c.get("content", "")})
+    return out
+
+
 def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
                     files: dict[str, str]) -> list[dict]:
     """Store open Doc comments as doc_comments rows (dedupe by comment id —
@@ -1653,6 +1677,9 @@ def push_doc(db: Database, manuscript: dict, query: str,
             f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
     _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
+    if rebuild:
+        _refuse_rebuild_over_comments(db, manuscript, bridge, relpath,
+                                      service, docs_service)
     # A tab that carries comments is never rebuilt, tables or not
     # (it-cd0fb0ad59fb; the author: "any comments on that tab are not
     # lost or orphaned"). diff_push aligns each Docs table as ONE unit
@@ -1716,6 +1743,40 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _refuse_rebuild_over_comments(db: Database, manuscript: dict,
+                                  bridge: DocBridge, relpath: str,
+                                  service, docs_service) -> None:
+    """A rebuild replaces the whole tab and orphans every comment anchored
+    in it, so it is refused while any open comment's quote is in the tab
+    (2026-10-26: four comments on read-again.md were orphaned by two
+    rebuilds run after a "tab structure and export disagree" error, the
+    rebuilding session believing the tab had none). Resolve or settle
+    those comments first. A tab that cannot be read is refused too: the
+    side that cannot destroy the margin is the safe one."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    master_id = links.get("_master_id")
+    if not (master_id and entry.get("tab_id")):
+        return
+    try:
+        tab = fetch_tab_markdown(service, docs_service, master_id, links,
+                                 bridge, relpath)
+    except Exception as err:  # noqa: BLE001 — unknown margin: refuse
+        raise LookupError(f"{relpath}: rebuild refused — the tab could not "
+                          f"be read to check its comments ({err})") from err
+    text = _flat_prose(tab or "")
+    anchored = [c for c in _open_comment_anchors(db, manuscript, service,
+                                                 master_id)
+                if _flat_prose(c["quoted"]) and _flat_prose(c["quoted"]) in text]
+    if anchored:
+        lines = "; ".join(f"[{c['comment_id']}] «{clamp(c['quoted'], 40)}» "
+                          f"{clamp(c['content'], 60)}" for c in anchored)
+        raise LookupError(
+            f"{relpath}: rebuild refused — {len(anchored)} open comment(s) "
+            f"anchor in this tab and a rebuild would orphan them: {lines}. "
+            "Settle or resolve them (doc resolve-comments <id>) first.")
 
 
 def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
@@ -2816,6 +2877,12 @@ def harvest_comments(db: Database, manuscript: dict, master_id: str,
                      (manuscript["id"], c["id"])) is None]
         report["comments"] = ingest_comments(
             db, manuscript, fresh, files)
+        # Every open comment a pull has already shown, listed again on
+        # each pull until it is settled (2026-10-26: comments listed once
+        # dropped out of view, and four were orphaned unnoticed). One whose
+        # quote is in no file has lost its anchor text: say so.
+        report["still_open"] = still_open_comments(
+            db, manuscript, open_comments, fresh, files)
         report["thread_replies"] = []
         for c in open_comments:
             thread = threads_mod.get_thread(
@@ -4692,15 +4759,17 @@ def _anchored_paragraphs(texts: list[str],
     more than once marks every occurrence (the Drive API gives the quote,
     not its position, and over-holding is the side that loses nothing).
     A quote found nowhere marks nothing."""
+    # On the words alone, like locate_quote: a comment quotes rendered
+    # text, so *religare* in the markdown is religare in the quote.
     spans, joined = [], ""
     for text in texts:
         start = len(joined)
-        joined += _flat(text)
+        joined += _flat_prose(text)
         spans.append((start, len(joined)))
         joined += " "
     marks: dict[int, list[dict]] = {}
     for c in comments:
-        needle = _flat(c.get("quoted") or "")
+        needle = _flat_prose(c.get("quoted") or "")
         if not needle:
             continue
         at = joined.find(needle)

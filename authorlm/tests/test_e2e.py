@@ -3425,6 +3425,40 @@ def scenario_doc_comments(root: Path) -> None:
           db.one("SELECT file FROM doc_comments WHERE comment_id='c2'")["file"] == "one.md"
           and db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
 
+    # Comment-loss causes (2026-10-26).
+    import authorlm.gdocs as gd
+    still = gd.still_open_comments(db, manuscript, [
+        {"id": "c1", "content": "x", "quotedFileContent": {"value": "Beta paragraph, quite distinctive text here."}},
+        {"id": "c9", "content": "gone", "quotedFileContent": {"value": "words no file has"}},
+        {"id": "c10", "content": "new", "quotedFileContent": {"value": "Gamma"}}],
+        [{"id": "c10"}], files)
+    check("a pull re-lists earlier open comments, marking a lost anchor",
+          [(c["comment_id"], c["location"]) for c in still]
+          == [("c1", "one.md#**The Middle**"), ("c9", "(anchor text gone)")], str(still))
+    marks = gd._anchored_paragraphs(
+        ["Plain one.", "It comes from *religare*. To tie back."],
+        [{"quoted": "It comes from religare. To tie back."}])
+    check("a commented paragraph with italics is held", list(marks) == [1], str(marks))
+    real = (gd._mapping, gd.fetch_tab_markdown, gd._open_comment_anchors)
+    gd._mapping = lambda *a, **k: {"gdocs": {"_master_id": "m", "one.md": {"tab_id": "t"}}}
+    gd.fetch_tab_markdown = lambda *a, **k: "Beta paragraph, *quite* distinctive text here."
+    gd._open_comment_anchors = lambda *a, **k: [
+        {"comment_id": "c1", "quoted": "Beta paragraph, quite distinctive", "content": "fix"}]
+    bridge = type("B", (), {"meta_key": "gdocs"})()
+    try:
+        try:
+            gd._refuse_rebuild_over_comments(db, manuscript, bridge, "one.md", None, None)
+            check("a rebuild over an anchored comment is refused", False)
+        except LookupError as err:
+            check("a rebuild over an anchored comment is refused by name",
+                  "rebuild refused" in str(err) and "c1" in str(err), str(err))
+        gd._open_comment_anchors = lambda *a, **k: [
+            {"comment_id": "c9", "quoted": "words no tab has", "content": "x"}]
+        gd._refuse_rebuild_over_comments(db, manuscript, bridge, "one.md", None, None)
+        check("a rebuild with no comment in the tab goes ahead", True)
+    finally:
+        gd._mapping, gd.fetch_tab_markdown, gd._open_comment_anchors = real
+
     # --- tab reconciliation: adopt / re-adopt / rename / ambiguity --------
     from authorlm.gdocs import MANIFEST_TITLE, classify_tabs
     links2 = {"a.md": {"tab_id": "t.a"}, "b.md": {"tab_id": "t.b"}}
