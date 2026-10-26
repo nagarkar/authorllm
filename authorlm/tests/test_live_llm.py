@@ -474,13 +474,12 @@ def main_test(only: str | None = None) -> None:
         # behind (the incident this file exists to fix), so it gets the
         # same try/except + hygiene treatment as any other section. A
         # `--section` run that isn't testing extraction registers with
-        # `--no-extract`: it still needs the manuscript row, not a second
+        # no extraction: it still needs the manuscript row, not a second
         # concept-extraction call it isn't there to test or pay for.
         if only in (None, "extraction"):
             run_section("extraction", section_extraction)
         else:
-            run(ws, "init", "--name", "sample", "--path", str(ms),
-                "--no-extract")
+            run(ws, "init", "--name", "sample", "--path", str(ms))
         run(ws, "session", "start")
 
         for name, fn in SECTIONS:

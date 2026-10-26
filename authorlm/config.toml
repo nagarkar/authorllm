@@ -124,17 +124,17 @@ model = "openai/gpt-image-2"
 image_size = "1536x1024"
 
 [extraction]
-# The switch for LLM concept extraction (init, 'extract', the end of a
-# writeup, analysed collects). OFF by author ruling 2026-09-25: the
-# concept-graph feature is to be redone; until then the graph changes only
-# by hand ('concept add'). The zero-token graph upkeep — realizations,
-# introduced_in, PROTECTED TERMS in filter and lens payloads — is not
-# governed by this switch and keeps running.
-enabled = false
+# The kill switch for LLM concept extraction. Extraction is LAZY (ruling
+# 2026-10-25, docs/extraction-redesign.md §0.9): nothing mines the graph
+# as a side effect — not init, not a collect, not the end of a writeup.
+# `authorlm extract --native` and the MCP tool extract_concepts are the
+# only roads, taken when someone wants a fresh Concept Graph. The
+# zero-token graph upkeep — realizations, introduced_in, PROTECTED TERMS
+# in filter and lens payloads — is not governed by this switch.
+enabled = true
 # --- The redesigned pipeline (docs/extraction-redesign.md §7, ratified
 # 2026-10-25) — what `authorlm extract` runs. `extract <file>` prints the
-# payload and makes no call; `--native` makes the calls and needs
-# `enabled = true` above.
+# payload and makes no call; `--native` makes the calls.
 #
 # Section calls (one per heading section). Thinking off: the contract is
 # schema-shaped and spans are copied, not reasoned.
@@ -144,9 +144,8 @@ thinking_budget = 0
 # system prompt me for what model I want to use. I don't always have api
 # credits") made the model a run-time question; on 2026-10-25 the author
 # ruled extraction UNATTENDED — "extract lazily, and unattended" — so
-# adjudicator_prompt = "default" takes `adjudicator_model` without asking,
-# and init, `write complete`, analysed collects and the MCP tool run the
-# changed sections as they come, with no question to answer. The choices
+# adjudicator_prompt = "default" takes `adjudicator_model` without asking:
+# a run, once asked for, has no question to answer. The choices
 # below are still what `extract --native --adjudicator <model>` and
 # adjudicator_prompt = "ask" offer, each with the run's estimated cost
 # (prices from llmlm's cache, never a constant). The opus-class default

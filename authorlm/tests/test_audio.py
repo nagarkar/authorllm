@@ -112,8 +112,7 @@ def _workspace(book: Path) -> tuple[Path, str]:
     ws = Path(tempfile.mkdtemp(prefix="authorlm-audio-ws-"))
     out, code = run_cli("-w", str(ws), "init", "--name", "Scratch", "--path",
                         str(book), "--author", "Chinmay Nagarkar",
-                        "--copyright-owner", "Chinmay Nagarkar",
-                        "--no-extract")
+                        "--copyright-owner", "Chinmay Nagarkar")
     assert code == 0, out
     out, code = run_cli("-w", str(ws), "manuscript", "set", "--narrator",
                         "Adam Stone", "--publisher", "Chinmay Nagarkar",

@@ -506,7 +506,8 @@ not re-ask at each beat.
    accounting tally and the episode analysis in a sentence or two.
    `close_session` is OFFERED, not required.
    `authorlm write complete` closes the writeup
-   and runs the deferred extraction pass; intent completion stays separate
+   (no extraction: the graph is mined on request, below); intent
+   completion stays separate
    (`complete_intent`, which runs episode analysis). `write abandon`
    restores the file from the pinned source — or DELETES it, if this
    writeup created it. Resume any time from `authorlm write status`.
@@ -642,13 +643,13 @@ migrate --dry-run` (report, nothing written), then `extract migrate`
 (§5; `--undo migration-1` reverses it). Read a triage batch's span and
 reason before the name: they are why the row is there. The same pipeline
 runs behind `init`, `write complete`, an analysed `collect` and the MCP
-tool `extract_concepts`, through `api.run_extraction`. The author ruled
-extraction UNATTENDED on 2026-10-25 ("extract lazily, and unattended"):
-the shipped config has `adjudicator_prompt = "default"` with the
-opus-class adjudicator, so those run the changed sections as they come,
-no question asked. With `adjudicator_prompt = "ask"` they instead return
-`{"stopped": …}` pointing at `extract --native`, unless the MCP call
-names `adjudicator=<model>` (or `init --adjudicator`).
+tool `extract_concepts`, through `api.run_extraction`. **Extraction is
+lazy and unattended** (ruling §0.9, 2026-10-25): `init`, `collect` and
+`write complete` never extract; when the author wants a fresh Concept
+Graph — "mine the new chapters", "refresh the concepts" — call
+`extract_concepts` (or send them to `authorlm extract --native`), which
+runs the changed sections with the shipped opus-class adjudicator and no
+question. Do not run it unasked, and do not suggest it after every edit.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.
