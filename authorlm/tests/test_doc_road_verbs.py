@@ -428,6 +428,72 @@ def divergence(root: Path) -> None:
           and d["hard_break_after"] is None, str(d))
 
 
+LISTED = ("# Solo\n\n"
+          "Boundaries:\n\n"
+          "- first item\n"
+          "- second item\n\n"
+          "[Illustration: a lone tracker kneeling]\n\n"
+          "[^RD1]: Jung, Seven Sermons.\n\n"
+          "Body para.\n")
+
+
+class _ListAndHardBreakFake(_HardBreakFake):
+    """The export joins list items with single newlines (the Doc holds
+    one paragraph per bullet) and, as in _HardBreakFake, glues the
+    illustration tag to the footnote with a hard line break."""
+
+    def files(self):
+        inner = super().files()
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                data = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute()
+                text = data.decode("utf-8").replace(
+                    "- first item\n\n- second item",
+                    "- first item\n- second item")
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+
+def list_and_join(root: Path) -> None:
+    print("F2. a list block and a hard-break join in one tab:")
+    units = gdocs._md_units(LISTED)
+    check("_md_units splits a list block into its items",
+          "- first item" in units and "- second item" in units, str(units))
+    export = ("Boundaries:\n\n- first item\n- second item\n\n"
+              "[Illustration: a lone tracker kneeling]  \n"
+              "[^RD1]: Jung, Seven Sermons.\n\nBody para.\n")
+    doc = ["Boundaries:", "first item", "second item",
+           "[Illustration: a lone tracker kneeling]",
+           "[^RD1]: Jung, Seven Sermons.", "Body para."]
+    got = gdocs._split_hard_breaks(gdocs._md_units(export), doc)
+    check("list items and the hard-break join both align with the "
+          "Doc's paragraphs",
+          len(got) == len(doc) and got[1] == "- first item"
+          and got[3] == "[Illustration: a lone tracker kneeling]",
+          str(got))
+    ws, db, manuscript, ms, fake = _fixture(root, "listjoin-ws", LISTED,
+                                            fake_cls=_ListAndHardBreakFake)
+    (ms / "solo.md").write_text(LISTED.replace("Body para.",
+                                               "Body para, changed."))
+    try:
+        gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("the push lands with the list and the join intact",
+          msg == "" and "Body para, changed." in fake.tab_text("solo.md")
+          and "second item" in fake.tab_text("solo.md"), msg)
+
+
 # ------------------------------------------------------------------ I
 
 
@@ -677,6 +743,7 @@ def main_test() -> None:
         footnote_from_json(root)
         resolve_comments(root)
         divergence(root)
+        list_and_join(root)
         spacing_join(root)
         toc_conflict(root)
         run_tests_script(root)
