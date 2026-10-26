@@ -494,6 +494,58 @@ def list_and_join(root: Path) -> None:
           and "second item" in fake.tab_text("solo.md"), msg)
 
 
+class _SoftBreakJoinFake(_SurgicalDocFake):
+    """Google's markdown import reads a soft line break inside a
+    paragraph as a space: consecutive tag lines with no blank line
+    between land as ONE Doc paragraph, space-joined, and the export
+    hands them back on one line (picture-story.md, 2026-10-25)."""
+
+    def _paras(self, markdown: str) -> list[str]:
+        out = []
+        for p in super()._paras(markdown):
+            lines = p.split("\n")
+            if not all(gdocs._LIST_ITEM.match(l) for l in lines):
+                p = " ".join(l.strip() for l in lines)
+            out.append(p)
+        return out
+
+
+STACKED_TAB = ("Opening line.\n\n[Illustration: one ⇢ one.md] "
+               "[Illustration: two ⇢ two.md]\n\nClosing line.\n")
+STACKED_LOCAL = ("Opening line.\n\n[Illustration: one ⇢ one.md]\n"
+                 "[Illustration: two ⇢ two.md]\n"
+                 "[Illustration: three ⇢ three.md]\n\nClosing line.\n")
+
+
+def stacked_tags(root: Path) -> None:
+    print("F3. stacked tag lines (one markdown paragraph):")
+    units = gdocs._md_units(STACKED_LOCAL)
+    check("_md_units splits consecutive tag lines into one unit each",
+          units[1:4] == ["[Illustration: one ⇢ one.md]",
+                         "[Illustration: two ⇢ two.md]",
+                         "[Illustration: three ⇢ three.md]"], str(units))
+    check("a prose paragraph with a soft break stays one unit",
+          len(gdocs._md_units("a line\nand more\n")) == 1)
+    ws, db, manuscript, ms, fake = _fixture(root, "stacked-ws", STACKED_TAB,
+                                            fake_cls=_SoftBreakJoinFake)
+    check("the fake reproduces the space-join in the tab",
+          "one.md] [Illustration: two" in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    (ms / "solo.md").write_text(STACKED_LOCAL)
+    try:
+        out = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+        msg = ""
+    except LookupError as err:
+        out, msg = {}, str(err)
+    tab = fake.tab_text("solo.md")
+    check("diff push lands stacked tags and its read-back agrees",
+          msg == "" and out.get("mode") == "diff"
+          and "[Illustration: one ⇢ one.md]\n[Illustration: two" in tab
+          and "three.md]" in tab, msg + "\n" + tab)
+    out = gdocs.diff_push(db, manuscript, "solo.md", fake, fake)
+    check("a second push finds nothing to do", out.get("ops") == 0, str(out))
+
+
 # ------------------------------------------------------------------ I
 
 
@@ -902,6 +954,7 @@ def main_test() -> None:
         resolve_comments(root)
         divergence(root)
         list_and_join(root)
+        stacked_tags(root)
         spacing_join(root)
         toc_conflict(root)
         toc_doc_only_tabs(root)

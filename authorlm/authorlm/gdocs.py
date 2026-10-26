@@ -302,6 +302,21 @@ def unescape_export_math(markdown: str) -> str:
     return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
 
 
+def separate_tag_lines(markdown: str) -> str:
+    """Stacked tag lines with a blank line between each, for bytes handed
+    to a markdown import: Google reads a soft break as a space, so
+    consecutive `[…]` tag lines would land as one space-joined paragraph
+    a later export cannot split (picture-story.md, 2026-10-25). Apply
+    ONLY to import bytes, never to the hashed or local text."""
+    lines = markdown.split("\n")
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        if (i and _TAG_LINE.match(line) and _TAG_LINE.match(lines[i - 1])):
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
+
+
 def escape_footnotes(markdown: str) -> str:
     """Pandoc footnote syntax — [^X1] references and [^X1]: definitions —
     must reach the Doc as LITERAL text, matching the manuscript convention
@@ -1650,7 +1665,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
     tab_id = entry["tab_id"]
 
     _rewrite_tab(service, docs_service, master_id, tab_id,
-                 escape_math(escape_footnotes(normalized)),
+                 escape_math(escape_footnotes(
+                     separate_tag_lines(normalized))),
                  f"authorlm-temp-{Path(relpath).stem}")
     apply_tab_spacing(docs_service, master_id, tab_id,
                       doc_spacing(manuscript))
@@ -2415,6 +2431,17 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report["renamed"] = cls["renamed"]
         if cls["ambiguous"]:
             report["ambiguous_tabs"] = cls["ambiguous"]
+        # Prune links whose tab is gone from the Doc AND whose file is
+        # retired or gone: nothing is left for the link to name. A live
+        # file whose tab vanished keeps its link (the author may have
+        # deleted the tab by mistake; push recreates it) and its warning.
+        live_ids = {tid for tid, _ in tab_props}
+        for f in [f for f, e in links.items()
+                  if not f.startswith("_") and isinstance(e, dict)
+                  and e.get("tab_id") and e["tab_id"] not in live_ids
+                  and not (bridge.root / f).exists()]:
+            del links[f]  # drop_link's work, on the meta this pull saves
+            report.setdefault("pruned", []).append(f)
 
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
@@ -4403,16 +4430,29 @@ def _md_paragraphs(markdown: str) -> list[str]:
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
 
+# A whole line that is one bracketed tag: `[Illustration: … ⇢ x.md]`,
+# `[Omit: …]`, `[/Omit]`. A footnote definition (`[^X]: …`) does not end
+# in `]`, and a link line ends in `)`.
+_TAG_LINE = re.compile(r"^\s*\[(?!\^)[^\n]*\]\s*$")
+
+
 def _md_units(markdown: str) -> list[str]:
     """`_md_paragraphs`, with a list block split into its items: the Doc
     holds one paragraph per bullet while the export joins consecutive
     items with single newlines, so the two sides would otherwise disagree
-    on the paragraph count (Paper 1's Boundaries list, 2026-10-21)."""
+    on the paragraph count (Paper 1's Boundaries list, 2026-10-21).
+    A block of stacked tag lines (no blank line between) splits the same
+    way: Google's markdown import reads their soft breaks as spaces and
+    lands them as one space-joined paragraph, so each tag is its own
+    unit and goes in as its own paragraph (picture-story.md,
+    2026-10-25)."""
     out: list[str] = []
     for block in _md_paragraphs(markdown):
         lines = block.split("\n")
-        if len(lines) > 1 and all(_LIST_ITEM.match(l) for l in lines):
-            out.extend(lines)
+        if len(lines) > 1 and (all(_LIST_ITEM.match(l) for l in lines)
+                               or all(_TAG_LINE.match(l)
+                                      for l in lines if l.strip())):
+            out.extend(l for l in lines if l.strip())
         else:
             out.append(block)
     return out
