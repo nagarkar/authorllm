@@ -709,9 +709,14 @@ memory of the whole book; a stale summary blocks the run) and the essay's
 scope chain triaged (the preflight gate refuses otherwise; `--force` runs
 WITHOUT the unconfirmed items — never with them). Summary length scales
 to the unit (~1 word per 7.5–10 words of essay, floored at 40/capped at
-500) rather than a fixed range, and every paragraph is numbered in the
-prompt input and must be cited — `paragraph_coverage` reports (never
-blocks on) any left uncited or cited out of range. Then, per essay:
+500) rather than a fixed range. An essay summary is composed from the
+essay's section summaries, which are built from paragraph records
+(`docs/summary-hierarchy-design.md`): `summarize rebuild` brings the
+lower levels up to date first and prints one cost line per level, and
+the structural check (every section cited in MOVES, every heading named
+in FLOW) reports, never blocks. `summarize outline <file>` is the
+one-screen map; `summarize show <file> --section N | --paragraph N` the
+lower levels. Then, per essay:
 1. `authorlm critique run <essay>` (shell; frontier `[critique]
    editor_model`) → stages paragraph-aligned proposals as critique threads
    and files non-paragraph suggestions as proposed system-sourced intents.

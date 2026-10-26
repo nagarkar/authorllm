@@ -5839,11 +5839,11 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     falsified = _falsified_prefix(db, mid, run)
 
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     # The learnings duty, on BOTH transports — the half of the loop that
@@ -6231,11 +6231,11 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values(),
                                           kind=_morph.MORPH_KIND)
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
@@ -6492,11 +6492,11 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values())
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)

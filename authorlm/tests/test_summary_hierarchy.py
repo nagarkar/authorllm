@@ -399,8 +399,12 @@ def main_test() -> None:
         class _LLM:
             model = "luna"
             def complete(self, system, user):
-                return "MOVES: [1]-[11] all of it."
-        new = sums.summarize_unit(db, manuscript, "doors.md", ESSAY, [], _LLM())
+                return "FLOW: all of it.\nMOVES: [1] [2] [3] all of it."
+        rows = [sums.store_section_summary(db, manuscript, "doors.md", sec,
+                                           f"POINT: {sec['section_ordinal']}",
+                                           "luna") for sec in secs]
+        new = sums.summarize_unit(db, manuscript, "doors.md", ESSAY, [], _LLM(),
+                                  list(zip(secs, rows)))
         check("model and sections_hash stored on the essay row",
               new["model"] == "luna" and new["sections_hash"]
               == sums.sections_hash([s["section_hash"] for s in secs]))

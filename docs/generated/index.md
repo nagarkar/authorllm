@@ -548,6 +548,12 @@ The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
 
 Pins llmlm's price cache to an empty one that never reaches the network.
 
+## `tests._summary_stubs`
+
+`authorlm/tests/_summary_stubs.py`
+
+Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
+
 ## `tests.test_api`
 
 `authorlm/tests/test_api.py`
@@ -607,6 +613,12 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 `authorlm/tests/test_e2e.py`
 
 End-to-end test of every MVP use case, driven through the real CLI.
+
+## `tests.test_essay_summaries`
+
+`authorlm/tests/test_essay_summaries.py`
+
+Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
 
 ## `tests.test_export_upload`
 
@@ -756,7 +768,7 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 `authorlm/tests/test_summaries.py`
 
-Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): reading order, autoregressive conditioning, composition from the section summaries, mark-don't-cascade staleness, rebuild semantics.
 
 ## `tests.test_summary_hierarchy`
 

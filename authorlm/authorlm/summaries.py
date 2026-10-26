@@ -3,15 +3,21 @@
 One summary per toc unit, built autoregressively in reading order: each
 is conditioned on every prior summary, so an edit pass over essay E can
 hold "everything before E" and "everything after E" in a few thousand
-tokens. Summaries are DERIVED machinery (like renders): they live in the
-database, never in the manuscript or the Doc.
+tokens. Since the summary hierarchy (docs/summary-hierarchy-design.md
+§3.4, ruling 6) the essay summary is COMPOSED from the essay's section
+summaries, never from its text: the model writes FLOW, MOVES, MOTIFS and
+DOES NOT, and code derives INTRODUCES, ASSUMES, PROMISES and DEBTS from
+the paragraph records (§6.6). Summaries are DERIVED machinery (like
+renders): they live in the database, never in the manuscript or the Doc.
 
 Staleness is marked, not cascaded. A collect that changes essay N leaves
 N's summary with a stale `source_hash` (a lie about the text — the edit
 pass refuses to run on it) and flags downstream rows `upstream_stale`
 (tolerated). `critique resolve` rebuilds one essay's summary at its
 confirmation gate, so processing in reading order keeps every "before"
-summary fresh by construction; `summarize --rebuild` does the full pass.
+summary fresh by construction. Every other consumer calls `ensure` for
+the level it reads and the dirty rows are rebuilt there, with their cost
+printed (rulings 3 and 9); `summarize rebuild` is the deliberate pass.
 """
 
 from __future__ import annotations
@@ -56,66 +62,13 @@ def target_length(text: str) -> tuple[int, int]:
 
 
 def _numbered_paragraphs(text: str) -> tuple[str, int]:
-    """THE UNIT's body with each paragraph prefixed by its 1-based
-    number, so the prompt can require every paragraph be accounted for
-    in MOVES by number — no paragraph silently dropped."""
+    """A file's body with each paragraph prefixed by its 1-based number.
+    The essay summarizer no longer reads text (§3.4); extraction keeps
+    numbering its payloads this way, so the helper stays."""
     from .revisions import _paragraphs
 
     paras = _paragraphs(text)
     return "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paras, 1)), len(paras)
-
-
-# Two citation forms, and the CROSS-BRACKET one comes first on purpose.
-# The prompt's example shows "[2-3]", but what the real summarizer writes
-# is "[1]-[11]" — and reading that as two single citations counted every
-# paragraph between them as missing (the live rebuild reported 350+
-# uncited across 18 of 24 essays where the true figure was 11 of 1,138).
-# Alternation is tried left to right at each position, so a cross-bracket
-# range consumes both of its brackets and its endpoints are never also
-# read as singles. Dashes: hyphen, en-dash, em-dash, any surrounding
-# whitespace. Brackets are required either way — "3-4" in prose is prose.
-_CITATION_RE = re.compile(
-    r"\[(\d+)\]\s*[-–—]\s*\[(\d+)\]"
-    r"|\[(\d+)(?:\s*[-–—]\s*(\d+))?\]"
-)
-
-
-def _cited_paragraphs(summary: str) -> set[int]:
-    """Every paragraph number MOVES actually cited — single "[3]",
-    in-bracket range "[2-3]", or cross-bracket range "[2]-[3]" — all
-    collapsing to the same per-number set."""
-    cited: set[int] = set()
-    for m in _CITATION_RE.finditer(summary):
-        if m.group(1) is not None:
-            lo, hi = int(m.group(1)), int(m.group(2))
-        else:
-            lo = int(m.group(3))
-            hi = int(m.group(4)) if m.group(4) else lo
-        if hi < lo:
-            lo, hi = hi, lo
-        cited.update(range(lo, hi + 1))
-    return cited
-
-
-def paragraph_coverage(summary: str, n_paragraphs: int) -> dict:
-    """VERIFY, don't just request, that MOVES cited every paragraph
-    number 1..n_paragraphs at least once. Coverage is REPORTED, never
-    enforced here: a summary short one transitional paragraph is still
-    useful, so this never retries, fabricates, or blocks the rebuild —
-    it records exactly which paragraphs were missed (or, if the model
-    cited a number outside range, invented) so that's visible instead of
-    silently assumed. A summary with `complete: True` can stand in for
-    the essay as compressed context; one that isn't complete might have
-    quietly dropped a move, and now that's known rather than guessed."""
-    cited = _cited_paragraphs(summary)
-    expected = set(range(1, n_paragraphs + 1))
-    missing = sorted(expected - cited)
-    out_of_range = sorted(n for n in cited if n < 1 or n > n_paragraphs)
-    return {"paragraph_count": n_paragraphs,
-            "cited": sorted(cited & expected),
-            "missing": missing,
-            "out_of_range": out_of_range,
-            "complete": not missing and not out_of_range}
 
 
 def summarizer_prompt() -> str:
@@ -275,6 +228,12 @@ def _state(row, text: str, pinned=NOT_IN_FLIGHT) -> str:
     if row["status"] == "deprecated":
         return "deprecated"
     if row["source_hash"] != _hash(text):
+        return "stale"
+    if row["sections_hash"] != sections_hash(
+            [sec["section_hash"] for sec in sections_of(text)]):
+        # "My sections changed" (§3.4, §4.3). Unreachable while the
+        # source_hash matches, except for a pre-hierarchy row ('') — which
+        # the first full rebuild replaces, as ruling 6 says.
         return "stale"
     if pinned is not NOT_IN_FLIGHT:
         return "rewriting"
@@ -479,45 +438,41 @@ def inflight_warning(entries: list[dict]) -> str | None:
     return "\n".join(WARN_PREFIX + line for line in lines)
 
 
-# How many paragraph numbers a coverage note will spell out before it
-# summarizes the rest. Since cross-bracket ranges parse (Z/M1), ONE
-# malformed blanket citation — "[1]-[100]" on a six-paragraph essay —
-# yields 94 out-of-range numbers, and this note goes verbatim into the
-# drafting payload. The count still tells the whole truth; only the
-# enumeration is bounded.
+# How many section numbers a coverage note will spell out before it
+# summarizes the rest; the note goes verbatim into the drafting payload.
 COVERAGE_LIST_CAP = 8
 
 
-def _paragraph_list(numbers: list[int]) -> str:
-    head = ", ".join(f"¶{n}" for n in numbers[:COVERAGE_LIST_CAP])
+def _section_list(numbers: list[int]) -> str:
+    head = ", ".join(f"§{n}" for n in numbers[:COVERAGE_LIST_CAP])
     rest = len(numbers) - COVERAGE_LIST_CAP
     return head + (f" …and {rest} more" if rest > 0 else "")
 
 
 def _coverage_note(entry: dict, text: str) -> str | None:
-    """Item 4's loudness. Coverage is recomputed here rather than read
-    from a column (`essay_summaries` stores none — summarize_unit
-    computes it fresh too): the stored summary plus the essay's current
-    paragraph count is all `paragraph_coverage` needs, and it is only
-    trustworthy when the two actually correspond, i.e. when source_hash
-    still matches. Reported, never blocking — the same tolerance editing
-    has, made impossible to miss."""
+    """Item 4's loudness, now structural (§3.3, §6.4): the stored block's
+    MOVES must cite every section of the essay that has a body and its
+    FLOW must name every heading. Recomputed from the stored summary and
+    the current text, which only correspond while source_hash matches.
+    Reported, never blocking."""
     if entry["summary"] is None or entry["state"] not in ("fresh",
                                                           "upstream_stale",
                                                           "rewriting"):
         return None
-    from .revisions import _paragraphs
-
-    cov = paragraph_coverage(entry["summary"], len(_paragraphs(text)))
+    cov = section_coverage(entry["summary"], sections_of(text))
     if cov["complete"]:
         return None
     bits = []
     if cov["missing"]:
-        bits.append(_paragraph_list(cov["missing"]) + " uncited")
-    if cov["out_of_range"]:
-        bits.append(_paragraph_list(cov["out_of_range"])
-                    + f" cited but the essay has {cov['paragraph_count']} "
-                      "paragraph(s)")
+        bits.append(_section_list(cov["missing"]) + " not cited in MOVES")
+    if cov["unknown"]:
+        bits.append(_section_list(cov["unknown"])
+                    + f" cited but the essay has {cov['section_count']} "
+                      "section(s)")
+    if cov["flow_missing"]:
+        bits.append("FLOW names no clause for "
+                    + ", ".join(f"'{h}'" for h in
+                                cov["flow_missing"][:COVERAGE_LIST_CAP]))
     return WARN_PREFIX + "coverage INCOMPLETE: " + "; ".join(bits)
 
 
@@ -605,28 +560,57 @@ def _prior_block(prior: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"[{f}]\n{s}" for f, s in prior)
 
 
+def _sections_block(sections: list[tuple[dict, dict]]) -> tuple[str, list[int]]:
+    """The SECTIONS block of the essay call: "[n] heading" and the stored
+    section summary, in order; a heading-only section is named and
+    excluded from COVER THESE."""
+    blocks, cover = [], []
+    for sec, row in sections:
+        n = sec["section_ordinal"]
+        head = sec["heading"] or "(preamble)"
+        if any(p["kind"] != "heading" for p in sec["paragraphs"]):
+            cover.append(n)
+            blocks.append(f"[{n}] {head}\n{row['summary']}")
+        else:
+            blocks.append(f"[{n}] {head}\n(heading only)")
+    return "\n\n".join(blocks), cover
+
+
 def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
-                   prior: list[tuple[str, str]], llm: LLMClient) -> dict:
-    """Write (or rewrite) one unit's summary conditioned on `prior`
-    [(file, summary), …]. Returns the stored row."""
+                   prior: list[tuple[str, str]], llm: LLMClient,
+                   sections: list[tuple[dict, dict]],
+                   texts: dict[str, str] | None = None) -> dict:
+    """Write (or rewrite) one unit's summary from its SECTION SUMMARIES
+    (`sections`: (section as `sections_of` yields it, its current row),
+    in order), conditioned on `prior` [(file, summary), …] (§3.4). The
+    model writes FLOW, MOVES, MOTIFS, DOES NOT; INTRODUCES, ASSUMES,
+    PROMISES, DEBTS are derived from the paragraph records and rendered
+    under those labels (ruling 6, §6.6). `texts` is the caller's capture
+    of the whole manuscript (the derived lists read every file's
+    records); omitted, one is taken. Returns the stored row with
+    `coverage` (the structural check) and `labels_missing`."""
     low, high = target_length(text)
-    numbered, n_paras = _numbered_paragraphs(text)
+    block, cover = _sections_block(sections)
     user = (
         "PRIOR SUMMARIES (reading order):\n" + _prior_block(prior)
         + "\n\nCONCEPTS (author's ratified definitions):\n"
         + _concept_slice(db, manuscript, file)
         + f"\n\nTARGET LENGTH: {low}-{high} words "
           f"(scaled to this unit's {len(text.split())} words)."
-        + f"\n\nPARAGRAPH COUNT: {n_paras} — every paragraph number below "
-          "must be cited at least once in MOVES."
-        + f"\n\nTHE UNIT: {file}\n\n{numbered}"
+        + f"\n\nCOVER THESE: {', '.join(str(n) for n in cover) or 'none'}"
+        + f"\n\nTHE UNIT: {file}\n\nSECTIONS ({len(sections)}, in order):"
+          f"\n\n{block}"
     )
-    summary = llm.complete(summarizer_prompt(), user)
-    if not summary:
+    reply = llm.complete(summarizer_prompt(), user)
+    if not reply or not reply.strip():
         raise RuntimeError(f"summarizer returned nothing for {file} "
                            "(LLM disabled or call failed)")
-    summary = summary.strip()
-    coverage = paragraph_coverage(summary, n_paras)
+    derived = derived_lists(
+        db, manuscript, file,
+        paragraph_records(db, manuscript, files=[file], texts={file: text}),
+        texts=texts if texts is not None else None)
+    summary, labels_missing = render_essay_block(reply.strip(), derived)
+    coverage = section_coverage(summary, [sec for sec, _row in sections])
     upstream_hash = _hash("\n".join(s for _, s in prior))
     existing = db.one(
         "SELECT id FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
@@ -639,7 +623,7 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
               "upstream_hash": upstream_hash, "upstream_stale": 0,
               "status": "current", "model": llm.model or "",
               "sections_hash": sections_hash(
-                  [sec["section_hash"] for sec in sections_of(text)])}
+                  [sec["section_hash"] for sec, _row in sections])}
     if existing:
         db.update("essay_summaries", existing["id"], fields)
         row_id = existing["id"]
@@ -649,110 +633,63 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
         db.insert("essay_summaries", row)
         row_id = row["id"]
     result = dict(db.one("SELECT * FROM essay_summaries WHERE id = ?", (row_id,)))
-    # Not persisted (essay_summaries stores no such column): computed fresh
-    # on every write so a caller can act on it immediately without a
-    # schema change.
-    result["paragraph_coverage"] = coverage
+    # Not persisted: computed fresh on every write so a caller can act on
+    # it immediately.
+    result["coverage"] = coverage
+    result["labels_missing"] = labels_missing
     return result
 
 
-def rebuild(db: Database, manuscript: dict, llm: LLMClient,
-            only_missing_or_stale: bool = False,
-            progress=None) -> dict:
-    """The full sequential pass in reading order. With
-    `only_missing_or_stale`, fresh units are reused as conditioning
-    context (their text unchanged) rather than re-summarized — but a
-    stale unit forces every unit AFTER it to rebuild too, since their
-    conditioning changed (this is the one place cascade is correct:
-    the author asked for truth from scratch).
+def rebuild(db: Database, manuscript: dict, llm, level: str = "essay",
+            files: list[str] | None = None, force: bool = False,
+            echo=print, progress=None) -> dict:
+    """The deliberate pass (§4.5, §8 `summarize rebuild`): `ensure` for
+    `level` that ALSO rebuilds the essay rows whose conditioning moved
+    (`upstream_stale`), which the lazy on-use path tolerates; `force`
+    rebuilds every row of `level` from scratch (the author asked for
+    truth from scratch). Lower levels are always brought up to date
+    lazily first. Returns `ensure`'s report for `level`.
 
-    Reads CONTEXT truth: an in-flight file is summarized from the PINNED
-    text pulled out of `manuscript_versions`, never from the placeholder
-    on disk — which is what makes the refusal's printed remedy actually
-    work. A file a writeup CREATED has no pre-rewrite text at all, so it
-    is skipped and reported rather than quietly summarized as empty.
-
-    **ONE snapshot, taken before the first model call.** A full rebuild
-    runs for minutes, and another session can truncate an essay at any
-    point during it. Re-reading each unit as its turn came would let a
-    truncation land between the pass starting and that unit being read,
-    and the unit would then be summarized as EMPTY and stored as fresh —
-    the exact incident this design exists to prevent, wearing a
-    stopwatch. Every unit is summarized from the text captured here, and
-    the stored `source_hash` is the hash of THAT text.
-
-    A file that becomes in-flight mid-run is safe by the same token: the
-    snapshot holds its pre-truncation text, which is exactly the text the
-    writeup went on to pin — so the hash stored here is the hash the
-    in-flight logic looks for, and the entry settles at `rewriting`
-    rather than at `stale`."""
-    have = all_summaries(db, manuscript["id"])
-    texts, _unlisted, flight = _context_units(db, manuscript)
-    prior: list[tuple[str, str]] = []
-    built, reused, skipped_inflight = [], [], []
-    incomplete_coverage: dict[str, dict] = {}
-    cascade = False
-    for file, text in texts.items():
-        pinned = flight.get(file, NOT_IN_FLIGHT)
-        if pinned is None:
-            # `unwritten`: nothing to summarize, and nothing to condition
-            # anything else on either — so it does not join `prior`.
-            skipped_inflight.append(file)
-            continue
-        row = have.get(file)
-        fresh = _state(row, text, pinned) == "fresh"
-        if only_missing_or_stale and fresh and not cascade:
-            prior.append((file, row["summary"]))
-            reused.append(file)
-            continue
-        cascade = True
-        if progress:
-            progress(file)
-        new = summarize_unit(db, manuscript, file, text, prior, llm)
-        prior.append((file, new["summary"]))
-        built.append(file)
-        cov = new.get("paragraph_coverage")
-        if cov and not cov["complete"]:
-            incomplete_coverage[file] = cov
-    return {"built": built, "reused": reused,
-            "skipped_inflight": skipped_inflight,
-            "incomplete_coverage": incomplete_coverage}
+    ONE snapshot, taken before the first model call (inside `ensure`): a
+    full rebuild runs for minutes and another session can truncate an
+    essay at any point during it; every unit is summarized from the text
+    captured first and the stored hashes are the hashes of THAT text. A
+    file a writeup CREATED has no pre-rewrite text and is skipped."""
+    return ensure(db, manuscript, llm, level=level, files=files, echo=echo,
+                  force=force, upstream=True, progress=progress)
 
 
-def rebuild_one(db: Database, manuscript: dict, file: str,
-                llm: LLMClient) -> dict:
+def rebuild_one(db: Database, manuscript: dict, file: str, llm,
+                echo=print) -> dict:
     """Rebuild one unit's summary against the CURRENT prior summaries
-    (the confirmation-gate rebuild), then mark everything downstream
-    upstream_stale — mark, don't cascade.
+    (the confirmation-gate rebuild), its lower levels brought up to date
+    first, then mark everything downstream upstream_stale — mark, don't
+    cascade. Returns the stored row with its `coverage`.
 
-    Reads CONTEXT truth, as `rebuild` does. Silently summarizing an empty
-    file is the failure the in-flight states exist to prevent, so it must
-    not be reachable through the singular verb either: a file a writeup
-    CREATED raises rather than summarizing nothing.
-
-    ONE capture, as in `rebuild`. This used to read the disk TWICE (once
-    for the order, once for the texts), which is two chances for a
-    parallel writer to interleave and for the order and the texts to
-    disagree about the same manuscript."""
-    texts, _unlisted, flight = _context_units(db, manuscript)
-    order = list(texts)
-    if file not in order:
+    Reads CONTEXT truth, as `ensure` does, over `ensure`'s ONE capture: a
+    file a writeup CREATED raises rather than summarizing nothing."""
+    try:
+        report = ensure(db, manuscript, llm, level="essay", files=[file],
+                        echo=echo, force=True)
+    except LookupError:
         raise LookupError(f"'{file}' is not in the manuscript's reading order")
-    if flight.get(file, NOT_IN_FLIGHT) is None:
-        raise LookupError(
-            f"'{file}' is being written for the first time by an active "
-            f"writeup — there is no pre-rewrite text to summarize, so a "
-            f"rebuild would summarize an empty file and store it as fresh. "
-            f"See 'write status'; its summary is built after "
-            f"'write complete'.")
-    have = all_summaries(db, manuscript["id"])
-    idx = order.index(file)
-    prior = [(f, have[f]["summary"]) for f in order[:idx] if f in have]
-    new = summarize_unit(db, manuscript, file, texts[file], prior, llm)
-    for f in order[idx + 1:]:
-        if f in have:
-            db.update("essay_summaries", have[f]["id"], {"upstream_stale": 1})
-    return new
+    if file not in report["built"]:
+        if file in report["unwritten"]:
+            raise LookupError(
+                f"'{file}' is being written for the first time by an active "
+                f"writeup — there is no pre-rewrite text to summarize, so a "
+                f"rebuild would summarize an empty file and store it as "
+                f"fresh. See 'write status'; its summary is built after "
+                f"'write complete'.")
+        reasons = [why for f, why in report["skipped"] if f == file]
+        raise RuntimeError(f"the summary of {file} was not rebuilt: "
+                           + (reasons[0] if reasons else "see the report"))
+    row = dict(db.one(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file)))
+    misses = [cov for f, cov in report["misses"] if f == file]
+    row["coverage"] = misses[0] if misses else {"complete": True}
+    return row
 
 
 def mark_changed(db: Database, manuscript: dict,
@@ -1164,12 +1101,13 @@ def _terms(records: list[dict]) -> list[str]:
     return seen
 
 
-def _first_mentions(db: Database, manuscript: dict) -> dict[str, str]:
+def _first_mentions(db: Database, manuscript: dict,
+                    texts: dict[str, str] | None = None) -> dict[str, str]:
     """term (lower-cased) → the first file in reading order with an
     `introduces | defines` mention of it, over current rows. The input to
-    §6.6's INTRODUCES / ASSUMES split."""
+    §6.6's INTRODUCES / ASSUMES split. `texts` is the caller's capture."""
     first: dict[str, str] = {}
-    for rec in paragraph_records(db, manuscript):
+    for rec in paragraph_records(db, manuscript, texts=texts):
         for m in rec["mentions"]:
             if m["role"] in ("introduces", "defines"):
                 first.setdefault(m["term"].lower(), rec["file"])
@@ -1177,7 +1115,8 @@ def _first_mentions(db: Database, manuscript: dict) -> dict[str, str]:
 
 
 def derived_lists(db: Database, manuscript: dict, file: str,
-                  records: list[dict] | None = None) -> dict[str, list[str]]:
+                  records: list[dict] | None = None,
+                  texts: dict[str, str] | None = None) -> dict[str, list[str]]:
     """INTRODUCES, ASSUMES, PROMISES, DEBTS for one essay, from paragraph
     records (ruling 6, §6.6), as lists. INTRODUCES: terms this essay
     introduces or defines with no earlier such mention in reading order.
@@ -1186,8 +1125,8 @@ def derived_lists(db: Database, manuscript: dict, file: str,
     references' terms. Normalization against the graph is the consumer's
     step (`manifest._canonical_names`), as §7 guarantee 3 says."""
     if records is None:
-        records = paragraph_records(db, manuscript, files=[file])
-    first = _first_mentions(db, manuscript)
+        records = paragraph_records(db, manuscript, files=[file], texts=texts)
+    first = _first_mentions(db, manuscript, texts)
     introduces: list[str] = []
     uses: list[str] = []
     promises: list[str] = []
@@ -1348,8 +1287,8 @@ DEFAULT_PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
 # boundaries into several calls.
 MAX_SECTION_CHARS = 24000
 # Built levels, lowest first: `ensure` for a level rebuilds every level
-# below it first (§4.5). Step 4 adds "essay".
-LEVELS = ("paragraph", "section")
+# below it first (§4.5).
+LEVELS = ("paragraph", "section", "essay")
 
 SECTION_PROMPT_PATH = Path(__file__).parent / "prompts" / "section-summary.md"
 # Today's n/10 – n/7.5 formula re-floored for the smaller unit (§3.3).
@@ -1362,6 +1301,14 @@ SECTION_LABELS = ("POINT", "MOVES", "DEPENDS ON", "LEAVES OPEN")
 # heading row (ruling 8).
 HEADING_ONLY_SUMMARY = ("POINT: A heading with no body text.\nMOVES: none\n"
                         "DEPENDS ON: none\nLEAVES OPEN: none")
+# The essay block's labels in stored order (§3.4): the model writes
+# ESSAY_MODEL_LABELS from the section summaries, code derives
+# DERIVED_LABELS from the paragraph records (ruling 6, §6.6) and renders
+# them under the same names, so `manifest._field` keeps working.
+ESSAY_MODEL_LABELS = ("FLOW", "MOVES", "MOTIFS", "DOES NOT")
+DERIVED_LABELS = ("INTRODUCES", "ASSUMES", "PROMISES", "DEBTS")
+ESSAY_LABELS = ("FLOW", "MOVES", "INTRODUCES", "ASSUMES", "PROMISES", "DEBTS",
+                "MOTIFS", "DOES NOT")
 
 
 def paragraph_prompt() -> str:
@@ -1438,14 +1385,17 @@ def _depends_on(raw, ordinal: int, earlier: dict[int, str]) -> tuple[list[str], 
 
 
 def _build_file(db: Database, manuscript: dict, file: str, text: str,
-                llm: LLMClient, report: dict, *, verse_file: bool) -> None:
+                llm: LLMClient, report: dict, *, verse_file: bool,
+                force: bool = False, **_ctx) -> None:
     """Fill the paragraph rows one file's text lacks: headings with
     `EMPTY_RECORD` and no call (ruling 8), an orphaned row whose text came
     back by flipping it current (no call), the rest one call per section
-    chunk that holds a dirty paragraph."""
+    chunk that holds a dirty paragraph. `force` treats every row as
+    lacking (the stores are idempotent on the hash, so rows are rewritten
+    in place)."""
     mark_orphans(db, manuscript, file, text)
-    have = _current_paragraph_rows(db, manuscript["id"], file)
-    orphaned = {r["para_hash"]: r["id"] for r in db.all(
+    have = {} if force else _current_paragraph_rows(db, manuscript["id"], file)
+    orphaned = {} if force else {r["para_hash"]: r["id"] for r in db.all(
         "SELECT id, para_hash FROM paragraph_summaries WHERE manuscript_id = ? "
         "AND file = ? AND status = 'orphaned'", (manuscript["id"], file))}
     done: set[str] = set(have)
@@ -1527,10 +1477,28 @@ def section_llm(config: dict) -> LLMClient:
     return llm
 
 
+def essay_llm(config: dict) -> LLMClient:
+    """The client for essay summaries: `summarizer_llm` (Luna, `[critique]
+    summarizer_model`, ruling 5), ledger purpose `critique.summarizer` —
+    the key the ledger has carried since 2026-08-30 (§10)."""
+    return summarizer_llm(config)
+
+
 def clients(config: dict) -> dict[str, LLMClient]:
     """One client per built level, for `ensure(llm=…)`: each level's
     spend is its own ledger line and its own cost line."""
-    return {"paragraph": paragraph_llm(config), "section": section_llm(config)}
+    return {"paragraph": paragraph_llm(config), "section": section_llm(config),
+            "essay": essay_llm(config)}
+
+
+def stats_lines(llm) -> str | None:
+    """The cost lines of one client or of a `clients()` dict, one per
+    level that was consulted, joined with '; '. None if none was."""
+    if not isinstance(llm, dict):
+        return llm.stats_line()
+    lines = [f"{lv}: {c.stats_line()}" for lv, c in llm.items()
+             if c.stats_line()]
+    return "; ".join(lines) or None
 
 
 def section_target_length(text: str) -> tuple[int, int]:
@@ -1543,10 +1511,11 @@ def section_target_length(text: str) -> tuple[int, int]:
     return low, high
 
 
-def _label_block(summary: str, label: str) -> str:
-    """The text under one label of a summary block, up to the next
-    label; '' when the label is absent."""
-    others = "|".join(re.escape(x) for x in SECTION_LABELS if x != label)
+def _label_block(summary: str, label: str,
+                 labels: tuple[str, ...] = SECTION_LABELS) -> str:
+    """The text under one label of a summary block, up to the next of
+    `labels`; '' when the label is absent."""
+    others = "|".join(re.escape(x) for x in labels if x != label)
     m = re.search(rf"^{re.escape(label)}:[ \t]*(.*?)(?=^(?:{others}):|\Z)",
                   summary, re.S | re.M)
     return m.group(1).strip() if m else ""
@@ -1608,7 +1577,8 @@ def _section_user(db: Database, manuscript: dict, file: str, section: dict,
 
 
 def _build_sections(db: Database, manuscript: dict, file: str, text: str,
-                    llm: LLMClient, report: dict, *, verse_file: bool) -> None:
+                    llm: LLMClient, report: dict, *, verse_file: bool,
+                    force: bool = False, **_ctx) -> None:
     """Fill the section rows one file's text lacks (§3.5 order: in file
     order, each call conditioned on the POINT lines of the sections
     before it). A heading-only section is stored without a call. A
@@ -1616,8 +1586,8 @@ def _build_sections(db: Database, manuscript: dict, file: str, text: str,
     reported (the paragraph level is retried by the next ensure);
     coverage misses are reported, never repaired."""
     mark_orphans(db, manuscript, file, text)
-    have = _current_section_rows(db, manuscript["id"], file)
-    orphaned = {r["section_hash"]: dict(r) for r in db.all(
+    have = {} if force else _current_section_rows(db, manuscript["id"], file)
+    orphaned = {} if force else {r["section_hash"]: dict(r) for r in db.all(
         "SELECT * FROM section_summaries WHERE manuscript_id = ? "
         "AND file = ? AND status = 'orphaned'", (manuscript["id"], file))}
     records = {h: _record_of(r) for h, r in
@@ -1704,6 +1674,129 @@ def _paragraph_line(report: dict) -> str:
     return line
 
 
+# -------------------------------------------------------- essay pass (§3.4)
+
+def _norm_heading(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def section_coverage(summary: str, sections: list[dict]) -> dict:
+    """The structural check that replaced `paragraph_coverage` (§3.3,
+    §3.4): MOVES must cite every section with a body (by `[n]`, no range
+    is read) and FLOW must name every heading. {section_count, missing:
+    ordinals no move cites, unknown: ordinals cited that the essay lacks,
+    flow_missing: headings FLOW does not name, complete}. Reported,
+    never enforced."""
+    body = {s["section_ordinal"] for s in sections
+            if any(p["kind"] != "heading" for p in s["paragraphs"])}
+    cited = {int(x) for x in _ORDINAL_RE.findall(
+        _label_block(summary, "MOVES", ESSAY_LABELS))}
+    flow = _norm_heading(_label_block(summary, "FLOW", ESSAY_LABELS))
+    flow_missing = [s["heading"] for s in sections if s["heading"]
+                    and _norm_heading(s["heading"].lstrip("#")) not in flow]
+    missing = sorted(body - cited)
+    unknown = sorted(cited - {s["section_ordinal"] for s in sections})
+    return {"section_count": len(sections), "missing": missing,
+            "unknown": unknown, "flow_missing": flow_missing,
+            "complete": not (missing or unknown or flow_missing)}
+
+
+def flow_of(summary: str) -> str:
+    """The FLOW paragraph of a stored essay summary (the one-screen map,
+    §8 `summarize outline`)."""
+    return " ".join(_label_block(summary, "FLOW", ESSAY_LABELS).split())
+
+
+def render_essay_block(reply: str, derived: dict[str, list[str]]
+                       ) -> tuple[str, list[str]]:
+    """The stored essay block (ruling 6): the model's four labels in
+    `ESSAY_LABELS` order with the derived lists rendered under theirs as
+    comma-separated terms ("none" when empty). Returns (block, the model
+    labels that were absent — rendered as "none" and reported)."""
+    found = {lb: _label_block(reply, lb, ESSAY_LABELS)
+             for lb in ESSAY_MODEL_LABELS}
+    missing = [lb for lb, body in found.items() if not body]
+    parts = dict(found)
+    for lb in DERIVED_LABELS:
+        parts[lb] = ", ".join(derived.get(lb.lower(), [])) or "none"
+    return ("\n".join(f"{lb}: {parts[lb] or 'none'}" for lb in ESSAY_LABELS),
+            missing)
+
+
+def _build_essay(db: Database, manuscript: dict, file: str, text: str,
+                 llm: LLMClient, report: dict, *, verse_file: bool,
+                 force: bool = False, upstream: bool = False,
+                 texts: dict[str, str] | None = None, flight: dict | None = None,
+                 **_ctx) -> None:
+    """Rebuild one essay's row from its section summaries when its state
+    says so: `missing`, `stale` (source or sections hash) or `deprecated`
+    always; `upstream_stale` only with `upstream` (the deliberate pass);
+    everything with `force`. An essay whose sections are not all current
+    is skipped and reported (the section level is retried by the next
+    ensure). Afterwards every later row is marked `upstream_stale` —
+    mark, don't cascade — which a later file of the same pass clears by
+    its own rebuild."""
+    flight = flight or {}
+    row = db.one(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file))
+    state = _state(row, text, flight.get(file, NOT_IN_FLIGHT))
+    settled = ("fresh", "rewriting") + (() if upstream else ("upstream_stale",))
+    if not force and state in settled:
+        return
+    secs = sections_of(text, verse_file=verse_file)
+    have_s = _current_section_rows(db, manuscript["id"], file)
+    missing = [s["section_ordinal"] for s in secs
+               if s["section_hash"] not in have_s]
+    if missing:
+        report["skipped"].append(
+            (file, f"section(s) {', '.join(map(str, missing))} have no "
+                   "current summary"))
+        return
+    if not llm.enabled:
+        raise RuntimeError(f"the essay summary of {file} needs the LLM, "
+                           "which is disabled ([llm] enabled)")
+    order = list(texts or {})
+    idx = order.index(file)
+    have = all_summaries(db, manuscript["id"])
+    prior = [(f, have[f]["summary"]) for f in order[:idx] if f in have]
+    new = summarize_unit(db, manuscript, file, text, prior, llm,
+                         [(sec, have_s[sec["section_hash"]]) for sec in secs],
+                         texts=texts)
+    report["calls"] += 1
+    report["built"].append(file)
+    if not new["coverage"]["complete"]:
+        report["misses"].append((file, new["coverage"]))
+    if new["labels_missing"]:
+        report["labels_missing"].append((file, new["labels_missing"]))
+    for f in order[idx + 1:]:
+        if f in have and not have[f]["upstream_stale"]:
+            db.update("essay_summaries", have[f]["id"], {"upstream_stale": 1})
+            report["marked"] += 1
+
+
+def _essay_line(report: dict) -> str:
+    line = (f"summaries: essay level rebuilt — {len(report['built'])} "
+            f"essay(s) in {report['calls']} call(s)")
+    if report["marked"]:
+        line += f", {report['marked']} downstream marked upstream_stale"
+    if report["misses"]:
+        line += (f"; {len(report['misses'])} essay(s) with a coverage miss: "
+                 + ", ".join(
+                     f"{f} (" + ", ".join(
+                         f"{k} {v}" for k, v in cov.items()
+                         if k not in ("complete", "section_count") and v)
+                     + ")" for f, cov in report["misses"]))
+    if report["labels_missing"]:
+        line += (f"; {len(report['labels_missing'])} essay(s) missing a "
+                 "label: " + ", ".join(
+                     f"{f} ({', '.join(labels)})"
+                     for f, labels in report["labels_missing"]))
+    if report["skipped"]:
+        line += f"; {len(report['skipped'])} essay(s) skipped"
+    return line
+
+
 _LEVEL_BUILDERS = {
     "paragraph": (_build_file, _paragraph_line,
                   lambda: {"calls": 0, "records": 0, "headings": 0,
@@ -1711,6 +1804,9 @@ _LEVEL_BUILDERS = {
     "section": (_build_sections, _section_line,
                 lambda: {"calls": 0, "sections": 0, "headings_only": 0,
                          "resurrected": 0, "misses": [], "skipped": []}),
+    "essay": (_build_essay, _essay_line,
+              lambda: {"calls": 0, "built": [], "marked": 0, "misses": [],
+                       "labels_missing": [], "skipped": []}),
 }
 
 
@@ -1723,19 +1819,29 @@ def _client_for(llm, level: str) -> LLMClient:
 
 
 def _ensure_level(db: Database, manuscript: dict, llm: LLMClient, level: str,
-                  texts: dict[str, str], flight: dict, files, echo) -> dict:
+                  texts: dict[str, str], flight: dict, files, echo, *,
+                  force: bool = False, upstream: bool = False,
+                  progress=None) -> dict:
     build, line_of, fresh = _LEVEL_BUILDERS[level]
     verse = verse_files_of(manuscript)
-    report = {"level": level, "files": [], **fresh(), "line": None}
+    report = {"level": level, "files": [], "unwritten": [], **fresh(),
+              "line": None}
     for file, text in texts.items():
         if files is not None and file not in files:
             continue
         if flight.get(file, NOT_IN_FLIGHT) is None:
-            continue        # a writeup created it: no text to record yet
-        before = json.dumps({k: v for k, v in report.items() if k != "files"},
-                            default=str)
-        build(db, manuscript, file, text, llm, report, verse_file=file in verse)
-        if json.dumps({k: v for k, v in report.items() if k != "files"},
+            # A writeup created it: no text to record yet (§14). Reported,
+            # never summarized as empty.
+            report["unwritten"].append(file)
+            continue
+        if progress:
+            progress(file)
+        before = json.dumps({k: v for k, v in report.items()
+                             if k not in ("files", "unwritten")}, default=str)
+        build(db, manuscript, file, text, llm, report, verse_file=file in verse,
+              force=force, upstream=upstream, texts=texts, flight=flight)
+        if json.dumps({k: v for k, v in report.items()
+                       if k not in ("files", "unwritten")},
                       default=str) != before:
             report["files"].append(file)
     if report["files"]:
@@ -1746,7 +1852,8 @@ def _ensure_level(db: Database, manuscript: dict, llm: LLMClient, level: str,
 
 
 def ensure(db: Database, manuscript: dict, llm, level: str = "paragraph",
-           files: list[str] | None = None, echo=print) -> dict:
+           files: list[str] | None = None, echo=print, *,
+           force: bool = False, upstream: bool = False, progress=None) -> dict:
     """Bring `level` up to date for `files` (every unit when None) and
     return its build report (§4.5, ruling 3): every level below it is
     brought up to date first, in `LEVELS` order, and only rows the text
@@ -1769,18 +1876,33 @@ def ensure(db: Database, manuscript: dict, llm, level: str = "paragraph",
     every body paragraph exactly once (stored all the same), skipped:
     [(file, section_ordinal)] not built because a paragraph record is
     missing or the model answered nothing, line, paragraph: the lower
-    level's report}."""
+    level's report}.
+
+    Essay report: {level, files, calls, built: [file] in reading order,
+    marked (downstream rows flagged upstream_stale), misses: [(file,
+    coverage)] whose MOVES or FLOW miss a section (stored all the same),
+    labels_missing: [(file, [label])] the model left out (rendered
+    "none"), skipped: [(file, why)] not built because a section summary
+    is missing, line, section: the lower level's report}.
+
+    `force` rebuilds every row of `level` itself (lower levels stay
+    lazy); `upstream` also rebuilds essays whose conditioning moved
+    (`upstream_stale`), which the on-use path tolerates. `progress(file)`
+    is called before each file of `level` is examined."""
     if level not in LEVELS:
-        raise ValueError(f"summary level {level!r} has no builder yet "
-                         f"(built: {', '.join(LEVELS)})")
+        raise ValueError(f"unknown summary level {level!r} "
+                         f"(levels: {', '.join(LEVELS)})")
     texts, _unlisted, flight = _context_units(db, manuscript)
     unknown = sorted(set(files or ()) - set(texts))
     if unknown:
         raise LookupError(f"not a unit of the manuscript: {', '.join(unknown)}")
     lower = None
     for lv in LEVELS[:LEVELS.index(level) + 1]:
+        top = lv == level
         report = _ensure_level(db, manuscript, _client_for(llm, lv), lv,
-                               texts, flight, files, echo)
+                               texts, flight, files, echo,
+                               force=force and top, upstream=upstream and top,
+                               progress=progress if top else None)
         if lower is not None:
             report[lower["level"]] = lower
         lower = report

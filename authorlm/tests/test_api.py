@@ -3583,11 +3583,14 @@ def check_placeholder_reader_paths() -> None:
         from authorlm import summaries as _sums
         from authorlm.db import ko_fields as _ko
 
+        pinned_text = "# Epictetus\n\nThe old essay stands here.\n"
         srow = _ko("es")
         srow.update(manuscript_id=manuscript["id"], file="01-epictetus.md",
                     summary="MOVES: [1] the pre-rewrite essay.",
-                    source_hash=_sums._hash(
-                        "# Epictetus\n\nThe old essay stands here.\n"),
+                    source_hash=_sums._hash(pinned_text),
+                    sections_hash=_sums.sections_hash(
+                        [s["section_hash"]
+                         for s in _sums.sections_of(pinned_text)]),
                     upstream_hash="", upstream_stale=0, status="current")
         db.insert("essay_summaries", srow)
         with contextlib.redirect_stdout(io.StringIO()):

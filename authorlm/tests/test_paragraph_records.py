@@ -283,11 +283,11 @@ def main_test() -> None:
 
         print("guards:")
         try:
-            sums.ensure(db, manuscript, fake, level="essay")
+            sums.ensure(db, manuscript, fake, level="book")
             ok = False
         except ValueError as err:
-            ok = "no builder yet" in str(err)
-        check("an unbuilt level is named, not silently skipped", ok)
+            ok = "book" in str(err) and "essay" in str(err)
+        check("an unknown level is named, not silently skipped", ok)
         try:
             sums.ensure(db, manuscript, fake, files=["nope.md"])
             ok = False
