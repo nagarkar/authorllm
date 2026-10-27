@@ -1777,6 +1777,24 @@ def check_audiobook_continuation_edit() -> None:
               and job["message"] == "the Doc matches the files · changed on both sides, "
                                     "left alone: kindness-2.md", str(job))
 
+        def pull_missing(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": [query]}
+        gdocs.pull_doc = pull_missing
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull that cannot find a tab fails by name, never 'matches'",
+              job["state"] == "failed" and "nothing pulled for kindness.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
+        def pull_ahead(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [query] if query == "kindness-2.md" else [], "missing": []}
+        gdocs.pull_doc = pull_ahead
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull says when the file is ahead of the Doc",
+              job["state"] == "done" and "the file is ahead of the Doc, kept: kindness-2.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
         def pull_changed(db, manuscript, query=None, **kw):
             if query == "kindness-2.md":
                 cont.write_text("## **Part Two, Again**\n\nThe Doc's wording of the recap.\n",

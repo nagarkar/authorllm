@@ -1353,8 +1353,72 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
+def tab_anchors(tab_doc: dict | None) -> dict[str, str]:
+    """Each tab's first non-empty paragraph as plain text, by title, from a
+    `documents.get(includeTabsContent=True)` result. The fallback boundary
+    for `split_tabbed_export` when the export carries no tab-title
+    headings (2026-10-26: Google's markdown export stopped writing them,
+    and every pull read every tab as missing)."""
+    out: dict[str, str] = {}
+
+    def walk(tabs: list) -> None:
+        for t in tabs:
+            title = t.get("tabProperties", {}).get("title", "")
+            body = t.get("documentTab", {}).get("body", {}).get("content", [])
+            for el in body:
+                text = "".join(r.get("textRun", {}).get("content", "")
+                               for r in el.get("paragraph", {}).get("elements", []))
+                if text.strip():
+                    out[title] = text.strip()
+                    break
+            else:
+                out[title] = ""
+            walk(t.get("childTabs", []))
+    walk((tab_doc or {}).get("tabs", []))
+    return out
+
+
+def _plain(line: str) -> str:
+    """A markdown line as the words a reader sees: heading marks, emphasis,
+    escapes and spacing gone, for matching against Docs API text."""
+    t = re.sub(r"^\s*#+\s*", "", line)
+    t = t.replace("\\", "")
+    t = re.sub(r"[*_`]", "", t)
+    return " ".join(t.split())
+
+
+def _split_by_anchors(text: str, order: list[str],
+                      anchors: dict[str, str]) -> dict[str, str]:
+    """Split the export at each tab's first paragraph, in tab order,
+    searching forward only. A tab with no text gets an empty section; a
+    tab whose first paragraph is not found gets none (reported missing,
+    never guessed)."""
+    lines = text.splitlines()
+    plain = [_plain(l) for l in lines]
+    starts: list[tuple[int, str]] = []
+    empty: list[str] = []
+    pos = 0
+    for title in order:
+        want = _plain(anchors.get(title, ""))
+        if not want:
+            empty.append(title)
+            continue
+        head = want[:80]
+        for i in range(pos, len(lines)):
+            if plain[i] and (plain[i] == want or plain[i].startswith(head)):
+                starts.append((i, title))
+                pos = i + 1
+                break
+    out = {t: "\n" for t in empty}
+    for k, (i, title) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        out[title] = "\n".join(lines[i:end]).strip() + "\n"
+    return out
+
+
 def split_tabbed_export(text: str, known_files,
-                        order: list[str] | None = None) -> dict[str, str]:
+                        order: list[str] | None = None,
+                        anchors: dict[str, str] | None = None) -> dict[str, str]:
     """Split a whole-master markdown export into per-file sections. Tab
     titles export as top-level headings ('# **<title>**'); only headings
     naming a known mapped file are boundaries — content headings, even
@@ -1392,8 +1456,14 @@ def split_tabbed_export(text: str, known_files,
             continue
         if current is not None:
             sections[current].append(line)
-    return {name: "\n".join(lines).strip() + "\n"
-            for name, lines in sections.items()}
+    found = {name: "\n".join(lines).strip() + "\n"
+             for name, lines in sections.items()}
+    # No tab-title heading at all for tabs the Docs API lists: the export
+    # dropped them (Google's format, 2026-10-26). Find each tab by its
+    # first paragraph instead.
+    if order and anchors and not any(t in found for t in order):
+        return _split_by_anchors(text, list(order), anchors)
+    return found
 
 
 # ---------------------------------------------------------------- mapping
@@ -2127,7 +2197,7 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
 
 
 def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
-                    master_id: str) -> tuple[set, list[str]]:
+                    master_id: str) -> tuple[set, list[str], dict[str, str]]:
     """The split boundaries and live tab order pull_doc and diff_push
     use: every live tab title (not only mapped essay files), the
     manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
@@ -2139,7 +2209,7 @@ def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
     walk_tabs(tab_doc.get("tabs", []), tab_props, [])
     known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
     titles = {t for _, t in tab_props if t}
-    return known | titles, [t for _, t in tab_props if t]
+    return known | titles, [t for _, t in tab_props if t], tab_anchors(tab_doc)
 
 
 def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
@@ -2147,13 +2217,14 @@ def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
     """`relpath`'s tab as normalized markdown, split out of the whole-Doc
     export exactly as pull_doc splits it; None when the export has no
     section for it."""
-    boundaries, order = _tab_boundaries(links, bridge, docs_service,
+    boundaries, order, anchors = _tab_boundaries(links, bridge, docs_service,
                                         master_id)
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
-    sections = split_tabbed_export(whole, boundaries, order=order)
+    sections = split_tabbed_export(whole, boundaries, order=order,
+                                   anchors=anchors)
     if relpath not in sections:
         return None
     return normalize_markdown(sections[relpath])
@@ -2326,6 +2397,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
 
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2345,7 +2417,8 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     # order-aware: a prose heading elsewhere that repeats another tab's
     # title must never be mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     if file not in sections:
         return {"marked": None, "state": "missing", "dangling": [],
                 "marker_warnings": []}
@@ -2435,6 +2508,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
         return report
 
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2450,7 +2524,8 @@ def read_manuscript(db: Database, manuscript: dict, service,
     boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
                   | set(pmapped) | {t for _, t in tab_props if t})
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
 
     for name in names:
         entry = blank(name)
@@ -2535,6 +2610,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     readopted_files: set[str] = set()
     illus_children: list[tuple[str, str]] = []
     illus_ids: set[str] = set()
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2615,7 +2691,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # prose heading that repeats another tab's title, out of turn, is
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     targets = mapped
     prompt_targets = sorted(pmapped)
     if query:
@@ -2963,6 +3040,7 @@ def reconcile(db: Database, manuscript: dict, service,
     # export, and the three-way check then reads that as a Doc-side edit
     # and writes it over the local file (it-307dc1279a7e).
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2977,7 +3055,8 @@ def reconcile(db: Database, manuscript: dict, service,
     # prose heading that repeats another tab's title, out of turn, is
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, known | titles, order=tab_order)
+    sections = split_tabbed_export(whole, known | titles, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     ignored = sorted(t for t in titles - known
                      if t != manuscript["name"])
     if ignored:

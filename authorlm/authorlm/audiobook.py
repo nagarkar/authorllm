@@ -450,13 +450,23 @@ class Session:
         db = self._thread_db()
         pulled: list[str] = []
         conflicts: list[str] = []
+        ahead: list[str] = []
+        missing: list[str] = []
         for i, name in enumerate(names):
             self._set(job, message=f"pulling {name}")
             report = gdocs.pull_doc(db, self.manuscript, name, service=service,
                                     docs_service=docs_service)
             pulled += [r for r in report.get("changed", []) if r not in pulled]
             conflicts += report.get("conflicts", [])
+            ahead += report.get("local_ahead", [])
+            missing += report.get("missing", [])
             self._set(job, done=i + 1)
+        if missing:
+            # Never "the Doc matches the files" when a tab was not read
+            # (2026-10-26: Google's export dropped the tab titles and the
+            # page said all was well while nothing came down).
+            raise LookupError(f"nothing pulled for {', '.join(missing)}: its "
+                              "tab could not be found in the Doc's export")
         if pulled:
             api.collect(db, self.manuscript, config, source="audiobook-pull")
         self._set(job, message="exporting")
@@ -464,7 +474,11 @@ class Session:
         self._set(job, done=len(names) + 1)
         self.doc = {**self.doc, "state": "pulled from the page", "detail": ""}
         parts = [f"pulled {', '.join(pulled)}" if pulled
-                 else "the Doc matches the files"]
+                 else "the Doc matches the files" if not ahead
+                 else "nothing new in the Doc"]
+        if ahead:
+            parts.append(f"the file is ahead of the Doc, kept: {', '.join(ahead)} "
+                         "(Push sends it)")
         if conflicts:
             parts.append(f"changed on both sides, left alone: {', '.join(conflicts)}")
         return " · ".join(parts)
