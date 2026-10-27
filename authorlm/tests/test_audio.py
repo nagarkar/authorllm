@@ -1315,6 +1315,19 @@ def check_generation() -> None:
                                       "Daniel", 175)
             check("a real say render produces an mp3", real.stat().st_size > 1000)
             real.unlink()
+            # A voice that renders silence for a dash (Jamie (Premium) on
+            # "Thursday, February 2nd - day"): the stub says nothing when
+            # the text has a dash, so only the comma retry makes sound.
+            stub = root / "say-stub.sh"
+            stub.write_text('#!/bin/sh\nf="$6"\nif grep -q -- "-" "$f"; then '
+                            ': > "$f"; fi\nexec say -v Daniel -f "$f" -o "$8"\n')
+            stub.chmod(0o755)
+            dashed = gen.render_preview(root, {"id": "d" * 32, "pronunciations": [],
+                                               "text": "One day - Thursday, again.",
+                                               "speed": 1.0}, "Daniel", 175, say=str(stub))
+            check("a silent render is retried with the dashes read as commas",
+                  dashed.stat().st_size > 1000)
+            dashed.unlink()
         out, code = run_cli("-w", str(ws), "audio", "preview", "-m", "Scratch")
         check("audio preview needs a chapter or --all", code != 0 and "--all" in out, out)
 
