@@ -1591,6 +1591,27 @@ def check_audiobook_page() -> None:
             verdicts["merged"] = "refused"
         finally:
             gdocs.doc_three_way = real_three
+        # A conflict settled by hand (2026-10-26, bind-again.md): the
+        # file took the Doc's paragraph and changed the line right after
+        # it, so git's merge calls the two adjacent hunks a conflict;
+        # nothing of the Doc's is lost, and the push goes through.
+        base3 = "x\n\na\n\nb\n\nc\n\nd\n"
+        doc3 = "x\n\nA\n\nn1\n\nb\n\nn2\n\nc\n\nd\n"
+        for name, local in (("settled", "x\n\nA\n\nn1\n\nB\n\nn2\n\nc\n\nd\n"),
+                            ("lost", "x\n\nA\n\nB\n\nn2\n\nc\n\nd\n")):
+            gdocs.doc_three_way = lambda *a, _l=local, **k: {
+                "state": "conflict", "base": base3, "doc": doc3, "local": _l}
+            try:
+                gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                          gdocs.manuscript_bridge(s.manuscript),
+                                          "kindness.md", None, None)
+                verdicts[name] = "passes"
+            except gdocs.DocChanged:
+                verdicts[name] = "refused"
+            finally:
+                gdocs.doc_three_way = real_three
+        check("a settled conflict next to a local edit pushes; a dropped Doc edit does not",
+              (verdicts.pop("settled"), verdicts.pop("lost")) == ("passes", "refused"))
         merged_ok = verdicts.pop("merged")
         check("a file the Doc's edits were merged into is let through",
               merged_ok == "passes", merged_ok)
