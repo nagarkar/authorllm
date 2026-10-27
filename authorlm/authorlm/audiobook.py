@@ -406,8 +406,13 @@ class Session:
         db = self._thread_db()
         urls: list[str] = []
         held = 0
+        sent: list[str] = []
         for i, name in enumerate(names):
+            if gdocs.unchanged_since_push(db, self.manuscript, name):
+                self._set(job, done=i + 1)
+                continue
             self._set(job, message=f"pushing {name}")
+            sent.append(name)
             # Guarded: a tab edited since the last push is never
             # overwritten from the page; the job fails with "did not
             # push; doc has changed. pull first" and Pull is beside it.
@@ -417,9 +422,11 @@ class Session:
             urls.append(result["url"])
             held += len(result.get("held") or [])
             self._set(job, done=i + 1)
+        if not sent:
+            return "nothing to push: the Doc has every file as it is"
         self.doc = {**self.doc, "state": "pushed from the page",
                     "detail": urls[-1] if urls else ""}
-        return (f"pushed {', '.join(names)} to the Doc"
+        return (f"pushed {', '.join(sent)} to the Doc"
                 + (f" · {held} paragraph(s) held under open comments" if held else ""))
 
     def _doc_services(self) -> tuple[dict, Any, Any]:

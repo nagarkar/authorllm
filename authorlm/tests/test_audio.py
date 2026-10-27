@@ -1834,6 +1834,33 @@ def check_audiobook_continuation_edit() -> None:
               and job["state"] == "done"
               and job["message"] == "pushed kindness.md, kindness-2.md to the Doc", str(job))
 
+        # Only what changed goes (2026-10-26): a file whose text is what
+        # was last pushed is skipped, without a call to Google.
+        pushed.clear()
+        import hashlib as _h
+        main_text = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+            (book / "kindness.md").read_text(encoding="utf-8")))
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta.setdefault("gdocs", {})["kindness.md"] = {
+            "tab_id": "t1", "pushed_hash": _h.sha256(main_text.encode()).hexdigest()[:16]}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        job = s.enqueue("push", stem="kindness")
+        check("Push sends only the file that changed since its last push",
+              pushed == [("kindness-2.md", True)]
+              and job["message"] == "pushed kindness-2.md to the Doc", str((pushed, job)))
+        pushed.clear()
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta["gdocs"]["kindness-2.md"] = {"tab_id": "t2", "pushed_hash": _h.sha256(
+            gdocs.strip_embed_lines(gdocs.normalize_markdown(cont.read_text(encoding="utf-8")))
+            .encode()).hexdigest()[:16]}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        job = s.enqueue("push", stem="kindness")
+        check("Push with nothing changed sends nothing and says so",
+              pushed == [] and job["state"] == "done"
+              and job["message"].startswith("nothing to push"), str(job))
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta["gdocs"].pop("kindness.md"); meta["gdocs"].pop("kindness-2.md")
+        gdocs._save_mapping(s.db, s.manuscript, meta)
         pushed.clear()
 
         def push_cont_changed(db, manuscript, query, **kw):
