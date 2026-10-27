@@ -1949,6 +1949,26 @@ def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     return True
 
 
+def unchanged_since_push(db: Database, manuscript: dict, query: str,
+                         bridge: "DocBridge | None" = None) -> bool:
+    """True when the file's text is what was last pushed to its tab
+    (the same normalized, embed-free hash push records). Local only, no
+    call to Google: the audiobook page's Push skips such files, so one
+    edited paragraph does not send every file of its chapter
+    (2026-10-26: seven recap files, ten minutes, for one changed line)."""
+    import hashlib
+
+    bridge = bridge or manuscript_bridge(manuscript)
+    relpath, path = _resolve(bridge, query)
+    entry = (_mapping(db, manuscript).get(bridge.meta_key, {}).get(relpath)
+             or {})
+    if not (isinstance(entry, dict) and entry.get("pushed_hash")
+            and path.exists()):
+        return False
+    text = strip_embed_lines(normalize_markdown(path.read_text(encoding="utf-8")))
+    return hashlib.sha256(text.encode()).hexdigest()[:16] == entry["pushed_hash"]
+
+
 def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
                   relpath: str) -> None:
     """Record when the author's push last landed this tab (`pushed_at`,
