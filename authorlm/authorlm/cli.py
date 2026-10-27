@@ -7742,6 +7742,17 @@ def cmd_doc(args):
                           "trip, nothing to collect.")
                 _print_comment_harvest(result)
                 print(ui.dim("Checkouts cleared — local editing is safe again."))
+                if result["missing"]:
+                    # A tab that could not be read is a failed pull, never
+                    # a clean one: the exit code says so, so a script or an
+                    # agent cannot read "nothing came down" as "nothing
+                    # changed" (2026-10-26, when Google's export dropped
+                    # the tab titles and every pull exited 0).
+                    sys.exit("error: nothing pulled for "
+                             f"{', '.join(result['missing'])}: its tab was "
+                             "not found in the Doc's export. 'doc list' "
+                             "shows the tabs; tab titles must stay exact "
+                             "filenames.")
         except (LookupError, FileExistsError, ValueError) as err:
             sys.exit(f"error: {err}")
         return

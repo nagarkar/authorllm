@@ -6062,6 +6062,31 @@ def main_test() -> None:
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
+
         _local_transport_guards(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
