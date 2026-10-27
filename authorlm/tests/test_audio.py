@@ -1390,7 +1390,7 @@ def check_audiobook_page() -> None:
         st = s.status()
         check("status lists every chapter with counts and opens none",
               [c["stem"] for c in st["book"]["chapters"]][:2] == ["_opening-credits", "sermons"]
-              and st["chapter"] is None and st["doc"]["state"] == "reconciled in chat"
+              and st["chapter"] is None and st["doc"]["state"] == ""
               and st["export"]["stale"] is False, str(st)[:300])
         st = s.status("kindness")
         ch = st["chapter"]
@@ -1471,6 +1471,160 @@ def check_audiobook_page() -> None:
                                  workspace=str(ws), inline=True)
         check("the dropdown lists the manuscripts with an audio export",
               out == {"current": "Scratch", "manuscripts": ["Scratch"]}, str(out))
+        # Editing a card on the page: the raw block comes back, the save
+        # rewrites only that block, and the paragraph returns under a new
+        # id with nothing rendered (2026-10-26).
+        ear = ch["sections"][2]
+        src = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                            "id": ear["id"]}, workspace=str(ws), inline=True)
+        check("source returns the raw markdown block and its place",
+              src == {"file": "kindness.md", "line": 9,
+                      "markdown": "[Only: audio]\nThis paragraph is for the ear only.\n[/Only]"}, str(src))
+        head = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                             "id": ch["sections"][0]["id"]},
+                                  workspace=str(ws), inline=True)
+        check("a heading's source keeps its markdown",
+              head["markdown"] == "# **Kindness that Kills**" and head["line"] == 1, str(head))
+        before = (book / "kindness.md").read_text(encoding="utf-8")
+        same = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                           "id": ear["id"], "markdown": src["markdown"] + "\n"},
+                                  workspace=str(ws), inline=True)
+        check("saving unchanged text writes nothing and runs no job",
+              same["changed"] is False and same["job"] is None
+              and (book / "kindness.md").read_text(encoding="utf-8") == before, str(same))
+        out = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                          "id": ear["id"],
+                                          "markdown": "[Only: audio]\nThis paragraph is for the *ear* alone.\n[/Only]"},
+                                 workspace=str(ws), inline=True)
+        after = (book / "kindness.md").read_text(encoding="utf-8")
+        check("edit rewrites only that block and refreshes",
+              out["changed"] is True and out["job"]["kind"] == "refresh"
+              and out["job"]["state"] == "done"
+              and after == before.replace("This paragraph is for the ear only.",
+                                          "This paragraph is for the *ear* alone."), str(out))
+        st = s.status("kindness")
+        new_ear = st["chapter"]["sections"][2]
+        check("the edited paragraph returns under a new id with nothing rendered",
+              new_ear["id"] != ear["id"] and new_ear["text"] == "This paragraph is for the ear alone."
+              and new_ear["take"] is None and new_ear["preview"] is None
+              and st["chapter"]["generated"] == 3, str(new_ear))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": ear["id"], "markdown": "late"},
+                               workspace=str(ws), inline=True)
+            check("a save against the old id is refused", False)
+        except LookupError as err:
+            check("a save against the old id is refused by name", "no paragraph" in str(err), str(err))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": new_ear["id"], "markdown": "  \n"},
+                               workspace=str(ws), inline=True)
+            check("an empty save is refused", False)
+        except audio.AudioError as err:
+            check("an empty save is refused by name", "empty" in str(err), str(err))
+        # The Push button (2026-10-26): the chapter's file goes to its
+        # tab through gdocs.push_doc, and the Doc line shows the stamp.
+        from authorlm import gdocs
+        st = s.status("kindness")
+        check("the Doc line reads 'never pushed' before any push", st["doc"]["at"] is None, str(st["doc"]))
+        pushed: list = []
+        real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            assert kw.get("guard") is True, "the page pushes guarded"
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        gdocs.push_doc = fake_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push job sends the chapter's file to its tab with the services",
+              pushed == [("kindness.md", "drive", "docs")] and job["state"] == "done"
+              and job["message"] == "pushed kindness.md to the Doc · 1 paragraph(s) held under open comments", str(job))
+        st = s.status("kindness")
+        check("the Doc line shows the push's stamp and state",
+              st["doc"]["at"] == "2026-10-26T12:00:00Z" and st["doc"]["state"] == "pushed from the page"
+              and st["doc"]["detail"].endswith("tab=t1"), str(st["doc"]))
+        check("another chapter has its own stamp", s.status("sermons")["doc"]["at"] is None)
+        # The guard itself, at push_doc: it reads the three-way state and
+        # refuses doc_ahead and conflict; local_ahead and unchanged pass.
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta.setdefault("gdocs", {})["_master_id"] = "m1"
+        meta["gdocs"]["kindness.md"] = {"tab_id": "t1", "pushed_hash": "abc"}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        real_three = gdocs.doc_three_way
+        verdicts = {}
+        try:
+            for state in ("doc_ahead", "conflict", "local_ahead", "unchanged"):
+                gdocs.doc_three_way = lambda *a, _st=state, **k: {
+                    "state": _st, "base": "a\n\nb\n", "local": "a\n\nb local\n",
+                    "doc": "a doc\n\nb\n"}
+                try:
+                    gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                              gdocs.manuscript_bridge(s.manuscript),
+                                              "kindness.md", None, None)
+                    verdicts[state] = "passes"
+                except gdocs.DocChanged:
+                    verdicts[state] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        gdocs.doc_three_way = lambda *a, **k: {
+            "state": "conflict", "base": "a\n\nb\n\nc\n",
+            "doc": "a doc\n\nb\n\nc\n", "local": "a doc\n\nb\n\nc local\n"}
+        try:
+            gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                      gdocs.manuscript_bridge(s.manuscript),
+                                      "kindness.md", None, None)
+            verdicts["merged"] = "passes"
+        except gdocs.DocChanged:
+            verdicts["merged"] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        merged_ok = verdicts.pop("merged")
+        check("a file the Doc's edits were merged into is let through",
+              merged_ok == "passes", merged_ok)
+        check("the guard refuses a moved tab and passes a local-only change",
+              verdicts == {"doc_ahead": "refused", "conflict": "refused",
+                           "local_ahead": "passes", "unchanged": "passes"}, str(verdicts))
+        # The guard: a tab edited since the last push is never overwritten.
+        def changed_push(db, manuscript, query, **kw):
+            raise gdocs.DocChanged(f"{query}: {gdocs.DOC_CHANGED}")
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        gdocs.push_doc = changed_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push over a changed tab fails with the plain status",
+              job["state"] == "failed"
+              and job["message"] == "kindness.md: did not push; doc has changed. pull first", str(job))
+        pulled: list = []
+        real_pull = gdocs.pull_doc
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_pull(db, manuscript, query=None, **kw):
+            pulled.append(query)
+            return {"changed": [], "unchanged": [query], "conflicts": []}
+        gdocs.pull_doc = fake_pull
+        try:
+            job = s.enqueue("pull", stem="kindness")
+        finally:
+            gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real_pull, real[1], real[2]
+        check("a pull job brings down only the chapter's own tab",
+              pulled == ["kindness.md"] and job["state"] == "done"
+              and job["message"] == "the Doc matches the files", str(job))
         # The server opened without -m (key "*"); the page then names the
         # manuscript, and must reach the same session, never a second worker.
         audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))
@@ -1553,6 +1707,149 @@ def check_audiobook_page() -> None:
         shutil.rmtree(book, ignore_errors=True)
 
 
+def check_audiobook_continuation_edit() -> None:
+    """Editing a continuation file's paragraph on the page (2026-10-26, the
+    author: "If I edit a continuation type text (like recap for sermon 2)
+    in audio view in web ui, will it correctly update the underlying md
+    file?"). The card belongs to the chapter it folds into; the edit must
+    land in the continuation file and nowhere else, and the Push and Pull
+    that follow must act on both files, each failure named by file."""
+    from authorlm import audiobook, gdocs, generation as gen
+
+    book = _book_copy()
+    (book / "kindness-2.md").write_text(
+        "## **Part Two**\n\nThe recap carries on the essay here.\n\n"
+        "A second paragraph of the recap.\n", encoding="utf-8")
+    toc = (book / "toc.toml").read_text(encoding="utf-8")
+    toc = toc.replace('file = "kindness.md"\n',
+                      'file = "kindness.md"\n\n[[chapter]]\nfile = "kindness-2.md"\n')
+    (book / "toc.toml").write_text(toc, encoding="utf-8")
+    (book / "_exports").mkdir(exist_ok=True)
+    (book / "_exports" / "settings.toml").write_text(
+        'continuation_level = "2"\n', encoding="utf-8")
+    ws, _out = _workspace(book)
+    audiobook._SESSIONS.clear()
+    real = (gdocs.push_doc, gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service)
+    try:
+        s = audiobook.session(str(ws), "Scratch", inline=True)
+        audio.export(s.db, s.manuscript, resolve_dictionary=False)
+        ch = s.status("kindness")["chapter"]
+        stems = [c["stem"] for c in s.status()["book"]["chapters"]]
+        texts = [sec["text"] for sec in ch["sections"]]
+        check("a continuation file folds into its chapter, not a chapter of its own",
+              "kindness-2" not in stems
+              and "The recap carries on the essay here." in texts, str(stems))
+        sec = next(x for x in ch["sections"] if x["text"] == "The recap carries on the essay here.")
+        src = s.source("kindness", sec["id"])
+        check("source finds the paragraph in the continuation file",
+              src["file"] == "kindness-2.md" and src["line"] == 3, str(src))
+        before_main = (book / "kindness.md").read_text(encoding="utf-8")
+        out = s.edit("kindness", sec["id"], "The recap carries the essay on from here.")
+        check("the edit lands in the continuation file only",
+              out["changed"] and out["file"] == "kindness-2.md"
+              and "The recap carries the essay on from here." in (book / "kindness-2.md").read_text(encoding="utf-8")
+              and (book / "kindness.md").read_text(encoding="utf-8") == before_main, str(out))
+        ch = s.status("kindness")["chapter"]
+        new = next(x for x in ch["sections"] if x["text"] == "The recap carries the essay on from here.")
+        check("the edited recap paragraph comes back in its chapter, unrendered",
+              new["id"] != sec["id"] and new["take"] is None and new["preview"] is None, str(new))
+        head = next(x for x in ch["sections"] if x["text"] == "Part Two")
+        s.edit("kindness", head["id"], "## **Part Two, Again**")
+        check("a continuation's heading edit keeps it a continuation",
+              "kindness-2" not in [c["stem"] for c in s.status()["book"]["chapters"]]
+              and any(x["text"] == "Part Two, Again" for x in s.status("kindness")["chapter"]["sections"]))
+        # The file moved underneath the box: the save is declined, nothing written.
+        sec2 = next(x for x in s.status("kindness")["chapter"]["sections"]
+                    if x["text"] == "A second paragraph of the recap.")
+        cont = book / "kindness-2.md"
+        cont.write_text(cont.read_text(encoding="utf-8").replace(
+            "A second paragraph of the recap.", "Changed in Obsidian meanwhile."), encoding="utf-8")
+        try:
+            s.edit("kindness", sec2["id"], "My edit.")
+            check("a save over a continuation paragraph changed on disk is declined", False)
+        except LookupError as err:
+            check("a save over a continuation paragraph changed on disk is declined",
+                  "changed on disk" in str(err)
+                  and "My edit." not in cont.read_text(encoding="utf-8"), str(err))
+
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        pushed: list = []
+
+        def push_ok(db, manuscript, query, **kw):
+            pushed.append((query, kw.get("guard")))
+            return {"relpath": query, "url": f"https://d/{query}", "held": []}
+        gdocs.push_doc = push_ok
+        job = s.enqueue("push", stem="kindness")
+        check("Push sends the chapter file and its continuation, both guarded",
+              pushed == [("kindness.md", True), ("kindness-2.md", True)]
+              and job["state"] == "done"
+              and job["message"] == "pushed kindness.md, kindness-2.md to the Doc", str(job))
+
+        pushed.clear()
+
+        def push_cont_changed(db, manuscript, query, **kw):
+            pushed.append(query)
+            if query == "kindness-2.md":
+                raise gdocs.DocChanged(f"{query}: {gdocs.DOC_CHANGED}")
+            return {"relpath": query, "url": f"https://d/{query}", "held": []}
+        gdocs.push_doc = push_cont_changed
+        job = s.enqueue("push", stem="kindness")
+        check("a continuation tab changed in the Doc stops the push by name",
+              job["state"] == "failed"
+              and job["message"] == "kindness-2.md: did not push; doc has changed. pull first"
+              and job["done"] == 1 and job["of"] == 2, str(job))
+
+        pulled: list = []
+
+        def pull_conflict(db, manuscript, query=None, **kw):
+            pulled.append(query)
+            return {"changed": [], "unchanged": [query] if query == "kindness.md" else [],
+                    "conflicts": [query] if query == "kindness-2.md" else []}
+        gdocs.pull_doc = pull_conflict
+        job = s.enqueue("pull", stem="kindness")
+        check("Pull asks for both tabs and names a two-sided continuation",
+              pulled == ["kindness.md", "kindness-2.md"] and job["state"] == "done"
+              and job["message"] == "the Doc matches the files · changed on both sides, "
+                                    "left alone: kindness-2.md", str(job))
+
+        def pull_missing(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": [query]}
+        gdocs.pull_doc = pull_missing
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull that cannot find a tab fails by name, never 'matches'",
+              job["state"] == "failed" and "nothing pulled for kindness.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
+        def pull_ahead(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [query] if query == "kindness-2.md" else [], "missing": []}
+        gdocs.pull_doc = pull_ahead
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull says when the file is ahead of the Doc",
+              job["state"] == "done" and "the file is ahead of the Doc, kept: kindness-2.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
+        def pull_changed(db, manuscript, query=None, **kw):
+            if query == "kindness-2.md":
+                cont.write_text("## **Part Two, Again**\n\nThe Doc's wording of the recap.\n",
+                                encoding="utf-8")
+                return {"changed": [query], "unchanged": [], "conflicts": []}
+            return {"changed": [], "unchanged": [query], "conflicts": []}
+        gdocs.pull_doc = pull_changed
+        job = s.enqueue("pull", stem="kindness")
+        texts = [x["text"] for x in s.status("kindness")["chapter"]["sections"]]
+        check("a pulled continuation re-exports, and its card shows the Doc's text",
+              job["state"] == "done" and job["message"] == "pulled kindness-2.md"
+              and "The Doc's wording of the recap." in texts, str(job))
+    finally:
+        gdocs.push_doc, gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real
+        audiobook._SESSIONS.clear()
+        shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(book, ignore_errors=True)
+
+
 def main_test() -> None:
     check_text_rules()
     check_voice_tags()
@@ -1568,6 +1865,7 @@ def main_test() -> None:
     check_casting_filter_block()
     check_generation()
     check_audiobook_page()
+    check_audiobook_continuation_edit()
     print(f"\nAll {PASSED} checks passed.")
 
 

@@ -2453,8 +2453,9 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
 
     # 4. A comment INSIDE the table: the changed table is held at its
     #    old text and reported (it-e26a44f924be holds any changed unit
-    #    an open comment is anchored in); --rebuild is the knowing
-    #    opt-in.
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
@@ -2468,12 +2469,16 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
-    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                          docs_service=fake2, rebuild=True)
-    check("rebuild=True rebuilds the tab, accepting the orphan",
-          push.get("mode") is None and fake2.orphaned
-          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
-          f"{push}\n{_tab_md(fake2)}")
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
 
     # 5. A table tab with no comments still pushes, by rebuild as before.
     _, db3, man3, ms3, fake3 = _table_fixture(
@@ -2607,16 +2612,21 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
           and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
-    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
     _, db3, man3, ms3, fake3 = _table_fixture(
         root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
     (ms3 / "agency.md").write_text(_HOLD_LOCAL)
-    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
-                          docs_service=fake3, rebuild=True)
-    check("rebuild=True overrides the hold",
-          push.get("mode") is None and not push.get("held")
-          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
-          f"{push}\n{_tab_md(fake3)}")
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
 
     # 7. The CLI names each held paragraph and its comment.
     ws4, db4, man4, ms4, fake4 = _table_fixture(

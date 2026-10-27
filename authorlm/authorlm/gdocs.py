@@ -25,7 +25,7 @@ import os
 import re
 from pathlib import Path
 
-from .db import Database, loads
+from .db import Database, loads, now_iso
 from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
@@ -664,6 +664,14 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _flat_prose(text: str) -> str:
+    """`_flat` with the emphasis markers gone: a Doc comment quotes the
+    rendered text (*religare* comes back as religare), so the anchor is
+    matched on the words alone (2026-10-26, a comment on read-again.md
+    that went unattributed for one pair of asterisks)."""
+    return _flat(re.sub(r"[*_]", "", text))
+
+
 def clamp(text: str, limit: int = 60) -> str:
     flat = _flat(text)
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
@@ -677,21 +685,45 @@ def locate_quote(files: dict[str, str],
     guessed."""
     from .revisions import _nearest_heading, _paragraphs
 
-    needle = _flat(quoted)
+    needle = _flat_prose(quoted)
     if not needle:
         return None, None
-    hits = [rel for rel, text in files.items() if needle in _flat(text)]
+    hits = [rel for rel, text in files.items() if needle in _flat_prose(text)]
     if len(hits) != 1:
         return None, None
     relpath = hits[0]
     paragraphs = _paragraphs(files[relpath])
     # A quote can span paragraphs; fall back to its head for the index.
     index = next(
-        (i for i, p in enumerate(paragraphs) if needle in _flat(p)),
+        (i for i, p in enumerate(paragraphs) if needle in _flat_prose(p)),
         next((i for i, p in enumerate(paragraphs)
-              if needle[:40] in _flat(p)), len(paragraphs) - 1),
+              if needle[:40] in _flat_prose(p)), len(paragraphs) - 1),
     )
     return relpath, _nearest_heading(paragraphs, index)
+
+
+def still_open_comments(db: Database, manuscript: dict,
+                        open_comments: list[dict], fresh: list[dict],
+                        files: dict[str, str]) -> list[dict]:
+    """The open comments a pull has shown before and that carry no margin
+    thread, projected like `ingest_comments`; the location says
+    "(anchor text gone)" when the quote is in no file."""
+    from . import threads as threads_mod
+
+    fresh_ids = {c["id"] for c in fresh}
+    out = []
+    for c in open_comments:
+        if c["id"] in fresh_ids or threads_mod.get_thread(
+                db, manuscript["id"], c["id"]) is not None:
+            continue
+        quoted = (c.get("quotedFileContent") or {}).get("value") or ""
+        rel, heading = locate_quote(files, quoted)
+        out.append({
+            "comment_id": c["id"],
+            "location": (f"{rel}#{heading}" if rel and heading else rel)
+                        or "(anchor text gone)",
+            "quote": clamp(quoted), "content": c.get("content", "")})
+    return out
 
 
 def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
@@ -705,11 +737,23 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
     seen = {r["comment_id"] for r in db.all(
         "SELECT comment_id FROM doc_comments WHERE manuscript_id = ?",
         (manuscript["id"],))}
+    unplaced = {r["comment_id"] for r in db.all(
+        "SELECT comment_id FROM doc_comments WHERE manuscript_id = ? "
+        "AND (file IS NULL OR file = '') AND state = 'ingested'",
+        (manuscript["id"],))}
     out = []
     for c in comments:
         quoted = (c.get("quotedFileContent") or {}).get("value") or ""
         relpath, heading = locate_quote(files, quoted)
         location = f"{relpath}#{heading}" if relpath and heading else relpath
+        if c["id"] in unplaced and relpath:
+            # Attributed on a later pull (the file changed, or the matcher
+            # improved): the row is placed, never duplicated.
+            row_id = db.one(
+                "SELECT id FROM doc_comments WHERE manuscript_id = ? "
+                "AND comment_id = ?", (manuscript["id"], c["id"]))["id"]
+            db.update("doc_comments", row_id,
+                      {"file": relpath, "location": location})
         if c["id"] not in seen:
             row = ko_fields("dc")
             row.update(
@@ -1309,8 +1353,72 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
+def tab_anchors(tab_doc: dict | None) -> dict[str, str]:
+    """Each tab's first non-empty paragraph as plain text, by title, from a
+    `documents.get(includeTabsContent=True)` result. The fallback boundary
+    for `split_tabbed_export` when the export carries no tab-title
+    headings (2026-10-26: Google's markdown export stopped writing them,
+    and every pull read every tab as missing)."""
+    out: dict[str, str] = {}
+
+    def walk(tabs: list) -> None:
+        for t in tabs:
+            title = t.get("tabProperties", {}).get("title", "")
+            body = t.get("documentTab", {}).get("body", {}).get("content", [])
+            for el in body:
+                text = "".join(r.get("textRun", {}).get("content", "")
+                               for r in el.get("paragraph", {}).get("elements", []))
+                if text.strip():
+                    out[title] = text.strip()
+                    break
+            else:
+                out[title] = ""
+            walk(t.get("childTabs", []))
+    walk((tab_doc or {}).get("tabs", []))
+    return out
+
+
+def _plain(line: str) -> str:
+    """A markdown line as the words a reader sees: heading marks, emphasis,
+    escapes and spacing gone, for matching against Docs API text."""
+    t = re.sub(r"^\s*#+\s*", "", line)
+    t = t.replace("\\", "")
+    t = re.sub(r"[*_`]", "", t)
+    return " ".join(t.split())
+
+
+def _split_by_anchors(text: str, order: list[str],
+                      anchors: dict[str, str]) -> dict[str, str]:
+    """Split the export at each tab's first paragraph, in tab order,
+    searching forward only. A tab with no text gets an empty section; a
+    tab whose first paragraph is not found gets none (reported missing,
+    never guessed)."""
+    lines = text.splitlines()
+    plain = [_plain(l) for l in lines]
+    starts: list[tuple[int, str]] = []
+    empty: list[str] = []
+    pos = 0
+    for title in order:
+        want = _plain(anchors.get(title, ""))
+        if not want:
+            empty.append(title)
+            continue
+        head = want[:80]
+        for i in range(pos, len(lines)):
+            if plain[i] and (plain[i] == want or plain[i].startswith(head)):
+                starts.append((i, title))
+                pos = i + 1
+                break
+    out = {t: "\n" for t in empty}
+    for k, (i, title) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        out[title] = "\n".join(lines[i:end]).strip() + "\n"
+    return out
+
+
 def split_tabbed_export(text: str, known_files,
-                        order: list[str] | None = None) -> dict[str, str]:
+                        order: list[str] | None = None,
+                        anchors: dict[str, str] | None = None) -> dict[str, str]:
     """Split a whole-master markdown export into per-file sections. Tab
     titles export as top-level headings ('# **<title>**'); only headings
     naming a known mapped file are boundaries — content headings, even
@@ -1348,8 +1456,14 @@ def split_tabbed_export(text: str, known_files,
             continue
         if current is not None:
             sections[current].append(line)
-    return {name: "\n".join(lines).strip() + "\n"
-            for name, lines in sections.items()}
+    found = {name: "\n".join(lines).strip() + "\n"
+             for name, lines in sections.items()}
+    # No tab-title heading at all for tabs the Docs API lists: the export
+    # dropped them (Google's format, 2026-10-26). Find each tab by its
+    # first paragraph instead.
+    if order and anchors and not any(t in found for t in order):
+        return _split_by_anchors(text, list(order), anchors)
+    return found
 
 
 # ---------------------------------------------------------------- mapping
@@ -1588,10 +1702,19 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"('filter unmark {relpath}') first.")
 
 
+class DocChanged(LookupError):
+    """The tab's text moved since the last push: a push would overwrite
+    the Doc's side (author's ask 2026-10-26: "did not push; doc has
+    changed. pull first")."""
+
+
+DOC_CHANGED = "did not push; doc has changed. pull first"
+
+
 def push_doc(db: Database, manuscript: dict, query: str,
              title: str | None = None, service=None,
              docs_service=None, bridge: DocBridge | None = None,
-             rebuild: bool = False) -> dict:
+             rebuild: bool = False, guard: bool = False) -> dict:
     """Tabbed push: normalize the local file, then rebuild its tab of the
     master Doc — markdown → temp-doc import (Google owns the conversion)
     → transplant into the tab → temp deleted. Marks the file checked out.
@@ -1601,6 +1724,9 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
+    if guard:
+        _refuse_doc_changed(db, manuscript, bridge, relpath, service,
+                            docs_service)
     # The pause: <<old>>{{new}} / {{insert}} forms the author may have
     # post-edited live either in the Doc (critique) or on disk (filter).
     # open_threads only sees author_comment rows, so without this gate a
@@ -1621,6 +1747,9 @@ def push_doc(db: Database, manuscript: dict, query: str,
             f"run '{remedy.format(file=relpath)}' before pushing "
             "(a rebuild would wipe the author's post-edits)")
     _refuse_mid_rewrite(relpath, path.read_text(encoding="utf-8"))
+    if rebuild:
+        _refuse_rebuild_over_comments(db, manuscript, bridge, relpath,
+                                      service, docs_service)
     # A tab that carries comments is never rebuilt, tables or not
     # (it-cd0fb0ad59fb; the author: "any comments on that tab are not
     # lost or orphaned"). diff_push aligns each Docs table as ONE unit
@@ -1646,6 +1775,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
             "tab_id")
         result.update(doc_id=master, url=tab_url(master, tab),
                       created=False, locally_normalized=False)
+        _stamp_pushed(db, manuscript, bridge, relpath)
         return result
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
@@ -1674,6 +1804,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry["checked_out"] = True
     # Snapshot what was pushed: pull uses it to detect two-sided edits.
     entry["pushed_hash"] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    entry["pushed_at"] = now_iso()
     _save_mapping(db, manuscript, meta)
     return {
         "relpath": relpath,
@@ -1682,6 +1813,91 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _refuse_rebuild_over_comments(db: Database, manuscript: dict,
+                                  bridge: DocBridge, relpath: str,
+                                  service, docs_service) -> None:
+    """A rebuild replaces the whole tab and orphans every comment anchored
+    in it, so it is refused while any open comment's quote is in the tab
+    (2026-10-26: four comments on read-again.md were orphaned by two
+    rebuilds run after a "tab structure and export disagree" error, the
+    rebuilding session believing the tab had none). Resolve or settle
+    those comments first. A tab that cannot be read is refused too: the
+    side that cannot destroy the margin is the safe one."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    master_id = links.get("_master_id")
+    if not (master_id and entry.get("tab_id")):
+        return
+    try:
+        tab = fetch_tab_markdown(service, docs_service, master_id, links,
+                                 bridge, relpath)
+    except Exception as err:  # noqa: BLE001 — unknown margin: refuse
+        raise LookupError(f"{relpath}: rebuild refused — the tab could not "
+                          f"be read to check its comments ({err})") from err
+    text = _flat_prose(tab or "")
+    anchored = [c for c in _open_comment_anchors(db, manuscript, service,
+                                                 master_id)
+                if _flat_prose(c["quoted"]) and _flat_prose(c["quoted"]) in text]
+    if anchored:
+        lines = "; ".join(f"[{c['comment_id']}] «{clamp(c['quoted'], 40)}» "
+                          f"{clamp(c['content'], 60)}" for c in anchored)
+        raise LookupError(
+            f"{relpath}: rebuild refused — {len(anchored)} open comment(s) "
+            f"anchor in this tab and a rebuild would orphan them: {lines}. "
+            "Settle or resolve them (doc resolve-comments <id>) first.")
+
+
+def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
+                        relpath: str, service, docs_service) -> None:
+    """`guard=True` (the author's `doc push`, and the audiobook page's
+    Push): read the tab and refuse when its text moved since the last
+    push, on its own or on both sides. A push overwrites the tab with the
+    local file, so it would otherwise drop those Doc edits silently. A
+    file with no tab yet, or never pushed, has nothing to lose. Internal
+    callers that push right after settling forms in the tab leave the
+    guard off: their tab differs from the base by design."""
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    if not (links.get("_master_id") and entry.get("tab_id")
+            and entry.get("pushed_hash")):
+        return
+    view = doc_three_way(db, manuscript, relpath, service, docs_service,
+                         bridge=bridge)
+    if view["state"] not in ("doc_ahead", "conflict"):
+        return
+    # A file the Doc's edits were already merged into (`doc merge`, then
+    # the draft copied over the file) pushes: merging the Doc into it
+    # again changes nothing, so nothing of the Doc's would be lost.
+    if view["base"] is not None:
+        merged, conflicts = merge3(view["local"], view["base"], view["doc"],
+                                   relpath)
+        if not conflicts and merged == view["local"]:
+            return
+    raise DocChanged(f"{relpath}: {DOC_CHANGED}")
+
+
+def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
+                  relpath: str) -> None:
+    """Record when the author's push last landed this tab (`pushed_at`,
+    read by the audiobook page's "pushed <when>" line, 2026-10-26). Only
+    `push_doc` stamps it: reconcile and the critique/filter writers move
+    `pushed_hash` without being a push the author asked for."""
+    meta = _mapping(db, manuscript)
+    entry = meta.get(bridge.meta_key, {}).get(relpath)
+    if isinstance(entry, dict):
+        entry["pushed_at"] = now_iso()
+        _save_mapping(db, manuscript, meta)
+
+
+def pushed_at(db: Database, manuscript: dict, relpaths: list[str]) -> str | None:
+    """The newest `pushed_at` among `relpaths`, or None when none of them
+    has been pushed by `push_doc` since the stamp exists."""
+    status = doc_status(db, manuscript)
+    stamps = [e.get("pushed_at") for r in relpaths
+              if isinstance((e := status.get(r)), dict) and e.get("pushed_at")]
+    return max(stamps) if stamps else None
 
 
 def _sidecar_would_be_emptied(relpath: str, incoming: str,
@@ -1981,7 +2197,7 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
 
 
 def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
-                    master_id: str) -> tuple[set, list[str]]:
+                    master_id: str) -> tuple[set, list[str], dict[str, str]]:
     """The split boundaries and live tab order pull_doc and diff_push
     use: every live tab title (not only mapped essay files), the
     manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
@@ -1993,7 +2209,7 @@ def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
     walk_tabs(tab_doc.get("tabs", []), tab_props, [])
     known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
     titles = {t for _, t in tab_props if t}
-    return known | titles, [t for _, t in tab_props if t]
+    return known | titles, [t for _, t in tab_props if t], tab_anchors(tab_doc)
 
 
 def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
@@ -2001,13 +2217,14 @@ def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
     """`relpath`'s tab as normalized markdown, split out of the whole-Doc
     export exactly as pull_doc splits it; None when the export has no
     section for it."""
-    boundaries, order = _tab_boundaries(links, bridge, docs_service,
+    boundaries, order, anchors = _tab_boundaries(links, bridge, docs_service,
                                         master_id)
     data = service.files().export(
         fileId=master_id, mimeType=MARKDOWN_MIME).execute()
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
-    sections = split_tabbed_export(whole, boundaries, order=order)
+    sections = split_tabbed_export(whole, boundaries, order=order,
+                                   anchors=anchors)
     if relpath not in sections:
         return None
     return normalize_markdown(sections[relpath])
@@ -2085,33 +2302,19 @@ def unified(a: str, b: str, from_name: str, to_name: str) -> str:
         tofile=to_name, lineterm=""))
 
 
-def doc_merge(db: Database, manuscript: dict, query: str, service,
-              docs_service, out=None,
-              bridge: "DocBridge | None" = None) -> dict:
-    """Three-way merge of the local file and its tab against the pushed
-    base (`git merge-file -p`, labels local/base/doc), written to `out`
-    (default `_drafts/<stem>.merged.md` under the manuscript, which
-    observation ignores). Never pushes, never writes the manuscript file.
-    Returns {relpath, state, out, conflicts: [line number of each
-    conflict region's '<<<<<<< local' line]}."""
+def merge3(local: str, base: str, doc: str,
+           relpath: str = "") -> tuple[str, list[int]]:
+    """`git merge-file -p` of local and doc against base (labels
+    local/base/doc): the merged text and the line of each conflict
+    region's '<<<<<<< local' marker."""
     import subprocess
     import tempfile
 
-    bridge = bridge or manuscript_bridge(manuscript)
-    view = doc_three_way(db, manuscript, query, service, docs_service,
-                         bridge=bridge)
-    relpath = view["relpath"]
-    if view["base"] is None:
-        raise LookupError(
-            f"no pushed base for {relpath}: no saved version hashes to its "
-            f"pushed_hash ({view['base_hash'] or 'none recorded'}), so there "
-            f"is nothing to merge against. Compare the sides and settle by "
-            f"hand: authorlm doc diff {relpath}")
     with tempfile.TemporaryDirectory(prefix="authorlm-merge-") as tmp:
         names = {}
-        for side in ("local", "base", "doc"):
+        for side, text in (("local", local), ("base", base), ("doc", doc)):
             names[side] = Path(tmp) / side
-            names[side].write_text(view[side], encoding="utf-8")
+            names[side].write_text(text, encoding="utf-8")
         try:
             run = subprocess.run(
                 ["git", "merge-file", "-p", "-L", "local", "-L", "base",
@@ -2126,8 +2329,31 @@ def doc_merge(db: Database, manuscript: dict, query: str, service,
         raise LookupError(f"git merge-file failed ({run.stderr.strip()}). "
                           f"authorlm doc diff {relpath}")
     merged = run.stdout
-    conflicts = [i for i, line in enumerate(merged.splitlines(), 1)
-                 if line.startswith("<<<<<<< local")]
+    return merged, [i for i, line in enumerate(merged.splitlines(), 1)
+                    if line.startswith("<<<<<<< local")]
+
+
+def doc_merge(db: Database, manuscript: dict, query: str, service,
+              docs_service, out=None,
+              bridge: "DocBridge | None" = None) -> dict:
+    """Three-way merge of the local file and its tab against the pushed
+    base (`git merge-file -p`, labels local/base/doc), written to `out`
+    (default `_drafts/<stem>.merged.md` under the manuscript, which
+    observation ignores). Never pushes, never writes the manuscript file.
+    Returns {relpath, state, out, conflicts: [line number of each
+    conflict region's '<<<<<<< local' line]}."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    view = doc_three_way(db, manuscript, query, service, docs_service,
+                         bridge=bridge)
+    relpath = view["relpath"]
+    if view["base"] is None:
+        raise LookupError(
+            f"no pushed base for {relpath}: no saved version hashes to its "
+            f"pushed_hash ({view['base_hash'] or 'none recorded'}), so there "
+            f"is nothing to merge against. Compare the sides and settle by "
+            f"hand: authorlm doc diff {relpath}")
+    merged, conflicts = merge3(view["local"], view["base"], view["doc"],
+                               relpath)
     target = (Path(out) if out else
               bridge.root / "_drafts" / f"{Path(relpath).stem}.merged.md")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2171,6 +2397,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
         raise LookupError(f"'{file}' has no tab in the master Doc")
 
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2190,7 +2417,8 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     # order-aware: a prose heading elsewhere that repeats another tab's
     # title must never be mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     if file not in sections:
         return {"marked": None, "state": "missing", "dangling": [],
                 "marker_warnings": []}
@@ -2280,6 +2508,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
         return report
 
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2295,7 +2524,8 @@ def read_manuscript(db: Database, manuscript: dict, service,
     boundaries = (set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE}
                   | set(pmapped) | {t for _, t in tab_props if t})
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
 
     for name in names:
         entry = blank(name)
@@ -2380,6 +2610,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     readopted_files: set[str] = set()
     illus_children: list[tuple[str, str]] = []
     illus_ids: set[str] = set()
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2460,7 +2691,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # prose heading that repeats another tab's title, out of turn, is
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, boundaries, order=tab_order)
+    sections = split_tabbed_export(whole, boundaries, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     targets = mapped
     prompt_targets = sorted(pmapped)
     if query:
@@ -2727,15 +2959,25 @@ def harvest_comments(db: Database, manuscript: dict, master_id: str,
         # auto-resolved. New comments are ingested and surfaced to
         # chat for proposal drafting; replies on threads we own are
         # the verdict machine's input (step 2).
+        # Fresh, or ingested earlier without a file: the second kind is
+        # offered again so a later pull can place it (ingest_comments
+        # updates the row, never duplicates it).
         fresh = [c for c in open_comments
                  if threads_mod.get_thread(
                      db, manuscript["id"], c["id"]) is None
                  and db.one(
                      "SELECT id FROM doc_comments WHERE "
-                     "manuscript_id = ? AND comment_id = ?",
+                     "manuscript_id = ? AND comment_id = ? "
+                     "AND file IS NOT NULL AND file != ''",
                      (manuscript["id"], c["id"])) is None]
         report["comments"] = ingest_comments(
             db, manuscript, fresh, files)
+        # Every open comment a pull has already shown, listed again on
+        # each pull until it is settled (2026-10-26: comments listed once
+        # dropped out of view, and four were orphaned unnoticed). One whose
+        # quote is in no file has lost its anchor text: say so.
+        report["still_open"] = still_open_comments(
+            db, manuscript, open_comments, fresh, files)
         report["thread_replies"] = []
         for c in open_comments:
             thread = threads_mod.get_thread(
@@ -2798,6 +3040,7 @@ def reconcile(db: Database, manuscript: dict, service,
     # export, and the three-way check then reads that as a Doc-side edit
     # and writes it over the local file (it-307dc1279a7e).
     tab_props: list[tuple[str, str]] = []
+    tab_doc = None
     if docs_service is not None:
         try:
             tab_doc = docs_service.documents().get(
@@ -2812,7 +3055,8 @@ def reconcile(db: Database, manuscript: dict, service,
     # prose heading that repeats another tab's title, out of turn, is
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
-    sections = split_tabbed_export(whole, known | titles, order=tab_order)
+    sections = split_tabbed_export(whole, known | titles, order=tab_order,
+                                   anchors=tab_anchors(tab_doc))
     ignored = sorted(t for t in titles - known
                      if t != manuscript["name"])
     if ignored:
@@ -4612,15 +4856,17 @@ def _anchored_paragraphs(texts: list[str],
     more than once marks every occurrence (the Drive API gives the quote,
     not its position, and over-holding is the side that loses nothing).
     A quote found nowhere marks nothing."""
+    # On the words alone, like locate_quote: a comment quotes rendered
+    # text, so *religare* in the markdown is religare in the quote.
     spans, joined = [], ""
     for text in texts:
         start = len(joined)
-        joined += _flat(text)
+        joined += _flat_prose(text)
         spans.append((start, len(joined)))
         joined += " "
     marks: dict[int, list[dict]] = {}
     for c in comments:
-        needle = _flat(c.get("quoted") or "")
+        needle = _flat_prose(c.get("quoted") or "")
         if not needle:
             continue
         at = joined.find(needle)

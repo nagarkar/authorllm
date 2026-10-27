@@ -1806,7 +1806,8 @@ run the CLI via Bash:
   `<<old>>{{new}}` forms.
 - push: `authorlm doc push <file> -m <manuscript>` → prints the Doc URL;
   the file is now *checked out* (warn the author against local edits).
-  `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a held paragraph.
+  `doc push <file> --rebuild` rebuilds the whole tab. It is refused while any open comment anchors in the tab (2026-10-26: a rebuild after a "tab structure and export disagree" error orphaned four comments); settle or `doc resolve-comments` them first, and never reach for a rebuild to get past that error or a held paragraph.
+  `doc push` also refuses when the tab's text changed since the last push ("did not push; doc has changed. pull first"): pull, or `doc merge` when both sides moved. Every pull lists the open comments again under "Still open from earlier pulls", marking one whose anchor text is gone; resolve it once addressed.
   **Held paragraphs** (it-e26a44f924be): a push holds back every changed paragraph (or table) an open comment is anchored in, pushes the rest, and prints "Held N paragraph(s)" with each comment's id, quote and content (`held` in the result). The local file keeps its new text and stays local ahead; a pull does not overwrite it. Address each held comment, then push again:
   1. A change request: register the edit beside the comment with `doc propose <comment-id>` ({"old","new","note"}; the anchor stays). A question: answer in chat.
   2. The author reviews in the margin; the next pull applies the verdict and closes the thread.
@@ -2193,6 +2194,21 @@ drops the tag lines and keeps every word of prose.
     (fetch the transcript and copy the full sentence; a fragment is a
     draft), and the `start:`/`end:` you propose cover exactly those
     sentences: begin at the first word, end before the next sentence.
+    **The brief carries everything the clip says (author ruling
+    2026-10-26: "add the full description/lines from the clips inline in
+    the doc, so you can see those and figure out what gaps should be
+    filled"; true for every YouTube clip).** Once a clip has its
+    `youtube:` and times, `quote:` holds EVERY line spoken inside the
+    span, in order, speakers marked, and `moment:` says what happens in
+    it. The lines come from ytlm, read by a subagent and never into the
+    chat (ytlm skill, "Never in the window"): `ytlm quote <id> "the"`
+    caches the free captions in `<ytlm workspace>/clips/<id>/captions.json`,
+    and the subagent copies the span's lines into the brief. Land them
+    with `clip spec --batch`; on a checked-out chapter they show in its
+    tab as pending forms, which is how the author reads them inline.
+    Drafting narration around a clip starts from its brief: supply only
+    what the clips leave out, never retell a line the brief holds. A
+    script whose YouTube clips lack their lines is not ready for review.
   - a clip to be generated takes a **generation spec** (`_clips/specs/`):
     `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
     `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),

@@ -404,6 +404,44 @@ and a card's respelling chips open the word. The standalone
 `authorlm workbench` verb and its page remain but are not the door.
 The page was restyled after gamelm's vocingo card UI the same day.
 
+**2026-10-26. Editing on the page.** The author's ask: "I want the
+text boxes that show up with paragraphs to be editable on the spot, and
+that change should be reflected in the .md file. This allows me to fix
+problems while I'm listening to the audio. Once the content is updated,
+it should be marked stale so when I try to replay the audio, it
+regenerates the audio." This amends §3's "Text is never edited here":
+a card's ✎ Edit (or a double-tap on the text) opens the paragraph's
+markdown as it is in the file (`source`: the block is found by what it
+says, since the export's line numbers count the pre-passed text), and
+Save (`edit`) rewrites that block alone and queues a refresh. Stale
+needs no mark of its own: the id hashes the text, so the paragraph
+returns under a new id with no preview and no take — its preview
+renders on the next play (the lazy listen), its take waits for a tap.
+A paragraph no single block of the file says whole (an inline tag the
+audio strips, a list read item by item) is not editable here and says
+so. The Doc stays out of it (ruling of 2026-09-26): the edit is a local
+edit, and reconcile in chat sees it like any other.
+
+**2026-10-26, later. The edit is an overlay.** "When I edit a
+particular paragraph in the web UI, it's jumping around quite a bit if
+I'm also playing some audio." The edit box is a fixed overlay over the
+page, so the player walks on and scrolls beneath it; the player sits
+above the dimmed backdrop and stays usable. Closing it (✕, Esc, a tap on
+the backdrop, Save & close) saves exactly as the in-place box did;
+Cancel is the one way out that writes nothing, and a save that fails
+keeps the box open with the error.
+
+**2026-10-26, later. Push from the page.** "Rename 'exported' to
+'pushed' and on the right of that text, put a 'push' button to push to
+the google doc; this should naturally update the last pushed date." The
+line under the chapter dropdown now reads "pushed <when> · Doc:
+<state>" with a ⇧ Push chip beside it; the chip queues a `push` job
+that runs `gdocs.push_doc` for the open chapter's files (never opening
+a consent browser: `doc auth` stays the one doorway), and `push_doc`
+stamps `pushed_at` on the tab's entry, which the line reads back. This
+narrows the 2026-09-26 ruling: the page still never *pulls* or
+reconciles — that stays in chat — but it may push what is on disk.
+
 ## 11. Open questions
 
 - Whether the served page should also host the pronunciation workbench

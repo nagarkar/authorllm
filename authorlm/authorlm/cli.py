@@ -343,6 +343,16 @@ def _print_comment_harvest(result: dict) -> None:
             "Address every comment above; when acting on one, "
             "record the author's words verbatim as the "
             "evidence/reason."))
+    still = result.get("still_open") or []
+    if still:
+        print(ui.bold(f"Still open from earlier pulls ({len(still)}):"))
+        for c in still:
+            print(f"  • [{c['location']}] on \"{c['quote']}\"  ({c['comment_id']})")
+            print(f"    {c['content']}")
+        if any(c["location"] == "(anchor text gone)" for c in still):
+            print(ui.dim("An anchor-text-gone comment no longer shows in the "
+                         "Doc's margin (only under Show all comments); "
+                         "resolve it once addressed: doc resolve-comments <id>."))
     if result.get("comments_error"):
         print(ui.yellow("warning: comment harvest failed "
                         f"({result['comments_error']}) — "
@@ -7550,7 +7560,8 @@ def cmd_doc(args):
                                             title=args.title, service=service,
                                             docs_service=docs_service,
                                             rebuild=(args.rebuild
-                                                     and target == args.name))
+                                                     and target == args.name),
+                                            guard=True)
                     normalized_any = normalized_any or result["locally_normalized"]
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
