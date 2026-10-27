@@ -1388,12 +1388,23 @@ def _plain(line: str) -> str:
     return " ".join(t.split())
 
 
+# Prefix match for `_split_by_anchors` only when the Docs-API first
+# paragraph is this long: a short needle like "Yes." used to match a
+# longer mid-chapter line ("Yes. This is still…") and pull the rest of
+# the prior tab into the next one (2026-10-27). Exact match always
+# wins; below this length a missed soft-break join stays missing.
+_ANCHOR_PREFIX_MIN = 40
+
+
 def _split_by_anchors(text: str, order: list[str],
                       anchors: dict[str, str]) -> dict[str, str]:
     """Split the export at each tab's first paragraph, in tab order,
     searching forward only. A tab with no text gets an empty section; a
     tab whose first paragraph is not found gets none (reported missing,
-    never guessed)."""
+    never guessed). A line matches when it equals the anchor, or — only
+    when the anchor is at least `_ANCHOR_PREFIX_MIN` chars — when it
+    starts with the anchor's first 80 plain chars (export line longer
+    than the API paragraph)."""
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
     starts: list[tuple[int, str]] = []
@@ -1404,9 +1415,12 @@ def _split_by_anchors(text: str, order: list[str],
         if not want:
             empty.append(title)
             continue
-        head = want[:80]
         for i in range(pos, len(lines)):
-            if plain[i] and (plain[i] == want or plain[i].startswith(head)):
+            p = plain[i]
+            if not p:
+                continue
+            if p == want or (len(want) >= _ANCHOR_PREFIX_MIN
+                             and p.startswith(want[:80])):
                 starts.append((i, title))
                 pos = i + 1
                 break
@@ -1929,22 +1943,24 @@ def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
 
 def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     """True when every edit the Doc made since the base is already in
-    the local file: each line the Doc added is in the file, and each
-    line the Doc removed is gone from it. Blank lines are not counted.
-    A push of such a file loses nothing of the Doc's."""
-    import difflib
+    the local file: each non-blank line the Doc added appears at least
+    as often locally as in the Doc, and each non-blank line the Doc
+    removed does not still appear more often locally than in the Doc.
+    Blank lines are not counted. Counts matter — a repeated line the
+    Doc added (or deleted) once is not "held" just because another copy
+    remains elsewhere (2026-10-27). A push of such a file loses nothing
+    of the Doc's."""
+    from collections import Counter
 
-    base_l, doc_l, local_l = (t.splitlines() for t in (base, doc, local))
-    local_set, doc_set = set(local_l), set(doc_l)
-    ops = difflib.SequenceMatcher(None, base_l, doc_l, autojunk=False)
-    for tag, i1, i2, j1, j2 in ops.get_opcodes():
-        if tag == "equal":
-            continue
-        if any(line.strip() and line not in local_set
-               for line in doc_l[j1:j2]):
+    def counts(text: str) -> Counter:
+        return Counter(line for line in text.splitlines() if line.strip())
+
+    base_c, doc_c, local_c = counts(base), counts(doc), counts(local)
+    for line in set(base_c) | set(doc_c):
+        b, d, loc = base_c[line], doc_c[line], local_c[line]
+        if d > b and loc < d:
             return False
-        if any(line.strip() and line not in doc_set and line in local_set
-               for line in base_l[i1:i2]):
+        if d < b and loc > d:
             return False
     return True
 
