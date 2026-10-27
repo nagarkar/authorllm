@@ -1576,6 +1576,20 @@ def check_audiobook_page() -> None:
         meta.setdefault("gdocs", {})["_master_id"] = "m1"
         meta["gdocs"]["kindness.md"] = {"tab_id": "t1", "pushed_hash": "abc"}
         gdocs._save_mapping(s.db, s.manuscript, meta)
+        # Two writers overlap (2026-10-26): a push of one tab loads the
+        # metadata, another tab's push lands, then the first saves. The
+        # second tab's pushed_hash must survive the first's save.
+        slow = gdocs._mapping(s.db, s.manuscript)
+        quick = gdocs._mapping(s.db, s.manuscript)
+        quick["gdocs"]["other.md"] = {"tab_id": "t2", "pushed_hash": "new"}
+        gdocs._save_mapping(s.db, s.manuscript, quick)
+        slow["gdocs"]["kindness.md"]["pushed_at"] = "now"
+        gdocs._save_mapping(s.db, s.manuscript, slow)
+        after = gdocs._mapping(s.db, s.manuscript)["gdocs"]
+        check("a slow save keeps what another writer saved meanwhile",
+              after.get("other.md", {}).get("pushed_hash") == "new"
+              and after["kindness.md"].get("pushed_at") == "now"
+              and after["kindness.md"].get("pushed_hash") == "abc", str(after))
         real_three = gdocs.doc_three_way
         verdicts = {}
         try:

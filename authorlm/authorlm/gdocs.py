@@ -20,6 +20,7 @@ AUTHORLM_GDOCS_TOKEN when that file is absent (cloud sessions).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -1468,15 +1469,57 @@ def split_tabbed_export(text: str, known_files,
 
 # ---------------------------------------------------------------- mapping
 
-def _mapping(db: Database, manuscript: dict) -> dict:
+class _Loaded(dict):
+    """The metadata as `_mapping` read it, with a copy of what was read
+    (`seen`), so `_save_mapping` can write back only what this caller
+    changed."""
+    seen: dict
+
+
+def _read_metadata(db: Database, manuscript: dict) -> dict:
     return loads(
         db.one("SELECT metadata FROM manuscripts WHERE id = ?",
                (manuscript["id"],))["metadata"], {}
     )
 
 
+def _mapping(db: Database, manuscript: dict) -> dict:
+    meta = _Loaded(_read_metadata(db, manuscript))
+    meta.seen = copy.deepcopy(dict(meta))
+    return meta
+
+
+def _merge_changes(seen: dict, mine: dict, now: dict) -> dict:
+    """`now` with every key `mine` changed since `seen` applied, key by
+    key down through nested dicts; keys this caller never touched keep
+    their current value."""
+    out = dict(now)
+    for key in set(seen) | set(mine):
+        if key not in mine:
+            out.pop(key, None)
+        elif key not in seen or seen[key] != mine[key]:
+            old, new, cur = seen.get(key), mine[key], now.get(key)
+            if isinstance(old, dict) and isinstance(new, dict) and isinstance(cur, dict):
+                out[key] = _merge_changes(old, new, cur)
+            else:
+                out[key] = new
+    return out
+
+
 def _save_mapping(db: Database, manuscript: dict, meta: dict) -> None:
-    db.update("manuscripts", manuscript["id"], {"metadata": json.dumps(meta)})
+    """Write the caller's changes onto the CURRENT metadata, never its
+    whole stale copy (2026-10-26: a push of bind-again.md loaded the
+    metadata, rewrote its tab for several seconds, then saved, and the
+    read-again.md push that landed meanwhile lost its pushed_hash; the
+    next push was then declined as "doc has changed"). A dict that did
+    not come from `_mapping` is written whole, as before."""
+    if isinstance(meta, _Loaded):
+        merged = _merge_changes(meta.seen, dict(meta),
+                                _read_metadata(db, manuscript))
+        meta.seen = copy.deepcopy(dict(meta))
+    else:
+        merged = meta
+    db.update("manuscripts", manuscript["id"], {"metadata": json.dumps(merged)})
 
 
 def mapped_files(links: dict, root: Path | None = None) -> list[str]:
