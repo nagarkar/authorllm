@@ -1298,7 +1298,8 @@ def mentions(db: Database, manuscript: dict, term: str | None = None,
 PARAGRAPH_PROMPT_PATH = Path(__file__).parent / "prompts" / "paragraph-records.md"
 # The flash tier (ruling 5). config.toml names it under `[summaries]`;
 # without that key the pass falls through to `[critique]
-# summarizer_model` (Luna, the ruling's fallback), and only then to this.
+# summarizer_model`, and only then to this. The call sends
+# `paragraph_schema()`, so flash replies in that shape.
 DEFAULT_PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
 # Extraction's cap (§3.5): a longer section splits at paragraph
 # boundaries into several calls.
@@ -1334,6 +1335,44 @@ def paragraph_prompt() -> str:
     return (PARAGRAPH_PROMPT_PATH.read_text(encoding="utf-8")
             .replace("<<MOVES>>", ", ".join(MOVES))
             .replace("<<RELATIONS>>", ", ".join(sorted(VALID_RELATIONS))))
+
+
+def _list(item: dict) -> dict:
+    return {"type": "array", "items": item}
+
+
+def _obj(**props) -> dict:
+    return {"type": "object", "properties": props,
+            "required": list(props), "additionalProperties": False}
+
+
+_STR = {"type": "string"}
+_STR_OR_NULL = {"type": ["string", "null"]}
+
+
+def paragraph_schema() -> tuple[str, dict]:
+    """The reply's shape as a JSON schema (§3.2), sent with the call so a
+    model that honours `json_schema` (the flash tier does) is held to it.
+    The root is an object holding `records`, since strict schemas want an
+    object root; `_reply_records` unwraps it. Enum checks stay in
+    `store_paragraph_record` too: a model without schema support still
+    gets only the prose."""
+    from .extraction import VALID_RELATIONS
+
+    record = _obj(
+        n={"type": "integer"}, gist=_STR, claim=_STR_OR_NULL,
+        move={"type": "string", "enum": list(MOVES)},
+        mentions=_list(_obj(term=_STR, span=_STR, role={
+            "type": "string", "enum": list(MENTION_ROLES)})),
+        definitions=_list(_obj(term=_STR, sentence=_STR)),
+        relations=_list(_obj(**{"from": _STR, "relation": {
+            "type": "string", "enum": sorted(VALID_RELATIONS)},
+            "to": _STR, "span": _STR})),
+        references=_list(_obj(term=_STR, direction={
+            "type": "string", "enum": list(REFERENCE_DIRECTIONS)},
+            target=_STR_OR_NULL, span=_STR)),
+        depends_on=_list({"type": "integer"}))
+    return "paragraph_records", _obj(records=_list(record))
 
 
 def paragraph_llm(config: dict) -> LLMClient:
@@ -1453,7 +1492,7 @@ def _build_file(db: Database, manuscript: dict, file: str, text: str,
                 paragraph_prompt(),
                 _records_user(file, sec["heading"], chunk,
                               [p["ordinal"] for p in wanted]),
-                thinking_budget=0)
+                thinking_budget=0, schema=paragraph_schema())
             report["calls"] += 1
             got = _reply_records(reply)
             for p in chunk:

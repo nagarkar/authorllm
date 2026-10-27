@@ -56,8 +56,9 @@ class FakeLLM:
         self.skip = set(skip)
         self.system = None
 
-    def complete_json(self, system, user, thinking_budget=None):
+    def complete_json(self, system, user, thinking_budget=None, schema=None):
         self.system = system
+        self.schema = schema
         self.calls.append(user)
         wanted = [int(n) for n in re.search(
             r"RECORD THESE: ([\d, ]+)", user).group(1).split(", ")]
@@ -134,6 +135,9 @@ def main_test() -> None:
         # refrain recorded once, 3 headings with no call.
         check("one call per section with a body; headings get no call",
               report["calls"] == 3 and len(fake.calls) == 3, str(report))
+        check("the call sends the record schema, enums included",
+              fake.schema and fake.schema[0] == "paragraph_records"
+              and "states" in str(fake.schema[1]), str(fake.schema)[:200])
         check("every distinct non-heading paragraph got a record, the "
               "refrain once", report["records"] == 7, str(report))
         check("three heading rows stored without a call",
