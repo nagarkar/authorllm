@@ -52,8 +52,8 @@ class RecordingParagraphLLM(FakeParagraphLLM):
     Field and one making a backward and a forward reference, so the
     derived lists have something to derive (§6.6)."""
 
-    def complete_json(self, system, user, thinking_budget=None):
-        out = super().complete_json(system, user, thinking_budget)
+    def complete_json(self, system, user, thinking_budget=None, schema=None):
+        out = super().complete_json(system, user, thinking_budget, schema)
         for rec in out:
             text = re.search(rf"^\[{rec['n']}\] (.*?)(?=\n\n\[\d+\] |\Z)",
                              user.split("THE SECTION:\n\n", 1)[1],
