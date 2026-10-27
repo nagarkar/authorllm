@@ -1875,7 +1875,35 @@ def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
                                    relpath)
         if not conflicts and merged == view["local"]:
             return
+        # A conflict settled by hand, with a local edit right beside one
+        # of the Doc's (2026-10-26, bind-again.md: the Doc's paragraph
+        # taken, the clip line under it changed): git's merge calls the
+        # adjacent hunks a conflict though nothing of the Doc's is lost.
+        if _holds_doc_edits(view["local"], view["base"], view["doc"]):
+            return
     raise DocChanged(f"{relpath}: {DOC_CHANGED}")
+
+
+def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
+    """True when every edit the Doc made since the base is already in
+    the local file: each line the Doc added is in the file, and each
+    line the Doc removed is gone from it. Blank lines are not counted.
+    A push of such a file loses nothing of the Doc's."""
+    import difflib
+
+    base_l, doc_l, local_l = (t.splitlines() for t in (base, doc, local))
+    local_set, doc_set = set(local_l), set(doc_l)
+    ops = difflib.SequenceMatcher(None, base_l, doc_l, autojunk=False)
+    for tag, i1, i2, j1, j2 in ops.get_opcodes():
+        if tag == "equal":
+            continue
+        if any(line.strip() and line not in local_set
+               for line in doc_l[j1:j2]):
+            return False
+        if any(line.strip() and line not in doc_set and line in local_set
+               for line in base_l[i1:i2]):
+            return False
+    return True
 
 
 def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
