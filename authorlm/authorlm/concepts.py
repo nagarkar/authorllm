@@ -240,13 +240,28 @@ def link_concepts(
     return row
 
 
+# ASCII, curly, and modifier letter apostrophes: Docs round-trips and LLM
+# extraction disagree on the mark. A name stored with one form must still
+# match text that uses another (2026-10-28: extract migrate's absent gate
+# retired confirmed concepts whose only "absence" was ' vs ’).
+_APOSTROPHE = "['\u2018\u2019\u02bc]"
+
+
+def _escape_name(name: str) -> str:
+    """`re.escape`, but any apostrophe in the name matches any apostrophe."""
+    folded = (name.replace("\u2018", "'").replace("\u2019", "'")
+              .replace("\u02bc", "'"))
+    return _APOSTROPHE.join(re.escape(part) for part in folded.split("'"))
+
+
 def concept_pattern(name: str) -> re.Pattern:
     """Word-boundary match tolerant of simple English plurals
-    (trajectory/trajectories, field/fields, class/classes)."""
+    (trajectory/trajectories, field/fields, class/classes) and of ASCII
+    vs curly apostrophes."""
     if name and name[-1].lower() == "y":
-        stem = re.escape(name[:-1])
+        stem = _escape_name(name[:-1])
         return re.compile(rf"\b{stem}(?:y|ies)\b", re.IGNORECASE)
-    return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b", re.IGNORECASE)
+    return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b", re.IGNORECASE)
 
 
 def mention_pattern(name: str) -> re.Pattern:
@@ -260,9 +275,9 @@ def mention_pattern(name: str) -> re.Pattern:
     casing of 'the herdsman' is genuinely the concept."""
     if " " not in name.strip() and name[:1].isupper():
         if name[-1].lower() == "y":
-            stem = re.escape(name[:-1])
+            stem = _escape_name(name[:-1])
             return re.compile(rf"\b{stem}(?:y|ies)\b")
-        return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b")
+        return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b")
     return concept_pattern(name)
 
 

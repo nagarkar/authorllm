@@ -416,6 +416,43 @@ def check_cli(root: Path) -> None:
           code == 0 and "migrate" in out and "migrate-undo" in out, out)
 
 
+def check_absent_apostrophe(root: Path) -> None:
+    """2026-10-28: a confirmed extracted name stored with ASCII `'` must
+    still match Doc-side curly `’` in the manuscript — else migrate
+    retires it (and its edges) as 'absent' while the phrase is on the
+    page."""
+    from authorlm.concepts import concept_pattern
+
+    print("absent gate vs curly apostrophe:")
+    ascii_name = "God's good graces"
+    curly_text = "a Question about God’s good graces in the essay"
+    check("concept_pattern matches curly apostrophe against an ASCII name",
+          bool(concept_pattern(ascii_name).search(curly_text)),
+          concept_pattern(ascii_name).pattern)
+    check("…and ASCII text against a curly name",
+          bool(concept_pattern("God’s good graces").search(
+              "about God's good graces here")),
+          concept_pattern("God’s good graces").pattern)
+
+    db, ms = fx.build(root / "apos", workspace=False)
+    fx.add_node(db, ms, ascii_name, confirmed=True,
+                introduced_in="hierarchy.md")
+    # Truly gone paraphrase: still retired.
+    fx.add_node(db, ms, "Written word as iron bond", confirmed=True,
+                introduced_in="hierarchy.md")
+    source = Path(ms["path"])
+    text = (source / "hierarchy.md").read_text(encoding="utf-8")
+    text += f"\n\n{curly_text}\n"
+    (source / "hierarchy.md").write_text(text, encoding="utf-8")
+    collect_revision(db, ms, session_id=None, source="test")
+    p = mig.plan(db, ms, extraction.knobs({}))
+    absent = sorted(n["name"] for n in p.absent)
+    check("the still-present ASCII name is not planned absent",
+          ascii_name not in absent, str(absent))
+    check("a name truly missing from the text is still planned absent",
+          "Written word as iron bond" in absent, str(absent))
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-extract-mig-"))
     try:
@@ -423,6 +460,7 @@ def main_test() -> None:
         check_plan_and_apply(root)
         check_adjudicated(root)
         check_cli(root)
+        check_absent_apostrophe(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")
