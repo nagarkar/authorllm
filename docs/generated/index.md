@@ -596,6 +596,12 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_depends_on`
+
+`authorlm/tests/test_depends_on.py`
+
+`summaries._depends_on` turns model-named ordinals into earlier para hashes.
+
 ## `tests.test_doc_add_toc`
 
 `authorlm/tests/test_doc_add_toc.py`
@@ -692,6 +698,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
 
+## `tests.test_hold_commented`
+
+`authorlm/tests/test_hold_commented.py`
+
+`gdocs._hold_commented` is the surgical-push door for open margin comments.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
@@ -764,6 +776,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_pronunciation_param_diff`
+
+`authorlm/tests/test_pronunciation_param_diff.py`
+
+`generation.pronunciation_diff` / `param_diff` flag a stale take for re-render.
+
 ## `tests.test_section_summaries`
 
 `authorlm/tests/test_section_summaries.py`
@@ -805,6 +823,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_unchanged_since_push`
+
+`authorlm/tests/test_unchanged_since_push.py`
+
+`gdocs.unchanged_since_push` is the audiobook page's Push skip door.
 
 ## `tools.bootstrap_beliefs`
 
