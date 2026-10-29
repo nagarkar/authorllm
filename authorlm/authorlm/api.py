@@ -883,7 +883,7 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None, episode=None) -> dict:
+            episode=None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -1100,43 +1100,11 @@ def collect(db: Database, manuscript: dict, config: dict,
     except Exception:  # observation must never die on a structural read
         pass
 
-    # The author never has to remember the analyzers: a collected change
-    # runs incremental extraction (concepts, links, aliasing statements)
-    # when an LLM is configured. Best-effort — analysis failure must never
-    # block observation.
-    if analyze is None:
-        analyze = auto
-    if analyze:
-        from .extraction import (extraction_enabled,
-                                 manuscript_extraction_enabled)
-
-        llm = LLMClient(config)
-        if not extraction_enabled(config):
-            report["extraction"] = "off"
-        elif not manuscript_extraction_enabled(db, manuscript):
-            # The manuscript's own switch: same report, same silence —
-            # the scans above still ran, and find nothing to do on a
-            # manuscript that has no concepts.
-            report["extraction"] = "off"
-        elif llm.enabled:
-            try:
-                summary = run_extraction(db, manuscript, llm) or {}
-            except Exception as err:
-                summary = {}
-                from . import tracelog
-
-                tracelog.record(
-                    "extraction", surface="api",
-                    workspace=str(db.path.parent.parent),
-                    manuscript=manuscript.get("name"),
-                    ok=False, error=f"{type(err).__name__}: {err}")
-            if summary and not summary.get("up_to_date"):
-                report["auto_analysis"] = {
-                    "new_concepts": len(summary.get("nodes", [])),
-                    "new_edges": len(summary.get("edges", [])),
-                    "proposed": summary.get("proposed", 0),
-                }
-
+    # No LLM runs at collect. Concept extraction is LAZY (ruling
+    # 2026-10-25, docs/extraction-redesign.md §0.9): the graph is mined
+    # when someone asks for a fresh one — `authorlm extract --native` or
+    # the MCP tool — never as a side effect of observing an edit. The
+    # extract hint above is all a collect says about it.
     # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
     # — are REPORTED here, beside the illustration slots, and never
     # drafted (footnote design §2): no LLM runs at collect and nothing is
@@ -1333,12 +1301,26 @@ DISPOSITIONS = ("kept", "removed")
 
 
 def _resolve_relpath(manuscript: dict, query: str) -> str:
+    """Map a file argument to the manuscript-relative path used as the
+    Doc-mapping key and the on-disk name. Absolute paths that sit under
+    the manuscript root (and relative paths that resolve there) are
+    accepted; anything outside is refused. Bare names still go through
+    `docs._match`'s exact-then-unique-substring forgiveness."""
     from .docs import _match
     from .revisions import iter_manuscript_paths
 
-    candidates = iter_manuscript_paths(Path(manuscript["path"]))
+    root = Path(manuscript["path"])
+    candidates = iter_manuscript_paths(root)
+    probe = Path(query).expanduser()
+    try:
+        resolved = (probe if probe.is_absolute() else root / probe).resolve()
+        rel = str(resolved.relative_to(root.resolve()))
+    except (ValueError, OSError):
+        rel = None
+    if rel is not None and rel in candidates:
+        return rel
     path = _match(candidates, query)
-    return str(path.relative_to(Path(manuscript["path"])))
+    return str(path.relative_to(root))
 
 
 def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
@@ -3026,6 +3008,22 @@ def write_draft(db: Database, manuscript: dict, config: dict,
             "guidance_id": proposal["guidance_id"], "usage": usage}
 
 
+def _beat_already_on_disk(existing: str, accepted: str) -> bool:
+    """True when `accepted` is already the essay's final section.
+
+    `write_accept` writes the beat to disk before it records the review
+    and advances the cursor. A crash (or exception) between those leaves
+    the proposal still `proposed` while the file already holds the beat;
+    a bare retry must finish the DB half without appending again."""
+    body = existing.rstrip("\n")
+    beat = accepted.rstrip("\n")
+    if not beat:
+        return False
+    if body == beat:
+        return True
+    return body.endswith("\n\n" + beat)
+
+
 def write_accept(db: Database, manuscript: dict, config: dict,
                  text: str | None = None, reason: str | None = None,
                  prefix: str | None = None,
@@ -3034,7 +3032,11 @@ def write_accept(db: Database, manuscript: dict, config: dict,
     revision is collected (transitions attach to the episode), the verdict
     is recorded through the review pathway, and the cursor advances. With
     reworded text on stdin the decision is 'modified' and the draft→final
-    diff is recoverable (draft in the guidance row, final in the version)."""
+    diff is recoverable (draft in the guidance row, final in the version).
+
+    Idempotent on resume: if a prior attempt already landed the beat on
+    disk but died before the proposal/cursor commit, a retry finishes the
+    commit without duplicating the text."""
     writeup = _writeup(db, manuscript, prefix)
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
@@ -3055,8 +3057,9 @@ def write_accept(db: Database, manuscript: dict, config: dict,
         # to the essay and would ship — the "never in a finished essay"
         # leak. (write_complete is the second, independent check.)
         existing = ""
-    prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
-    path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
+    if not _beat_already_on_disk(existing, accepted):
+        prefix_text = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
+        path.write_text(prefix_text + accepted + "\n", encoding="utf-8")
 
     session, _ = ensure_session(db, manuscript)
     # ONE episode for the whole verb, resolved BEFORE the collect: the
@@ -3273,24 +3276,8 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     report = collect(db, manuscript, config, source="write-complete",
                      episode=_writeup_episode(db, manuscript, writeup,
                                               session))
-    extraction = None
-    llm = LLMClient(config)
-    from .extraction import extraction_allowed
-
-    if not extraction_allowed(db, manuscript, config):
-        extraction = {"off": True}
-    elif llm.enabled:
-        try:
-            extraction = run_extraction(db, manuscript, llm)
-        except Exception as err:
-            extraction = None
-            from . import tracelog
-
-            tracelog.record(
-                "extraction", surface="api",
-                workspace=str(db.path.parent.parent),
-                manuscript=manuscript.get("name"),
-                ok=False, error=f"{type(err).__name__}: {err}")
+    # No extraction here either: the concept graph is mined on request
+    # (ruling §0.9), and the report's summary_hint says what to rebuild.
     plan = loads(writeup["plan"], [])
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
@@ -3305,7 +3292,7 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "toc_stanza": toc_stanza, "toc_placement": placement,
             "marker_present": marker_survives,
             "summary_hint": writeup["file"],
-            "collect": report, "extraction": extraction}
+            "collect": report}
 
 
 def write_abandon(db: Database, manuscript: dict, config: dict,
@@ -4128,8 +4115,6 @@ def compact_collect(report: dict) -> dict:
                    "after": len(report["gaps_after"])}
     out["gaps_resolved"] = [_compact_gap(g) for g in report["gaps_resolved"]]
     out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
-    if "auto_analysis" in report:
-        out["auto_analysis"] = report["auto_analysis"]
     if "illustrations" in report:
         out["illustrations"] = report["illustrations"]
     if "directives" in report:
@@ -4367,14 +4352,93 @@ def compact_show_concept(result: dict) -> dict:
     return {"node": keep, "edges": [_compact_edge(e) for e in result["edges"]]}
 
 
+def extraction_scope(db: Database, manuscript: dict, knob: dict,
+                     files: list[str] | None = None, full: bool = False
+                     ) -> list[tuple[str, list]]:
+    """The essays a non-interactive run assembles, [(file, payloads)] in
+    reading order: the named files whole, the whole book with `full`,
+    else the sections changed since the extraction watermark (everything
+    when there is none). Mirrors `cli._extract_scope` without its exits:
+    an unknown file is a LookupError for the caller to report."""
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    on_disk = read_manuscript_files(Path(manuscript["path"]))
+    if files:
+        # A named file held by an active writeup (its text on disk is the
+        # placeholder) has nothing to mine: dropped, never sent.
+        scope = [(rel, None) for rel in (_resolve(on_disk, f) for f in files)
+                 if not ex.is_in_flight(on_disk.get(rel, ""))]
+    elif full:
+        scope = [(name, None) for name in ex.eligible_files(on_disk)]
+    else:
+        changed = ex.changed_units(db, manuscript, on_disk,
+                                   int(knob["max_section_chars"]))
+        scope = ([(name, None) for name in ex.eligible_files(on_disk)]
+                 if changed is None else list(changed.items()))
+    out = []
+    for name, units in scope:
+        payloads = ex.assemble_essay(db, manuscript, name, units=units,
+                                     knob=knob)
+        if payloads:
+            out.append((name, payloads))
+    return out
+
+
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
-                   edges_only: bool = False,
-                   aliases_only: bool = False) -> dict | None:
-    from .extraction import extract_concepts
+                   adjudicator: str | None = None) -> dict | None:
+    """The non-interactive front on `extraction.run` (the redesigned
+    pipeline, docs/extraction-redesign.md) — the MCP tool's road, and the
+    one a script takes. Extraction is lazy (ruling §0.9): nothing calls
+    this as a side effect; the author, or the chat on their word, asks for
+    a fresh graph. Incremental by default: the sections changed since the
+    watermark; `files` or `full` widen it.
 
-    return extract_concepts(db, manuscript, llm, files=files, full=full,
-                            edges_only=edges_only, aliases_only=aliases_only)
+    The adjudicator is chosen before the first call (ruling §0.2, never
+    spend unasked): `adjudicator` answers it outright, `[extraction]
+    adjudicator_prompt = "default"` takes `adjudicator_model`, and with
+    neither there is no one to ask here, so the run stops before any call
+    and returns {"stopped": …} pointing at `authorlm extract --native`.
+    {"up_to_date": True} when nothing changed. Raises ExtractionDisabled
+    when either switch is off. The report is `extraction.run`'s, made
+    JSON-safe (the per-essay screenings dropped) and printable by
+    `extraction.render_run`."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+
+    config = getattr(llm, "config", None) or {}
+    if not ex.extraction_enabled(config):
+        raise ex.ExtractionDisabled(ex.DISABLED_MESSAGE)
+    if not ex.manuscript_extraction_enabled(db, manuscript):
+        raise ex.ExtractionDisabled(ex.MANUSCRIPT_DISABLED_MESSAGE)
+    knob = ex.knobs(config, db, manuscript)
+    essays = extraction_scope(db, manuscript, knob, files=files, full=full)
+    if not essays:
+        return {"up_to_date": True}
+    est = adj.estimate_scope(essays, knob["proposable_relations"])
+    try:
+        model = adj.choose(config, knob, est, answer=adjudicator, ask=None)
+    except LookupError as err:
+        return {"stopped": f"{err}. Nothing was spent: run `authorlm extract "
+                           "--native` to be asked, or set [extraction] "
+                           "adjudicator_prompt = \"default\".",
+                "essays": [name for name, _ in essays],
+                "sections": est["sections"]}
+    # The caller's client makes the section calls (so its usage line is
+    # the run's), under `[extraction] model` when one is set.
+    if knob.get("model"):
+        llm.model = knob["model"]
+    llm.purpose = "extraction"
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm,
+                    judge_llm=judge, knob=knob,
+                    run_id=ex.new_run_id("extract"),
+                    advance_watermark=not files)
+    report["essays"] = [{k: v for k, v in r.items() if k != "screening"}
+                        for r in report["essays"]]
+    return report
 
 
 # ----------------------------------------------- self-improvement tasks
@@ -5499,9 +5563,8 @@ def filter_push(db: Database, manuscript: dict, config: dict, file: str,
     #     gate STAYS on this verb: staging read `old` from local, so
     #     pushing forms onto a tab whose text the author has since edited
     #     in the Doc is the drift case, and the gate names the remedy.
-    #     (`critique write` has no such gate and opens with a `push_doc`
-    #     that would overwrite a Doc-side edit — a live hazard in that
-    #     pass, RISK-4. This design does not inherit it.)
+    #     (`critique write` carries the same gate for the same reason —
+    #     its levelling push would otherwise wipe Doc-side prose.)
     _rel, _text, _capture, _dict = _filter_capture(db, manuscript, rel,
                                                    "filter push")
     # 4b. Something to push. UNTRIAGED PROPOSALS GO TOO — see the
@@ -5839,11 +5902,11 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     falsified = _falsified_prefix(db, mid, run)
 
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     # The learnings duty, on BOTH transports — the half of the loop that
@@ -6231,11 +6294,11 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values(),
                                           kind=_morph.MORPH_KIND)
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
@@ -6492,11 +6555,11 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values())
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
