@@ -54,7 +54,7 @@ function Pandoc(doc)
   local custom = meta_text(doc.meta, "authorlm-review-notice")
   local lead = {
     pandoc.Header(1, inlines(
-      "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT"),
+      "CONFIDENTIAL REVIEW DRAFT"),
       pandoc.Attr("", {"unnumbered"})),
   }
   if custom ~= "" then

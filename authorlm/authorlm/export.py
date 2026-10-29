@@ -44,7 +44,10 @@ def footnote_prefixes(names: list[str]) -> dict[str, str]:
     the shortest unique prefix of each file's stem — the first letter,
     extended to k+1 letters wherever two files collide on their first k
     (the author's scheme, it-9e6b7613a5c5). An exhausted stem uses its
-    whole self; file names are unique, so the map is collision-free."""
+    whole self. Nested paths may share a stem (`intro.md` and
+    `part2/intro.md`); when prefixing still leaves duplicate tokens,
+    later names get a numeric suffix so pandoc cannot bind two files'
+    footnotes to one definition."""
     stems = {name: Path(name).stem for name in names}
     tokens: dict[str, str] = {}
     for name, stem in stems.items():
@@ -53,6 +56,20 @@ def footnote_prefixes(names: list[str]) -> dict[str, str]:
         while k < len(stem) and any(o[:k] == stem[:k] for o in others):
             k += 1
         tokens[name] = stem[:k]
+    # Stem prefixes alone are not injective when two paths share a stem:
+    # both exhaust to the full stem and would emit the same [^token-…]
+    # labels. Disambiguate in caller order so the map stays unique.
+    used: set[str] = set()
+    for name in names:
+        tok = tokens[name]
+        if tok not in used:
+            used.add(tok)
+            continue
+        n = 2
+        while f"{tok}-{n}" in used:
+            n += 1
+        tokens[name] = f"{tok}-{n}"
+        used.add(tokens[name])
     return tokens
 
 
@@ -88,6 +105,63 @@ VOICE_LINE = re.compile(r"^\[Voice:\s*(?P<body>[^\]]*)\]\s*$", re.IGNORECASE)
 def strip_voice_lines(text: str) -> str:
     return "\n".join(line for line in text.split("\n")
                      if not VOICE_LINE.match(line))
+
+
+# The full-line signature tag: `[Signature: _assets/signature.png]`.
+# Plain text on every road like [Voice:] and [Illustration:] — it stays
+# in the file and on the Doc tabs — and expanded for the reader outputs
+# alone (resolve_signatures): the image, the author's name, the export
+# date. The audio-clean build drops it; nothing is read aloud.
+SIGNATURE_LINE = re.compile(
+    r"^\[Signature:\s*(?P<uri>[^\]]*)\]\s*$", re.IGNORECASE)
+SIGNATURE_WIDTH = "40%"
+
+
+def signature_path(uri: str, root: Path) -> Path:
+    """The image a signature uri names: absolute, `~/`, or relative to
+    the manuscript root. Empty or missing is a fault — a signature that
+    silently vanished would read as an unsigned copy."""
+    uri = uri.strip()
+    if not uri:
+        raise RuntimeError("[Signature:] names no image — give it a path "
+                           "(absolute, ~/, or relative to the manuscript)")
+    path = Path(uri).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    if not path.is_file():
+        raise RuntimeError(f"[Signature: {uri}] — no such image at {path}")
+    return path
+
+
+def resolve_signatures(text: str, root: Path, author: str,
+                       outputs: frozenset[str] | set[str],
+                       when: date | None = None) -> str:
+    """Expand every `[Signature: uri]` line for one build: the image at
+    about two inches (SIGNATURE_WIDTH of the text width, left-aligned,
+    empty alt so pandoc makes no figure and no caption), then the
+    author's name, then the export date (`25 October 2026`). An audio
+    build drops the line. The image is checked here, never later: a
+    missing file raises naming the uri."""
+    out: list[str] = []
+    stamp = (when or date.today()).strftime("%-d %B %Y")
+    for line in text.split("\n"):
+        m = SIGNATURE_LINE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        if "audio" in outputs:
+            continue
+        path = signature_path(m.group("uri"), root)
+        if not author:
+            raise RuntimeError(
+                "[Signature:] needs the author's name — set it with "
+                "'authorlm manuscript set --author'")
+        uri = m.group("uri").strip()
+        src = uri if (not Path(uri).is_absolute()
+                      and not uri.startswith("~")) else str(path)
+        out.extend(["", f"![]({src}){{width={SIGNATURE_WIDTH}}}", "",
+                    author, "", stamp, ""])
+    return "\n".join(out)
 
 
 def publish_outputs(fmt: str, variant: str) -> frozenset[str]:
@@ -469,6 +543,8 @@ def publish_markdown(manuscript: dict, variant: str,
     matter = matter_map(files)
     level = continuation_level(manuscript)
     outputs = publish_outputs(fmt, variant)
+    author = (manuscript.get("author") or "").strip() or (
+        manuscript.get("copyright_owner") or "").strip()
     warnings: list[str] = []
     parts: list[str] = []
     tokens = footnote_prefixes(order)
@@ -486,6 +562,7 @@ def publish_markdown(manuscript: dict, variant: str,
         # §6): the tag lines go, every word of prose stays.
         text, _media_tags = strip_for_book(text, name)
         text = strip_voice_lines(text)
+        text = resolve_signatures(text, root, author, outputs)
         # An unresolved [Footnote: …] or [Explain: …] tag never reaches
         # a reader: a shorthand instruction inside a sentence reads as
         # damage, and a reviewer cannot act on it (footnote-directive
@@ -902,3 +979,273 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     result["trim"] = f"{trim[0]:g}x{trim[1]:g}" + (" +bleed" if bleed else "")
     warnings.extend(kdp_checks(manuscript, pages))
     return result
+
+
+# ------------------------------------------------ teleprompter
+
+TELEPROMPTER_SUFFIX = ".teleprompter"
+TELEPROMPTER_PT = 32        # body type; teleprompter apps reflow, print does not
+TELEPROMPTER_LABEL_PT = 20
+TELEPROMPTER_LINE = 360     # 240ths of a line: 1.5 spacing
+
+
+def _file_arg(file: str) -> str:
+    file = file.strip().lstrip("./")
+    return file if file.endswith(".md") else file + ".md"
+
+
+def teleprompter_passages(manuscript: dict, file: str,
+                          whole: bool = False) -> list[dict]:
+    """The passages the author reads on camera in one file, in order:
+    every clip marked `voice: author` (docs/video-clips-design.md §5),
+    its text the clip's note (`_clips/notes/<key>.md`, paragraphs kept)
+    or, unkeyed, its inline description. Labels are plain: `Intro` for a
+    passage with nothing spoken before it, `Outro` for one with nothing
+    spoken after, otherwise the Collage's title up to its first comma.
+    Other clip problems (a missing `use:` file) do not matter here: the
+    words are what the author needs."""
+    from . import media
+
+    root = Path(manuscript["path"])
+    file = _file_arg(file)
+    if not (root / file).is_file():
+        raise LookupError(f"{file} is not in the manuscript folder")
+    entries = media.list_media(root, [file])["media"]
+    titles = {e["line"]: e["title"] for e in entries
+              if e["kind"] == "collage"}
+    passages: list[dict] = []
+    for e in entries:
+        if e["kind"] != "clip" or e["fields"].get("voice") != "author":
+            continue
+        text = e["description"]
+        if e["spec_path"] and (root / e["spec_path"]).is_file():
+            text = (root / e["spec_path"]).read_text(encoding="utf-8")
+        paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", text)
+                      if p.strip()]
+        if not e.get("before_sentence"):
+            label = "Intro"
+        elif not e.get("after_sentence"):
+            label = "Outro"
+        else:
+            box = max((i for i in titles if i < e["line"]), default=None)
+            label = (titles[box].split(",")[0].strip() if box is not None
+                     else "") or f"Passage {len(passages) + 1}"
+        passages.append({"label": label, "paragraphs": paragraphs,
+                         "line": e["line"]})
+    if whole:
+        return _with_body(root / file, passages)
+    return passages
+
+
+_MEDIA_TAG = re.compile(r"^\[/?(Collage|Montage|Clip)\b", re.IGNORECASE)
+
+
+def _with_body(path: Path, passages: list[dict]) -> list[dict]:
+    """`--whole`: the file read on camera end to end — every word of prose
+    the md export keeps (an `[Omit: audio]` intro or outro included: the
+    author speaks it; tags and headings dropped, paragraphs kept) as
+    `Body` passages, any `voice: author` clip in its place."""
+    from . import media
+
+    by_line = {p["line"]: p for p in passages}
+    lines = path.read_text(encoding="utf-8").split("\n")
+    for i in range(len(lines)):
+        if i + 1 in by_line:
+            lines[i] = media._SENTINEL.format(i + 1)
+    resolved = resolve_regions("\n".join(lines), {"md"}, path.name)
+    out: list[dict] = []
+    body: list[str] = []
+    block: list[str] = []
+
+    def flush_block():
+        text = media._spoken("\n".join(block))
+        if text:
+            body.append(text)
+        block.clear()
+
+    def flush_body():
+        flush_block()
+        if body:
+            out.append({"label": "Body", "paragraphs": body[:], "line": 0})
+        body.clear()
+
+    for ln in resolved.split("\n"):
+        mark = media._SENTINEL_RE.fullmatch(ln.strip())
+        if mark:
+            flush_body()
+            out.append(by_line[int(mark.group(1))])
+        elif _MEDIA_TAG.match(ln.strip()):
+            flush_block()           # a Collage or Montage box, or its close
+        elif ln.strip():
+            block.append(ln)
+        else:
+            flush_block()
+    flush_body()
+    return out
+
+
+def _xml(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def write_teleprompter_docx(passages: list[dict], out_path: Path) -> None:
+    """A bare WordprocessingML package, written by hand so nothing can
+    slip in: large type, 1.5 line spacing, a plain bold label above each
+    passage and a page break between passages. No header, no footer, no
+    page numbers, no notice or watermark — none of those parts exist."""
+    import zipfile
+
+    size, label = TELEPROMPTER_PT * 2, TELEPROMPTER_LABEL_PT * 2
+
+    def para(text: str, style: str, page_break: bool = False) -> str:
+        # Formatting sits on every paragraph and run as well as in the
+        # styles: importers that skip style inheritance (QuickLook, some
+        # teleprompter apps) would otherwise show 12pt type.
+        pt = label if style == "Label" else size
+        ppr = (f'<w:pPr><w:pStyle w:val="{style}"/>'
+               + ("<w:keepNext/>" if style == "Label" else "")
+               + ("<w:pageBreakBefore/>" if page_break else "")
+               + f'<w:spacing w:after="360" w:line="{TELEPROMPTER_LINE}" '
+               'w:lineRule="auto"/></w:pPr>')
+        rpr = ('<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'
+               + ("<w:b/>" if style == "Label" else "")
+               + f'<w:sz w:val="{pt}"/><w:szCs w:val="{pt}"/></w:rPr>')
+        return (f"<w:p>{ppr}<w:r>{rpr}<w:t xml:space=\"preserve\">"
+                f"{_xml(text)}</w:t></w:r></w:p>")
+
+    body = []
+    for n, passage in enumerate(passages):
+        body.append(para(passage["label"], "Label", page_break=n > 0))
+        body.extend(para(p, "Normal") for p in passage["paragraphs"])
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    document = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:document {w}><w:body>{''.join(body)}"
+        '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" '
+        'w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>'
+        "</w:body></w:document>")
+    styles = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f"<w:styles {w}><w:docDefaults><w:rPrDefault><w:rPr>"
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'
+        f'<w:sz w:val="{size}"/><w:szCs w:val="{size}"/></w:rPr></w:rPrDefault>'
+        f'<w:pPrDefault><w:pPr><w:spacing w:after="360" '
+        f'w:line="{TELEPROMPTER_LINE}" w:lineRule="auto"/></w:pPr>'
+        "</w:pPrDefault></w:docDefaults>"
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        '<w:name w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Label"><w:name w:val="Label"/>'
+        '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+        '<w:pPr><w:keepNext/></w:pPr>'
+        f'<w:rPr><w:b/><w:sz w:val="{label}"/><w:szCs w:val="{label}"/></w:rPr>'
+        "</w:style></w:styles>")
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        "</Types>")
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        "</Relationships>")
+    doc_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        "</Relationships>")
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document)
+        z.writestr("word/_rels/document.xml.rels", doc_rels)
+        z.writestr("word/styles.xml", styles)
+
+
+def export_teleprompter(manuscript: dict, file: str,
+                        whole: bool = False) -> dict:
+    """`export teleprompter --file F`: the author's on-camera passages of
+    one file as `_exports/<stem>.teleprompter.docx` (what teleprompter
+    apps import) and the same words as `.teleprompter.txt`. Stops with
+    an error when the file marks no clip `voice: author`."""
+    passages = teleprompter_passages(manuscript, file, whole=whole)
+    stem = Path(_file_arg(file)).stem
+    if not passages:
+        raise LookupError(
+            f"{stem}.md has no clip marked 'voice: author' — add "
+            "'| voice: author' to the [Clip:] of each recorded intro or "
+            "outro (a clip in a Collage)")
+    export_dir = Path(manuscript["path"]) / EXPORT_DIR
+    export_dir.mkdir(exist_ok=True)
+    docx_path = export_dir / f"{stem}{TELEPROMPTER_SUFFIX}.docx"
+    write_teleprompter_docx(passages, docx_path)
+    txt_path = docx_path.with_suffix(".txt")
+    txt_path.write_text("\n\n\n".join(
+        "\n\n".join([p["label"], *p["paragraphs"]]) for p in passages) + "\n",
+        encoding="utf-8")
+    return {"docx": str(docx_path), "txt": str(txt_path),
+            "passages": [p["label"] for p in passages], "warnings": []}
+
+
+# ------------------------------------------------ upload to Drive
+
+UPLOADS_KEY = "_uploads"    # metadata.gdocs key: output name → Drive file
+UPLOAD_MIME = {".pdf": "application/pdf", ".epub": "application/epub+zip",
+               ".md": "text/markdown", ".docx": DOCX_MIME,
+               ".txt": "text/plain"}
+
+
+def upload_export(db: Database, manuscript: dict, path: Path, service,
+                  as_doc: bool = False, drive_id: str | None = None) -> dict:
+    """Put one export file on the author's Drive, in the manuscript's
+    folder, and remember its id per output (`metadata.gdocs._uploads`,
+    beside the export Doc's `_export`): the next upload of the same file
+    replaces it in place — same id, same link. A file deleted in Drive is
+    created anew. `as_doc` converts a DOCX to a Google Doc (a separate
+    Drive file from the plain .docx); `drive_id` adopts a file already on
+    Drive (one uploaded by hand) as this output's target."""
+    from googleapiclient.http import MediaFileUpload
+
+    path = Path(path)
+    if as_doc and path.suffix != ".docx":
+        raise ValueError("--as-doc converts a DOCX to a Google Doc; this "
+                         f"export is {path.suffix.lstrip('.')}")
+    mime = UPLOAD_MIME.get(path.suffix, "application/octet-stream")
+    key = path.name + (" (Google Doc)" if as_doc else "")
+    meta = _mapping(db, manuscript)
+    uploads = meta.setdefault("gdocs", {}).setdefault(UPLOADS_KEY, {})
+    entry = uploads.setdefault(key, {})
+    if drive_id:
+        entry["file_id"] = drive_id
+    media = MediaFileUpload(str(path), mimetype=mime, resumable=False)
+    created, info = False, None
+    if entry.get("file_id"):
+        try:
+            info = service.files().update(
+                fileId=entry["file_id"], media_body=media,
+                fields="id,webViewLink").execute()
+        except Exception as err:
+            if not _doc_gone(err):
+                raise
+            entry["file_id"] = None  # deleted in Drive — create below
+    if not entry.get("file_id"):
+        body = {"name": path.stem if as_doc else path.name,
+                "parents": [_ensure_folder(manuscript, meta, service)]}
+        if as_doc:
+            body["mimeType"] = GDOC_MIME
+        info = service.files().create(body=body, media_body=media,
+                                      fields="id,webViewLink").execute()
+        entry["file_id"] = info["id"]
+        created = True
+    entry["as_doc"] = as_doc
+    _save_mapping(db, manuscript, meta)
+    fid = entry["file_id"]
+    url = (f"https://docs.google.com/document/d/{fid}/edit" if as_doc
+           else (info or {}).get("webViewLink")
+           or f"https://drive.google.com/file/d/{fid}/view")
+    return {"file_id": fid, "url": url, "created": created, "name": key}

@@ -154,9 +154,14 @@ def retire_concept(db: Database, manuscript_id: str, node: dict) -> int:
     """Retire a concept and every edge touching it. Nothing is deleted —
     retired knowledge stays historically accessible (Common Core §8.10).
     Returns the number of edges retired."""
+    from .db import now_iso
+
     meta = loads(node.get("metadata"), {}) or {}
+    # `at`: when — the text written after it is what a revival must recur
+    # in (docs/extraction-redesign.md §4.10).
     meta["retired_from"] = {"status": node.get("status"),
-                            "introduced_in": node.get("introduced_in")}
+                            "introduced_in": node.get("introduced_in"),
+                            "at": now_iso()}
     db.update("concept_nodes", node["id"],
               {"status": "retired", "metadata": json.dumps(meta)})
     edges = db.all(
@@ -182,6 +187,7 @@ def revive_concept(db: Database, manuscript_id: str, node: dict) -> dict:
     {status, introduced_in, edges_revived}."""
     meta = loads(node.get("metadata"), {}) or {}
     prior = meta.pop("retired_from", None) or {}
+    meta.pop("retired_for_good", None)  # the author's own revive reopens it
     status = prior.get("status") or "declared"
     introduced_in = prior.get("introduced_in") or node.get("introduced_in")
     if status == "retired":
