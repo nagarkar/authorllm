@@ -140,6 +140,12 @@ Session-start backups of the SQLite store (OPS-4).
 
 Learning Engine (RFC AuthorLM §17.8, Chapter 8).
 
+## `authorlm.branding`
+
+`authorlm/authorlm/branding.py`
+
+The AuthorLM brand files every served page links, and the routes that serve them.
+
 ## `authorlm.briefing`
 
 `authorlm/authorlm/briefing.py`
@@ -583,6 +589,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 `authorlm/tests/test_audio_voice_config.py`
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
+
+## `tests.test_branding`
+
+`authorlm/tests/test_branding.py`
+
+Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
 ## `tests.test_context`
 
