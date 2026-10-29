@@ -858,12 +858,22 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
             )
             db.insert("doc_comments", row)
             seen.add(c["id"])
-        out.append({
+        entry = {
             "comment_id": c["id"],
             "location": location or "(unattributed)",
             "quote": clamp(quoted),
             "content": c.get("content", ""),
-        })
+            "file": relpath,
+        }
+        if relpath:
+            from . import summaries as sums
+            try:
+                entry["context"] = sums.comment_context(
+                    db, manuscript, relpath, files[relpath], quoted,
+                    _flat_prose)
+            except Exception:  # context is a convenience; never break a pull
+                entry["context"] = None
+        out.append(entry)
     return out
 
 
