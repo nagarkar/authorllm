@@ -4173,6 +4173,42 @@ def _locate_form(t: dict, paragraphs: list[str], docs_service,
     return _mark_insert_requests(tab_id, at, t["proposed_new"]), ""
 
 
+_LEVEL_HOLDS = (
+    ("conflicts", "changed both locally and in the Doc since the last "
+                  "sync — settle that by hand first"),
+    ("missing", "has no section in the master Doc export — its tab is "
+                "gone"),
+    ("marked", "carries pending forms on disk (mid-settle)"),
+    ("sidecar_unparsable", "came back from the Doc unparsable"),
+)
+
+
+def level_from_doc(db: Database, manuscript: dict, relpath: str, service,
+                   docs_service, bridge: DocBridge | None = None
+                   ) -> dict | None:
+    """Pull `relpath` down first when it is checked out, so a producer
+    that reads the local file and then stages into the tab works from
+    the Doc's text. Without this, `write_pending_forms`' levelling push
+    would overwrite prose the author edited only in the tab. Returns
+    the pull report, or None when the file was not checked out. Raises
+    LookupError when the pull could not bring the file level (edited on
+    both sides, tab gone, marked on disk, sidecar unparsable), naming
+    what the author must do; no caller proceeds on a two-sided edit."""
+    entry = doc_status(db, manuscript).get(relpath)
+    if not (isinstance(entry, dict) and entry.get("checked_out")):
+        return None
+    pulled = pull_doc(db, manuscript, query=relpath, service=service,
+                      docs_service=docs_service, with_comments=False,
+                      bridge=bridge)
+    for key, why in _LEVEL_HOLDS:
+        if relpath in (pulled.get(key) or []):
+            raise LookupError(
+                f"{relpath} {why}"
+                + (" — run 'doc pull' once it is settled."
+                   if key == "conflicts" else ""))
+    return pulled
+
+
 def write_pending_forms(db: Database, manuscript: dict, file: str,
                         threads: list[dict], service, docs_service,
                         bridge: DocBridge | None = None,

@@ -572,6 +572,12 @@ Canned replies for the three summary-hierarchy prompts, shared by the hermetic s
 
 `_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
 
+## `tests.test_anchor_split_and_holds`
+
+`authorlm/tests/test_anchor_split_and_holds.py`
+
+Doc sync doors that silently corrupt when wrong.
+
 ## `tests.test_api`
 
 `authorlm/tests/test_api.py`
