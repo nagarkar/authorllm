@@ -48,9 +48,14 @@ pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
 pip install -e ".[all]"       # everything above
 ```
 
-There is no build step for normal installation; the compiled Triage App is
-included in the package. Frontend contributors rebuild it with `npm install &&
-npm run build` from `web/triage-app/`. The MCP server is a long-running
+Installing builds the web pages (the Triage App, the audiobook page, and the
+pronunciation workbench) into the package, so it needs **Node and npm**: the
+version in `.nvmrc` (`nvm use`), within each page's `engines` range.
+The built pages are not tracked in git (`setup.py`). Without npm the install
+stops, unless the pages are already built or `AUTHORLM_SKIP_WEB_BUILD=1` is
+set (then the commands that serve a page say it has not been built). After a
+frontend change or a `git pull`, rebuild a page with `npm run build` in its
+`web/<page>/` directory, or reinstall. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
@@ -193,6 +198,8 @@ outstanding questions.
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
 | `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
+| `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
 | `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
 | `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` |
 | `audio dictionary push` | `pronunciations.md` → the ElevenLabs dictionary named in `audiobook.toml`, append-only with replacement, after showing the plan |
@@ -222,7 +229,7 @@ outstanding questions.
 | `plan` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents |
 | `doc list/add/retire/revive` | Mechanical chapter management: list files (with the concepts each introduces and Google Docs link state), scaffold a new chapter (`--title`), archive one to `_retired/` (history stays replayable), bring it back |
 | `doc push/pull <file>`, `doc auth` | Google Docs bridge (markdown only): `push` normalizes the local file and creates/updates a linked Doc inside an auto-created per-manuscript Drive folder ("AuthorLM — <name>"; move it anywhere later, links are id-based) (checked out — edit there); `pull` exports the Doc, normalizes away export churn, writes the file, and collects. Requires `[gdocs] client_secret` in config.toml; `doc auth` runs the one-time browser consent. Local files remain the system of record |
-| `doc create-manuscript` | Combine every chapter (reading order per `toc.md`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
+| `doc create-manuscript` | Combine every chapter (reading order per `toc.toml`) into a single `_exports/<Manuscript Name>.md` and one Google Doc of the same name (`--title` overrides). Both are transient, push-only artifacts: re-exporting updates the same file and the same Doc (never reconciled or pulled; a Doc deleted in Drive is simply recreated). Works without Drive auth — the Doc half is skipped with a note |
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
@@ -327,13 +334,29 @@ model = "gemini/gemini-2.5-flash"
 ```
 
 
-**Reading order & the TOC.** A `toc.md` in the manuscript root is
-structural, not prose: its ordered file references (e.g. `1. preface.md`)
-define the authoritative reading order used by prerequisite checks,
-definition precedence (a concept's primary location is its first
-reading-order appearance; if that text is deleted, the location re-points
-and you're told), plan placement, and hierarchical extraction. Files not
-listed fall back to alphabetical order and are flagged in the briefing.
+**Reading order & the TOC.** A `toc.toml` in the manuscript root is
+structural, not prose: its ordered `[[chapter]]` tables define the
+authoritative reading order used by prerequisite checks, definition
+precedence (a concept's primary location is its first reading-order
+appearance; if that text is deleted, the location re-points and you're
+told), plan placement, and hierarchical extraction:
+
+```toml
+[[chapter]]
+file = "preface.md"
+matter = "front"     # optional: front | main (default) | back
+
+[[chapter]]
+file = "chapter1.md"
+
+[[chapter]]
+file = "section1a.md"
+parent = "chapter1.md"   # optional: nests this file under chapter1.md
+```
+
+Files not listed fall to the end in alphabetical order and are flagged in
+the briefing. Without a parseable `toc.toml`, the whole reading order is
+alphabetical. A `toc.md` is not read as a TOC.
 Concepts whose text vanishes entirely become proposals: adopt retires
 them, dismiss keeps them as declared placeholders. Full extractions larger
 than `extraction_max_chars` run hierarchically — one bounded pass per file
@@ -356,8 +379,9 @@ Optional LLM settings: `"timeout_seconds"` (default 120) and
 `"extraction_max_chars"` (default 24000) — the cap on manuscript text sent
 per extraction call, balancing cost against coverage (concept selection
 also degrades on very long inputs). Incremental extraction usually keeps
-payloads far below the cap; when a payload does exceed it you get an
-explicit truncation warning suggesting per-file extraction.
+payloads far below the cap; a scope that exceeds it runs as several bounded
+passes instead of being truncated. Only `extract --edges-only` still sends
+one payload cut at the cap.
 
 Any LiteLLM model string works (`gpt-4o-mini`, `claude-sonnet-5`,
 `ollama/llama3`, …) with the matching key exported. Alternatively, point at
@@ -448,12 +472,15 @@ server — no network or keys needed.
 
 **Live-LLM suite** (record/replay): exercises the real LiteLLM → Gemini
 path against a generated sample manuscript (never your manuscripts; reset
-to the same default state every run). Every unique payload is sent to the
-LLM **at most once** — responses are recorded in `tests/llm_cache/*.json`
-and replayed thereafter, so an unchanged suite makes zero live calls and
-runs without a key. Changing a prompt, the sample text, or the model
-re-records exactly the affected calls (or delete a cache file to force
-one). With no key and an incomplete cache, the suite skips loudly.
+to the same default state every run). It reads `GEMINI_API_KEY` from
+`authorlm/.env` like every other verb. Each request is hashed (model,
+temperature, messages, and `max_tokens`/`effort`/`thinking_budget` when
+set); a hash with no recording in `tests/llm_cache/*.json` is sent live
+once and recorded. **Commit new recordings with the change that caused
+them**: a clean checkout then makes zero billed calls. A full run that
+passes deletes recordings nothing asked for. With no key anywhere, a
+section that needs a missing recording reports one SKIP (`ReplayMiss`),
+never a failure.
 
 ## Logging & traces
 
@@ -615,6 +642,9 @@ the tables reads like the history of the book (RFC §18.7). See
   as the policy statement (with an LLM they are distilled).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
-- Extraction reads at most the first ~24k characters of the manuscript.
+- `extract --edges-only` sends a single payload capped at
+  `extraction_max_chars` (default 24k characters) and truncates anything
+  beyond it; other extractions split oversized scopes into multiple
+  bounded passes rather than truncating.
 - Inferred intents, replay, and cross-manuscript long-term memory are
   schema-ready but deferred (RFC growth stages 7–8).

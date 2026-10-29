@@ -93,7 +93,7 @@ examples = "prompt"                             # "prompt" (default) | "omit"
 | `glossary` | GLOSSARY | `api.scoped_concepts(file, text=essay)`: name, aliases, notes, **introduced in**, edges among the selected nodes |
 | `audience` | AUDIENCE PROFILE | `_profiles/audience.md` via `filtering._profiles_block` (a labelled absence if missing) |
 | `scheme` | ORGANIZING SCHEME | `_profiles/scheme.md` — a new, short, author-written profile listing the book's framework items (walls, idols, parts, stages); labelled absence if missing |
-| `registers` | PROTECTED REGISTERS | toc.toml entries carrying `register = "protected"` (new per-chapter key, riding on the TOC like `matter` and `voice`); a lens asked to run ON a protected chapter refuses |
+| `registers` | PROTECTED REGISTERS | toc.toml entries carrying `register = "protected"` (new per-chapter key, riding on the TOC like `matter` and `illustrations`); a lens asked to run ON a protected chapter refuses |
 | `passes` | SENTENCE-LEVEL PASSES | `_filters/*.md`: name and first line each, so a lens hands off by name |
 | `reading-order` | READING ORDER | the toc as a numbered list: file, title (first heading), matter, and a `card` mark for entries under a word threshold (part openers), with the essay under review marked |
 

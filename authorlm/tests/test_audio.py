@@ -48,6 +48,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import tomllib
 import zlib
 from pathlib import Path
 
@@ -111,8 +112,7 @@ def _workspace(book: Path) -> tuple[Path, str]:
     ws = Path(tempfile.mkdtemp(prefix="authorlm-audio-ws-"))
     out, code = run_cli("-w", str(ws), "init", "--name", "Scratch", "--path",
                         str(book), "--author", "Chinmay Nagarkar",
-                        "--copyright-owner", "Chinmay Nagarkar",
-                        "--no-extract")
+                        "--copyright-owner", "Chinmay Nagarkar")
     assert code == 0, out
     out, code = run_cli("-w", str(ws), "manuscript", "set", "--narrator",
                         "Adam Stone", "--publisher", "Chinmay Nagarkar",
@@ -140,7 +140,7 @@ def _strip(d: dict) -> dict:
 # --------------------------------------------------------------- units
 
 def check_text_rules() -> None:
-    cfg = audio.load_config(Path("/nonexistent"))
+    cfg = audio.load_config(FIXTURE)
     text, warnings = audio.speech_text(
         "**Bold** and *italic* and __under__ with a [link](http://x), "
         "a note[^F1], `code`, and $E=mc^2$.", cfg)
@@ -237,8 +237,9 @@ def check_config() -> None:
     cfg_path = root / audio.AUDIO_DIR / audio.CONFIG_FILENAME
     cfg_path.write_text(audio.DEFAULT_CONFIG_TEXT, encoding="utf-8")
     cfg = audio.load_config(root)
-    check("the seeded toml parses to exactly the defaults",
-          cfg == audio._CONFIG_DEFAULTS, json.dumps(cfg))
+    # #173 requires explicit role declarations; only non-voice settings default.
+    check("the seeded toml parses to its explicit configuration",
+          cfg == tomllib.loads(audio.DEFAULT_CONFIG_TEXT), json.dumps(cfg))
     for bad, why in (("[text]\nfootnote = \"drop\"\n", "unknown key text.footnote"),
                      ("[text]\nfootnotes = \"read\"\n", "one of drop, inline, end"),
                      ("[tts]\nquality = \"wav\"\n", "one of"),
@@ -252,9 +253,11 @@ def check_config() -> None:
         except audio.AudioError as err:
             check(f"config refuses {bad.strip()!r} by name", why in str(err),
                   str(err))
-    cfg_path.write_text("[text]\nparagraph_gap_ms = 900\n", encoding="utf-8")
+    cfg_path.write_text('[text]\nvoice = "narrator"\nparagraph_gap_ms = 900\n'
+                        '[headings]\nvoice = "narrator"\n'
+                        '[credits]\nvoice = "narrator"\n', encoding="utf-8")
     cfg = audio.load_config(root)
-    check("a partial toml takes the defaults for the rest",
+    check("explicit voices with partial non-voice settings take the remaining defaults",
           cfg["text"]["paragraph_gap_ms"] == 900
           and cfg["headings"]["gap_ms"]["h1"] == 3250)
     shutil.rmtree(root, ignore_errors=True)
@@ -326,7 +329,7 @@ def check_fixture_and_hash() -> None:
                   json.dumps(built["chapters"][path.stem], indent=1)[:1500])
         sermons = built["chapters"]["sermons"]
         speech = [s for s in sermons["sections"] if s["type"] == "speech"]
-        check("the essay default voice from toc.toml casts the headings and "
+        check("the essay default voice from audiobook.toml casts the headings and "
               "paragraphs", speech[0]["cast"] == "herdsman"
               and speech[0]["kind"] == "heading")
         dead = [s for s in speech if s["cast"] == "the_dead"]
@@ -704,6 +707,95 @@ def check_elevenlabs() -> None:
             "name": "Scratch pronunciations", "id": "D1", "versionId": "V7"})
         check("the export carries the dictionary locator by name",
               built["book"]["pronunciationDictionary"]["versionId"] == "V7")
+    finally:
+        shutil.rmtree(book, ignore_errors=True)
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def check_dictionary_by_default() -> None:
+    """Every book that renders audio has a dictionary (ruling 2026-10-18):
+    an empty `[tts].dictionary` means the manuscript's name, init seeds
+    that name, and export creates the dictionary when the account lacks
+    it, so the first render finds it in place."""
+    book = _book_copy()
+    ws, _out = _workspace(book)
+    manuscript, db = _manuscript(ws)
+    toml = book / "_audio" / "audiobook.toml"
+    try:
+        check("a named dictionary is used as named",
+              audio.dictionary_name(manuscript) == "Scratch pronunciations")
+        toml.write_text(toml.read_text(encoding="utf-8").replace(
+            'dictionary = "Scratch pronunciations"', 'dictionary = ""'),
+            encoding="utf-8")
+        check("an empty [tts].dictionary means the manuscript's name",
+              audio.dictionary_name(manuscript) == "Scratch")
+        # init seeds the name into a fresh config.
+        fresh = Path(tempfile.mkdtemp(prefix="authorlm-audio-init-"))
+        try:
+            seeded = audio.init({"name": "Two Returns", "path": str(fresh)})
+            text = (fresh / "_audio" / "audiobook.toml").read_text(encoding="utf-8")
+            check("init seeds [tts].dictionary with the manuscript's name",
+                  'dictionary = "Two Returns"' in text and len(seeded["written"]) == 2,
+                  text[text.find("[tts]"):text.find("[tts]") + 300])
+            cfg = audio.load_config(fresh)
+            check("the seeded name reads back", cfg["tts"]["dictionary"] == "Two Returns")
+        finally:
+            shutil.rmtree(fresh, ignore_errors=True)
+        # Export creates the dictionary from the table when it is absent.
+        log: list = []
+        wanted = audio.desired_rules(manuscript, audio.load_config(book))
+        client = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": []}, {}),
+            "/add-from-rules": ({"id": "D7", "version_id": "V7"}, {}),
+        }))
+        result = audio.export(db, manuscript, client=client)
+        made = [b for m, u, b in log if u.endswith("/add-from-rules")]
+        book_json = json.loads((book / "_audio" / "audiobook.json").read_text(encoding="utf-8"))
+        check("export creates the missing dictionary from every table rule",
+              len(made) == 1 and made[0]["name"] == "Scratch"
+              and len(made[0]["rules"]) == len(wanted), str(log)[:400])
+        check("the export carries the created dictionary's locator and says so",
+              book_json["pronunciationDictionary"] == {"name": "Scratch", "id": "D7",
+                                                       "versionId": "V7"}
+              and any("created on ElevenLabs" in n for n in result["notes"])
+              and not any("not on the ElevenLabs account" in w for w in result["warnings"]),
+              str(result))
+        log.clear()
+        client2 = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": [
+                {"id": "D7", "name": "Scratch", "latest_version_id": "V8"}]}, {}),
+        }))
+        again = audio.export(db, manuscript, client=client2)
+        check("an existing dictionary is resolved, not created again",
+              not any(u.endswith("/add-from-rules") for _m, u, _b in log)
+              and again["notes"] == [] and json.loads(
+                  (book / "_audio" / "audiobook.json").read_text(encoding="utf-8"))
+              ["pronunciationDictionary"]["versionId"] == "V8", str(log)[:300])
+        # An empty table makes an empty dictionary (the API allows it).
+        (book / audio.pron.FILENAME).unlink()
+        log.clear()
+        client3 = audio.ElevenLabs("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": []}, {}),
+            "/add-from-rules": ({"id": "D0", "version_id": "V0"}, {}),
+        }))
+        made0 = audio.ensure_dictionary(manuscript, client3)
+        check("a book without a table still gets its (empty) dictionary",
+              made0["created"] and made0["rules"] == 0
+              and log[-1][2] == {"name": "Scratch", "rules": []}, str(log)[-300:])
+        # The locator path creates too, so a first render never refuses.
+        log.clear()
+        locators = audio.dictionary_locators(manuscript, client3)
+        check("dictionary_locators creates the dictionary instead of refusing",
+              locators == [{"pronunciation_dictionary_id": "D0", "version_id": "V0"}])
+        # The workbench reports the effective name.
+        from authorlm import workbench
+        workbench.CLIENT_FACTORY = lambda: client2
+        workbench._SESSIONS.clear()
+        state = workbench.dispatch("state", {"manuscript": "Scratch"}, workspace=str(ws))
+        check("the Pronunciations tab sees the book's dictionary without a key in audiobook.toml",
+              state["dictionary"] == "Scratch", str(state)[:200])
+        workbench.CLIENT_FACTORY = None
+        workbench._SESSIONS.clear()
     finally:
         shutil.rmtree(book, ignore_errors=True)
         shutil.rmtree(ws, ignore_errors=True)
@@ -1269,15 +1361,69 @@ def check_generation() -> None:
         st = gen.status(manuscript, "kindness")["chapters"][0]
         check("status counts previews and names them per paragraph",
               st["previewed"] == 4 and st["sections"][0]["preview"] == f"preview/{ids[0]}.mp3")
+        # stitch --preview: the free stand-in narration of one chapter.
+        if gen.find_tool("ffmpeg"):
+            said_ids: list[str] = []
+
+            def mp3_stub(r: Path, sp: dict, v: str, rt: int) -> Path:
+                said_ids.append(sp["id"])
+                out = gen.preview_path(r, sp["id"])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                _mp3(out, 0.5)
+                return out
+            gen.preview_path(root, ids[0]).unlink()
+            for sid in ids[1:]:
+                _mp3(gen.preview_path(root, sid), 0.5)
+            ps = gen.stitch_preview(manuscript, "kindness", renderer=mp3_stub)
+            out = root / "preview" / "chapters" / "kindness.mp3"
+            sidecar = json.loads((root / "preview" / "chapters" /
+                                  "kindness.sections.json").read_text())
+            silences = sum(s["durationMs"] for s in chapter["sections"]
+                           if s.get("type") != "speech") / 1000.0
+            check("stitch --preview renders only the missing preview, then stitches "
+                  "every section in order",
+                  said_ids == [ids[0]] and ps["rendered"] == 1
+                  and Path(ps["path"]).resolve() == out.resolve() and out.stat().st_size > 0
+                  and ps["sections"] == len(ids), str(ps))
+            check("the stitched preview lasts the clips plus the silences",
+                  abs(ps["duration_s"] - (0.5 * len(ids) + silences)) < 0.15, str(ps))
+            spans = sidecar["sections"]
+            check("the sidecar names each speech section with its line, text and span",
+                  [s["id"] for s in spans] == ids
+                  and all(set(s) >= {"id", "line", "text", "start_s", "end_s"} for s in spans)
+                  and spans[0]["line"] == gen.speech_of(chapter)[0]["source"]["line"]
+                  and all(abs((s["end_s"] - s["start_s"]) - 0.5) < 0.05 for s in spans)
+                  and all(a["end_s"] <= b["start_s"] for a, b in zip(spans, spans[1:])),
+                  str(spans)[:400])
+            again_ps = gen.stitch_preview(manuscript, "kindness", renderer=mp3_stub)
+            check("a second stitch --preview renders nothing", again_ps["rendered"] == 0
+                  and said_ids == [ids[0]])
         if sys.platform == "darwin" and gen.find_tool("ffmpeg"):
             real = gen.render_preview(root, {"id": "c" * 32, "text": "A short test.",
                                              "speed": 1.0, "pronunciations": []},
                                       "Daniel", 175)
             check("a real say render produces an mp3", real.stat().st_size > 1000)
             real.unlink()
+            # A voice that renders silence for a dash (Jamie (Premium) on
+            # "Thursday, February 2nd - day"): the stub says nothing when
+            # the text has a dash, so only the comma retry makes sound.
+            stub = root / "say-stub.sh"
+            stub.write_text('#!/bin/sh\nf="$6"\nif grep -q -- "-" "$f"; then '
+                            ': > "$f"; fi\nexec say -v Daniel -f "$f" -o "$8"\n')
+            stub.chmod(0o755)
+            dashed = gen.render_preview(root, {"id": "d" * 32, "pronunciations": [],
+                                               "text": "One day - Thursday, again.",
+                                               "speed": 1.0}, "Daniel", 175, say=str(stub))
+            check("a silent render is retried with the dashes read as commas",
+                  dashed.stat().st_size > 1000)
+            dashed.unlink()
         out, code = run_cli("-w", str(ws), "audio", "preview", "-m", "Scratch")
         check("audio preview needs a chapter or --all", code != 0 and "--all" in out, out)
 
+        # #173 moves fixture voice declarations without changing golden JSON.
+        # Export the copied sources before asserting freshness; checkout mtimes
+        # are not evidence that the golden manifest was exported after them.
+        audio.export(db, manuscript, resolve_dictionary=False)
         # The stale banner: a source saved after the export.
         fresh = gen.export_staleness(manuscript)
         check("a fresh export is not stale", fresh["stale"] is False and fresh["changed"] == [],
@@ -1340,23 +1486,40 @@ def check_audiobook_page() -> None:
     audiobook._SESSIONS.clear()
     try:
         s = audiobook.session(str(ws), "Scratch", inline=True)
+        # #173's migrated source fixture must be exported before the page
+        # promises a fresh manifest; golden checkout mtimes are arbitrary.
+        audio.export(s.db, s.manuscript, resolve_dictionary=False)
         st = s.status()
         check("status lists every chapter with counts and opens none",
               [c["stem"] for c in st["book"]["chapters"]][:2] == ["_opening-credits", "sermons"]
-              and st["chapter"] is None and st["doc"]["state"] == "reconciled in chat"
+              and st["chapter"] is None and st["doc"]["state"] == ""
               and st["export"]["stale"] is False, str(st)[:300])
         st = s.status("kindness")
         ch = st["chapter"]
         check("a chapter comes with its paragraphs, text, and audio urls",
               ch["total"] == 4 and ch["sections"][1]["text"].startswith("The Dharmic")
-              and ch["sections"][1]["previewUrl"] is None and ch["sections"][1]["takeUrl"] is None
+              and ch["sections"][1]["preview"] is None and ch["sections"][1]["takeUrl"] is None
+              and ch["sections"][1]["previewUrl"]
+              == f"/preview/kindness/{ch['sections'][1]['id']}.mp3?m=Scratch"
               and ch["sections"][3]["moved"]["detail"] == ["speed", "removed Dharmic"], str(ch)[:400])
         job = s.enqueue("preview", stem="kindness")
         check("a preview job runs inline in tests and reports",
               job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
         st = s.status("kindness")
-        check("previews show up as urls", st["chapter"]["sections"][0]["previewUrl"]
-              == f"/preview/{st['chapter']['sections'][0]['id']}.mp3")
+        job = s.enqueue("preview", stem="kindness", force=True)
+        check("a forced preview job re-renders the previews already there",
+              job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
+        check("preview urls name their chapter and manuscript",
+              st["chapter"]["sections"][0]["previewUrl"]
+              == f"/preview/kindness/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
+        # The lazy listen: a missing preview renders when it is asked for.
+        lazy = ch["sections"][2]["id"]
+        gen.preview_path(s.root, lazy).unlink()
+        got = audiobook.audio_file_for(s, f"/preview/kindness/{lazy}.mp3")
+        check("a missing preview renders on request",
+              got is not None and got.read_bytes() == b"PREVIEW-" + lazy.encode())
+        check("an id the chapter does not have renders nothing",
+              audiobook.audio_file_for(s, f"/preview/kindness/{'0' * 32}.mp3") is None)
         job = s.enqueue("generate", stem="kindness", ids=[ch["sections"][1]["id"]])
         check("a generate job carries its cost and ordinal and renders",
               job["characters"] == ch["sections"][1]["characters"] and job["ordinals"] == [2]
@@ -1387,15 +1550,224 @@ def check_audiobook_page() -> None:
             _os2.utime(p_, (_t2.time() - 60, _t2.time() - 60))
         _os2.utime(book / "kindness.md", None)
         check("a source newer than the export wants a refresh", s.wants_refresh() is True)
-        s.enqueue("refresh", stem="kindness")
+        job = s.enqueue("refresh", stem="kindness")
         check("the refresh re-exports and clears the want", s.wants_refresh() is False)
+        check("the refresh renders no previews", "rendered" not in job["message"], job["message"])
         jobs = s.jobs()
         check("jobs lists the recent ones newest last",
               jobs["running"] is None and jobs["queued"] == []
-              and [j["kind"] for j in jobs["recent"]] == ["preview", "generate", "retake", "generate", "refresh"])
+              and [j["kind"] for j in jobs["recent"]] == ["preview", "preview", "generate", "retake", "generate", "refresh"])
+        stamp = s.root / gen.PREVIEW_DIR / gen.PREVIEW_STAMP
+        stamp.write_text("Another Voice\n175\n", encoding="utf-8")
+        _os2.utime(book / "kindness.md", None)
+        for p_ in [root / "audiobook.json", *(root / "chapters").glob("*.json")]:
+            _os2.utime(p_, (_t2.time() - 60, _t2.time() - 60))
+        job = s.enqueue("refresh", stem="kindness")
+        check("a new preview voice clears every preview on refresh",
+              "cleared for the new voice" in job["message"]
+              and not list((s.root / gen.PREVIEW_DIR).glob("*.mp3")), job["message"])
         out = audiobook.dispatch("status", {"manuscript": "Scratch", "stem": "kindness"},
                                  workspace=str(ws), inline=True)
         check("dispatch routes to the same session", out["chapter"]["generated"] == 4)
+        out = audiobook.dispatch("manuscripts", {"manuscript": "Scratch"},
+                                 workspace=str(ws), inline=True)
+        check("the dropdown lists the manuscripts with an audio export",
+              out == {"current": "Scratch", "manuscripts": ["Scratch"]}, str(out))
+        # Editing a card on the page: the raw block comes back, the save
+        # rewrites only that block, and the paragraph returns under a new
+        # id with nothing rendered (2026-10-26).
+        ear = ch["sections"][2]
+        src = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                            "id": ear["id"]}, workspace=str(ws), inline=True)
+        check("source returns the raw markdown block and its place",
+              src == {"file": "kindness.md", "line": 9,
+                      "markdown": "[Only: audio]\nThis paragraph is for the ear only.\n[/Only]"}, str(src))
+        head = audiobook.dispatch("source", {"manuscript": "Scratch", "stem": "kindness",
+                                             "id": ch["sections"][0]["id"]},
+                                  workspace=str(ws), inline=True)
+        check("a heading's source keeps its markdown",
+              head["markdown"] == "# **Kindness that Kills**" and head["line"] == 1, str(head))
+        before = (book / "kindness.md").read_text(encoding="utf-8")
+        same = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                           "id": ear["id"], "markdown": src["markdown"] + "\n"},
+                                  workspace=str(ws), inline=True)
+        check("saving unchanged text writes nothing and runs no job",
+              same["changed"] is False and same["job"] is None
+              and (book / "kindness.md").read_text(encoding="utf-8") == before, str(same))
+        out = audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                          "id": ear["id"],
+                                          "markdown": "[Only: audio]\nThis paragraph is for the *ear* alone.\n[/Only]"},
+                                 workspace=str(ws), inline=True)
+        after = (book / "kindness.md").read_text(encoding="utf-8")
+        check("edit rewrites only that block and refreshes",
+              out["changed"] is True and out["job"]["kind"] == "refresh"
+              and out["job"]["state"] == "done"
+              and after == before.replace("This paragraph is for the ear only.",
+                                          "This paragraph is for the *ear* alone."), str(out))
+        st = s.status("kindness")
+        new_ear = st["chapter"]["sections"][2]
+        check("the edited paragraph returns under a new id with nothing rendered",
+              new_ear["id"] != ear["id"] and new_ear["text"] == "This paragraph is for the ear alone."
+              and new_ear["take"] is None and new_ear["preview"] is None
+              and st["chapter"]["generated"] == 3, str(new_ear))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": ear["id"], "markdown": "late"},
+                               workspace=str(ws), inline=True)
+            check("a save against the old id is refused", False)
+        except LookupError as err:
+            check("a save against the old id is refused by name", "no paragraph" in str(err), str(err))
+        try:
+            audiobook.dispatch("edit", {"manuscript": "Scratch", "stem": "kindness",
+                                        "id": new_ear["id"], "markdown": "  \n"},
+                               workspace=str(ws), inline=True)
+            check("an empty save is refused", False)
+        except audio.AudioError as err:
+            check("an empty save is refused by name", "empty" in str(err), str(err))
+        # The Push button (2026-10-26): the chapter's file goes to its
+        # tab through gdocs.push_doc, and the Doc line shows the stamp.
+        from authorlm import gdocs
+        st = s.status("kindness")
+        check("the Doc line reads 'never pushed' before any push", st["doc"]["at"] is None, str(st["doc"]))
+        pushed: list = []
+        real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        def fake_push(db, manuscript, query, **kw):
+            pushed.append((query, kw["service"], kw["docs_service"]))
+            assert kw.get("guard") is True, "the page pushes guarded"
+            meta = gdocs._mapping(db, manuscript)
+            meta.setdefault("gdocs", {})[query] = {"tab_id": "t1", "pushed_at": "2026-10-26T12:00:00Z"}
+            gdocs._save_mapping(db, manuscript, meta)
+            return {"relpath": query, "url": "https://docs.google.com/document/d/x/edit?tab=t1", "held": [{"a": 1}]}
+        gdocs.push_doc = fake_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push job sends the chapter's file to its tab with the services",
+              pushed == [("kindness.md", "drive", "docs")] and job["state"] == "done"
+              and job["message"] == "pushed kindness.md to the Doc · 1 paragraph(s) held under open comments", str(job))
+        st = s.status("kindness")
+        check("the Doc line shows the push's stamp and state",
+              st["doc"]["at"] == "2026-10-26T12:00:00Z" and st["doc"]["state"] == "pushed from the page"
+              and st["doc"]["detail"].endswith("tab=t1"), str(st["doc"]))
+        check("another chapter has its own stamp", s.status("sermons")["doc"]["at"] is None)
+        # The guard itself, at push_doc: it reads the three-way state and
+        # refuses doc_ahead and conflict; local_ahead and unchanged pass.
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta.setdefault("gdocs", {})["_master_id"] = "m1"
+        meta["gdocs"]["kindness.md"] = {"tab_id": "t1", "pushed_hash": "abc"}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        # Two writers overlap (2026-10-26): a push of one tab loads the
+        # metadata, another tab's push lands, then the first saves. The
+        # second tab's pushed_hash must survive the first's save.
+        slow = gdocs._mapping(s.db, s.manuscript)
+        quick = gdocs._mapping(s.db, s.manuscript)
+        quick["gdocs"]["other.md"] = {"tab_id": "t2", "pushed_hash": "new"}
+        gdocs._save_mapping(s.db, s.manuscript, quick)
+        slow["gdocs"]["kindness.md"]["pushed_at"] = "now"
+        gdocs._save_mapping(s.db, s.manuscript, slow)
+        after = gdocs._mapping(s.db, s.manuscript)["gdocs"]
+        check("a slow save keeps what another writer saved meanwhile",
+              after.get("other.md", {}).get("pushed_hash") == "new"
+              and after["kindness.md"].get("pushed_at") == "now"
+              and after["kindness.md"].get("pushed_hash") == "abc", str(after))
+        real_three = gdocs.doc_three_way
+        verdicts = {}
+        try:
+            for state in ("doc_ahead", "conflict", "local_ahead", "unchanged"):
+                gdocs.doc_three_way = lambda *a, _st=state, **k: {
+                    "state": _st, "base": "a\n\nb\n", "local": "a\n\nb local\n",
+                    "doc": "a doc\n\nb\n"}
+                try:
+                    gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                              gdocs.manuscript_bridge(s.manuscript),
+                                              "kindness.md", None, None)
+                    verdicts[state] = "passes"
+                except gdocs.DocChanged:
+                    verdicts[state] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        gdocs.doc_three_way = lambda *a, **k: {
+            "state": "conflict", "base": "a\n\nb\n\nc\n",
+            "doc": "a doc\n\nb\n\nc\n", "local": "a doc\n\nb\n\nc local\n"}
+        try:
+            gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                      gdocs.manuscript_bridge(s.manuscript),
+                                      "kindness.md", None, None)
+            verdicts["merged"] = "passes"
+        except gdocs.DocChanged:
+            verdicts["merged"] = "refused"
+        finally:
+            gdocs.doc_three_way = real_three
+        # A conflict settled by hand (2026-10-26, bind-again.md): the
+        # file took the Doc's paragraph and changed the line right after
+        # it, so git's merge calls the two adjacent hunks a conflict;
+        # nothing of the Doc's is lost, and the push goes through.
+        base3 = "x\n\na\n\nb\n\nc\n\nd\n"
+        doc3 = "x\n\nA\n\nn1\n\nb\n\nn2\n\nc\n\nd\n"
+        for name, local in (("settled", "x\n\nA\n\nn1\n\nB\n\nn2\n\nc\n\nd\n"),
+                            ("lost", "x\n\nA\n\nB\n\nn2\n\nc\n\nd\n")):
+            gdocs.doc_three_way = lambda *a, _l=local, **k: {
+                "state": "conflict", "base": base3, "doc": doc3, "local": _l}
+            try:
+                gdocs._refuse_doc_changed(s.db, s.manuscript,
+                                          gdocs.manuscript_bridge(s.manuscript),
+                                          "kindness.md", None, None)
+                verdicts[name] = "passes"
+            except gdocs.DocChanged:
+                verdicts[name] = "refused"
+            finally:
+                gdocs.doc_three_way = real_three
+        check("a settled conflict next to a local edit pushes; a dropped Doc edit does not",
+              (verdicts.pop("settled"), verdicts.pop("lost")) == ("passes", "refused"))
+        merged_ok = verdicts.pop("merged")
+        check("a file the Doc's edits were merged into is let through",
+              merged_ok == "passes", merged_ok)
+        check("the guard refuses a moved tab and passes a local-only change",
+              verdicts == {"doc_ahead": "refused", "conflict": "refused",
+                           "local_ahead": "passes", "unchanged": "passes"}, str(verdicts))
+        # The guard: a tab edited since the last push is never overwritten.
+        def changed_push(db, manuscript, query, **kw):
+            raise gdocs.DocChanged(f"{query}: {gdocs.DOC_CHANGED}")
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        gdocs.push_doc = changed_push
+        try:
+            job = s.enqueue("push", stem="kindness")
+        finally:
+            gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+        check("a push over a changed tab fails with the plain status",
+              job["state"] == "failed"
+              and job["message"] == "kindness.md: did not push; doc has changed. pull first", str(job))
+        pulled: list = []
+        real_pull = gdocs.pull_doc
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        def fake_pull(db, manuscript, query=None, **kw):
+            pulled.append(query)
+            return {"changed": [], "unchanged": [query], "conflicts": []}
+        gdocs.pull_doc = fake_pull
+        try:
+            job = s.enqueue("pull", stem="kindness")
+        finally:
+            gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real_pull, real[1], real[2]
+        check("a pull job brings down only the chapter's own tab",
+              pulled == ["kindness.md"] and job["state"] == "done"
+              and job["message"] == "the Doc matches the files", str(job))
+        # The server opened without -m (key "*"); the page then names the
+        # manuscript, and must reach the same session, never a second worker.
+        audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))
+        check("a named manuscript finds the session the default opened",
+              audiobook.session(str(ws), "Scratch") is s
+              and (str(ws), "Scratch") not in audiobook._SESSIONS)
         try:
             audiobook.dispatch("dance", {"manuscript": "Scratch"}, workspace=str(ws))
             check("an unknown method is refused", False)
@@ -1414,12 +1786,12 @@ def check_audiobook_page() -> None:
             check("the server serves the built page at /", resp.status == 200
                   and "/api/audiobook" in page)
             sid = ch["sections"][0]["id"]
-            with urllib.request.urlopen(f"{base}/preview/{sid}.mp3") as resp:
+            with urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3") as resp:
                 body = resp.read()
             check("a preview streams whole with Accept-Ranges",
                   resp.status == 200 and body == b"PREVIEW-" + sid.encode()
                   and resp.headers["Accept-Ranges"] == "bytes")
-            req = urllib.request.Request(f"{base}/preview/{sid}.mp3", headers={"Range": "bytes=8-11"})
+            req = urllib.request.Request(f"{base}/preview/kindness/{sid}.mp3", headers={"Range": "bytes=8-11"})
             with urllib.request.urlopen(req) as resp:
                 part = resp.read()
             check("a byte range answers 206 with the slice",
@@ -1427,6 +1799,14 @@ def check_audiobook_page() -> None:
                   and resp.headers["Content-Range"] == f"bytes 8-11/{8 + 32}")
             with urllib.request.urlopen(f"{base}/take/kindness/{ch['sections'][1]['id']}.mp3") as resp:
                 check("a take streams from the book's quality", resp.read() == b"MP3BYTES")
+            with urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3?m=Scratch") as resp:
+                check("?m= names the manuscript an audio url plays from",
+                      resp.read() == b"PREVIEW-" + sid.encode())
+            try:
+                urllib.request.urlopen(f"{base}/preview/kindness/{sid}.mp3?m=Nowhere")
+                check("an unknown ?m= manuscript is a 404", False)
+            except urllib.error.HTTPError as err:
+                check("an unknown ?m= manuscript is a 404", err.code == 404)
             try:
                 urllib.request.urlopen(f"{base}/take/kindness/{'0' * 32}.mp3")
                 check("a missing take is a 404", False)
@@ -1464,6 +1844,176 @@ def check_audiobook_page() -> None:
         shutil.rmtree(book, ignore_errors=True)
 
 
+def check_audiobook_continuation_edit() -> None:
+    """Editing a continuation file's paragraph on the page (2026-10-26, the
+    author: "If I edit a continuation type text (like recap for sermon 2)
+    in audio view in web ui, will it correctly update the underlying md
+    file?"). The card belongs to the chapter it folds into; the edit must
+    land in the continuation file and nowhere else, and the Push and Pull
+    that follow must act on both files, each failure named by file."""
+    from authorlm import audiobook, gdocs, generation as gen
+
+    book = _book_copy()
+    (book / "kindness-2.md").write_text(
+        "## **Part Two**\n\nThe recap carries on the essay here.\n\n"
+        "A second paragraph of the recap.\n", encoding="utf-8")
+    toc = (book / "toc.toml").read_text(encoding="utf-8")
+    toc = toc.replace('file = "kindness.md"\n',
+                      'file = "kindness.md"\n\n[[chapter]]\nfile = "kindness-2.md"\n')
+    (book / "toc.toml").write_text(toc, encoding="utf-8")
+    (book / "_exports").mkdir(exist_ok=True)
+    (book / "_exports" / "settings.toml").write_text(
+        'continuation_level = "2"\n', encoding="utf-8")
+    ws, _out = _workspace(book)
+    audiobook._SESSIONS.clear()
+    real = (gdocs.push_doc, gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service)
+    try:
+        s = audiobook.session(str(ws), "Scratch", inline=True)
+        audio.export(s.db, s.manuscript, resolve_dictionary=False)
+        ch = s.status("kindness")["chapter"]
+        stems = [c["stem"] for c in s.status()["book"]["chapters"]]
+        texts = [sec["text"] for sec in ch["sections"]]
+        check("a continuation file folds into its chapter, not a chapter of its own",
+              "kindness-2" not in stems
+              and "The recap carries on the essay here." in texts, str(stems))
+        sec = next(x for x in ch["sections"] if x["text"] == "The recap carries on the essay here.")
+        src = s.source("kindness", sec["id"])
+        check("source finds the paragraph in the continuation file",
+              src["file"] == "kindness-2.md" and src["line"] == 3, str(src))
+        before_main = (book / "kindness.md").read_text(encoding="utf-8")
+        out = s.edit("kindness", sec["id"], "The recap carries the essay on from here.")
+        check("the edit lands in the continuation file only",
+              out["changed"] and out["file"] == "kindness-2.md"
+              and "The recap carries the essay on from here." in (book / "kindness-2.md").read_text(encoding="utf-8")
+              and (book / "kindness.md").read_text(encoding="utf-8") == before_main, str(out))
+        ch = s.status("kindness")["chapter"]
+        new = next(x for x in ch["sections"] if x["text"] == "The recap carries the essay on from here.")
+        check("the edited recap paragraph comes back in its chapter, unrendered",
+              new["id"] != sec["id"] and new["take"] is None and new["preview"] is None, str(new))
+        head = next(x for x in ch["sections"] if x["text"] == "Part Two")
+        s.edit("kindness", head["id"], "## **Part Two, Again**")
+        check("a continuation's heading edit keeps it a continuation",
+              "kindness-2" not in [c["stem"] for c in s.status()["book"]["chapters"]]
+              and any(x["text"] == "Part Two, Again" for x in s.status("kindness")["chapter"]["sections"]))
+        # The file moved underneath the box: the save is declined, nothing written.
+        sec2 = next(x for x in s.status("kindness")["chapter"]["sections"]
+                    if x["text"] == "A second paragraph of the recap.")
+        cont = book / "kindness-2.md"
+        cont.write_text(cont.read_text(encoding="utf-8").replace(
+            "A second paragraph of the recap.", "Changed in Obsidian meanwhile."), encoding="utf-8")
+        try:
+            s.edit("kindness", sec2["id"], "My edit.")
+            check("a save over a continuation paragraph changed on disk is declined", False)
+        except LookupError as err:
+            check("a save over a continuation paragraph changed on disk is declined",
+                  "changed on disk" in str(err)
+                  and "My edit." not in cont.read_text(encoding="utf-8"), str(err))
+
+        gdocs.get_service = lambda *a, **k: "drive"
+        gdocs.get_docs_service = lambda *a, **k: "docs"
+        pushed: list = []
+
+        def push_ok(db, manuscript, query, **kw):
+            pushed.append((query, kw.get("guard")))
+            return {"relpath": query, "url": f"https://d/{query}", "held": []}
+        gdocs.push_doc = push_ok
+        job = s.enqueue("push", stem="kindness")
+        check("Push sends the chapter file and its continuation, both guarded",
+              pushed == [("kindness.md", True), ("kindness-2.md", True)]
+              and job["state"] == "done"
+              and job["message"] == "pushed kindness.md, kindness-2.md to the Doc", str(job))
+
+        # Only what changed goes (2026-10-26): a file whose text is what
+        # was last pushed is skipped, without a call to Google.
+        pushed.clear()
+        import hashlib as _h
+        main_text = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+            (book / "kindness.md").read_text(encoding="utf-8")))
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta.setdefault("gdocs", {})["kindness.md"] = {
+            "tab_id": "t1", "pushed_hash": _h.sha256(main_text.encode()).hexdigest()[:16]}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        job = s.enqueue("push", stem="kindness")
+        check("Push sends only the file that changed since its last push",
+              pushed == [("kindness-2.md", True)]
+              and job["message"] == "pushed kindness-2.md to the Doc", str((pushed, job)))
+        pushed.clear()
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta["gdocs"]["kindness-2.md"] = {"tab_id": "t2", "pushed_hash": _h.sha256(
+            gdocs.strip_embed_lines(gdocs.normalize_markdown(cont.read_text(encoding="utf-8")))
+            .encode()).hexdigest()[:16]}
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        job = s.enqueue("push", stem="kindness")
+        check("Push with nothing changed sends nothing and says so",
+              pushed == [] and job["state"] == "done"
+              and job["message"].startswith("nothing to push"), str(job))
+        meta = gdocs._mapping(s.db, s.manuscript)
+        meta["gdocs"].pop("kindness.md"); meta["gdocs"].pop("kindness-2.md")
+        gdocs._save_mapping(s.db, s.manuscript, meta)
+        pushed.clear()
+
+        def push_cont_changed(db, manuscript, query, **kw):
+            pushed.append(query)
+            if query == "kindness-2.md":
+                raise gdocs.DocChanged(f"{query}: {gdocs.DOC_CHANGED}")
+            return {"relpath": query, "url": f"https://d/{query}", "held": []}
+        gdocs.push_doc = push_cont_changed
+        job = s.enqueue("push", stem="kindness")
+        check("a continuation tab changed in the Doc stops the push by name",
+              job["state"] == "failed"
+              and job["message"] == "kindness-2.md: did not push; doc has changed. pull first"
+              and job["done"] == 1 and job["of"] == 2, str(job))
+
+        pulled: list = []
+
+        def pull_conflict(db, manuscript, query=None, **kw):
+            pulled.append(query)
+            return {"changed": [], "unchanged": [query] if query == "kindness.md" else [],
+                    "conflicts": [query] if query == "kindness-2.md" else []}
+        gdocs.pull_doc = pull_conflict
+        job = s.enqueue("pull", stem="kindness")
+        check("Pull asks for both tabs and names a two-sided continuation",
+              pulled == ["kindness.md", "kindness-2.md"] and job["state"] == "done"
+              and job["message"] == "the Doc matches the files · changed on both sides, "
+                                    "left alone: kindness-2.md", str(job))
+
+        def pull_missing(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": [query]}
+        gdocs.pull_doc = pull_missing
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull that cannot find a tab fails by name, never 'matches'",
+              job["state"] == "failed" and "nothing pulled for kindness.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
+        def pull_ahead(db, manuscript, query=None, **kw):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [query] if query == "kindness-2.md" else [], "missing": []}
+        gdocs.pull_doc = pull_ahead
+        job = s.enqueue("pull", stem="kindness")
+        check("a pull says when the file is ahead of the Doc",
+              job["state"] == "done" and "the file is ahead of the Doc, kept: kindness-2.md" in job["message"]
+              and "matches" not in job["message"], str(job))
+
+        def pull_changed(db, manuscript, query=None, **kw):
+            if query == "kindness-2.md":
+                cont.write_text("## **Part Two, Again**\n\nThe Doc's wording of the recap.\n",
+                                encoding="utf-8")
+                return {"changed": [query], "unchanged": [], "conflicts": []}
+            return {"changed": [], "unchanged": [query], "conflicts": []}
+        gdocs.pull_doc = pull_changed
+        job = s.enqueue("pull", stem="kindness")
+        texts = [x["text"] for x in s.status("kindness")["chapter"]["sections"]]
+        check("a pulled continuation re-exports, and its card shows the Doc's text",
+              job["state"] == "done" and job["message"] == "pulled kindness-2.md"
+              and "The Doc's wording of the recap." in texts, str(job))
+    finally:
+        gdocs.push_doc, gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real
+        audiobook._SESSIONS.clear()
+        shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(book, ignore_errors=True)
+
+
 def main_test() -> None:
     check_text_rules()
     check_voice_tags()
@@ -1473,12 +2023,14 @@ def main_test() -> None:
     check_fixture_and_hash()
     check_cli_and_refusals()
     check_elevenlabs()
+    check_dictionary_by_default()
     check_say()
     check_workbench()
     check_audiostation_launch()
     check_casting_filter_block()
     check_generation()
     check_audiobook_page()
+    check_audiobook_continuation_edit()
     print(f"\nAll {PASSED} checks passed.")
 
 

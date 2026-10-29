@@ -1,0 +1,30 @@
+# .github/workflows/docs.yml — regenerates docs/generated/ on every PR and pushes the result
+# to the PR branch, so a commit made without the hook never leaves the docs stale.
+# Agents may merge a PR, or approve a commit, that changes only docs/generated/ (guidelines/index.md).
+name: docs
+on: pull_request
+permissions:
+  contents: write
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pre-commit
+      # First run regenerates and exits 1 when it changed files; the second must pass, so a real error fails the job.
+      - run: pre-commit run metalm-gendocs --all-files || true
+      - run: pre-commit run metalm-gendocs --all-files
+      - name: Commit regenerated docs
+        run: |
+          if [ -n "$(git status --porcelain docs/generated)" ]; then
+            git config user.name "metalm-gendocs"
+            git config user.email "metalm-gendocs@users.noreply.github.com"
+            git add docs/generated
+            git commit -m "[metalm-gendocs] Regenerate docs/generated"
+            git push
+          fi

@@ -37,9 +37,12 @@ directives as named ranges inside a Google Doc; AuthorLM's push rebuilds
 tabs and destroys every anchor, so the two cannot share a Doc. The author
 does not use the add-on. Nothing in it is kept or made compatible.
 
-**Not a generator.** AuthorLM never generates chapter audio. The only
+~~**Not a generator.** AuthorLM never generates chapter audio. The only
 speech it ever requests from ElevenLabs is an audition clip (§11). The
-credits are spent from audiostation, one section at a time, by the author.
+credits are spent from audiostation, one section at a time, by the author.~~
+Reversed 2026-09-25: AuthorLM now generates, retakes and stitches through
+its `audio` verbs and the served review page; audiostation stays as an
+equal second door. See `audiobook-review-design.md`.
 
 **Not a play.** Voice switches are per paragraph and rare (the Sermons need
 about a dozen tags; every essay needs none). A manuscript that alternates
@@ -54,6 +57,15 @@ speakers every line would need a different mechanism; it is not designed
 2. **Two writers, two kinds of file, never the same file.** AuthorLM
    writes `audiobook.json` and `chapters/*.json`; audiostation writes
    `state/*.json` and the audio. The shared key is the section id (§6).
+
+   *Amended 2026-09-25 (principles 1 and 2).* AuthorLM still alone writes
+   `audiobook.json` and `chapters/*.json`. Generation is no longer
+   audiostation's alone: AuthorLM and audiostation both write
+   `state/<stem>.json` and `audio/`, so `state/<stem>.json` is the one
+   exception to "never the same file". The shared writer is safe only
+   under the three guards in `audiobook-review-design.md` §5 (audiostation
+   watches `state/`; Python re-reads state from disk before every render;
+   no Generate in audiostation on a chapter the server is rendering).
 3. **The paragraph is the unit of audio.** A speaker change inside a
    paragraph is resolved by splitting the paragraph in the prose, never by
    an inline marker.
@@ -93,9 +105,9 @@ manuscripts/<M>/_audio/
                           about-author, retail sample, cover, dictionary locator,
                           resolved cast snapshot, schema version
   chapters/<stem>.json    AuthorLM writes: one per toc file; ordered sections
-  state/<stem>.json       audiostation writes: section id → audio files, request id,
+  state/<stem>.json       audiostation or AuthorLM writes: section id → audio files, request id,
                           generated-at; stitched output, duration, loudness
-  audio/<id>.<format>.mp3 audiostation writes
+  audio/<id>.<format>.mp3 audiostation or AuthorLM writes
   _orphaned/…             audiostation moves audio whose id no longer appears anywhere
 ```
 
@@ -116,6 +128,7 @@ Seeded fully populated with a comment on every key. Keys and defaults:
 schema = 1
 
 [text]
+voice = "narrator"           # required book-wide text role in cast.md
 paragraph_gap_ms = 700        # silence after every paragraph section
 rule_gap_ms = 1500            # a horizontal rule is silence, not speech
 footnotes = "drop"            # drop | inline | end   (inline/end reserved, see §16)
@@ -124,13 +137,13 @@ lists = "one-section"         # one-section | one-per-item
 max_section_chars = 5000      # export warns above this; ElevenLabs per-request limits differ by model
 
 [headings]
-voice = "essay-default"       # essay-default | a cast key such as "narrator"
+voice = "narrator"            # required heading role; explicit essay-default follows the file text role
 gap_ms = { h1 = 3250, h2 = 2250, other = 1250 }   # silence BEFORE a heading; adjacent headings collapse to the smaller
 
 [tts]
 model = "eleven_multilingual_v2"   # decides the dictionary rule type (§7)
 quality = "mp3_44100_128"          # ACX accepts 128 or 192
-dictionary = "SMSTTD pronunciations"   # ElevenLabs dictionary NAME; looked up, never stored as an id
+dictionary = "SMSTTD"              # ElevenLabs dictionary NAME; looked up, never stored as an id. Init seeds the manuscript's name; empty also means the manuscript's name
 
 [credits]
 voice = "narrator"
@@ -147,8 +160,13 @@ path = "_assets/audiobook-cover.jpg"   # square, ≥ 2400 px, RGB; the print cov
 ```
 
 Placeholders in `[credits]` resolve from manuscript metadata (§9). An
-unknown key or value is an export error naming the line; a missing key
-takes the default and the export says so once.
+unknown key, wrong type, or invalid value is an export error naming the
+field. The file itself and `text.voice`, `headings.voice`, `credits.voice`
+are required; none is filled from a runtime default. A missing file names
+`authorlm audio init`. Other settings retain their defaults. The seed is
+packaged at `authorlm/audiobook-defaults.toml` and copied once by init.
+Init creates only missing files, preserving an existing config or cast
+byte-for-byte, and refuses when both already exist.
 
 ## 4. From markdown to speech text
 
@@ -188,19 +206,33 @@ pairing heuristic in §10.3.
 
 ## 5. Casting
 
-### 5.1 Layer one — the essay default in `toc.toml`
+### 5.1 Layer one — explicit roles in `_audio/audiobook.toml`
+
+`[text].voice` is the book-wide text role. `[headings].voice` and
+`[credits].voice` independently name their roles. All three are required;
+`audio init` writes `"narrator"` explicitly for each. A heading voice of
+`"essay-default"` is allowed only when explicitly configured and follows
+the file's text role.
+
+An optional exact-file text override lives in the same per-manuscript file:
 
 ```toml
 [[chapter]]
 file = "sermons.md"
-parent = "chapter1.md"
-voice = "herdsman"          # a key in cast.md; absent → "narrator"
+voice = "herdsman"          # required key in _audio/cast.md
 ```
 
-`toc.toml` is structural, never mirrored to the Doc, never exported, and
-already carries per-chapter keys (`illustrations = "none"`). For most
-essays this is the whole of casting. Headings follow the essay default
-unless `[headings].voice` names a key.
+Repeat `[[chapter]]` for additional files. A parent chapter's override never
+flows to its children; a file without an override uses `[text].voice`.
+Unknown keys, wrong types, duplicate files, missing or invalid targets,
+empty role keys, unknown cast roles, and roles without a Voice ID are
+refused by name, including declarations unused by current speech.
+`toc.toml` remains structural; any legacy `voice` there refuses export
+with a hint to move it into `_audio/audiobook.toml`.
+
+The export resolves all speech parameters before writing the existing JSON
+schema. The review page, CLI generation, and audiostation consume those
+resolved sections without selecting a fallback voice.
 
 ### 5.2 Layer two — `cast.md`
 
@@ -317,6 +349,27 @@ seams soft.
 
 ## 7. Pronunciations → ElevenLabs dictionary
 
+**Amended 2026-10-18: every book has a dictionary, and nobody makes it by
+hand.** The author's words, after the Pronunciations tab said "no
+dictionary named in audiobook.toml" and the narrator read the biblical
+Job as an acronym: AuthorLM should create the dictionary for every
+manuscript that renders audio, name it in `audiobook.toml`, and show the
+tab working without the author having to make one. So:
+
+- `audio init` seeds `[tts].dictionary` with the manuscript's name. An
+  empty key in an older `audiobook.toml` means the same thing
+  (`dictionary_name()`); there is no "none" — a book with no table has
+  an empty dictionary, which costs nothing.
+- `audio export` (and so every render, since the page and the CLI export
+  first) looks the dictionary up by name and **creates it from the table
+  when the account does not have it** (`ensure_dictionary()`; the API
+  accepts a dictionary with zero rules, verified 2026-10-18). The export
+  reports the creation as a note, not a warning. `dictionary_locators`
+  (say, workbench) creates the same way instead of refusing.
+- `audio dictionary push` still mirrors the table into it; `audio check`
+  still reports drift. "Dictionary does not exist" is now a transient
+  state that the next export clears.
+
 **Amended 2026-09-26: the push mirrors the table.** The author's words:
 "if we delete something on our end in the pronunciation table, it's not
 making it into the server" and "can we clean out the server every time
@@ -349,8 +402,8 @@ Rulings:
   (A configurable form was built and removed the same day.)
 - Every term is pushed **twice**: as written and lowercased.
 - `audio dictionary push` is **append-only with replacement**:
-  1. look the dictionary up by `[tts].dictionary` name; create it if
-     absent;
+  1. look the dictionary up by name (`[tts].dictionary`, else the
+     manuscript's name); create it if absent;
   2. read the remote rules; diff against the table;
   3. show the diff as prose — rows to add, rows whose reading changed,
      remote rules with no table row — and **ask before applying**;
@@ -469,7 +522,7 @@ id.
 
 | Verb | Does | MCP tool |
 |---|---|---|
-| `audio init` | Seeds `audiobook.toml` and `cast.md`. Refuses if either exists. | — |
+| `audio init` | Seeds missing `audiobook.toml` (with `[tts].dictionary` = the manuscript's name) or `cast.md`; preserves existing files. Refuses when both exist. | — |
 | `audio export [--chapters …]` | Compiles `audiobook.json` and `chapters/*.json`; rewrites only changed files; warns per inline-math span, per unresolved tag, per over-long section. | `export_audio` |
 | `audio check` | Readiness (§12). Exit 1 on any blocking item. | `audio_readiness` |
 | `audio voices [--search …]` | Account and library voices with their free preview clips into the gallery. | `list_voices` |
@@ -576,8 +629,8 @@ Source side (blocking unless noted):
   `[Voice:]` tag) — warning;
 - no unresolved `[Footnote:]`/`[Explain:]`; inline math spans — warning
   with count;
-- dictionary exists remotely, table not ahead of it, no remote-only rules
-  — the last is a warning;
+- dictionary exists remotely (the next export creates it if not), table
+  not ahead of it, no remote-only rules — the last is a warning;
 - retail sample resolves to one to five minutes at ~150 wpm;
 - `audiobook.json` and every chapter file newer than every source they
   depend on (toc, toml, cast, the essays, pronunciations, metadata).
@@ -590,7 +643,7 @@ audiostation's ACX audit.
 ## 13. Build order (ratified)
 
 1. **One voice, end to end.** `audio init`, `audio export`, §4 rules, §6
-   ids, `toc.toml` `voice`, audiostation moved/renamed/folder-open/state
+   ids, `audiobook.toml` voice declarations, audiostation moved/renamed/folder-open/state
    /watch/highlights/continuity, deletions in §10.2. Proves the two
    programs meet on the hash. Output: stitched chapters in the narrator.
 2. **Voices and pronunciation.** `voices`, `audition`, `cast set`, the
@@ -754,7 +807,7 @@ unit, who is speaking, and mark the switches with a `[Voice: key]` line
 above the paragraph. You place tags; you never change a word of prose and
 you never choose a voice or a parameter.
 
-- The essay's default voice is already set (toc.toml). A unit stays in the
+- The essay's default voice is already set (`_audio/audiobook.toml`). A unit stays in the
   active voice unless the speaker plainly changes.
 - A switch is a replace of the unit with the tag line, one blank line, and
   the paragraph exactly as it was. Nothing else in the unit changes.

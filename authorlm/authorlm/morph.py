@@ -89,7 +89,7 @@ SCHEMA_INSTRUCTIONS = (
 
 _NON_PROSE = re.compile(
     r"^(?:#{1,6}\s|\[\^[^\]]+\]:|\[(?:Illustration|Footnote|Explain|"
-    r"Judgment|Voice):)")
+    r"Suggestion|Judgment|Voice):)")
 
 
 def _is_prose(unit: str) -> bool:

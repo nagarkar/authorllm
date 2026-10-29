@@ -10,8 +10,8 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 //
 // TriageApp.tsx inlines docs/writing-essays-tutorial.md at build time via a
 // `?raw` import, so the Help tab can never *diverge in content* from the
-// doc. But the committed dist (authorlm/triage_dist/index.html) is a build
-// product: nothing stops it from going *stale* relative to the doc if
+// doc. But the dist (authorlm/triage_dist/index.html) is a build
+// product, built on install and by hand, never tracked: nothing stops it from going *stale* relative to the doc if
 // someone edits the tutorial and forgets to rebuild. HelpTabTest pins the
 // title and a few distinctive lines from the doc as tripwires, but a
 // tutorial rewrite that happens to preserve those exact lines would still
@@ -59,10 +59,15 @@ const tutorialDoc = fileURLToPath(
 
 export default defineConfig({
   base: "./",
+  // The brand icons (authorlm/brand/, copied from metalm) are served by the
+  // Python server at the site root; the dev server serves them from here too,
+  // and the build leaves them out of the dist (the page links them by url).
+  publicDir: "../../authorlm/brand",
   plugins: [react(), viteSingleFile(), tutorialChecksumPlugin(tutorialDoc)],
   build: {
     outDir: "../../authorlm/triage_dist",
     emptyOutDir: true,
     cssCodeSplit: false,
+    copyPublicDir: false,
   },
 });

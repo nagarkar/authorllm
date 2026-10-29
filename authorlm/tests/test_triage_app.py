@@ -58,13 +58,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
 from authorlm import (  # noqa: E402
     api, cli, triage, triage_analysis, triage_rules, triage_server,
     triage_transport,
 )
 from authorlm.db import Database, ko_fields  # noqa: E402
-from authorlm.extraction import triage_feedback  # noqa: E402
 
 
 def manuscript_fixture(root: Path):
@@ -340,7 +340,13 @@ class TriageAppTest(unittest.TestCase):
                             "concept", "add", "Legacy", option, "definition",
                         ])
 
-    def test_deterministic_plan_is_pure_and_uses_system_provenance(self):
+    def test_deterministic_plan_reads_absence_as_below_the_bar(self):
+        """`concept_unmentioned` and `edge_unmentioned_endpoint` are gone
+        (docs/extraction-redesign.md §9 phase 6): the redesigned
+        extraction grounds every candidate in a span (gate 1), and a
+        pending name with zero contexts is simply below the recurrence bar.
+        The edge on it has no rule of its own any more; it falls with the
+        concept, as collateral."""
         db, manuscript, choice, field, _ = self.fixture()
         self.settle_fixture_concepts(db, choice, field)
         ghost = self.add_pending_concept(db, manuscript, "Spectral Machinery")
@@ -349,31 +355,30 @@ class TriageAppTest(unittest.TestCase):
 
         plan = triage_rules.plan(db, manuscript, files)
 
+        self.assertNotIn("concept_unmentioned", triage_rules.RULES)
+        self.assertNotIn("edge_unmentioned_endpoint", triage_rules.RULES)
         self.assertEqual(
-            {item["rule"] for item in plan["decisions"]},
-            {"concept_unmentioned", "edge_unmentioned_endpoint"})
-        self.assertNotEqual(db.one(
-            "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
-        )["status"], "retired")
+            [(item["rule"], item["object_id"]) for item in plan["decisions"]],
+            [("concept_below_recurrence_bar", ghost["id"])])
+        self.assertIn("0 context(s)", plan["decisions"][0]["reason"])
         self.assertEqual(db.one(
             "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
         )["status"], "inferred")
 
         result = triage.apply_deterministic(db, manuscript, plan["decisions"])
 
-        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["count"], 1)
         self.assertEqual(db.one(
             "SELECT status FROM concept_nodes WHERE id = ?", (ghost["id"],)
         )["status"], "retired")
         self.assertEqual(db.one(
             "SELECT status FROM concept_edges WHERE id = ?", (edge["id"],)
-        )["status"], "rejected")
+        )["status"], "retired")
         evidence = db.all(
             "SELECT e.evidence_type, s.kind FROM evidence e "
             "JOIN sources s ON s.id = e.source_id ORDER BY e.created_at")
         self.assertEqual([(row["evidence_type"], row["kind"]) for row in evidence],
-                         [("deterministic_triage", "system")] * 2)
-        self.assertNotIn("Spectral Machinery", triage_feedback(db, manuscript["id"]))
+                         [("deterministic_triage", "system")])
 
     def test_recommendation_transport_stages_without_applying(self):
         db, manuscript, choice, field, _ = self.fixture()
@@ -682,7 +687,7 @@ class TriageAppTest(unittest.TestCase):
         self.assertTrue(dirty["manuscript_version"]["local_dirty"])
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in dirty["rows"]))
-        api.collect(db, manuscript, {}, analyze=False)
+        api.collect(db, manuscript, {})
         stale = triage.snapshot(db, manuscript, "concepts")
         self.assertTrue(all(row["analysis"]["state"] == "outdated"
                             for row in stale["rows"]))
@@ -738,6 +743,13 @@ class HelpTabTest(unittest.TestCase):
     DIST = REPO / "authorlm" / "triage_dist" / "index.html"
     TITLE = "Writing essays with the beat loop — a tutorial"
 
+    def _need_dist(self):
+        """The dist is build output, not tracked in git: `pip install`
+        builds it (setup.py), and a fresh checkout has none until then."""
+        if not self.DIST.is_file():
+            self.skipTest(f"{self.DIST} not built "
+                          "(cd web/triage-app && npm ci && npm run build)")
+
     def test_canonical_tutorial_exists_and_is_substantial(self):
         self.assertTrue(self.DOC.is_file(), f"missing {self.DOC}")
         text = self.DOC.read_text(encoding="utf-8")
@@ -745,7 +757,7 @@ class HelpTabTest(unittest.TestCase):
         self.assertIn(self.TITLE, text)
 
     def test_built_dist_carries_the_tutorial(self):
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         # `assertTrue`, not `assertIn`: the haystack is an 800 kB
         # single-file bundle and assertIn would print all of it.
@@ -779,7 +791,7 @@ class HelpTabTest(unittest.TestCase):
         that same hash here and requiring an exact match makes ANY edit to
         the doc without a rebuild fail this test, regardless of which
         lines moved — no line list to keep in sync."""
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         doc_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
         expected = f"<!-- tutorial-sha256:{doc_hash} -->"
@@ -794,7 +806,7 @@ class HelpTabTest(unittest.TestCase):
         matches. This is what 'structurally detectable' cashes out to: the
         comparison fails on ANY edit, not just ones that happen to touch a
         pinned line."""
-        self.assertTrue(self.DIST.is_file(), f"missing {self.DIST}")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         real_hash = hashlib.sha256(self.DOC.read_bytes()).hexdigest()
         perturbed = hashlib.sha256(
@@ -1099,12 +1111,14 @@ class HelpTabTest(unittest.TestCase):
             "the renderer is discarding <details> again")
         self.assertIn("<details className=\"doc-fold\"", src,
                       "the renderer no longer builds a real <details>")
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         self.assertTrue("doc-fold" in built,
                         "the fold class did not reach the dist — rebuild "
                         "(cd web/triage-app && npm run build)")
 
     def test_built_dist_carries_the_help_tab_itself(self):
+        self._need_dist()
         built = self.DIST.read_text(encoding="utf-8")
         self.assertTrue("help-doc" in built,
                         "the Help tab's markup is missing from the dist")

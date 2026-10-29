@@ -1,0 +1,1005 @@
+# Summary hierarchy — paragraph, section and essay summaries, and what each consumer reads
+
+Status: RATIFIED by the owner 2026-10-25, after a ten-question grill (the
+rulings are §0) and the owner's confirmation that §6.0's reading of the
+processes matches theirs. Build not started; §11 is the plan. Written from
+the owner's request of the same day ("a first class paragraph summary
+generation process … we still need section summaries … an essay summary
+which takes all of the section summaries … figure out what the correct
+inputs to filters and lenses ought to be … a deep dive is required"). No
+code changed by this document; every count was read from the live DB
+read-only. The extraction redesign (`docs/extraction-redesign.md`, PR
+nagarkar/authorllm#267) consumes §7 through `summaries.for_unit`.
+
+Companion designs: critique-pass-design.md §4 (the current `essay_summaries`
+table), autoregressive-writing-design.md §12 (the 2026-08-27 finding that
+per-paragraph summaries were not worth it, revisited in §3.1 here),
+filter-pass-design.md §9.1a (the `summaries` front-matter key),
+lens-architecture-design.md §1–2 (lenses never read summaries),
+track-a-two-step-extraction.md (why extraction is noisy).
+
+## 0. Rulings (grilled 2026-10-25)
+
+Ten questions were put to the owner one at a time; the rulings below are
+binding for the build and the rest of the document is written to them.
+
+1. **Section = heading-delimited subunit** (`extraction._sections`, 265 in
+   SMSTTD); paragraph = blank-line block; essay = toc unit (36). A file
+   without headings is one section. The existing `essay_summaries` row is
+   the essay grain.
+2. **A paragraph summary is a record with a gist.** The gist is written for
+   AI agents, not for a human reader: as rich and as terse as possible, so
+   more fits in a payload and an agent gets more out of it. The record
+   carries definitions (verbatim), relations between concepts (with the
+   asserting span) and backward and forward references to concepts, because
+   it is the raw material for concept and edge extraction, and by
+   composition for the section and essay summaries (§3.2, §7).
+3. **Every level rebuilds lazily, on use.** Nothing rebuilds on collect; a
+   collect only invalidates (the stored hash no longer matches). The verb
+   that needs a level rebuilds the dirty rows of that level and proceeds.
+   The owner's reason: a paragraph edited ten times before anything reads it
+   should cost one call, not ten.
+4. **Lenses: a backward reference pulls in the referenced section's text.**
+   When a paragraph record refers back to a concept or chapter, the section
+   that supplied it enters the lens payload as reference text (hashed),
+   for lenses whose concern is consistency across the book, declared per
+   lens; a line-level pass never gets it. The 2026-09-06 ruling stands: the
+   record chooses the text, the model never sees the record (§6.2).
+5. **Models:** the flash tier for paragraph records (Luna if a recorded
+   trial shows flash is not good enough); Luna (`[critique]
+   summarizer_model`) for sections and essays.
+6. **Essay summary:** the model writes FLOW, MOVES, MOTIFS, DOES NOT from the
+   section summaries; code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from
+   the paragraph records and renders them under the same labels (§6.6). The
+   first full rebuild replaces every row; no back-compat.
+7. **Recurrence is a query, not a model judgment:** a candidate concept is
+   a term with mentions in at least two paragraphs in distinct contexts,
+   counted from the records before any proposal is made (§7.3). The
+   extraction redesign owns the consumer.
+8. **Tiny paragraphs get their own row.** A heading row has `kind = heading`
+   and an empty record with no model call; verse lines and dialogue beats
+   get a record like any paragraph. Coverage is set equality.
+9. **A lazy rebuild inside a verb reports its cost and proceeds:** no gate,
+   no flag; the verb prints one line per level rebuilt with the ledger's
+   cost line. `summarize rebuild` stays for a deliberate full pass.
+
+10. **Passes declare their inputs; the framework supplies them.** No
+    one-off decision per pass. Each processing module (critique edit pass,
+    beat loop, filters, lenses, extraction, manifest) declares the artifacts
+    it needs as a set of enum values in its own code module; a lens or
+    filter artifact declares the same enum names in its front matter.
+    Changing what a pass receives is a change to that one declaration
+    (e.g. the critique module adds `Input.PARAGRAPH_RECORDS`), never to the
+    assembler. §6.7 names the enum and each module's declaration.
+
+## 1. What exists today, with locations
+
+### 1.1 Storage
+
+One table, `essay_summaries` (`db.py:335-353`): `file`, `summary` (one prose
+block with the seven labels), `source_hash` (first 16 hex of sha256 of the
+unit's text, `summaries.py:43`), `upstream_hash` (hash of the concatenated
+prior summaries), `upstream_stale`, `status` (`current | deprecated`), unique
+on (manuscript, file). No coverage column: coverage is recomputed from the
+stored summary and the current paragraph count whenever it is shown
+(`summaries.py:497-521`).
+
+Live state (manuscript `ms-b33871dc315c`, read 2026-10-25): 35 rows, all
+`current`, 12,643 summary words in total; the longest is kindness.md at 876
+words, the shortest recap-sermon-five.md at 72. The book's reading order has
+36 toc units.
+
+### 1.2 Building
+
+- Unit = toc entry, front matter included (`summaries.units`, `:143-150`).
+- Autoregressive in reading order: each call carries every prior summary
+  (`summarize_unit`, `:608-654`, PRIOR SUMMARIES block), the graph's `file=`
+  slice (`_concept_slice`, `:587-599`), a target length of n/10 to n/7.5
+  words floored at 40 and capped at 500 (`target_length`, `:47-55`), and the
+  unit's text with every paragraph numbered `[n]` (`_numbered_paragraphs`,
+  `:58-65`; paragraphs are blank-line blocks, `revisions._paragraphs`, `:231`).
+- The prompt (`prompts/summarizer.md`) asks for MOVES with a paragraph
+  citation per move, then INTRODUCES, ASSUMES, PROMISES, DEBTS, MOTIFS,
+  DOES NOT, prose only, author's vocabulary verbatim.
+- `paragraph_coverage` (`:77-118`) checks that every number 1..N appears in
+  some citation; a cross-bracket range `[1]-[30]` counts every paragraph
+  between as cited, so `complete` means "no paragraph fell outside a cited
+  span", not "every paragraph got a move".
+- `rebuild` (`:657-717`) takes ONE snapshot of context text before the first
+  call (in-flight files contribute their pinned text, `_context_units`,
+  `:205-219`); with `only_missing_or_stale` a fresh unit is reused until the
+  first stale one, after which everything downstream cascades.
+  `rebuild_one` (`:720-753`) rebuilds one unit against the current priors
+  and marks everything after it `upstream_stale`.
+
+### 1.3 Staleness
+
+Mark, never cascade (module docstring, `:1-15`). `_state` (`:248-281`)
+decides, in order: `unwritten` (a writeup created the file) → `missing` →
+`deprecated` (file left the toc, `api._deprecate_departed_summaries`, `:860`)
+→ `stale` (source_hash mismatch) → `rewriting` (in flight, pinned text
+matches) → `upstream_stale` → `fresh`. `mark_changed` (`:756-775`) runs after
+every collect (`api.py:982`) and flags the rows after the first changed unit.
+
+### 1.4 Cost, measured
+
+The usage ledger (`~/.authorlm/logs/usage.jsonl`, purpose
+`critique.summarizer`) records 217 calls on `openai/gpt-5.6-luna` since
+2026-08-30: 3.39 M input tokens, 249 K output tokens, $0.98 in total. That is
+about 15.6 K input and 1.1 K output tokens per call. The input is dominated by
+the PRIOR SUMMARIES block, which grows to ~12 K words by the last unit.
+
+| | per full rebuild (36 units) | per `rebuild_one` late in the book |
+|---|---|---|
+| input tokens | ~560 K | ~20 K |
+| output tokens | ~41 K | ~1.2 K |
+| cost at $0.20 / $1.20 per M | **~$0.16** | ~$0.006 |
+
+### 1.5 Consumers, and what each does with a summary
+
+| consumer | reads | how | gated? | location |
+|---|---|---|---|---|
+| critique edit pass | before/after essay summaries | `summaries_ready` then `build_context` puts `before` and `after` into the editor's context | blocks on missing / stale / deprecated; tolerates upstream_stale | `passes.py:220-256`, `:356-377` |
+| beat loop (write path) | before/after essay summaries | `drafting_context` renders them as the L1 book frame, with `!!` state warnings and a coverage note per entry; `write start` gates on the same predicate | same gate as the edit pass | `summaries.py:524-582`, `api.py:1515-1533`, `api.py:1838` |
+| filter pass | before/after essay summaries | only when the filter declares `summaries = true`; rendered ungated and marked, never blocked | no (`§9.1a`) | `filters.py:193-199`, `filtering.py:341-380`, `:787-797` |
+| manifest reader load | every essay summary's INTRODUCES and ASSUMES lists | regex over the prose labels, normalized against graph names and aliases; debt = ASSUMES minus everything introduced earlier | no; stale rows are shown and marked | `manifest.py:40-118` |
+| lenses | nothing | by ruling: the assembler does not import `_neighbour_summaries`, the prompt says "no summary of any chapter exists here" | n/a | `lenses.py:19-23`, `:270-273` |
+| briefing | nothing | its "summary" is `proposals.describe`, unrelated | n/a | `briefing.py:77` |
+| critique.py | nothing directly | the pass reads through `passes.build_context` | | |
+| `write collect`, `critique resolve` | write only | `mark_changed`; rebuild-at-gate | | `api.py:982`, `cli.py:1593-1617` |
+
+There is no MCP verb for summaries at all (`mcp_server.py` has no summarize
+tool); the CLI has `summarize status | show <file> | rebuild [file] [--all]`
+(`cli.py:1873-1929`).
+
+## 2. Does a section summary help edge extraction today? No, and it cannot.
+
+`extraction.py` never reads `essay_summaries` or imports `summaries`: the only
+"summary" in the module is the result dict `extract_concepts` returns
+(`extraction.py:624`). Its inputs are:
+
+- the raw text of the changed heading sections (`_changed_sections`,
+  `:406-411`; the extraction unit ratified 2026-08-10), batched into payloads
+  of at most `extraction_max_chars` = 24,000 characters (`_section_payloads`,
+  `:414-446`, `config.toml:14`), or the whole file set when `--full`;
+- a KNOWN CONCEPTS inventory of names (`_inventory_names`, `:449-456`),
+  trimmed to fit (`_fit_inventory`, `:459-469`);
+- the author's triage precedents (`triage_feedback`, `:208`);
+- the prompt (`prompts/extraction.md`): concepts, links with a strict relation
+  guide, aliasing sentences quoted verbatim.
+
+A proposed link survives only if both endpoints occur in the text the model
+saw (`endpoint_in_text`, `:1059-1067`), and a concept only if it recurs across
+the manuscript (`hygiene.passes_recurrence_bar`). So **the owner's belief is
+correct, and for a stronger reason than suspected: no summary of any level
+reaches extraction, so none can be helping.**
+
+Would today's summary help if it were fed in? Not for edges. The MOVES block
+is written for an editor deciding what another essay may assume; it names the
+central claim and the moves, not the sentences that assert a relation. A
+316-word MOVES block over a 1,385-word essay (basilides.md) has dropped the
+very spans the grounding gate (`endpoint_in_text`) and the alias rule ("the
+exact sentence copied verbatim") require. What extraction lacks is not a
+higher-level view; it is a paragraph-level one with the asserting span kept.
+That is §7.
+
+## 3. The hierarchy
+
+### 3.1 Why the 2026-08-27 "no" is reversed
+
+autoregressive-writing-design.md §12.3 rejected paragraph summaries on three
+grounds. Each has changed:
+
+- *Cost*: it assumed a before/after context assembled from paragraph
+  summaries. Nothing here puts paragraph summaries into a drafting or edit
+  context; those keep the essay grain (§6). The paragraph level serves
+  extraction, the reader load and the section summary's citation skeleton.
+- *Staleness*: it assumed paragraph rows keyed by ordinal, so an insertion
+  renumbers everything. Rows here are keyed by the paragraph's content hash
+  (§4.1); an insertion costs one new row and a section rebuild.
+- *Coverage*: it argued numbered citation already gives paragraph-level
+  accountability. The addendum of 2026-08-28 conceded that a blanket
+  `[1]-[30]` satisfies the check. A row per paragraph is the only coverage
+  guarantee that cannot be satisfied by a range.
+
+### 3.2 Paragraph summary
+
+- **Unit**: one blank-line block (`revisions._paragraphs`), as the critique
+  pass and the writing loop already define it. Average 47 words in SMSTTD.
+- **Kind** (deterministic, no model): `heading` (first line starts with `#`),
+  `verse` (the file's toc entry is verse, or every line is short),
+  `dialogue` (the house's speaker-prefixed lines), `prose`. Headings get no
+  model call and an empty summary; they exist so a section's paragraph list
+  is complete and so `ordinal` is a position in the file.
+- **Record** (one JSON object per paragraph, produced by one call per
+  section, see §3.5):
+  - `gist`: one sentence, at most ~30 words, in the author's vocabulary.
+  - `claim`: the assertion this paragraph makes, or `null` for a paragraph
+    that only transitions, illustrates or restates.
+  - `move`: one of `states | defines | argues | illustrates | objects |
+    answers | transitions | restates | promises | recalls`.
+  - `mentions`: `[{term, span, role}]` — every term of art, named figure,
+    text, image or character the paragraph uses; `span` is the verbatim
+    substring of the paragraph containing it (checked by byte comparison
+    before storage, a mention with no matching span is dropped and counted);
+    `role` is `introduces | defines | uses | names` (`names` is an aliasing
+    sentence, the extraction prompt's ALIAS GUIDE case).
+  - `definitions`: `[{term, sentence}]` — every sentence of the paragraph
+    that fixes what a term means ("X is Y", "we call X Y", a naming
+    ceremony), copied verbatim; the raw material for a concept's notes and
+    for the alias rule. A `defines` mention always has a definition here.
+  - `relations`: `[{from, relation, to, span}]` with `relation` from
+    `extraction.VALID_RELATIONS`; `span` verbatim, checked the same way.
+    This is the raw material for edge extraction: a connection the
+    paragraph asserts between two concepts, with the sentence that asserts
+    it (owner, 2026-10-25).
+  - `references`: `[{term, direction, target, span}]` — every place the
+    paragraph points the reader backward ("as the Metaphysic showed",
+    "recall the two Fields") or forward ("a later essay will show", "we
+    return to this in the Recapitulation") about a concept; `direction` is
+    `back | forward`, `target` the chapter or section named if the text
+    names one, else `null`. These feed the essay summary's PROMISES and
+    DEBTS (derived like INTRODUCES and ASSUMES, §6.6) and the lens
+    `pointers` resolver.
+  - `depends_on`: the hashes of earlier paragraphs in the same section the
+    model says this one presupposes (the step it continues, the term it uses
+    that was defined above). Within-section only; across sections the
+    section summary carries it.
+- **Length**: the record's prose is the `gist`; the whole record for a
+  47-word paragraph runs ~60–80 tokens. Across the book that is ~90 K output
+  tokens, which is the number that makes it "about the same cost as section
+  generation" (§5).
+- **What it must not do**: evaluate, soften, or name a concept the paragraph
+  does not contain. The span rule enforces the last one mechanically.
+
+### 3.3 Section summary — rebuilt from text, with the paragraph records as skeleton
+
+The question was: from paragraph summaries, or from text? **From both, with
+the text as authority.** A section is short (265 sections over 92 K words,
+~350 words each on average, the largest a few thousand), so re-reading its
+text costs almost nothing, and a summary written from text cannot inherit a
+paragraph record's error. The paragraph records are supplied as a numbered
+skeleton the model must place: every non-heading paragraph hash appears in
+exactly one move, which replaces today's `[n]` citation check with an
+equality check on sets (no range can satisfy it).
+
+- **Unit**: `extraction._sections` on the file, each with its heading line;
+  a file without headings is one section. Key: `(file, section_ordinal)`
+  for display, `section_hash` = hash of the ordered paragraph hashes for
+  identity.
+- **Content** (prose, labelled like today's block): `POINT` (what the section
+  establishes, one or two sentences), `MOVES` (in order, each citing its
+  paragraphs by ordinal), `DEPENDS ON` (earlier sections of the same essay
+  it presupposes, by heading), `LEAVES OPEN` (what it defers to a later
+  section or essay).
+- **Length**: n/10 to n/7.5 words of the section's text, floored at 30,
+  capped at 250 (today's formula, re-floored for the smaller unit).
+- **Conditioning**: the section's text, its paragraph records, the graph
+  slice for the file, and the POINT lines of the earlier sections of the same
+  essay (not their full summaries: within one essay the sections are read
+  together by every consumer that wants them).
+
+### 3.4 Essay summary — composed from section summaries
+
+- **Unit**: the toc entry, as today. The row stays in `essay_summaries`.
+- **Inputs**: the essay's section summaries (never the text: at this level the
+  compression is the point, and metaphysic.md is 13,778 words), the graph
+  slice, and the prior essay summaries in reading order exactly as today
+  (`PRIOR SUMMARIES`), so the autoregressive book memory is unchanged.
+- **Content**: `FLOW` first (new: the line of the argument section by
+  section, one clause per section, naming each by heading, which is "the
+  flow of the whole essay" the owner asked for), then MOVES (now citing
+  sections rather than paragraphs), PROMISES, DEBTS, MOTIFS, DOES NOT as in
+  the ratified prompt. INTRODUCES and ASSUMES stop being model prose: they
+  are derived from the paragraph records (§6.6) and rendered into the block
+  by code, so the manifest's "sentence fragments" limitation
+  (`manifest.py:25-30`) closes.
+- **Length**: today's formula over the essay's word count, unchanged.
+- **Staleness**: unchanged semantics (`source_hash`, `upstream_hash`,
+  `upstream_stale`, `status`), plus `sections_hash` so a rebuild can tell
+  "my sections changed" from "the text changed under me while my sections
+  were rebuilt".
+
+### 3.5 Calls (ruling 3: every call below happens on use, never on collect)
+
+- Paragraph records are produced **one call per section**, the section's
+  text numbered by paragraph ordinal, JSON array out. One call per paragraph
+  would be 1,949 calls with a prompt each; one call per essay would put
+  185-paragraph god.md into a single 10 K-token answer, which Luna-class
+  models truncate. A section over `max_section_chars` (24,000, extraction's
+  cap) splits at paragraph boundaries into two calls.
+- Section summaries: one call per section (265).
+- Essay summaries: one call per essay (36), after its sections.
+- Order within a rebuild: paragraphs of a section → that section → next
+  section … → the essay → the next essay. A stale paragraph record forces
+  only its own section and essay to rebuild; the essay's downstream
+  neighbours are marked, as today.
+
+## 4. Storage
+
+Three tables (3NF: the levels have different columns and different keys; one
+`summaries` table with a `level` column was considered and rejected, §9).
+All carry `KNOWLEDGE_OBJECT_COLUMNS` through `ko_fields`.
+
+### 4.1 `paragraph_summaries`
+
+```
+manuscript_id   TEXT NOT NULL
+file            TEXT NOT NULL
+para_hash       TEXT NOT NULL     -- hash of the paragraph's normalized text
+ordinal         INTEGER NOT NULL  -- 1-based position at last build (display only)
+section_ordinal INTEGER NOT NULL  -- the section it sat in at last build
+kind            TEXT NOT NULL     -- heading | verse | dialogue | prose
+record          TEXT NOT NULL     -- the JSON object of §3.2
+model           TEXT NOT NULL     -- which model wrote it (the ledger's key)
+status          TEXT NOT NULL DEFAULT 'current'   -- current | orphaned
+UNIQUE (manuscript_id, file, para_hash)
+```
+
+Identity is the content hash. An unchanged paragraph that moves keeps its row
+(its `ordinal` is refreshed by the next section build, no model call). A
+paragraph whose text changed gets a new row; the old row becomes `orphaned`
+(kept, like `deprecated` essays: the record of what a paragraph said, useful
+to the proposal learning loop; pruned by an explicit verb, never on collect).
+A paragraph that appears verbatim twice in one file (a refrain) has one row
+and two ordinals; the second is stored in the section row's paragraph list.
+
+### 4.2 `section_summaries`
+
+```
+manuscript_id   TEXT NOT NULL
+file            TEXT NOT NULL
+section_hash    TEXT NOT NULL     -- hash of the ordered para_hashes
+section_ordinal INTEGER NOT NULL  -- position at last build
+heading         TEXT              -- the heading line, NULL for a preamble
+para_hashes     TEXT NOT NULL     -- JSON list, in order
+summary         TEXT NOT NULL     -- POINT / MOVES / DEPENDS ON / LEAVES OPEN
+model           TEXT NOT NULL
+status          TEXT NOT NULL DEFAULT 'current'   -- current | orphaned
+UNIQUE (manuscript_id, file, section_hash)
+```
+
+### 4.3 `essay_summaries`
+
+Unchanged columns plus `sections_hash TEXT NOT NULL` (hash of the ordered
+section hashes) and `model TEXT NOT NULL`. Existing rows are replaced by the
+first full rebuild (no migration of their text; the format changes).
+
+### 4.4 Staleness per level
+
+| edit | paragraph rows | section rows | essay row | downstream essays |
+|---|---|---|---|---|
+| wording inside one paragraph | that paragraph: new row needed | its section: stale (hash moved) | stale (`source_hash`) | `upstream_stale` |
+| paragraph inserted or deleted | one new row, or one orphan | its section: stale | stale | `upstream_stale` |
+| paragraph moved within a section | none | stale (order is in the hash) | stale | `upstream_stale` |
+| paragraph moved across sections | none | both sections stale | stale | `upstream_stale` |
+| heading renamed | the heading paragraph: new row (no model call) | stale | stale | `upstream_stale` |
+| file leaves the toc | untouched | untouched | `deprecated` (as today) | `upstream_stale` |
+
+`status` per level is derived at read time exactly as `_state` does today,
+from the hashes, never stored as a flag; the only stored flag remains the
+essay row's `upstream_stale`, because conditioning on prior essays is the one
+thing a hash of the file cannot see.
+
+### 4.5 Incremental rebuild, on use (ruling 3, ruling 9)
+
+A consumer asks `summaries.ensure(db, manuscript, llm, level, files)`
+before it reads a level. `ensure` reads one capture, finds the dirty rows of
+that level and every level below it for those files, rebuilds them in the
+order of §3.5, prints one line per level with the ledger's cost line, and
+returns the fresh rows. `passes.summaries_ready` and the `write start` gate
+stop blocking: they call `ensure` for the essay level and proceed. A collect
+does nothing but write the text; dirtiness is the hash comparison at read
+time. `summaries.rebuild(level=…)` remains the deliberate full pass: it reads one capture (as today) and for each essay
+in reading order: computes the paragraph hashes, finds the paragraphs with no
+`current` row, groups them by section, makes one call per such section,
+stores the records; rebuilds every section whose `section_hash` has no
+current row; rebuilds the essay if its `sections_hash` or `source_hash`
+moved, or if `--all`; marks downstream. A paragraph edit in essay 30 of 36
+therefore costs: one paragraph-record call for its section, one section call,
+one essay call. The prior-summaries block of that essay call is the same size
+as today's `rebuild_one`.
+
+## 5. Cost on SMSTTD
+
+Counts from the live DB (version 637, 2026-10-25): 36 toc units, 92,425
+words, 1,949 paragraphs (265 of them headings; 537 under 15 words), 265
+sections, 429 live concepts, 1,569 edges. Token estimates use 1.35 tokens per
+word for the prose and the measured per-call overhead of today's summarizer.
+Prices are the configured summarizer's (`openai/gpt-5.6-luna`, $0.20 input /
+$1.20 output per M tokens, from `~/.llmlm/prices.json`); a flash-lite tier is
+$0.10 / $0.40.
+
+| level | calls per full build | input tokens | output tokens | cost (Luna) | cost (flash-lite) |
+|---|---|---|---|---|---|
+| paragraph records | 265 (one per section) | ~125 K text + ~130 K prompt and slice overhead ≈ 255 K | ~90 K | **~$0.16** | ~$0.06 |
+| section summaries | 265 | ~125 K text + ~90 K records + ~130 K overhead ≈ 345 K | ~45 K | **~$0.12** | ~$0.05 |
+| essay summaries | 36 | ~45 K section summaries + ~560 K cumulative priors (as today) ≈ 600 K | ~41 K | **~$0.17** | n/a (keep the ratified model) |
+| whole hierarchy | 566 | ~1.2 M | ~176 K | **~$0.45** | ~$0.28 with the cheap tier on the lower two |
+
+**Measured (step 4, the first full live rebuild, 2026-10-25, `summarize
+rebuild --all` from the worktree, DB version 657, 37 toc units, 1,935
+paragraphs, 266 sections; sequential, 67 minutes wall clock):**
+
+| level | calls | input tokens | output tokens | cost | model | estimate above |
+|---|---|---|---|---|---|---|
+| paragraph records | 273 | 418 K | 409 K | **$0.72** | `gemini/gemini-3.1-flash-lite` | ~$0.06 |
+| section summaries | 266 | 1,001 K | 244 K | **$0.49** | `openai/gpt-5.6-luna` | ~$0.12 |
+| essay summaries | 33 | 474 K | 28 K | **$0.13** | `openai/gpt-5.6-luna` | ~$0.17 |
+| whole hierarchy | 572 | 1.89 M | 681 K | **$1.34** | | ~$0.45 |
+
+Where the estimate was wrong, and why: the paragraph records' OUTPUT is
+4.5× the estimate (409 K against ~90 K) — a record with verbatim spans for
+every mention, definition, relation and reference is much richer than a
+gist, and flash-lite's output price ($0.40 / M) makes that the biggest
+line; the section calls' INPUT is 3× the estimate (1.0 M against 345 K),
+the text plus skeleton plus concept slice plus prompt per call being
+~3.8 K tokens, not ~1.3 K; the essay level came in under the estimate
+(the section summaries are a smaller block than the old numbered text).
+Two more passes were needed because flash-lite returned unparseable JSON
+on 4 of 273 calls (43 paragraphs without a record, 7 sections and 4 essays
+skipped): a plain `summarize rebuild` retried exactly the gaps (10
+paragraph calls, 6 section calls, $0.04) but, being the deliberate pass,
+also cascaded every essay after the first refilled one (33 essay calls,
+$0.13); a third pass after the tag-only rule (below) did the same ($0.13).
+The lazy `ensure` path would have cost the three essay calls alone. Two
+findings from the pass are design notes for the lower levels: a paragraph
+that is only an audiobook tag line (`[Omit: all]`) never gets a record
+from the flash tier and now gets an empty one with no call, like a heading
+(ruling 8 extended, code in `_build_file`); and one LaTeX-heavy section of
+mixing.md (§20, display math with backslashes) breaks flash-lite's JSON on
+every attempt, so that essay stays `stale` until the paragraph pass
+escapes or retries differently (open; ruling 5's Luna fallback is the
+obvious candidate). Section summaries overshoot their length target:
+median summary/text ratio 0.27 against the n/10–n/7.5 target, every one
+of the 272 body sections above its range — the labels and one-line-per-
+move MOVES are a fixed cost the formula does not see; tightening the
+prompt or re-flooring is step 5's call. The essay blocks total 15,541
+words over 37 rows (12,643 before, 35 rows): the four derived lists add
+words the old prose lists did not.
+
+For comparison today's full rebuild is ~$0.16 (§1.4). An incremental rebuild
+after editing one section late in the book is three calls, ~25 K input and
+~2 K output tokens, **about one cent**. The paragraph level is, as the owner
+expected, about the price of the section level; the essay level is unchanged
+because its cost was always the prior-summaries block, which this design does
+not touch.
+
+Wall clock: today's rebuild is sequential (prior summaries). Paragraph and
+section calls within one essay are also sequential (section N's POINT lines
+feed section N+1), but different essays' lower levels are independent and may
+run in parallel before the essay pass; a full build at four workers is on the
+order of today's.
+
+### 5.1 The first live rebuild, and the JSON call (2026-10-25/26)
+
+The step 4 session's full rebuild cost $1.34 (paragraph $0.72, section
+$0.49, essay $0.13) against the $0.45 estimate above: paragraph-record
+output ran 4.5× the estimate and section input 3×. One essay, mixing.md,
+stayed stale because its display-math section made the paragraph model's
+reply unparseable on every attempt. The owner's ruling on that: a model
+not returning JSON is not a reason for a model fallback; the call must ask
+for JSON properly. The finding behind it: `LLMClient.complete_json` only
+appends "Reply with JSON only" to the prompt; llmlm sends
+`response_format json_object` for the paragraph model
+(gemini-3.1-flash-lite) because authorlm declares no `output_schema` and no
+`schema_loader`, although that model's profile supports `json_schema`
+(verified live 2026-10-17); and the prompt asks for a top-level JSON array,
+which `json_object` mode cannot return, so every reply survived only
+through the parser's tolerance of an object wrapping one list. The fix is
+a declared record schema sent as `json_schema`, reply shaped
+`{"records": […]}`; it is its own PR.
+
+## 6. Inputs: which consumer gets which level
+
+### 6.0 The processes: what each is for, when to use which, what it needs, what it lacks
+
+AuthorLM has five model-driven processes that read the manuscript. They are
+not interchangeable; each exists for a different kind of question, and the
+inputs follow from the question.
+
+**Critique edit pass** (`critique run`, `passes.py`, `prompts/editor.md`).
+*Use it when an outside reader (a critic's document, a referee, the author's
+own notes) has said what is wrong with an essay and the author wants the
+essay revised.* It takes the critique's items and the author's intents, and
+proposes edits to one existing essay as diffs the author accepts or rejects
+one by one. It is the only process that rewrites existing prose at the
+paragraph level under direction.
+- *Needs, for that job:* the law it writes under (style guide, validated
+  beliefs), the work orders (intents), the author's definitions of the
+  concepts the essay uses, the author's verdicts earlier in the same pass,
+  the essay itself paragraph by paragraph, and enough of the rest of the
+  book to avoid re-explaining, pre-empting or contradicting it.
+- *Gets today:* all of that; "the rest of the book" is the before/after
+  essay summaries (the summaries of every essay earlier and later in the
+  reading order).
+- *Lacks:* a map of the essay it is editing. A 185-paragraph essay arrives as
+  a numbered list and the editor must reconstruct the argument before it can
+  tell a redundant paragraph from a load-bearing one. Also, when the essay
+  refers back to an earlier chapter ("as the Metaphysic showed"), it has only
+  that chapter's summary, not the passage pointed at. → SECTION_OUTLINE of
+  the target; REFERENCED_SECTIONS (ruling 4 applied here under ruling 10).
+
+**Beat loop** (`write start/plan/propose/accept`, `writing.py`,
+`prompts/beat-draft.md`). *Use it when an essay is to be written from a
+plan, or rewritten whole from a ratified plan.* It drafts one beat at a
+time, conditioned on the verbatim text accepted so far; the author accepts
+or rejects each beat. It is the only process that produces new prose.
+- *Needs:* style law, beliefs, intents, the ratified plan and brief, the
+  concepts the plan names with their definitions, the pinned original when
+  rewriting, the accepted text so far, the last verdict, and the book frame
+  (what is already established before this essay, what is still to come).
+- *Gets today:* all of that; the book frame is the before/after essay
+  summaries, gated fresh.
+- *Lacks:* little. The within-essay grain is already verbatim, so paragraph
+  records of this essay add nothing. For a rewrite, the pinned original's
+  section summaries would give the planner the original's structure with
+  provenance, where the DIGEST today is a model-written claim list.
+  → SECTION_OUTLINE of the pinned original, rewrites only.
+
+**Filters** (`filter run`, `filtering.py`, `_filters/*.md`,
+`prompts/filter-run.md`). *Use one when a concern is mechanical, author-
+ratified, and inside one essay: pronunciation tags, typography, a protected
+term, repeated phrasing, a transition rule.* A filter walks the essay unit
+by unit (sequential) or sees it whole (global) and emits edits the author
+triages. It never judges the argument; its jurisdiction is one essay and
+one rule.
+- *Needs:* the rule (its own prompt), the beliefs and intents that say which
+  changes matter, the concept slice and protected terms so it does not
+  rename a term of art, the dictionary or cast when the rule is about them,
+  its own prior runs on this file, the unit or the essay.
+- *Gets today:* all of that; the other essays' summaries only when the
+  filter declares `summaries = true`, ungated.
+- *Lacks:* for the few filters whose rule depends on where a unit sits in
+  the argument (repetition, transitions), the essay's own outline. For the
+  rest, nothing. → SECTION_OUTLINE, by front matter, for those filters only.
+  The neighbours' essay summaries are the wrong level for a per-unit pass
+  and stay opt-in.
+
+**Lenses** (`lens run`, `lenses.py`, `_lenses/*.md`). *Use one when the
+question is editorial judgment against a ratified concern, inside a chapter
+or across chapters: is this pitched to the audience, does the through-line
+hold, are cross-references right, do the premises a chapter leans on
+actually get supplied where it says.* A lens reports findings that quote the
+chapter verbatim; it does not edit. It runs on stable inputs only, so a
+finding stays valid until the text it quotes changes.
+- *Needs:* its own prompt and examples, the glossary with where each term
+  was introduced, the audience and scheme profiles, the reading order, and
+  the TEXT of any other chapter the concern needs, hashed.
+- *Gets today:* all of that; other chapters come in whole under `pointers`
+  and `neighbours`.
+- *Lacks:* a way to bring in only the passage of another chapter that a
+  backward reference points at, instead of the whole chapter (metaphysic.md
+  is 13,778 words). → REFERENCED_SECTIONS for consistency lenses (ruling 4).
+  Summaries never enter the payload; they only choose the text.
+
+**Extraction** (`extract`, `extraction.py`, `prompts/extraction.md`).
+*Use it to grow the concept graph: which terms are concepts, how they
+relate, what aliases the text declares.* Its output is proposals the author
+confirms or rejects; it never touches prose.
+- *Needs:* the text at a grain where an asserted relation can be quoted,
+  the known concepts so it links rather than re-extracts, the author's past
+  verdicts.
+- *Gets today:* raw changed heading sections, a list of known names, a
+  capped sample of verdicts. No summary of any level (§2).
+- *Lacks:* paragraph-level raw material with the asserting sentences kept:
+  definitions, relations, references. → PARAGRAPH_RECORDS, SECTION_OUTLINE
+  (§7; the extraction redesign, PR #267, owns the consumer).
+
+**Manifest reader load** (`manifest.py`, derived on every Doc push). *A
+report, not a pass: what does each essay assume that no earlier essay
+supplied.* Gets the prose INTRODUCES and ASSUMES lists today and parses
+them; lacks exact lists. → PARAGRAPH_RECORDS (mentions and references).
+
+Rule of thumb for choosing: **prose exists and an outside reader has
+findings → critique; prose does not exist or is to be rewritten whole →
+beat loop; a mechanical rule inside one essay → filter; a judgment against
+a ratified concern, possibly across chapters → lens; the graph → extraction.**
+
+The block-by-block inventory each assembler sends today, with file and line,
+follows, for anyone checking the claims above.
+
+#### 6.0.1 Block inventory, as assembled today
+
+A "✓" is a block the pass receives; "–" means it does not.
+
+| input | source | critique edit pass (`passes.build_context`, `render_user_message`) | beat loop (`writing.assemble`) | filter (`filtering.assemble`, `_frame_block`) | lens (`lenses.assemble`) |
+|---|---|---|---|---|---|
+| **the point of the pass** | | propose edits to ONE existing essay, from an outside critique's items and the author's intents, as diffs the author accepts or rejects one by one; must respect what the rest of the book already established | write or rewrite ONE essay beat by beat under a ratified plan, conditioned on the verbatim accepted text so far; the author accepts or rejects each beat | apply ONE author-ratified mechanical concern (pronunciation, typography, repetition, a protected term) to one essay, unit by unit or whole; intra-essay by jurisdiction | judge ONE chapter against ONE author-ratified editorial concern (audience pitch, cross-references, through-line, validity), quoting the chapter verbatim and, when the concern spans chapters, quoting the other chapter's text |
+| **what "the book" means to it** | | BOOK CONTEXT: summaries of every essay before and after this one in reading order (`before_after`), used for four things only: do not re-explain, do not pre-empt, honor promises, keep terms consistent | DRAFTING CONTEXT: the same before/after summaries, gated fresh; before = available concepts, after = forward-reference only | nothing unless `summaries = true`; then the same before/after summaries, ungated and marked | the TEXT of named chapters; never a summary |
+| system prompt | `prompts/editor.md` 781 w / `beat-draft.md` 1,384 w / `filter-run.md` 1,338 w / the lens's own prompt + examples | ✓ | ✓ | ✓ | ✓ (S block) |
+| style law | `styles.render` | ✓ STYLE GUIDE | ✓ STYLE LAW (block S) | – | – |
+| validated beliefs | `editorial_beliefs` status validated | ✓ POLICIES | ✓ VALIDATED BELIEFS | ✓ VALIDATED BELIEFS | – |
+| intents in scope | `declared_intents` via `intents_in_scope` | ✓ INTENTS | ✓ INTENTS (frozen member set) | ✓ INTENTS | – |
+| concept notes, file slice | `api.scoped_concepts(file=)`: name, aliases, notes, edges among the slice | ✓ CONCEPTS | ✓ CONCEPT NOTES (the plan's concepts via `show_concept`, with every edge of each) | ✓ CONCEPT NOTES (+ aliases, + edges) | ✓ GLOSSARY (+ `introduced_in`, + edges), capped |
+| protected terms, dictionary, cast | graph names + `_pronunciations` + `_profiles/cast` | – | – | ✓ | – (PROTECTED REGISTERS from the toc instead) |
+| author profiles | `_profiles/*.md` | – | – | ✓ when declared | ✓ AUDIENCE, SCHEME when declared |
+| prior runs / learnings | `filter_runs`; this pass's verdicts; the writeup's last verdict | ✓ LEARNINGS (this pass) | ✓ LEARNINGS, LAST VERDICT, PREVIOUS DRAFT | ✓ PRIOR RUNS OF THIS FILTER ON THIS FILE | – (findings carry hashes instead) |
+| other essays' summaries | `essay_summaries` via `before_after` | ✓ BOOK CONTEXT BEFORE / AFTER, gated | ✓ DRAFTING CONTEXT, gated | ✓ NEIGHBOURING ESSAYS only if `summaries = true`, ungated | – by ruling |
+| other chapters' text | disk, hashed | – | – | – | ✓ T block: `pointers`, `neighbours`; `earlier` and `book` are graph-derived lists |
+| this essay's text | capture | ✓ as a numbered paragraph list | pinned ORIGINAL (a rewrite) + ACCEPTED TEXT SO FAR | ✓ unit by unit (sequential) or whole (global) | ✓ E block, whole |
+| this essay's plan / outline | writeup metadata | – | ✓ RATIFIED PLAN, BRIEF, DIGEST, THIS BEAT | – | – |
+| reading order, where this essay sits | toc | implicit in BEFORE/AFTER | implicit, plus placement | – | ✓ READING ORDER when declared |
+| paragraph or section summaries | (do not exist) | – | – | – | – |
+| graph edges beyond the slice | – | – | – | – | – |
+
+Assessment, pass by pass:
+
+- **Critique edit pass.** Its job is to propose edits to one essay that
+  respect what the rest of the book established. It has the law, the
+  policies, the intents, the slice of the graph and a memory of every other
+  essay. It has no map of the essay it is editing beyond the raw paragraphs:
+  a 185-paragraph essay (god.md) is handed to the editor as a list, and the
+  editor must reconstruct the argument itself before it can tell a
+  redundant paragraph from a load-bearing one. **Missing: the target's
+  section summaries** (POINT and MOVES per section). The essay-level memory
+  of the other essays is the right grain for its four stated uses
+  (`editor.md`, "Use them for exactly four things"); paragraph records of
+  other essays would be noise here.
+- **Beat loop.** Its job is to draft one beat of one essay under a ratified
+  plan. It has the plan, the digest, the pinned original and the verbatim
+  accepted text: the within-essay grain is already verbatim, so paragraph
+  records of this essay add nothing. Its cross-essay view is the essay
+  summaries, gated. **Missing: nothing structural.** What would help is the
+  FLOW line (so a beat knows the shape of the neighbour it refers to) and,
+  for a rewrite, the pinned original's section summaries beside the DIGEST
+  (the DIGEST is a model-written claim list; section summaries are the
+  same thing with provenance).
+- **Filters.** A filter's job is mechanical and intra-essay (sentence-level
+  passes). A sequential filter sees one unit at a time with the graph slice,
+  the protected terms and, on request, the other essays' summaries. It
+  cannot see where its current unit sits in the essay's argument. **Missing:
+  the essay's own outline** (section summaries), and only for the filters
+  whose rule depends on argument position (a repetition filter, a
+  transition filter); for a pronunciation or typography filter nothing is
+  missing. The neighbours' essay summaries are the wrong level for a
+  per-unit pass and rarely used; keep the key, do not extend it.
+- **Lenses.** A lens's job is to judge one chapter against a ratified
+  concern using only stable inputs. It has the glossary with `introduced_in`
+  and edges, the profiles, the reading order and the text of the chapters
+  it names. **Missing: the paragraphs of another chapter that supply a
+  premise or introduce a term**, when the whole chapter is too large to
+  carry (metaphysic.md is 13,778 words). Today `pointers` carries whole
+  chapters; `earlier` carries only the graph's `introduced_in` fact. The
+  ruling forbids a summary as witness; it does not forbid a summary as
+  index. §6.2.
+- **Extraction** (not a pass in the table because it is not assembled the
+  same way): raw changed sections, a name inventory, triage precedents.
+  **Missing: everything a paragraph record carries** (§2, §7).
+- **The graph itself.** Every pass gets the file slice (concepts realized in
+  the essay, edges among them) and never the book-wide graph; that is right
+  for all four, since a pass that needs "where was this introduced" gets it
+  as a field, not as the graph. The one consumer that needs the whole graph
+  is extraction's recurrence check, and that is a query, not a prompt block.
+
+| consumer | today | proposed | why |
+|---|---|---|---|
+| extraction | raw section text + name inventory | **paragraph records** (mentions, relations, spans) grouped by section, plus the **section summary** of each section in the payload as linking context; never the essay summary | grounding is per paragraph; the span is what `endpoint_in_text` and the alias rule want; the essay level is too compressed to carry a relation (§2) |
+| critique edit pass | before/after essay summaries + the target's paragraphs | unchanged **before/after essay summaries**, plus the **target essay's section summaries** as the editor's map of what it is editing | the editor already has every paragraph of the target; what it lacks is the target's own argument outline. Gate unchanged |
+| beat loop (drafting) | before/after essay summaries | unchanged **before/after essay summaries** (FLOW-first format), plus, for a rewrite of an existing essay, the pinned essay's **section summaries** as the plan's scaffold | L1 stays essay-grain (§3.1 cost argument); the loop conditions on verbatim accepted text at the paragraph grain already (L2), so paragraph records add nothing there |
+| filters | neighbours' essay summaries when `summaries = true` | the same, and a new front-matter key **`outline = true`** that adds the essay's own section summaries to block A | a sequential filter sees one unit at a time and today has no idea where in the argument it is; the outline is intra-essay, so it does not reopen the §9.1a gating objection (rendered ungated and marked, like `summaries`) |
+| lenses | nothing | **nothing in the payload** (ruling kept). A `targets` key **`located`** may use paragraph records as an index to pick which paragraphs of another chapter enter T as text (§6.2) | the finding quotes and hashes text; the summary only chose which text |
+| manifest reader load | INTRODUCES / ASSUMES prose lists | **paragraph mentions** with `role = introduces | defines` vs `uses`, normalized against the graph, per essay | closes the known fragment limitation; the number of introduces and the debt list become exact |
+| `summarize show`, the chat agent | one prose block | all three levels, by flag | an editor working on one paragraph wants its record, not the essay's memory |
+
+### 6.1 Where today's input is wrong or missing
+
+- Extraction has no summary input at all (§2); its only linking context is a
+  list of names, which is why the alias rule and the relation guide have to
+  rely on the model remembering what it just read across a 24,000-character
+  payload.
+- The manifest reads prose lists as if they were a vocabulary; its own
+  docstring says the real repair is upstream in the summarizer (`manifest.py:
+  29-30`). §3.4 is that repair.
+- The filter pass's `summaries = true` gives a filter the other essays and
+  nothing about the essay it is filtering: the wrong level for a per-unit
+  pass.
+- The edit pass hands the editor every paragraph of the target and a memory
+  of every other essay, and no outline of the target: the one essay it is
+  allowed to change is the one it has no map of.
+
+### 6.2 Lenses: a summary as a pointer, never as a witness
+
+The ruling stands: no summary in the payload, every finding about another
+chapter names it and quotes its text, provenance is the text hash
+(`lens-architecture-design.md §2`). The `earlier` target key already shows
+the shape of what is allowed: zero-token derived lists computed from the
+graph. A `located` key extends that: for each term the essay uses that the
+graph says was introduced elsewhere, the paragraph records of the introducing
+chapter say which paragraphs carry `role = introduces | defines` for it, and
+those paragraphs' TEXT (with the chapter's hash and the paragraph ordinals)
+enter T under the chapter's file name. The model never sees a record; it sees
+chapter text chosen by a record. A stale record can at worst choose the wrong
+paragraph, which the lens sees as text that does not say what the essay
+assumes, and reports as such. Whether `located` replaces `pointers` for the
+premise-supplying case (`validity-and-objections`) is a lens-by-lens choice.
+
+### 6.3 The extraction session's interface
+
+§7 below. It is written here because the summary side must exist before the
+extraction side can read it; the extraction redesign owns the consumer and
+may narrow or rename fields.
+
+### 6.4 The beat loop
+
+The drafting context keeps the essay grain. Two changes only: the FLOW line
+leads each neighbour's entry, and `drafting_context`'s coverage note is
+replaced by a section-count line (coverage is now structural, §3.3). The
+`summaries_ready` gate is untouched; it still gates on essay rows.
+
+### 6.5 The critique pass
+
+`build_context` adds `sections` (the target's section summaries, fresh by the
+same capture) beside `paragraphs`; `render_user_message` prints them as an
+OUTLINE block before the paragraphs. The editor prompt's instruction set does
+not change.
+
+### 6.6 INTRODUCES and ASSUMES by derivation
+
+For essay E: INTRODUCES(E) = terms with a mention of `role = introduces |
+defines` in E's paragraph records whose graph node is `introduced_in` E (or
+has no earlier `introduces` mention in reading order); ASSUMES(E) = terms
+mentioned in E with `role = uses` whose first `introduces | defines` mention
+lies in an earlier essay, or in no essay (a debt). Both lists are normalized
+against `concept_nodes` names and aliases as `manifest._canonical_names`
+does today, and rendered into the essay summary block by code, under the same
+labels, so `manifest._field` keeps working and the summarizer prompt loses
+two sections it was never good at.
+
+### 6.7 Declared needs: the `Input` enum and each module's declaration (ruling 10)
+
+`context.py` (new) owns one enum and one function. Every block any pass can
+receive is a member; the assemblers in `passes.py`, `writing.py`,
+`filtering.py`, `lenses.py` stop deciding and call
+`context.supply(db, manuscript, file, needs, capture) -> dict[Input, str]`,
+which renders each requested block deterministically (same helpers as
+today, same `(none)` convention, same hashes per block) and runs
+`summaries.ensure` for any summary level requested (ruling 3, ruling 9).
+
+```python
+class Input(Enum):
+    STYLE_LAW = "style-law"                  # styles.render
+    VALIDATED_BELIEFS = "beliefs"            # editorial_beliefs, validated
+    INTENTS = "intents"                      # intents_in_scope
+    CONCEPT_SLICE = "concepts"               # scoped_concepts(file=), notes, aliases, edges, introduced_in
+    PROTECTED_TERMS = "protected"            # filtering.protected_terms
+    DICTIONARY = "dictionary"                # pronunciations
+    CAST = "cast"
+    PROFILES = "profiles"                    # _profiles/*.md, named in the declaration
+    PRIOR_RUNS = "prior-runs"                # this pass's own history on this file
+    ESSAY_SUMMARIES = "essay-summaries"      # before/after, ensure(level=essay)
+    SECTION_OUTLINE = "section-outline"      # this essay's section summaries, ensure(level=section)
+    PARAGRAPH_RECORDS = "paragraph-records"  # this essay's records, ensure(level=paragraph)
+    REFERENCED_SECTIONS = "referenced-sections"  # text of sections this essay's records refer back to, hashed
+    TARGET_CHAPTERS = "target-chapters"      # text of chapters resolved by pointers/neighbours (lenses)
+    READING_ORDER = "reading-order"
+    ESSAY_TEXT = "essay-text"                # the unit under review, whole or per unit
+```
+
+Declarations, as the build will write them (today's set first, then what
+ruling 4 and §6.0 add; the owner changes any of these by editing the one
+line):
+
+| module | declaration today | declaration after this design |
+|---|---|---|
+| `critique.py` (edit pass) | STYLE_LAW, VALIDATED_BELIEFS, INTENTS, CONCEPT_SLICE, PRIOR_RUNS, ESSAY_SUMMARIES, ESSAY_TEXT | + SECTION_OUTLINE, + REFERENCED_SECTIONS |
+| `writing.py` (beat loop) | STYLE_LAW, VALIDATED_BELIEFS, INTENTS, CONCEPT_SLICE (plan's concepts), PRIOR_RUNS, ESSAY_SUMMARIES, ESSAY_TEXT (pinned original + accepted) | + SECTION_OUTLINE of the pinned original (rewrites only) |
+| `filtering.py` | VALIDATED_BELIEFS, INTENTS, CONCEPT_SLICE, PROTECTED_TERMS, DICTIONARY, PRIOR_RUNS, ESSAY_TEXT; CAST, PROFILES, ESSAY_SUMMARIES by front matter | front matter may add SECTION_OUTLINE (the filters whose rule depends on argument position) |
+| `lenses.py` | lens front matter: CONCEPT_SLICE (glossary), PROFILES, READING_ORDER, TARGET_CHAPTERS, ESSAY_TEXT | front matter may add REFERENCED_SECTIONS (consistency lenses only, ruling 4); summaries never |
+| `extraction.py` | ESSAY_TEXT (changed sections), name inventory, precedents | PARAGRAPH_RECORDS, SECTION_OUTLINE (as linking context); the extraction redesign owns this line |
+| `manifest.py` | ESSAY_SUMMARIES (prose lists) | PARAGRAPH_RECORDS (mentions, references) |
+
+A front-matter key on a lens or filter uses the enum's string value, so
+`inputs = ["concepts", "referenced-sections"]` is checked against the enum
+and an unknown name is rejected by name at parse time, as the current
+front-matter vocabularies already are.
+
+Built (step 5, first slice, 2026-10-26): `context.py` holds the enum,
+`Input.parse`, and `supply`, which renders STYLE_LAW, VALIDATED_BELIEFS,
+INTENTS, CONCEPT_SLICE, ESSAY_SUMMARIES, SECTION_OUTLINE, PARAGRAPH_RECORDS,
+REFERENCED_SECTIONS, READING_ORDER and ESSAY_TEXT; the six inputs whose
+renderer needs an argument only its pass has (PROTECTED_TERMS, DICTIONARY,
+CAST, PROFILES, PRIOR_RUNS, TARGET_CHAPTERS) are declared and say by name
+which module still renders them. `passes.INPUTS` is the critique pass's
+declaration; `build_context(llm=…)` runs `context.ensure_for` over it
+before the gate (rulings 3 and 9, the CLI passes `summaries.clients`), and
+`render_user_message` adds OUTLINE and REFERENCED SECTIONS between BOOK
+CONTEXT and THE ESSAY. `manifest.INPUTS` declares PARAGRAPH_RECORDS and
+`manifest.compute` reads `derived_lists` instead of parsing prose. One
+snapshot per invocation holds: `supply` hands the caller's capture to every
+renderer, and `for_unit`, `mentions` and `derived_lists` take the caller's
+`texts`, so a pass never reads the manuscript from disk twice (test_e2e
+E2/P3 counts the reads). Not yet moved onto `supply`: the critique pass's seven original blocks (their
+shape is what the editor prompt and the HTTP-stub tests describe), the
+beat loop, filters and lenses.
+
+### 6.8 REFERENCED_SECTIONS: how a backward reference finds its text
+
+`context.referenced_sections(db, manuscript, file, texts)`: for every
+record of `file` with a reference of direction `back`, the term's first
+`introduces | defines` mention in reading order (`summaries.mentions`),
+when it lies in another file, names a section; that section's text enters
+the block under its file, ordinal, heading and `section_hash`, with the
+terms that led there. Deduplicated, reading order, capped at
+`REFERENCED_CAP` = 12 sections. The record's own `target` field is not
+yet used for resolution (a chapter named in the text could override the
+mention lookup); that is a follow-up once the live records show how often
+the model fills it.
+
+## 7. The summary side of the extraction interface
+
+What a paragraph record hands extraction, per paragraph, in the words of the
+proposal learning loop and the sweep framework (a link is proposed only when
+the text asserts it):
+
+```json
+{
+  "file": "basilides.md",
+  "para_hash": "3f9c…",
+  "ordinal": 12,
+  "section_ordinal": 2,
+  "kind": "prose",
+  "gist": "Basilides' pleroma is read as the Field before any Choice.",
+  "claim": "The pleroma names the undivided Field prior to Choice.",
+  "move": "defines",
+  "mentions": [
+    {"term": "pleroma", "span": "the pleroma, which Basilides sets before all things", "role": "defines"},
+    {"term": "the Field", "span": "is the Field before any Choice has been made", "role": "uses"},
+    {"term": "Basilides", "span": "which Basilides sets before all things", "role": "uses"}
+  ],
+  "relations": [
+    {"from": "pleroma", "relation": "specializes", "to": "the Field",
+     "span": "the pleroma … is the Field before any Choice has been made"}
+  ],
+  "depends_on": ["a81e…"]
+}
+```
+
+Guarantees the summary side makes:
+
+1. **Every span is a verbatim substring of the paragraph** (byte check before
+   storage; failures are counted in the build report and the mention is
+   dropped). Extraction's `endpoint_in_text` becomes a lookup, and the alias
+   rule's "exact sentence copied verbatim" is already satisfied.
+2. **Every paragraph has a row** (headings included, with an empty record).
+   Coverage is set equality, not citation parsing.
+3. **Terms are the author's spelling and casing**, as they appear in the span;
+   normalization against the graph is the consumer's step, with
+   `manifest._canonical_names` as the shared helper.
+4. **Relations use `extraction.VALID_RELATIONS`** and nothing else; an unknown
+   relation is dropped at the summary side and counted.
+5. **`depends_on` is within-section**; cross-section dependence is in the
+   section summary's DEPENDS ON prose, and cross-essay dependence in the essay
+   summary's ASSUMES list (derived, §6.6).
+
+What extraction can then do, paragraph by paragraph (the extraction session
+decides whether it does):
+
+- Candidate concepts = terms with ≥ 2 `introduces | defines | uses` mentions
+  across distinct paragraphs in distinct contexts (the recurrence law, as a
+  query rather than a regex sweep after the fact, §0.7).
+- Candidate edges = (from, relation, to) triples asserted in ≥ 1 paragraph,
+  each carrying its asserting spans; an edge asserted in two paragraphs is
+  stronger evidence than the model's confidence ever was.
+- Aliases = mentions with `role = names`, span included.
+- Notes for a concept = the `claim` of each paragraph where it is `defines`,
+  in reading order: the author's own definitional sentences, not a paraphrase.
+
+Read API. The extraction redesign (`docs/extraction-redesign.md` §4.3,
+PR nagarkar/authorllm#267) asks for one call, `summaries.for_unit(db,
+manuscript, file)`, returning the three levels with `source_hash` per row
+and short `terms` lists. That contract is a projection of the records
+above, and it is the one this design implements first:
+
+| their field | from here |
+|---|---|
+| `essay.summary`, `essay.source_hash` | the essay row |
+| `essay.introduces`, `assumes`, `promises` | the derived lists of ruling 6 (§6.6), as lists not prose |
+| `sections[].heading`, `paragraphs` (ordinal range), `summary`, `source_hash` | the section row; `source_hash` = `section_hash` |
+| `sections[].terms` | the union of `mentions[].term` over the section's records |
+| `paragraphs[].n`, `gist`, `source_hash` | the record; `source_hash` = `para_hash` |
+| `paragraphs[].terms` | `mentions[].term` |
+
+A missing level is `None` and a stale one is returned with its hash so the
+consumer can print STALE, exactly as §4.3 there specifies; but under
+ruling 3 the consumer calls `summaries.ensure` first and will normally see
+no stale level. The full records stay reachable for the gates that want
+spans: `summaries.paragraph_records(db, manuscript, files=None)` in
+reading order and `summaries.mentions(db, manuscript, term=None)` across
+the book, both read-only over `status = 'current'` rows.
+
+## 8. Verbs
+
+CLI (`cmd_summarize`), replacing today's three actions:
+
+| verb | does |
+|---|---|
+| `summarize status [--level paragraph\|section\|essay]` | per essay: fresh / stale / … as today; with a level, the count of current vs needed rows at that level |
+| `summarize rebuild [file] [--level …] [--all]` | the incremental pass of §4.5; `--level essay` alone is today's behaviour; `--all` forces every row |
+| `summarize show <file> [--section N] [--paragraph N] [--json]` | the essay block; with `--section` that section's block and its paragraph gists; with `--paragraph` the record |
+| `summarize outline <file>` | the essay's FLOW line and each section's POINT, the one-screen map |
+| `summarize prune` | drops `orphaned` paragraph and section rows older than `[summaries] keep_orphans_days` |
+
+MCP (`mcp_server.py`), new, read-only: `get_summary(file, level="essay",
+section=None, paragraph=None)` and `summary_status()`. No MCP rebuild verb:
+rebuilds are billed and the CLI already owns every billed verb that is not a
+drafting step.
+
+Triggers (ruling 3, ruling 9): no automatic rebuild on collect. Every
+consumer calls `ensure` for the level it reads and the rebuild happens
+there, with its cost printed. `critique resolve` keeps rebuilding the
+resolved essay's summary at its gate (the one place an eager rebuild is
+cheap and keeps the before-summaries fresh by construction).
+
+## 9. Rejected alternatives
+
+- **One `summaries` table with a `level` column.** The three levels differ in
+  key (content hash vs section hash vs file), in what `status` means, and in
+  which carries `upstream_stale`; a single table would carry nullable columns
+  for every level and a `CHECK` per level. Three tables, one fact each.
+- **One call per paragraph.** 1,949 prompts; the overhead would exceed the
+  content. One call per section keeps the paragraphs' neighbours in view,
+  which `depends_on` needs anyway.
+- **Essay summary from text.** It is what today's summarizer does, and it is
+  the reason a 13,778-word essay yields a 719-word block the manifest has to
+  regex. Composition from sections is cheaper and gives FLOW for free.
+- **Section summary from paragraph records only.** Cheaper by ~125 K input
+  tokens per build (~$0.03) and one error-propagation step worse. Not worth it.
+- **Feeding essay summaries to extraction.** §2: the level is wrong.
+- **Putting a `located` text into lenses as a summary excerpt.** Ruled out
+  2026-09-06; the pointer form of §6.2 is the only use that survives the
+  ruling.
+- **Keying paragraph rows by ordinal.** The 2026-08-27 objection; content
+  hashes answer it.
+
+## 10. Knobs
+
+| setting | where | proposed value | why |
+|---|---|---|---|
+| paragraph unit | code | blank-line block (`revisions._paragraphs`) | the unit every other pass already uses |
+| section unit | code | heading-delimited (`extraction._sections`), whole file if no heading | the ratified extraction unit |
+| essay unit | code | toc entry | unchanged |
+| paragraph `gist` length | prompt | ≤ 30 words, written for an agent: dense, no connective prose | ruling 2 |
+| paragraph record per call | code | one call per section; split at `max_section_chars` = 24,000 | §3.5 |
+| section summary length | `target_length` variant | n/10 to n/7.5 words, floor 30, cap 250 | today's ratio, re-floored |
+| essay summary length | `target_length` | n/10 to n/7.5, floor 40, cap 500 | unchanged |
+| essay summary labels | prompt | FLOW, MOVES, PROMISES, DEBTS, MOTIFS, DOES NOT; INTRODUCES and ASSUMES derived | §3.4, §6.6 |
+| `[critique] summarizer_model` | config | `openai/gpt-5.6-luna` (as configured) | section and essay levels |
+| `[summaries] paragraph_model` | config, new | `gemini/gemini-2.5-flash-lite`, Luna if a recorded trial finds it thin | ruling 5 |
+| rebuild trigger | code | on use, every level; never on collect | ruling 3 |
+| lazy rebuild inside a verb | code | rebuild, print cost line, proceed | ruling 9 |
+| lens reference text | front matter | `targets = ["referenced"]`: sections a backward reference points at, as text | ruling 4 |
+| `[summaries] keep_orphans_days` | config, new | 90 | the learning loop reads old records; nothing else does |
+| span check | code | byte equality, drop and count on failure | §7 guarantee 1 |
+| coverage | code | set equality of paragraph hashes per section | replaces `paragraph_coverage` |
+| extraction input | consumer | paragraph records + section summaries | §6 |
+| edit pass input | consumer | before/after essays + target's sections | §6 |
+| beat loop input | consumer | before/after essays, FLOW-first | §6 |
+| filter input | front matter | `summaries = true` as today; `outline = true` new | §6 |
+| lens input | front matter | none; `targets = ["located"]` picks text via records | §6.2 |
+| manifest input | consumer | paragraph mentions | §6.6 |
+| MCP | new | `get_summary`, `summary_status`, read-only | §8 |
+| ledger purposes | `llm.purpose` | `summaries.paragraph`, `summaries.section`, `critique.summarizer` (essay, unchanged key) | per-level spend stays visible |
+
+## 11. Build plan (after ratification; small commits, each with tests)
+
+1. Tables and hashing (`db.py`, `summaries.py`): paragraph kinds, hashes,
+   `paragraph_records`, `mentions`, status derivation; hermetic tests on a
+   fixture essay with headings, verse and a refrain.
+2. Paragraph pass: `prompts/paragraph-records.md`, one call per section, span
+   check, build report; recorded live test on one short essay
+   (basilides.md, 40 paragraphs) with the recording committed.
+3. Section pass: `prompts/section-summary.md`, skeleton equality check.
+4. Essay pass: the new FLOW-first prompt, INTRODUCES / ASSUMES derivation,
+   `sections_hash`; `rebuild` with levels; a full live rebuild of SMSTTD
+   recorded with its measured cost beside the estimates of §5. DONE
+   2026-10-25 (PR after #283): `ensure(level="essay")`, `summarize rebuild
+   [file] --level --all`, `show --section/--paragraph/--json`, `outline`;
+   the live rebuild's numbers are in §5.
+5. Consumers: manifest first (pure gain), then the edit pass OUTLINE block,
+   then `outline = true` for filters, then the drafting context's FLOW line.
+6. Verbs: CLI actions, MCP read verbs, collect's auto trigger.
+7. Lenses `located` target: only after the extraction session's design lands,
+   since it shares the index.
+8. Extraction consumes `paragraph_records`: in the extraction session's own
+   plan, against this interface.

@@ -56,6 +56,7 @@ import contextlib
 import http.server
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -63,7 +64,9 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -2101,6 +2104,782 @@ def _the_lens_door(root: Path) -> None:
           str([r["signal"] for r in ev]))
 
 
+class _CommentedDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` plus ONE open margin comment anchored on
+    `quote` in one tab. The anchor is a doc-index range that moves with
+    every insert and delete before it, the way Docs moves it; a delete
+    that touches the anchored text orphans the comment, which is what a
+    rebuild does to every anchor in the tab (it-459f2c04ef77)."""
+
+    def __init__(self, tabs, quote: str, title: str, **kw):
+        super().__init__(tabs, **kw)
+        self.quote = quote
+        tab = next(t for t in self.tabs if t["title"] == title)
+        self.anchor_tab = tab["id"]
+        at = tab["body"].find(quote)
+        assert at >= 0, tab["body"]
+        self.anchor = [at + 1, at + 1 + len(quote)]
+        self.orphaned = False
+        self.resolved = False   # the author resolved it in the margin
+
+    def comments(self):
+        outer = self
+
+        class _Req:
+            def execute(self_):
+                if outer.resolved:
+                    return {"comments": []}
+                return {"comments": [{
+                    "id": "c-1", "content": "a margin note",
+                    "resolved": False, "replies": [],
+                    "quotedFileContent": {"value": outer.quote}}]}
+
+        class _Comments:
+            def list(self_, **kw):
+                return _Req()
+        return _Comments()
+
+    def anchored_text(self) -> str:
+        body = self._tab(self.anchor_tab)["body"]
+        return body[self.anchor[0] - 1: self.anchor[1] - 1]
+
+    def _apply(self, req: dict) -> dict:
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            if rng.get("tabId") == self.anchor_tab:
+                a, b = rng["startIndex"], rng["endIndex"]
+                s, e = self.anchor
+                if a < e and b > s:
+                    self.orphaned = True
+                elif b <= s:
+                    self.anchor = [s - (b - a), e - (b - a)]
+        if "insertText" in req:
+            spec = req["insertText"]
+            if spec["location"].get("tabId") == self.anchor_tab:
+                at, n = spec["location"]["index"], len(spec["text"])
+                s, e = self.anchor
+                if at <= s:
+                    self.anchor = [s + n, e + n]
+                elif at < e:
+                    self.orphaned = True
+        return super()._apply(req)
+
+
+# Structural markers for a table inside a flat tab body. Each costs one
+# doc index, as Docs' own structure does: the table's start and end, each
+# row, each cell (whose paragraph follows it, newline-terminated).
+_TS, _RS, _CS, _TE = "", "", "", ""
+_MARKS = (_TS, _RS, _CS, _TE)
+
+
+def _md_table_rows(block: str) -> list[list[str]] | None:
+    lines = block.strip().split("\n")
+    if not all(line.strip().startswith("|") for line in lines):
+        return None
+    return [[c.strip() for c in line.strip().strip("|").split("|")]
+            for line in lines if not gdocs._TABLE_DELIM.match(line.strip())]
+
+
+def _table_str(rows: list[list[str]]) -> str:
+    return (_TS + "".join(_RS + "".join(_CS + c + "\n" for c in row)
+                          for row in rows) + _TE)
+
+
+class _TableDocFake(_CommentedDocFake):
+    """`_CommentedDocFake` whose tabs can hold Docs TABLES
+    (it-cd0fb0ad59fb). A table sits in the flat body as marker
+    characters, one doc index each, laid out the way
+    `transplant_requests` measured a real one: start, a marker per row,
+    a marker per cell followed by its newline-terminated paragraph, end.
+    The importer turns a pipe-table block into a table element preceded
+    by the empty paragraph `insertTable` always leaves; `documents.get`
+    reports it as a table element with cell paragraphs; the export
+    writes it back as ONE pipe-table block. It enforces Docs' rules: text
+    goes only inside a paragraph, a delete takes a table whole or not at
+    all, and the newline before a kept table stays. `quote=None` is a
+    tab with no comments at all."""
+
+    def __init__(self, tabs, quote=None, title=None, **kw):
+        if quote is None:
+            _SurgicalDocFake.__init__(self, tabs, **kw)
+            self.quote, self.anchor_tab = None, None
+            self.anchor, self.orphaned = [0, 0], False
+        else:
+            super().__init__(tabs, quote, title, **kw)
+
+    def comments(self):
+        if self.quote is None:
+            return _SurgicalDocFake.comments(self)
+        return super().comments()
+
+    def _as_body(self, markdown, tab_id=None):
+        body = ""
+        for p in self._paras(markdown):
+            rows = _md_table_rows(p)
+            if rows is not None:
+                body += "\n" + _table_str(rows)
+                continue
+            body += _SurgicalDocFake._as_body(self, p, None)
+        if body.endswith(_TE):
+            body += "\n"
+        return body
+
+    def _content(self, body):
+        out, i = [], 0
+        while i < len(body):
+            if body[i] == _TS:
+                j, rows = i + 1, []
+                while body[j] != _TE:
+                    if body[j] == _RS:
+                        rows.append([])
+                        j += 1
+                    else:  # a cell marker, then its paragraph
+                        k = body.index("\n", j + 1) + 1
+                        seg = body[j + 1:k]
+                        rows[-1].append({"content": [{
+                            "startIndex": j + 2, "endIndex": k + 1,
+                            "paragraph": {"elements": [{
+                                "startIndex": j + 2, "endIndex": k + 1,
+                                "textRun": {"content": seg,
+                                            "textStyle": {}}}]}}]})
+                        j = k
+                out.append({"startIndex": i + 1, "endIndex": j + 2,
+                            "table": {"rows": len(rows),
+                                      "columns": len(rows[0]),
+                                      "tableRows": [{"tableCells": r}
+                                                    for r in rows]}})
+                i = j + 1
+                continue
+            k = body.index("\n", i) + 1
+            out.extend(_SurgicalDocFake._content(self, body[i:k]))
+            out[-1]["startIndex"] = i + 1
+            out[-1]["endIndex"] = k + 1
+            for e in out[-1]["paragraph"]["elements"]:
+                e["startIndex"], e["endIndex"] = i + 1, k + 1
+            i = k
+        return out
+
+    def _temp_content(self, markdown):
+        out = []
+        for p in self._paras(markdown):
+            rows = _md_table_rows(p)
+            if rows is None:
+                out.extend(_SurgicalDocFake._temp_content(self, p))
+                continue
+            out.append({"table": {"tableRows": [{"tableCells": [
+                {"content": [{"paragraph": {"elements": [{"textRun": {
+                    "content": c + "\n", "textStyle": {}}}]}}]}
+                for c in row]} for row in rows]}})
+        return out
+
+    def export_tab(self, tab) -> str:
+        md = self._markdown_of_tab(tab)
+        blocks = []
+        for seg in self._re.split(f"({_TS}.*?{_TE})", md,
+                                  flags=self._re.S):
+            if seg.startswith(_TS):
+                rows = [[c for c in r.split(_CS)[1:]]
+                        for r in seg[1:-1].split(_RS)[1:]]
+                rows = [[c.rstrip("\n") for c in r] for r in rows]
+                lines = ["| " + " | ".join(r) + " |" for r in rows]
+                lines.insert(1, "| " + " | ".join(":----" for _ in rows[0])
+                             + " |")
+                blocks.append("\n".join(lines))
+            else:
+                blocks += [p for p in seg.split("\n") if p.strip()]
+        return "\n\n".join(blocks)
+
+    def files(self):
+        base, outer = super().files(), self
+
+        class _Req:
+            def __init__(self_, result):
+                self_._result = result
+
+            def execute(self_):
+                return self_._result
+
+        class _Files:
+            def __getattr__(self_, name):
+                return getattr(base, name)
+
+            def export(self_, fileId=None, mimeType=None):
+                whole = "\n".join(
+                    f"# **{t['title']}**\n\n" + outer.export_tab(t)
+                    + ("\n" if t["body"].strip() else "")
+                    for t in outer.tabs)
+                return _Req(whole.encode("utf-8"))
+        return _Files()
+
+    def _apply(self, req):
+        if "insertTable" in req:
+            spec = req["insertTable"]
+            empty = [[""] * spec["columns"] for _ in range(spec["rows"])]
+            return self._apply({"insertText": {
+                "location": spec["location"],
+                "text": "\n" + _table_str(empty)}})
+        if "insertText" in req:
+            loc = req["insertText"]["location"]
+            tab = self._tab(loc.get("tabId"))
+            if tab is not None:
+                at = loc["index"] - 1
+                assert not (at < len(tab["body"])
+                            and tab["body"][at] in _MARKS), (
+                    f"insertText at {loc['index']}: not inside a paragraph")
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            tab = self._tab(rng.get("tabId"))
+            if tab is not None:
+                body = tab["body"]
+                seg = body[rng["startIndex"] - 1: rng["endIndex"] - 1]
+                depth = 0
+                for ch in seg:
+                    depth += {_TS: 1, _TE: -1}.get(ch, 0)
+                    assert depth >= 0, f"delete {rng}: cuts into a table"
+                    assert depth or ch not in (_RS, _CS), (
+                        f"delete {rng}: cuts into a table")
+                assert depth == 0, f"delete {rng}: cuts into a table"
+                after = rng["endIndex"] - 1
+                assert not (after < len(body) and body[after] == _TS
+                            and seg.endswith("\n")), (
+                    f"delete {rng}: takes the newline before a table")
+        return super()._apply(req)
+
+
+_TBL_A = "Agency opens the paper by naming what a choice costs."
+_TBL_A_NEW = "Agency opens the paper by naming what every choice costs."
+_TBL_B = "The table above scores each account against the axioms."
+_TBL_C = "Omega closes the paper on a falling cadence."
+_TBL_DOC = "\n\n".join([
+    "# Agency",
+    _TBL_A,
+    "| Account | Score |\n| --- | --- |\n| Choice scores | 3 |\n"
+    "| Habit | 1 |",
+    _TBL_B,
+    _TBL_C,
+]) + "\n"
+
+
+def _table_fixture(root: Path, name: str, fake_of, text: str = _TBL_DOC):
+    ws = root / name
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "agency.md").write_text(text)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    fake = fake_of([("book", ""), ("agency.md", text)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["agency.md"] = {"tab_id": "tab-2", "checked_out": True,
+                          "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return ws, db, manuscript, ms, fake
+
+
+def _tab_md(fake, title: str = "agency.md") -> str:
+    return gdocs.normalize_markdown(fake.export_tab(
+        next(t for t in fake.tabs if t["title"] == title)))
+
+
+def _a_table_tab_keeps_its_comments(root: Path) -> None:
+    """it-cd0fb0ad59fb. A tab carrying a table always rebuilt on push,
+    orphaning every comment anchor in it ("the known price"). The
+    author: "I wanna make sure that any comments on that tab are not
+    lost or orphaned." Now a table is one aligned unit in the surgical
+    push: prose edits leave it alone, a table edit replaces only the
+    table, and a table edit that would take a comment with it stops,
+    named, unless the author passes --rebuild."""
+    print("it-cd0fb0ad59fb: a table tab with comments is never rebuilt:")
+
+    def commented(quote):
+        return lambda tabs: _TableDocFake(tabs, quote, "agency.md",
+                                          render=True)
+
+    # 1. Prose edit beside a table, comment on another paragraph.
+    _, db, manuscript, ms, fake = _table_fixture(
+        root, "tbl-prose-ws", commented(_TBL_C))
+    table_before = fake.tab_text("agency.md").split(_TS)[1].split(_TE)[0]
+    temps = len(fake.temps)
+    (ms / "agency.md").write_text(_TBL_DOC.replace(_TBL_A, _TBL_A_NEW))
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    tab = fake.tab_text("agency.md")
+    check("a prose edit on a table tab pushes surgically, not by rebuild",
+          push.get("mode") == "diff" and push.get("ops") == 1, str(push))
+    check("the comment on the untouched paragraph keeps its anchor",
+          not fake.orphaned and fake.anchored_text() == _TBL_C, tab)
+    check("the table is untouched and the tab matches the file",
+          tab.split(_TS)[1].split(_TE)[0] == table_before
+          and len(fake.temps) == temps + 1
+          and _tab_md(fake) == gdocs.normalize_markdown(
+              (ms / "agency.md").read_text()), _tab_md(fake))
+
+    # 2. A table edit, the comment on prose: the table alone is replaced.
+    changed = _TBL_DOC.replace("| Habit | 1 |", "| Habit | 2 |")
+    (ms / "agency.md").write_text(changed.replace(_TBL_A, _TBL_A_NEW))
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("a table edit replaces the table as one unit, surgically",
+          push.get("mode") == "diff" and push.get("ops") == 1
+          and _tab_md(fake) == gdocs.normalize_markdown(
+              (ms / "agency.md").read_text()), f"{push}\n{_tab_md(fake)}")
+    check("and the prose comment survives it",
+          not fake.orphaned and fake.anchored_text() == _TBL_C)
+
+    # 3. Prose inserted right before a table, and after a closing table.
+    grown = changed.replace(_TBL_A, _TBL_A_NEW).replace(
+        "| Account", "A new lead-in to the scores.\n\n| Account")
+    (ms / "agency.md").write_text(grown)
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("a paragraph inserted before a kept table lands before it",
+          push.get("mode") == "diff" and _tab_md(fake)
+          == gdocs.normalize_markdown(grown) and not fake.orphaned,
+          _tab_md(fake))
+    ends = "# Agency\n\n" + _TBL_C + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    _, db4, man4, ms4, fake4 = _table_fixture(
+        root, "tbl-tail-ws", commented(_TBL_C), text=ends)
+    (ms4 / "agency.md").write_text(ends + "\nA closing line.\n")
+    push = gdocs.push_doc(db4, man4, "agency.md", service=fake4,
+                          docs_service=fake4)
+    check("a paragraph appended after a closing table lands after it",
+          push.get("mode") == "diff" and _tab_md(fake4)
+          == gdocs.normalize_markdown(ends + "\nA closing line.\n")
+          and not fake4.orphaned, _tab_md(fake4))
+
+    # 4. A comment INSIDE the table: the changed table is held at its
+    #    old text and reported (it-e26a44f924be holds any changed unit
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
+    _, db2, man2, ms2, fake2 = _table_fixture(
+        root, "tbl-cell-ws", commented("Choice scores"))
+    before = fake2.tab_text("agency.md")
+    (ms2 / "agency.md").write_text(changed)
+    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                          docs_service=fake2)
+    held = push.get("held") or []
+    check("a table edit that would orphan a comment in the table is held "
+          "and reported with the comment",
+          len(held) == 1 and held[0]["comments"][0]["quoted"]
+          == "Choice scores", str(push))
+    check("and leaves the tab and the comment untouched",
+          fake2.tab_text("agency.md") == before and not fake2.orphaned)
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
+
+    # 5. A table tab with no comments still pushes, by rebuild as before.
+    _, db3, man3, ms3, fake3 = _table_fixture(
+        root, "tbl-bare-ws", lambda tabs: _TableDocFake(tabs, render=True))
+    (ms3 / "agency.md").write_text(changed)
+    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                          docs_service=fake3)
+    check("a table tab with no comments still pushes (rebuild)",
+          push.get("mode") is None
+          and _tab_md(fake3) == gdocs.normalize_markdown(changed),
+          f"{push}\n{_tab_md(fake3)}")
+
+    # 6. The CLI: --rebuild reaches push_doc for the named file only, and
+    #    a bare --rebuild (the whole manuscript) is not accepted.
+    ws5, db5, man5, ms5, fake5 = _table_fixture(
+        root, "tbl-cli-ws", commented(_TBL_C))
+    seen = []
+    real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+
+    def spy(db_, m_, target, **kw):
+        seen.append((target, kw.get("rebuild")))
+        return {"relpath": target, "url": "u", "doc_id": "doc-fake",
+                "created": False, "locally_normalized": False}
+    gdocs.push_doc = spy
+    gdocs.get_service = lambda *a, **k: fake5
+    gdocs.get_docs_service = lambda *a, **k: fake5
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(ws5), "doc", "push", "agency.md",
+                      "--rebuild"])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(ws5), "doc", "push",
+                          "--rebuild"])
+            bare = None
+        except SystemExit as e:
+            bare = str(e.code)
+    finally:
+        gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+    check("doc push <file> --rebuild passes rebuild for that file only",
+          ("agency.md", True) in seen
+          and all(not r for t, r in seen if t != "agency.md"), str(seen))
+    check("a bare doc push --rebuild is not accepted",
+          bare is not None and "--rebuild takes one file" in bare, str(bare))
+
+
+_HOLD_P1 = "The reader looks for an escape from the argument."
+_HOLD_P1_NEW = _HOLD_P1.replace("escape", "shake")
+_HOLD_P2 = "Beta stands where the argument began."
+_HOLD_P2_NEW = "Beta stands where the argument first began."
+_HOLD_DOC = "\n\n".join(["# Escape", _HOLD_P1, _HOLD_P2,
+                         "Omega closes the paper."]) + "\n"
+_HOLD_LOCAL = _HOLD_DOC.replace(_HOLD_P1, _HOLD_P1_NEW).replace(
+    _HOLD_P2, _HOLD_P2_NEW)
+
+
+def _a_commented_paragraph_is_held(root: Path) -> None:
+    """it-e26a44f924be. A surgical push rewrote a paragraph carrying an
+    open margin comment and orphaned it ("escape" became "shake"). The
+    author: "Any particular paragraph that is being pushed in a targeted
+    manner has a comment it should not be pushed until that comment is
+    addressed." The paragraph is held at its old text, every other change
+    lands, the hold is reported, and the next push after the comment is
+    resolved lands it."""
+    print("it-e26a44f924be: a paragraph with an open comment is held:")
+
+    def commented(quote):
+        return lambda tabs: _TableDocFake(tabs, quote, "agency.md",
+                                          render=True)
+
+    # 1. The held paragraph keeps its old text and its anchor; the other
+    #    change lands; the report names the comment.
+    _, db, manuscript, ms, fake = _table_fixture(
+        root, "hold-ws", commented("escape"), text=_HOLD_DOC)
+    (ms / "agency.md").write_text(_HOLD_LOCAL)
+    push = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    tab = _tab_md(fake)
+    check("the commented paragraph is held at its old text; the other "
+          "change lands",
+          push.get("mode") == "diff" and _HOLD_P1 in tab
+          and _HOLD_P1_NEW not in tab and _HOLD_P2_NEW in tab, tab)
+    check("the comment keeps its anchor",
+          not fake.orphaned and fake.anchored_text() == "escape")
+    held = push.get("held") or []
+    check("the result reports the held paragraph with its comment",
+          len(held) == 1 and held[0]["paragraph"] == _HOLD_P1
+          and held[0]["comments"] == [{"comment_id": "c-1",
+                                       "quoted": "escape",
+                                       "content": "a margin note"}],
+          str(held))
+    check("the local file keeps its new text",
+          (ms / "agency.md").read_text() == _HOLD_LOCAL)
+
+    # 2. A pull after the partial push reads the file as local ahead,
+    #    never a conflict, and does not overwrite it.
+    with contextlib.redirect_stdout(io.StringIO()):
+        pull = gdocs.pull_doc(db, manuscript, "agency.md", service=fake,
+                              docs_service=fake)
+    check("a pull after a partial push keeps the file (local ahead, no "
+          "conflict)",
+          "agency.md" in pull.get("local_ahead", [])
+          and "agency.md" not in pull.get("conflicts", [])
+          and (ms / "agency.md").read_text() == _HOLD_LOCAL, str(pull))
+
+    # 3. While the comment is open, a second push holds it again.
+    again = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                           docs_service=fake)
+    check("a second push while the comment is open holds again, ops 0",
+          again.get("ops") == 0 and len(again.get("held") or []) == 1
+          and _HOLD_P1 in _tab_md(fake), str(again))
+
+    # 4. The author resolves the comment; the next push lands it.
+    fake.resolved = True
+    done = gdocs.push_doc(db, manuscript, "agency.md", service=fake,
+                          docs_service=fake)
+    check("after the comment is resolved the next push lands the held "
+          "paragraph",
+          not done.get("held") and _tab_md(fake)
+          == gdocs.normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
+
+    # 5. An unlocatable comment holds nothing.
+    _, db2, man2, ms2, fake2 = _table_fixture(
+        root, "hold-lost-ws", commented("escape"), text=_HOLD_DOC)
+    fake2.quote = "words that stand nowhere in this tab"
+    (ms2 / "agency.md").write_text(_HOLD_LOCAL)
+    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                          docs_service=fake2)
+    check("a comment whose anchor is not in the tab holds nothing",
+          push.get("mode") == "diff" and not push.get("held")
+          and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
+          f"{push}\n{_tab_md(fake2)}")
+
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
+    _, db3, man3, ms3, fake3 = _table_fixture(
+        root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
+    (ms3 / "agency.md").write_text(_HOLD_LOCAL)
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
+
+    # 7. The CLI names each held paragraph and its comment.
+    ws4, db4, man4, ms4, fake4 = _table_fixture(
+        root, "hold-cli-ws", commented("escape"), text=_HOLD_DOC)
+    real = (gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service)
+
+    def spy(db_, m_, target, **kw):
+        out = {"relpath": target, "url": "u", "doc_id": "doc-fake",
+               "created": False, "locally_normalized": False}
+        if target == "agency.md":
+            out["held"] = [{"paragraph": _HOLD_P1, "local": _HOLD_P1_NEW,
+                            "comments": [{"comment_id": "c-1",
+                                          "quoted": "escape",
+                                          "content": "a margin note"}]}]
+        return out
+    gdocs.push_doc = spy
+    gdocs.get_service = lambda *a, **k: fake4
+    gdocs.get_docs_service = lambda *a, **k: fake4
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws4), "doc", "push", "agency.md"])
+    finally:
+        gdocs.push_doc, gdocs.get_service, gdocs.get_docs_service = real
+    out = buf.getvalue()
+    check("doc push prints each held paragraph with its comment id, quote "
+          "and content",
+          "Held" in out and "c-1" in out and "escape" in out
+          and "a margin note" in out and "doc propose" in out, out)
+
+
+_ALPHA_OLD = "Alpha opens the essay and says a thing worth saying twice."
+_ALPHA_NEW = "Alpha opens the essay and says a thing once, and well."
+_GAMMA_OLD = "Gamma follows, saying something else entirely."
+_GAMMA_NEW = "Gamma follows, and changes the subject."
+_OMEGA = "Omega closes the essay on a falling cadence."
+
+
+def _lens_forms_out(root: Path, name: str, fake_of):
+    """A manuscript whose solo.md has two lens forms out in its tab
+    (Alpha and Gamma rewritten), pushed through `fake_of(tabs)`."""
+    from authorlm import lenses as _lenses
+
+    ws = root / name
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(DOC_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    _lenses.add_lens(manuscript, "tidy-lens", "# Tidy lens\nA test lens.")
+    session, _ = api.ensure_session(db, manuscript)
+    staged = _lenses.register_findings(
+        db, manuscript, session, "tidy-lens", "solo.md", [
+            {"quote": "says a thing worth saying twice",
+             "note": "undercuts itself",
+             "replacement": "says a thing once, and well"},
+            {"quote": _GAMMA_OLD, "note": "flat",
+             "replacement": _GAMMA_NEW}])
+    assert len(staged["edits_staged"]) == 2, staged
+    fake = fake_of([("book", ""), ("solo.md", DOC_ESSAY)])
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    push = api.lens_push(db, manuscript, {}, "solo.md",
+                         services=lambda: (fake, fake))
+    assert push["written"] == 2, push
+    assert "<<" in fake.tab_text("solo.md"), fake.tab_text("solo.md")
+    return db, manuscript, ms, fake
+
+
+def _lens_resolve_clears_its_forms_in_place(root: Path) -> None:
+    """it-459f2c04ef77 (1). `lens resolve` used to leave its settled
+    forms in the tab "until your next doc push" — and that push then
+    failed, because the tab carries comments (so it goes surgical) and
+    the surgical push will not edit a paragraph holding `<<`/`{{`. The
+    author's constraint: clearing the tab must never orphan a comment.
+    So the resolve takes ITS OWN settled forms out in place — markers
+    and the losing half only — and a later push meets settled forms
+    the same way."""
+    print("it-459f2c04ef77: lens resolve clears the tab in place:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lensclear-ws",
+        lambda tabs: _CommentedDocFake(tabs, _OMEGA, "solo.md",
+                                       render=True))
+    check("the margin comment survives the lens push",
+          not fake.orphaned and fake.anchored_text() == _OMEGA,
+          fake.tab_text("solo.md"))
+    temps = len(fake.temps)
+    settle = api.lens_resolve(db, manuscript, {}, "solo.md",
+                              services=lambda: (fake, fake))
+    tab = fake.tab_text("solo.md")
+    check("both forms accepted and landed locally",
+          settle["accepted"] == 2
+          and _ALPHA_NEW in (ms / "solo.md").read_text()
+          and _GAMMA_NEW in (ms / "solo.md").read_text(), str(settle))
+    check("the resolve took its forms out of the tab: no markers, the "
+          "kept halves stand, the losing halves are gone",
+          not any(m in tab for m in ("<<", ">>", "{{", "}}"))
+          and _ALPHA_NEW in tab and _GAMMA_NEW in tab
+          and _ALPHA_OLD not in tab and _GAMMA_OLD not in tab, tab)
+    check("in place: no rebuild (no temp-doc import) and the comment's "
+          "anchor text is intact",
+          len(fake.temps) == temps and not fake.orphaned
+          and fake.anchored_text() == _OMEGA,
+          f"temps {temps}->{len(fake.temps)} anchored="
+          f"{fake.anchored_text()!r}")
+    check("the result says the tab is clear",
+          settle["tab_still_marked"] is False, str(settle["warnings"]))
+    push = gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                          docs_service=fake)
+    check("the next ordinary push has nothing left to do, and still "
+          "orphans nothing",
+          push.get("mode") == "diff" and push.get("ops") == 0
+          and not fake.orphaned, str(push))
+
+    # Forms settled in the record but still standing in the tab (what an
+    # older resolve left behind): the surgical push takes them out in
+    # place instead of stopping on "overlaps a pending margin thread".
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lensclear2-ws",
+        lambda tabs: _CommentedDocFake(tabs, _OMEGA, "solo.md",
+                                       render=True))
+    rows = db2.all("SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+                   "state = 'written'", (manuscript2["id"],))
+    for r in rows:
+        db2.update("doc_threads", r["id"], {
+            "state": "cleaned" if r["proposed_old"].startswith("Alpha")
+            else "declined"})
+    (ms2 / "solo.md").write_text(DOC_ESSAY.replace(_ALPHA_OLD, _ALPHA_NEW))
+    try:
+        gdocs.push_doc(db2, manuscript2, "solo.md", service=fake2,
+                       docs_service=fake2)
+        err = None
+    except LookupError as e:
+        err = str(e)
+    tab2 = fake2.tab_text("solo.md")
+    check("a push meeting already-settled forms clears them in place and "
+          "lands — cleaned keeps new, declined keeps old",
+          err is None and not any(m in tab2 for m in ("<<", "{{", "}}"))
+          and _ALPHA_NEW in tab2 and _GAMMA_OLD in tab2
+          and _GAMMA_NEW not in tab2, f"{err}\n{tab2}")
+    check("and the comment is not orphaned",
+          not fake2.orphaned and fake2.anchored_text() == _OMEGA)
+
+
+def _lens_resolve_keeps_a_local_edit(root: Path) -> None:
+    """it-459f2c04ef77 (2). A local fix made after the push was reverted
+    by the resolve, which wrote the file from the tab. Now: an edit
+    that does not overlap a form is merged in; one that does stops the
+    resolve, naming the file, with nothing settled."""
+    print("it-459f2c04ef77: lens resolve keeps a post-push local edit:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lenslocal-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    path = ms / "solo.md"
+    path.write_text(path.read_text().replace(
+        _OMEGA, "Omega closes the essay on a rising cadence."))
+    settle = api.lens_resolve(db, manuscript, {}, "solo.md",
+                              services=lambda: (fake, fake))
+    final = path.read_text()
+    check("the local edit survives the resolve, beside both lens changes",
+          "Omega closes the essay on a rising cadence." in final
+          and _OMEGA not in final
+          and _ALPHA_NEW in final and _GAMMA_NEW in final, final)
+    check("the tab is cleared of its forms all the same",
+          "<<" not in fake.tab_text("solo.md")
+          and settle["tab_still_marked"] is False,
+          fake.tab_text("solo.md"))
+    base = (gdocs._mapping(db, manuscript)["gdocs"]["solo.md"]
+            .get("pushed_hash"))
+    tab_now = gdocs.tab_marked_markdown(db, manuscript, "solo.md",
+                                        fake, fake)
+    check("the local edit stays ahead of the tab, so the next pull keeps "
+          "it rather than overwriting it",
+          base is not None and tab_now["state"] == "local_ahead",
+          tab_now["state"])
+
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lenslocal2-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    path2 = ms2 / "solo.md"
+    path2.write_text(path2.read_text().replace(
+        _GAMMA_OLD, "Gamma follows, saying something else, locally."))
+    try:
+        api.lens_resolve(db2, manuscript2, {}, "solo.md",
+                         services=lambda: (fake2, fake2))
+        err = None
+    except ValueError as e:
+        err = str(e)
+    written = db2.all("SELECT id FROM doc_threads WHERE manuscript_id = ? "
+                      "AND state = 'written'", (manuscript2["id"],))
+    check("a local edit overlapping a form stops the resolve, naming the "
+          "file, and settles nothing",
+          err is not None and "solo.md" in err and len(written) == 2
+          and "saying something else, locally." in path2.read_text(),
+          str(err))
+
+
+def _a_brace_remnant_is_taken_out(root: Path) -> None:
+    """it-459f2c04ef77 (3). The author hand-resolved a form in the Doc by
+    deleting `<<old>>{{` and left the closing `}}`. Both the resolve and
+    the pull kept it at the end of the paragraph. A `}}` is stripped
+    only where it closes a known form's new half — never globally."""
+    print("it-459f2c04ef77: a hand-resolve's `}}` remnant:")
+
+    db, manuscript, ms, fake = _lens_forms_out(
+        root, "lensremnant-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    form = f"<<{_ALPHA_OLD}>>{{{{{_ALPHA_NEW}}}}}"
+    assert form in fake.tab_text("solo.md"), fake.tab_text("solo.md")
+    fake.edit("tab-2", form, _ALPHA_NEW + "}}")
+    # And an author's own `}}` that is no form's remnant stays.
+    fake.edit("tab-2", _OMEGA, _OMEGA + " Set {{a}} and x}}.")
+    api.lens_resolve(db, manuscript, {}, "solo.md",
+                     services=lambda: (fake, fake))
+    final = (ms / "solo.md").read_text()
+    check("resolve: the remnant is gone from the local file",
+          _ALPHA_NEW + "}}" not in final and _ALPHA_NEW in final, final)
+    check("resolve: and from the tab",
+          _ALPHA_NEW + "}}" not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("the author's own braces elsewhere are untouched",
+          "Set {{a}} and x}}." in final, final)
+
+    db2, manuscript2, ms2, fake2 = _lens_forms_out(
+        root, "lensremnant2-ws",
+        lambda tabs: _SurgicalDocFake(tabs, render=True))
+    for r in db2.all("SELECT id FROM doc_threads WHERE manuscript_id = ? "
+                     "AND state = 'written'", (manuscript2["id"],)):
+        db2.update("doc_threads", r["id"], {"state": "cleaned"})
+    fake2.edit("tab-2", f"<<{_ALPHA_OLD}>>{{{{{_ALPHA_NEW}}}}}",
+               _ALPHA_NEW + "}}")
+    fake2.edit("tab-2", f"<<{_GAMMA_OLD}>>{{{{{_GAMMA_NEW}}}}}",
+               _GAMMA_NEW)
+    gdocs.pull_doc(db2, manuscript2, "solo.md", service=fake2,
+                   with_comments=False, docs_service=fake2)
+    pulled = (ms2 / "solo.md").read_text()
+    check("pull: the remnant of a known form does not reach the file",
+          _ALPHA_NEW in pulled and "}}" not in pulled, pulled)
+
+
 def _the_changed_words_pop(root: Path) -> None:
     """Author request 2026-08-31: a one-word edit inside a
     paragraph-sized form was invisible in the Doc. The push now
@@ -2707,6 +3486,141 @@ def _status_can_reach_the_tab(root: Path) -> None:
           and "covers the LOCAL road only" in printed, printed)
 
 
+STATUS_ESSAYS = ("first.md", "second.md")
+
+
+def _status_history_fixture(root: Path, subdir: str):
+    """A manuscript with a long filter history: 30 runs over two essays,
+    settled and active alike, each with three proposal threads in mixed
+    states, plus author comments on the same files as noise. Rows are
+    inserted directly with fixed ids and timestamps, so the report is
+    the same on every run of the suite. The essays carry no marks, so
+    the orphan scan sends no queries of its own."""
+    from authorlm.db import ko_fields as _ko
+
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    for rel in STATUS_ESSAYS:
+        (ms / rel).write_text(f"# {rel}\n\nPlain text, no forms.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    mid = manuscript["id"]
+    states = ("proposed", "accepted", "rejected", "written", "cleaned",
+              "declined")
+    for i in range(30):
+        rel = STATUS_ESSAYS[i % 2]
+        run_id = f"fr-status-{i:02d}"
+        run = _ko("fr")
+        run.update(
+            id=run_id, created_at=f"2026-01-{1 + i // 2:02d}T00:00:{i:02d}",
+            manuscript_id=mid, filter=f"filter-{i % 3}",
+            **{"class": "sequential" if i % 2 else "global"},
+            file=rel, unit_count=5, cursor=i % 6,
+            status="active" if i % 4 == 0 else "settled",
+            metadata=json.dumps({"mode": "doc"} if i % 5 == 0 else {}))
+        db.insert("filter_runs", run)
+        # Inserted out of order, so the report's per-run order has to
+        # come from (created_at, id), not from insertion.
+        for n in (2, 0, 1):
+            t = _ko("dt")
+            t.update(
+                id=f"dt-status-{i:02d}-{n}",
+                created_at=f"2026-02-01T00:{i:02d}:0{n % 2}",
+                manuscript_id=mid, origin_type=api.FILTER_ORIGIN,
+                origin_id=f"{run_id}:{rel}:{n}", file=rel,
+                proposed_old="old", proposed_new="new", note="test",
+                state=states[(i + n) % len(states)], our_reply_ids="[]",
+                scope_kind="file", scope_ref=rel)
+            db.insert("doc_threads", t)
+    for k, rel in enumerate(STATUS_ESSAYS * 2):
+        t = _ko("dt")
+        t.update(manuscript_id=mid, origin_type="author_comment",
+                 origin_id=f"comment-{k}", file=rel, state="proposed",
+                 our_reply_ids="[]")
+        db.insert("doc_threads", t)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links[STATUS_ESSAYS[0]] = {"tab_id": "tab-7", "checked_out": False,
+                               "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript
+
+
+def _counted_status(db, manuscript, file=None):
+    """`filter_status`, with the number of doc_threads reads it sent."""
+    sent: list[str] = []
+    db.conn.set_trace_callback(sent.append)
+    try:
+        report = api.filter_status(db, manuscript, file)
+    finally:
+        db.conn.set_trace_callback(None)
+    return report, sum(1 for s in sent if "FROM doc_threads" in s)
+
+
+def _status_reads_threads_once(root: Path) -> None:
+    """`filter status` reads the filter threads ONCE, however long the
+    filter history is. Every run, settled or active, stays in the
+    report, so a read per run made the verb quadratic in the author's
+    history: a scan of every filter thread for each run."""
+    print("filter status over a long history:")
+
+    db, manuscript = _status_history_fixture(root, "status-history-ws")
+    mid = manuscript["id"]
+
+    def expected(file=None):
+        """The report the per-run read built: each run's own threads,
+        through the same tallies."""
+        where = "WHERE manuscript_id = ?" + (" AND file = ?" if file else "")
+        rows = [dict(r) for r in db.all(
+            f"SELECT * FROM filter_runs {where} ORDER BY created_at",
+            (mid, file) if file else (mid,))]
+        out = []
+        for run in rows:
+            threads = api._run_threads(db, mid, run)
+            out.append({"id": run["id"], "file": run["file"],
+                        "forms_out": sum(1 for t in threads
+                                         if t["state"] == "written"),
+                        **api._run_tallies(threads)})
+        return out
+
+    def got(report):
+        return [{k: r[k] for k in ("id", "file", "forms_out", "proposed",
+                                   "accepted", "rejected", "open")}
+                for r in report["runs"]]
+
+    report, reads = _counted_status(db, manuscript)
+    check("filter status reads doc_threads once for all 30 runs, not "
+          "once per run", reads == 1, str(reads))
+    check("...and every run keeps its own tallies and forms out, in run "
+          "order, exactly as the per-run read gave them",
+          got(report) == expected(), json.dumps(got(report), indent=1))
+    check("...with no thread counted twice and none lost: 3 per run, the "
+          "author comments on the same files left out",
+          [r["proposed"] for r in report["runs"]] == [3] * 30)
+    check("...and a doc-mode run with forms out still carries its tab URL",
+          any(r["tab_url"] == "https://docs.google.com/document/d/doc-fake"
+                             "/edit?tab=tab-7" for r in report["runs"]),
+          json.dumps([r["tab_url"] for r in report["runs"]]))
+    check("...and the report has the same three keys",
+          set(report) == {"runs", "orphaned_marks", "orphan_scan_note"}
+          and report["orphaned_marks"] == [])
+
+    one = STATUS_ESSAYS[0]
+    report, reads = _counted_status(db, manuscript, one)
+    check("filter status <essay> reads doc_threads once for its 15 runs",
+          reads == 1, str(reads))
+    check("...and reports only that essay's runs, each with its own "
+          "tallies", got(report) == expected(one)
+          and len(report["runs"]) == 15
+          and all(r["file"] == one for r in report["runs"]),
+          json.dumps(got(report), indent=1))
+
+
 def _a_second_run_may_not_push_into_the_same_tab(root: Path) -> None:
     """P3c / Q-1, ruled: refuse EARLY and BY NAME when another producer's
     forms are already in this essay's tab.
@@ -3143,9 +4057,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        stub = _summary_stubs.reply(system, user)
         if "THE UNIT: " in user:
             unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: summary of {unit}."
+            content = f"MOVES: [1] summary of {unit}."
+        elif stub is not None:
+            content = stub
         elif "Essay editor" in system:
             Stub.editor_calls.append(user)
             content = json.dumps(Stub.editor_replies.pop(0))
@@ -3502,12 +4419,806 @@ def _directives_on_the_doc_road(root: Path) -> None:
                  (mid,))["n"] == 7)
 
 
+SUGGESTION_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha opens the essay.[Suggestion: tighten this] Then on.",
+    "Beta states the claim without a case.",
+    "[Suggestion: add an example]",
+    "Gamma hedges every clause.[Suggestion: cut the hedges] More.",
+    "Delta is fine.",
+    "[Suggestion: reconsider the claim]",
+    "Epsilon is long.",
+    "[Suggestion: split it]",
+]) + "\n"
+
+
+def _suggestions_on_the_doc_road(root: Path) -> None:
+    """[Suggestion: …] on a CHECKED-OUT file (docs/suggestion-directive-
+    design.md §3): the form wraps the TARGET paragraph — inline, tag and
+    all; standalone, the paragraph before it, the tag line left standing
+    until resolve consumes it on acceptance. A decline wraps the tag
+    itself. Local stays pristine; resolve lands the author's ruling."""
+    print("suggestions on the Doc road:")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
+                                             essay=SUGGESTION_ESSAY)
+    mid = manuscript["id"]
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "suggestion", "solo.md", [
+        (1, "Alpha opens. Then on."),
+        {"tag": "add an example", "text": "Beta states the claim: a wall "
+                                          "that holds forever is a tomb."},
+        {"tag": 3, "decline": True, "reason": "the hedges are the point"},
+        {"tag": 4, "decline": True, "reason": "the claim is load-bearing"},
+        (5, "Epsilon is short."),
+    ], services=services)
+    tab = fake.tab_text("solo.md")
+    check("apply on a checked-out file STAGES one form per suggestion: "
+          "inline wraps the paragraph with its tag; standalone wraps the "
+          "paragraph BEFORE the tag and leaves the tag line standing; a "
+          "decline wraps the tag (inline: the paragraph without it; "
+          "standalone: an empty green half)",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<Alpha opens the essay.[Suggestion: tighten this] Then on.>>"
+              "{{Alpha opens. Then on.}}\n" in tab
+          and "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}\n"
+              "[Suggestion: add an example]\n" in tab
+          and "<<Gamma hedges every clause.[Suggestion: cut the hedges] "
+              "More.>>{{Gamma hedges every clause. More.}}\n" in tab
+          and "Delta is fine.\n<<[Suggestion: reconsider the claim]>>{{}}\n"
+              in tab
+          and "<<Epsilon is long.>>{{Epsilon is short.}}\n[Suggestion: split "
+              "it]\n" in tab, tab)
+    check("...the local file is PRISTINE and the report names the declines",
+          (ms / "solo.md").read_text() == SUGGESTION_ESSAY
+          and [(r["n"], r["declined"]) for r in rep["landed"]]
+          == [(1, False), (2, False), (3, True), (4, True), (5, False)],
+          str(rep))
+    check("the staged rows are `written` suggestion threads; the push gate "
+          "and a second apply name 'suggestion resolve'",
+          len(passes.staged_threads(db, mid, "solo.md", states=("written",),
+                                    origin_type="suggestion")) == 5
+          and gdocs.forms_pending(db, mid, "solo.md") == "suggestion"
+          and _refuses(lambda: dv.apply(db, manuscript, {}, "suggestion",
+                                        "solo.md", [(1, "x")],
+                                        services=services),
+                       "suggestion resolve solo.md")
+          and _refuses(lambda: gdocs.push_doc(db, manuscript, "solo.md",
+                                              service=fake,
+                                              docs_service=fake),
+                       "suggestion resolve solo.md"))
+    check("list reports the forms out in the Doc",
+          [t["proposed_new"] for t in dv.pending(db, mid, "suggestion")]
+          [:1] == ["Alpha opens. Then on."])
+
+    # The author: edits one green half, deletes the standalone accept's
+    # form (restoring the paragraph), leaves the rest to stand.
+    fake.edit("tab-2", "{{Alpha opens. Then on.}}",
+              "{{Alpha opens, and opens well. Then on.}}")
+    fake.edit("tab-2",
+              "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}",
+              "Beta states the claim without a case.")
+    res = dv.resolve(db, manuscript, {}, "suggestion", "solo.md",
+                     services=services)
+    local = (ms / "solo.md").read_text()
+    check("resolve lands the edited paragraph; a deleted form is a decline "
+          "that keeps the paragraph AND its tag; an accepted decline removes "
+          "the tag and keeps the paragraph; an accepted standalone "
+          "suggestion lands and its tag line is consumed",
+          "Alpha opens, and opens well. Then on.\n" in local
+          and "Beta states the claim without a case.\n"
+              "[Suggestion: add an example]\n" in local
+          and "Gamma hedges every clause. More.\n" in local
+          and "Delta is fine.\nEpsilon is short.\n" in local
+          and "[Suggestion: split it]" not in local
+          and "[Suggestion: reconsider" not in local
+          and "[Suggestion: cut" not in local
+          and "<<" not in local and "{{" not in local, local)
+    check("the resolve report: four landed (one reworded), one declined",
+          res["accepted"] == 4 and res["declined"] == 1
+          and len(res["diffs"]) == 1
+          and "opens well" in res["diffs"][0]["final"]
+          and res["version_no"] and res["url"], str(res))
+    check("...and pushed the tab clean",
+          "<<" not in fake.tab_text("solo.md")
+          and "Epsilon is short." in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("one tag stays open; the evidence carries the producer's type",
+          [(r["n"], r["gist"]) for r in dv.open_report(ms)]
+          == [(1, "add an example")]
+          and db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id "
+                     "= ? AND evidence_type = 'suggestion_edit'",
+                     (mid,))["n"] == 5
+          and gdocs.forms_pending(db, mid, "solo.md") is None,
+          str(dv.open_report(ms)))
+
+
+SKY_TAG = ("[Illustration: A sky of parted clouds from which no hand "
+           "descends ⇢ a-sky-of-parted.md | caption: No hand descends. "
+           "*Nothing* falls.]")
+SKY_EMBED = "![](_illustrations/a-sky-of-parted-82891df3-2e99-01.jpg)"
+SKY_ESSAY = ("# Sky\n\nThe clouds part.[Footnote: cite the Psalm]\n\n"
+             "Beta holds.[Footnote: cite Job]\n\n"
+             + SKY_TAG + "\n" + SKY_EMBED + "\n")
+
+
+def _footnotes_after_a_closing_illustration(root: Path) -> None:
+    """it-816cd7998fec. The author: "Illustration tag at the end of an
+    essay should not prevent us from adding footnotes." An essay whose
+    last paragraph is an illustration tag (followed locally by its
+    derived embed line, which the push strips) takes its definitions
+    after the tag AS THE TAB RENDERS IT — and a file's anchors and
+    definitions land together or not at all."""
+    print("footnotes after a closing illustration (Doc road):")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _outside_fixture(root, "sky-ws",
+                                                essay=SKY_ESSAY)
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                   [(1, "Psalm 121."), (2, "Job 38.")], services=services)
+    tab = fake.tab_text("solo.md")
+    shown_tag = gdocs.rendered_text(SKY_TAG)
+    check("the definitions land after the closing illustration tag as the "
+          "tab renders it, in series order, with every anchor",
+          rep["mode"] == "marked" and not rep["failed"]
+          and len(rep["landed"]) == 2
+          and "<<[Footnote: cite the Psalm]>>{{[^S1]}}" in tab
+          and "<<[Footnote: cite Job]>>{{[^S2]}}" in tab
+          and tab.index(shown_tag) < tab.index("{{[^S1]: Psalm 121.}}")
+          < tab.index("{{[^S2]: Job 38.}}")
+          and "_illustrations/" not in tab, f"{rep}\n{tab}")
+    check("...and the local file is PRISTINE, embed line and all",
+          (ms / "solo.md").read_text() == SKY_ESSAY)
+
+    # Atomicity: when a definition cannot be placed, NOTHING is written —
+    # never anchors without definitions.
+    db2, ms2, msdir2, fake2 = _outside_fixture(root, "sky-ws-2",
+                                               essay=SKY_ESSAY)
+    meta = gdocs._mapping(db2, ms2)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db2, ms2, meta)
+    real_locate = gdocs._locate_in_tab
+
+    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0):
+        if "Illustration" in needle and "<<" not in needle:
+            return None
+        return real_locate(docs, master, tab_id, needle, occurrence)
+
+    gdocs._locate_in_tab = blind_to_the_tag
+    try:
+        rep = dv.apply(db2, ms2, {}, "footnote", "solo.md",
+                       [(1, "Psalm 121."), (2, "Job 38.")],
+                       services=lambda: (fake2, fake2))
+    finally:
+        gdocs._locate_in_tab = real_locate
+    tab = fake2.tab_text("solo.md")
+    states = {r["state"] for r in db2.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'footnote'", (ms2["id"],))}
+    check("atomic: one definition that cannot be placed writes NOTHING — "
+          "no anchor, no definition — and the report says why",
+          rep["landed"] == [] and rep["failed"]
+          and any("anchor paragraph" in why for _, why in rep["failed"])
+          and "<<" not in tab and "{{" not in tab
+          and "[Footnote: cite the Psalm]" in tab, f"{rep}\n{tab}")
+    check("...every staged row is withdrawn, so no forms are pending and "
+          "the local file is pristine",
+          states == {"withdrawn"}
+          and gdocs.forms_pending(db2, ms2["id"], "solo.md") is None
+          and (msdir2 / "solo.md").read_text() == SKY_ESSAY, str(states))
+
+    # A failure AFTER writing (here: one definition's read-back) takes
+    # every planted form back out IN PLACE — never a rebuild, so a margin
+    # comment on the tab keeps its anchor (the author: "make sure that
+    # any comments on that tab are not lost or orphaned").
+    db3, ms3, msdir3, _plain = _outside_fixture(root, "sky-ws-3",
+                                                essay=SKY_ESSAY)
+    meta = gdocs._mapping(db3, ms3)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db3, ms3, meta)
+    fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.threads_mod.render_insertion
+
+    def job_never_reads_back(new):
+        return ("never in the tab" if "Job 38." in new
+                else real_insertion(new))
+
+    gdocs.threads_mod.render_insertion = job_never_reads_back
+    try:
+        rep = dv.apply(db3, ms3, {}, "footnote", "solo.md",
+                       [(1, "Psalm 121."), (2, "Job 38.")],
+                       services=lambda: (fake3, fake3))
+    finally:
+        gdocs.threads_mod.render_insertion = real_insertion
+    tab = fake3.tab_text("solo.md")
+    states = {r["state"] for r in db3.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
+        "origin_type = 'footnote'", (ms3["id"],))}
+    check("atomic after writing: a read-back failure takes every form "
+          "back out, anchors and definitions alike, and says why",
+          rep["landed"] == [] and rep["failed"]
+          and any("read-back" in why for _, why in rep["failed"])
+          and not any(m in tab for m in ("<<", ">>", "{{", "}}"))
+          and "Beta holds.[Footnote: cite Job]" in tab
+          and states == {"withdrawn"}
+          and gdocs.forms_pending(db3, ms3["id"], "solo.md") is None,
+          f"{rep}\n{tab}\n{states}")
+    check("...in place: no rebuild (no temp-doc import after the levelling "
+          "push) and the margin comment's anchor is intact",
+          not fake3.temps and not fake3.orphaned
+          and fake3.anchored_text() == "Beta holds.",
+          f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
+          f"anchored={fake3.anchored_text()!r}")
+
+
+OUTSIDE_ESSAY = (
+    "# Topic\n\n"
+    "Alpha stays as it is.\n\n"
+    "Beta is to be replaced.\n\n"
+    "Gamma is to be reworded.\n\n"
+    "Delta is to be kept after all.\n\n"
+    "Omega closes.\n")
+
+
+def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY,
+                     fake_class=None):
+    """`_twin_fixture` with a RENDERING fake: its export gives each tab
+    paragraph back as its own markdown paragraph, which a resolve that
+    writes the tab's text to disk needs."""
+    ws = root / subdir
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(essay)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    fake = (fake_class or _SurgicalDocFake)(
+        [("book", ""), ("solo.md", essay)], render=True)
+    meta = gdocs._mapping(db, manuscript)
+    links = meta.setdefault("gdocs", {})
+    links["_master_id"] = "doc-fake"
+    links["_container_tab"] = "tab-1"
+    links["solo.md"] = {"tab_id": "tab-2", "checked_out": False,
+                        "pushed_hash": None}
+    gdocs._save_mapping(db, manuscript, meta)
+    return db, manuscript, ms, fake
+
+
+def _an_outside_caller_resolves_one_tab(root: Path) -> None:
+    """`api.resolve_revisions` (issue #130): one tab read back, the
+    named outside caller's forms landed with the standing semantics, a
+    structured verdict per revision, the tab cleared — and every other
+    producer's form left exactly where it is."""
+    print("outside callers: stage, then resolve one tab:")
+
+    # --- every verdict, on one tab --------------------------------------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-ws")
+    mid = manuscript["id"]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced.",
+         "note": "c-1"},
+        {"old": "Gamma is to be reworded.", "new": "Gamma, as proposed.",
+         "note": "c-2"},
+        {"old": "Delta is to be kept after all.", "new": "Delta, changed.",
+         "note": "c-3"},
+        {"old": "", "new": "An added close.", "note": "c-4",
+         "anchor_paragraph": 6},
+        {"old": "", "new": "An added aside.", "note": "c-5",
+         "anchor_paragraph": 2},
+        {"old": "", "new": "A second aside.", "note": "c-6",
+         "anchor_paragraph": 2},
+        {"old": "Omega closes.", "new": "Omega, redone.", "note": "c-7"},
+    ], "ytlm", fake, fake)
+    tab = fake.tab_text("solo.md")
+    check("the fixture: seven forms out, four replacements and three "
+          "additions, the local file pristine",
+          len(staged["written"]) == 7 and not staged["failed"]
+          and tab.count("<<") == 4 and tab.count("{{") == 7
+          and tab.index("{{An added aside.}}")
+          < tab.index("{{A second aside.}}") < tab.index("<<Beta")
+          and (ms / "solo.md").read_text() == OUTSIDE_ESSAY, tab)
+
+    # The author rules in the tab. Beta and the added close are left
+    # alone; Gamma's green half and the second aside are reworded; Delta
+    # is put back to its old text; Omega's green half is deleted; the
+    # first aside is deleted outright; and Alpha, outside any form, is
+    # touched too.
+    fake.edit("tab-2", "{{Gamma, as proposed.}}",
+              "{{Gamma, in my own words.}}")
+    fake.edit("tab-2", "{{A second aside.}}",
+              "{{A second aside, reworded by hand.}}")
+    fake.edit("tab-2",
+              "<<Delta is to be kept after all.>>{{Delta, changed.}}",
+              "Delta is to be kept after all.")
+    fake.edit("tab-2", "<<Omega closes.>>{{Omega, redone.}}",
+              "<<Omega closes.>>")
+    fake.edit("tab-2", "{{An added aside.}}\n", "")
+    fake.edit("tab-2", "Alpha stays as it is.",
+              "Alpha stays, lightly touched.")
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r for r in res["revisions"]}
+    check("an untouched form is accepted — a replacement and an addition",
+          by_note["c-1"]["verdict"] == "accepted"
+          and by_note["c-4"]["verdict"] == "accepted"
+          and by_note["c-1"]["final"] is None, str(res["revisions"]))
+    check("an edited {{new}} half wins: a modified acceptance, with the "
+          "author's final text in the result",
+          by_note["c-2"]["verdict"] == "modified"
+          and by_note["c-2"]["final"] == "Gamma, in my own words."
+          and by_note["c-2"]["new"] == "Gamma, as proposed."
+          and by_note["c-6"]["verdict"] == "modified"
+          and by_note["c-6"]["final"] == "A second aside, reworded by hand.",
+          str(res["revisions"]))
+    check("the old text restored, the green half deleted, and an "
+          "addition deleted outright are all declines",
+          by_note["c-3"]["verdict"] == "declined"
+          and by_note["c-7"]["verdict"] == "declined"
+          and by_note["c-5"]["verdict"] == "declined", str(res["revisions"]))
+    check("the result is structured: revisions in the caller's order, "
+          "the tallies, the tab's state, the version it made",
+          [r["index"] for r in res["revisions"]] == list(range(7))
+          and (res["accepted"], res["modified"], res["declined"])
+          == (2, 2, 3)
+          and res["state"] == "changed" and res["landed"]
+          and res["version_no"] and "tab=" in res["url"]
+          and res["file"] == "solo.md" and res["origin"] == "ytlm",
+          str(res))
+    expected = (
+        "# Topic\n\n"
+        "Alpha stays, lightly touched.\n\n"
+        "A second aside, reworded by hand.\n\n"
+        "Beta, replaced.\n\n"
+        "Gamma, in my own words.\n\n"
+        "Delta is to be kept after all.\n\n"
+        "Omega closes.\n\n"
+        "An added close.\n")
+    check("the local file carries exactly what the author ruled — and "
+          "their edit outside any form with it",
+          (ms / "solo.md").read_text() == expected,
+          (ms / "solo.md").read_text())
+    check("the tab is re-pushed: no marker is left in it, and it holds "
+          "the landed text",
+          not res["tab_still_marked"]
+          and "<<" not in fake.tab_text("solo.md")
+          and "{{" not in fake.tab_text("solo.md")
+          and "Gamma, in my own words." in fake.tab_text("solo.md")
+          and gdocs.forms_pending(db, mid, "solo.md") is None,
+          fake.tab_text("solo.md"))
+    states = sorted(r["state"] for r in db.all(
+        "SELECT state FROM doc_threads WHERE manuscript_id = ?", (mid,)))
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (mid, api.EXTERNAL_EVIDENCE)))
+    check("the threads are closed and each verdict is one evidence row "
+          "of the outside-caller type, under no episode",
+          states == ["cleaned"] * 4 + ["declined"] * 3
+          and signals == ["declined"] * 3 + ["resolved"] * 2
+          + ["revised"] * 2
+          and db.one("SELECT COUNT(*) AS n FROM evidence WHERE "
+                     "manuscript_id = ? AND evidence_type = ? AND "
+                     "episode_id IS NOT NULL",
+                     (mid, api.EXTERNAL_EVIDENCE))["n"] == 0,
+          str((states, signals)))
+    idle = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                 fake, fake)
+    check("with nothing out, a resolve is a report and not an error",
+          idle["revisions"] == [] and idle["state"] is None
+          and not idle["landed"] and "nothing to resolve"
+          in idle["warnings"][0], str(idle))
+    again = api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "Omega closes.", "new": "Omega, a second try."}],
+        "ytlm", fake, fake)
+    check("a resolved tab takes new revisions again",
+          len(again["written"]) == 1 and not again["failed"]
+          and "<<Omega closes.>>{{Omega, a second try.}}"
+          in fake.tab_text("solo.md"), str(again))
+    fake.edit("tab-2", "{{Omega, a second try.}}", "{{}}")
+    emptied = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                    fake, fake)
+    check("an EMPTIED green half is a decline, never a rewording to "
+          "nothing: the old text stands",
+          [r["verdict"] for r in emptied["revisions"]] == ["declined"]
+          and (ms / "solo.md").read_text() == expected
+          and "Omega closes.\n" in fake.tab_text("solo.md")
+          and "<<" not in fake.tab_text("solo.md"),
+          str(emptied) + (ms / "solo.md").read_text())
+
+    # --- two origins in one tab: only the named one is resolved ---------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-two-ws")
+    mid = manuscript["id"]
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+        {"old": "", "new": "An added close.", "anchor_paragraph": 6},
+    ], "ytlm", fake, fake)
+    from authorlm.db import ko_fields as _ko
+
+    def foreign(origin_type, old, new, anchor, origin=None):
+        """Another producer's form, in the tab and on record."""
+        fake.edit("tab-2", old, f"<<{old}>>{{{{{new}}}}}")
+        row = _ko("dt")
+        meta = {"kind": "replace", "anchor_paragraph": anchor,
+                "original_new": new}
+        if origin:
+            meta["origin"] = origin
+        row.update(
+            manuscript_id=mid, origin_type=origin_type,
+            origin_id=f"foreign:{origin_type}:{anchor}", file="solo.md",
+            anchor_quote=None, proposed_old=old, proposed_new=new,
+            note="theirs", state="written", our_reply_ids="[]",
+            last_author_reply_id=None, scope_kind="file",
+            scope_ref="solo.md", metadata=json.dumps(meta))
+        db.insert("doc_threads", row)
+        return row
+
+    crit = foreign("critique", "Gamma is to be reworded.",
+                   "Gamma, the critic's way.", 4)
+    other = foreign("external", "Delta is to be kept after all.",
+                    "Delta, another caller's way.", 5, origin="other-tool")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    tab = fake.tab_text("solo.md")
+    check("with two origins in the tab, the named origin's forms are "
+          "resolved and landed",
+          [r["verdict"] for r in res["revisions"]] == ["accepted"] * 2
+          and "Beta, replaced." in local and "An added close." in local
+          and "Beta is to be replaced." not in local, local)
+    check("...and the others are left alone: their threads still "
+          "`written`, their old text still the local file's, their "
+          "forms still in the tab",
+          {r["id"]: r["state"] for r in db.all(
+              "SELECT id, state FROM doc_threads WHERE id IN (?, ?)",
+              (crit["id"], other["id"]))}
+          == {crit["id"]: "written", other["id"]: "written"}
+          and "Gamma is to be reworded." in local
+          and "Delta is to be kept after all." in local
+          and "critic's way" not in local and "another caller" not in local
+          and "<<" not in local and "{{" not in local
+          and "<<Gamma is to be reworded.>>{{Gamma, the critic's way.}}"
+          in tab
+          and "<<Delta is to be kept after all.>>"
+              "{{Delta, another caller's way.}}" in tab, tab + local)
+    check("...while the named origin's own forms are taken out of the "
+          "tab one by one, since a rebuild push is held",
+          not res["tab_still_marked"] and tab.count("<<") == 2
+          and tab.count("{{") == 2 and "Beta, replaced.\n" in tab
+          and "An added close.\n" in tab
+          and "Beta is to be replaced." not in tab
+          and any("still carries critique forms" in w
+                  for w in res["warnings"]), tab + str(res["warnings"]))
+    # What the surgical settle is FOR: the critic's own resolve, later,
+    # reads this tab back and collapses every form it does not own to
+    # its old half. Had ytlm's forms stayed, that would have undone them.
+    fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md",
+                                        fake, fake)
+    later, _forms = passes.final_text_from_marked(
+        fetched["marked"],
+        written=passes.staged_threads(db, mid, "solo.md",
+                                      states=("written",)))
+    check("...so the other producer's later resolve keeps what this one "
+          "landed, and the tab reads as level with the local file",
+          fetched["state"] == "unchanged" and "Beta, replaced." in later
+          and "An added close." in later
+          and "Gamma, the critic's way." in later, later)
+    held = api.stage_revisions(
+        db, manuscript, "solo.md",
+        [{"old": "Omega closes.", "new": "Omega, redone."}],
+        "ytlm", fake, fake)
+    check("...and that tab still takes no new revisions while the "
+          "others' forms are out",
+          not held["written"] and "takes no new ones" in held["failed"][0][1],
+          str(held))
+
+    # --- a two-sided edit lands nothing ---------------------------------
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-conflict-ws")
+    api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+    ], "ytlm", fake, fake)
+    fake.edit("tab-2", "Alpha stays as it is.", "Alpha, edited in the Doc.")
+    (ms / "solo.md").write_text(
+        OUTSIDE_ESSAY.replace("Omega closes.", "Omega, edited locally."))
+    before = (ms / "solo.md").read_text()
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    check("a tab and a local file that both moved land nothing: the "
+          "state is reported, the forms stay out, the file is untouched",
+          res["state"] == "conflict" and not res["landed"]
+          and [r["verdict"] for r in res["revisions"]] == [None]
+          and res["tab_still_marked"]
+          and (ms / "solo.md").read_text() == before
+          and gdocs.forms_pending(db, manuscript["id"], "solo.md")
+          == "external"
+          and "<<Beta is to be replaced.>>" in fake.tab_text("solo.md"),
+          str(res))
+
+
+def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
+    """The two doors an outside caller lacked, so that it never writes
+    AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
+    manuscript (`api.caller_metadata`, `api.set_caller_metadata`), and
+    taking back its staged revisions on one tab
+    (`api.withdraw_revisions`), with `api.outstanding_revisions` to count
+    what it still has out."""
+    print("outside callers: own settings, outstanding count, withdraw:")
+    from authorlm.extraction import manuscript_extraction_enabled
+
+    db, manuscript, ms, fake = _outside_fixture(root, "outside-own-ws")
+    mid = manuscript["id"]
+
+    def row_meta() -> dict:
+        return json.loads(db.one("SELECT metadata FROM manuscripts WHERE "
+                                 "id = ?", (mid,))["metadata"] or "{}")
+
+    check("a caller with nothing set reads an empty dict",
+          api.caller_metadata(db, manuscript, "ytlm") == {})
+    merged = api.set_caller_metadata(db, manuscript, "ytlm",
+                                     {"title": "Dharma"})
+    merged = api.set_caller_metadata(db, manuscript, "ytlm",
+                                     {"named": True})
+    api.set_caller_metadata(db, manuscript, "other-tool", {"title": "x"})
+    meta = row_meta()
+    check("settings merge key by key under the caller's own name, and "
+          "another caller's are kept apart",
+          merged == {"title": "Dharma", "named": True}
+          and api.caller_metadata(db, manuscript, "ytlm") == merged
+          and api.caller_metadata(db, manuscript, "other-tool")
+          == {"title": "x"}
+          and meta["callers"]["ytlm"] == merged, str(meta))
+    check("...and AuthorLM's own keys in the same column are untouched: "
+          "the Doc mapping and the extraction switch",
+          meta["gdocs"]["_master_id"] == "doc-fake"
+          and meta["extraction"] == {"enabled": False}
+          and not manuscript_extraction_enabled(
+              db, manuscript), str(meta))
+
+    # A caller that wrote its settings straight into the column before
+    # this door existed kept them at the top level under its own name.
+    meta = row_meta()
+    meta["legacy-tool"] = {"title": "Old", "named": True}
+    gdocs._save_mapping(db, manuscript, meta)
+    check("settings written at the top level before the door existed "
+          "read back through it",
+          api.caller_metadata(db, manuscript, "legacy-tool")
+          == {"title": "Old", "named": True})
+    api.set_caller_metadata(db, manuscript, "legacy-tool", {"named": False})
+    meta = row_meta()
+    check("...and the first write moves them under `callers`",
+          "legacy-tool" not in meta
+          and meta["callers"]["legacy-tool"]
+          == {"title": "Old", "named": False}, str(meta))
+    check("a caller that does not name itself is turned away",
+          _refuses(lambda: api.caller_metadata(db, manuscript, " "),
+                   "names itself")
+          and _refuses(lambda: api.set_caller_metadata(
+              db, manuscript, "", {"a": 1}), "names itself"))
+
+    # --- outstanding and withdraw ---------------------------------------
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced."},
+        {"old": "", "new": "An added close.", "anchor_paragraph": 6},
+    ], "ytlm", fake, fake)
+    from authorlm.db import ko_fields as _ko
+
+    other = _ko("dt")
+    other.update(
+        manuscript_id=mid, origin_type="external",
+        origin_id="foreign:other", file="solo.md", anchor_quote=None,
+        proposed_old="Gamma is to be reworded.", proposed_new="Gamma, theirs.",
+        note="theirs", state="written", our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace", "anchor_paragraph": 4,
+                             "origin": "other-tool"}))
+    db.insert("doc_threads", other)
+    check("the outstanding count is per file and per caller",
+          len(staged["written"]) == 2
+          and api.outstanding_revisions(db, manuscript, "ytlm")
+          == {"solo.md": 2}
+          and api.outstanding_revisions(db, manuscript, "other-tool")
+          == {"solo.md": 1}
+          and api.outstanding_revisions(db, manuscript, "nobody") == {})
+    gone = api.withdraw_revisions(db, manuscript, "solo.md", "ytlm")
+    states = {r["id"]: r["state"] for r in db.all(
+        "SELECT id, state FROM doc_threads WHERE manuscript_id = ?", (mid,))}
+    check("withdraw closes the caller's own written threads on the file "
+          "as `withdrawn` and names each one",
+          sorted(g["id"] for g in gone)
+          == sorted(w["id"] for w in staged["written"])
+          and [g["new"] for g in gone] == ["Beta, replaced.",
+                                           "An added close."]
+          and all(states[w["id"]] == "withdrawn" for w in staged["written"])
+          and api.outstanding_revisions(db, manuscript, "ytlm") == {},
+          str(gone))
+    check("...leaves another caller's thread written, and the local file "
+          "as it was",
+          states[other["id"]] == "written"
+          and (ms / "solo.md").read_text() == OUTSIDE_ESSAY)
+    check("...and with nothing out, withdraw is an empty list, not an "
+          "error",
+          api.withdraw_revisions(db, manuscript, "solo.md", "ytlm") == [])
+    check("an unknown file raises, as staging does",
+          _refuses(lambda: api.withdraw_revisions(
+              db, manuscript, "no-such.md", "ytlm"), "no document matching"))
+
+
+EXTENDS_ESSAY = (
+    "# Topic\n\n"
+    "The answer is not a place; it is the pursuit.\n\n"
+    "To give a thing a figure is to mark where it is not.\n\n"
+    "Böhme’s account of Nothing, abyss, will.\n\n"
+    "Its consequences may change, but the act remains.\n\n"
+    "Omega closes.\n")
+
+
+def _a_new_half_that_extends_its_old(root: Path) -> None:
+    """A revision whose new text CONTAINS its old (a sentence appended
+    or prepended) leaves the old text standing inside the new once it
+    lands. When the forms come back without their markers (resolved by
+    hand, or anything else that leaves the form unmatched), the verdict
+    is inferred from the prose — and the old text found inside the
+    landed new is no decline (SMSTTD recapitulation.md, 2026-10-18:
+    7 accepted forms recorded `declined`)."""
+    print("outside callers: a new half that extends its old:")
+    db, manuscript, ms, fake = _outside_fixture(root, "extends-ws",
+                                                EXTENDS_ESSAY)
+    revisions = [
+        ("it is the pursuit.",
+         "it is the pursuit. The verdict is given from within."),
+        ("To give a thing a figure is to mark where it is not.",
+         "To give a thing a figure is to mark where it is not. Spinoza "
+         "drew the opposite conclusion."),
+        ("Böhme’s account of Nothing, abyss, will.",
+         "Trans. Ellistone (1651). Böhme’s account of Nothing, abyss, "
+         "will."),
+        ("Its consequences may change, but the act remains.",
+         "Its consequences may change, but the act remains. The balance "
+         "is conserved."),
+    ]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": old, "new": new, "note": f"x-{n}"}
+        for n, (old, new) in enumerate(revisions)], "ytlm", fake, fake)
+    check("the fixture: four replacements out",
+          len(staged["written"]) == 4 and not staged["failed"],
+          str(staged))
+    # The author takes the markers off by hand: the first three keep the
+    # new text (acceptances), the last is put back to its old (a decline).
+    for old, new in revisions[:3]:
+        fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", new)
+    old, new = revisions[3]
+    fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", old)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r["verdict"] for r in res["revisions"]}
+    check("a landed new that contains its old is accepted — appended "
+          "or prepended",
+          [by_note[f"x-{n}"] for n in range(3)] == ["accepted"] * 3,
+          str(res["revisions"]))
+    check("...and the old text put back is still a decline",
+          by_note["x-3"] == "declined"
+          and (res["accepted"], res["modified"], res["declined"])
+          == (3, 0, 1), str(res))
+    text = (ms / "solo.md").read_text()
+    check("the file carries what was ruled",
+          all(new in text for _, new in revisions[:3])
+          and "The balance is conserved." not in text, text)
+    rows = {r["note"]: r["state"] for r in db.all(
+        "SELECT note, state FROM doc_threads WHERE manuscript_id = ?",
+        (manuscript["id"],))}
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (manuscript["id"], api.EXTERNAL_EVIDENCE)))
+    check("the evidence agrees: three resolved, one declined",
+          [rows[f"x-{n}"] for n in range(4)] == ["cleaned"] * 3
+          + ["declined"]
+          and signals == ["declined"] + ["resolved"] * 3,
+          str((rows, signals)))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
     except Exception as err:  # noqa: BLE001
         return fragment in str(err)
     return False
+
+
+class _EscapingDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` with Google's backslash escapes on both ends:
+    the importer consumes one backslash before any ASCII punctuation
+    (`\{` imports as `{`, which is why push runs escape_math), and the
+    markdown export escapes the characters it was measured escaping
+    around math — `\`, `$`, `_`, `=`, `<`, `>` (#152,
+    margin-threads-design.md "Export encodings")."""
+
+    _IMPORT_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+    def _paras(self, markdown):
+        return [self._IMPORT_ESCAPE.sub(r"\1", p)
+                for p in super()._paras(markdown)]
+
+    def _markdown_of_tab(self, tab):
+        saved = tab["body"]
+        tab["body"] = "".join("\\" + c if c in "\\$_=<>" else c
+                              for c in saved)
+        # One character for one: the style map's indices still hold.
+        assert len(tab["body"]) == len(saved) or not self.styled, \
+            "escaping fake: emphasis and escapes in one tab"
+        try:
+            return super()._markdown_of_tab(tab)
+        finally:
+            tab["body"] = saved
+
+
+MATH_ESSAY = (
+    "# Topic\n\n"
+    "Formally, let $N=\\bigcup\\limits_{A}\\{A,\\neg A\\}$, where $A$ "
+    "ranges over all things. Define negation of the whole element by "
+    "element:$\\neg N:=\\{\\neg x:x\\in N\\}$. Assuming "
+    "$\\neg \\neg A=A$, negation leaves the whole unchanged: "
+    "$\\neg N=N$.\n\n"
+    "Omega closes.\n")
+
+
+def _a_resolve_keeps_math_a_form_cuts_through(root: Path) -> None:
+    r"""2026-10-18, SMSTTD recapitulation.md R10: a revision that moved a
+    math span's opening `$` (`element:$\neg` → `element: $\neg`) put a
+    `$` in each half of its form. Pairing the export's delimiters on the
+    marked text left the new half's `\$` escaped; the resolve landed
+    `\$\neg N:=\{…\}$`, the push took the span for prose so the importer
+    ate `\{` `\}`, and normalize stripped them from the local file too."""
+    print("math a form cuts through survives resolve, push and pull:")
+    # The tab as a push leaves it: the essay through escape_math.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "math-form-ws", gdocs.escape_math(MATH_ESSAY),
+        fake_class=_EscapingDocFake)
+    (ms / "solo.md").write_text(MATH_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    check("the fixture: the tab holds the TeX the file does",
+          "element:$\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "element:$\\neg", "new": "element: $\\neg", "note": "c-1"},
+    ], "ytlm", fake, fake)
+    check("the form is out, a `$` in each half",
+          len(staged["written"]) == 1 and not staged["failed"]
+          and "<<element:$\\neg>>{{element: $\\neg}}" in tab["body"],
+          tab["body"])
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    want = MATH_ESSAY.replace("element:$", "element: $")
+    local = (ms / "solo.md").read_text()
+    check("the resolve lands the TeX byte for byte",
+          res["accepted"] == 1 and local == want, repr(local))
+    check("the tab holds the escaped braces after the resolve's push",
+          not res["tab_still_marked"]
+          and "element: $\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, with_comments=False)
+    local = (ms / "solo.md").read_text()
+    check("a pull gives the same bytes back", local == want, repr(local))
 
 
 def main_test() -> None:
@@ -4507,6 +6218,31 @@ def main_test() -> None:
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
+
         _local_transport_guards(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
@@ -4523,6 +6259,11 @@ def main_test() -> None:
         _the_doc_settle(root)
         _a_hand_resolved_tab_settles_true(root)
         _the_lens_door(root)
+        _lens_resolve_clears_its_forms_in_place(root)
+        _lens_resolve_keeps_a_local_edit(root)
+        _a_table_tab_keeps_its_comments(root)
+        _a_commented_paragraph_is_held(root)
+        _a_brace_remnant_is_taken_out(root)
         _the_changed_words_pop(root)
         _a_pull_between_push_and_settle(root)
         _twins_settle_by_position(root)
@@ -4530,11 +6271,18 @@ def main_test() -> None:
         _recovery_while_forms_are_out(root)
         _chat_sees_each_run_s_transport(root)
         _status_can_reach_the_tab(root)
+        _status_reads_threads_once(root)
         _a_second_run_may_not_push_into_the_same_tab(root)
         _the_hint_after_an_unmark(root)
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _suggestions_on_the_doc_road(root)
+        _footnotes_after_a_closing_illustration(root)
+        _an_outside_caller_resolves_one_tab(root)
+        _a_resolve_keeps_math_a_form_cuts_through(root)
+        _a_new_half_that_extends_its_old(root)
+        _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

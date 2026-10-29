@@ -162,6 +162,14 @@ the enclosed charge divided by the permittivity of free space.
   `[Only: a, b]` ... `[/Only]` keeps the region for the named outputs and
   removes it everywhere else. Output names: `pdf`, `docx`, `epub`,
   `doc` (the export Doc), `md`, `audio`. Untagged text goes everywhere.
+- `[Omit: all]` ... `[/Omit]` removes the region from every output in
+  that list, including any added later, so a region meant for no reader
+  does not have to be kept in step with the list. `all` covers the
+  exports only: the export Doc is one of them, the Doc tabs are not. A
+  tab is the working surface, so the region and its two tag lines go to
+  the tab on a push and come back unchanged on a pull. There is no
+  `[Only: all]`; that would be untagged text, and it fails the build
+  like any other malformed tag.
 - Tags sit on their own lines, may nest one level (`Only` inside
   `Omit` is the substitution pattern above), and never split a
   paragraph.
@@ -209,6 +217,13 @@ Done 2026-09-02:
   way into Google's importer; `gdocs.unescape_export_math` strips the
   exporter's escapes inside math on every pull. A hermetic test models
   the measured importer and exporter and asserts a byte-clean round trip.
+- Math is found per READING of every pending form (`gdocs._FORM`): the
+  text with each `<<old>>{{new}}` collapsed to its old half, then its new.
+  A revision that moves a span's opening `$` puts a `$` in each half, and
+  pairing delimiters on the marked text left the new half's `\$` escaped;
+  the resolve landed it and the next push lost the span's `\{` `\}`
+  (2026-10-18, SMSTTD recapitulation.md R10). A TeX `\$` inside math now
+  round-trips too.
 - `export.export_manuscript` builds the export Doc from the pandoc DOCX
   (`export.build_docx`), so the Doc carries native equations, footnotes,
   and illustrations.

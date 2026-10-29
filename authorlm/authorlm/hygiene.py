@@ -138,12 +138,14 @@ def below_recurrence_bar(db: Database, mid: str, files: dict[str, str],
                          ungrounded_names: set[str] | None = None) -> list[dict]:
     """Unconfirmed recurring-kind concepts that fail the ratified bar.
 
-    Ungrounded concepts are excluded because the stronger zero-context rule
-    already accounts for them.
+    Ungrounded concepts are excluded when the caller names them (an empty
+    set excludes none: a name with zero contexts is then simply below the
+    bar, which is how `triage_rules` reads absence now that the
+    redesigned extraction's gate 1 owns grounding).
     """
-    ungrounded_names = ungrounded_names or {
-        row["name"] for row in ungrounded_concepts(db, mid, files)
-    }
+    if ungrounded_names is None:
+        ungrounded_names = {
+            row["name"] for row in ungrounded_concepts(db, mid, files)}
     below_bar = []
     for node in db.all(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? "

@@ -1,0 +1,20 @@
+# metalm standard hooks (guidelines/design.md#generated-docs, guidelines/coding.md).
+# The owner approves this file once; after it is committed, agents run `pre-commit install`
+# in any checkout of the repo without asking. A new or changed hook is approved again.
+# Left out of the template until fixed (docs/design/exceptions.md): ruff (137 errors in 26 files),
+# ruff-format (100 files would be reformatted), import-contracts (no contracts or .venv yet).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: no-commit-to-branch   # branch for every change (guidelines/index.md)
+        args: [--branch, main]
+  - repo: https://github.com/nagarkar/metalm
+    rev: c6980f86d45928a2f547e58f8b16251162e18808   # update with: pre-commit autoupdate --bleeding-edge --repo https://github.com/nagarkar/metalm
+    hooks:
+      - id: metalm-gendocs   # regenerates docs/generated/; stops the commit when it changed files
+      - id: no-env-files     # no .env* path ever enters git (metalm guidelines/coding.md#security-and-secrets)
+  - repo: https://github.com/gitleaks/gitleaks   # secret scan of staged changes
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

@@ -20,6 +20,7 @@ from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
 from . import threads as th
+from .context import Input
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "editor.md"
 ESSAY_STATES = ("pending", "proposed", "triaged", "written", "resolved",
@@ -324,12 +325,36 @@ def learnings(db: Database, pass_row: dict) -> list[str]:
     return [f"{r['signal']}: {r['target']}" for r in rows][-40:]
 
 
+# The edit pass's declaration (summary-hierarchy-design.md ruling 10,
+# §6.7): what it reads, as `context.Input` members. The first seven are
+# the blocks it always had; SECTION_OUTLINE (the target's own argument map)
+# and REFERENCED_SECTIONS (the text of other essays' sections the target
+# refers back to) are what §6.0 found it lacking. Changing what the editor
+# sees is a change to this tuple, not to the assembler.
+INPUTS = (Input.STYLE_LAW, Input.VALIDATED_BELIEFS, Input.INTENTS,
+          Input.CONCEPT_SLICE, Input.PRIOR_RUNS, Input.ESSAY_SUMMARIES,
+          Input.ESSAY_TEXT, Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS)
+
+# Of those, the blocks `context.supply` renders for this pass; the rest
+# are assembled below as they always were (their shape is what the HTTP
+# stubs in the tests and the editor prompt describe) and move onto
+# `supply` as that module takes their renderers.
+SUPPLIED = (Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS)
+
+
 def build_context(db: Database, manuscript: dict, file: str,
-                  pass_row: dict, force: bool = False) -> dict:
+                  pass_row: dict, force: bool = False, llm=None) -> dict:
     """Assemble everything the editor model sees. Raises with a precise
-    message when the gate or the summaries block the run."""
+    message when the gate or the summaries block the run.
+
+    `llm` (a `summaries.clients` dict, or one client) is what makes the
+    summaries lazy (ruling 3, ruling 9): every level the declaration reads
+    is brought up to date first, each printing its cost line, and the
+    summaries gate below then has nothing to block on. Without it the
+    stored rows are judged as they are and a stale one still blocks, as
+    the pass has always done."""
     from .styles import render as render_style
-    from . import api
+    from . import api, context
 
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
@@ -353,11 +378,17 @@ def build_context(db: Database, manuscript: dict, file: str,
             f"writeup ('write complete') or put the old essay back "
             f"('write abandon'). To refresh its summary from the pinned "
             f"pre-rewrite text meanwhile: 'summarize rebuild {file}'.")
+    if file not in texts:
+        raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    if llm is not None:
+        context.ensure_for(db, manuscript, file, list(INPUTS), llm)
+        # The rebuild wrote rows; the gate must judge the text it captured
+        # against the rows as they are now, so the capture is retaken.
+        capture = sums.capture(db, manuscript)
+        texts, _unlisted, inflight_now = capture
     ready = summaries_ready(db, manuscript, file, capture=capture)
     if not ready["ok"]:
         raise RuntimeError(summaries_message(ready, "edit pass"))
-    if file not in texts:
-        raise LookupError(f"'{file}' is not in the manuscript's reading order")
     # Disk text for the target: the refusal above has already proved this
     # file is not in flight, so the capture carries no overlay for it.
     paragraphs = paragraphs_of(texts[file])
@@ -376,6 +407,8 @@ def build_context(db: Database, manuscript: dict, file: str,
         "before": ready["before"], "after": ready["after"],
         "inflight": ready["inflight"],
         "learnings": learnings(db, pass_row),
+        "blocks": context.supply(db, manuscript, file, list(SUPPLIED),
+                                 capture=capture),
         "gate": gate, "forced": force and not gate["clear"],
     }
 
@@ -416,6 +449,7 @@ def render_user_message(ctx: dict) -> str:
                         for e in ctx["after"] if e["summary"])
     essay = "\n\n".join(f"[{n}] {p}" for n, p in
                         enumerate(ctx["paragraphs"], 1))
+    blocks = ctx.get("blocks") or {}
     return "\n".join([
         block("STYLE GUIDE", ctx["style"]),
         block("POLICIES", beliefs),
@@ -424,6 +458,10 @@ def render_user_message(ctx: dict) -> str:
         block("LEARNINGS (this pass)", learn),
         block("BOOK CONTEXT — BEFORE", before),
         block("BOOK CONTEXT — AFTER", after),
+        block("OUTLINE — this essay's sections",
+              blocks.get(Input.SECTION_OUTLINE, "")),
+        block("REFERENCED SECTIONS — text this essay refers back to",
+              blocks.get(Input.REFERENCED_SECTIONS, "")),
         block(f"THE ESSAY — {ctx['file']} ({len(ctx['paragraphs'])} "
               "paragraphs)", essay),
     ])
@@ -448,6 +486,8 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
             f"{len(items) if isinstance(items, list) else 'none'}")
     edits = []
     for i, (item, src) in enumerate(zip(items, paragraphs), 1):
+        if not isinstance(item, dict):
+            raise ContractError(f"paragraph entry {i} is not a JSON object")
         if item.get("n") != i:
             raise ContractError(f"entry {i} has n={item.get('n')}")
         want = echo_of(src)
@@ -469,8 +509,16 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
         edits.append({"n": i, "old": src, "new": new,
                       "why": str(item.get("why") or "").strip(),
                       "intent_id": item.get("intent_id") or None})
+    raw_ins = raw.get("insertions") or []
+    if not isinstance(raw_ins, list):
+        raise ContractError("insertions is not a JSON array")
+    raw_sug = raw.get("suggestions") or []
+    if not isinstance(raw_sug, list):
+        raise ContractError("suggestions is not a JSON array")
     insertions = []
-    for ins in raw.get("insertions") or []:
+    for k, ins in enumerate(raw_ins, 1):
+        if not isinstance(ins, dict):
+            raise ContractError(f"insertion {k} is not a JSON object")
         after = ins.get("after")
         if not isinstance(after, int) or not 0 <= after <= len(paragraphs):
             raise ContractError(f"insertion after={after} out of range")
@@ -481,7 +529,9 @@ def validate_output(raw: dict, paragraphs: list[str]) -> dict:
                            "why": str(ins.get("why") or "").strip(),
                            "intent_id": ins.get("intent_id") or None})
     suggestions = []
-    for s in raw.get("suggestions") or []:
+    for k, s in enumerate(raw_sug, 1):
+        if not isinstance(s, dict):
+            raise ContractError(f"suggestion {k} is not a JSON object")
         text = str(s.get("text") or "").strip()
         if text:
             suggestions.append({"kind": s.get("kind") or "other",
@@ -819,7 +869,8 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                       forms: list[dict],
                       origin_type: str = "critique",
                       evidence_type: str = "critique_edit",
-                      final_text: str | None = None) -> list[dict]:
+                      final_text: str | None = None,
+                      threads: list[dict] | None = None) -> list[dict]:
     """Match the resolved forms back to their threads by proposal text;
     record proposal→final diffs as evidence; close the threads. Returns
     the modified-acceptance diffs (the learnings duty's feedstock).
@@ -835,9 +886,17 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
     2026-08-31: old text still standing as-is → decline; old text gone →
     acceptance, the resolved text being the final wording). Without
     `final_text` the old behavior stands: an unmatched form is a
-    decline."""
-    threads = staged_threads(db, manuscript_id, file, states=("written",),
-                             origin_type=origin_type)
+    decline.
+
+    `threads` narrows the resolution to exactly the rows handed in, for
+    a caller whose set is smaller than "every written thread of this
+    origin on the file" (`api.resolve_revisions`: one outside caller's
+    replacements, its insertions already ruled). Omitted, the set is
+    read here as it always was."""
+    if threads is None:
+        threads = staged_threads(db, manuscript_id, file,
+                                 states=("written",),
+                                 origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
     # Replaces match by their verbatim OLD half (law). Insertions have no
@@ -888,13 +947,19 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
         # inside the braces. Insertions are excluded: their old half is
         # the empty string, which is "present" in any text.
         old = " ".join((t["proposed_old"] or "").split())
-        if norm_final is None or not old or old in norm_final:
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        # The old text counts as standing only OUTSIDE the landed new: a
+        # new that extends its old (a sentence appended or prepended)
+        # carries the old inside it once it lands, and that is the
+        # acceptance, not the old text restored (SMSTTD, 2026-10-18).
+        rest = (norm_final.replace(new, "\0") if new and norm_final
+                else norm_final)
+        if norm_final is None or not old or old in rest:
             db.update("doc_threads", t["id"], {"state": "declined"})
             _edit_evidence(db, manuscript_id, t, "declined",
                            evidence_type=evidence_type)
             continue
-        proposed = t["proposed_new"] or ""
-        new = " ".join(proposed.split())
         if new and new in norm_final:
             db.update("doc_threads", t["id"], {"state": "cleaned"})
             _edit_evidence(db, manuscript_id, t, "resolved",
