@@ -6,9 +6,12 @@ and `stitch.rs`. Both programs read `chapters/<stem>.json` and write
 `state/<stem>.json` in the same schema (`src-tauri/src/types.rs`), the
 same `audio/<id>.<quality>.mp3` take files and the same
 `audio/<stem>.<quality>.mp3` stitched file, so a take made by either is
-done for both. "Done" is: the id has a state entry whose file exists at
-the book's quality. Same id, same audio; nothing here ever re-renders a
-done id except `retake`, on the author's word.
+done for both. Takes and stitched chapter files are written via a sibling
+`.tmp` then renamed into place so a failed or killed write cannot destroy
+a previously good file while state still names that path. "Done" is: the
+id has a state entry whose file exists at the book's quality. Same id,
+same audio; nothing here ever re-renders a done id except `retake`, on
+the author's word.
 
 Guard against double renders with two writers on one state (§5): the
 chapter's state is re-read from disk immediately before every render,
@@ -169,6 +172,25 @@ def save_state(root: Path, stem: str, state: dict) -> Path:
     return path
 
 
+def write_take_bytes(root: Path, rel: str, audio_bytes: bytes) -> Path:
+    """Write a paragraph take via sibling `.tmp` + rename.
+
+    A retake that fails or is killed mid-write must not destroy a previously
+    good file while `state.sections[id].audioFiles[quality]` still names that
+    path (the twin of stitch's atomic encode; audiostation's `generate_one`
+    uses the same pattern)."""
+    dest = root / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        tmp.write_bytes(audio_bytes)
+        os.replace(tmp, dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    return dest
+
+
 def take_of(root: Path, state: dict, section_id: str, quality: str) -> str | None:
     """The take's path relative to the folder when the id is done at
     `quality`, else None."""
@@ -313,6 +335,7 @@ def build_request(book: dict, chapter: dict, state: dict, section_id: str,
     speech = next((s for s in speech_of(chapter) if s["id"] == section_id), None)
     if speech is None:
         raise AudioError(f"section {section_id} is not speech in {chapter.get('stem')}")
+    audio.require_paid_voice(speech["voiceId"], speech["cast"])
     now = now or datetime.now(timezone.utc)
     prev, nxt = neighbours(chapter, section_id)
     stitchable = not speech["model"].startswith("eleven_v3")
@@ -379,7 +402,7 @@ def render_one(root: Path, book: dict, chapter: dict, section_id: str,
     takes = root / TAKES_DIR
     takes.mkdir(parents=True, exist_ok=True)
     rel = f"{TAKES_DIR}/{section_id}.{quality}.mp3"
-    (root / rel).write_bytes(audio_bytes)
+    write_take_bytes(root, rel, audio_bytes)
     state = load_state(root, stem)
     entry = state["sections"].setdefault(section_id, {})
     entry.setdefault("audioFiles", {})[quality] = rel
@@ -408,6 +431,10 @@ def generate(manuscript: dict, stem: str, spec: str | None = None,
     book = load_book(root)
     chapter = load_chapter(root, book, stem)
     p = plan(root, book, chapter, spec, remaining, retake)
+    selected_ids = set(p["ids"])
+    for speech in speech_of(chapter):
+        if speech["id"] in selected_ids:
+            audio.require_paid_voice(speech["voiceId"], speech["cast"])
     result = {"stem": stem, "quality": p["quality"], "characters": p["characters"],
               "planned": [{"id": sid, "ordinal": ordinal_of(chapter, sid),
                            "characters": len(next(s["text"] for s in speech_of(chapter)

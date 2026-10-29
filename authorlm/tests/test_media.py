@@ -11,6 +11,7 @@ os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-media/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-media/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
 
+import json
 import sys
 import tempfile
 import unittest
@@ -615,7 +616,6 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(p["previous_interaction_id"], "v1_x")
         self.assertEqual(p["est_usd"], 0.43)      # $0.40 out + $0.03 re-read
         self.assertTrue(p["prompt"].endswith("Keep everything else the same."))
-        import time; time.sleep(1.1)              # job ids are per second
         edit = media_gen.edit_start(ms, key, "01", "warmer light", http=http)
         self.assertEqual(calls[-1][2]["previous_interaction_id"], "v1_x")
         self.assertEqual(edit["edit_of"], first)
@@ -652,6 +652,48 @@ class MediaTests(unittest.TestCase):
             'resolution = "1080p"\n', encoding="utf-8")
         p = media_gen.plan(self._DB(), ms, key, "gemini-omni-1.1-flash")
         self.assertTrue(any("no 1080p" in r for r in p["reasons"]))
+
+    def test_job_ids_do_not_overwrite_same_second(self):
+        """Two starts in the same second keep both billed jobs."""
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        n = {"i": 0}
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            n["i"] += 1
+            return {"id": f"v1_{n['i']}", "status": "in_progress"}
+
+        a = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                            http=http)
+        b = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                            http=http)
+        self.assertNotEqual(a["id"], b["id"])
+        jobs = self.root / "_clips" / "jobs"
+        self.assertEqual(
+            json.loads((jobs / f"{a['id']}.json").read_text())["operation"],
+            "interactions/v1_1")
+        self.assertEqual(
+            json.loads((jobs / f"{b['id']}.json").read_text())["operation"],
+            "interactions/v1_2")
+
+    def test_take_overflow_refuses_instead_of_overwrite(self):
+        """After 99 listed takes, another save must not clobber paid bytes."""
+        key = "clip1"
+        desc, law = "abcd1234", "ef01"
+        clips = self.root / "_clips"
+        clips.mkdir(parents=True, exist_ok=True)
+        for i in range(1, 100):
+            (clips / f"{key}-{desc}-{law}-{i:02d}.mp4").write_bytes(
+                b"GOOD-%d" % i)
+        with self.assertRaises(RuntimeError) as ctx:
+            media_gen._next_n(self.root, key)
+        self.assertIn("99 takes", str(ctx.exception))
+        job = {"key": key, "desc": desc, "law": law}
+        with self.assertRaises(RuntimeError):
+            media_gen._save_take(self.root, job, b"WOULD-WIPE")
+        self.assertEqual(
+            (clips / f"{key}-{desc}-{law}-99.mp4").read_bytes(), b"GOOD-99")
 
     # -- exports
 

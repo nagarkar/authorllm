@@ -7,7 +7,8 @@ which is `workbench.dispatch` — the pronunciation workbench is a mode of
 the same page), and streams audio from
 `/preview/<stem>/<id>.mp3` (rendered on the request when missing — the
 lazy listen), `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
-with HTTP ranges honoured so a phone can seek. Any manuscript with an
+with HTTP ranges honoured so a phone can seek, and the brand icons
+(`branding.py`). Any manuscript with an
 audio export can be open: the page names it on every request (`params.
 manuscript`, and `?m=` on the audio urls), and `-m` is only the one the
 page opens on. The phone reaches the
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-from . import audiobook
+from . import audiobook, branding
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
@@ -99,6 +100,8 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 return
             if path == "/health":
                 self._json(200, {"ok": True})
+                return
+            if branding.send(self, path, head=head):
                 return
             if path.startswith(("/preview/", "/take/", "/stitched/")):
                 named = (parse_qs(query).get("m") or [None])[0]

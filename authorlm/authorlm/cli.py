@@ -1388,7 +1388,12 @@ def _critique_edits_triage(db: Database, manuscript: dict, args) -> None:
 
 def _critique_write(db: Database, manuscript: dict, args) -> None:
     """Diff-write: accepted edits → the essay's Doc tab as pending forms.
-    Pins the pre-pass version. Local keeps OLD."""
+    Pins the pre-pass version. Local keeps OLD.
+
+    The checkout gate matches `filter push` (RISK-4): accepted edits were
+    staged against local, and `write_pending_forms` opens with a levelling
+    push that would overwrite Doc-side prose edits if the file is
+    checked out. Refuse and name `doc pull` — never a silent wipe."""
     from . import gdocs, passes
 
     if not args.target:
@@ -1400,6 +1405,11 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     accepted = [t for t in threads if t["state"] == "accepted"]
     if not accepted:
         sys.exit(f"error: no accepted edits for {file} — triage first.")
+    # Before pin / OAuth / Doc writes: staging read `old` from local.
+    try:
+        api._checkout_gate(db, manuscript, file)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
     # Pristine check + pin: the pass row remembers what to roll back to.
     from .revisions import collect_revision
     version = collect_revision(db, manuscript, session_id=None,
@@ -5371,7 +5381,8 @@ def cmd_export(args):
                 "export teleprompter needs --file <file> — the monologue "
                 "whose on-camera passages to collect"))
         try:
-            result = ex.export_teleprompter(manuscript, args.file)
+            result = ex.export_teleprompter(manuscript, args.file,
+                                            whole=args.whole)
         except (LookupError, ValueError) as err:
             raise SystemExit(ui.yellow(f"export failed: {err}"))
         print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")
@@ -5472,6 +5483,8 @@ def cmd_audio(args):
             print(ui.dim(f"  {len(result['chapters'])} chapter(s), "
                          f"{result['sections']} speech section(s), "
                          f"{result['characters']:,} characters"))
+            for note in result.get("notes", []):
+                print(ui.dim(f"  {note}"))
             for warning in result["warnings"]:
                 print(ui.yellow(f"warning: {warning}"))
             return
@@ -9684,6 +9697,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "manuscript's folder); re-uploading the same "
                         "output replaces it in place — same file, same "
                         "link")
+    p.add_argument("--whole", action="store_true",
+                   help="teleprompter only: the whole file read on camera "
+                        "— the narrated prose as Body between the "
+                        "'voice: author' clips")
     p.add_argument("--as-doc", action="store_true",
                    help="with --upload, docx/teleprompter only: convert "
                         "to a Google Doc instead of keeping the .docx")

@@ -140,6 +140,12 @@ Session-start backups of the SQLite store (OPS-4).
 
 Learning Engine (RFC AuthorLM §17.8, Chapter 8).
 
+## `authorlm.branding`
+
+`authorlm/authorlm/branding.py`
+
+The AuthorLM brand files every served page links, and the routes that serve them.
+
 ## `authorlm.briefing`
 
 `authorlm/authorlm/briefing.py`
@@ -560,11 +566,11 @@ Pins llmlm's price cache to an empty one that never reaches the network.
 
 Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
 
-## `tests.test_anchor_split_and_holds`
+## `tests.test_anchor_prefix_truncation`
 
-`authorlm/tests/test_anchor_split_and_holds.py`
+`authorlm/tests/test_anchor_prefix_truncation.py`
 
-Doc sync doors that silently corrupt when wrong.
+`_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
 
 ## `tests.test_api`
 
@@ -578,11 +584,23 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_preview_without_paid_voice`
+
+`authorlm/tests/test_audio_preview_without_paid_voice.py`
+
+Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
+
+## `tests.test_branding`
+
+`authorlm/tests/test_branding.py`
+
+Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
 ## `tests.test_context`
 
@@ -686,6 +704,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
 
+## `tests.test_footnote_prefixes_nested`
+
+`authorlm/tests/test_footnote_prefixes_nested.py`
+
+footnote_prefixes must stay injective when nested paths share a stem.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -697,6 +721,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 `authorlm/tests/test_generated_docs.py`
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
+
+## `tests.test_generation_take_atomic`
+
+`authorlm/tests/test_generation_take_atomic.py`
+
+Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 ## `tests.test_interlocutor`
 
@@ -811,6 +841,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_write_accept_idempotent`
+
+`authorlm/tests/test_write_accept_idempotent.py`
+
+write_accept must not duplicate a beat after a crash mid-accept.
 
 ## `tools.bootstrap_beliefs`
 

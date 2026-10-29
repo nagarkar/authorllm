@@ -119,3 +119,7 @@ While a project is open, its rulings live in the rulings record named in section
 1. **A standing rule** (anything that should bind future writing: a vocabulary, a stance, a source never cited, a kind of repair never made) is proposed as a style law with its scope named (this essay, this part, the whole book) and its wording shown in chat; `authorlm style add` runs on the author's yes, one law at a time. An unratified rule never becomes a law.
 2. **A reason behind one decision** stays with that decision, in the form's thread note.
 3. **An open question** goes to the author; it is settled, or carried to the next project by name.
+
+## Rulings
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file, or the full URL of its Doc tab, on the ruling's id, for example `[R2](/Users/nagarkar/workspace/repos/<repo>/<path>/rulings.md)`. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).

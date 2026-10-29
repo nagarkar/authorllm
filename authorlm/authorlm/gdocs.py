@@ -131,12 +131,59 @@ _EXPORT_INLINE_MATH = re.compile(
     r"(?<![\\$])\\\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\\\$(?![\d$])")
 _MATH_SENTINEL = "\x00M%d\x00"
 _SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
+_ANY_MATH = re.compile(
+    f"(?s:{_DISPLAY_MATH.pattern})|{_INLINE_MATH.pattern}")
+_ANY_EXPORT_MATH = re.compile(
+    f"(?s:{_EXPORT_DISPLAY_MATH.pattern})|(?s:{_DISPLAY_MATH.pattern})"
+    f"|{_EXPORT_INLINE_MATH.pattern}|{_INLINE_MATH.pattern}")
+# Inside math the exporter's escapes are all undone — _ESCAPE's set and
+# the `$` of an escaped delimiter or a TeX `\$`.
+_EXPORT_ESCAPE_IN_MATH = re.compile(r"\\(.)", re.DOTALL)
+_MATH_ESCAPED = set("\\`*_{}[]()#+-.!<>~|=:$")
 
 
 def map_math(text: str, fn) -> str:
     """fn over the inside of every math span, delimiters excluded."""
     text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
     return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
+
+
+# A pending form, as the tab and its export hold it: `<<old>>{{new}}`,
+# the old half struck (`~~`) and its markers escaped (`\<\<`) by the
+# exporter. A form whose halves each carry a `$` — a revision that moves
+# a span's opening delimiter, `<<by element:$\neg>>{{by element: $\neg}}`
+# — leaves the marked text with three delimiters where each reading has
+# two, and pairing them on the marked text pairs the wrong ones: the new
+# half kept its `\$` on pull, the resolve landed it, and the next push
+# and normalize took the span for prose and stripped its `\{` `\}`
+# (2026-10-18, SMSTTD recapitulation.md R10). So math is found on each
+# READING — every form collapsed to its old half, then to its new — and
+# mapped back to the marked text.
+_FORM = re.compile(
+    r"(?:~~)?\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    re.DOTALL)
+
+
+def _math_positions(text: str, pattern: re.Pattern) -> list[list[int]]:
+    """Each math span `pattern` finds, as the positions in `text` it
+    covers. Without forms that is the match itself; with forms, every
+    span of either reading, each mapped back through its reading."""
+    forms = list(_FORM.finditer(text))
+    if not forms:
+        return [list(range(*m.span())) for m in pattern.finditer(text)]
+    spans: list[list[int]] = []
+    for keep in ("old", "new"):
+        idx: list[int] = []
+        pos = 0
+        for f in forms:
+            idx += range(pos, f.start())
+            idx += range(f.start(keep), f.end(keep))
+            pos = f.end()
+        idx += range(pos, len(text))
+        reading = "".join(text[i] for i in idx)
+        spans += [idx[m.start():m.end()] for m in pattern.finditer(reading)
+                  if m.end() > m.start()]
+    return spans
 
 
 def _lift_math(text: str) -> tuple[str, list[str]]:
@@ -150,7 +197,10 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(m.group(0))
         return _MATH_SENTINEL % (len(spans) - 1)
 
-    text = _DISPLAY_MATH.sub(display, text)
+    if _FORM.search(text):
+        text = _lift_marked_math(text, spans)
+    else:
+        text = _DISPLAY_MATH.sub(display, text)
     # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
     # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
     # normalized bytes back to disk, so the damage is permanent. Keep
@@ -163,6 +213,38 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(tail.rstrip("\n"))
         return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
     return _INLINE_MATH.sub(inline, text), spans
+
+
+def _lift_marked_math(text: str, spans: list[str]) -> str:
+    r"""_lift_math for text carrying pending forms: every stretch that is
+    math in either reading goes opaque, so no prose rule reaches a `\{`
+    inside it. A span a form cuts through is lifted piece by piece —
+    the form markers between the pieces stay prose, for the rules that
+    unescape them. Display layout is canonicalized only for a piece
+    that is one whole display span."""
+    runs: list[list[int]] = []
+    for span in _math_positions(text, _ANY_MATH):
+        start = span[0]
+        for prev, at in zip(span, span[1:] + [None]):
+            if at != prev + 1:
+                runs.append([start, prev + 1])
+                start = at
+    ranges: list[list[int]] = []
+    for a, b in sorted(runs):
+        if ranges and a < ranges[-1][1]:
+            ranges[-1][1] = max(ranges[-1][1], b)
+        else:
+            ranges.append([a, b])
+    out, pos = [], 0
+    for a, b in ranges:
+        chunk = text[a:b]
+        m = _DISPLAY_MATH.fullmatch(chunk)
+        if m:
+            chunk = "$$ " + " ".join(m.group(1).split()) + " $$"
+        spans.append(chunk)
+        out.append(text[pos:a] + _MATH_SENTINEL % (len(spans) - 1))
+        pos = b
+    return "".join(out) + text[pos:]
 
 
 def _restore_math(text: str, spans: list[str]) -> str:
@@ -295,12 +377,19 @@ def unescape_export_math(markdown: str) -> str:
     corrupt every equation with an equals sign). Pull-side only:
     normalize_markdown leaves math alone because on a local file every
     backslash is TeX. Escaped delimiters (`\$…\$`, `\$\$…\$\$`) are
-    unescaped first so the spans are found at all (#152)."""
-    markdown = _EXPORT_DISPLAY_MATH.sub(
-        lambda m: "$$" + m.group(1) + "$$", markdown)
-    markdown = _EXPORT_INLINE_MATH.sub(
-        lambda m: "$" + m.group(1) + "$", markdown)
-    return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
+    unescaped with the rest so the spans are found at all (#152), and
+    spans are found per reading of any pending form (see _FORM)."""
+    inside: set[int] = set()
+    for span in _math_positions(markdown, _ANY_EXPORT_MATH):
+        inside.update(span)
+
+    def one(m: re.Match) -> str:
+        at = m.start()
+        if (at in inside and at + 1 in inside
+                and m.group(1) in _MATH_ESCAPED):
+            return m.group(1)
+        return m.group(0)
+    return _EXPORT_ESCAPE_IN_MATH.sub(one, markdown)
 
 
 def separate_tag_lines(markdown: str) -> str:
@@ -1389,10 +1478,10 @@ def _plain(line: str) -> str:
 
 
 # Prefix match for `_split_by_anchors` only when the Docs-API first
-# paragraph is this long: a short needle like "Yes." used to match a
-# longer mid-chapter line ("Yes. This is still…") and pull the rest of
-# the prior tab into the next one (2026-10-27). Exact match always
-# wins; below this length a missed soft-break join stays missing.
+# paragraph is this long: a short needle like "Yes." is a prefix of any
+# longer line that opens with it ("Yes. This is still…") and pulled the
+# rest of the prior tab into the next one (2026-10-27). Exact match
+# always wins; below this length a missed soft-break join stays missing.
 _ANCHOR_PREFIX_MIN = 40
 
 
@@ -1402,9 +1491,14 @@ def _split_by_anchors(text: str, order: list[str],
     searching forward only. A tab with no text gets an empty section; a
     tab whose first paragraph is not found gets none (reported missing,
     never guessed). A line matches when it equals the anchor, or — only
-    when the anchor is at least `_ANCHOR_PREFIX_MIN` chars — when it
-    starts with the anchor's first 80 plain chars (export line longer
-    than the API paragraph)."""
+    when the anchor is at least `_ANCHOR_PREFIX_MIN` plain chars — when
+    it starts with the whole anchor (the export line can be longer than
+    the Docs-API paragraph). The match uses the full anchor, not a
+    truncated prefix: truncating to 80 plain chars let a later tab's
+    opener steal mid-chapter lines that only shared that prefix
+    (2026-10-29). The length floor closes the same door for a short
+    anchor like "Yes.", which is a prefix of any line that opens with it
+    (2026-10-27)."""
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
     starts: list[tuple[int, str]] = []
@@ -1417,10 +1511,8 @@ def _split_by_anchors(text: str, order: list[str],
             continue
         for i in range(pos, len(lines)):
             p = plain[i]
-            if not p:
-                continue
-            if p == want or (len(want) >= _ANCHOR_PREFIX_MIN
-                             and p.startswith(want[:80])):
+            if p and (p == want or (len(want) >= _ANCHOR_PREFIX_MIN
+                                    and p.startswith(want))):
                 starts.append((i, title))
                 pos = i + 1
                 break
@@ -1781,9 +1873,8 @@ def push_doc(db: Database, manuscript: dict, query: str,
 
     bridge = bridge or manuscript_bridge(manuscript)
     relpath, path = _resolve(bridge, query)
-    if guard:
-        _refuse_doc_changed(db, manuscript, bridge, relpath, service,
-                            docs_service)
+    seen = (_refuse_doc_changed(db, manuscript, bridge, relpath, service,
+                                docs_service) if guard else None)
     # The pause: <<old>>{{new}} / {{insert}} forms the author may have
     # post-edited live either in the Doc (critique) or on disk (filter).
     # open_threads only sees author_comment rows, so without this gate a
@@ -1825,7 +1916,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
         # carrying either push by paragraph diff instead — anchors on
         # untouched text survive by construction.
         result = diff_push(db, manuscript, relpath, service, docs_service,
-                           bridge=bridge)
+                           bridge=bridge, seen=seen)
         meta_now = _mapping(db, manuscript)
         master = meta_now.get(bridge.meta_key, {}).get("_master_id")
         tab = (meta_now.get(bridge.meta_key, {}).get(relpath) or {}).get(
@@ -1907,23 +1998,42 @@ def _refuse_rebuild_over_comments(db: Database, manuscript: dict,
 
 
 def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
-                        relpath: str, service, docs_service) -> None:
+                        relpath: str, service, docs_service) -> dict | None:
     """`guard=True` (the author's `doc push`, and the audiobook page's
     Push): read the tab and refuse when its text moved since the last
     push, on its own or on both sides. A push overwrites the tab with the
     local file, so it would otherwise drop those Doc edits silently. A
     file with no tab yet, or never pushed, has nothing to lose. Internal
     callers that push right after settling forms in the tab leave the
-    guard off: their tab differs from the base by design."""
+    guard off: their tab differs from the base by design.
+
+    Returns what it read, {tab, revision}, for diff_push to reuse in
+    place of a second whole-Doc export (2026-10-27: three exports at
+    about 21 seconds each made one tab's push take 88). When the Doc's
+    revision id is still the one this tab's last push left (`doc_rev`),
+    nobody has edited the Doc since, so the tab is the pushed base and
+    no export is read at all."""
     links = _mapping(db, manuscript).get(bridge.meta_key, {})
     entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
     if not (links.get("_master_id") and entry.get("tab_id")
             and entry.get("pushed_hash")):
-        return
+        return None
+    revision = doc_revision(docs_service, links["_master_id"])
+    if revision and entry.get("doc_rev") == revision:
+        _, path = _resolve(bridge, relpath)
+        local = strip_embed_lines(path.read_text(encoding="utf-8")
+                                  if path.exists() else "")
+        base = find_pushed_base(db, manuscript, relpath,
+                                entry["pushed_hash"], also=(local,))
+        if base is not None:
+            return {"tab": base, "revision": revision}
     view = doc_three_way(db, manuscript, relpath, service, docs_service,
                          bridge=bridge)
+    seen = ({"tab": view["tab"], "revision": view["revision"]}
+            if view.get("tab") is not None and view.get("revision")
+            else None)
     if view["state"] not in ("doc_ahead", "conflict"):
-        return
+        return seen
     # A file the Doc's edits were already merged into (`doc merge`, then
     # the draft copied over the file) pushes: merging the Doc into it
     # again changes nothing, so nothing of the Doc's would be lost.
@@ -1931,36 +2041,34 @@ def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
         merged, conflicts = merge3(view["local"], view["base"], view["doc"],
                                    relpath)
         if not conflicts and merged == view["local"]:
-            return
+            return seen
         # A conflict settled by hand, with a local edit right beside one
         # of the Doc's (2026-10-26, bind-again.md: the Doc's paragraph
         # taken, the clip line under it changed): git's merge calls the
         # adjacent hunks a conflict though nothing of the Doc's is lost.
         if _holds_doc_edits(view["local"], view["base"], view["doc"]):
-            return
+            return seen
     raise DocChanged(f"{relpath}: {DOC_CHANGED}")
 
 
 def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     """True when every edit the Doc made since the base is already in
-    the local file: each non-blank line the Doc added appears at least
-    as often locally as in the Doc, and each non-blank line the Doc
-    removed does not still appear more often locally than in the Doc.
-    Blank lines are not counted. Counts matter — a repeated line the
-    Doc added (or deleted) once is not "held" just because another copy
-    remains elsewhere (2026-10-27). A push of such a file loses nothing
-    of the Doc's."""
-    from collections import Counter
+    the local file: each line the Doc added is in the file, and each
+    line the Doc removed is gone from it. Blank lines are not counted.
+    A push of such a file loses nothing of the Doc's."""
+    import difflib
 
-    def counts(text: str) -> Counter:
-        return Counter(line for line in text.splitlines() if line.strip())
-
-    base_c, doc_c, local_c = counts(base), counts(doc), counts(local)
-    for line in set(base_c) | set(doc_c):
-        b, d, loc = base_c[line], doc_c[line], local_c[line]
-        if d > b and loc < d:
+    base_l, doc_l, local_l = (t.splitlines() for t in (base, doc, local))
+    local_set, doc_set = set(local_l), set(doc_l)
+    ops = difflib.SequenceMatcher(None, base_l, doc_l, autojunk=False)
+    for tag, i1, i2, j1, j2 in ops.get_opcodes():
+        if tag == "equal":
+            continue
+        if any(line.strip() and line not in local_set
+               for line in doc_l[j1:j2]):
             return False
-        if d < b and loc > d:
+        if any(line.strip() and line not in doc_set and line in local_set
+               for line in base_l[i1:i2]):
             return False
     return True
 
@@ -2037,7 +2145,7 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
       content drift is the author's call — no push-base survives a relink)
     - unknown id, title duplicating a LIVE mapped tab → ambiguous (a hand-made
       duplicate; relinking would hijack the real tab's mapping)
-    - manifest / non-.md titles    → ignored
+    - manifest / obsolete Reader-load (`manifest.md`) / non-.md titles → ignored
     """
     from collections import Counter
 
@@ -2053,7 +2161,11 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
             if title != known_ids[tid]:
                 out["renamed"].append((known_ids[tid], title))
             continue
-        if title == MANIFEST_TITLE or not title.endswith(".md"):
+        # Inventory tab, and the pre-2026-10-19 Reader-load tab title
+        # (`manifest.md`): never an essay. Without this, a leftover Doc
+        # tab is adopted and rewrite_toc_from_doc writes it into toc.toml.
+        if (title == MANIFEST_TITLE or title == OLD_READER_LOAD_TITLE
+                or not title.endswith(".md")):
             out["ignored"].append(title)
             continue
         entry = links.get(title)
@@ -2131,8 +2243,12 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     toc_text = (toc_path.read_text(encoding="utf-8")
                 if toc_path.exists() else "")
     outside = toc_outside(toc_text)
+    # Sidecars, and the retired Reader-load filename, must never become
+    # chapters — a leftover Doc `manifest.md` tab would otherwise ship
+    # inside the book after a doc_moved pull.
     doc_pairs = [(n, p) for n, p in doc_pairs
-                 if not is_sidecar(n) and not is_outside(n, outside)]
+                 if not is_sidecar(n) and n != OLD_READER_LOAD_TITLE
+                 and not is_outside(n, outside)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -2214,11 +2330,13 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     outside = toc_outside(toc_path.read_text(encoding="utf-8"))
     doc_pairs = [(n, p if p in linked else None)
                  for n, p in doc_pairs if n in linked and not is_sidecar(n)
+                 and n != OLD_READER_LOAD_TITLE
                  and not is_outside(n, outside)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked and not is_sidecar(n)]
+               if n in linked and not is_sidecar(n)
+               and n != OLD_READER_LOAD_TITLE]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     doc_pairs, base = _toc_listed_view(doc_pairs, desired, base)
@@ -2319,6 +2437,18 @@ def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
     return known | titles, [t for _, t in tab_props if t], tab_anchors(tab_doc)
 
 
+def doc_revision(docs_service, master_id: str) -> str | None:
+    """The master Doc's revision id, read without its content. Google
+    changes it on every edit to any tab. None when it cannot be read,
+    which callers treat as "changed": the safe side."""
+    try:
+        got = docs_service.documents().get(
+            documentId=master_id, fields="revisionId").execute()
+    except Exception:  # noqa: BLE001 — unknown revision: read the tab
+        return None
+    return got.get("revisionId") if isinstance(got, dict) else None
+
+
 def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
                        bridge: "DocBridge", relpath: str) -> str | None:
     """`relpath`'s tab as normalized markdown, split out of the whole-Doc
@@ -2337,6 +2467,19 @@ def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
     return normalize_markdown(sections[relpath])
 
 
+def _pushed_dir(db: Database, manuscript: dict) -> Path:
+    """Where pushes keep the text they left in a tab, one file per text
+    named by its hash, beside the database: the guard's revision check
+    needs the base text, and snapshots do not always hold it."""
+    return Path(db.path).parent / "pushed" / str(manuscript["id"])
+
+
+def _keep_pushed(db: Database, manuscript: dict, text: str) -> None:
+    folder = _pushed_dir(db, manuscript)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{text_hash(text)}.md").write_text(text, encoding="utf-8")
+
+
 def find_pushed_base(db: Database, manuscript: dict, relpath: str,
                      base_hash: str | None,
                      also: tuple = ()) -> str | None:
@@ -2348,6 +2491,11 @@ def find_pushed_base(db: Database, manuscript: dict, relpath: str,
         return None
     for text in also:
         if text is not None and text_hash(text) == base_hash:
+            return text
+    kept = _pushed_dir(db, manuscript) / f"{base_hash}.md"
+    if kept.exists():
+        text = kept.read_text(encoding="utf-8")
+        if text_hash(text) == base_hash:
             return text
     rows = db.all(
         "SELECT json_extract(files, ?) AS text FROM manuscript_versions "
@@ -2382,6 +2530,7 @@ def doc_three_way(db: Database, manuscript: dict, query: str, service,
     if not (master_id and entry.get("tab_id")):
         raise LookupError(f"'{relpath}' has no tab in the master Doc. "
                           f"authorlm doc push {relpath}")
+    revision = doc_revision(docs_service, master_id)
     tab = fetch_tab_markdown(service, docs_service, master_id, links,
                              bridge, relpath)
     if tab is None:
@@ -2397,7 +2546,7 @@ def doc_three_way(db: Database, manuscript: dict, query: str, service,
             "base_hash": base_hash,
             "base": find_pushed_base(db, manuscript, relpath, base_hash,
                                      also=(local, doc)),
-            "doc": doc, "local": local}
+            "doc": doc, "local": local, "tab": tab, "revision": revision}
 
 
 def unified(a: str, b: str, from_name: str, to_name: str) -> str:
@@ -2707,6 +2856,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     report: dict = {"changed": [], "unchanged": [], "conflicts": [],
                     "local_ahead": [], "missing": [], "doc_id": master_id}
 
+    # Drop a stale mapping for the retired Reader-load tab (`manifest.md`
+    # before 2026-10-19). If left linked, a full pull treats it as an
+    # essay: content can land on disk and a doc_moved toc sync writes it
+    # into toc.toml. Local-ghost cleanup on push is separate (#252).
+    if OLD_READER_LOAD_TITLE in links:
+        links.pop(OLD_READER_LOAD_TITLE, None)
+
     # Tab reconciliation (best-effort — a pull must survive without it):
     # the Docs API is the authority on what tabs exist. Unknown *.md tabs
     # the author created by hand are adopted (new essays materialize on
@@ -2987,6 +3143,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         doc_struct = [(n, p if p in linked else None)
                       for n, p in doc_pairs
                       if n in linked and not is_sidecar(n)
+                      and n != OLD_READER_LOAD_TITLE
                       and not is_outside(n, outside)]
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
@@ -4169,11 +4326,18 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
         # the tab is lost or orphaned. Document order (ascending anchor),
         # as `settle_forms_in_tab` wants; a form not in the tab (never
         # written, or already taken out) is simply not found.
+        # record_base=False: the levelling push at the top of this call
+        # already recorded what the tab holds (including any paragraph
+        # held for an open comment). Re-hashing the local file here would
+        # claim local IS the base while the tab still carries held old
+        # text — the next pull would read that as doc-ahead and wipe the
+        # author's local edit.
         outcomes = [{"old": tab_old_of.get(t["id"], t["proposed_old"]),
                      "new": t["proposed_new"], "keep": "old"}
                     for t in reversed(ordered)]
         faults = settle_forms_in_tab(db, manuscript, file, outcomes,
-                                     docs_service, bridge=bridge)
+                                     docs_service, bridge=bridge,
+                                     record_base=False)
         failed += [(t, "taken back out: another form of this file failed, "
                        "and a file's forms land together or not at all")
                    for t in written]
@@ -4649,7 +4813,7 @@ def doc_spacing(manuscript: dict) -> dict:
 
 
 def apply_tab_spacing(docs_service, master_id: str, tab_id: str,
-                      spacing: dict) -> int:
+                      spacing: dict, chain: dict | None = None) -> int:
     """Impose the standard paragraph spacing on a tab's NORMAL_TEXT
     paragraphs. Imported content arrives with Google's defaults (no
     space after paragraph), so every content write re-applies the
@@ -4692,10 +4856,24 @@ def apply_tab_spacing(docs_service, master_id: str, tab_id: str,
         },
         "fields": "lineSpacing,spaceAbove,spaceBelow"}}
         for s, e in ranges]
+    if chain is not None and chain.get("rev") != doc.get("revisionId"):
+        chain["rev"] = None  # someone else wrote since: the chain breaks
     if requests:
-        docs_service.documents().batchUpdate(
-            documentId=master_id, body={"requests": requests}).execute()
+        body: dict = {"requests": requests}
+        if chain and chain.get("rev"):
+            body["writeControl"] = {"requiredRevisionId": chain["rev"]}
+        reply = docs_service.documents().batchUpdate(
+            documentId=master_id, body=body).execute()
+        if chain is not None:
+            chain["rev"] = _written_revision(reply) if chain.get("rev") else None
     return len(requests)
+
+
+def _written_revision(reply) -> str | None:
+    """The revision id a batchUpdate left the Doc at, or None."""
+    if not isinstance(reply, dict):
+        return None
+    return (reply.get("writeControl") or {}).get("requiredRevisionId")
 
 
 def _cell_texts(table: dict) -> list[str]:
@@ -4710,7 +4888,7 @@ def _cell_texts(table: dict) -> list[str]:
 
 
 def _doc_paragraphs(docs_service, master_id: str,
-                    tab_id: str) -> list[dict]:
+                    tab_id: str, revision: dict | None = None) -> list[dict]:
     """Non-empty paragraphs of a tab with their doc index ranges:
     [{start, end, text}] in order. Rule paragraphs surface as '---' so
     they align positionally with the markdown export.
@@ -4722,9 +4900,12 @@ def _doc_paragraphs(docs_service, master_id: str,
     paragraph just before the table — Docs keeps one there always (it
     is where a new table's newline goes), and an edit must neither
     delete it while the table stands nor insert text at the table's own
-    start index."""
+    start index. `revision`, when given, receives the revision id of
+    the read under "rev"."""
     doc = docs_service.documents().get(
         documentId=master_id, includeTabsContent=True).execute()
+    if revision is not None:
+        revision["rev"] = doc.get("revisionId")
     out: list[dict] = []
 
     def walk(tabs):
@@ -5031,7 +5212,8 @@ def _hold_commented(canonical: list[str], local: list[str],
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
               bridge: DocBridge | None = None,
-              clearing: tuple[str, ...] = ()) -> dict:
+              clearing: tuple[str, ...] = (),
+              seen: dict | None = None) -> dict:
     """Push local changes into a tab by editing only the changed
     paragraphs — anchors (margin threads, ingested comments) on
     untouched text survive by construction. Diffs in EXPORT space (both
@@ -5048,8 +5230,18 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     text. `pushed_hash` then records what the tab actually holds, so the
     next pull reads the file as local_ahead (only local moved off the
     base), never a conflict, and never overwrites the held text; the
-    next push after the comment is resolved lands it."""
+    next push after the comment is resolved lands it.
+
+    `seen` is the push guard's read, {tab, revision}: the first pass
+    uses its tab text instead of exporting the whole Doc again, provided
+    the Doc's revision has not moved since. Every write names the
+    revision it was planned against (Google declines it if the Doc moved
+    in between), and a push whose writes and read-back form one unbroken
+    chain records the revision it left as this tab's `doc_rev`; the next
+    guarded push skips its export while the Doc still stands there."""
     import hashlib as _hashlib
+
+    from googleapiclient.errors import HttpError
 
     from difflib import SequenceMatcher
 
@@ -5087,20 +5279,38 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                                   bridge, relpath)
         return text if text is not None else normalize_markdown("")
 
-    def read_tab() -> tuple[str, list[dict], list[str]]:
+    # revs["now"]: the revision of the last paragraph read, which every
+    # write requires. revs["sure"]: that same revision when the tab text
+    # was read at it too (else None), the one a doc_rev may record.
+    revs: dict = {"now": None, "sure": None}
+
+    def read_tab(reuse: dict | None = None
+                 ) -> tuple[str, list[dict], list[str]]:
         """The tab's export and its Doc paragraphs, aligned: hard-break
-        joins the Doc's own paragraphs explain are split back apart."""
-        md = tab_markdown()
-        paras = _doc_paragraphs(docs_service, master_id, tab_id)
+        joins the Doc's own paragraphs explain are split back apart.
+        `reuse` is the guard's read, used in place of an export."""
+        if reuse is not None:
+            before, md = reuse.get("revision"), reuse["tab"]
+        else:
+            before = doc_revision(docs_service, master_id)
+            md = tab_markdown()
+        got: dict = {}
+        paras = _doc_paragraphs(docs_service, master_id, tab_id, got)
+        revs["now"] = got.get("rev")
+        revs["sure"] = (revs["now"] if before and before == revs["now"]
+                        else None)
+        if reuse is not None and revs["sure"] is None:
+            raise DocChanged(f"{relpath}: the Doc changed during the push. "
+                             "push again")
         return md, paras, _split_hard_breaks(
             _md_units(md), [d["text"] for d in paras])
 
-    def read_tab_healed(healed: bool) -> tuple[str, list[dict], list[str],
-                                               bool]:
+    def read_tab_healed(healed: bool, reuse: dict | None = None
+                        ) -> tuple[str, list[dict], list[str], bool]:
         """`read_tab`, after re-applying spacing once when the Doc's
         paragraphs and the export's disagree in number. Spacing is style
         only, the standard every content write imposes."""
-        md, paras, units = read_tab()
+        md, paras, units = read_tab(reuse)
         if len(paras) != len(units) and not healed:
             # A tab left without paragraph spacing (an earlier push that
             # failed before spacing was applied, or a hand edit) exports
@@ -5155,9 +5365,23 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 f"diff push: settled forms could not be taken out of "
                 f"{relpath}'s tab in place ({'; '.join(faults)})")
 
+    # The guard's read stands only while nothing has written since it:
+    # settling forms above wrote to the tab.
+    reuse = seen if seen and seen.get("revision") and not (
+        settled or news) else None
+
+    def vouch(rev: str | None, base: str) -> None:
+        """Record that the tab holds `base`, its pushed base, at `rev`."""
+        if rev:
+            _keep_pushed(db, manuscript, base)
+            entry["doc_rev"] = rev
+        else:
+            entry.pop("doc_rev", None)
+
     anchors: list[dict] | None = None
     for attempt in (1, 2):
-        tab_md, doc_paras, tab_paras, healed = read_tab_healed(healed)
+        tab_md, doc_paras, tab_paras, healed = read_tab_healed(
+            healed, reuse if attempt == 1 else None)
         canonical = [threads_mod.strip_pending(p)[0].strip("\n")
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_units(local_md)]
@@ -5169,6 +5393,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             entry["pushed_hash"] = _hashlib.sha256(
                 local_md.encode()).hexdigest()[:16]
             entry["checked_out"] = True
+            vouch(revs["sure"], local_md)
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
             return {"relpath": relpath, "mode": "diff", "ops": 0}
@@ -5208,6 +5433,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             entry["pushed_hash"] = _hashlib.sha256(threads_mod.strip_pending(
                 tab_md)[0].encode()).hexdigest()[:16]
             entry["checked_out"] = True
+            vouch(revs["sure"], threads_mod.strip_pending(tab_md)[0])
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
             return {"relpath": relpath, "mode": "diff", "ops": 0,
@@ -5325,9 +5551,21 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         flat: list[dict] = []
         for r in requests:
             flat.extend(r if isinstance(r, list) else [r])
+        planned = revs["now"]
+        chain: dict = {"rev": planned}
         if flat:
-            docs_service.documents().batchUpdate(
-                documentId=master_id, body={"requests": flat}).execute()
+            body: dict = {"requests": flat}
+            if planned:
+                body["writeControl"] = {"requiredRevisionId": planned}
+            try:
+                reply = docs_service.documents().batchUpdate(
+                    documentId=master_id, body=body).execute()
+            except HttpError as err:
+                if planned and "revision" in str(err).lower():
+                    raise DocChanged(f"{relpath}: the Doc changed during "
+                                     "the push. push again") from err
+                raise
+            chain["rev"] = _written_revision(reply) if planned else None
             sent += ops
             # Spacing BEFORE the read-back: inserted paragraphs carry none,
             # and Google's export joins unspaced paragraphs with hard line
@@ -5335,7 +5573,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             # the tab held and failed every push that inserted one
             # (2026-10-25, read-again.md).
             apply_tab_spacing(docs_service, master_id, tab_id,
-                              doc_spacing(manuscript))
+                              doc_spacing(manuscript), chain=chain)
 
         verify_md, _verify_doc, verify_paras = read_tab()
         verify = [threads_mod.strip_pending(p)[0].strip("\n")
@@ -5349,6 +5587,17 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             entry["pushed_hash"] = _hashlib.sha256(
                 pushed.encode()).hexdigest()[:16]
             entry["checked_out"] = True
+            # Only this tab was written, so every other tab vouched for at
+            # the revision the writes started from still holds its base
+            # at the revision they ended on, if nobody wrote in between.
+            unbroken = bool(planned and chain["rev"]
+                            and revs["sure"] == chain["rev"])
+            if unbroken:
+                for other, value in links.items():
+                    if (other != relpath and isinstance(value, dict)
+                            and value.get("doc_rev") == planned):
+                        value["doc_rev"] = chain["rev"]
+            vouch(chain["rev"] if unbroken else None, pushed)
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
             out = {"relpath": relpath, "mode": "diff", "ops": ops}

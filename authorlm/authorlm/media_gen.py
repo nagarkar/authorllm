@@ -31,6 +31,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 import urllib.error
@@ -136,10 +137,45 @@ def takes(root: Path, key: str, want_desc: str | None = None,
 
 
 def _next_n(root: Path, key: str, prefix: str = "") -> str:
-    """The next take number; prefix `i` for imported, `e` for edited."""
+    """The next take number; prefix `i` for imported, `e` for edited.
+
+    Take names carry exactly two digits (`TAKE`); past 99 the next name
+    would be invisible to `takes` and every later save would overwrite the
+    same paid bytes. Refuse rather than destroy."""
     numbers = [int(t["n"].lstrip("ie")) for t in takes(root, key)]
     n = (max(numbers) + 1) if numbers else 1
+    if n > 99:
+        raise RuntimeError(
+            f"{key} already has 99 takes — pick or remove one before "
+            "generating or editing another")
     return f"{prefix}{n:02d}"
+
+
+def _write_new_job(jobs: Path, key: str, job: dict, request: dict) -> str:
+    """Create `_clips/jobs/<id>.json` under an unused id and write it.
+
+    Ids are `{key}-{YYYYMMDDHHMMSS}` with a numeric suffix on collision.
+    A second-granularity stamp alone lets two starts (or a start and an
+    edit) in the same wall-clock second overwrite the first job file and
+    orphan a billed Gemini interaction."""
+    jobs.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    for n in range(1000):
+        job_id = f"{key}-{stamp}" if n == 0 else f"{key}-{stamp}-{n}"
+        path = jobs / f"{job_id}.json"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        job["id"] = job_id
+        try:
+            os.write(fd, json.dumps(job, indent=1).encode("utf-8"))
+        finally:
+            os.close(fd)
+        (jobs / f"{job_id}.request.json").write_text(
+            json.dumps(request, indent=1), encoding="utf-8")
+        return job_id
+    raise RuntimeError(f"could not allocate a job id for {key}")
 
 
 CHOSEN_FILE = "chosen.json"
@@ -428,8 +464,6 @@ def _http(method: str, url: str, key: str, body: dict | None = None,
 
 
 def _key() -> str:
-    import os
-
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise RuntimeError("no GEMINI_API_KEY — set it in authorlm/.env "
@@ -458,18 +492,14 @@ def start(db, manuscript: dict, key: str, model: str | None = None,
                   _key(), request_body(p))
     root = Path(manuscript["path"])
     jobs = root / media.CLIPS_DIR / JOBS_SUBDIR
-    jobs.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
-    job_id = f"{key}-{now.strftime('%Y%m%d%H%M%S')}"
-    job = {"id": job_id, "key": key, "operation": op["name"], "state": "running",
+    job = {"id": "", "key": key, "operation": op["name"], "state": "running",
            "model": p["model"], "duration": p["duration"],
            "resolution": p["resolution"], "est_usd": p["est_usd"],
            "desc": p["desc"], "law": p["law"],
            "started_local": now.strftime("%Y-%m-%d %H:%M:%S"),
            "started_utc": datetime.now(timezone.utc).isoformat(),
            "prompt": p["prompt"], "take": None, "error": None}
-    (jobs / f"{job_id}.json").write_text(json.dumps(job, indent=1),
-                                         encoding="utf-8")
     # The request as sent, with image paths in place of their bytes, so a
     # caller (podlm) can see what shaped a take.
     images = {"prompt": p["prompt"], "first_frame": p["first_frame"],
@@ -480,8 +510,7 @@ def start(db, manuscript: dict, key: str, model: str | None = None,
     else:
         sent = request_body(p)
         sent["instances"][0] = images
-    (jobs / f"{job_id}.request.json").write_text(json.dumps(sent, indent=1),
-                                                 encoding="utf-8")
+    _write_new_job(jobs, key, job, sent)
     return job
 
 
@@ -524,9 +553,26 @@ def poll(manuscript: dict, job_id: str, http=None) -> dict:
 
 
 def _save_take(root: Path, job: dict, blob: bytes) -> None:
-    name = (f"{job['key']}-{job['desc']}-{job['law']}-"
-            f"{_next_n(root, job['key'], 'e' if job.get('edit_of') else '')}.mp4")
-    (root / media.CLIPS_DIR / name).write_bytes(blob)
+    """Land the paid bytes under a new take name.
+
+    Exclusive create so two overlapping polls for the same clip cannot
+    both compute the same next N and destroy each other's take."""
+    prefix = "e" if job.get("edit_of") else ""
+    clips = root / media.CLIPS_DIR
+    clips.mkdir(parents=True, exist_ok=True)
+    while True:
+        name = (f"{job['key']}-{job['desc']}-{job['law']}-"
+                f"{_next_n(root, job['key'], prefix)}.mp4")
+        path = clips / name
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        try:
+            os.write(fd, blob)
+        finally:
+            os.close(fd)
+        break
     if not chosen(root, job["key"]):
         _set_chosen(root, job["key"], name)
     job.update(state="done", take=f"{media.CLIPS_DIR}/{name}")
@@ -641,16 +687,13 @@ def edit_start(manuscript: dict, key: str, take: str, instruction: str,
     root = Path(manuscript["path"])
     jobs = root / media.CLIPS_DIR / JOBS_SUBDIR
     now = datetime.now()
-    job_id = f"{p['key']}-{now.strftime('%Y%m%d%H%M%S')}"
-    job = {"id": job_id, "key": p["key"], "operation": f"interactions/{op['id']}",
+    job = {"id": "", "key": p["key"],
+           "operation": f"interactions/{op['id']}",
            "state": "running", "model": p["model"], "duration": p["duration"],
            "resolution": "720p", "est_usd": p["est_usd"], "desc": p["desc"],
            "law": p["law"], "started_local": now.strftime("%Y-%m-%d %H:%M:%S"),
            "started_utc": datetime.now(timezone.utc).isoformat(),
            "prompt": p["prompt"], "edit_of": p["take"],
            "instruction": p["instruction"], "take": None, "error": None}
-    (jobs / f"{job_id}.json").write_text(json.dumps(job, indent=1),
-                                         encoding="utf-8")
-    (jobs / f"{job_id}.request.json").write_text(json.dumps(body, indent=1),
-                                                 encoding="utf-8")
+    _write_new_job(jobs, p["key"], job, body)
     return job
