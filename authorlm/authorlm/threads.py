@@ -118,6 +118,25 @@ _INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)"
 # several head inserts before the first live paragraph).
 _INSERTION_START = re.compile(
     r"\A\s*\{\{(?P<new>.*?)\}\}(?:(?:\s*\n)+|\Z)", re.DOTALL)
+# TeX math spans: `$$…$$` display (own line or not) and `$…$` inline.
+# Set notation inside them (`{{-q,+q},{-q-p,+q+p}}`) is the author's and
+# is never a form, whatever line it sits on. Display first so `$$` is
+# never read as an empty inline span.
+_MATH_SPAN = re.compile(r"\$\$.+?\$\$|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$)",
+                        re.DOTALL)
+
+
+def math_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of every TeX math span in `text`, in order."""
+    return [(m.start(), m.end()) for m in _MATH_SPAN.finditer(text)]
+
+
+def in_math(text: str, pos: int,
+            spans: list[tuple[int, int]] | None = None) -> bool:
+    """True when `pos` lies inside a `$…$` or `$$…$$` span."""
+    if spans is None:
+        spans = math_spans(text)
+    return any(s <= pos < e for s, e in spans)
 
 _REPLACE_MARKER = re.compile(r"<<|>>")
 
@@ -139,7 +158,10 @@ def _collapse(text: str, keep: str) -> str:
             if nxt == text:
                 break
             text = nxt
-        return _INSERTION_PARA.sub("", text)
+        spans = math_spans(text)
+        return _INSERTION_PARA.sub(
+            lambda m: m.group(0) if in_math(text, m.start("new"), spans)
+            else "", text)
     while True:
         m = _INSERTION_START.match(text)
         if not m:
@@ -148,7 +170,10 @@ def _collapse(text: str, keep: str) -> str:
         # unwrapped insertion stays its own paragraph.
         rest = text[m.end():]
         text = m.group("new") + ("\n\n" + rest if rest else "")
-    return _INSERTION_PARA.sub(lambda m: "\n\n" + m.group("new"), text)
+    spans = math_spans(text)
+    return _INSERTION_PARA.sub(
+        lambda m: m.group(0) if in_math(text, m.start("new"), spans)
+        else "\n\n" + m.group("new"), text)
 
 
 def strip_pending(text: str) -> tuple[str, list[str]]:
@@ -259,7 +284,13 @@ def own_line_form(text: str, start: int, end: int) -> bool:
     stacked with a single newline between them (the Docs export shape)
     each pass this test and fail a `\n\n`-bounded "alone in paragraph"
     check. Outside-caller resolve already used this rule; keep it here
-    so every consumer of `pending_forms` agrees."""
+    so every consumer of `pending_forms` agrees.
+
+    Braces inside a TeX math span (`$…$`, `$$…$$`) are never a form,
+    own line or not: a display block whose set notation sits on its
+    own line between `$$` fences is the realistic case."""
+    if in_math(text, start):
+        return False
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
     if line_end == -1:

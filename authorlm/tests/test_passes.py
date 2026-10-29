@@ -4103,6 +4103,40 @@ def _braces_are_the_authors(root: Path) -> None:
           and "{{a, b}}" in fn_final
           and "{{[^" not in fn_final
           and len(fn_matched) == 2, repr(fn_final))
+    # Set notation inside TeX math is never a form, own line or not: an
+    # inline `${{a,b},{c}}$` shares a line with prose anyway, but a
+    # display `$$…$$` block puts its braces on their own line, and the
+    # own-line rule alone would read that as a planted insertion.
+    math_text = (
+        "The charge pairs are ${{a,b},{c}}$ in the plane.\n\n"
+        "$$\n{{a,b},{c}}\n$$\n\n"
+        "Then the prose resumes.\n\n"
+        "{{A real insertion, planted.}}\n")
+    math_forms = _th.pending_forms(math_text)
+    check("pending_forms skips braces inside $…$ and $$…$$ — only the "
+          "real own-line insertion is a form",
+          [(f["kind"], f["new"]) for f in math_forms]
+          == [("insert", "A real insertion, planted.")],
+          str([(f["kind"], f["new"]) for f in math_forms]))
+    math_written = [{"id": "m1", "proposed_old": "",
+                     "proposed_new": "A real insertion, planted.",
+                     "metadata": json.dumps({"kind": "insert"})}]
+    math_final, math_matched = passes.final_text_from_marked(
+        math_text, written=math_written)
+    check("resolve leaves both math spans byte-intact and unwraps the "
+          "real form",
+          "${{a,b},{c}}$" in math_final
+          and "$$\n{{a,b},{c}}\n$$" in math_final
+          and "A real insertion, planted." in math_final
+          and "{{A real" not in math_final
+          and len(math_matched) == 1, repr(math_final))
+    math_stripped, math_warns = _th.strip_pending(math_text)
+    check("strip_pending (Doc pull) drops the insertion and keeps both "
+          "math spans, no warnings",
+          "${{a,b},{c}}$" in math_stripped
+          and "$$\n{{a,b},{c}}\n$$" in math_stripped
+          and "A real insertion" not in math_stripped
+          and math_warns == [], repr((math_stripped, math_warns)))
 
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
