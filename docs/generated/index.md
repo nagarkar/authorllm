@@ -560,6 +560,12 @@ Pins llmlm's price cache to an empty one that never reaches the network.
 
 Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
 
+## `tests.test_anchor_prefix_truncation`
+
+`authorlm/tests/test_anchor_prefix_truncation.py`
+
+`_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
+
 ## `tests.test_api`
 
 `authorlm/tests/test_api.py`
