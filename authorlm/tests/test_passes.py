@@ -792,9 +792,12 @@ TWIN_ESSAY = (
 TWIN = "And so the wall stands, and the Dead do not pass."
 
 
-def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY):
+def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY,
+                  render: bool = False):
     """A workspace whose one essay is mapped to a tab of a live-text
-    Doc fake, positioned exactly where `critique write` finds it."""
+    Doc fake, positioned exactly where `critique write` finds it.
+    `render` is the fake's render mode (a real export: paragraph gaps
+    survive a pull)."""
     ws = root / subdir
     ms = ws / "book"
     ms.mkdir(parents=True)
@@ -806,7 +809,8 @@ def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY):
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
-    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)])
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)],
+                            render=render)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -4463,7 +4467,7 @@ def _directives_on_the_doc_road(root: Path) -> None:
     from authorlm import directives as dv
 
     db, manuscript, ms, fake = _twin_fixture(root, "directive-ws",
-                                             essay=DIRECTIVE_ESSAY)
+                                             essay=DIRECTIVE_ESSAY, render=True)
     mid = manuscript["id"]
     meta = gdocs._mapping(db, manuscript)
     meta["gdocs"]["solo.md"]["checked_out"] = True
@@ -4541,12 +4545,6 @@ def _directives_on_the_doc_road(root: Path) -> None:
           str(dv.open_report(ms)))
 
     # Explain on the same road: inline and standalone, resolve accepts.
-    # (The fake's export flattened the paragraph gaps into the local
-    # file above; a real export keeps them. Restore them so the anchor
-    # paragraphs the staging computes are the tab's paragraphs.)
-    flat = (ms / "solo.md").read_text()
-    (ms / "solo.md").write_text(
-        "\n\n".join(ln for ln in flat.split("\n") if ln.strip()) + "\n")
     rep = dv.apply(db, manuscript, {}, "explain", "solo.md",
                    [(1, "Holding means refusing the easier story."),
                     (2, "A wall that holds forever is a tomb.",
@@ -4566,12 +4564,10 @@ def _directives_on_the_doc_road(root: Path) -> None:
     res = dv.resolve(db, manuscript, {}, "explain", "solo.md",
                      services=services)
     local = (ms / "solo.md").read_text()
-    # (The Doc fake's export flattens paragraph gaps, so this reads the
-    # landed prose line by line rather than by blank-line separation.)
     check("resolve lands both passages in place — inline continuing its "
-          "sentence, standalone as its own line",
+          "sentence, standalone as its own paragraph",
           "Beta holds the line. Holding means refusing the easier story. "
-          "Then on.\nA wall that holds forever is a tomb.[^W3]\n" in local
+          "Then on.\n\nA wall that holds forever is a tomb.[^W3]\n" in local
           and "[^W3]: Cf. the Sermons' wall, which is also a door." in local
           and "[Explain:" not in local
           and res["accepted"] == 3 and res["declined"] == 0, local)
@@ -4579,6 +4575,75 @@ def _directives_on_the_doc_road(root: Path) -> None:
           db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
                  "AND evidence_type IN ('footnote_edit', 'explain_edit')",
                  (mid,))["n"] == 7)
+
+
+def _directives_pull_first(root: Path) -> None:
+    """#248's hazard, fixed the way lens and morph already are: a
+    directive applied to a CHECKED-OUT file pulls the tab down first
+    (gdocs.level_from_doc), so the levelling push in
+    write_pending_forms never wipes prose the author typed only in the
+    Doc. A two-sided edit stops before anything reaches the tab."""
+    print("directives pull the Doc down before staging:")
+    from authorlm import directives as dv
+
+    def fixture(subdir: str):
+        db, manuscript, ms, fake = _twin_fixture(root, subdir,
+                                                 essay=DIRECTIVE_ESSAY,
+                                                 render=True)
+        meta = gdocs._mapping(db, manuscript)
+        meta["gdocs"]["solo.md"]["checked_out"] = True
+        meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
+            gdocs.normalize_markdown(DIRECTIVE_ESSAY))
+        gdocs._save_mapping(db, manuscript, meta)
+        # The author edits one paragraph in the tab only.
+        fake.edit("tab-2", "Beta holds the line.",
+                  "Beta holds the line firmly.")
+        return db, manuscript, ms, fake, (lambda: (fake, fake))
+
+    # (a) Doc-ahead: only the tab moved since the push.
+    db, manuscript, ms, fake, services = fixture("pull-first-ws")
+    rep = dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                   [(1, "Ernest Becker, *The Denial of Death* (1973).")],
+                   services=services)
+    tab = fake.tab_text("solo.md")
+    local = (ms / "solo.md").read_text()
+    check("the Doc's edit came down into the local file before staging",
+          "Beta holds the line firmly." in local, local)
+    check("...the forms are planted and the Doc-side edit is still in "
+          "the tab — nothing wiped by the levelling push",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<[Footnote: cite Becker]>>{{[^W2]}}" in tab
+          and "{{[^W2]: Ernest Becker" in tab
+          and "Beta holds the line firmly." in tab, tab)
+    check("...and the file is checked out again: the levelling push "
+          "made the tab the working copy, forms out",
+          gdocs.doc_status(db, manuscript)["solo.md"].get("checked_out"))
+
+    # (b) Two-sided: local and the tab both moved since the push.
+    db, manuscript, ms, fake, services = fixture("two-sided-ws")
+    (ms / "solo.md").write_text(DIRECTIVE_ESSAY.replace(
+        "Omega closes the essay.", "Omega closes the essay at last."))
+    before_tab = fake.tab_text("solo.md")
+    before_local = (ms / "solo.md").read_text()
+    try:
+        dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                 [(1, "Ernest Becker, *The Denial of Death* (1973).")],
+                 services=services)
+        err = None
+    except LookupError as e:
+        err = str(e)
+    check("a two-sided edit stops apply with the conflict message",
+          err is not None and "changed both locally and in the Doc" in err
+          and "settle that by hand" in err, str(err))
+    check("...and nothing reached the tab or the local file",
+          fake.tab_text("solo.md") == before_tab
+          and (ms / "solo.md").read_text() == before_local
+          and not db.all("SELECT id FROM doc_threads WHERE manuscript_id = ?",
+                         (manuscript["id"],)),
+          fake.tab_text("solo.md"))
+    check("...and the file stays checked out: the Doc is still the "
+          "working copy",
+          gdocs.doc_status(db, manuscript)["solo.md"].get("checked_out"))
 
 
 SUGGESTION_ESSAY = "\n\n".join([
@@ -4604,7 +4669,7 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
     from authorlm import directives as dv
 
     db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
-                                             essay=SUGGESTION_ESSAY)
+                                             essay=SUGGESTION_ESSAY, render=True)
     mid = manuscript["id"]
     meta = gdocs._mapping(db, manuscript)
     meta["gdocs"]["solo.md"]["checked_out"] = True
@@ -4675,10 +4740,10 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
           "the tag and keeps the paragraph; an accepted standalone "
           "suggestion lands and its tag line is consumed",
           "Alpha opens, and opens well. Then on.\n" in local
-          and "Beta states the claim without a case.\n"
+          and "Beta states the claim without a case.\n\n"
               "[Suggestion: add an example]\n" in local
           and "Gamma hedges every clause. More.\n" in local
-          and "Delta is fine.\nEpsilon is short.\n" in local
+          and "Delta is fine.\n\nEpsilon is short.\n" in local
           and "[Suggestion: split it]" not in local
           and "[Suggestion: reconsider" not in local
           and "[Suggestion: cut" not in local
@@ -4741,8 +4806,12 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           and tab.index(shown_tag) < tab.index("{{[^S1]: Psalm 121.}}")
           < tab.index("{{[^S2]: Job 38.}}")
           and "_illustrations/" not in tab, f"{rep}\n{tab}")
-    check("...and the local file is PRISTINE, embed line and all",
-          (ms / "solo.md").read_text() == SKY_ESSAY)
+    local = (ms / "solo.md").read_text()
+    check("...and the local file is PRISTINE, embed line and all (the "
+          "pull-first only canonicalized the embed line's spacing)",
+          gdocs.strip_embed_lines(local).strip()
+          == gdocs.strip_embed_lines(SKY_ESSAY).strip()
+          and SKY_EMBED in local and "<<" not in local, local)
 
     # Atomicity: when a definition cannot be placed, NOTHING is written —
     # never anchors without definitions.
@@ -4779,7 +4848,11 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           "the local file is pristine",
           states == {"withdrawn"}
           and gdocs.forms_pending(db2, ms2["id"], "solo.md") is None
-          and (msdir2 / "solo.md").read_text() == SKY_ESSAY, str(states))
+          and gdocs.strip_embed_lines(
+              (msdir2 / "solo.md").read_text()).strip()
+          == gdocs.strip_embed_lines(SKY_ESSAY).strip()
+          and SKY_EMBED in (msdir2 / "solo.md").read_text(),
+          f"{states}\n{(msdir2 / 'solo.md').read_text()}")
 
     # A failure AFTER writing (here: one definition's read-back) takes
     # every planted form back out IN PLACE — never a rebuild, so a margin
@@ -4836,6 +4909,11 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     (msdir4 / "solo.md").write_text(hold_local)
     meta = gdocs._mapping(db4, ms4)
     meta["gdocs"]["solo.md"]["checked_out"] = True
+    # The base the push that checked the file out would have recorded:
+    # apply pulls first (level_from_doc), and against this base the pull
+    # reads local as ahead and keeps the author's edit.
+    meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
+        gdocs.normalize_markdown(hold_doc))
     gdocs._save_mapping(db4, ms4, meta)
     fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
                               "Beta holds.", "solo.md", render=True)
@@ -6486,6 +6564,7 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _directives_pull_first(root)
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)

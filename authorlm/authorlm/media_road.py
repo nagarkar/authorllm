@@ -77,10 +77,6 @@ def stage_specs(db, manuscript: dict, specs: dict[str, str],
                          for t in out)
             gdocs.diff_push(db, manuscript, file, service, docs_service,
                             clearing=keys)
-            if (gdocs.doc_status(db, manuscript).get(file) or {}).get(
-                    "checked_out"):
-                gdocs.pull_doc(db, manuscript, query=file, service=service,
-                               docs_service=docs_service, with_comments=False)
     pending_origin = gdocs.forms_pending(db, mid, file)
     if pending_origin:
         remedy = gdocs._SETTLE_REMEDY.get(pending_origin,
@@ -90,6 +86,12 @@ def stage_specs(db, manuscript: dict, specs: dict[str, str],
         raise ValueError(f"{file} already carries {pending_origin} forms in its "
                          f"tab — run '{remedy.format(file=file)}' before "
                          f"staging more{hint}.")
+    if (gdocs.doc_status(db, manuscript).get(file) or {}).get("checked_out"):
+        # A checked-out file (after the supersede push above, or because
+        # the author is editing the tab) is read from the Doc first, so
+        # the levelling push below wipes nothing the author typed there.
+        service, docs_service = _services(services, file, "staging")
+        gdocs.level_from_doc(db, manuscript, file, service, docs_service)
     text = (root / file).read_text(encoding="utf-8")
     lines = text.split("\n")
     threads = []

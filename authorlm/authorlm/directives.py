@@ -555,11 +555,24 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     path = root / file
     if not path.is_file():
         raise LookupError(f"no manuscript file '{file}'")
+    doc_road = _checked_out(db, manuscript, file)
+    if doc_road:
+        # The Doc is the working copy: bring its text down before reading
+        # local, or the levelling push in write_pending_forms would wipe
+        # what the author typed only in the tab (#248's hazard). A
+        # two-sided edit stops here with the helper's message. The
+        # forms-out refusal comes first: a state refusal costs no
+        # network and must not pull (which clears the checkout).
+        from . import gdocs
+
+        _no_forms_out(db, manuscript["id"], file)
+        service, docs_service = _services(services, file, "apply")
+        gdocs.level_from_doc(db, manuscript, file, service, docs_service)
     text = _read(path)
     chosen = _choose(text, kind, file, pairs)
     labels = _mint_labels(text, file, chosen, kind)
 
-    if _checked_out(db, manuscript, file):
+    if doc_road:
         return _stage_doc(db, manuscript, kind, file, text, chosen, labels,
                           services)
 
@@ -639,6 +652,19 @@ def _thread_row(db, manuscript_id: str, kind: str, file: str, tag: dict,
     return row
 
 
+def _no_forms_out(db, mid: str, file: str) -> None:
+    """Refuse to stage into a tab that already carries one producer's
+    forms (one producer's forms per tab, resolved before the next)."""
+    from . import gdocs
+
+    pending = gdocs.forms_pending(db, mid, file)
+    if pending:
+        remedy = gdocs._SETTLE_REMEDY.get(pending, "settle the staged edits")
+        raise ValueError(
+            f"{file} already carries {pending} forms in its tab — run "
+            f"'{remedy.format(file=file)}' before staging more.")
+
+
 def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
                chosen: list[dict], labels: dict[int, str],
                services) -> dict:
@@ -647,12 +673,7 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
     from .revisions import _paragraphs
 
     mid = manuscript["id"]
-    pending = gdocs.forms_pending(db, mid, file)
-    if pending:
-        remedy = gdocs._SETTLE_REMEDY.get(pending, "settle the staged edits")
-        raise ValueError(
-            f"{file} already carries {pending} forms in its tab — run "
-            f"'{remedy.format(file=file)}' before staging more.")
+    _no_forms_out(db, mid, file)
     paragraphs = _paragraphs(text)
 
     def paragraph_of(tag: dict) -> int:

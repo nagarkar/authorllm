@@ -6000,8 +6000,7 @@ def lens_push(db: Database, manuscript: dict, config: dict, file: str,
     # standing protocol and brings any Doc-side edit with it.
     if (gdocs.doc_status(db, manuscript).get(rel) or {}).get("checked_out"):
         service, docs_service = _resolve_services(services, rel)
-        gdocs.pull_doc(db, manuscript, query=rel, service=service,
-                       docs_service=docs_service, with_comments=False)
+        gdocs.level_from_doc(db, manuscript, rel, service, docs_service)
     threads = [t for t in threads if t["state"] != "withdrawn"]
     mine = {t["id"] for t in threads}
     outside = [dict(r) for r in db.all(
@@ -6127,8 +6126,7 @@ def morph_push(db: Database, manuscript: dict, config: dict, file: str,
                        docs_service=docs_service)
     if (gdocs.doc_status(db, manuscript).get(rel) or {}).get("checked_out"):
         service, docs_service = _resolve_services(services, rel)
-        gdocs.pull_doc(db, manuscript, query=rel, service=service,
-                       docs_service=docs_service, with_comments=False)
+        gdocs.level_from_doc(db, manuscript, rel, service, docs_service)
     threads = [t for t in threads if t["state"] != "withdrawn"]
     mine = {t["id"] for t in threads}
     outside = [dict(r) for r in db.all(
@@ -6948,24 +6946,12 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
             f"{rel}'s tab still carries {n} unresolved {pending} form(s) — "
             f"a tab with open revisions takes no new ones until they are "
             f"resolved")
-    entry = gdocs.doc_status(db, manuscript).get(rel)
-    if isinstance(entry, dict) and entry.get("checked_out"):
-        try:
-            pulled = gdocs.pull_doc(db, manuscript, query=rel,
-                                    service=service,
-                                    docs_service=docs_service,
-                                    with_comments=False)
-        except LookupError as err:
-            return held(str(err))
-        for key, why in (
-                ("conflicts", "changed both locally and in the Doc since "
-                              "the last sync — settle that by hand first"),
-                ("missing", "has no section in the master Doc export — "
-                            "its tab is gone"),
-                ("marked", "carries pending forms on disk (mid-settle)"),
-                ("sidecar_unparsable", "came back from the Doc unparsable")):
-            if rel in (pulled.get(key) or []):
-                return held(f"{rel} {why}")
+    try:
+        pulled = gdocs.level_from_doc(db, manuscript, rel, service,
+                                      docs_service)
+    except LookupError as err:
+        return held(str(err))
+    if pulled is not None:
         if rel in pulled.get("changed", []):
             with contextlib.redirect_stdout(io.StringIO()):
                 collect(db, manuscript, config or {},
