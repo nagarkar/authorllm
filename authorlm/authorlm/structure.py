@@ -210,6 +210,17 @@ def _file_line_re(name: str) -> re.Pattern:
     return re.compile(rf'^\s*file\s*=\s*["\']{re.escape(name)}["\']\s*$')
 
 
+def _descendants_of(chapters: list[dict], ancestor: str) -> set[str]:
+    """Files whose parent chain reaches `ancestor`, in document order so
+    a child of a descendant counts too."""
+    found: set[str] = set()
+    for c in chapters:
+        parent = c.get("parent")
+        if parent == ancestor or parent in found:
+            found.add(c["file"])
+    return found
+
+
 def insert_toc_entry(toc_text: str, file: str,
                      after: str | None) -> tuple[str, str] | None:
     """Register `file` in toc.toml immediately after `after` (or, for the
@@ -225,6 +236,13 @@ def insert_toc_entry(toc_text: str, file: str,
     The stanza carries the anchor's `parent` — structural depth, which is
     deterministic — and nothing else. `matter` and the rest are semantic;
     the author sets them.
+
+    When `after` has descendants in the toc, the new stanza goes after
+    that whole subtree — not between the anchor and its first child. A
+    wedged sibling would keep the children's written `parent =` lines
+    but `tree_to_parents(parse_toc_tree(...))` (depth + document order)
+    would reparent them under the new file, so the next Doc tab sync
+    and any serialize round trip would steal the chapter's children.
     """
     # Split and re-join on the file's OWN dominant line ending. `splitlines`
     # + `"\n".join` silently relaid a CRLF toc in LF, rewriting every line
@@ -252,19 +270,25 @@ def insert_toc_entry(toc_text: str, file: str,
                           if anchor.match(line)), None)
         if anchor_at is None:
             return None
-        parent = next((c.get("parent") for c in _toc_chapters(toc_text)
+        chapters = _toc_chapters(toc_text)
+        parent = next((c.get("parent") for c in chapters
                        if c.get("file") == after), None)
         if parent:
             stanza_lines.append(f'parent = "{parent}"')
-        # Forward to the start of the next chapter table (or EOF), then
-        # back over everything that belongs to THAT table rather than to
-        # the anchor's: the blank lines that separate them, and any
-        # comment lines, which annotate the table below them. Stopping at
-        # a comment would drop the new stanza between the comment and the
-        # table it describes — silently re-attributing the comment to the
-        # new essay, and gluing the new stanza to its neighbour with no
-        # separator.
-        insert_at = next((i for i in chapter_at if i > anchor_at), len(lines))
+        # After the anchor's whole subtree (anchor + descendants), not
+        # merely the anchor stanza: see the docstring. Then back over
+        # blanks and comments that belong to the NEXT table rather than
+        # to the subtree we just left — stopping at a comment would drop
+        # the new stanza between the comment and the table it describes.
+        descendants = _descendants_of(chapters, after)
+        last_file = after
+        for c in chapters:
+            if c["file"] in descendants:
+                last_file = c["file"]
+        last_at = next((i for i, line in enumerate(lines)
+                        if _file_line_re(last_file).match(line)),
+                       anchor_at)
+        insert_at = next((i for i in chapter_at if i > last_at), len(lines))
         while insert_at > 0 and (not lines[insert_at - 1].strip()
                                  or lines[insert_at - 1].lstrip()
                                  .startswith("#")):
