@@ -830,6 +830,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 
 _No docstring._
 
+## `tests.test_write_accept_idempotent`
+
+`authorlm/tests/test_write_accept_idempotent.py`
+
+write_accept must not duplicate a beat after a crash mid-accept.
+
 ## `tools.bootstrap_beliefs`
 
 `authorlm/tools/bootstrap_beliefs.py`
