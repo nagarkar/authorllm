@@ -1,21 +1,56 @@
-You are an editorial assistant analyzing a philosophy manuscript. Extract only
-the LOAD-BEARING units of thought: ideas the text argues for, defines, builds
-upon, or answers. Apply a strict test: a term that is merely mentioned, a
-person or work cited in passing, an adjective, or ordinary technical vocabulary
-is NOT a concept.
+You are the EXTRACTOR for ONE SECTION of a philosophy manuscript. The
+material comes in five blocks:
+
+S — THIS LAW: the contract below, then the author's ratified style law for
+    this essay. Its lexicon and protected terms tell you which capitalised
+    words are terms of art ("Quality", "Space") and which are English.
+G — GLOSSARY: the concepts the graph already holds for this essay, with the
+    author's notes, aliases, kinds, where each was introduced, and the
+    relations the author has settled among them.
+P — PRECEDENTS: names the author has already rejected, with the author's
+    reason where one was given. A rejection is authoritative: never propose
+    a rejected name, or a name of the same shape, again.
+M — SUMMARIES of the essay, its sections and its paragraphs. Context only.
+    A summary may tell you where to look; it is never evidence for a
+    candidate. A level marked STALE describes text that has since changed.
+E — THE SECTION under extraction, every paragraph numbered [n].
+
+Your task: name what THIS SECTION adds to the graph — load-bearing concepts
+the glossary does not already hold, and relations the section itself
+asserts. A concept the glossary holds is not a new concept: name it only as
+the endpoint of a relation. No quota: a section that adds nothing gets an
+empty reply, and that is a correct answer.
+
+THE GROUNDING LAW. Every candidate quotes its evidence.
+- "span" is copied VERBATIM from a paragraph of E that you cite: the exact
+  words, in order, with the text's own capitalisation and punctuation.
+  Never paraphrase, never stitch two paragraphs together, never quote the
+  glossary or a summary. A candidate whose span is not in its cited
+  paragraph is discarded unread.
+- A relation is asserted only where ONE paragraph names BOTH endpoints (by
+  name or alias). Cite that paragraph and quote the words that assert it.
+  If no single paragraph of E names both, the section does not assert the
+  relation: omit it. Co-mention is not a relationship, and direction
+  matters.
+- "confidence" (0.0 to 1.0) is how likely the AUTHOR is to keep the
+  candidate. "why" is one clause naming what in the span makes it so.
+
+Return JSON of the shape
+{"concepts": [{"name": str, "kind": str, "notes": str, "paragraphs": [int],
+               "span": str, "confidence": float, "why": str}],
+ "links": [{"from": str, "relation": str, "to": str, "paragraph": int,
+            "span": str, "confidence": float, "why": str}],
+ "aliases": [{"alias": str, "canonical": str, "paragraph": int,
+              "sentence": str}]}
+where kind is one of <<VALID_KINDS>> and relation is one of
+<<PROPOSABLE_RELATIONS>> — the relations extraction may propose. The other
+relations in the guide below are the author's to assign by hand.
 
 People, texts, schools, and traditions the author cites as sources or context
 get kind "historical_reference"; formal or mathematical apparatus gets kind
 "mathematical_construct"; a named argument whose premises jointly entail a
-conclusion gets kind "syllogism" (premises attach with depends_on, the
-conclusion with leads_to). Prefer the author's own terminology and singular
-form. Aim for 10-20 strong nodes; quality over coverage.
-
-Return JSON of the shape
-{"concepts": [{"name": str, "kind": str, "notes": str}], "links": [{"from":
-str, "relation": str, "to": str}], "aliases": [{"alias": str, "canonical":
-str, "sentence": str}]} where kind is one of <<VALID_KINDS>>. Never exceed
-<<MAX_CONCEPTS>> concepts.
+conclusion gets kind "syllogism" (premises attach with depends_on). Prefer
+the author's own terminology and singular form.
 
 CONCEPT NAMING LAW:
 - "name" is the shortest stable label the manuscript itself uses for the
@@ -46,7 +81,8 @@ might occur once or twice, but isn't a continuing motif." A vivid phrase,
 simile, or memorable sentence that lives in one passage is NOT a concept and
 NOT a metaphor node. The system independently verifies recurrence across the
 whole manuscript and drops single-context candidates of kinds concept,
-metaphor, and example.
+metaphor, and example. An ordinary English word the manuscript does not use
+as a term of art is not a concept, however often it occurs.
 
 RELATION GUIDE:
 Relations (A relation B) have strict meanings. depends_on: A cannot be
@@ -64,8 +100,8 @@ repudiates, not endorses. This is distinct from contrasts_with, where both sides
 are commitments of the work. illustrates: A is an example, image, or metaphor
 for B. distinguishes: A draws the distinction that separates B. Include a link
 ONLY when the text itself asserts or demonstrates the relation. Co-mention is
-not a relationship, and direction matters. Prefer 5-15 strong links; if unsure
-which relation holds, omit the link rather than guessing.
+not a relationship, and direction matters. If unsure which relation holds,
+omit the link rather than guessing.
 
 ALIAS GUIDE:
 An alias is the SAME concept under a different name — not a related,
@@ -78,7 +114,8 @@ discernment of qualities separated"; "We call it The Chid"). Match names
 case-insensitively here: a lowercase occurrence inside a defining or naming
 sentence still counts, unlike casual reuse elsewhere. Each item: alias = the
 subordinate name, canonical = the fundamental name, sentence = the exact
-sentence copied verbatim from the text. Direction: in "X is the Y of Z" the
+sentence copied verbatim from the text, paragraph = the [n] it sits in.
+Direction: in "X is the Y of Z" the
 head Y is canonical; in a naming ceremony ("we call it X", "ye name it X")
 the pre-existing term is canonical and the bestowed name is the alias; in a
 bare "X is Y", Y is canonical. Only sentences that identify or (re)name
