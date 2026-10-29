@@ -143,7 +143,7 @@ gap_ms = { h1 = 3250, h2 = 2250, other = 1250 }   # silence BEFORE a heading; ad
 [tts]
 model = "eleven_multilingual_v2"   # decides the dictionary rule type (§7)
 quality = "mp3_44100_128"          # ACX accepts 128 or 192
-dictionary = "SMSTTD pronunciations"   # ElevenLabs dictionary NAME; looked up, never stored as an id
+dictionary = "SMSTTD"              # ElevenLabs dictionary NAME; looked up, never stored as an id. Init seeds the manuscript's name; empty also means the manuscript's name
 
 [credits]
 voice = "narrator"
@@ -349,6 +349,27 @@ seams soft.
 
 ## 7. Pronunciations → ElevenLabs dictionary
 
+**Amended 2026-10-18: every book has a dictionary, and nobody makes it by
+hand.** The author's words, after the Pronunciations tab said "no
+dictionary named in audiobook.toml" and the narrator read the biblical
+Job as an acronym: AuthorLM should create the dictionary for every
+manuscript that renders audio, name it in `audiobook.toml`, and show the
+tab working without the author having to make one. So:
+
+- `audio init` seeds `[tts].dictionary` with the manuscript's name. An
+  empty key in an older `audiobook.toml` means the same thing
+  (`dictionary_name()`); there is no "none" — a book with no table has
+  an empty dictionary, which costs nothing.
+- `audio export` (and so every render, since the page and the CLI export
+  first) looks the dictionary up by name and **creates it from the table
+  when the account does not have it** (`ensure_dictionary()`; the API
+  accepts a dictionary with zero rules, verified 2026-10-18). The export
+  reports the creation as a note, not a warning. `dictionary_locators`
+  (say, workbench) creates the same way instead of refusing.
+- `audio dictionary push` still mirrors the table into it; `audio check`
+  still reports drift. "Dictionary does not exist" is now a transient
+  state that the next export clears.
+
 **Amended 2026-09-26: the push mirrors the table.** The author's words:
 "if we delete something on our end in the pronunciation table, it's not
 making it into the server" and "can we clean out the server every time
@@ -381,8 +402,8 @@ Rulings:
   (A configurable form was built and removed the same day.)
 - Every term is pushed **twice**: as written and lowercased.
 - `audio dictionary push` is **append-only with replacement**:
-  1. look the dictionary up by `[tts].dictionary` name; create it if
-     absent;
+  1. look the dictionary up by name (`[tts].dictionary`, else the
+     manuscript's name); create it if absent;
   2. read the remote rules; diff against the table;
   3. show the diff as prose — rows to add, rows whose reading changed,
      remote rules with no table row — and **ask before applying**;
@@ -501,7 +522,7 @@ id.
 
 | Verb | Does | MCP tool |
 |---|---|---|
-| `audio init` | Seeds missing `audiobook.toml` or `cast.md`; preserves existing files. Refuses when both exist. | — |
+| `audio init` | Seeds missing `audiobook.toml` (with `[tts].dictionary` = the manuscript's name) or `cast.md`; preserves existing files. Refuses when both exist. | — |
 | `audio export [--chapters …]` | Compiles `audiobook.json` and `chapters/*.json`; rewrites only changed files; warns per inline-math span, per unresolved tag, per over-long section. | `export_audio` |
 | `audio check` | Readiness (§12). Exit 1 on any blocking item. | `audio_readiness` |
 | `audio voices [--search …]` | Account and library voices with their free preview clips into the gallery. | `list_voices` |
@@ -608,8 +629,8 @@ Source side (blocking unless noted):
   `[Voice:]` tag) — warning;
 - no unresolved `[Footnote:]`/`[Explain:]`; inline math spans — warning
   with count;
-- dictionary exists remotely, table not ahead of it, no remote-only rules
-  — the last is a warning;
+- dictionary exists remotely (the next export creates it if not), table
+  not ahead of it, no remote-only rules — the last is a warning;
 - retail sample resolves to one to five minutes at ~150 wpm;
 - `audiobook.json` and every chapter file newer than every source they
   depend on (toc, toml, cast, the essays, pronunciations, metadata).

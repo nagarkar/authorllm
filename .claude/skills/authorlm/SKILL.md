@@ -1624,6 +1624,24 @@ to choose an ElevenLabs voice just to listen with Mac `say`.
    actually be generated) or `text`. Without `confirm=True` it returns
    the character cost — read it to the author and wait for a yes. Never
    audition on paid clips before a free pass has narrowed the field.
+   **This verb is for short samples only** (a paragraph or two per
+   voice). It renders one cheap request per voice at audition quality
+   with default settings, and nothing it makes can become a chapter take.
+2b. **A chapter-length audition IS a chapter render** (author's ruling
+   2026-10-18: "when I ask you to render a chapter, render it exactly as
+   chapter render would; there is no reason to reinvent the wheel"). When
+   the author wants to hear a whole chapter, or more than a couple of
+   paragraphs, in a candidate voice, go through the ordinary verbs, per
+   candidate: `audio cast set <role> --voice-id <id> --voice "<name>"`,
+   `audio export`, `audio generate <stem> --remaining` (dry run shown
+   first), `audio stitch <stem>`, then copy or note the stitched file
+   before the next candidate overwrites `audio/<stem>.<quality>.mp3`.
+   Takes are keyed by text + voice + settings (§6 of the design), so every
+   candidate's takes stay in `state/` and `audio/`: casting the winner
+   back costs nothing, the losers cost nothing to keep, and a later Doc
+   edit re-renders only the moved paragraphs in whichever voice is cast.
+   Outside AuthorLM (another repo, another agent) the same rule holds:
+   call these verbs, never a hand-rolled ElevenLabs request.
 3. **One parameter per round.** Vary stability or speed, not both.
    Industry practice is one setting per voice for the whole book;
    drama comes from the prose.
@@ -1640,7 +1658,12 @@ changed, and rules to remove — and applies only with `confirm=True`.
 append-only rule of 2026-09-03 is reversed): a rule on ElevenLabs that
 `pronunciations.md` does not carry is removed on the next push, and a
 row without a reading carries nothing. Deleting a row is how a rule is
-dropped; nothing lives only on the server. The dictionary is named in `audiobook.toml`; the model
+dropped; nothing lives only on the server. **Every book has a dictionary
+and nobody makes one by hand** (ruling 2026-10-18): `audio init` seeds
+`[tts].dictionary` with the manuscript's name, an empty key means the
+same, and `audio export` creates the dictionary on ElevenLabs from the
+table when the account lacks it — so the Pronunciations tab works from
+the first row and a first render never needs a push. The model
 there decides alias (multilingual v2 and most others) versus phoneme
 (`eleven_flash_v2`, `eleven_v3`) rules. After a push, `export_audio`
 writes the new version into `audiobook.json`.
