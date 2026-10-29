@@ -1393,7 +1393,11 @@ def _split_by_anchors(text: str, order: list[str],
     """Split the export at each tab's first paragraph, in tab order,
     searching forward only. A tab with no text gets an empty section; a
     tab whose first paragraph is not found gets none (reported missing,
-    never guessed)."""
+    never guessed). A line matches when it equals the anchor, or when it
+    starts with the whole anchor (the export line can be longer than the
+    Docs-API paragraph). The match uses the full anchor, not a truncated
+    prefix: truncating to 80 plain chars let a later tab's opener steal
+    mid-chapter lines that only shared that prefix (2026-10-29)."""
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
     starts: list[tuple[int, str]] = []
@@ -1404,9 +1408,9 @@ def _split_by_anchors(text: str, order: list[str],
         if not want:
             empty.append(title)
             continue
-        head = want[:80]
         for i in range(pos, len(lines)):
-            if plain[i] and (plain[i] == want or plain[i].startswith(head)):
+            p = plain[i]
+            if p and (p == want or p.startswith(want)):
                 starts.append((i, title))
                 pos = i + 1
                 break
